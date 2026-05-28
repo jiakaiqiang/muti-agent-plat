@@ -46,3 +46,6 @@ Thumbs.db
 playwright-report/
 test-results/
 junit.xml
+
+# Local verification artifacts
+output/

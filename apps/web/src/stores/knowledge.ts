@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import { apiGet } from '@/api/client'
 import { mockDocumentsByKnowledgeBaseId, mockKnowledgeBases } from '@/mock/mockEvents'
 import type { KnowledgeBase, KnowledgeDocument } from '@/types/contracts'
 
@@ -13,8 +14,13 @@ export const useKnowledgeStore = defineStore('knowledge', {
       state.knowledgeBases.find((base) => base.id === knowledgeBaseId)?.name ?? knowledgeBaseId
   },
   actions: {
-    loadKnowledgeBases() {
-      this.knowledgeBases = mockKnowledgeBases
+    async loadKnowledgeBases() {
+      try {
+        const bases = await apiGet<KnowledgeBase[]>('/knowledge-bases')
+        this.knowledgeBases = bases.length ? bases : mockKnowledgeBases
+      } catch {
+        this.knowledgeBases = mockKnowledgeBases
+      }
       this.documentsByKnowledgeBaseId = mockDocumentsByKnowledgeBaseId
       this.indexingStatusByDocumentId = Object.values(mockDocumentsByKnowledgeBaseId)
         .flat()

@@ -48,6 +48,18 @@ export const defaultAgents: Agent[] = [
   },
   {
     id: '00000000-0000-0000-0000-000000000004',
+    key: 'frontend',
+    name: '前端 Agent',
+    role: '负责前端界面、状态派生和实时事件展示',
+    runtimeType: 'mock',
+    status: 'active',
+    capabilityIds: [],
+    defaultKnowledgeBaseIds: [],
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  },
+  {
+    id: '00000000-0000-0000-0000-000000000005',
     key: 'backend',
     name: '后端 Agent',
     role: '负责后端实现、接口、数据和受控执行',
@@ -59,7 +71,7 @@ export const defaultAgents: Agent[] = [
     updatedAt: nowIso()
   },
   {
-    id: '00000000-0000-0000-0000-000000000005',
+    id: '00000000-0000-0000-0000-000000000006',
     key: 'test',
     name: '测试 Agent',
     role: '负责测试策略、回归验证和验收标准检查',
@@ -71,10 +83,22 @@ export const defaultAgents: Agent[] = [
     updatedAt: nowIso()
   },
   {
-    id: '00000000-0000-0000-0000-000000000006',
+    id: '00000000-0000-0000-0000-000000000007',
     key: 'review',
     name: 'Review Agent',
     role: '负责一致性检查、风险审查和复盘建议',
+    runtimeType: 'mock',
+    status: 'active',
+    capabilityIds: [],
+    defaultKnowledgeBaseIds: [],
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  },
+  {
+    id: '00000000-0000-0000-0000-000000000008',
+    key: 'notification',
+    name: '通知 Agent',
+    role: '负责交付通知、外部消息草稿和用户确认后的发送流程',
     runtimeType: 'mock',
     status: 'active',
     capabilityIds: [],

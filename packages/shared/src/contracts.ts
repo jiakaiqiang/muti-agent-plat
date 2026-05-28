@@ -149,6 +149,7 @@ export type SessionDetail = {
   workspaceId: string;
   projectId?: UUID;
   currentTaskBriefId?: UUID;
+  knowledgeBaseIds?: UUID[];
   tokenBudget?: number;
   tokenUsed: number;
   participatingAgentIds: UUID[];

@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import { apiPage, eventStreamUrl, parseSseEvent } from '@/api/client'
 import { useAgentStore } from '@/stores/agent'
 import { useKnowledgeStore } from '@/stores/knowledge'
 import { mockEvents } from '@/mock/mockEvents'
@@ -55,6 +56,40 @@ function shouldRenderInTimeline(event: CollaborationEvent) {
   return eventTypeToMessageType[event.type] !== undefined || event.metadata.renderAs === 'system_notice'
 }
 
+function confirmationStatuses(events: CollaborationEvent[]) {
+  const statuses = new Map<string, ConfirmationCardState['status']>()
+  const confirmationIdByBriefId = new Map<string, string>()
+
+  for (const event of events) {
+    if (event.type === 'user_confirmation_requested') {
+      const payload = payloadOf<ConfirmationRequestedPayload & Record<string, unknown>>(event)
+      statuses.set(payload.confirmationId, 'pending')
+      if (payload.relatedBriefId) {
+        confirmationIdByBriefId.set(String(payload.relatedBriefId), payload.confirmationId)
+      }
+    }
+
+    if (event.type === 'user_confirmation_resolved') {
+      const payload = payloadOf<{ confirmationId?: string; status?: ConfirmationCardState['status'] }>(event)
+      if (payload.confirmationId) {
+        statuses.set(payload.confirmationId, payload.status ?? 'approved')
+      }
+    }
+
+    if (event.type === 'brief_confirmed') {
+      const payload = payloadOf<{ briefId?: string }>(event)
+      const confirmationId = payload.briefId ? confirmationIdByBriefId.get(payload.briefId) : undefined
+      if (confirmationId) {
+        statuses.set(confirmationId, 'approved')
+      }
+    }
+  }
+
+  return statuses
+}
+
+const streams = new Map<string, EventSource>()
+
 export const useEventStore = defineStore('event', {
   state: () => ({
     eventsBySessionId: {} as Record<string, CollaborationEvent[]>,
@@ -64,19 +99,31 @@ export const useEventStore = defineStore('event', {
   }),
   getters: {
     eventsForSession: (state) => (sessionId: string) => state.eventsBySessionId[sessionId] ?? [],
-    chatMessages: (state) => (sessionId: string): ChatMessage[] =>
-      (state.eventsBySessionId[sessionId] ?? []).filter(shouldRenderInTimeline).map((event) => ({
-        id: `msg-${event.id}`,
-        sessionId: event.sessionId,
-        senderType: senderTypeOf(event),
-        senderAgentId: event.fromAgentId,
-        toAgentIds: event.toAgentIds,
-        messageType: eventTypeToMessageType[event.type] ?? 'text',
-        content: event.content,
-        createdAt: event.createdAt,
-        rawEventId: event.id,
-        payload: event.metadata.payload
-      })),
+    chatMessages: (state) => (sessionId: string): ChatMessage[] => {
+      const events = state.eventsBySessionId[sessionId] ?? []
+      const confirmationStatusById = confirmationStatuses(events)
+      return events.filter(shouldRenderInTimeline).map((event) => {
+        const payload = event.metadata.payload ?? {}
+        const confirmationId =
+          event.type === 'user_confirmation_requested'
+            ? (payload as ConfirmationRequestedPayload).confirmationId
+            : undefined
+        return {
+          id: `msg-${event.id}`,
+          sessionId: event.sessionId,
+          senderType: senderTypeOf(event),
+          senderAgentId: event.fromAgentId,
+          toAgentIds: event.toAgentIds,
+          messageType: eventTypeToMessageType[event.type] ?? 'text',
+          content: event.content,
+          createdAt: event.createdAt,
+          rawEventId: event.id,
+          payload: confirmationId
+            ? { ...payload, status: confirmationStatusById.get(confirmationId) ?? 'pending' }
+            : payload
+        }
+      })
+    },
     agentCards: (state) => (sessionId: string): AgentCardState[] => {
       const agentStore = useAgentStore()
       const knowledgeStore = useKnowledgeStore()
@@ -191,6 +238,12 @@ export const useEventStore = defineStore('event', {
             card = { ...card, status: payload.status ?? 'approved' }
           }
         }
+        if (event.type === 'brief_confirmed' && card?.relatedBriefId) {
+          const payload = payloadOf<{ briefId?: string }>(event)
+          if (payload.briefId === card.relatedBriefId) {
+            card = { ...card, status: 'approved' }
+          }
+        }
       }
       return card?.status === 'pending' ? card : undefined
     }
@@ -200,6 +253,23 @@ export const useEventStore = defineStore('event', {
       this.eventsBySessionId[sessionId] = mockEvents.filter((event) => event.sessionId === sessionId)
       this.lastEventIdBySessionId[sessionId] = this.eventsBySessionId[sessionId].at(-1)?.id ?? ''
     },
+    async loadEvents(sessionId: string, options: { append?: boolean; afterEventId?: string } = {}) {
+      const afterEventId = options.afterEventId ?? (options.append ? this.lastEventIdBySessionId[sessionId] : undefined)
+      const suffix = afterEventId ? `?afterEventId=${encodeURIComponent(afterEventId)}` : ''
+      try {
+        const page = await apiPage<CollaborationEvent>(`/sessions/${sessionId}/events${suffix}`)
+        if (options.append) {
+          page.items.forEach((event) => this.appendEvent(event))
+        } else {
+          this.eventsBySessionId[sessionId] = page.items
+          this.lastEventIdBySessionId[sessionId] = page.items.at(-1)?.id ?? ''
+        }
+      } catch {
+        if (!options.append) {
+          this.loadMockEvents(sessionId)
+        }
+      }
+    },
     appendEvent(event: CollaborationEvent) {
       const events = this.eventsBySessionId[event.sessionId] ?? []
       if (events.some((item) => item.id === event.id)) return
@@ -207,10 +277,26 @@ export const useEventStore = defineStore('event', {
       this.lastEventIdBySessionId[event.sessionId] = event.id
     },
     connectSse(sessionId: string) {
+      this.disconnectSse()
       this.connectedSessionId = sessionId
-      this.sseConnected = true
+      const stream = new EventSource(eventStreamUrl(sessionId))
+      streams.set(sessionId, stream)
+      stream.onopen = () => {
+        this.sseConnected = true
+        void this.loadEvents(sessionId, { append: true })
+      }
+      stream.onerror = () => {
+        this.sseConnected = false
+      }
+      stream.addEventListener('collaboration-event', (message) => {
+        this.appendEvent(parseSseEvent(message as MessageEvent))
+      })
     },
     disconnectSse() {
+      if (this.connectedSessionId) {
+        streams.get(this.connectedSessionId)?.close()
+        streams.delete(this.connectedSessionId)
+      }
       this.connectedSessionId = undefined
       this.sseConnected = false
     }

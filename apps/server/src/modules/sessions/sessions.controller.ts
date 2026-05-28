@@ -15,7 +15,10 @@ export class SessionsController {
   }
 
   @Post('sessions')
-  create(@Body() body: { input: string; agentIds?: string[]; projectId?: string; tokenBudget?: number }) {
+  create(
+    @Body()
+    body: { input: string; agentIds?: string[]; projectId?: string; tokenBudget?: number; knowledgeBaseIds?: string[] }
+  ) {
     return this.sessions.create(body).then(ok);
   }
 

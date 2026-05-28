@@ -1,10 +1,29 @@
 import { spawn } from 'node:child_process';
+import { rmSync } from 'node:fs';
+import net from 'node:net';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const npmCli = process.env.npm_execpath;
-const port = String(3100 + Math.floor(Math.random() * 500));
-const apiBase = `http://127.0.0.1:${port}/api`;
+const dataFile = join(root, '.cache', 'agent-cluster', `main-chain-${Date.now()}.json`);
+
+function findFreePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      server.close(() => {
+        if (typeof address === 'object' && address?.port) {
+          resolve(String(address.port));
+        } else {
+          reject(new Error('Could not allocate a free port'));
+        }
+      });
+    });
+  });
+}
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -55,14 +74,19 @@ async function waitForServer() {
   throw lastError ?? new Error('Server did not become ready');
 }
 
+await runNpm(['run', 'build', '-w', '@agent-cluster/shared']);
 await runNpm(['run', 'build', '-w', '@agent-cluster/server']);
+
+const port = await findFreePort();
+const apiBase = `http://127.0.0.1:${port}/api`;
 
 const server = spawn(process.execPath, ['apps/server/dist/apps/server/src/main.js'], {
   cwd: root,
   stdio: ['ignore', 'pipe', 'pipe'],
   env: {
     ...process.env,
-    SERVER_PORT: port
+    SERVER_PORT: port,
+    AGENT_CLUSTER_DATA_FILE: dataFile
   }
 });
 
@@ -87,4 +111,5 @@ try {
       resolve();
     });
   });
+  rmSync(dataFile, { force: true });
 }

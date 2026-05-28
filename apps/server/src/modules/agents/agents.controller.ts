@@ -17,29 +17,30 @@ export class AgentsController {
   }
 
   @Post()
-  create(@Body() body: Record<string, unknown>) {
-    return ok({
-      ...body,
-      id: crypto.randomUUID(),
-      status: 'active'
-    });
+  create(@Body() body: Parameters<AgentsService['create']>[0]) {
+    return ok(this.agents.create(body));
   }
 
   @Patch(':agentId')
-  update(@Param('agentId') agentId: string, @Body() body: Record<string, unknown>) {
-    return ok({
-      ...this.agents.getByIdOrKey(agentId),
-      ...body
-    });
+  update(@Param('agentId') agentId: string, @Body() body: Parameters<AgentsService['update']>[1]) {
+    return ok(this.agents.update(agentId, body));
   }
 
   @Post(':agentId/knowledge-bases/:knowledgeBaseId')
   bindKnowledge(@Param('agentId') agentId: string, @Param('knowledgeBaseId') knowledgeBaseId: string) {
-    return ok({ agentId, knowledgeBaseId, accessLevel: 'read' });
+    return ok({
+      agent: this.agents.bindKnowledge(agentId, knowledgeBaseId),
+      knowledgeBaseId,
+      accessLevel: 'read'
+    });
   }
 
   @Delete(':agentId/knowledge-bases/:knowledgeBaseId')
   unbindKnowledge(@Param('agentId') agentId: string, @Param('knowledgeBaseId') knowledgeBaseId: string) {
-    return ok({ agentId, knowledgeBaseId, removed: true });
+    return ok({
+      agent: this.agents.unbindKnowledge(agentId, knowledgeBaseId),
+      knowledgeBaseId,
+      removed: true
+    });
   }
 }

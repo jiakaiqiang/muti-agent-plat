@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Subject } from 'rxjs';
 import type { CollaborationEvent, CollaborationEventType, EventMetadata, UUID } from '@agent-cluster/shared';
 import { nowIso } from '../../common/time.js';
+import { PersistenceService } from '../persistence/persistence.service.js';
 
 type CreateEventInput<TPayload extends Record<string, unknown> = Record<string, unknown>> = {
   sessionId: UUID;
@@ -19,6 +20,13 @@ type CreateEventInput<TPayload extends Record<string, unknown> = Record<string, 
 export class EventsService {
   private readonly eventsBySession = new Map<string, CollaborationEvent[]>();
   private readonly subjectsBySession = new Map<string, Subject<CollaborationEvent>>();
+
+  constructor(private readonly persistence: PersistenceService) {
+    const persisted = this.persistence.getCollection<Record<string, CollaborationEvent[]>>('eventsBySession', {});
+    for (const [sessionId, events] of Object.entries(persisted)) {
+      this.eventsBySession.set(sessionId, events);
+    }
+  }
 
   create<TPayload extends Record<string, unknown> = Record<string, unknown>>(
     input: CreateEventInput<TPayload>
@@ -40,6 +48,7 @@ export class EventsService {
     const current = this.eventsBySession.get(input.sessionId) ?? [];
     current.push(event as CollaborationEvent);
     this.eventsBySession.set(input.sessionId, current);
+    this.persist();
     this.subjectFor(input.sessionId).next(event as CollaborationEvent);
     return event;
   }
@@ -65,5 +74,9 @@ export class EventsService {
     const subject = new Subject<CollaborationEvent>();
     this.subjectsBySession.set(sessionId, subject);
     return subject;
+  }
+
+  private persist() {
+    this.persistence.setCollection('eventsBySession', Object.fromEntries(this.eventsBySession));
   }
 }

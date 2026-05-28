@@ -5,6 +5,7 @@ import { nowIso } from '../../common/time.js';
 import { AgentsService } from '../agents/agents.service.js';
 import { EventsService } from '../events/events.service.js';
 import { OrchestratorService } from '../orchestrator/orchestrator.service.js';
+import { PersistenceService } from '../persistence/persistence.service.js';
 import { UserMessageRouterService } from '../user-message-router/user-message-router.service.js';
 
 type CreateSessionInput = {
@@ -23,8 +24,14 @@ export class SessionsService {
     private readonly agents: AgentsService,
     private readonly events: EventsService,
     private readonly router: UserMessageRouterService,
-    private readonly orchestrator: OrchestratorService
-  ) {}
+    private readonly orchestrator: OrchestratorService,
+    private readonly persistence: PersistenceService
+  ) {
+    const persisted = this.persistence.getCollection<SessionDetail[]>('sessions', []);
+    for (const session of persisted) {
+      this.sessions.set(session.id, session);
+    }
+  }
 
   list() {
     return [...this.sessions.values()].map((session) => ({
@@ -60,6 +67,7 @@ export class SessionsService {
       ownerId: 'local-user',
       workspaceId: 'default-workspace',
       projectId: input.projectId,
+      knowledgeBaseIds: input.knowledgeBaseIds ?? [],
       tokenBudget: input.tokenBudget,
       tokenUsed: 0,
       participatingAgentIds,
@@ -67,6 +75,7 @@ export class SessionsService {
       updatedAt: now
     };
     this.sessions.set(session.id, session);
+    this.persist();
 
     const firstEvent = this.events.create({
       sessionId: session.id,
@@ -83,6 +92,7 @@ export class SessionsService {
     const brief = await this.orchestrator.discussAndCreateBrief(session);
     this.setStatus(session, 'WAIT_USER_CONFIRM');
     session.currentTaskBriefId = brief.id;
+    this.persist();
 
     return { session, firstEvent };
   }
@@ -145,9 +155,14 @@ export class SessionsService {
   private setStatus(session: SessionDetail, status: SessionStatus) {
     session.status = status;
     session.updatedAt = nowIso();
+    this.persist();
   }
 
   private titleFromInput(input: string) {
     return input.trim().slice(0, 28) || '新协作会话';
+  }
+
+  private persist() {
+    this.persistence.setCollection('sessions', [...this.sessions.values()]);
   }
 }

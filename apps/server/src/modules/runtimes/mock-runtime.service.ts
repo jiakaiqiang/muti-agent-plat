@@ -15,6 +15,50 @@ import { nowIso } from '../../common/time.js';
 @Injectable()
 export class MockRuntimeService {
   async run(input: AgentRunInput): Promise<AgentRunResult> {
+    if (input.options?.scenario === 'task_failed') {
+      return {
+        runId: input.runId,
+        runtimeType: 'mock',
+        status: 'failed',
+        output: {
+          kind: 'agent_message',
+          messageKind: 'risk',
+          content: `${input.agent.name} failed ${input.phase}.`
+        } satisfies AgentMessageOutput,
+        events: [
+          {
+            runId: input.runId,
+            type: 'runtime_started',
+            content: `${input.agent.name} started ${input.phase}`,
+            createdAt: nowIso()
+          },
+          {
+            runId: input.runId,
+            type: 'runtime_failed',
+            content: `${input.agent.name} failed ${input.phase}`,
+            metadata: { code: 'MODEL_ERROR' },
+            createdAt: nowIso()
+          }
+        ],
+        artifacts: [],
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          model: 'mock'
+        },
+        error: {
+          code: 'MODEL_ERROR',
+          message: 'Mock runtime failure scenario: task_failed',
+          retryable: true,
+          details: {
+            scenario: 'task_failed',
+            phase: input.phase
+          }
+        }
+      };
+    }
+
     const output = this.outputFor(input);
     return {
       runId: input.runId,

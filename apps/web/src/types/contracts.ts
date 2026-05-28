@@ -8,6 +8,7 @@ import type {
   KnowledgeBase,
   KnowledgeDocument,
   RagMatchedChunk,
+  RuntimeCapabilityDefinition,
   RuntimeInvocationStatus,
   RuntimeType,
   SessionDetail,
@@ -32,6 +33,7 @@ export type {
   KnowledgeDocument,
   KnowledgeScope,
   RagMatchedChunk,
+  RuntimeCapabilityDefinition,
   RuntimeInvocationStatus,
   RuntimeType,
   SessionDetail,
@@ -126,15 +128,28 @@ export type RuntimeEventPayload = {
 }
 
 export type ToolEventPayload = {
-  invocationId: string
+  invocationId?: string
   capabilityId: string
+  capabilityKey?: string
   capabilityName: string
   riskLevel: CapabilityRiskLevel
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'blocked'
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'blocked' | 'allowed' | 'approved'
+  approvalKey?: string
+  reason?: string
   inputSummary?: string
   outputSummary?: string
   requiresUserConfirmation?: boolean
+  allowed?: boolean
+  code?: string
   error?: string
+}
+
+export type ArtifactEventPayload = {
+  artifactId: string
+  type: string
+  title: string
+  contentSummary?: string
+  relatedCapabilityId?: string
 }
 
 export type RagRetrievedPayload = {
@@ -145,14 +160,16 @@ export type RagRetrievedPayload = {
 }
 
 export type FinalDeliveryPayload = {
-  deliveryId: string
+  deliveryId?: string
   summary: string
   completedItems: string[]
   incompleteItems: string[]
-  outOfScopeChanges: string[]
-  testResults: string[]
+  outOfScopeChanges?: string[]
+  testResults?: string[]
   risks: string[]
-  artifactIds: string[]
+  artifactIds?: string[]
+  artifactRefs?: string[]
+  notificationDraftArtifactId?: string
 }
 
 export type ChatMessage = {

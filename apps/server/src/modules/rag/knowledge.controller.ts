@@ -19,7 +19,7 @@ export class KnowledgeController {
   @Post(':knowledgeBaseId/documents')
   createDocument(
     @Param('knowledgeBaseId') knowledgeBaseId: string,
-    @Body() body: { title: string; sourceType: 'text' | 'markdown' | 'file' | 'feishu_doc'; sourceUri?: string }
+    @Body() body: { title: string; sourceType: 'text' | 'markdown' | 'file' | 'feishu_doc'; sourceUri?: string; content?: string }
   ) {
     return ok(this.knowledge.createDocument(knowledgeBaseId, body));
   }

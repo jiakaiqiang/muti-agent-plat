@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import { apiGet, apiPage, apiPost } from '@/api/client'
 import { mockSession, mockSessionId, mockSessions } from '@/mock/mockEvents'
 import type { SessionDetail, SessionListItem, SessionStatus, SessionViewMode } from '@/types/contracts'
 
@@ -18,27 +19,19 @@ export const useSessionStore = defineStore('session', {
     loading: false
   }),
   actions: {
-    loadSessions() {
+    async loadSessions() {
       this.loading = true
-      this.sessions = mockSessions
+      try {
+        const page = await apiPage<SessionListItem>('/sessions')
+        this.sessions = page.items
+      } catch {
+        this.sessions = mockSessions
+      }
       this.loading = false
     },
-    createSession(input: CreateSessionInput) {
-      const now = new Date().toISOString()
-      const session: SessionDetail = {
-        id: `session-${Date.now()}`,
-        title: input.input.slice(0, 28) || 'Untitled Session',
-        originalInput: input.input,
-        status: 'DRAFT_INPUT',
-        ownerId: 'local-user',
-        workspaceId: 'default-workspace',
-        projectId: input.projectId,
-        tokenBudget: input.tokenBudget,
-        tokenUsed: 0,
-        participatingAgentIds: input.agentIds ?? [],
-        createdAt: now,
-        updatedAt: now
-      }
+    async createSession(input: CreateSessionInput) {
+      const result = await apiPost<{ session: SessionDetail }>('/sessions', input)
+      const session = result.session
       this.currentSession = session
       this.sessions = [
         {
@@ -56,21 +49,41 @@ export const useSessionStore = defineStore('session', {
       ]
       return session
     },
-    loadSession(sessionId = mockSessionId) {
+    async loadSession(sessionId?: string) {
       this.loading = true
-      this.currentSession = sessionId === mockSession.id ? mockSession : undefined
+      const selectedSessionId = sessionId ?? this.sessions[0]?.id ?? mockSessionId
+      if (!sessionId && !this.sessions.length) {
+        this.currentSession = undefined
+        this.loading = false
+        return
+      }
+      try {
+        this.currentSession = await apiGet<SessionDetail>(`/sessions/${selectedSessionId}`)
+      } catch {
+        this.currentSession = selectedSessionId === mockSession.id ? mockSession : undefined
+      }
       this.loading = false
     },
-    sendMessage(sessionId: string, content: string, mentionedAgentIds: string[] = []) {
-      return { sessionId, content, mentionedAgentIds }
+    async sendMessage(sessionId: string, content: string, mentionedAgentIds: string[] = []) {
+      return apiPost(`/sessions/${sessionId}/messages`, { content, mentionedAgentIds })
     },
-    pauseSession(sessionId: string) {
+    async confirmBrief(sessionId: string, briefId: string) {
+      const result = await apiPost<{ brief: { status?: SessionStatus } }>(
+        `/sessions/${sessionId}/briefs/${briefId}/confirm`
+      )
+      await this.loadSession(sessionId)
+      return result
+    },
+    async pauseSession(sessionId: string) {
+      await apiPost(`/sessions/${sessionId}/pause`)
       this.setCurrentStatus(sessionId, 'WAIT_USER_DECISION')
     },
-    resumeSession(sessionId: string) {
+    async resumeSession(sessionId: string) {
+      await apiPost(`/sessions/${sessionId}/resume`)
       this.setCurrentStatus(sessionId, 'EXECUTING')
     },
-    cancelSession(sessionId: string) {
+    async cancelSession(sessionId: string) {
+      await apiPost(`/sessions/${sessionId}/cancel`)
       this.setCurrentStatus(sessionId, 'CANCELLED')
     },
     switchViewMode(mode: SessionViewMode) {

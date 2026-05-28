@@ -10,8 +10,11 @@ import type {
 } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
 import { AgentsService } from '../agents/agents.service.js';
+import { ArtifactsService } from '../artifacts/artifacts.service.js';
+import { CapabilitiesService } from '../capabilities/capabilities.service.js';
 import { EventsService } from '../events/events.service.js';
 import { KnowledgeService } from '../rag/knowledge.service.js';
+import { PersistenceService } from '../persistence/persistence.service.js';
 import { RuntimeService } from '../runtimes/runtime.service.js';
 import { TasksService } from '../tasks/tasks.service.js';
 import { nowIso } from '../../common/time.js';
@@ -25,8 +28,16 @@ export class OrchestratorService {
     private readonly events: EventsService,
     private readonly runtime: RuntimeService,
     private readonly tasks: TasksService,
-    private readonly knowledge: KnowledgeService
-  ) {}
+    private readonly knowledge: KnowledgeService,
+    private readonly artifacts: ArtifactsService,
+    private readonly capabilities: CapabilitiesService,
+    private readonly persistence: PersistenceService
+  ) {
+    const persisted = this.persistence.getCollection<Record<string, TaskBrief[]>>('briefsBySession', {});
+    for (const [sessionId, briefs] of Object.entries(persisted)) {
+      this.briefsBySession.set(sessionId, briefs);
+    }
+  }
 
   async discussAndCreateBrief(session: SessionDetail) {
     const coordinator = this.agents.getByIdOrKey('coordinator');
@@ -58,6 +69,7 @@ export class OrchestratorService {
     };
 
     this.briefsBySession.set(session.id, [...(this.briefsBySession.get(session.id) ?? []), brief]);
+    this.persistBriefs();
 
     this.events.create({
       sessionId: session.id,
@@ -100,6 +112,24 @@ export class OrchestratorService {
       )
     });
 
+    this.events.create({
+      sessionId: session.id,
+      type: 'user_confirmation_requested',
+      fromAgentId: coordinator.id,
+      content: '请确认是否按任务契约执行。',
+      metadata: createMetadata('confirmation_card', {
+        confirmationId: crypto.randomUUID(),
+        reason: 'confirm_task_brief',
+        title: '确认执行任务契约',
+        description: '确认后将进入 dry-run 执行、测试验证、复盘和最终交付。',
+        relatedBriefId: brief.id,
+        options: [
+          { key: 'approve', label: '确认执行', style: 'primary' },
+          { key: 'revise', label: '继续沟通', style: 'default' }
+        ]
+      })
+    });
+
     return brief;
   }
 
@@ -118,6 +148,7 @@ export class OrchestratorService {
     }
     brief.confirmedByUser = true;
     brief.confirmedAt = nowIso();
+    this.persistBriefs();
 
     const agentIdByKey = new Map(this.agents.list().map((agent) => [agent.key, agent.id]));
     const tasks = this.tasks.createFromSuggestions(
@@ -171,6 +202,7 @@ export class OrchestratorService {
     const review = this.agents.getByIdOrKey('review');
 
     for (const task of tasks) {
+      const taskAgent = task.assigneeAgentId ? this.agents.getByIdOrKey(task.assigneeAgentId) : backend;
       this.tasks.update(task, { status: 'running' });
       this.events.create({
         sessionId: session.id,
@@ -191,9 +223,13 @@ export class OrchestratorService {
         sessionId: session.id,
         type: 'runtime_started',
         taskId: task.id,
-        fromAgentId: task.assigneeAgentId ?? backend.id,
+        fromAgentId: taskAgent.id,
         content: 'MockRuntime started dry-run task execution.',
-        metadata: createMetadata('system_notice', { runtimeInvocationId: runId, runtimeType: 'mock', status: 'running' })
+        metadata: createMetadata('system_notice', {
+          runtimeInvocationId: runId,
+          runtimeType: taskAgent.runtimeType,
+          status: 'running'
+        })
       });
 
       await this.runtime.run({
@@ -201,8 +237,8 @@ export class OrchestratorService {
         sessionId: session.id,
         taskId: task.id,
         phase: 'task_execution',
-        agent: this.toRuntimeAgent(backend),
-        contextPack: this.createContextPack(session, backend, brief, task),
+        agent: this.toRuntimeAgent(taskAgent),
+        contextPack: this.createContextPack(session, taskAgent, brief, task),
         expectedOutput: { kind: 'task_execution_result', schemaVersion: '0.1' },
         budget: {}
       });
@@ -211,24 +247,54 @@ export class OrchestratorService {
         sessionId: session.id,
         type: 'rag_retrieved',
         taskId: task.id,
-        fromAgentId: task.assigneeAgentId ?? backend.id,
+        fromAgentId: taskAgent.id,
         content: '已检索 Agent 专属 RAG 知识片段。',
         metadata: createMetadata('rag_card', {
           retrievalLogId: crypto.randomUUID(),
-          agentId: task.assigneeAgentId ?? backend.id,
+          agentId: taskAgent.id,
           query: task.title,
-          matchedChunks: this.knowledge.search('mock-kb-contracts', task.title)
+          matchedChunks: this.searchAgentKnowledge(session, taskAgent, task.title)
         })
       });
 
       this.tasks.update(task, { status: 'completed', resultSummary: 'dry-run completed' });
+      const executionArtifact = this.artifacts.create({
+        sessionId: session.id,
+        taskId: task.id,
+        agentId: taskAgent.id,
+        type: task.assigneeAgentId === this.agents.getByIdOrKey('test').id ? 'test_report' : 'json',
+        title: `${task.title} artifact`,
+        contentSummary: 'dry-run completed',
+        metadata: {
+          phase: 'task_execution',
+          status: 'completed',
+          resultSummary: 'dry-run completed'
+        }
+      });
+      this.events.create({
+        sessionId: session.id,
+        type: 'artifact_created',
+        taskId: task.id,
+        fromAgentId: taskAgent.id,
+        content: `生成产物：${executionArtifact.title}`,
+        metadata: createMetadata('artifact_card', {
+          artifactId: executionArtifact.id,
+          type: executionArtifact.type,
+          title: executionArtifact.title,
+          contentSummary: executionArtifact.contentSummary
+        })
+      });
       this.events.create({
         sessionId: session.id,
         type: 'runtime_completed',
         taskId: task.id,
-        fromAgentId: task.assigneeAgentId ?? backend.id,
+        fromAgentId: taskAgent.id,
         content: 'MockRuntime completed dry-run task execution.',
-        metadata: createMetadata('system_notice', { runtimeInvocationId: runId, runtimeType: 'mock', status: 'completed' })
+        metadata: createMetadata('system_notice', {
+          runtimeInvocationId: runId,
+          runtimeType: taskAgent.runtimeType,
+          status: 'completed'
+        })
       });
       this.events.create({
         sessionId: session.id,
@@ -262,13 +328,36 @@ export class OrchestratorService {
       expectedOutput: { kind: 'post_review_report', schemaVersion: '0.1' },
       budget: {}
     });
+    const reviewArtifact = this.artifacts.create({
+      sessionId: session.id,
+      agentId: review.id,
+      type: 'test_report',
+      title: 'Post review report',
+      contentSummary: '复盘完成：dry-run 结果与任务契约一致。',
+      metadata: reviewRun.output as unknown as Record<string, unknown>
+    });
 
     this.events.create({
       sessionId: session.id,
       type: 'post_review_completed',
       fromAgentId: review.id,
       content: '复盘完成：dry-run 结果与任务契约一致。',
-      metadata: createMetadata('review_card', reviewRun.output as unknown as Record<string, unknown>)
+      metadata: createMetadata('review_card', {
+        ...(reviewRun.output as unknown as Record<string, unknown>),
+        artifactIds: [reviewArtifact.id]
+      })
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'artifact_created',
+      fromAgentId: review.id,
+      content: `生成产物：${reviewArtifact.title}`,
+      metadata: createMetadata('artifact_card', {
+        artifactId: reviewArtifact.id,
+        type: reviewArtifact.type,
+        title: reviewArtifact.title,
+        contentSummary: reviewArtifact.contentSummary
+      })
     });
 
     const finalRun = await this.runtime.run({
@@ -280,17 +369,81 @@ export class OrchestratorService {
       expectedOutput: { kind: 'final_delivery', schemaVersion: '0.1' },
       budget: {}
     });
+    const coordinator = this.agents.getByIdOrKey('coordinator');
+    const notification = this.agents.getByIdOrKey('notification');
+    const deliveryArtifact = this.artifacts.create({
+      sessionId: session.id,
+      agentId: coordinator.id,
+      type: 'markdown',
+      title: 'Final delivery summary',
+      contentSummary: 'v1 协作闭环 dry-run 已完成。',
+      metadata: finalRun.output as unknown as Record<string, unknown>
+    });
+    const finalOutput = finalRun.output as unknown as Record<string, unknown>;
+    const notificationDraft = this.artifacts.create({
+      sessionId: session.id,
+      agentId: notification.id,
+      type: 'feishu_draft',
+      title: 'Feishu notification draft',
+      contentSummary: '飞书通知草稿已生成，当前未发送外部消息。',
+      metadata: {
+        channel: 'feishu',
+        mode: 'draft',
+        dryRun: true,
+        status: 'pending_user_confirmation',
+        title: 'Agent Cluster dry-run delivery ready',
+        body: {
+          sessionId: session.id,
+          goal: brief.goal,
+          summary: finalOutput.summary,
+          completedItems: finalOutput.completedItems,
+          risks: finalOutput.risks
+        },
+        sourceArtifactId: deliveryArtifact.id
+      }
+    });
+    const artifactRefs = [...this.artifacts.listBySession(session.id).map((artifact) => artifact.id)];
 
     this.events.create({
       sessionId: session.id,
       type: 'final_delivery_created',
-      fromAgentId: this.agents.getByIdOrKey('coordinator').id,
+      fromAgentId: coordinator.id,
       content: '最终交付已生成。',
-      metadata: createMetadata('delivery_card', finalRun.output as unknown as Record<string, unknown>)
+      metadata: createMetadata('delivery_card', {
+        ...finalOutput,
+        artifactRefs,
+        notificationDraftArtifactId: notificationDraft.id
+      })
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'artifact_created',
+      fromAgentId: coordinator.id,
+      content: `生成产物：${deliveryArtifact.title}`,
+      metadata: createMetadata('artifact_card', {
+        artifactId: deliveryArtifact.id,
+        type: deliveryArtifact.type,
+        title: deliveryArtifact.title,
+        contentSummary: deliveryArtifact.contentSummary
+      })
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'artifact_created',
+      fromAgentId: notification.id,
+      content: `生成产物：${notificationDraft.title}`,
+      metadata: createMetadata('artifact_card', {
+        artifactId: notificationDraft.id,
+        type: notificationDraft.type,
+        title: notificationDraft.title,
+        contentSummary: notificationDraft.contentSummary,
+        relatedCapabilityId: 'cap-feishu-draft'
+      })
     });
   }
 
   private createContextPack(session: SessionDetail, agent: Agent, brief?: TaskBrief, task?: AgentTask): ContextPack {
+    const ragSnippets = task ? this.searchAgentKnowledge(session, agent, task.title) : [];
     return {
       systemRules: ['使用 v0.1 契约输出结构化结果。', 'v1 阶段仅 dry-run，禁止真实高风险操作。'],
       sessionGoal: session.originalInput,
@@ -312,9 +465,9 @@ export class OrchestratorService {
       agentProfile: this.toRuntimeAgent(agent),
       relevantEvents: [],
       relevantMemories: [],
-      ragSnippets: [],
+      ragSnippets,
       artifacts: [],
-      capabilities: [],
+      capabilities: this.capabilities.resolve(agent.capabilityIds),
       constraints: brief?.constraints ?? ['dry-run only'],
       budget: {}
     };
@@ -330,5 +483,20 @@ export class OrchestratorService {
       runtimeType: agent.runtimeType,
       capabilityIds: agent.capabilityIds
     };
+  }
+
+  private persistBriefs() {
+    this.persistence.setCollection('briefsBySession', Object.fromEntries(this.briefsBySession));
+  }
+
+  private searchAgentKnowledge(session: SessionDetail, agent: Agent, query: string) {
+    const knowledgeBaseIds = Array.from(new Set([...agent.defaultKnowledgeBaseIds, ...(session.knowledgeBaseIds ?? [])]));
+    const matches = knowledgeBaseIds.flatMap((knowledgeBaseId) => this.knowledge.search(knowledgeBaseId, query));
+
+    if (matches.length) {
+      return matches.sort((left, right) => right.score - left.score).slice(0, Number(process.env.RAG_TOP_K ?? 6));
+    }
+
+    return this.knowledge.search('mock-kb-contracts', query);
   }
 }
