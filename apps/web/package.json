@@ -9,6 +9,7 @@
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
+    "@agent-cluster/shared": "0.1.0",
     "@vitejs/plugin-vue": "^5.2.1",
     "agent-cluster": "file:../..",
     "pinia": "^2.3.0",
