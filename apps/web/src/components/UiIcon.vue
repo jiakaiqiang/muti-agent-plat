@@ -58,6 +58,19 @@ withDefaults(
       <path d="m4.9 19.1 2.1-2.1" />
       <path d="m17 7 2.1-2.1" />
     </template>
+    <template v-else-if="name === 'debug'">
+      <path d="M8 3h8" />
+      <path d="M9 3v4" />
+      <path d="M15 3v4" />
+      <rect x="5" y="7" width="14" height="14" rx="4" />
+      <path d="M3 13h4" />
+      <path d="M17 13h4" />
+      <path d="M3 17h4" />
+      <path d="M17 17h4" />
+      <circle cx="10" cy="13" r="1" />
+      <circle cx="14" cy="13" r="1" />
+      <path d="M9 17h6" />
+    </template>
     <template v-else-if="name === 'bot'">
       <rect x="5" y="8" width="14" height="10" rx="3" />
       <path d="M12 8V4" />
@@ -87,6 +100,10 @@ withDefaults(
     <template v-else-if="name === 'plus'">
       <path d="M12 5v14" />
       <path d="M5 12h14" />
+    </template>
+    <template v-else-if="name === 'x'">
+      <path d="M18 6 6 18" />
+      <path d="m6 6 12 12" />
     </template>
     <template v-else-if="name === 'search'">
       <circle cx="11" cy="11" r="7" />

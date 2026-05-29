@@ -172,6 +172,7 @@ export type Agent = {
   name: string;
   role: string;
   description?: string;
+  tags?: string[];
   runtimeType: RuntimeType;
   status: 'active' | 'disabled';
   capabilityIds: UUID[];
@@ -318,6 +319,20 @@ export type RuntimeMemoryItem = {
   scope: string;
   content: string;
   confidence: number;
+};
+
+export type MemoryScope = 'short_term' | 'session' | 'long_term_candidate';
+
+export type MemoryItem = {
+  id: UUID;
+  sessionId: UUID;
+  agentId?: UUID;
+  scope: MemoryScope;
+  content: string;
+  sourceEventId?: UUID;
+  confidence: number;
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
 };
 
 export type RuntimeRagSnippet = RagMatchedChunk;

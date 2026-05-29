@@ -36,18 +36,18 @@ export class SessionsController {
   }
 
   @Post('sessions/:sessionId/pause')
-  pause(@Param('sessionId') sessionId: string, @Body() body: { reason?: string }) {
-    return ok(this.sessions.control(sessionId, 'WAIT_USER_DECISION', body?.reason ?? 'Paused by user'));
+  pause(@Param('sessionId') sessionId: string, @Body() body: { reason?: string; confirmationId?: string }) {
+    return ok(this.sessions.control(sessionId, 'WAIT_USER_DECISION', body?.reason ?? '用户已暂停会话', body?.confirmationId));
   }
 
   @Post('sessions/:sessionId/resume')
-  resume(@Param('sessionId') sessionId: string, @Body() body: { reason?: string }) {
-    return ok(this.sessions.control(sessionId, 'EXECUTING', body?.reason ?? 'Resumed by user'));
+  resume(@Param('sessionId') sessionId: string, @Body() body: { reason?: string; confirmationId?: string }) {
+    return ok(this.sessions.control(sessionId, 'EXECUTING', body?.reason ?? '用户已继续会话', body?.confirmationId));
   }
 
   @Post('sessions/:sessionId/cancel')
-  cancel(@Param('sessionId') sessionId: string, @Body() body: { reason?: string }) {
-    return ok(this.sessions.control(sessionId, 'CANCELLED', body?.reason ?? 'Cancelled by user'));
+  cancel(@Param('sessionId') sessionId: string, @Body() body: { reason?: string; confirmationId?: string }) {
+    return ok(this.sessions.control(sessionId, 'CANCELLED', body?.reason ?? '用户已取消会话', body?.confirmationId));
   }
 
   @Get('sessions/:sessionId/briefs')

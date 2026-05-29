@@ -4,58 +4,58 @@ export const defaultCapabilities: RuntimeCapabilityDefinition[] = [
   {
     id: 'cap-brief',
     key: 'brief.generate',
-    name: 'Generate Task Brief',
+    name: '任务契约生成',
     riskLevel: 'low',
-    description: 'Create or revise a structured task brief.'
+    description: '创建或修订结构化任务契约。'
   },
   {
     id: 'cap-router',
     key: 'message.route',
-    name: 'Route User Message',
+    name: '消息路由',
     riskLevel: 'low',
-    description: 'Classify and route user messages during a session.'
+    description: '在会话中识别并路由用户消息。'
   },
   {
     id: 'cap-dry-run',
     key: 'runtime.dry_run',
-    name: 'Dry-run Runtime',
+    name: 'Dry-run 执行',
     riskLevel: 'medium',
-    description: 'Execute deterministic non-destructive runtime simulation.'
+    description: '执行确定性的非破坏性运行模拟。'
   },
   {
     id: 'cap-test-report',
     key: 'test.report',
-    name: 'Generate Test Report',
+    name: '测试报告',
     riskLevel: 'medium',
-    description: 'Summarize validation output and acceptance evidence.'
+    description: '汇总验证输出和验收证据。'
   },
   {
     id: 'cap-post-review',
     key: 'review.post',
-    name: 'Post Review',
+    name: '交付复盘',
     riskLevel: 'medium',
-    description: 'Compare runtime results against the confirmed task brief.'
+    description: '根据已确认的任务契约复盘运行结果。'
   },
   {
     id: 'cap-feishu-draft',
     key: 'notification.feishu_draft',
-    name: 'Create Feishu Draft',
+    name: '飞书草稿',
     riskLevel: 'medium',
-    description: 'Create a Feishu notification draft without sending it externally.'
+    description: '创建飞书通知草稿，不直接对外发送。'
   },
   {
     id: 'cap-file-write',
     key: 'tool.file_write',
-    name: 'File Write',
+    name: '文件写入',
     riskLevel: 'high',
-    description: 'Write or modify workspace files. Requires explicit user approval.'
+    description: '写入或修改工作区文件，需要用户明确确认。'
   },
   {
     id: 'cap-command-run',
     key: 'tool.command_run',
-    name: 'Command Execution',
+    name: '命令执行',
     riskLevel: 'high',
-    description: 'Run shell commands. Requires explicit user approval.'
+    description: '运行 shell 命令，需要用户明确确认。'
   }
 ];
 

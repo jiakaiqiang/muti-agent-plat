@@ -66,8 +66,20 @@ Dark cockpit shell:
 - Task steps: vertical stepper with numbered states and nested checklist rows.
 - Graph nodes: avatar centered in a glowing circular frame; role title,
   numbered agent badge, status pill, and color-coded border.
-- Workflow cards: rectangular glowing blocks with numbered agent badge,
-  bullet list, and arrow connectors.
+- Collaboration graph: keep the dark cockpit layout from the reference:
+  title/task row, `Agent 阵列` heading, five fixed-position Agent cards,
+  green active-task callout, connector lines, real-time status table, and a
+  right-side `对话 / 消息日志` panel with message cards and a bottom input.
+  Use the existing project palette/tokens; do not introduce a new color system.
+- Workflow view: keep the existing project colors and dark cockpit treatment.
+  Layout follows the reference: top runtime bar, left `Agents` rail with status
+  legend, central workflow canvas with five colored stage cards, hub, output
+  block, arrow connectors, bottom workflow progress strip, and right-side
+  real-time `对话 / 任务日志` panel.
+
+- Graph and workflow canvases: the visual content layer supports zooming from
+  60% to 180% by toolbar controls and mouse wheel. Keep the zoom toolbar fixed
+  to the canvas chrome; only nodes, connectors, hubs, and output blocks scale.
 
 ## Agent Colors
 

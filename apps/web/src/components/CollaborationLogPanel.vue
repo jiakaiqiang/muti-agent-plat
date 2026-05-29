@@ -7,6 +7,7 @@ import UiIcon from './UiIcon.vue'
 const props = defineProps<{
   events: CollaborationEvent[]
   agents: AgentCardState[]
+  title?: string
 }>()
 
 const visibleEvents = computed(() =>
@@ -40,7 +41,7 @@ function eventTime(event: CollaborationEvent) {
     <header class="collaboration-log-header">
       <h2>
         <UiIcon name="message" :size="18" />
-        对话 / 消息日志
+        {{ title ?? '对话 / 消息日志' }}
       </h2>
       <button type="button">全部</button>
     </header>

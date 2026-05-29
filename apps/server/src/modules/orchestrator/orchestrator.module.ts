@@ -3,13 +3,23 @@ import { AgentsModule } from '../agents/agents.module.js';
 import { ArtifactsModule } from '../artifacts/artifacts.module.js';
 import { CapabilitiesModule } from '../capabilities/capabilities.module.js';
 import { EventsModule } from '../events/events.module.js';
+import { MemoryModule } from '../memory/memory.module.js';
 import { KnowledgeModule } from '../rag/knowledge.module.js';
 import { RuntimeModule } from '../runtimes/runtime.module.js';
 import { TasksModule } from '../tasks/tasks.module.js';
 import { OrchestratorService } from './orchestrator.service.js';
 
 @Module({
-  imports: [AgentsModule, EventsModule, RuntimeModule, TasksModule, KnowledgeModule, ArtifactsModule, CapabilitiesModule],
+  imports: [
+    AgentsModule,
+    EventsModule,
+    RuntimeModule,
+    TasksModule,
+    KnowledgeModule,
+    MemoryModule,
+    ArtifactsModule,
+    CapabilitiesModule
+  ],
   providers: [OrchestratorService],
   exports: [OrchestratorService]
 })

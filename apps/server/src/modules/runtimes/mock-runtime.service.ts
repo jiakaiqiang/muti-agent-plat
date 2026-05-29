@@ -10,11 +10,17 @@ import type {
   TaskExecutionResultOutput,
   UserMessageHandlingPlanOutput
 } from '@agent-cluster/shared';
+import { mockRuntimeEnabled } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
 
 @Injectable()
 export class MockRuntimeService {
   async run(input: AgentRunInput): Promise<AgentRunResult> {
+    if (!mockRuntimeEnabled()) {
+      return this.disabledResult(input);
+    }
+
+    await this.optionalDelay();
     if (input.options?.scenario === 'task_failed') {
       return {
         runId: input.runId,
@@ -85,6 +91,46 @@ export class MockRuntimeService {
         outputTokens: 0,
         totalTokens: 0,
         model: 'mock'
+      }
+    };
+  }
+
+  private async optionalDelay() {
+    const delayMs = Number(process.env.MOCK_RUNTIME_DELAY_MS ?? 0);
+    if (!Number.isFinite(delayMs) || delayMs <= 0) return;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+
+  private disabledResult(input: AgentRunInput): AgentRunResult {
+    return {
+      runId: input.runId,
+      runtimeType: 'mock',
+      status: 'failed',
+      output: {
+        kind: 'agent_message',
+        messageKind: 'risk',
+        content: `${input.agent.name} mock runtime is disabled.`
+      } satisfies AgentMessageOutput,
+      events: [
+        {
+          runId: input.runId,
+          type: 'runtime_failed',
+          content: `${input.agent.name} mock runtime is disabled`,
+          metadata: { code: 'RUNTIME_DISABLED' },
+          createdAt: nowIso()
+        }
+      ],
+      artifacts: [],
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        model: 'mock'
+      },
+      error: {
+        code: 'CAPABILITY_BLOCKED',
+        message: 'Mock runtime is disabled. Set MOCK_RUNTIME_ENABLED=true to enable explicit local mock mode.',
+        retryable: false
       }
     };
   }

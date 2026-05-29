@@ -48,7 +48,7 @@ export class KnowledgeService {
       agentId: input.agentId,
       roleType: input.roleType,
       visibility: input.visibility ?? 'private',
-      embeddingModel: input.embeddingModel ?? 'mock-embedding',
+      embeddingModel: input.embeddingModel ?? process.env.RAG_EMBEDDING_MODEL ?? 'local-keyword-search',
       createdAt: now,
       updatedAt: now
     };
@@ -103,17 +103,7 @@ export class KnowledgeService {
         .map(({ normalizedText, ...chunk }) => chunk);
     }
 
-    const document = this.documentsByBase.get(knowledgeBaseId)?.[0];
-    return [
-      {
-        chunkId: crypto.randomUUID(),
-        knowledgeBaseId,
-        documentId: document?.id ?? crypto.randomUUID(),
-        title: document?.title ?? 'Mock RAG Knowledge',
-        snippet: `Mock knowledge matched for: ${query}`,
-        score: 0.91
-      }
-    ];
+    return [];
   }
 
   private chunkDocument(document: KnowledgeDocument, content: string): KnowledgeChunkRecord[] {

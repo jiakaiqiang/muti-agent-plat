@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck --workspaces --if-present
+
+      - name: Build
+        run: npm run build --workspaces --if-present
+
+      - name: Main chain E2E
+        run: npm run test:e2e:main-chain
+
+      - name: P1 behavior E2E
+        run: npm run test:e2e:p1-behaviors
+
+      - name: Ops smoke E2E
+        run: npm run test:e2e:ops
+
+      - name: Security smoke E2E
+        run: npm run test:e2e:security
+
+      - name: Real data mode E2E
+        run: npm run test:e2e:real-data-mode
+
+      - name: Generic LLM real-compatible E2E
+        run: npm run test:e2e:generic-llm-real
+
+      - name: PostgreSQL persistence E2E
+        run: npm run test:e2e:postgres-persistence
+
+      - name: BullMQ ops E2E
+        run: npm run test:e2e:bullmq-ops
+
+      - name: Real agents no-seed E2E
+        run: npm run test:e2e:real-agents-no-seed
+
+      - name: Debug memory E2E
+        run: npm run test:e2e:debug-memory
+
+      - name: Persistence smoke E2E
+        run: npm run test:e2e:persistence

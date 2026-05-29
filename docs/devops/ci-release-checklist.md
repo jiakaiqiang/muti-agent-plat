@@ -13,11 +13,15 @@
 - Build：前端和后端均可生产构建。
 - E2E smoke：至少覆盖创建会话、生成任务契约、确认执行、dry-run 执行、最终交付链路。
 
-建议 CI 阶段：
+当前 CI 阶段：
 
 ```text
-install -> lint -> typecheck -> unit-test -> contract-test -> integration-test -> build -> e2e-smoke
+install -> typecheck -> build -> main-chain-e2e -> p1-behavior-e2e -> ops-smoke -> security-smoke -> debug-memory-smoke -> persistence-smoke
+        -> real-data-mode-smoke -> generic-llm-real-smoke -> postgres-persistence-smoke -> bullmq-ops-smoke
+        -> real-agents-no-seed-smoke
 ```
+
+后续仍需补充 lint、unit-test、contract-test 和更细粒度 integration-test 独立阶段。
 
 ## CI 环境服务
 
@@ -36,6 +40,9 @@ Redis 验收要求：
 
 - BullMQ 能创建 queue、添加 job、消费 job。
 - 队列前缀使用 `BULLMQ_PREFIX`，避免 CI 并发污染。
+- `npm run test:e2e:postgres-persistence` 能跨后端进程恢复 session 和 events。
+- `npm run test:e2e:bullmq-ops` 能通过 `GET /api/ops/queues` 读取真实 BullMQ job counts。
+- `npm run test:e2e:real-agents-no-seed` 能证明真实模式不会自动注入默认 Agent seed。
 
 ## 发布前 Checklist
 
@@ -46,6 +53,7 @@ Redis 验收要求：
 - 高风险能力默认关闭，开启需要用户确认或环境级开关。
 - Runtime、RAG、Memory、Capability 调用均有结构化日志或审计记录。
 - SSE 或实时连接断线重连路径已通过 smoke test。
+- CORS 白名单和基础安全响应头已通过 security smoke test。
 - 前端构建产物可部署，后端健康检查可通过。
 - 版本说明包含功能变更、配置变更、数据变更、已知风险。
 
@@ -68,7 +76,7 @@ Redis 验收要求：
 - 回滚应用版本。
 - 回滚或补偿配置项。
 - 检查 worker 是否重复消费旧版本 job。
-- 检查 Redis pending/delayed/failed job。
+- 检查 Redis pending、delayed、failed job。
 - 验证核心链路恢复。
 
 ## 观测建议
@@ -77,7 +85,7 @@ v1 至少记录以下指标或日志：
 
 - API 请求耗时和错误率。
 - SSE 连接数、断开次数、重连次数。
-- Queue job started/completed/failed/retried。
+- Queue job started、completed、failed、retried。
 - Runtime invocation status、耗时、token 估算、成本估算。
 - RAG retrieval query、命中数量、top score。
 - Token budget preflight 和超预算事件。

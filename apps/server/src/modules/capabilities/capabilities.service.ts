@@ -20,7 +20,7 @@ export class CapabilitiesService {
       approvals: string[];
     }>('capabilities', { capabilities: [], approvals: [] });
 
-    for (const capability of [...defaultCapabilities, ...persisted.capabilities]) {
+    for (const capability of [...persisted.capabilities, ...defaultCapabilities]) {
       this.capabilities.set(capability.id, capability);
     }
     for (const approval of persisted.approvals) {

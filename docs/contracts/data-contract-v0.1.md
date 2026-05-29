@@ -344,7 +344,8 @@ create table memories (
   confidence numeric not null default 1,
   source_event_id uuid null references collaboration_events(id),
   expires_at timestamptz null,
-  created_at timestamptz not null
+  created_at timestamptz not null,
+  updated_at timestamptz not null
 );
 ```
 
@@ -394,6 +395,8 @@ create table artifacts (
 - session_agents 表示某个 Agent 在某次会话内的状态。
 - knowledge_base 可以绑定到 agent、session、project 或 global。
 - agent_knowledge_bases 定义 Agent 对知识库的访问关系。
+- memories 可以绑定 session，也可以进一步绑定到指定 agent。
+- Runtime Context Pack 中的 `relevantMemories` 必须来自 memories 的可追溯记录。
 - artifacts 必须关联 session，可选关联 task 和 agent。
 
 ## 6. v0.1 迁移要求

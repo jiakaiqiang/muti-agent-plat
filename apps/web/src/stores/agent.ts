@@ -1,7 +1,13 @@
 import { defineStore } from 'pinia'
-import { apiGet } from '@/api/client'
-import { mockAgents } from '@/mock/mockEvents'
+import { apiGet, apiPost } from '@/api/client'
 import type { Agent, RuntimeCapabilityDefinition } from '@/types/contracts'
+
+type CreateAgentInput = {
+  name: string
+  role: string
+  tags?: string[]
+  capabilityIds?: string[]
+}
 
 const capabilityNameById: Record<string, string> = {
   'cap-brief': '任务契约生成',
@@ -29,23 +35,15 @@ export const useAgentStore = defineStore('agent', {
   },
   actions: {
     async loadAgents() {
-      try {
-        this.agents = await apiGet<Agent[]>('/agents')
-      } catch {
-        this.agents = mockAgents
-      }
+      this.agents = await apiGet<Agent[]>('/agents')
+    },
+    async createAgent(input: CreateAgentInput) {
+      const agent = await apiPost<Agent>('/agents', input)
+      this.agents = [agent, ...this.agents.filter((item) => item.id !== agent.id)]
+      return agent
     },
     async loadCapabilities() {
-      try {
-        this.capabilities = await apiGet<RuntimeCapabilityDefinition[]>('/capabilities')
-      } catch {
-        this.capabilities = Object.entries(capabilityNameById).map(([id, name]) => ({
-          id,
-          key: id,
-          name,
-          riskLevel: 'medium'
-        }))
-      }
+      this.capabilities = await apiGet<RuntimeCapabilityDefinition[]>('/capabilities')
     }
   }
 })

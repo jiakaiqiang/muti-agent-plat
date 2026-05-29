@@ -13,9 +13,38 @@ Agent Cluster is a multi-agent collaboration system. The v1 implementation follo
 ## Development Order
 
 1. Keep the v0.1 contracts stable.
-2. Build the event stream, mock runtime, and three-column chat workspace first.
-3. Use dry-run execution until the collaboration loop is verified.
-4. Add real Codex/Claude Code runtimes in v2.
+2. Keep the event stream and three-column chat workspace contract-compatible.
+3. Run agents through the configured `generic_llm` runtime by default.
+4. Use mock runtime only when an explicit local demo/test mode enables it.
+
+## Runtime Configuration
+
+Runtime execution is real-first by default. Copy `.env.example` to `.env` and
+keep `DEFAULT_AGENT_RUNTIME_TYPE=generic_llm`, `LLM_DRY_RUN=false`, and
+`LLM_MOCK_FALLBACK=false`. If the LLM configuration is missing or unreachable,
+the runtime fails visibly instead of silently returning mock data.
+
+Local Ollama is supported through Ollama's OpenAI-compatible endpoint:
+
+```env
+LLM_PROVIDER=ollama
+LLM_MODEL=llama3.2
+LLM_API_KEY=
+LLM_BASE_URL=http://127.0.0.1:11434/v1
+```
+
+For an OpenAI-compatible cloud provider, use its real API key and base URL:
+
+```env
+LLM_PROVIDER=openai-compatible
+LLM_MODEL=gpt-4.1-mini
+LLM_API_KEY=sk-...
+LLM_BASE_URL=https://api.openai.com/v1
+```
+
+For local demos or E2E tests, explicitly enable mock mode with
+`VITE_ENABLE_MOCKS=true`, `DEFAULT_AGENT_RUNTIME_TYPE=mock`,
+`LLM_MOCK_FALLBACK=true`, and `MOCK_RUNTIME_ENABLED=true`.
 
 ## Local Runtime State
 
@@ -32,5 +61,5 @@ keeps `ENABLE_HIGH_RISK_TOOLS=false` and `REQUIRE_USER_CONFIRMATION=true` by
 default.
 
 Final delivery also creates a local `feishu_draft` artifact through the
-Notification Agent. It is a dry-run draft only: no external Feishu message is
-sent until a future explicit send/confirmation flow is added.
+Notification Agent. It remains a draft artifact only: no external Feishu
+message is sent until a future explicit send/confirmation flow is added.

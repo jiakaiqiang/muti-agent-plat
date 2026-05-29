@@ -2,7 +2,6 @@ import { defineStore } from 'pinia'
 import { apiPage, eventStreamUrl, parseSseEvent } from '@/api/client'
 import { useAgentStore } from '@/stores/agent'
 import { useKnowledgeStore } from '@/stores/knowledge'
-import { mockEvents } from '@/mock/mockEvents'
 import type {
   AgentCardState,
   AgentStatusChangedPayload,
@@ -249,25 +248,15 @@ export const useEventStore = defineStore('event', {
     }
   },
   actions: {
-    loadMockEvents(sessionId: string) {
-      this.eventsBySessionId[sessionId] = mockEvents.filter((event) => event.sessionId === sessionId)
-      this.lastEventIdBySessionId[sessionId] = this.eventsBySessionId[sessionId].at(-1)?.id ?? ''
-    },
     async loadEvents(sessionId: string, options: { append?: boolean; afterEventId?: string } = {}) {
       const afterEventId = options.afterEventId ?? (options.append ? this.lastEventIdBySessionId[sessionId] : undefined)
       const suffix = afterEventId ? `?afterEventId=${encodeURIComponent(afterEventId)}` : ''
-      try {
-        const page = await apiPage<CollaborationEvent>(`/sessions/${sessionId}/events${suffix}`)
-        if (options.append) {
-          page.items.forEach((event) => this.appendEvent(event))
-        } else {
-          this.eventsBySessionId[sessionId] = page.items
-          this.lastEventIdBySessionId[sessionId] = page.items.at(-1)?.id ?? ''
-        }
-      } catch {
-        if (!options.append) {
-          this.loadMockEvents(sessionId)
-        }
+      const page = await apiPage<CollaborationEvent>(`/sessions/${sessionId}/events${suffix}`)
+      if (options.append) {
+        page.items.forEach((event) => this.appendEvent(event))
+      } else {
+        this.eventsBySessionId[sessionId] = page.items
+        this.lastEventIdBySessionId[sessionId] = page.items.at(-1)?.id ?? ''
       }
     },
     appendEvent(event: CollaborationEvent) {

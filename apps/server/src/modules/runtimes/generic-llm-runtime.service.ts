@@ -6,6 +6,7 @@ import type {
   RuntimeOutput,
   RuntimeUsage
 } from '@agent-cluster/shared';
+import { genericLlmMockFallbackEnabled, llmApiKey, llmBaseUrl, llmModel } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
 import { MockRuntimeService } from './mock-runtime.service.js';
 
@@ -14,20 +15,16 @@ export class GenericLlmRuntimeService {
   constructor(private readonly mockRuntime: MockRuntimeService) {}
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
-    if (this.shouldUseDeterministicFallback()) {
+    if (genericLlmMockFallbackEnabled()) {
       return this.runFallback(input);
     }
 
-    return this.runOpenAiCompatible(input);
-  }
+    const missingConfig = this.missingConfig();
+    if (missingConfig.length) {
+      return this.failedResult(input, nowIso(), `GenericLlmRuntime missing required config: ${missingConfig.join(', ')}`);
+    }
 
-  private shouldUseDeterministicFallback() {
-    return (
-      process.env.LLM_PROVIDER === 'mock' ||
-      process.env.LLM_DRY_RUN !== 'false' ||
-      !process.env.LLM_API_KEY ||
-      !process.env.LLM_BASE_URL
-    );
+    return this.runOpenAiCompatible(input);
   }
 
   private async runFallback(input: AgentRunInput): Promise<AgentRunResult> {
@@ -53,11 +50,11 @@ export class GenericLlmRuntimeService {
       const response = await fetch(this.chatCompletionsUrl(), {
         method: 'POST',
         headers: {
-          authorization: `Bearer ${process.env.LLM_API_KEY}`,
+          authorization: `Bearer ${llmApiKey()}`,
           'content-type': 'application/json'
         },
         body: JSON.stringify({
-          model: process.env.LLM_MODEL ?? 'gpt-4.1-mini',
+          model: llmModel(),
           temperature: 0.2,
           response_format: { type: 'json_object' },
           messages: [
@@ -125,44 +122,57 @@ export class GenericLlmRuntimeService {
         usage: this.toUsage(body.usage, body.model)
       };
     } catch (error) {
-      return {
-        runId: input.runId,
-        runtimeType: 'generic_llm',
-        status: 'failed',
-        output: {
-          kind: 'agent_message',
-          messageKind: 'risk',
-          content: `GenericLlmRuntime failed during ${input.phase}.`
-        } satisfies AgentMessageOutput,
-        events: [
-          {
-            runId: input.runId,
-            type: 'runtime_started',
-            content: `${input.agent.name} GenericLlmRuntime started ${input.phase}`,
-            createdAt: startedAt
-          },
-          {
-            runId: input.runId,
-            type: 'runtime_failed',
-            content: `${input.agent.name} GenericLlmRuntime failed ${input.phase}`,
-            metadata: { message: error instanceof Error ? error.message : String(error) },
-            createdAt: nowIso()
-          }
-        ],
-        artifacts: [],
-        usage: this.toUsage(undefined, process.env.LLM_MODEL),
-        error: {
-          code: 'MODEL_ERROR',
-          message: error instanceof Error ? error.message : String(error),
-          retryable: true
-        }
-      };
+      return this.failedResult(input, startedAt, error instanceof Error ? error.message : String(error));
     }
   }
 
+  private missingConfig() {
+    return [
+      ['LLM_API_KEY', llmApiKey()],
+      ['LLM_BASE_URL', llmBaseUrl()]
+    ]
+      .filter(([, value]) => !value?.trim())
+      .map(([name]) => name);
+  }
+
   private chatCompletionsUrl() {
-    const baseUrl = process.env.LLM_BASE_URL?.replace(/\/$/, '');
+    const baseUrl = llmBaseUrl()?.replace(/\/$/, '');
     return `${baseUrl}/chat/completions`;
+  }
+
+  private failedResult(input: AgentRunInput, startedAt: string, message: string): AgentRunResult {
+    return {
+      runId: input.runId,
+      runtimeType: 'generic_llm',
+      status: 'failed',
+      output: {
+        kind: 'agent_message',
+        messageKind: 'risk',
+        content: `GenericLlmRuntime failed during ${input.phase}.`
+      } satisfies AgentMessageOutput,
+      events: [
+        {
+          runId: input.runId,
+          type: 'runtime_started',
+          content: `${input.agent.name} GenericLlmRuntime started ${input.phase}`,
+          createdAt: startedAt
+        },
+        {
+          runId: input.runId,
+          type: 'runtime_failed',
+          content: `${input.agent.name} GenericLlmRuntime failed ${input.phase}`,
+          metadata: { message },
+          createdAt: nowIso()
+        }
+      ],
+      artifacts: [],
+      usage: this.toUsage(undefined, llmModel()),
+      error: {
+        code: 'MODEL_ERROR',
+        message,
+        retryable: true
+      }
+    };
   }
 
   private toUsage(
@@ -173,7 +183,7 @@ export class GenericLlmRuntimeService {
       inputTokens: usage?.prompt_tokens ?? 0,
       outputTokens: usage?.completion_tokens ?? 0,
       totalTokens: usage?.total_tokens ?? 0,
-      model: model ?? process.env.LLM_MODEL ?? 'generic-llm'
+      model: model ?? llmModel()
     };
   }
 }

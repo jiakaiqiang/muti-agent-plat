@@ -1,8 +1,11 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { defaultAgents } from '@agent-cluster/shared';
 import type { Agent } from '@agent-cluster/shared';
+import { defaultAgentRuntimeType } from '../../common/runtime-config.js';
 import { defaultCapabilityIdsByAgentKey } from '../capabilities/default-capabilities.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
+
+const truthyValues = new Set(['1', 'true', 'yes', 'on']);
 
 @Injectable()
 export class AgentsService {
@@ -10,10 +13,15 @@ export class AgentsService {
 
   constructor(private readonly persistence: PersistenceService) {
     const persistedAgents = this.persistence.getCollection<Agent[]>('agents', []);
-    for (const agent of [...defaultAgents, ...persistedAgents]) {
+    const defaultRuntimeType = defaultAgentRuntimeType();
+    const defaultAgentKeys = new Set(defaultAgents.map((agent) => agent.key));
+    const seedAgents = this.defaultAgentSeedEnabled() ? defaultAgents : [];
+    for (const agent of [...seedAgents, ...persistedAgents]) {
       const defaultCapabilityIds = defaultCapabilityIdsByAgentKey[agent.key] ?? [];
+      const runtimeType = defaultAgentKeys.has(agent.key) ? defaultRuntimeType : agent.runtimeType;
       this.agents.set(agent.id, {
         ...agent,
+        runtimeType,
         capabilityIds: Array.from(new Set([...defaultCapabilityIds, ...agent.capabilityIds]))
       });
     }
@@ -45,17 +53,19 @@ export class AgentsService {
     return selected.map((agent) => agent.id);
   }
 
-  create(input: Partial<Agent> & Pick<Agent, 'key' | 'name' | 'role'>) {
+  create(input: Partial<Agent> & Pick<Agent, 'name' | 'role'>) {
     const now = new Date().toISOString();
     const agent: Agent = {
       id: input.id ?? crypto.randomUUID(),
-      key: input.key,
-      name: input.name,
-      role: input.role,
-      runtimeType: input.runtimeType ?? 'mock',
+      key: this.uniqueAgentKey(input.key ?? input.name),
+      name: input.name.trim(),
+      role: input.role.trim(),
+      description: input.description?.trim() || undefined,
+      tags: this.normalizeStringList(input.tags),
+      runtimeType: input.runtimeType ?? defaultAgentRuntimeType(),
       status: input.status ?? 'active',
-      capabilityIds: input.capabilityIds ?? [],
-      defaultKnowledgeBaseIds: input.defaultKnowledgeBaseIds ?? [],
+      capabilityIds: this.normalizeStringList(input.capabilityIds),
+      defaultKnowledgeBaseIds: this.normalizeStringList(input.defaultKnowledgeBaseIds),
       createdAt: input.createdAt ?? now,
       updatedAt: input.updatedAt ?? now
     };
@@ -92,5 +102,37 @@ export class AgentsService {
 
   private persist() {
     this.persistence.setCollection('agents', this.list());
+  }
+
+  private normalizeStringList(values?: string[]) {
+    if (!Array.isArray(values)) {
+      return [];
+    }
+    return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+  }
+
+  private uniqueAgentKey(source: string) {
+    const base =
+      source
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '') || `agent-${crypto.randomUUID().slice(0, 8)}`;
+    const usedKeys = new Set(this.list().map((agent) => agent.key));
+    if (!usedKeys.has(base)) {
+      return base;
+    }
+
+    let index = 2;
+    let candidate = `${base}-${index}`;
+    while (usedKeys.has(candidate)) {
+      index += 1;
+      candidate = `${base}-${index}`;
+    }
+    return candidate;
+  }
+
+  private defaultAgentSeedEnabled() {
+    return truthyValues.has((process.env.AGENT_CLUSTER_SEED_DEFAULT_AGENTS ?? '').trim().toLowerCase());
   }
 }

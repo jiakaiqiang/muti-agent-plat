@@ -1,6 +1,5 @@
 import { defineStore } from 'pinia'
 import { apiGet, apiPage, apiPost } from '@/api/client'
-import { mockSession, mockSessionId, mockSessions } from '@/mock/mockEvents'
 import type { SessionDetail, SessionListItem, SessionStatus, SessionViewMode } from '@/types/contracts'
 
 type CreateSessionInput = {
@@ -24,10 +23,9 @@ export const useSessionStore = defineStore('session', {
       try {
         const page = await apiPage<SessionListItem>('/sessions')
         this.sessions = page.items
-      } catch {
-        this.sessions = mockSessions
+      } finally {
+        this.loading = false
       }
-      this.loading = false
     },
     async createSession(input: CreateSessionInput) {
       const result = await apiPost<{ session: SessionDetail }>('/sessions', input)
@@ -51,7 +49,7 @@ export const useSessionStore = defineStore('session', {
     },
     async loadSession(sessionId?: string) {
       this.loading = true
-      const selectedSessionId = sessionId ?? this.sessions[0]?.id ?? mockSessionId
+      const selectedSessionId = sessionId ?? this.sessions[0]?.id
       if (!sessionId && !this.sessions.length) {
         this.currentSession = undefined
         this.loading = false
@@ -59,10 +57,9 @@ export const useSessionStore = defineStore('session', {
       }
       try {
         this.currentSession = await apiGet<SessionDetail>(`/sessions/${selectedSessionId}`)
-      } catch {
-        this.currentSession = selectedSessionId === mockSession.id ? mockSession : undefined
+      } finally {
+        this.loading = false
       }
-      this.loading = false
     },
     async sendMessage(sessionId: string, content: string, mentionedAgentIds: string[] = []) {
       return apiPost(`/sessions/${sessionId}/messages`, { content, mentionedAgentIds })
@@ -74,16 +71,16 @@ export const useSessionStore = defineStore('session', {
       await this.loadSession(sessionId)
       return result
     },
-    async pauseSession(sessionId: string) {
-      await apiPost(`/sessions/${sessionId}/pause`)
+    async pauseSession(sessionId: string, confirmationId?: string) {
+      await apiPost(`/sessions/${sessionId}/pause`, confirmationId ? { confirmationId } : undefined)
       this.setCurrentStatus(sessionId, 'WAIT_USER_DECISION')
     },
-    async resumeSession(sessionId: string) {
-      await apiPost(`/sessions/${sessionId}/resume`)
+    async resumeSession(sessionId: string, confirmationId?: string) {
+      await apiPost(`/sessions/${sessionId}/resume`, confirmationId ? { confirmationId } : undefined)
       this.setCurrentStatus(sessionId, 'EXECUTING')
     },
-    async cancelSession(sessionId: string) {
-      await apiPost(`/sessions/${sessionId}/cancel`)
+    async cancelSession(sessionId: string, confirmationId?: string) {
+      await apiPost(`/sessions/${sessionId}/cancel`, confirmationId ? { confirmationId } : undefined)
       this.setCurrentStatus(sessionId, 'CANCELLED')
     },
     switchViewMode(mode: SessionViewMode) {

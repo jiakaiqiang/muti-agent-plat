@@ -38,6 +38,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
 
   private codeFor(status: number, message: string) {
     if (message.includes('Session not found')) return 'SESSION_NOT_FOUND';
+    if (message.includes('Invalid session transition')) return 'INVALID_SESSION_TRANSITION';
     if (message.includes('Brief not found')) return 'BRIEF_NOT_FOUND';
     if (message.includes('Agent not found')) return 'AGENT_NOT_FOUND';
     if (message.includes('Artifact not found')) return 'ARTIFACT_NOT_FOUND';

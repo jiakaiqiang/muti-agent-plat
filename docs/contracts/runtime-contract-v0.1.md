@@ -89,6 +89,7 @@ type ContextPack = {
 
 - Runtime 不应收到完整群聊历史。
 - `taskBrief` 优先级高于长期 Memory 和 RAG。
+- `relevantMemories` 必须来自 Memory API 或自动沉淀的可追溯记忆项。
 - `constraints` 必须显式传入。
 - `ragSnippets` 必须包含来源。
 
@@ -365,6 +366,7 @@ CodexRuntime 和 ClaudeCodeRuntime 接入时必须遵守：
 - 必须支持 timeout。
 - 最好支持 cancel；如果不支持，需要在 Adapter 中标记。
 - 必须返回 artifact，包括 diff、测试结果或执行摘要。
+- v1 仅预留 `CodexRuntimeAdapter` 和 `ClaudeCodeRuntimeAdapter` 文件结构，真实执行能力后续版本接入。
 
 ## 15. 错误结构
 

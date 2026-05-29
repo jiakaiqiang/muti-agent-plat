@@ -42,7 +42,7 @@ export type {
   UserMessageIntent
 } from '@agent-cluster/shared'
 
-export type SessionViewMode = 'chat' | 'collaboration_graph' | 'workflow'
+export type SessionViewMode = 'chat' | 'collaboration_graph' | 'workflow' | 'debug'
 
 export type ConfirmationReason =
   | 'confirm_task_brief'

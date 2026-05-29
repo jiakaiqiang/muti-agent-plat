@@ -82,7 +82,11 @@ async function startServer() {
     env: {
       ...process.env,
       SERVER_PORT: port,
-      AGENT_CLUSTER_DATA_FILE: dataFile
+      AGENT_CLUSTER_DATA_FILE: dataFile,
+      AGENT_CLUSTER_SEED_DEFAULT_AGENTS: 'true',
+      LLM_DRY_RUN: 'true',
+      LLM_MOCK_FALLBACK: 'true',
+      MOCK_RUNTIME_ENABLED: 'true'
     }
   });
 

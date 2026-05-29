@@ -515,7 +515,67 @@ type Artifact = {
 }
 ```
 
-## 10. Capabilities API
+## 10. Memory API
+
+### 10.1 会话 Memory 列表和检索
+
+```text
+GET /api/sessions/:sessionId/memories?q=&agentId=
+```
+
+响应：
+
+```ts
+type MemoryItem = {
+  id: string
+  sessionId: string
+  agentId?: string
+  scope: 'short_term' | 'session' | 'long_term_candidate'
+  content: string
+  sourceEventId?: string
+  confidence: number
+  createdAt: string
+  updatedAt: string
+}
+```
+
+### 10.2 创建会话 Memory
+
+```text
+POST /api/sessions/:sessionId/memories
+```
+
+请求：
+
+```ts
+type CreateMemoryRequest = {
+  content: string
+  scope?: 'short_term' | 'session' | 'long_term_candidate'
+  agentId?: string
+  sourceEventId?: string
+  confidence?: number
+}
+```
+
+## 11. Debug API
+
+Debug API 仅用于开发态和验收态，生产环境可以通过网关或权限策略限制访问。
+
+```text
+GET /api/sessions/:sessionId/debug/context-packs
+GET /api/sessions/:sessionId/debug/runtime-invocations
+GET /api/sessions/:sessionId/debug/rag-retrievals
+GET /api/sessions/:sessionId/debug/token-usage
+```
+
+规则：
+
+- `context-packs` 返回每次 Runtime 调用的完整 Context Pack 快照。
+- `runtime-invocations` 返回调用状态、阶段、Agent、usage 和 Context Pack 摘要。
+- `rag-retrievals` 从 `rag_retrieved` 事件派生可追溯检索记录。
+- `token-usage` 汇总 Runtime invocation 的 token usage。
+
+## 12. Capabilities API
 
 ```text
 GET  /api/capabilities
@@ -535,7 +595,7 @@ type Capability = {
 }
 ```
 
-## 11. 错误码
+## 13. 错误码
 
 ```text
 SESSION_NOT_FOUND
