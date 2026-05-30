@@ -45,6 +45,10 @@ export async function apiPost<T>(path: string, body?: unknown) {
   ).data
 }
 
+export async function apiDelete<T>(path: string) {
+  return (await request<T>(path, { method: 'DELETE' })).data
+}
+
 export async function apiPage<T>(path: string) {
   return apiGet<PageResponse<T>>(path)
 }

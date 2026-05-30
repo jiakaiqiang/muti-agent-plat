@@ -185,6 +185,14 @@ async function createAgent(
   }
 }
 
+async function deleteAgent(agentId: string) {
+  try {
+    await agentStore.deleteAgent(agentId)
+  } catch (error) {
+    inputError.value = error instanceof Error ? error.message : '删除 Agent 失败'
+  }
+}
+
 async function sendUserMessage(content: string) {
   inputError.value = ''
   isSendingMessage.value = true
@@ -385,6 +393,7 @@ async function resolveConfirmation(optionKey: string) {
       :connected="eventStore.sseConnected"
       @resolve-confirmation="resolveConfirmation"
       @create-agent="createAgent"
+      @delete-agent="deleteAgent"
     />
 
     <section v-else-if="activeSection === 'knowledge'" class="workspace-admin">

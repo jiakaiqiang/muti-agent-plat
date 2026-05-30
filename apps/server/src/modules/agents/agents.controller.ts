@@ -21,6 +21,11 @@ export class AgentsController {
     return ok(this.agents.create(body));
   }
 
+  @Delete(':agentId')
+  remove(@Param('agentId') agentId: string) {
+    return ok(this.agents.remove(agentId));
+  }
+
   @Patch(':agentId')
   update(@Param('agentId') agentId: string, @Body() body: Parameters<AgentsService['update']>[1]) {
     return ok(this.agents.update(agentId, body));

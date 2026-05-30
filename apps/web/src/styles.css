@@ -1390,6 +1390,32 @@ textarea:disabled {
   color: #b91c1c;
 }
 
+.agent-card__top-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.agent-delete-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--light-border);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--light-muted);
+  cursor: pointer;
+}
+
+.agent-delete-button:hover {
+  border-color: #fecaca;
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
 .agent-meter {
   height: 6px;
   border-radius: 999px;

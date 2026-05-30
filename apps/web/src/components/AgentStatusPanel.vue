@@ -30,6 +30,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   resolveConfirmation: [optionKey: string]
   createAgent: [input: CreateAgentInput, done: (error?: string) => void]
+  deleteAgent: [agentId: string]
 }>()
 
 const showAgentForm = ref(false)
@@ -129,6 +130,12 @@ function submitAgentForm() {
     }
   )
 }
+
+function requestDelete(agent: AgentCardState) {
+  if (window.confirm(`确定删除 Agent “${agent.name}”吗？该操作不可恢复。`)) {
+    emit('deleteAgent', agent.agentId)
+  }
+}
 </script>
 
 <template>
@@ -193,7 +200,12 @@ function submitAgentForm() {
               <h3>{{ agent.name }}</h3>
               <p>{{ agent.role }}</p>
             </div>
-            <span class="agent-status" :class="agent.status">{{ statusLabel(agent.status) }}</span>
+            <div class="agent-card__top-actions">
+              <span class="agent-status" :class="agent.status">{{ statusLabel(agent.status) }}</span>
+              <button class="agent-delete-button" type="button" title="删除 Agent" @click="requestDelete(agent)">
+                <UiIcon name="trash" :size="14" />
+              </button>
+            </div>
           </div>
           <p v-if="agent.currentTaskTitle" class="agent-task">{{ agent.currentTaskTitle }}</p>
           <p v-if="agent.thoughtSummary" class="agent-summary">{{ agent.thoughtSummary }}</p>

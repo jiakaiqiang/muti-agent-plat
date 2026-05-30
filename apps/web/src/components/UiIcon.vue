@@ -122,6 +122,13 @@ withDefaults(
       <circle cx="8" cy="10" r="2" />
       <path d="m21 16-5-5L5 19" />
     </template>
+    <template v-else-if="name === 'trash'">
+      <path d="M3 6h18" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+    </template>
     <template v-else>
       <circle cx="12" cy="12" r="9" />
       <path d="M12 8v8" />

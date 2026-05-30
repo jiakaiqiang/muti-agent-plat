@@ -10,13 +10,20 @@ const truthyValues = new Set(['1', 'true', 'yes', 'on']);
 @Injectable()
 export class AgentsService {
   private readonly agents = new Map<string, Agent>();
+  private readonly defaultAgentIds = new Set(defaultAgents.map((agent) => agent.id));
 
   constructor(private readonly persistence: PersistenceService) {
     const persistedAgents = this.persistence.getCollection<Agent[]>('agents', []);
     const defaultRuntimeType = defaultAgentRuntimeType();
     const defaultAgentKeys = new Set(defaultAgents.map((agent) => agent.key));
+
+    // Default agents are seed-only: injected in memory when seeding is enabled, and never written
+    // to the persisted store (see persist()). The store keeps only user-created agents, so turning
+    // seeding off makes the defaults disappear on the next start instead of lingering forever.
     const seedAgents = this.defaultAgentSeedEnabled() ? defaultAgents : [];
-    for (const agent of [...seedAgents, ...persistedAgents]) {
+    const customAgents = persistedAgents.filter((agent) => !this.defaultAgentIds.has(agent.id));
+
+    for (const agent of [...seedAgents, ...customAgents]) {
       const defaultCapabilityIds = defaultCapabilityIdsByAgentKey[agent.key] ?? [];
       const runtimeType = defaultAgentKeys.has(agent.key) ? defaultRuntimeType : agent.runtimeType;
       this.agents.set(agent.id, {
@@ -25,6 +32,8 @@ export class AgentsService {
         capabilityIds: Array.from(new Set([...defaultCapabilityIds, ...agent.capabilityIds]))
       });
     }
+
+    // Rewrite the store without default agents so legacy seeds persisted by older builds are pruned.
     this.persist();
   }
 
@@ -87,6 +96,13 @@ export class AgentsService {
     return updated;
   }
 
+  remove(agentId: string) {
+    const agent = this.getByIdOrKey(agentId);
+    this.agents.delete(agent.id);
+    this.persist();
+    return { id: agent.id, removed: true };
+  }
+
   bindKnowledge(agentId: string, knowledgeBaseId: string) {
     const agent = this.getByIdOrKey(agentId);
     const defaultKnowledgeBaseIds = Array.from(new Set([...agent.defaultKnowledgeBaseIds, knowledgeBaseId]));
@@ -101,7 +117,10 @@ export class AgentsService {
   }
 
   private persist() {
-    this.persistence.setCollection('agents', this.list());
+    this.persistence.setCollection(
+      'agents',
+      this.list().filter((agent) => !this.defaultAgentIds.has(agent.id))
+    );
   }
 
   private normalizeStringList(values?: string[]) {

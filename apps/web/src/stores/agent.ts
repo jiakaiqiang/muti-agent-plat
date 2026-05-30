@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { apiGet, apiPost } from '@/api/client'
+import { apiDelete, apiGet, apiPost } from '@/api/client'
 import type { Agent, RuntimeCapabilityDefinition } from '@/types/contracts'
 
 type CreateAgentInput = {
@@ -41,6 +41,10 @@ export const useAgentStore = defineStore('agent', {
       const agent = await apiPost<Agent>('/agents', input)
       this.agents = [agent, ...this.agents.filter((item) => item.id !== agent.id)]
       return agent
+    },
+    async deleteAgent(agentId: string) {
+      await apiDelete(`/agents/${agentId}`)
+      this.agents = this.agents.filter((agent) => agent.id !== agentId)
     },
     async loadCapabilities() {
       this.capabilities = await apiGet<RuntimeCapabilityDefinition[]>('/capabilities')
