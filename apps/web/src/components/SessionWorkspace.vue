@@ -101,7 +101,13 @@ onMounted(async () => {
 const currentSessionId = computed(() => sessionStore.currentSession?.id ?? '')
 const events = computed(() => eventStore.eventsForSession(currentSessionId.value))
 const messages = computed(() => eventStore.chatMessages(currentSessionId.value))
-const agents = computed(() => eventStore.agentCards(currentSessionId.value))
+const agents = computed(() => {
+  const cards = eventStore.agentCards(currentSessionId.value)
+  const participating = sessionStore.currentSession?.participatingAgentIds
+  if (!participating?.length) return cards
+  const allowed = new Set(participating)
+  return cards.filter((card) => allowed.has(card.agentId))
+})
 const tasks = computed(() => eventStore.taskStates(currentSessionId.value))
 const activeConfirmation = computed(() => eventStore.activeConfirmation(currentSessionId.value))
 const currentMode = computed(() => sessionStore.currentViewMode)
@@ -109,15 +115,15 @@ const primaryAgent = computed(() => agents.value[0])
 const workspaceLabel = computed(() => sessionStore.currentSession?.title ?? '无活动会话')
 const activeAgentIds = computed(() => agentStore.agents.filter((agent) => agent.status === 'active').map((agent) => agent.id))
 
-// IDs of agents optimistically marked as running. This covers the gap where the backend can't be
-// observed live: a new session's brief generation runs before SSE connects (createSession resolves
-// first). During brief *execution* the session's SSE is already connected, so real per-agent
-// agent_status_changed events drive the cards instead — hence the overlay only fills in agents whose
-// real status is still 'idle', never masking a live backend status.
-const processingAgentIds = ref<string[]>([])
+// IDs of agents optimistically marked as running while a brand-new session's brief is being planned.
+// The session's SSE is already connected by then (createSession connects before resolving), so once
+// real per-agent agent_status_changed events arrive they take over; the overlay only fills agents
+// whose real status is still 'idle', never masking a live backend status. It is NOT used for
+// messages to an existing session — those rely entirely on the real status events.
+const planningAgentIds = ref<string[]>([])
 const displayAgents = computed<AgentCardState[]>(() =>
   agents.value.map((agent) =>
-    processingAgentIds.value.includes(agent.agentId) && agent.status === 'idle'
+    planningAgentIds.value.includes(agent.agentId) && agent.status === 'idle'
       ? { ...agent, status: 'running' }
       : agent
   )
@@ -140,6 +146,25 @@ async function selectSession(sessionId: string) {
   await sessionStore.loadSession(sessionId)
   await eventStore.loadEvents(sessionId)
   eventStore.connectSse(sessionId)
+}
+
+async function deleteSessionFromSidebar(sessionId: string) {
+  if (!window.confirm('确定删除该会话吗？该操作不可恢复。')) {
+    return
+  }
+  const wasCurrent = sessionStore.currentSession?.id === sessionId
+  if (wasCurrent) {
+    eventStore.disconnectSse()
+  }
+  try {
+    await sessionStore.deleteSession(sessionId)
+  } catch (error) {
+    inputError.value = error instanceof Error ? error.message : '删除会话失败'
+    return
+  }
+  if (wasCurrent && sessionStore.sessions[0]) {
+    await selectSession(sessionStore.sessions[0].id)
+  }
 }
 
 async function createSession(input: string, agentIds: string[]) {
@@ -310,20 +335,21 @@ async function sendUserMessage(content: string) {
         inputError.value = '请先添加 Agent'
         return
       }
-      processingAgentIds.value = [...activeAgentIds.value]
+      planningAgentIds.value = [...activeAgentIds.value]
       await createSession(content, activeAgentIds.value)
       return
     }
 
+    // Existing session: the brief is confirmed/executing and SSE is connected, so the real
+    // agent_status_changed events drive the cards. No optimistic overlay here.
     const sessionId = sessionStore.currentSession.id
-    processingAgentIds.value = agents.value.map((agent) => agent.agentId)
     await sessionStore.sendMessage(sessionId, content)
     await eventStore.loadEvents(sessionId)
   } catch (error) {
     inputError.value = error instanceof Error ? error.message : '发送失败'
   } finally {
     isSendingMessage.value = false
-    processingAgentIds.value = []
+    planningAgentIds.value = []
   }
 }
 
@@ -398,6 +424,7 @@ async function resolveConfirmation(optionKey: string) {
       :current-session-id="sessionStore.currentSession?.id"
       @select="selectSession"
       @create="openCreateSessionDialog"
+      @delete="deleteSessionFromSidebar"
     />
 
     <section v-if="activeSection === 'session'" class="workspace-main">

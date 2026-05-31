@@ -66,6 +66,17 @@ export class EventsService {
     return this.subjectFor(sessionId).asObservable();
   }
 
+  /** Drops all events for a session and tears down its live stream. Used when a session is deleted. */
+  removeSession(sessionId: string) {
+    this.eventsBySession.delete(sessionId);
+    const subject = this.subjectsBySession.get(sessionId);
+    if (subject) {
+      subject.complete();
+      this.subjectsBySession.delete(sessionId);
+    }
+    this.persist();
+  }
+
   private subjectFor(sessionId: string) {
     const existing = this.subjectsBySession.get(sessionId);
     if (existing) {

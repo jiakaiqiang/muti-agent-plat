@@ -1,11 +1,14 @@
 // Regression for interactive user-message routing (question / constraint / new-task).
 //
-// These handlers ask the runtime for `kind: 'agent_message'` but with a *custom* jsonSchema
-// (answer / relevant+response / taskTitle...). GenericLlmRuntime.normalizeRuntimeOutput must
-// preserve those caller-requested fields; an earlier version rebuilt a fixed agent_message shape
-// and dropped them, so answers came back empty, constraints were never acknowledged, and
-// new-task requests created title-less tasks. We drive the real runtime path with a fake
-// OpenAI-compatible server (deterministic, no Ollama dependency) and assert the fields survive.
+// Every user message is now first triaged by the Coordinator, which returns a
+// `user_message_handling_plan` carrying a `route` (answer / apply_to_agents / new_task / ...) plus
+// a `replyToUser`. The fake OpenAI-compatible server below keys its response off BOTH the requested
+// `expectedOutput` and the `contextPack.focusMessage`, so triage is deterministic (no Ollama).
+//
+// All user-facing replies are now consolidated by the Coordinator (single point of contact) rather
+// than emitted per-agent. Downstream handlers (e.g. new-task) may still ask for `kind:'agent_message'`
+// with a custom jsonSchema (taskTitle...), and GenericLlmRuntime.normalizeRuntimeOutput must preserve
+// those caller-requested fields. We assert the Coordinator's single reply carries the expected text.
 
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -94,9 +97,36 @@ async function waitForServer(apiBase) {
   throw lastError ?? new Error('Server did not become ready');
 }
 
-// Canned, contract-shaped payloads keyed off the expectedOutput the orchestrator asks for.
-function payloadForExpected(expected) {
+// Canned, contract-shaped payloads keyed off the expectedOutput the orchestrator asks for, plus the
+// user message under triage (contextPack.focusMessage).
+function payloadForExpected(expected, focusMessage = '') {
   const kind = expected?.kind;
+  // Coordinator triage: decide how to route this user message based on its content.
+  if (kind === 'user_message_handling_plan') {
+    if (/多久|时间|几天|[?？]/.test(focusMessage)) {
+      return { kind, intent: 'question', route: 'answer', needsUserInput: false, replyToUser: ANSWER_TEXT };
+    }
+    if (/不要|不能|禁止|保持|约束/.test(focusMessage)) {
+      return {
+        kind,
+        intent: 'constraint',
+        route: 'apply_to_agents',
+        needsUserInput: false,
+        replyToUser: CONSTRAINT_ACK_TEXT,
+        targetAgentKeys: ['backend']
+      };
+    }
+    if (/加|新增|接口|功能|重新/.test(focusMessage)) {
+      return {
+        kind,
+        intent: 'correction',
+        route: 'new_task',
+        needsUserInput: false,
+        replyToUser: '好的，我来创建这个任务并安排执行。'
+      };
+    }
+    return { kind, intent: 'clarification', route: 'apply_to_agents', needsUserInput: false, replyToUser: '收到，已记录。' };
+  }
   if (kind === 'task_brief') {
     return {
       kind: 'task_brief',
@@ -174,12 +204,15 @@ const llmServer = createServer(async (request, response) => {
   const body = await readJsonRequest(request);
   const userMessage = (body.messages ?? []).find((message) => message.role === 'user');
   let expected;
+  let focusMessage = '';
   try {
-    expected = JSON.parse(userMessage?.content ?? '{}').expectedOutput;
+    const parsed = JSON.parse(userMessage?.content ?? '{}');
+    expected = parsed.expectedOutput;
+    focusMessage = parsed.contextPack?.focusMessage ?? '';
   } catch {
     expected = undefined;
   }
-  const payload = payloadForExpected(expected);
+  const payload = payloadForExpected(expected, focusMessage);
   response.writeHead(200, { 'content-type': 'application/json' });
   response.end(
     JSON.stringify({
@@ -245,6 +278,18 @@ async function events(sessionId) {
   return (await api(`/sessions/${sessionId}/events?limit=200`)).data.items;
 }
 
+async function waitForSessionStatus(sessionId, status, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const session = (await api(`/sessions/${sessionId}`)).data;
+    if (session.status === status) {
+      return session;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`session ${sessionId} did not reach ${status} in time`);
+}
+
 try {
   await waitForServer(apiBase);
 
@@ -260,7 +305,10 @@ try {
     body: JSON.stringify({ input: '帮我写一个简单的 HTTP 服务', agentIds: agents.map((agent) => agent.id), tokenBudget: 50_000 })
   });
   const sessionId = created.data.session.id;
-  assert(created.data.session.status === 'WAIT_USER_CONFIRM', `expected WAIT_USER_CONFIRM, got ${created.data.session.status}`);
+  // The brief is now planned in the background, so create returns AGENT_DISCUSSING; wait for the
+  // background planning to land WAIT_USER_CONFIRM before exercising the message handlers.
+  assert(created.data.session.status === 'AGENT_DISCUSSING', `expected AGENT_DISCUSSING, got ${created.data.session.status}`);
+  await waitForSessionStatus(sessionId, 'WAIT_USER_CONFIRM');
 
   // Scenario 1: question -> coordinator answers, answer text must survive normalization.
   await postMessage(sessionId, '这个任务大概需要多久？');
@@ -285,6 +333,23 @@ try {
   assert(newTask, `expected a task titled "${NEW_TASK_TITLE}" (taskTitle/assignee fields were dropped if missing)`);
   assert(newTask.assigneeAgentId === assigneeAgentId, `new task assignee mismatch: ${newTask.assigneeAgentId}`);
   console.log('scenario 3 ok: new task created from preserved structured fields');
+
+  // Scenario 4: deleting the session cascades and removes it from the list + detail + tasks.
+  const tasksBeforeDelete = (await api(`/sessions/${sessionId}/tasks`)).data;
+  assert(tasksBeforeDelete.length > 0, 'expected the session to have tasks before deletion');
+  await api(`/sessions/${sessionId}`, { method: 'DELETE' });
+  const remaining = (await api('/sessions')).data.items;
+  assert(!remaining.some((session) => session.id === sessionId), 'deleted session should disappear from the list');
+  const tasksAfterDelete = (await api(`/sessions/${sessionId}/tasks`)).data;
+  assert(tasksAfterDelete.length === 0, 'deleted session tasks should be cleared');
+  let detailGone = false;
+  try {
+    await api(`/sessions/${sessionId}`);
+  } catch {
+    detailGone = true;
+  }
+  assert(detailGone, 'deleted session detail should 404');
+  console.log('scenario 4 ok: session deleted and cascaded (list, detail, tasks)');
 
   console.log('interactive messaging smoke ok');
 } catch (error) {

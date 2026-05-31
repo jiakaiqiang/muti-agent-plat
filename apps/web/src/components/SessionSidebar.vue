@@ -12,6 +12,7 @@ defineProps<{
 const emit = defineEmits<{
   select: [sessionId: string]
   create: []
+  delete: [sessionId: string]
 }>()
 </script>
 
@@ -58,6 +59,16 @@ const emit = defineEmits<{
       <span class="session-meta">
         <span>{{ sessionStatusLabel[session.status] }}</span>
         <span>{{ session.tokenUsed }} / {{ session.tokenBudget ?? '∞' }}</span>
+      </span>
+      <span
+        class="session-delete"
+        role="button"
+        tabindex="0"
+        title="删除会话"
+        @click.stop="emit('delete', session.id)"
+        @keydown.enter.stop.prevent="emit('delete', session.id)"
+      >
+        <UiIcon name="trash" :size="15" />
       </span>
     </button>
   </aside>

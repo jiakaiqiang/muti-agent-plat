@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import type {
   Agent,
+  AgentMessageOutput,
   AgentRunInput,
   AgentRunResult,
   AgentStatus,
@@ -13,7 +14,10 @@ import type {
   SuggestedAgentTask,
   TaskBrief,
   TaskBriefOutput,
-  TaskExecutionResultOutput
+  TaskExecutionResultOutput,
+  UserMessageHandlingPlan,
+  UserMessageIntent,
+  UserMessageRoute
 } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
 import { runtimeModeLabel } from '../../common/runtime-config.js';
@@ -27,6 +31,7 @@ import { PersistenceService } from '../persistence/persistence.service.js';
 import { KnowledgeService } from '../rag/knowledge.service.js';
 import { RuntimeService } from '../runtimes/runtime.service.js';
 import { TasksService } from '../tasks/tasks.service.js';
+import { agentSystemPrompt } from './agent-personas.js';
 
 @Injectable()
 export class OrchestratorService {
@@ -58,18 +63,84 @@ export class OrchestratorService {
     }
   }
 
-  async discussAndCreateBrief(session: SessionDetail) {
+  async discussAndCreateBrief(session: SessionDetail, goal?: string) {
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    // 新一轮（会话结束后又来新需求）时 goal 为这条新需求；首轮省略 goal，沿用会话原始目标。
+    // 上一轮的交付物/事件已通过 createContextPack 注入，保证新一轮带着历史上下文讨论。
+    const roundGoal = goal?.trim() || session.originalInput;
+
+    // 第一步：协调者理解需求。给用户一条简短进度提示；真正的团队讨论在内部进行，不往聊天区刷屏。
+    const discussants = this.discussionAgents(session);
     this.emitAgentStatus(session.id, coordinator, 'thinking', {
-      content: `${coordinator.name} 正在理解需求并生成任务简报…`,
-      thoughtSummary: '分析用户目标，拟定范围、验收标准与建议任务。'
+      content: `${coordinator.name} 正在理解需求并组织团队讨论…`,
+      thoughtSummary: '梳理用户目标，提出需要团队重点讨论的问题。'
     });
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      fromAgentId: coordinator.id,
+      content: '收到需求，我先和团队讨论实现方案，稍后给你一份任务简报确认。',
+      metadata: createMetadata('chat_message', { messageKind: 'progress' })
+    });
+    const kickoff = await this.runDiscussionTurn(
+      session,
+      coordinator,
+      [
+        `用户目标：${roundGoal}`,
+        '请用 2-4 句中文概述你对该目标的理解，并指出希望团队（需求/架构/前后端/测试）重点讨论的问题。'
+      ].join('\n')
+    );
+    // 协调者的理解写入 Agent 状态（agent_status_changed 不进聊天区，只驱动 Agent 卡片）。
+    this.emitAgentStatus(session.id, coordinator, 'idle', {
+      content: `${coordinator.name} 已梳理需求并向团队发起讨论。`,
+      thoughtSummary: kickoff
+    });
+
+    // 第二步：团队成员逐一从各自专业角度参与「内部」讨论。意见写入 Agent 状态（卡片可见），
+    // 不再逐条作为聊天消息推送给用户——避免多个 Agent 重复刷屏、各自反问用户。
+    const contributions: { agent: Agent; content: string }[] = [];
+    for (const agent of discussants) {
+      this.emitAgentStatus(session.id, agent, 'thinking', {
+        content: `${agent.name} 正在从「${agent.role}」角度参与讨论…`,
+        thoughtSummary: `针对「${session.title}」给出专业意见与风险。`
+      });
+      const opinion = await this.runDiscussionTurn(
+        session,
+        agent,
+        [
+          `用户目标：${roundGoal}`,
+          `协调者的理解：${kickoff}`,
+          '这是团队内部讨论，发言对象是协调者与同事，不是用户：禁止向用户提问或要求用户补充信息。',
+          '请从你的专业职责出发，用 2-4 句中文给出关键意见、约束或风险；信息不足时基于合理假设给出建议并说明假设。'
+        ].join('\n')
+      );
+      contributions.push({ agent, content: opinion });
+      this.emitAgentStatus(session.id, agent, 'idle', {
+        content: `${agent.name} 已给出意见。`,
+        actionSummary: opinion
+      });
+    }
+
+    // 第三步：协调者汇总团队讨论，生成任务简报（讨论内容通过 focusMessage 注入，确保被综合）。
+    this.emitAgentStatus(session.id, coordinator, 'running', {
+      content: `${coordinator.name} 正在汇总团队讨论并生成任务简报…`,
+      thoughtSummary: '综合各方意见，拟定范围、验收标准与建议任务。'
+    });
+    const discussionDigest = [
+      `协调者理解：${kickoff}`,
+      ...contributions.map((entry) => `${entry.agent.name}（${entry.agent.role}）：${entry.content}`)
+    ].join('\n');
+    const briefFocus = [
+      `用户目标：${roundGoal}`,
+      '请综合以下团队讨论结果，生成可供用户确认的任务简报：',
+      discussionDigest
+    ].join('\n');
     const result = await this.runtime.run({
       runId: crypto.randomUUID(),
       sessionId: session.id,
       phase: 'brief_generation',
       agent: this.toRuntimeAgent(coordinator),
-      contextPack: this.createContextPack(session, coordinator),
+      contextPack: this.createContextPack(session, coordinator, undefined, undefined, briefFocus),
       expectedOutput: { kind: 'task_brief', schemaVersion: '0.1' },
       budget: {}
     });
@@ -95,29 +166,20 @@ export class OrchestratorService {
     this.suggestedTasksByBriefId.set(brief.id, suggestedTasks);
     this.persistBriefs();
 
+    // 协调者把讨论结果收口为一条面向用户的说明，再附上简报卡片请用户确认。
     this.events.create({
       sessionId: session.id,
       type: 'agent_message',
-      fromAgentId: this.pickSessionAgent(session, ['requirements'], 0).id,
-      toAgentIds: [coordinator.id],
-      content: 'Requirements Agent summarized the user goal and recommends confirming the task brief before execution.',
-      metadata: createMetadata('chat_message', { messageKind: 'discussion' })
-    });
-
-    this.events.create({
-      sessionId: session.id,
-      type: 'agent_message',
-      fromAgentId: this.pickSessionAgent(session, ['architect', 'backend'], 0).id,
-      toAgentIds: [coordinator.id],
-      content: `Execution will use the configured ${runtimeModeLabel(coordinator.runtimeType)} runtime and capability policy.`,
-      metadata: createMetadata('chat_message', { messageKind: 'risk' })
+      fromAgentId: coordinator.id,
+      content: `团队已完成讨论，我据此整理出任务简报（目标：${brief.goal}）。请确认后再下发执行。`,
+      metadata: createMetadata('chat_message', { messageKind: 'summary' })
     });
 
     this.events.create({
       sessionId: session.id,
       type: 'brief_created',
       fromAgentId: coordinator.id,
-      content: 'Agent team created a task brief. Confirm it to start execution.',
+      content: '团队已生成任务简报，确认后即可开始执行。',
       metadata: createMetadata(
         'brief_card',
         {
@@ -141,17 +203,17 @@ export class OrchestratorService {
       sessionId: session.id,
       type: 'user_confirmation_requested',
       fromAgentId: coordinator.id,
-      content: 'Please confirm whether to execute the task brief.',
+      content: '请确认是否执行该任务简报。',
       metadata: createMetadata('confirmation_card', {
         confirmationId: crypto.randomUUID(),
         reason: 'confirm_task_brief',
-        title: 'Confirm task brief execution',
+        title: '确认执行任务简报',
         description:
-          'After confirmation, the configured agent runtime will execute the suggested tasks and create review and delivery artifacts.',
+          '确认后，配置的 Agent 运行时将执行建议任务，并生成复盘与交付产物。',
         relatedBriefId: brief.id,
         options: [
-          { key: 'approve', label: 'Approve', style: 'primary' },
-          { key: 'revise', label: 'Revise', style: 'default' }
+          { key: 'approve', label: '确认执行', style: 'primary' },
+          { key: 'revise', label: '修改简报', style: 'default' }
         ]
       })
     });
@@ -165,6 +227,16 @@ export class OrchestratorService {
 
   listBriefs(sessionId: string) {
     return this.briefsBySession.get(sessionId) ?? [];
+  }
+
+  /** Clears briefs, suggested tasks, and tasks for a deleted session. */
+  removeSessionData(sessionId: string) {
+    for (const brief of this.briefsBySession.get(sessionId) ?? []) {
+      this.suggestedTasksByBriefId.delete(brief.id);
+    }
+    this.briefsBySession.delete(sessionId);
+    this.persistBriefs();
+    this.tasks.removeSession(sessionId);
   }
 
   getBrief(sessionId: string, briefId: string) {
@@ -188,7 +260,7 @@ export class OrchestratorService {
     const event = this.events.create({
       sessionId: session.id,
       type: 'brief_confirmed',
-      content: 'User confirmed the task brief. Starting configured agent runtime execution.',
+      content: '用户已确认任务简报，开始执行配置的 Agent 运行时。',
       metadata: createMetadata('system_notice', { briefId: brief.id })
     });
 
@@ -197,7 +269,7 @@ export class OrchestratorService {
         sessionId: session.id,
         type: 'task_created',
         taskId: task.id,
-        content: `Created task: ${task.title}`,
+        content: `已创建任务：${task.title}`,
         metadata: createMetadata('task_card', {
           taskId: task.id,
           title: task.title,
@@ -230,7 +302,7 @@ export class OrchestratorService {
         type: 'task_started',
         taskId: task.id,
         fromAgentId: taskAgent.id,
-        content: `Started task: ${task.title}`,
+        content: `开始执行任务：${task.title}`,
         metadata: createMetadata('task_card', {
           taskId: task.id,
           title: task.title,
@@ -278,7 +350,7 @@ export class OrchestratorService {
         type: 'rag_retrieved',
         taskId: task.id,
         fromAgentId: taskAgent.id,
-        content: 'Retrieved agent knowledge snippets for the task.',
+        content: '已为该任务检索 Agent 知识片段。',
         metadata: createMetadata('rag_card', {
           retrievalLogId: crypto.randomUUID(),
           agentId: taskAgent.id,
@@ -299,7 +371,7 @@ export class OrchestratorService {
         type: 'artifact_created',
         taskId: task.id,
         fromAgentId: taskAgent.id,
-        content: `Created artifact: ${executionArtifact.title}`,
+        content: `已创建产物：${executionArtifact.title}`,
         metadata: createMetadata('artifact_card', {
           artifactId: executionArtifact.id,
           type: executionArtifact.type,
@@ -325,7 +397,7 @@ export class OrchestratorService {
         type: 'task_completed',
         taskId: task.id,
         fromAgentId: taskAgent.id,
-        content: `Completed task: ${task.title}`,
+        content: `已完成任务：${task.title}`,
         metadata: createMetadata('task_card', {
           taskId: task.id,
           title: task.title,
@@ -345,7 +417,7 @@ export class OrchestratorService {
       sessionId: session.id,
       type: 'post_review_started',
       fromAgentId: review.id,
-      content: 'Review Agent started checking runtime results against the confirmed task brief.',
+      content: '评审 Agent 开始对照已确认的任务简报检查执行结果。',
       metadata: createMetadata('review_card', { briefId: brief.id })
     });
 
@@ -368,7 +440,7 @@ export class OrchestratorService {
       sessionId: session.id,
       agentId: review.id,
       type: 'test_report',
-      title: 'Post review report',
+      title: '复盘报告',
       contentSummary: reviewOutput.recommendation,
       metadata: reviewOutput as unknown as Record<string, unknown>
     });
@@ -376,7 +448,7 @@ export class OrchestratorService {
       sessionId: session.id,
       type: 'post_review_completed',
       fromAgentId: review.id,
-      content: 'Review Agent completed the consistency review.',
+      content: '评审 Agent 已完成一致性复盘。',
       metadata: createMetadata('review_card', {
         ...reviewOutput,
         artifactIds: [reviewArtifact.id]
@@ -386,7 +458,7 @@ export class OrchestratorService {
       sessionId: session.id,
       type: 'artifact_created',
       fromAgentId: review.id,
-      content: `Created artifact: ${reviewArtifact.title}`,
+      content: `已创建产物：${reviewArtifact.title}`,
       metadata: createMetadata('artifact_card', {
         artifactId: reviewArtifact.id,
         type: reviewArtifact.type,
@@ -419,7 +491,7 @@ export class OrchestratorService {
       sessionId: session.id,
       agentId: coordinator.id,
       type: 'markdown',
-      title: 'Final delivery summary',
+      title: '最终交付摘要',
       contentSummary: finalOutput.summary,
       metadata: finalOutput as unknown as Record<string, unknown>
     });
@@ -427,14 +499,14 @@ export class OrchestratorService {
       sessionId: session.id,
       agentId: notification.id,
       type: 'feishu_draft',
-      title: 'Feishu notification draft',
-      contentSummary: 'Notification draft created and awaiting explicit send confirmation.',
+      title: '飞书通知草稿',
+      contentSummary: '通知草稿已生成，等待用户显式确认后发送。',
       metadata: {
         channel: 'feishu',
         mode: 'draft',
         dryRun: true,
         status: 'pending_user_confirmation',
-        title: 'Agent Cluster delivery ready',
+        title: 'Agent Cluster 交付完成',
         body: {
           sessionId: session.id,
           goal: brief.goal,
@@ -450,7 +522,7 @@ export class OrchestratorService {
       sessionId: session.id,
       type: 'final_delivery_created',
       fromAgentId: coordinator.id,
-      content: 'Final delivery was created.',
+      content: '最终交付物已生成。',
       metadata: createMetadata('delivery_card', {
         ...finalOutput,
         artifactRefs,
@@ -461,7 +533,7 @@ export class OrchestratorService {
       sessionId: session.id,
       type: 'artifact_created',
       fromAgentId: coordinator.id,
-      content: `Created artifact: ${deliveryArtifact.title}`,
+      content: `已创建产物：${deliveryArtifact.title}`,
       metadata: createMetadata('artifact_card', {
         artifactId: deliveryArtifact.id,
         type: deliveryArtifact.type,
@@ -473,7 +545,7 @@ export class OrchestratorService {
       sessionId: session.id,
       type: 'artifact_created',
       fromAgentId: notification.id,
-      content: `Created artifact: ${notificationDraft.title}`,
+      content: `已创建产物：${notificationDraft.title}`,
       metadata: createMetadata('artifact_card', {
         artifactId: notificationDraft.id,
         type: notificationDraft.type,
@@ -494,7 +566,7 @@ export class OrchestratorService {
       thoughtSummary: '理解问题背景，结合会话上下文给出回答。'
     });
 
-    const contextPack = this.createContextPack(session, coordinator);
+    const contextPack = this.createContextPack(session, coordinator, undefined, undefined, question);
     const result = await this.runtime.run({
       runId: crypto.randomUUID(),
       sessionId: session.id,
@@ -541,75 +613,330 @@ export class OrchestratorService {
     });
   }
 
-  async handleClarificationOrConstraint(session: SessionDetail, message: string, intent: 'clarification' | 'constraint') {
-    const allAgents = session.participatingAgentIds.map((id) => this.agents.getByIdOrKey(id));
-    const responses: Array<{ agent: Agent; relevant: boolean; response?: string }> = [];
+  /**
+   * Coordinator 对一条用户消息进行分诊，产出结构化的处理决策（route 等）。这是「单点收口」的核心：
+   * 不再用正则把消息直接 fan-out 给所有 Agent，而是先由 Coordinator 决定怎么处理。LLM 调用失败时
+   * 回退到传入的 fallback（正则计划），保证健壮。
+   */
+  async triageUserMessage(
+    session: SessionDetail,
+    message: string,
+    fallback: UserMessageHandlingPlan
+  ): Promise<UserMessageHandlingPlan> {
+    const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    this.emitAgentStatus(session.id, coordinator, 'thinking', {
+      content: `${coordinator.name} 正在理解你的消息并决定如何处理…`,
+      thoughtSummary: '判断意图、是否需要回到用户，以及交给哪些 Agent。'
+    });
 
-    // 并行让所有 agent 判断相关性
-    await Promise.all(
-      allAgents.map(async (agent) => {
-        this.emitAgentStatus(session.id, agent, 'thinking', {
-          content: `${agent.name} 正在判断消息是否与自己相关…`,
-          thoughtSummary: `分析「${message}」是否影响自己负责的任务。`
-        });
+    const roster = this.participatingAgents(session)
+      .filter((agent) => agent.key !== 'coordinator')
+      .map((agent) => `${agent.key}（${agent.name}）`)
+      .join('、');
+    const hasUnconfirmedBrief = ['AGENT_DISCUSSING', 'WAIT_USER_CONFIRM', 'REVISING_BRIEF'].includes(session.status);
+    const isFinished = ['COMPLETED', 'FAILED', 'CANCELLED'].includes(session.status);
 
-        const contextPack = this.createContextPack(session, agent);
-        const result = await this.runtime.run({
-          runId: crypto.randomUUID(),
-          sessionId: session.id,
-          phase: 'user_message_routing',
-          agent: this.toRuntimeAgent(agent),
-          contextPack,
-          expectedOutput: {
-            kind: 'agent_message',
-            schemaVersion: '0.1',
-            jsonSchema: {
-              type: 'object',
-              properties: {
-                relevant: { type: 'boolean', description: '是否与自己相关' },
-                reason: { type: 'string', description: '相关性原因（如果 relevant=true）' },
-                response: { type: 'string', description: '给用户的回复（如果 relevant=true）' }
-              },
-              required: ['relevant']
-            }
+    const contextPack = this.createContextPack(session, coordinator, undefined, undefined, message);
+    contextPack.systemRules = [
+      ...contextPack.systemRules,
+      `当前会话状态：${session.status}。`,
+      roster ? `可参与/可分配的 Agent：${roster}。` : '当前没有其它可分配的 Agent。',
+      '按以下规则判断 route：',
+      '· 用户在提问、想了解信息（如“多久/能不能/是不是/为什么/怎么做”）→ answer：把答案直接写进 replyToUser，不要反问用户。',
+      '· 用户在给出限制、约束或纠正（如“不要/必须/保持/改成/不对”）→ apply_to_agents：把要同步给执行 Agent 的确认写进 replyToUser。',
+      hasUnconfirmedBrief
+        ? '· 用户在补充或修改尚未确认的任务简报 → revise_brief。'
+        : '· 用户提出一个全新的待办需求 → new_task。',
+      isFinished
+        ? '· 本对话上一轮任务已结束；只要用户提出新的需求、或要在已交付内容上继续做/修改 → new_task（系统会据此在同一对话开启新一轮：理解→讨论→简报→确认→执行）；只有当用户单纯就已交付内容提问时才用 answer。'
+        : null,
+      '· 仅当确实需要用户提供某个无法自行合理假设、缺了就无法继续的关键信息时，才用 ask_user；能假设就假设，不要反问。',
+      `基于关键词的初步判断是 intent=${fallback.intent}、route=${fallback.route}；若无充分理由推翻，请沿用该 route。`,
+      '不要因为任务简报里列了 openQuestions 就向用户反问，那些问题应由你自行假设。',
+      'replyToUser 必须直接回应用户“当前这条消息”，不要引入与当前消息无关的问题。'
+    ].filter((rule): rule is string => rule !== null);
+
+    const result = await this.runtime.run({
+      runId: crypto.randomUUID(),
+      sessionId: session.id,
+      phase: 'user_message_routing',
+      agent: this.toRuntimeAgent(coordinator),
+      contextPack,
+      expectedOutput: {
+        kind: 'user_message_handling_plan',
+        schemaVersion: '0.1',
+        jsonSchema: {
+          type: 'object',
+          properties: {
+            intent: {
+              type: 'string',
+              enum: ['clarification', 'constraint', 'command', 'question', 'correction', 'knowledge_input', 'preference_input'],
+              description: '用户消息的意图'
+            },
+            route: {
+              type: 'string',
+              enum: ['answer', 'ask_user', 'apply_to_agents', 'revise_brief', 'new_task', 'command'],
+              description: '如何处理这条消息'
+            },
+            needsUserInput: { type: 'boolean', description: '是否必须回到用户继续追问' },
+            replyToUser: { type: 'string', description: '直接面向用户的中文话术（answer/ask_user/apply_to_agents 时必填）' },
+            targetAgentKeys: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'apply_to_agents 时相关 Agent 的 key 列表'
+            },
+            coordinatorInstruction: { type: 'string', description: '给团队的一句话处理说明' }
           },
-          budget: {}
-        });
-
-        if (result.status === 'completed' && result.output) {
-          const output = result.output as unknown as { relevant: boolean; reason?: string; response?: string };
-          responses.push({ agent, relevant: output.relevant, response: output.response });
-
-          if (output.relevant && output.response) {
-            this.events.create({
-              sessionId: session.id,
-              type: 'agent_message',
-              fromAgentId: agent.id,
-              content: output.response,
-              metadata: createMetadata('chat_message', {
-                messageKind: intent === 'constraint' ? 'constraint_ack' : 'clarification_response',
-                reason: output.reason
-              })
-            });
-          }
+          required: ['route', 'replyToUser']
         }
+      },
+      budget: {}
+    });
 
-        this.emitAgentStatus(session.id, agent, 'idle', {
-          content: `${agent.name} 已完成相关性判断。`
-        });
-      })
-    );
+    const plan = this.toHandlingPlan(result, fallback, session);
+    this.emitAgentStatus(session.id, coordinator, 'idle', {
+      content: `${coordinator.name} 已决定如何处理这条消息。`,
+      thoughtSummary: `处理方式：${plan.route}。`
+    });
+    return plan;
+  }
 
-    const relevantCount = responses.filter((r) => r.relevant).length;
-    if (relevantCount === 0) {
-      const coordinator = this.pickSessionAgent(session, ['coordinator']);
-      this.events.create({
-        sessionId: session.id,
-        type: 'agent_message',
-        fromAgentId: coordinator.id,
-        content: '已通知所有 Agent，但暂无 Agent 认为此消息与当前任务直接相关。',
-        metadata: createMetadata('chat_message', { messageKind: 'broadcast_result' })
+  /** route=answer：Coordinator 直接回答用户；triage 已给出回答就直接用，否则再问一次运行时。 */
+  async answerUser(session: SessionDetail, message: string, plan: UserMessageHandlingPlan) {
+    const reply = plan.replyToUser?.trim();
+    if (!reply) {
+      await this.handleQuestion(session, message);
+      return;
+    }
+    const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      fromAgentId: coordinator.id,
+      content: reply,
+      metadata: createMetadata('chat_message', { messageKind: 'answer' })
+    });
+  }
+
+  /** route=ask_user：仅由 Coordinator 发出唯一一条追问，绝不让多个角色各自追问用户。 */
+  askUser(session: SessionDetail, plan: UserMessageHandlingPlan) {
+    const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    const question = plan.replyToUser?.trim() || '需要你补充一些信息才能继续，可以提供更多细节吗？';
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      fromAgentId: coordinator.id,
+      content: question,
+      metadata: createMetadata('chat_message', { messageKind: 'question', needsUserInput: true })
+    });
+  }
+
+  /**
+   * route=apply_to_agents：把用户的约束/澄清同步给相关 Agent，并由 Coordinator 收口为一条面向用户的
+   * 回执。相关 Agent 只在内部消化（通过状态事件体现），不会各自向用户发言——这正是避免「一群 Agent
+   * 追着用户问」的关键。
+   */
+  async applyConstraintToAgents(session: SessionDetail, message: string, plan: UserMessageHandlingPlan) {
+    const targets = this.resolveTargetAgents(session, plan.targetAgentKeys);
+    const noun = plan.intent === 'constraint' ? '约束' : '说明';
+    for (const agent of targets) {
+      this.emitAgentStatus(session.id, agent, 'thinking', {
+        content: `${agent.name} 收到协调者同步的用户${noun}，正在纳入任务上下文。`,
+        thoughtSummary: `将「${message}」纳入自己负责的工作。`
       });
+      this.emitAgentStatus(session.id, agent, 'idle', {
+        content: `${agent.name} 已记录该${noun}。`
+      });
+    }
+
+    const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    const names = targets.map((agent) => agent.name).join('、');
+    const ack =
+      plan.replyToUser?.trim() ||
+      (plan.intent === 'constraint' ? `已将该约束同步给 ${names}，后续执行会遵循。` : `已将你的说明同步给 ${names}。`);
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      fromAgentId: coordinator.id,
+      content: ack,
+      metadata: createMetadata('chat_message', {
+        messageKind: plan.intent === 'constraint' ? 'constraint_ack' : 'clarification_response',
+        handledByAgentIds: targets.map((agent) => agent.id)
+      })
+    });
+  }
+
+  /** route=revise_brief：用户补充了尚未确认简报的信息，修订简报并重新请求确认。 */
+  async reviseBriefFromMessage(session: SessionDetail, message: string): Promise<TaskBrief> {
+    const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    this.emitAgentStatus(session.id, coordinator, 'thinking', {
+      content: `${coordinator.name} 正在根据你的补充修订任务简报…`,
+      thoughtSummary: '结合补充信息更新范围、约束与验收标准。'
+    });
+
+    const previous = this.briefsBySession.get(session.id)?.at(-1);
+    const contextPack = this.createContextPack(session, coordinator, previous, undefined, message);
+    const result = await this.runtime.run({
+      runId: crypto.randomUUID(),
+      sessionId: session.id,
+      phase: 'brief_revision',
+      agent: this.toRuntimeAgent(coordinator),
+      contextPack,
+      expectedOutput: { kind: 'task_brief', schemaVersion: '0.1' },
+      budget: {}
+    });
+    const output = this.completedOutput<TaskBriefOutput>(result, 'task_brief');
+    const suggestedTasks = output.suggestedTasks.length ? output.suggestedTasks : this.defaultSuggestedTasks();
+
+    const brief: TaskBrief = {
+      id: crypto.randomUUID(),
+      sessionId: session.id,
+      version: (this.briefsBySession.get(session.id)?.length ?? 0) + 1,
+      goal: output.goal,
+      scope: output.scope,
+      outOfScope: output.outOfScope,
+      constraints: output.constraints,
+      acceptanceCriteria: output.acceptanceCriteria,
+      risks: output.risks,
+      openQuestions: output.openQuestions,
+      confirmedByUser: false,
+      createdAt: nowIso()
+    };
+    this.briefsBySession.set(session.id, [...(this.briefsBySession.get(session.id) ?? []), brief]);
+    this.suggestedTasksByBriefId.set(brief.id, suggestedTasks);
+    this.persistBriefs();
+
+    this.events.create({
+      sessionId: session.id,
+      type: 'brief_updated',
+      fromAgentId: coordinator.id,
+      content: '已根据你的补充更新任务简报，请再次确认。',
+      metadata: createMetadata(
+        'brief_card',
+        {
+          briefId: brief.id,
+          version: brief.version,
+          goal: brief.goal,
+          scope: brief.scope,
+          outOfScope: brief.outOfScope,
+          constraints: brief.constraints,
+          acceptanceCriteria: brief.acceptanceCriteria,
+          risks: brief.risks,
+          openQuestions: brief.openQuestions,
+          suggestedTasks,
+          requiresUserConfirmation: true
+        },
+        'Task brief'
+      )
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'user_confirmation_requested',
+      fromAgentId: coordinator.id,
+      content: '请确认是否按更新后的任务简报执行。',
+      metadata: createMetadata('confirmation_card', {
+        confirmationId: crypto.randomUUID(),
+        reason: 'confirm_task_brief',
+        title: '确认更新后的任务简报',
+        description: '确认后将按更新后的简报执行建议任务，并生成复盘与交付物。',
+        relatedBriefId: brief.id,
+        options: [
+          { key: 'approve', label: '确认执行', style: 'primary' },
+          { key: 'revise', label: '继续修改', style: 'default' }
+        ]
+      })
+    });
+    this.emitAgentStatus(session.id, coordinator, 'idle', {
+      content: `${coordinator.name} 已更新任务简报，等待用户确认。`
+    });
+    return brief;
+  }
+
+  /** Resolves which agents a constraint should sync to: triage-named keys, else executors, else all non-coordinator. */
+  private resolveTargetAgents(session: SessionDetail, keys?: string[]): Agent[] {
+    const agents = this.participatingAgents(session);
+    if (keys?.length) {
+      const matched = agents.filter((agent) => keys.includes(agent.key));
+      if (matched.length) {
+        return matched;
+      }
+    }
+    const executors = agents.filter((agent) => ['backend', 'frontend', 'test', 'architect'].includes(agent.key));
+    if (executors.length) {
+      return executors;
+    }
+    const nonCoordinator = agents.filter((agent) => agent.key !== 'coordinator');
+    return nonCoordinator.length ? nonCoordinator : agents;
+  }
+
+  /** Normalizes the runtime's triage output into a complete handling plan, deriving status-dependent fields. */
+  private toHandlingPlan(
+    result: AgentRunResult,
+    fallback: UserMessageHandlingPlan,
+    session: SessionDetail
+  ): UserMessageHandlingPlan {
+    if (result.status !== 'completed' || !result.output) {
+      return fallback;
+    }
+    const raw = result.output as Record<string, unknown>;
+    const route = this.asRoute(raw.route) ?? fallback.route;
+    const intent = this.asIntent(raw.intent) ?? this.intentForRoute(route, fallback.intent);
+    const isExecuting = ['EXECUTING', 'REWORKING', 'POST_REVIEW'].includes(session.status);
+    const replyToUser =
+      typeof raw.replyToUser === 'string' && raw.replyToUser.trim() ? raw.replyToUser.trim() : fallback.replyToUser;
+    const targetAgentKeys = Array.isArray(raw.targetAgentKeys)
+      ? raw.targetAgentKeys.filter((key): key is string => typeof key === 'string')
+      : undefined;
+    const coordinatorInstruction =
+      typeof raw.coordinatorInstruction === 'string' && raw.coordinatorInstruction.trim()
+        ? raw.coordinatorInstruction.trim()
+        : fallback.coordinatorInstruction;
+    return {
+      intent,
+      route,
+      priority: intent === 'constraint' || intent === 'correction' ? 'high' : 'normal',
+      shouldPause: isExecuting && route === 'apply_to_agents' && (intent === 'constraint' || intent === 'correction'),
+      needsUserInput: route === 'ask_user' || raw.needsUserInput === true,
+      replyToUser,
+      targetAgentKeys: targetAgentKeys && targetAgentKeys.length ? targetAgentKeys : undefined,
+      affectedTaskIds: [],
+      affectedAgentIds: [],
+      requiresBriefRevision: route === 'revise_brief',
+      requiresUserConfirmation: route === 'ask_user',
+      coordinatorInstruction
+    };
+  }
+
+  private asRoute(value: unknown): UserMessageRoute | undefined {
+    const routes: UserMessageRoute[] = ['answer', 'ask_user', 'apply_to_agents', 'revise_brief', 'new_task', 'command'];
+    return typeof value === 'string' && routes.includes(value as UserMessageRoute) ? (value as UserMessageRoute) : undefined;
+  }
+
+  private asIntent(value: unknown): UserMessageIntent | undefined {
+    const intents: UserMessageIntent[] = [
+      'clarification',
+      'constraint',
+      'command',
+      'question',
+      'correction',
+      'knowledge_input',
+      'preference_input'
+    ];
+    return typeof value === 'string' && intents.includes(value as UserMessageIntent) ? (value as UserMessageIntent) : undefined;
+  }
+
+  private intentForRoute(route: UserMessageRoute, fallbackIntent: UserMessageIntent): UserMessageIntent {
+    switch (route) {
+      case 'answer':
+        return 'question';
+      case 'new_task':
+        return 'correction';
+      case 'command':
+        return 'command';
+      case 'apply_to_agents':
+        return 'constraint';
+      default:
+        return fallbackIntent;
     }
   }
 
@@ -620,7 +947,7 @@ export class OrchestratorService {
       thoughtSummary: '分析用户需求，创建任务并分配给合适的 Agent。'
     });
 
-    const contextPack = this.createContextPack(session, coordinator);
+    const contextPack = this.createContextPack(session, coordinator, undefined, undefined, request);
     const result = await this.runtime.run({
       runId: crypto.randomUUID(),
       sessionId: session.id,
@@ -730,7 +1057,7 @@ export class OrchestratorService {
       type: 'task_completed',
       taskId: task.id,
       fromAgentId: taskAgent.id,
-      content: `Task completed: ${task.title}`,
+      content: `任务已完成：${task.title}`,
       metadata: createMetadata('task_card', {
         taskId: task.id,
         title: task.title,
@@ -757,7 +1084,7 @@ export class OrchestratorService {
       type: 'memory_used',
       taskId,
       fromAgentId: agentId,
-      content: 'Relevant memories were injected into the runtime context pack.',
+      content: '已将相关记忆注入运行时上下文包。',
       metadata: createMetadata('system_notice', {
         agentId,
         taskId,
@@ -781,7 +1108,7 @@ export class OrchestratorService {
       type: 'runtime_failed',
       taskId: task.id,
       fromAgentId: agentId,
-      content: `Runtime failed while executing task: ${task.title}`,
+      content: `运行时执行任务失败：${task.title}`,
       metadata: createMetadata('error_card', {
         runtimeInvocationId: runId,
         runtimeType,
@@ -794,7 +1121,7 @@ export class OrchestratorService {
       type: 'task_rejected',
       taskId: task.id,
       fromAgentId: agentId,
-      content: `Task failed: ${task.title}`,
+      content: `任务失败：${task.title}`,
       metadata: createMetadata('task_card', {
         taskId: task.id,
         title: task.title,
@@ -828,7 +1155,13 @@ export class OrchestratorService {
     });
   }
 
-  private createContextPack(session: SessionDetail, agent: Agent, brief?: TaskBrief, task?: AgentTask): ContextPack {
+  private createContextPack(
+    session: SessionDetail,
+    agent: Agent,
+    brief?: TaskBrief,
+    task?: AgentTask,
+    focusMessage?: string
+  ): ContextPack {
     const ragSnippets = task ? this.searchAgentKnowledge(session, agent, task.title) : [];
     const relevantMemories = this.memories
       .search(session.id, [session.originalInput, brief?.goal, task?.title, task?.description].filter(Boolean).join(' '), agent.id)
@@ -839,6 +1172,7 @@ export class OrchestratorService {
         'Do not perform external side effects unless a capability policy explicitly allows it.'
       ],
       sessionGoal: session.originalInput,
+      focusMessage,
       taskBrief: brief
         ? {
             id: brief.id,
@@ -881,7 +1215,7 @@ export class OrchestratorService {
       key: agent.key,
       name: agent.name,
       role: agent.role,
-      systemPrompt: `${agent.name}: ${agent.role}`,
+      systemPrompt: agentSystemPrompt(agent),
       runtimeType: agent.runtimeType,
       modelId: agent.modelId,
       capabilityIds: agent.capabilityIds
@@ -893,6 +1227,52 @@ export class OrchestratorService {
       .map((agentId) => this.agents.findByIdOrKey(agentId))
       .filter((agent): agent is Agent => Boolean(agent));
     return agents.length ? agents : this.agents.list();
+  }
+
+  /** 参与简报讨论的角色：去掉协调者（主持人）和通知助手（不参与方案讨论），按职责顺序排列。 */
+  private discussionAgents(session: SessionDetail): Agent[] {
+    const order = ['requirements', 'architect', 'backend', 'frontend', 'test', 'review'];
+    const agents = this.participatingAgents(session).filter(
+      (agent) => agent.key !== 'coordinator' && agent.key !== 'notification'
+    );
+    return [...agents].sort((left, right) => {
+      const leftIndex = order.indexOf(left.key);
+      const rightIndex = order.indexOf(right.key);
+      return (leftIndex === -1 ? order.length : leftIndex) - (rightIndex === -1 ? order.length : rightIndex);
+    });
+  }
+
+  /** 单次讨论发言：以 discussion phase 运行一个 Agent，返回它面向团队的中文意见文本。 */
+  private async runDiscussionTurn(session: SessionDetail, agent: Agent, focusMessage: string): Promise<string> {
+    const result = await this.runtime.run({
+      runId: crypto.randomUUID(),
+      sessionId: session.id,
+      phase: 'discussion',
+      agent: this.toRuntimeAgent(agent),
+      contextPack: this.createContextPack(session, agent, undefined, undefined, focusMessage),
+      expectedOutput: {
+        kind: 'agent_message',
+        schemaVersion: '0.1',
+        jsonSchema: {
+          type: 'object',
+          properties: {
+            messageKind: {
+              type: 'string',
+              enum: ['discussion', 'risk', 'summary', 'handoff', 'progress', 'answer', 'decision'],
+              description: '发言类型，通常为 discussion，提示风险时用 risk'
+            },
+            content: { type: 'string', description: '面向团队的中文发言（2-4 句）' }
+          },
+          required: ['content']
+        }
+      },
+      budget: {}
+    });
+    if (result.status !== 'completed' || !result.output) {
+      throw this.runtimeError(result, 'discussion');
+    }
+    const output = result.output as Partial<AgentMessageOutput>;
+    return output.content?.trim() || `${agent.name} 暂无补充意见。`;
   }
 
   private pickSessionAgent(session: SessionDetail, preferredKeys: string[], fallbackIndex = 0) {

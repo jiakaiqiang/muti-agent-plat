@@ -459,7 +459,7 @@ textarea:disabled {
 
 .session-list-item {
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) auto;
+  grid-template-columns: 44px minmax(0, 1fr) auto auto;
   gap: 10px;
   align-items: center;
   width: 100%;
@@ -505,6 +505,29 @@ textarea:disabled {
 .session-meta {
   justify-items: end;
   white-space: nowrap;
+}
+
+.session-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: var(--light-muted);
+  opacity: 0;
+  cursor: pointer;
+  transition: 150ms ease;
+}
+
+.session-list-item:hover .session-delete,
+.session-list-item.active .session-delete {
+  opacity: 1;
+}
+
+.session-delete:hover {
+  background: rgba(229, 72, 77, 0.12);
+  color: #e5484d;
 }
 
 .workspace-main {

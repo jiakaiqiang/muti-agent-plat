@@ -196,8 +196,12 @@ export class MockRuntimeService {
         return {
           kind: 'user_message_handling_plan',
           intent: 'constraint',
+          route: 'apply_to_agents',
           priority: 'high',
           shouldPause: true,
+          needsUserInput: false,
+          replyToUser: '已将用户新增约束同步给相关 Agent，将保持 dry-run 非破坏性执行。',
+          targetAgentKeys: ['backend', 'test'],
           affectedTaskIds: input.taskId ? [input.taskId] : [],
           affectedAgentIds: [input.agent.id],
           requiresBriefRevision: false,

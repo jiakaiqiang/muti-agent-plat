@@ -318,10 +318,31 @@ export type Artifact = {
   createdAt: ISODateTime;
 };
 
+/**
+ * Coordinator 对一条用户消息做出的路由决策。这是「单点收口」的核心:用户消息先经
+ * Coordinator 分诊得到一个 route，再决定是直接回答、回到用户追问，还是同步给相关 Agent，
+ * 而不是按正则把消息直接 fan-out 给所有 Agent 各自处理。
+ */
+export type UserMessageRoute =
+  | 'answer' // Coordinator 直接回答用户
+  | 'ask_user' // 信息不足，回到用户追问澄清（唯一一条、由 Coordinator 发出）
+  | 'apply_to_agents' // 约束/澄清：内部同步相关 Agent 后由 Coordinator 收口为一条回执
+  | 'revise_brief' // 针对尚未确认的任务简报的补充 → 修订简报后重新等待确认
+  | 'new_task' // 新任务请求
+  | 'command'; // 暂停/继续/取消等控制指令（由前端调用 control API）
+
 export type UserMessageHandlingPlan = {
   intent: UserMessageIntent;
+  /** Coordinator 的路由决策，决定这条消息如何被处理。 */
+  route: UserMessageRoute;
   priority: EventPriority;
   shouldPause: boolean;
+  /** 是否需要回到用户（追问澄清）。为 true 时不向其它 Agent 分发，避免「一群 Agent 追问」。 */
+  needsUserInput: boolean;
+  /** Coordinator 面向用户的话术：answer 的回答、ask_user 的追问、apply_to_agents 的收口回执。 */
+  replyToUser?: string;
+  /** apply_to_agents 时 Coordinator 指定的相关 Agent key（精准同步，而非全体广播）。 */
+  targetAgentKeys?: string[];
   affectedTaskIds: UUID[];
   affectedAgentIds: UUID[];
   requiresBriefRevision: boolean;
@@ -414,6 +435,8 @@ export type RuntimeCapabilityDefinition = {
 export type ContextPack = {
   systemRules: string[];
   sessionGoal: string;
+  /** 当前需要 Coordinator 优先处理的用户消息（用户消息分诊/路由阶段填入）。 */
+  focusMessage?: string;
   taskBrief?: RuntimeTaskBrief;
   currentTask?: RuntimeAgentTask;
   agentProfile: RuntimeAgentProfile;

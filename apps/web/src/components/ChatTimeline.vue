@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useAgentStore } from '@/stores/agent'
 import type {
   ArtifactEventPayload,
@@ -22,6 +22,43 @@ const emit = defineEmits<{
 
 const agentStore = useAgentStore()
 const timeline = computed(() => props.messages)
+
+const timelineRef = ref<HTMLElement | null>(null)
+// 用户主动向上翻看历史时不强行拉回底部;贴近底部才视为“跟随最新”。
+const stickToBottom = ref(true)
+const NEAR_BOTTOM_THRESHOLD = 80
+
+function isNearBottom() {
+  const el = timelineRef.value
+  if (!el) return true
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_THRESHOLD
+}
+
+function onScroll() {
+  stickToBottom.value = isNearBottom()
+}
+
+function scrollToBottom() {
+  const el = timelineRef.value
+  if (!el) return
+  el.scrollTop = el.scrollHeight
+}
+
+onMounted(() => {
+  void nextTick(scrollToBottom)
+})
+
+watch(
+  () => {
+    const last = timeline.value[timeline.value.length - 1]
+    return `${timeline.value.length}:${last?.id ?? ''}:${last?.content?.length ?? 0}`
+  },
+  async () => {
+    if (!stickToBottom.value) return
+    await nextTick()
+    scrollToBottom()
+  }
+)
 
 function senderLabel(message: ChatMessage) {
   if (message.senderType === 'user') return '你'
@@ -92,7 +129,7 @@ function capabilityLabel(capabilityId?: string) {
 </script>
 
 <template>
-  <main class="chat-timeline">
+  <main ref="timelineRef" class="chat-timeline" @scroll="onScroll">
     <article
       v-for="message in timeline"
       :key="message.id"

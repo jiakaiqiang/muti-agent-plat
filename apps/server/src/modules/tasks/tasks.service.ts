@@ -62,6 +62,12 @@ export class TasksService {
     return this.tasksBySession.get(sessionId) ?? [];
   }
 
+  /** Removes all tasks for a deleted session. */
+  removeSession(sessionId: string) {
+    this.tasksBySession.delete(sessionId);
+    this.persist();
+  }
+
   update(task: AgentTask, patch: Partial<AgentTask>) {
     Object.assign(task, patch, { updatedAt: nowIso() });
     this.persist();

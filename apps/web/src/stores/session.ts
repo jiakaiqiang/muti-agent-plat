@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { apiGet, apiPage, apiPost } from '@/api/client'
+import { apiDelete, apiGet, apiPage, apiPost } from '@/api/client'
 import type { SessionDetail, SessionListItem, SessionStatus, SessionViewMode } from '@/types/contracts'
 
 type CreateSessionInput = {
@@ -46,6 +46,13 @@ export const useSessionStore = defineStore('session', {
         ...this.sessions
       ]
       return session
+    },
+    async deleteSession(sessionId: string) {
+      await apiDelete(`/sessions/${sessionId}`)
+      this.sessions = this.sessions.filter((session) => session.id !== sessionId)
+      if (this.currentSession?.id === sessionId) {
+        this.currentSession = undefined
+      }
     },
     async loadSession(sessionId?: string) {
       this.loading = true

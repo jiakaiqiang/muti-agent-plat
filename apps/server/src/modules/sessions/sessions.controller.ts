@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
 import { ok } from '../../common/api-response.js';
 import { SessionsService } from './sessions.service.js';
 
@@ -25,6 +25,11 @@ export class SessionsController {
   @Get('sessions/:sessionId')
   detail(@Param('sessionId') sessionId: string) {
     return ok(this.sessions.get(sessionId));
+  }
+
+  @Delete('sessions/:sessionId')
+  remove(@Param('sessionId') sessionId: string) {
+    return ok(this.sessions.remove(sessionId));
   }
 
   @Post('sessions/:sessionId/messages')
