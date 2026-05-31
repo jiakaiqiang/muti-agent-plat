@@ -56,6 +56,20 @@ export const defaultCapabilities: RuntimeCapabilityDefinition[] = [
     name: '命令执行',
     riskLevel: 'high',
     description: '运行 shell 命令，需要用户明确确认。'
+  },
+  {
+    id: 'cap-run-test',
+    key: 'tool.run_test',
+    name: '运行测试',
+    riskLevel: 'medium',
+    description: '在工作区内运行受控测试命令并汇总验证结果。'
+  },
+  {
+    id: 'cap-git-diff',
+    key: 'tool.git_diff',
+    name: 'Git 差异',
+    riskLevel: 'low',
+    description: '只读查看工作区 Git 变更摘要，不修改任何文件。'
   }
 ];
 
@@ -64,8 +78,8 @@ export const defaultCapabilityIdsByAgentKey: Record<string, string[]> = {
   requirements: ['cap-brief'],
   architect: ['cap-brief'],
   frontend: ['cap-dry-run'],
-  backend: ['cap-dry-run', 'cap-file-write', 'cap-command-run'],
-  test: ['cap-test-report', 'cap-command-run'],
-  review: ['cap-post-review'],
+  backend: ['cap-dry-run', 'cap-file-write', 'cap-command-run', 'cap-git-diff'],
+  test: ['cap-test-report', 'cap-command-run', 'cap-run-test'],
+  review: ['cap-post-review', 'cap-git-diff'],
   notification: ['cap-feishu-draft']
 };

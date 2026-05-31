@@ -5,7 +5,8 @@ import type {
   AgentCardState,
   ConfirmationCardState,
   RuntimeCapabilityDefinition,
-  TaskViewState
+  TaskViewState,
+  ModelDefinition
 } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
 import ConfirmationCard from './ConfirmationCard.vue'
@@ -16,12 +17,14 @@ type CreateAgentInput = {
   role: string
   tags: string[]
   capabilityIds: string[]
+  modelId?: string
 }
 
 const props = defineProps<{
   agents: AgentCardState[]
   availableAgents: Agent[]
   capabilities: RuntimeCapabilityDefinition[]
+  models: ModelDefinition[]
   tasks: TaskViewState[]
   activeConfirmation?: ConfirmationCardState
   connected: boolean
@@ -40,10 +43,12 @@ const agentName = ref('')
 const agentRole = ref('')
 const agentTags = ref('')
 const selectedCapabilityIds = ref<string[]>([])
+const selectedModelId = ref<string>()
 const tasksExpanded = ref(false)
 
 const agentById = computed(() => new Map(props.availableAgents.map((agent) => [agent.id, agent])))
 const capabilityNameById = computed(() => new Map(props.capabilities.map((capability) => [capability.id, capability.name])))
+const modelNameById = computed(() => new Map(props.models.map((model) => [model.id, model.name])))
 
 function statusLabel(status: string) {
   return (
@@ -98,6 +103,7 @@ function resetAgentForm() {
   agentRole.value = ''
   agentTags.value = ''
   selectedCapabilityIds.value = []
+  selectedModelId.value = undefined
   agentFormError.value = ''
 }
 
@@ -117,7 +123,8 @@ function submitAgentForm() {
       name,
       role,
       tags: normalizedTags(),
-      capabilityIds: selectedCapabilityIds.value
+      capabilityIds: selectedCapabilityIds.value,
+      modelId: selectedModelId.value
     },
     (error?: string) => {
       isCreatingAgent.value = false
@@ -169,6 +176,15 @@ function requestDelete(agent: AgentCardState) {
         <span>能力描述</span>
         <textarea v-model="agentRole" rows="3" placeholder="说明这个 Agent 负责什么，以及适合处理哪些任务" />
       </label>
+      <label>
+        <span>模型</span>
+        <select v-model="selectedModelId">
+          <option :value="undefined">默认模型</option>
+          <option v-for="model in models" :key="model.id" :value="model.id">
+            {{ model.name }}
+          </option>
+        </select>
+      </label>
       <div class="agent-capability-picker">
         <span>可用能力</span>
         <button
@@ -219,6 +235,9 @@ function requestDelete(agent: AgentCardState) {
           <div v-if="capabilityNames(agent).length" class="tag-row">
             <span v-for="capability in capabilityNames(agent)" :key="capability" class="tag">{{ capability }}</span>
           </div>
+          <p v-if="configuredAgent(agent)?.modelId" class="agent-model">
+            模型: {{ modelNameById.get(configuredAgent(agent)!.modelId!) ?? configuredAgent(agent)!.modelId }}
+          </p>
           <ul v-if="agent.usedRagSnippets.length" class="rag-list">
             <li v-for="snippet in agent.usedRagSnippets" :key="snippet.title">
               <strong>{{ snippet.title }}</strong>

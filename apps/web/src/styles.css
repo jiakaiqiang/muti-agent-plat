@@ -1340,6 +1340,7 @@ textarea:disabled {
 .agent-card__top p,
 .agent-summary,
 .agent-task,
+.agent-model,
 .rag-list,
 .task-step p {
   color: var(--light-muted);
@@ -1353,6 +1354,8 @@ textarea:disabled {
 .mode-workflow .agent-summary,
 .mode-collaboration_graph .agent-task,
 .mode-workflow .agent-task,
+.mode-collaboration_graph .agent-model,
+.mode-workflow .agent-model,
 .mode-collaboration_graph .rag-list,
 .mode-workflow .rag-list,
 .mode-collaboration_graph .task-step p,
@@ -1378,6 +1381,33 @@ textarea:disabled {
 .agent-status.completed {
   background: #dcfce7;
   color: #166534;
+}
+
+.agent-status.running {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.agent-status.running::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #16a34a;
+  animation: agent-status-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes agent-status-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.3;
+    transform: scale(0.6);
+  }
 }
 
 .agent-status.waiting {
@@ -1551,6 +1581,32 @@ textarea:disabled {
   color: var(--primary);
   font-size: 12px;
   font-weight: 800;
+}
+
+.admin-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.admin-agent-form {
+  margin-bottom: 18px;
+}
+
+.admin-card-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.panel-action-button.danger {
+  border-color: #fecaca;
+  background: #ffffff;
+  color: #b91c1c;
+}
+
+.panel-action-button.danger:hover {
+  background: #fee2e2;
 }
 
 .admin-grid {
@@ -2752,6 +2808,8 @@ textarea:disabled {
 .mode-workflow .agent-summary,
 .mode-collaboration_graph .agent-task,
 .mode-workflow .agent-task,
+.mode-collaboration_graph .agent-model,
+.mode-workflow .agent-model,
 .mode-collaboration_graph .rag-list,
 .mode-workflow .rag-list,
 .mode-collaboration_graph .task-step p,

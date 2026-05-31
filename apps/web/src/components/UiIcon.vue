@@ -129,6 +129,18 @@ withDefaults(
       <path d="M10 11v6" />
       <path d="M14 11v6" />
     </template>
+    <template v-else-if="name === 'cpu'">
+      <rect x="6" y="6" width="12" height="12" rx="2" />
+      <rect x="9" y="9" width="6" height="6" rx="1" />
+      <path d="M9 2v2" />
+      <path d="M15 2v2" />
+      <path d="M9 20v2" />
+      <path d="M15 20v2" />
+      <path d="M2 9h2" />
+      <path d="M2 15h2" />
+      <path d="M20 9h2" />
+      <path d="M20 15h2" />
+    </template>
     <template v-else>
       <circle cx="12" cy="12" r="9" />
       <path d="M12 8v8" />

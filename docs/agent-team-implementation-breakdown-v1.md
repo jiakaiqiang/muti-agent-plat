@@ -527,6 +527,11 @@ v2 实现：
 - 飞书确认后发送。
 - runtime cancel、timeout、retry。
 
+实施状态（2026-05-30）：
+
+- 已落地：CodexRuntimeAdapter、ClaudeCodeRuntimeAdapter 通过子进程接入真实 CLI（real-first，默认关闭或 CLI 不可用时返回可见失败而非崩溃）；受控代码修改（file_write）、command_run、run_test、git_diff 经 ToolExecutorService 在工作区沙箱内执行，受能力策略与 `ENABLE_HIGH_RISK_TOOLS` / `ALLOW_FILE_WRITE_RUNTIME` / `ALLOW_COMMAND_RUNTIME` 多重 gate；runtime timeout、retry、cancel 已接入。回归见 `npm run test:e2e:v2-runtime`，配置见 README「Agentic Coding Runtimes (v2)」。
+- 后置：真实 Codex/Claude Code CLI 的生产级深度接入与凭证管理、飞书确认后真实发送仍属后续范围。
+
 ### 6.5 交付物
 
 - Runtime Adapter 接口。

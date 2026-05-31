@@ -26,6 +26,14 @@ async function request<T>(path: string, init?: RequestInit) {
   if (!response.ok) {
     const body = await response.json().catch(() => undefined)
     const message = body?.error?.message ?? `${init?.method ?? 'GET'} ${path} failed: ${response.status}`
+    console.error('[API Error]', {
+      path,
+      method: init?.method ?? 'GET',
+      status: response.status,
+      statusText: response.statusText,
+      body,
+      message
+    })
     throw new Error(message)
   }
 
@@ -40,6 +48,15 @@ export async function apiPost<T>(path: string, body?: unknown) {
   return (
     await request<T>(path, {
       method: 'POST',
+      body: body === undefined ? undefined : JSON.stringify(body)
+    })
+  ).data
+}
+
+export async function apiPatch<T>(path: string, body?: unknown) {
+  return (
+    await request<T>(path, {
+      method: 'PATCH',
       body: body === undefined ? undefined : JSON.stringify(body)
     })
   ).data

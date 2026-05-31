@@ -1,7 +1,9 @@
 import { Controller, Get, Query } from '@nestjs/common';
-import type { AgentRunInput } from '@agent-cluster/shared';
+import type { AgentRunInput, RuntimeType } from '@agent-cluster/shared';
 import { ok } from '../../common/api-response.js';
 import { RuntimeService } from './runtime.service.js';
+
+type SmokeRuntimeType = Extract<RuntimeType, 'mock' | 'generic_llm' | 'codex' | 'claude_code'>;
 
 @Controller('runtimes')
 export class RuntimeController {
@@ -17,7 +19,17 @@ export class RuntimeController {
     return ok(await this.runtime.run(this.createSmokeInput('generic_llm', scenario)));
   }
 
-  private createSmokeInput(runtimeType: 'mock' | 'generic_llm', scenario?: 'happy_path' | 'task_failed'): AgentRunInput {
+  @Get('codex/smoke')
+  async codexSmoke() {
+    return ok(await this.runtime.run(this.createSmokeInput('codex')));
+  }
+
+  @Get('claude-code/smoke')
+  async claudeCodeSmoke() {
+    return ok(await this.runtime.run(this.createSmokeInput('claude_code')));
+  }
+
+  private createSmokeInput(runtimeType: SmokeRuntimeType, scenario?: 'happy_path' | 'task_failed'): AgentRunInput {
     const agent = {
       id: 'runtime-smoke-agent',
       key: 'backend',

@@ -28,7 +28,7 @@ yarn-error.log*
 tmp/
 temp/
 uploads/
-artifacts/
+/artifacts/
 
 # Docker and database local state
 *.pid

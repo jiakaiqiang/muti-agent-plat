@@ -32,17 +32,10 @@ function applySecurityHeaders(
 async function bootstrap() {
   const logger = process.env.LOG_FORMAT === 'json' ? new JsonLogger() : new Logger('Bootstrap');
   const app = await NestFactory.create(AppModule, { logger });
-  const allowedOrigins = new Set(parseCorsOrigins(process.env.CORS_ORIGIN));
+  const allowedOrigins = parseCorsOrigins(process.env.CORS_ORIGIN);
 
   app.enableCors({
-    origin(origin, callback) {
-      if (!origin || allowedOrigins.has(origin)) {
-        callback(null, true);
-        return;
-      }
-
-      callback(null, false);
-    },
+    origin: allowedOrigins,
     credentials: true
   });
   app.use(applySecurityHeaders);

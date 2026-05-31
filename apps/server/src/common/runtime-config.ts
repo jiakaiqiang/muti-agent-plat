@@ -1,10 +1,11 @@
+import { resolve } from 'node:path';
 import type { RuntimeType } from '@agent-cluster/shared';
 
 export type LlmProvider = 'openai-compatible' | 'ollama';
 
 const truthyValues = new Set(['1', 'true', 'yes', 'on']);
 const mockFallbackValues = new Set(['1', 'true', 'yes', 'on', 'mock']);
-const defaultAgentRuntimeTypes = new Set<RuntimeType>(['mock', 'generic_llm']);
+const defaultAgentRuntimeTypes = new Set<RuntimeType>(['mock', 'generic_llm', 'codex', 'claude_code']);
 const ollamaProviderValues = new Set(['ollama', 'local-ollama']);
 const openAiDefaultBaseUrl = 'https://api.openai.com/v1';
 const openAiDefaultModel = 'gpt-4.1-mini';
@@ -70,4 +71,62 @@ export function mockRuntimeEnabled() {
 
 export function runtimeModeLabel(runtimeType: RuntimeType) {
   return runtimeType === 'mock' ? 'mock simulation' : runtimeType;
+}
+
+export function envInt(name: string, fallback: number) {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') {
+    return fallback;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+export function highRiskToolsEnabled() {
+  return process.env.ENABLE_HIGH_RISK_TOOLS === 'true';
+}
+
+export function fileWriteRuntimeAllowed() {
+  return envFlag('ALLOW_FILE_WRITE_RUNTIME', false);
+}
+
+export function commandRuntimeAllowed() {
+  return envFlag('ALLOW_COMMAND_RUNTIME', false);
+}
+
+export function codexRuntimeEnabled() {
+  return envFlag('CODEX_RUNTIME_ENABLED', false);
+}
+
+export function claudeCodeRuntimeEnabled() {
+  return envFlag('CLAUDE_CODE_RUNTIME_ENABLED', false);
+}
+
+export function runtimeTimeoutMs() {
+  return envInt('RUNTIME_TIMEOUT_MS', envInt('LLM_TIMEOUT_MS', 60_000));
+}
+
+export function runtimeMaxRetries() {
+  return envInt('RUNTIME_MAX_RETRIES', envInt('LLM_MAX_RETRIES', 2));
+}
+
+export function agentWorkspaceRoot() {
+  const configured = process.env.AGENT_WORKSPACE_ROOT?.trim();
+  return configured ? resolve(configured) : process.cwd();
+}
+
+export function codexCliCommand() {
+  return process.env.CODEX_CLI_COMMAND?.trim() || 'codex';
+}
+
+export function claudeCodeCliCommand() {
+  return process.env.CLAUDE_CODE_CLI_COMMAND?.trim() || 'claude';
+}
+
+export function runtimeCliArgs(name: string): string[] {
+  const raw = process.env[name]?.trim();
+  if (!raw) {
+    return [];
+  }
+  return raw.split(/\s+/).filter(Boolean);
 }

@@ -29,6 +29,7 @@ export class AgentsService {
       this.agents.set(agent.id, {
         ...agent,
         runtimeType,
+        modelId: agent.modelId?.trim() || undefined,
         capabilityIds: Array.from(new Set([...defaultCapabilityIds, ...agent.capabilityIds]))
       });
     }
@@ -72,6 +73,7 @@ export class AgentsService {
       description: input.description?.trim() || undefined,
       tags: this.normalizeStringList(input.tags),
       runtimeType: input.runtimeType ?? defaultAgentRuntimeType(),
+      modelId: input.modelId?.trim() || undefined,
       status: input.status ?? 'active',
       capabilityIds: this.normalizeStringList(input.capabilityIds),
       defaultKnowledgeBaseIds: this.normalizeStringList(input.defaultKnowledgeBaseIds),

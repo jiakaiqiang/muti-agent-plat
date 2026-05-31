@@ -33,6 +33,31 @@ export class TasksService {
     return tasks;
   }
 
+  create(input: {
+    sessionId: UUID;
+    title: string;
+    description: string;
+    assigneeAgentId?: string;
+    acceptanceCriteria?: string[];
+  }): AgentTask {
+    const task: AgentTask = {
+      id: crypto.randomUUID(),
+      sessionId: input.sessionId,
+      title: input.title,
+      description: input.description,
+      status: 'pending',
+      assigneeAgentId: input.assigneeAgentId,
+      dependsOnTaskIds: [],
+      acceptanceCriteria: input.acceptanceCriteria ?? [],
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    };
+
+    this.tasksBySession.set(input.sessionId, [...(this.tasksBySession.get(input.sessionId) ?? []), task]);
+    this.persist();
+    return task;
+  }
+
   list(sessionId: string) {
     return this.tasksBySession.get(sessionId) ?? [];
   }

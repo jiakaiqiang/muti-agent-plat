@@ -3,6 +3,7 @@ import type {
   Agent,
   AgentRunInput,
   AgentRunResult,
+  AgentStatus,
   AgentTask,
   ContextPack,
   FinalDeliveryOutput,
@@ -59,6 +60,10 @@ export class OrchestratorService {
 
   async discussAndCreateBrief(session: SessionDetail) {
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    this.emitAgentStatus(session.id, coordinator, 'thinking', {
+      content: `${coordinator.name} 正在理解需求并生成任务简报…`,
+      thoughtSummary: '分析用户目标，拟定范围、验收标准与建议任务。'
+    });
     const result = await this.runtime.run({
       runId: crypto.randomUUID(),
       sessionId: session.id,
@@ -151,6 +156,10 @@ export class OrchestratorService {
       })
     });
 
+    this.emitAgentStatus(session.id, coordinator, 'idle', {
+      content: `${coordinator.name} 已生成任务简报，等待用户确认。`
+    });
+
     return brief;
   }
 
@@ -210,6 +219,12 @@ export class OrchestratorService {
     for (const task of tasks) {
       const taskAgent = task.assigneeAgentId ? this.agents.getByIdOrKey(task.assigneeAgentId) : backend;
       this.tasks.update(task, { status: 'running' });
+      this.emitAgentStatus(session.id, taskAgent, 'running', {
+        content: `${taskAgent.name} 正在执行任务：${task.title}`,
+        currentTaskId: task.id,
+        currentTaskTitle: task.title,
+        thoughtSummary: `执行任务「${task.title}」`
+      });
       this.events.create({
         sessionId: session.id,
         type: 'task_started',
@@ -320,6 +335,10 @@ export class OrchestratorService {
           risks: output.risks
         })
       });
+      this.emitAgentStatus(session.id, taskAgent, 'idle', {
+        content: `${taskAgent.name} 已完成任务：${task.title}`,
+        actionSummary: output.summary
+      });
     }
 
     this.events.create({
@@ -328,6 +347,11 @@ export class OrchestratorService {
       fromAgentId: review.id,
       content: 'Review Agent started checking runtime results against the confirmed task brief.',
       metadata: createMetadata('review_card', { briefId: brief.id })
+    });
+
+    this.emitAgentStatus(session.id, review, 'reviewing', {
+      content: `${review.name} 正在复盘执行结果是否符合任务简报。`,
+      thoughtSummary: '核对执行产物与验收标准、范围一致性。'
     });
 
     const reviewRun = await this.runtime.run({
@@ -371,7 +395,15 @@ export class OrchestratorService {
       })
     });
 
+    this.emitAgentStatus(session.id, review, 'idle', {
+      content: `${review.name} 复盘完成。`
+    });
+
     const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
+    this.emitAgentStatus(session.id, coordinator, 'running', {
+      content: `${coordinator.name} 正在汇总最终交付物。`,
+      thoughtSummary: '整理交付摘要、完成项与风险。'
+    });
     const finalRun = await this.runtime.run({
       runId: crypto.randomUUID(),
       sessionId: session.id,
@@ -449,6 +481,270 @@ export class OrchestratorService {
         contentSummary: notificationDraft.contentSummary,
         relatedCapabilityId: 'cap-feishu-draft'
       })
+    });
+    this.emitAgentStatus(session.id, coordinator, 'completed', {
+      content: `${coordinator.name} 已完成最终交付。`
+    });
+  }
+
+  async handleQuestion(session: SessionDetail, question: string) {
+    const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    this.emitAgentStatus(session.id, coordinator, 'thinking', {
+      content: `${coordinator.name} 正在思考如何回答用户的问题…`,
+      thoughtSummary: '理解问题背景，结合会话上下文给出回答。'
+    });
+
+    const contextPack = this.createContextPack(session, coordinator);
+    const result = await this.runtime.run({
+      runId: crypto.randomUUID(),
+      sessionId: session.id,
+      phase: 'user_message_routing',
+      agent: this.toRuntimeAgent(coordinator),
+      contextPack,
+      expectedOutput: {
+        kind: 'agent_message',
+        schemaVersion: '0.1',
+        jsonSchema: {
+          type: 'object',
+          properties: {
+            answer: { type: 'string', description: '对用户问题的回答' },
+            references: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '引用的任务 ID 或产物 ID（可选）'
+            }
+          },
+          required: ['answer']
+        }
+      },
+      budget: {}
+    });
+
+    if (result.status !== 'completed' || !result.output) {
+      throw this.runtimeError(result, 'question handling');
+    }
+
+    const output = result.output as unknown as { answer: string; references?: string[] };
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      fromAgentId: coordinator.id,
+      content: output.answer,
+      metadata: createMetadata('chat_message', {
+        messageKind: 'answer',
+        references: output.references
+      })
+    });
+
+    this.emitAgentStatus(session.id, coordinator, 'idle', {
+      content: `${coordinator.name} 已回答用户问题。`
+    });
+  }
+
+  async handleClarificationOrConstraint(session: SessionDetail, message: string, intent: 'clarification' | 'constraint') {
+    const allAgents = session.participatingAgentIds.map((id) => this.agents.getByIdOrKey(id));
+    const responses: Array<{ agent: Agent; relevant: boolean; response?: string }> = [];
+
+    // 并行让所有 agent 判断相关性
+    await Promise.all(
+      allAgents.map(async (agent) => {
+        this.emitAgentStatus(session.id, agent, 'thinking', {
+          content: `${agent.name} 正在判断消息是否与自己相关…`,
+          thoughtSummary: `分析「${message}」是否影响自己负责的任务。`
+        });
+
+        const contextPack = this.createContextPack(session, agent);
+        const result = await this.runtime.run({
+          runId: crypto.randomUUID(),
+          sessionId: session.id,
+          phase: 'user_message_routing',
+          agent: this.toRuntimeAgent(agent),
+          contextPack,
+          expectedOutput: {
+            kind: 'agent_message',
+            schemaVersion: '0.1',
+            jsonSchema: {
+              type: 'object',
+              properties: {
+                relevant: { type: 'boolean', description: '是否与自己相关' },
+                reason: { type: 'string', description: '相关性原因（如果 relevant=true）' },
+                response: { type: 'string', description: '给用户的回复（如果 relevant=true）' }
+              },
+              required: ['relevant']
+            }
+          },
+          budget: {}
+        });
+
+        if (result.status === 'completed' && result.output) {
+          const output = result.output as unknown as { relevant: boolean; reason?: string; response?: string };
+          responses.push({ agent, relevant: output.relevant, response: output.response });
+
+          if (output.relevant && output.response) {
+            this.events.create({
+              sessionId: session.id,
+              type: 'agent_message',
+              fromAgentId: agent.id,
+              content: output.response,
+              metadata: createMetadata('chat_message', {
+                messageKind: intent === 'constraint' ? 'constraint_ack' : 'clarification_response',
+                reason: output.reason
+              })
+            });
+          }
+        }
+
+        this.emitAgentStatus(session.id, agent, 'idle', {
+          content: `${agent.name} 已完成相关性判断。`
+        });
+      })
+    );
+
+    const relevantCount = responses.filter((r) => r.relevant).length;
+    if (relevantCount === 0) {
+      const coordinator = this.pickSessionAgent(session, ['coordinator']);
+      this.events.create({
+        sessionId: session.id,
+        type: 'agent_message',
+        fromAgentId: coordinator.id,
+        content: '已通知所有 Agent，但暂无 Agent 认为此消息与当前任务直接相关。',
+        metadata: createMetadata('chat_message', { messageKind: 'broadcast_result' })
+      });
+    }
+  }
+
+  async handleNewTaskRequest(session: SessionDetail, request: string) {
+    const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    this.emitAgentStatus(session.id, coordinator, 'thinking', {
+      content: `${coordinator.name} 正在理解新任务需求…`,
+      thoughtSummary: '分析用户需求，创建任务并分配给合适的 Agent。'
+    });
+
+    const contextPack = this.createContextPack(session, coordinator);
+    const result = await this.runtime.run({
+      runId: crypto.randomUUID(),
+      sessionId: session.id,
+      phase: 'user_message_routing',
+      agent: this.toRuntimeAgent(coordinator),
+      contextPack,
+      expectedOutput: {
+        kind: 'agent_message',
+        schemaVersion: '0.1',
+        jsonSchema: {
+          type: 'object',
+          properties: {
+            taskTitle: { type: 'string', description: '任务标题' },
+            taskDescription: { type: 'string', description: '任务描述' },
+            assigneeAgentId: { type: 'string', description: '负责的 Agent ID' },
+            acceptanceCriteria: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '验收标准'
+            }
+          },
+          required: ['taskTitle', 'taskDescription', 'assigneeAgentId']
+        }
+      },
+      budget: {}
+    });
+
+    if (result.status !== 'completed' || !result.output) {
+      throw this.runtimeError(result, 'new task request handling');
+    }
+
+    const output = result.output as unknown as {
+      taskTitle: string;
+      taskDescription: string;
+      assigneeAgentId: string;
+      acceptanceCriteria?: string[];
+    };
+
+    const task = this.tasks.create({
+      sessionId: session.id,
+      title: output.taskTitle,
+      description: output.taskDescription,
+      assigneeAgentId: output.assigneeAgentId,
+      acceptanceCriteria: output.acceptanceCriteria ?? []
+    });
+
+    this.events.create({
+      sessionId: session.id,
+      type: 'task_created',
+      taskId: task.id,
+      fromAgentId: coordinator.id,
+      content: `Created task: ${task.title}`,
+      metadata: createMetadata('task_card', {
+        taskId: task.id,
+        title: task.title,
+        status: task.status,
+        assigneeAgentId: task.assigneeAgentId,
+        acceptanceCriteria: task.acceptanceCriteria
+      })
+    });
+
+    this.emitAgentStatus(session.id, coordinator, 'idle', {
+      content: `${coordinator.name} 已创建任务并开始执行。`
+    });
+
+    // 立即执行任务
+    if (!task.assigneeAgentId) {
+      throw new Error(`Task ${task.id} has no assignee agent`);
+    }
+    const taskAgent = this.agents.getByIdOrKey(task.assigneeAgentId);
+    this.tasks.update(task, { status: 'running' });
+    this.emitAgentStatus(session.id, taskAgent, 'running', {
+      content: `${taskAgent.name} 正在执行任务：${task.title}`,
+      currentTaskId: task.id,
+      currentTaskTitle: task.title,
+      thoughtSummary: `执行任务「${task.title}」`
+    });
+
+    const taskContextPack = this.createContextPack(session, taskAgent, undefined, task);
+    const taskResult = await this.runtime.run({
+      runId: crypto.randomUUID(),
+      sessionId: session.id,
+      taskId: task.id,
+      phase: 'task_execution',
+      agent: this.toRuntimeAgent(taskAgent),
+      contextPack: taskContextPack,
+      expectedOutput: { kind: 'task_execution_result', schemaVersion: '0.1' },
+      budget: {}
+    });
+
+    if (taskResult.status !== 'completed' || !taskResult.output) {
+      this.markTaskFailed(
+        session.id,
+        task,
+        taskAgent.id,
+        taskResult.runId ?? crypto.randomUUID(),
+        taskResult.error?.message ?? 'Runtime execution failed',
+        taskAgent.runtimeType
+      );
+      throw this.runtimeError(taskResult, 'task execution');
+    }
+
+    const taskOutput = this.completedOutput<TaskExecutionResultOutput>(taskResult, 'task_execution_result');
+    this.tasks.update(task, { status: 'completed' });
+    this.events.create({
+      sessionId: session.id,
+      type: 'task_completed',
+      taskId: task.id,
+      fromAgentId: taskAgent.id,
+      content: `Task completed: ${task.title}`,
+      metadata: createMetadata('task_card', {
+        taskId: task.id,
+        title: task.title,
+        status: 'completed',
+        assigneeAgentId: task.assigneeAgentId,
+        resultSummary: taskOutput.summary,
+        completedItems: taskOutput.completedItems,
+        risks: taskOutput.risks
+      })
+    });
+
+    this.emitAgentStatus(session.id, taskAgent, 'idle', {
+      content: `${taskAgent.name} 已完成任务：${task.title}`,
+      actionSummary: taskOutput.summary
     });
   }
 
@@ -587,6 +883,7 @@ export class OrchestratorService {
       role: agent.role,
       systemPrompt: `${agent.name}: ${agent.role}`,
       runtimeType: agent.runtimeType,
+      modelId: agent.modelId,
       capabilityIds: agent.capabilityIds
     };
   }
@@ -642,6 +939,37 @@ export class OrchestratorService {
 
   private runtimeError(result: AgentRunResult, phase: string) {
     return new Error(`${result.runtimeType} runtime failed during ${phase}: ${result.error?.message ?? result.status}`);
+  }
+
+  // Emits an agent_status_changed event so the UI can surface, in real time over SSE, which agent is
+  // working in which phase. renderAs is left undefined so these don't clutter the chat timeline — they
+  // only drive the agent cards.
+  private emitAgentStatus(
+    sessionId: string,
+    agent: Agent,
+    status: AgentStatus,
+    details: {
+      content?: string;
+      currentTaskId?: string;
+      currentTaskTitle?: string;
+      thoughtSummary?: string;
+      actionSummary?: string;
+    } = {}
+  ) {
+    this.events.create({
+      sessionId,
+      type: 'agent_status_changed',
+      fromAgentId: agent.id,
+      content: details.content ?? `${agent.name} 状态更新为 ${status}`,
+      metadata: createMetadata(undefined, {
+        agentId: agent.id,
+        status,
+        currentTaskId: details.currentTaskId,
+        currentTaskTitle: details.currentTaskTitle,
+        thoughtSummary: details.thoughtSummary,
+        actionSummary: details.actionSummary
+      })
+    });
   }
 
   private defaultSuggestedTasks(): SuggestedAgentTask[] {

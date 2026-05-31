@@ -46,6 +46,8 @@ export type RuntimeType =
   | 'mcp_tool'
   | 'human';
 
+export type ModelProvider = 'openai-compatible' | 'ollama' | 'anthropic';
+
 export type KnowledgeScope = 'global' | 'project' | 'session' | 'agent' | 'role_type';
 export type CapabilityRiskLevel = 'low' | 'medium' | 'high';
 
@@ -174,11 +176,67 @@ export type Agent = {
   description?: string;
   tags?: string[];
   runtimeType: RuntimeType;
+  modelId?: UUID;
   status: 'active' | 'disabled';
   capabilityIds: UUID[];
   defaultKnowledgeBaseIds: UUID[];
   createdAt: ISODateTime;
   updatedAt: ISODateTime;
+};
+
+export type ModelFeatureFlags = {
+  toolCalling: boolean;
+  vision: boolean;
+  jsonMode: boolean;
+  contextWindow: number;
+};
+
+export type ModelDefaults = {
+  temperature?: number;
+  maxOutputTokens?: number;
+};
+
+export type ModelSource = 'local' | 'official' | 'custom';
+
+export type ModelConnection = {
+  id: UUID;
+  name: string;
+  source: ModelSource;
+  provider: ModelProvider;
+  runtimeType: RuntimeType;
+  baseUrl: string;
+  /** Whether a usable credential (encrypted at rest or env-backed) is configured; never the secret. */
+  hasCredential: boolean;
+  isDefault?: boolean;
+  status: 'active' | 'disabled';
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+};
+
+export type ModelDefinition = {
+  id: UUID;
+  connectionId: UUID;
+  name: string;
+  upstreamModel: string;
+  features: ModelFeatureFlags;
+  defaults?: ModelDefaults;
+  status: 'active' | 'disabled';
+  isDefault?: boolean;
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+};
+
+/** Non-secret view of a model joined with its connection, resolved for a runtime call. */
+export type ResolvedRuntimeModel = {
+  modelId: UUID;
+  connectionId: UUID;
+  source: ModelSource;
+  provider: ModelProvider;
+  runtimeType: RuntimeType;
+  baseUrl: string;
+  upstreamModel: string;
+  features: ModelFeatureFlags;
+  defaults?: ModelDefaults;
 };
 
 export type TaskBrief = {
@@ -301,6 +359,7 @@ export type RuntimeAgentProfile = {
   role: string;
   systemPrompt: string;
   runtimeType: RuntimeType;
+  modelId?: UUID;
   capabilityIds: UUID[];
 };
 
@@ -382,6 +441,8 @@ export type AgentRunInput = {
   taskId?: UUID;
   phase: AgentRunPhase;
   agent: RuntimeAgentProfile;
+  /** Resolved model + connection the runtime should use; filled in by RuntimeService before dispatch. */
+  model?: ResolvedRuntimeModel;
   contextPack: ContextPack;
   expectedOutput: ExpectedRuntimeOutput;
   budget: RuntimeBudget;

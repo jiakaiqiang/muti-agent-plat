@@ -7,6 +7,7 @@ type CreateAgentInput = {
   role: string
   tags?: string[]
   capabilityIds?: string[]
+  modelId?: string
 }
 
 const capabilityNameById: Record<string, string> = {
@@ -38,9 +39,16 @@ export const useAgentStore = defineStore('agent', {
       this.agents = await apiGet<Agent[]>('/agents')
     },
     async createAgent(input: CreateAgentInput) {
-      const agent = await apiPost<Agent>('/agents', input)
-      this.agents = [agent, ...this.agents.filter((item) => item.id !== agent.id)]
-      return agent
+      console.log('[Agent Store] Creating agent with input:', input)
+      try {
+        const agent = await apiPost<Agent>('/agents', input)
+        console.log('[Agent Store] Agent created successfully:', agent)
+        this.agents = [agent, ...this.agents.filter((item) => item.id !== agent.id)]
+        return agent
+      } catch (error) {
+        console.error('[Agent Store] Failed to create agent:', error)
+        throw error
+      }
     },
     async deleteAgent(agentId: string) {
       await apiDelete(`/agents/${agentId}`)

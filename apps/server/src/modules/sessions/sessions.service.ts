@@ -176,6 +176,20 @@ export class SessionsService {
       });
     }
 
+    // 根据意图触发相应的执行流程
+    if (handlingPlan.intent === 'question') {
+      await this.orchestrator.handleQuestion(session, content);
+    } else if (handlingPlan.intent === 'clarification' || handlingPlan.intent === 'constraint') {
+      await this.orchestrator.handleClarificationOrConstraint(session, content, handlingPlan.intent);
+    } else if (handlingPlan.intent === 'command') {
+      // 命令类消息（暂停/继续/取消）由前端直接调用对应的 API，这里不处理
+    } else if (handlingPlan.intent === 'preference_input' || handlingPlan.intent === 'knowledge_input') {
+      // 偏好和知识输入已在上面处理（存 memory），不需要额外执行
+    } else {
+      // 其他意图（correction 等）视为新任务请求
+      await this.orchestrator.handleNewTaskRequest(session, content);
+    }
+
     return { event, handlingPlan };
   }
 

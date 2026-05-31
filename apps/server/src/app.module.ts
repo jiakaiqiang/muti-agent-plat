@@ -5,6 +5,7 @@ import { CapabilitiesModule } from './modules/capabilities/capabilities.module.j
 import { DebugModule } from './modules/debug/debug.module.js';
 import { EventsModule } from './modules/events/events.module.js';
 import { MemoryModule } from './modules/memory/memory.module.js';
+import { ModelsModule } from './modules/models/models.module.js';
 import { KnowledgeModule } from './modules/rag/knowledge.module.js';
 import { OrchestratorModule } from './modules/orchestrator/orchestrator.module.js';
 import { OpsModule } from './modules/ops/ops.module.js';
@@ -19,6 +20,7 @@ import { UserMessageRouterModule } from './modules/user-message-router/user-mess
     PersistenceModule,
     CapabilitiesModule,
     AgentsModule,
+    ModelsModule,
     EventsModule,
     MemoryModule,
     TasksModule,

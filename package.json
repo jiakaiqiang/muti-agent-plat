@@ -27,6 +27,8 @@
     "test:e2e:real-session-custom-agent": "node tests/e2e/real-session-custom-agent-smoke.mjs",
     "test:e2e:debug-memory": "node tests/e2e/debug-memory-smoke.mjs",
     "test:e2e:persistence": "node tests/e2e/persistence-smoke.mjs",
+    "test:e2e:v2-runtime": "node tests/e2e/v2-runtime-smoke.mjs",
+    "test:e2e:interactive-messaging": "node tests/e2e/interactive-messaging-smoke.mjs",
     "lint": "npm run lint --workspaces --if-present"
   },
   "engines": {

@@ -3,14 +3,16 @@ import { computed, onMounted, ref } from 'vue'
 import { useAgentStore } from '@/stores/agent'
 import { useEventStore } from '@/stores/event'
 import { useKnowledgeStore } from '@/stores/knowledge'
+import { useModelStore } from '@/stores/model'
 import { useSessionStore } from '@/stores/session'
-import { sessionStatusLabel, type SessionStatus, type SessionViewMode } from '@/types/contracts'
-import AgentStatusPanel from './AgentStatusPanel.vue'
+import { sessionStatusLabel, type AgentCardState, type SessionStatus, type SessionViewMode } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
 import ChatTimeline from './ChatTimeline.vue'
 import CollaborationGraphView from './CollaborationGraphView.vue'
 import CollaborationLogPanel from './CollaborationLogPanel.vue'
+import ConfirmationCard from './ConfirmationCard.vue'
 import DebugRuntimeView from './DebugRuntimeView.vue'
+import ModelManagementPanel from './ModelManagementPanel.vue'
 import SessionSidebar from './SessionSidebar.vue'
 import UiIcon from './UiIcon.vue'
 import UserInputBox from './UserInputBox.vue'
@@ -20,6 +22,7 @@ const sessionStore = useSessionStore()
 const eventStore = useEventStore()
 const agentStore = useAgentStore()
 const knowledgeStore = useKnowledgeStore()
+const modelStore = useModelStore()
 
 const isSendingMessage = ref(false)
 const inputError = ref('')
@@ -30,7 +33,7 @@ const newSessionInput = ref('')
 const selectedSessionAgentIds = ref<string[]>([])
 const sessionCreateError = ref('')
 
-type WorkspaceSection = 'session' | 'knowledge' | 'settings' | 'models' | 'tools' | 'notifications'
+type WorkspaceSection = 'session' | 'knowledge' | 'agents' | 'settings' | 'models' | 'tools' | 'notifications'
 
 const viewModes: SessionViewMode[] = ['chat', 'workflow', 'collaboration_graph', 'debug']
 const activeSection = ref<WorkspaceSection>('session')
@@ -38,8 +41,9 @@ const activeSection = ref<WorkspaceSection>('session')
 const railSections: Array<{ id: WorkspaceSection; label: string; icon: string }> = [
   { id: 'session', label: '工作台', icon: 'message' },
   { id: 'knowledge', label: '知识库', icon: 'database' },
+  { id: 'agents', label: 'Agent 管理', icon: 'bot' },
   { id: 'settings', label: '设置', icon: 'settings' },
-  { id: 'models', label: '模型管理', icon: 'bot' },
+  { id: 'models', label: '模型管理', icon: 'cpu' },
   { id: 'tools', label: '工具集成', icon: 'sparkles' },
   { id: 'notifications', label: '通知中心', icon: 'bell' }
 ]
@@ -84,6 +88,7 @@ onMounted(async () => {
     agentStore.loadAgents(),
     agentStore.loadCapabilities(),
     knowledgeStore.loadKnowledgeBases(),
+    modelStore.loadModels(),
     sessionStore.loadSessions()
   ])
   await sessionStore.loadSession()
@@ -103,6 +108,20 @@ const currentMode = computed(() => sessionStore.currentViewMode)
 const primaryAgent = computed(() => agents.value[0])
 const workspaceLabel = computed(() => sessionStore.currentSession?.title ?? '无活动会话')
 const activeAgentIds = computed(() => agentStore.agents.filter((agent) => agent.status === 'active').map((agent) => agent.id))
+
+// IDs of agents optimistically marked as running. This covers the gap where the backend can't be
+// observed live: a new session's brief generation runs before SSE connects (createSession resolves
+// first). During brief *execution* the session's SSE is already connected, so real per-agent
+// agent_status_changed events drive the cards instead — hence the overlay only fills in agents whose
+// real status is still 'idle', never masking a live backend status.
+const processingAgentIds = ref<string[]>([])
+const displayAgents = computed<AgentCardState[]>(() =>
+  agents.value.map((agent) =>
+    processingAgentIds.value.includes(agent.agentId) && agent.status === 'idle'
+      ? { ...agent, status: 'running' }
+      : agent
+  )
+)
 
 const derivedStatus = computed(() => {
   const statusEvent = [...eventStore.eventsForSession(currentSessionId.value)]
@@ -173,23 +192,112 @@ async function createSessionFromDialog() {
   }
 }
 
-async function createAgent(
-  input: { name: string; role: string; tags: string[]; capabilityIds: string[] },
-  done: (error?: string) => void
-) {
-  try {
-    await agentStore.createAgent(input)
-    done()
-  } catch (error) {
-    done(error instanceof Error ? error.message : '创建 Agent 失败')
+const showModelAgentForm = ref(false)
+const isSavingModelAgent = ref(false)
+const modelAgentError = ref('')
+const modelAgentName = ref('')
+const modelAgentRole = ref('')
+const modelAgentTags = ref('')
+const modelAgentCapabilityIds = ref<string[]>([])
+const modelAgentModelId = ref('')
+const tasksExpanded = ref(false)
+
+function resetModelAgentForm() {
+  modelAgentName.value = ''
+  modelAgentRole.value = ''
+  modelAgentTags.value = ''
+  modelAgentCapabilityIds.value = []
+  modelAgentModelId.value = ''
+  modelAgentError.value = ''
+}
+
+function toggleModelAgentForm() {
+  showModelAgentForm.value = !showModelAgentForm.value
+  if (!showModelAgentForm.value) {
+    resetModelAgentForm()
   }
 }
 
-async function deleteAgent(agentId: string) {
+function toggleModelAgentCapability(capabilityId: string) {
+  modelAgentCapabilityIds.value = modelAgentCapabilityIds.value.includes(capabilityId)
+    ? modelAgentCapabilityIds.value.filter((id) => id !== capabilityId)
+    : [...modelAgentCapabilityIds.value, capabilityId]
+}
+
+function getModelName(modelId?: string) {
+  if (!modelId) return ''
+  return modelStore.models.find(m => m.id === modelId)?.name ?? modelId
+}
+
+function configuredAgentCard(agentId: string) {
+  return agentStore.agents.find((agent) => agent.id === agentId)
+}
+
+function agentCapabilityNames(agent: AgentCardState) {
+  const configured = configuredAgentCard(agent.agentId)
+  const configuredNames = (configured?.capabilityIds ?? []).map((id) => agentStore.capabilityName(id))
+  return agent.activeCapabilityNames.length ? agent.activeCapabilityNames : configuredNames
+}
+
+function statusLabel(status: string) {
+  return (
+    {
+      idle: '空闲',
+      running: '运行中',
+      thinking: '思考中',
+      discussing: '讨论中',
+      waiting: '等待中',
+      reviewing: '复盘中',
+      reworking: '返工中',
+      completed: '已完成',
+      failed: '失败',
+      disabled: '停用',
+      pending: '待处理',
+      claimed: '已领取',
+      rejected: '已拒绝',
+      cancelled: '已取消'
+    }[status] ?? status
+  )
+}
+
+async function submitModelAgentForm() {
+  const name = modelAgentName.value.trim()
+  const role = modelAgentRole.value.trim()
+  if (!name || !role) {
+    modelAgentError.value = '请填写 Agent 名称和能力描述'
+    return
+  }
+
+  isSavingModelAgent.value = true
+  modelAgentError.value = ''
+  try {
+    await agentStore.createAgent({
+      name,
+      role,
+      tags: modelAgentTags.value
+        .split(/[,\n\s]+/)
+        .map((tag) => tag.trim())
+        .filter(Boolean),
+      capabilityIds: modelAgentCapabilityIds.value,
+      modelId: modelAgentModelId.value || undefined
+    })
+    resetModelAgentForm()
+    showModelAgentForm.value = false
+  } catch (error) {
+    modelAgentError.value = error instanceof Error ? error.message : '创建 Agent 失败'
+  } finally {
+    isSavingModelAgent.value = false
+  }
+}
+
+async function removeAgentFromAdmin(agentId: string, name: string) {
+  if (!window.confirm(`确定删除 Agent “${name}”吗？该操作不可恢复。`)) {
+    return
+  }
   try {
     await agentStore.deleteAgent(agentId)
   } catch (error) {
-    inputError.value = error instanceof Error ? error.message : '删除 Agent 失败'
+    modelAgentError.value = error instanceof Error ? error.message : '删除 Agent 失败'
   }
 }
 
@@ -202,17 +310,20 @@ async function sendUserMessage(content: string) {
         inputError.value = '请先添加 Agent'
         return
       }
+      processingAgentIds.value = [...activeAgentIds.value]
       await createSession(content, activeAgentIds.value)
       return
     }
 
     const sessionId = sessionStore.currentSession.id
+    processingAgentIds.value = agents.value.map((agent) => agent.agentId)
     await sessionStore.sendMessage(sessionId, content)
     await eventStore.loadEvents(sessionId)
   } catch (error) {
     inputError.value = error instanceof Error ? error.message : '发送失败'
   } finally {
     isSendingMessage.value = false
+    processingAgentIds.value = []
   }
 }
 
@@ -320,13 +431,13 @@ async function resolveConfirmation(optionKey: string) {
                 <strong>全部 Agent</strong>
                 <span>{{ agents.length }} 个成员</span>
               </header>
-              <article v-for="(agent, index) in agents" :key="agent.agentId">
+              <article v-for="(agent, index) in displayAgents" :key="agent.agentId">
                 <AgentPortrait :tone="(index % 5) + 1" :label="agent.name" size="sm" />
                 <div>
                   <strong>{{ agent.name }}</strong>
                   <p>{{ agent.role }}</p>
                 </div>
-                <span :class="['agent-status', agent.status]">{{ agent.status }}</span>
+                <span :class="['agent-status', agent.status]">{{ statusLabel(agent.status) }}</span>
               </article>
             </section>
           </div>
@@ -383,18 +494,75 @@ async function resolveConfirmation(optionKey: string) {
       :agents="agents"
       :title="currentMode === 'workflow' ? '对话 / 任务日志（实时）' : currentMode === 'debug' ? '调试事件流' : '对话 / 消息日志'"
     />
-    <AgentStatusPanel
-      v-else-if="activeSection === 'session'"
-      :agents="agents"
-      :available-agents="agentStore.agents"
-      :capabilities="agentStore.capabilities"
-      :tasks="tasks"
-      :active-confirmation="activeConfirmation"
-      :connected="eventStore.sseConnected"
-      @resolve-confirmation="resolveConfirmation"
-      @create-agent="createAgent"
-      @delete-agent="deleteAgent"
-    />
+    <aside v-else-if="activeSection === 'session'" class="agent-panel">
+      <header class="panel-header">
+        <span>任务与状态</span>
+        <span class="connection-pill" :class="{ online: eventStore.sseConnected }">{{ eventStore.sseConnected ? '实时连接' : '离线' }}</span>
+      </header>
+
+      <ConfirmationCard
+        v-if="activeConfirmation"
+        :confirmation="activeConfirmation"
+        compact
+        @resolve="resolveConfirmation"
+      />
+
+      <section class="panel-section agent-list-section">
+        <header>
+          <h2>Agent 列表</h2>
+          <span class="agent-list-count">{{ agents.length }} 个成员</span>
+        </header>
+        <p v-if="!displayAgents.length" class="empty-state">暂无参与 Agent。</p>
+        <article v-for="(agent, index) in displayAgents" :key="agent.agentId" class="agent-card">
+          <AgentPortrait :tone="(index % 5) + 1" :label="agent.name" size="md" />
+          <div class="agent-card__body">
+            <div class="agent-card__top">
+              <div>
+                <h3>{{ agent.name }}</h3>
+                <p>{{ agent.role }}</p>
+              </div>
+              <span class="agent-status" :class="agent.status">{{ statusLabel(agent.status) }}</span>
+            </div>
+            <p v-if="agent.currentTaskTitle" class="agent-task">{{ agent.currentTaskTitle }}</p>
+            <p v-if="agent.thoughtSummary" class="agent-summary">{{ agent.thoughtSummary }}</p>
+            <p v-if="agent.actionSummary" class="agent-summary muted">{{ agent.actionSummary }}</p>
+            <div class="agent-meter">
+              <span :style="{ width: agent.status === 'running' ? '66%' : agent.status === 'completed' ? '100%' : '18%' }"></span>
+            </div>
+            <div v-if="configuredAgentCard(agent.agentId)?.tags?.length" class="tag-row">
+              <span v-for="tag in configuredAgentCard(agent.agentId)?.tags" :key="tag" class="tag">{{ tag }}</span>
+            </div>
+            <div v-if="agentCapabilityNames(agent).length" class="tag-row">
+              <span v-for="capability in agentCapabilityNames(agent)" :key="capability" class="tag">{{ capability }}</span>
+            </div>
+            <p v-if="configuredAgentCard(agent.agentId)?.modelId" class="agent-model">
+              模型: {{ getModelName(configuredAgentCard(agent.agentId)?.modelId) }}
+            </p>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel-section task-steps-panel">
+        <header>
+          <h2>任务执行步骤</h2>
+          <button type="button" @click="tasksExpanded = !tasksExpanded">
+            {{ tasksExpanded ? '收起全部' : '展开全部' }}
+          </button>
+        </header>
+        <p v-if="!tasks.length" class="empty-state">暂无任务。</p>
+        <article v-for="(task, index) in tasks" :key="task.taskId" class="task-step">
+          <span :class="['task-step__index', task.status]">{{ index + 1 }}</span>
+          <div>
+            <strong>{{ task.title }}</strong>
+            <p v-if="tasksExpanded">{{ task.resultSummary ?? statusLabel(task.status) }}</p>
+            <ul v-if="tasksExpanded && task.acceptanceCriteria.length" class="task-criteria">
+              <li v-for="item in task.acceptanceCriteria" :key="item">{{ item }}</li>
+            </ul>
+          </div>
+          <small>{{ statusLabel(task.status) }}</small>
+        </article>
+      </section>
+    </aside>
 
     <section v-else-if="activeSection === 'knowledge'" class="workspace-admin">
       <header class="admin-header">
@@ -463,14 +631,64 @@ async function resolveConfirmation(optionKey: string) {
       </div>
     </section>
 
-    <section v-else-if="activeSection === 'models'" class="workspace-admin">
+    <section v-else-if="activeSection === 'agents'" class="workspace-admin">
       <header class="admin-header">
         <div>
-          <h1>模型管理</h1>
-          <p>按 Agent 查看当前运行时类型与能力配置。</p>
+          <h1>Agent 管理</h1>
+          <p>查看并管理 Agent 的运行时类型与能力配置，可直接新增或删除 Agent。</p>
         </div>
-        <span class="admin-count">{{ agentStore.agents.length }} 个 Agent</span>
+        <div class="admin-header-actions">
+          <span class="admin-count">{{ agentStore.agents.length }} 个 Agent</span>
+          <button class="panel-action-button primary" type="button" @click="toggleModelAgentForm">
+            <UiIcon name="plus" :size="15" />
+            添加 Agent
+          </button>
+        </div>
       </header>
+
+      <form v-if="showModelAgentForm" class="agent-create-form admin-agent-form" @submit.prevent="submitModelAgentForm">
+        <label>
+          <span>名称</span>
+          <input v-model="modelAgentName" type="text" placeholder="Research Agent" />
+        </label>
+        <label>
+          <span>标签</span>
+          <input v-model="modelAgentTags" type="text" placeholder="research, market" />
+        </label>
+        <label>
+          <span>能力描述</span>
+          <textarea v-model="modelAgentRole" rows="3" placeholder="说明这个 Agent 负责什么，以及适合处理哪些任务" />
+        </label>
+        <label>
+          <span>模型</span>
+          <select v-model="modelAgentModelId">
+            <option value="">默认模型</option>
+            <option v-for="model in modelStore.models" :key="model.id" :value="model.id">
+              {{ model.name }}
+            </option>
+          </select>
+        </label>
+        <div class="agent-capability-picker">
+          <span>可用能力</span>
+          <button
+            v-for="capability in agentStore.capabilities"
+            :key="capability.id"
+            type="button"
+            :class="{ selected: modelAgentCapabilityIds.includes(capability.id) }"
+            @click="toggleModelAgentCapability(capability.id)"
+          >
+            {{ capability.name }}
+          </button>
+        </div>
+        <p v-if="modelAgentError" class="form-error">{{ modelAgentError }}</p>
+        <div class="form-actions">
+          <button type="button" @click="toggleModelAgentForm">取消</button>
+          <button type="submit" class="primary" :disabled="isSavingModelAgent">
+            {{ isSavingModelAgent ? '创建中' : '创建 Agent' }}
+          </button>
+        </div>
+      </form>
+
       <div class="admin-grid">
         <article v-for="agent in agentStore.agents" :key="agent.id" class="admin-card">
           <header>
@@ -478,14 +696,30 @@ async function resolveConfirmation(optionKey: string) {
             <span>{{ agent.runtimeType }}</span>
           </header>
           <p>{{ agent.role }}</p>
-          <div class="tag-row">
+          <div v-if="agent.capabilityIds.length" class="tag-row">
             <span v-for="capabilityId in agent.capabilityIds" :key="capabilityId" class="tag">
               {{ agentStore.capabilityName(capabilityId) }}
             </span>
           </div>
+          <dl v-if="agent.modelId">
+            <div>
+              <dt>模型</dt>
+              <dd>{{ getModelName(agent.modelId) }}</dd>
+            </div>
+          </dl>
+          <footer class="admin-card-actions">
+            <button class="panel-action-button danger" type="button" @click="removeAgentFromAdmin(agent.id, agent.name)">
+              <UiIcon name="trash" :size="14" />
+              删除
+            </button>
+          </footer>
         </article>
-        <p v-if="!agentStore.agents.length" class="admin-empty">暂无 Agent，请先在工作台右侧添加 Agent。</p>
+        <p v-if="!agentStore.agents.length" class="admin-empty">暂无 Agent，点击右上角"添加 Agent"创建。</p>
       </div>
+    </section>
+
+    <section v-else-if="activeSection === 'models'" class="workspace-admin">
+      <ModelManagementPanel />
     </section>
 
     <section v-else-if="activeSection === 'tools'" class="workspace-admin">

@@ -46,6 +46,44 @@ For local demos or E2E tests, explicitly enable mock mode with
 `VITE_ENABLE_MOCKS=true`, `DEFAULT_AGENT_RUNTIME_TYPE=mock`,
 `LLM_MOCK_FALLBACK=true`, and `MOCK_RUNTIME_ENABLED=true`.
 
+## Agentic Coding Runtimes (v2)
+
+The `codex` and `claude_code` runtimes execute through an external agentic
+coding CLI. Each adapter spawns the configured CLI, sends the `AgentRunInput`
+as JSON on stdin, and expects a JSON response on stdout — either a bare
+`RuntimeOutput` or `{ output, toolRequests, usage }`. They are real-first and
+safe-by-default: when the runtime is disabled or the CLI is missing they return
+a visible failed result instead of crashing.
+
+```env
+CODEX_RUNTIME_ENABLED=false
+CODEX_CLI_COMMAND=codex
+CODEX_CLI_ARGS=
+CLAUDE_CODE_RUNTIME_ENABLED=false
+CLAUDE_CODE_CLI_COMMAND=claude
+CLAUDE_CODE_CLI_ARGS=
+```
+
+Any `toolRequests` the CLI declares run through the controlled
+`ToolExecutorService` (`file_write`, `command_run`, `run_test`, `git_diff`),
+never by the CLI process directly. Tool execution is gated in depth: the
+capability policy first, then the dedicated `ALLOW_FILE_WRITE_RUNTIME` /
+`ALLOW_COMMAND_RUNTIME` flags, then `ENABLE_HIGH_RISK_TOOLS`, plus a
+workspace-root sandbox that rejects any path escaping `AGENT_WORKSPACE_ROOT`.
+Every run is bounded by `RUNTIME_TIMEOUT_MS` and retried up to
+`RUNTIME_MAX_RETRIES` times for retryable errors; in-flight runs can be
+cancelled, which kills the spawned process. See `npm run test:e2e:v2-runtime`
+for an end-to-end example using a fake CLI.
+
+```env
+ENABLE_HIGH_RISK_TOOLS=false
+ALLOW_FILE_WRITE_RUNTIME=false
+ALLOW_COMMAND_RUNTIME=false
+AGENT_WORKSPACE_ROOT=
+RUNTIME_TIMEOUT_MS=60000
+RUNTIME_MAX_RETRIES=2
+```
+
 ## Local Runtime State
 
 The server now keeps a JSON persistence snapshot for local development. By
