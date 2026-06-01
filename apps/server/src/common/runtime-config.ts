@@ -116,8 +116,8 @@ export function agentWorkspaceRoot() {
 }
 
 /**
- * 解析某次工具执行应使用的工作区根目录:优先用会话选择的目录,否则回退到全局
- * AGENT_WORKSPACE_ROOT,最后回退到进程工作目录。仅本地部署使用,允许是机器上的任意绝对目录。
+ * 解析某次工具执行应使用的运行环境根目录:优先用会话选择的本地目录,否则回退到全局
+ * AGENT_WORKSPACE_ROOT,最后回退到进程工作目录。这里记录的是本地路径,不是上传目录。
  */
 export function resolveWorkspaceRoot(sessionDir?: string) {
   const dir = sessionDir?.trim();

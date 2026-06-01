@@ -12,7 +12,7 @@ const props = withDefaults(
   {
     disabled: false,
     busy: false,
-    placeholder: '输入消息...（支持 @agent / #知识库 / 发送文件）'
+    placeholder: '输入消息...（支持 @agent / #知识库）'
   }
 )
 

@@ -5,40 +5,82 @@ import UiIcon from './UiIcon.vue'
 defineProps<{ modelValue?: string }>()
 const emit = defineEmits<{ 'update:modelValue': [value: string | undefined] }>()
 
-const inputRef = ref<HTMLInputElement>()
 const warning = ref('')
+const isChoosing = ref(false)
 
-// 点击按钮触发原生「选择文件夹」对话框(input[webkitdirectory])。
-function trigger() {
+type NativeDirectoryPicker = (options?: unknown) => Promise<unknown> | unknown
+
+// 只从用户侧的本地运行环境取目录路径。普通浏览器不会暴露绝对路径,此时只能手动填写。
+async function trigger() {
   warning.value = ''
-  inputRef.value?.click()
-}
-
-function onChange(event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  input.value = ''
-  if (!file) return
-  const dir = resolveSelectedDir(file)
-  if (dir) {
-    emit('update:modelValue', dir)
-  } else {
-    warning.value = '当前环境拿不到文件夹的绝对路径，请在下方手动补全。'
+  isChoosing.value = true
+  try {
+    const path = await pickDirectoryFromUserDevice()
+    if (path) {
+      emit('update:modelValue', path)
+      return
+    }
+    warning.value = '当前浏览器无法直接读取本机目录绝对路径，请手动填写本地目录绝对路径。'
+  } catch (error) {
+    warning.value = error instanceof Error
+      ? error.message
+      : '当前环境无法选择本机目录，请手动填写本地目录绝对路径。'
+  } finally {
+    isChoosing.value = false
   }
 }
 
-// 从选中文件夹里任一文件推出该文件夹的绝对路径:File.path（本地 / Electron / webview 会暴露）减去
-// webkitRelativePath 的相对部分,得到所选文件夹的绝对路径。
-function resolveSelectedDir(file: File): string | undefined {
-  const rel = (file.webkitRelativePath || '').replace(/\\/g, '/')
-  const folderName = rel.split('/')[0] || ''
-  const abs = ((file as unknown as { path?: string }).path ?? '').replace(/\\/g, '/')
-  if (abs && rel && abs.endsWith(rel)) {
-    const base = abs.slice(0, abs.length - rel.length)
-    const dir = `${base}${folderName}`.replace(/\/+$/, '')
-    return dir || undefined
+async function pickDirectoryFromUserDevice(): Promise<string | undefined> {
+  const host = window as unknown as {
+    electronAPI?: Record<string, NativeDirectoryPicker>
+    nativeAPI?: Record<string, NativeDirectoryPicker>
+    desktopAPI?: Record<string, NativeDirectoryPicker>
+    __TAURI__?: { dialog?: { open?: NativeDirectoryPicker } }
   }
+
+  const nativePickers = [
+    host.electronAPI?.selectDirectory,
+    host.electronAPI?.pickDirectory,
+    host.electronAPI?.openDirectory,
+    host.nativeAPI?.selectDirectory,
+    host.nativeAPI?.pickDirectory,
+    host.desktopAPI?.selectDirectory,
+    host.desktopAPI?.pickDirectory
+  ].filter(Boolean) as NativeDirectoryPicker[]
+
+  for (const picker of nativePickers) {
+    const path = normalizeSelectedPath(await picker())
+    if (path) return path
+  }
+
+  const tauriOpen = host.__TAURI__?.dialog?.open
+  if (tauriOpen) {
+    const path = normalizeSelectedPath(await tauriOpen({ directory: true, multiple: false }))
+    if (path) return path
+  }
+
   return undefined
+}
+
+function normalizeSelectedPath(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    return value.trim() || undefined
+  }
+  if (Array.isArray(value)) {
+    return normalizeSelectedPath(value[0])
+  }
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+
+  const record = value as Record<string, unknown>
+  return (
+    normalizeSelectedPath(record.path) ??
+    normalizeSelectedPath(record.selectedPath) ??
+    normalizeSelectedPath(record.directory) ??
+    normalizeSelectedPath(record.filePath) ??
+    normalizeSelectedPath(record.filePaths)
+  )
 }
 
 function onManual(event: Event) {
@@ -60,15 +102,15 @@ function clear() {
         type="text"
         class="directory-picker__input"
         :value="modelValue ?? ''"
-        placeholder="点击「选择文件夹」，或手动填写本地目录绝对路径（留空用默认目录）"
+        placeholder="选择本次会话的运行目录，或手动填写本地目录绝对路径（留空用默认环境）"
         spellcheck="false"
         @input="onManual"
       />
-      <button type="button" class="directory-picker__choose" @click="trigger">选择文件夹</button>
+      <button type="button" class="directory-picker__choose" :disabled="isChoosing" @click="trigger">
+        {{ isChoosing ? '选择中...' : '选择环境目录' }}
+      </button>
       <button v-if="modelValue" type="button" class="directory-picker__clear" @click="clear">清除</button>
     </div>
     <p v-if="warning" class="directory-picker__warning">{{ warning }}</p>
-    <!-- 原生文件夹选择:webkitdirectory 让对话框只能选目录 -->
-    <input ref="inputRef" type="file" webkitdirectory multiple hidden @change="onChange" />
   </div>
 </template>

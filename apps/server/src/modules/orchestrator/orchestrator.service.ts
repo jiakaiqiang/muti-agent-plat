@@ -234,6 +234,8 @@ export class OrchestratorService {
     this.suggestedTasksByBriefId.set(brief.id, suggestedTasks);
     this.persistBriefs();
 
+    this.createBriefArtifact(session, coordinator, brief, suggestedTasks, 'created');
+
     // 协调者把讨论结果收口为一条面向用户的说明，再附上简报卡片请用户确认。
     this.events.create({
       sessionId: session.id,
@@ -569,6 +571,8 @@ export class OrchestratorService {
   /**
    * 从 startIndex 顺序执行任务。当某个任务请求文件写入(proposedWrites)时,先暂停并发出写入确认卡,
    * 返回 { suspended: true } 让上层把会话置为 WAIT_USER_DECISION;用户确认后由 applyPendingWrites 续跑。
+   * 单个任务失败不再中断整条链路:把失败标记好(task_rejected/runtime_failed 事件 + 任务状态 failed),
+   * 继续跑下一个任务,最后照常进入复盘与交付,让复盘报告/交付摘要/通知草稿这三种产物始终能产生。
    * 全部任务执行完后进入复盘与交付,返回 { suspended: false }。
    */
   private async runTaskQueue(
@@ -620,24 +624,51 @@ export class OrchestratorService {
       const contextPack = this.createContextPack(session, taskAgent, brief, task);
       this.emitMemoryUsedEvent(session.id, task.id, taskAgent.id, contextPack);
 
-      const result = await this.runtime.run({
-        runId,
-        sessionId: session.id,
-        taskId: task.id,
-        phase: 'task_execution',
-        agent: this.toRuntimeAgent(taskAgent),
-        workspaceDir: session.workspaceDir,
-        contextPack,
-        expectedOutput: { kind: 'task_execution_result', schemaVersion: '0.1' },
-        budget: {}
-      });
+      let result: AgentRunResult;
+      try {
+        result = await this.runtime.run({
+          runId,
+          sessionId: session.id,
+          taskId: task.id,
+          phase: 'task_execution',
+          agent: this.toRuntimeAgent(taskAgent),
+          workspaceDir: session.workspaceDir,
+          contextPack,
+          expectedOutput: { kind: 'task_execution_result', schemaVersion: '0.1' },
+          budget: {}
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.markTaskFailed(session.id, task, taskAgent.id, runId, message, taskAgent.runtimeType);
+        this.emitAgentStatus(session.id, taskAgent, 'failed', {
+          content: `${taskAgent.name} 执行任务「${task.title}」时抛错。`,
+          actionSummary: message
+        });
+        continue;
+      }
 
       if (result.status !== 'completed') {
         this.markTaskFailed(session.id, task, taskAgent.id, runId, result.error?.message ?? result.status, taskAgent.runtimeType);
-        throw this.runtimeError(result, 'task_execution');
+        this.emitAgentStatus(session.id, taskAgent, 'failed', {
+          content: `${taskAgent.name} 在任务「${task.title}」上失败。`,
+          actionSummary: result.error?.message ?? result.status
+        });
+        continue;
       }
 
-      const output = this.completedOutput<TaskExecutionResultOutput>(result, 'task_execution_result');
+      let output: TaskExecutionResultOutput;
+      try {
+        output = this.completedOutput<TaskExecutionResultOutput>(result, 'task_execution_result');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.markTaskFailed(session.id, task, taskAgent.id, runId, message, taskAgent.runtimeType);
+        this.emitAgentStatus(session.id, taskAgent, 'failed', {
+          content: `${taskAgent.name} 任务「${task.title}」输出格式不符。`,
+          actionSummary: message
+        });
+        continue;
+      }
+
       this.events.create({
         sessionId: session.id,
         type: 'rag_retrieved',
@@ -654,7 +685,11 @@ export class OrchestratorService {
 
       if (output.status !== 'completed') {
         this.markTaskFailed(session.id, task, taskAgent.id, runId, output.summary, taskAgent.runtimeType);
-        throw new Error(`Task ${task.title} ended with ${output.status}: ${output.summary}`);
+        this.emitAgentStatus(session.id, taskAgent, 'failed', {
+          content: `${taskAgent.name} 任务「${task.title}」未完成（${output.status}）。`,
+          actionSummary: output.summary
+        });
+        continue;
       }
 
       if (result.proposedWrites?.length) {
@@ -923,14 +958,24 @@ export class OrchestratorService {
       })
     });
     // 任务完成后，由协调者主动向用户收口一条完成通知（单点对话接口），让用户明确知道任务已交付。
+    // 真实统计 completed/failed,不再无脑说"已全部完成"——某任务失败时本环节仍要执行,但话术得诚实。
+    const sessionTasks = this.tasks.list(session.id);
+    const failedTasks = sessionTasks.filter((task) => task.status === 'failed');
+    const completedTasks = sessionTasks.filter((task) => task.status === 'completed');
     const completedSummary = finalOutput.completedItems.length
       ? finalOutput.completedItems.map((item) => `· ${item}`).join('\n')
       : finalOutput.summary;
+    const headline = failedTasks.length
+      ? `任务已结束，但有 ${failedTasks.length} 个任务未完成（共 ${sessionTasks.length} 个）。`
+      : `任务已全部完成并交付（共 ${completedTasks.length} 个）。`;
+    const failedBlock = failedTasks.length
+      ? `\n\n失败任务：\n${failedTasks.map((task) => `· ${task.title}：${task.resultSummary ?? '未提供原因'}`).join('\n')}`
+      : '';
     this.events.create({
       sessionId: session.id,
       type: 'agent_message',
       fromAgentId: coordinator.id,
-      content: `任务已全部完成并交付。\n${finalOutput.summary}\n\n完成项：\n${completedSummary}`,
+      content: `${headline}\n${finalOutput.summary}\n\n完成项：\n${completedSummary}${failedBlock}`,
       metadata: createMetadata('chat_message', { messageKind: 'summary' })
     });
     // 交付完成后，征求用户是否真实发送飞书通知（默认不自动发送）。用户在确认卡点“发送通知”后，
@@ -1296,6 +1341,8 @@ export class OrchestratorService {
     this.suggestedTasksByBriefId.set(brief.id, suggestedTasks);
     this.persistBriefs();
 
+    this.createBriefArtifact(session, coordinator, brief, suggestedTasks, 'updated');
+
     this.events.create({
       sessionId: session.id,
       type: 'brief_updated',
@@ -1617,6 +1664,93 @@ export class OrchestratorService {
         title: task.title,
         status: 'failed',
         resultSummary: message
+      })
+    });
+  }
+
+  /**
+   * 把任务简报渲染成 Markdown 产物并写入产物面板,让"讨论/简报"阶段在产物侧也有可见的交付物。
+   * 同时发出 artifact_created 事件,前端 ArtifactPanel 会随之刷新。kind 用来区分首轮简报与修订版。
+   */
+  private createBriefArtifact(
+    session: SessionDetail,
+    coordinator: Agent,
+    brief: TaskBrief,
+    suggestedTasks: SuggestedAgentTask[],
+    kind: 'created' | 'updated'
+  ) {
+    const lines: string[] = [
+      `# 任务简报 v${brief.version}`,
+      '',
+      `**目标**：${brief.goal}`,
+      ''
+    ];
+    if (brief.scope.length) {
+      lines.push('## 范围', '');
+      for (const item of brief.scope) lines.push(`- ${item}`);
+      lines.push('');
+    }
+    if (brief.outOfScope.length) {
+      lines.push('## 不做范围', '');
+      for (const item of brief.outOfScope) lines.push(`- ${item}`);
+      lines.push('');
+    }
+    if (brief.constraints.length) {
+      lines.push('## 约束', '');
+      for (const item of brief.constraints) lines.push(`- ${item}`);
+      lines.push('');
+    }
+    if (brief.acceptanceCriteria.length) {
+      lines.push('## 验收标准', '');
+      for (const item of brief.acceptanceCriteria) lines.push(`- ${item}`);
+      lines.push('');
+    }
+    if (brief.risks.length) {
+      lines.push('## 风险', '');
+      for (const item of brief.risks) lines.push(`- ${item}`);
+      lines.push('');
+    }
+    if (brief.openQuestions.length) {
+      lines.push('## 待澄清问题', '');
+      for (const item of brief.openQuestions) lines.push(`- ${item}`);
+      lines.push('');
+    }
+    if (suggestedTasks.length) {
+      lines.push('## 建议拆解任务', '');
+      for (const item of suggestedTasks) {
+        lines.push(`- **${item.title}**${item.suggestedAgentKey ? `（${item.suggestedAgentKey}）` : ''}`);
+        if (item.description) lines.push(`  ${item.description}`);
+      }
+      lines.push('');
+    }
+    const content = lines.join('\n');
+    const title = kind === 'updated' ? `任务简报 v${brief.version}（修订）` : `任务简报 v${brief.version}`;
+    const artifact = this.artifacts.create({
+      sessionId: session.id,
+      agentId: coordinator.id,
+      type: 'markdown',
+      title,
+      contentSummary: brief.goal,
+      metadata: {
+        phase: 'brief_generation',
+        briefId: brief.id,
+        version: brief.version,
+        kind,
+        content,
+        brief,
+        suggestedTasks
+      }
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'artifact_created',
+      fromAgentId: coordinator.id,
+      content: `已创建产物：${artifact.title}`,
+      metadata: createMetadata('artifact_card', {
+        artifactId: artifact.id,
+        type: artifact.type,
+        title: artifact.title,
+        contentSummary: artifact.contentSummary
       })
     });
   }

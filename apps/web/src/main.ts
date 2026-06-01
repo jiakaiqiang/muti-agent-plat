@@ -1,9 +1,10 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
+import { router } from './router'
 // Element Plus theme first, then our styles.css — so our same-specificity
 // overrides reliably win over EP defaults.
 import 'element-plus/dist/index.css'
 import './styles.css'
 
-createApp(App).use(createPinia()).mount('#app')
+createApp(App).use(createPinia()).use(router).mount('#app')

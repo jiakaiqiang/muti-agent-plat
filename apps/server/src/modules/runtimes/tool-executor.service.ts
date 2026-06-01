@@ -27,7 +27,7 @@ export type ToolExecutionContext = {
   taskId?: string;
   agentId?: string;
   agentKey?: string;
-  /** 本会话选择的工作区根目录(绝对路径);为空时回退到全局 AGENT_WORKSPACE_ROOT / 进程目录。 */
+  /** 本会话选择的本地运行环境根目录(绝对路径,不是上传目录);为空时回退到全局 AGENT_WORKSPACE_ROOT / 进程目录。 */
   workspaceRoot?: string;
   /** 用户已就本次 file_write 显式确认。为 true 时以确认替代 ALLOW_FILE_WRITE_RUNTIME 环境闸门(能力策略 + 沙箱仍生效)。 */
   userConfirmed?: boolean;

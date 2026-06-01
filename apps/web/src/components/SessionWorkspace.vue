@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useAgentStore } from '@/stores/agent'
 import { useEventStore } from '@/stores/event'
 import { useKnowledgeStore } from '@/stores/knowledge'
@@ -25,6 +26,8 @@ const eventStore = useEventStore()
 const agentStore = useAgentStore()
 const knowledgeStore = useKnowledgeStore()
 const modelStore = useModelStore()
+const route = useRoute()
+const router = useRouter()
 
 const isSendingMessage = ref(false)
 const inputError = ref('')
@@ -39,7 +42,17 @@ const sessionCreateError = ref('')
 type WorkspaceSection = 'session' | 'knowledge' | 'agents' | 'settings' | 'models' | 'tools' | 'notifications'
 
 const viewModes: SessionViewMode[] = ['chat', 'workflow', 'collaboration_graph', 'debug']
-const activeSection = ref<WorkspaceSection>('session')
+const routeNameBySection: Record<WorkspaceSection, string> = {
+  session: 'workspace-session',
+  knowledge: 'workspace-knowledge',
+  agents: 'workspace-agents',
+  settings: 'workspace-settings',
+  models: 'workspace-models',
+  tools: 'workspace-tools',
+  notifications: 'workspace-notifications'
+}
+const workspaceSections: WorkspaceSection[] = ['session', 'knowledge', 'agents', 'settings', 'models', 'tools', 'notifications']
+const activeSection = ref<WorkspaceSection>(sectionFromRoute())
 
 const railSections: Array<{ id: WorkspaceSection; label: string; icon: string }> = [
   { id: 'session', label: '工作台', icon: 'message' },
@@ -53,6 +66,20 @@ const railSections: Array<{ id: WorkspaceSection; label: string; icon: string }>
 
 function isViewMode(value: string | null): value is SessionViewMode {
   return value === 'chat' || value === 'collaboration_graph' || value === 'workflow' || value === 'debug'
+}
+
+function sectionFromRoute(): WorkspaceSection {
+  const section = route.meta.section
+  return typeof section === 'string' && workspaceSections.includes(section as WorkspaceSection)
+    ? (section as WorkspaceSection)
+    : 'session'
+}
+
+function viewModeFromRoute(): SessionViewMode | undefined {
+  const view = route.query.view
+  const value = Array.isArray(view) ? view[0] : view
+  const candidate = value ?? null
+  return isViewMode(candidate) ? candidate : undefined
 }
 
 function viewModeLabel(mode: SessionViewMode) {
@@ -77,13 +104,27 @@ function viewModeIcon(mode: SessionViewMode) {
   )[mode]
 }
 
-function activateRailSection(section: WorkspaceSection) {
-  activeSection.value = section
+async function activateRailSection(section: WorkspaceSection) {
+  if (activeSection.value === section) return
+  await router.push({
+    name: routeNameBySection[section],
+    query: section === 'session' ? { view: sessionStore.currentViewMode } : undefined
+  })
+}
+
+function switchViewMode(mode: SessionViewMode) {
+  sessionStore.switchViewMode(mode)
+  if (activeSection.value === 'session') {
+    void router.replace({
+      name: routeNameBySection.session,
+      query: { ...route.query, view: mode }
+    })
+  }
 }
 
 onMounted(async () => {
-  const view = new URLSearchParams(window.location.search).get('view')
-  if (isViewMode(view)) {
+  const view = viewModeFromRoute()
+  if (view) {
     sessionStore.switchViewMode(view)
   }
 
@@ -100,6 +141,25 @@ onMounted(async () => {
     eventStore.connectSse(sessionStore.currentSession.id)
   }
 })
+
+watch(
+  () => route.meta.section,
+  () => {
+    activeSection.value = sectionFromRoute()
+  },
+  { immediate: true }
+)
+
+watch(
+  () => route.query.view,
+  () => {
+    const view = viewModeFromRoute()
+    if (view) {
+      sessionStore.switchViewMode(view)
+    }
+  },
+  { immediate: true }
+)
 
 const currentSessionId = computed(() => sessionStore.currentSession?.id ?? '')
 const events = computed(() => eventStore.eventsForSession(currentSessionId.value))
@@ -543,7 +603,7 @@ async function reviseBrief(instruction: string) {
             :key="mode"
             type="button"
             :class="['mode-button', { active: currentMode === mode }]"
-            @click="sessionStore.switchViewMode(mode)"
+            @click="switchViewMode(mode)"
           >
             <UiIcon :name="viewModeIcon(mode)" :size="16" />
             {{ viewModeLabel(mode) }}
@@ -889,9 +949,11 @@ async function reviseBrief(instruction: string) {
           <textarea v-model="newSessionInput" rows="4" placeholder="描述要让 Agent 协作完成的目标" />
         </label>
         <div class="dialog-field">
-          <span>工作目录</span>
+          <span>会话运行环境</span>
           <DirectoryPicker v-model="newSessionWorkspaceDir" />
-          <small class="dialog-field__hint">Agent 生成的代码将写入此目录；留空则使用默认目录。</small>
+          <small class="dialog-field__hint">
+            选择本次会话的运行根目录。研发类 Agent 会在整个文件夹内读写代码；运营等非研发岗位也会以此目录作为运行环境。此操作不会上传文件。
+          </small>
         </div>
         <div class="dialog-agent-picker">
           <span>参与 Agent</span>

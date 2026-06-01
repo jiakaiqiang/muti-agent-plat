@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import SessionWorkspace from '@/components/SessionWorkspace.vue'
+import { RouterView } from 'vue-router'
 </script>
 
 <template>
-  <SessionWorkspace />
+  <RouterView />
 </template>

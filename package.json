@@ -29,6 +29,7 @@
     "test:e2e:persistence": "node tests/e2e/persistence-smoke.mjs",
     "test:e2e:v2-runtime": "node tests/e2e/v2-runtime-smoke.mjs",
     "test:e2e:interactive-messaging": "node tests/e2e/interactive-messaging-smoke.mjs",
+    "test:e2e:artifact-write": "node tests/e2e/artifact-write-smoke.mjs",
     "lint": "npm run lint --workspaces --if-present"
   },
   "engines": {

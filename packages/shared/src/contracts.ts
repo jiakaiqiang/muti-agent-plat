@@ -149,7 +149,7 @@ export type SessionDetail = {
   status: SessionStatus;
   ownerId: string;
   workspaceId: string;
-  /** 用户为本会话选择的本地目标目录(绝对路径)。为空时回退到 AGENT_WORKSPACE_ROOT 或进程工作目录。 */
+  /** 用户为本会话选择的本地运行环境根目录(绝对路径),不是上传目录。为空时回退到 AGENT_WORKSPACE_ROOT 或进程工作目录。 */
   workspaceDir?: string;
   projectId?: UUID;
   currentTaskBriefId?: UUID;
@@ -468,7 +468,7 @@ export type AgentRunInput = {
   agent: RuntimeAgentProfile;
   /** Resolved model + connection the runtime should use; filled in by RuntimeService before dispatch. */
   model?: ResolvedRuntimeModel;
-  /** 本会话选择的本地工作目录(绝对路径);运行时用它解析文件读写路径,为空时回退全局配置。 */
+  /** 本会话选择的本地运行环境根目录(绝对路径);运行时用它解析文件读写路径,为空时回退全局配置。 */
   workspaceDir?: string;
   contextPack: ContextPack;
   expectedOutput: ExpectedRuntimeOutput;
