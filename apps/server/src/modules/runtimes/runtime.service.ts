@@ -108,7 +108,7 @@ export class RuntimeService {
   private invokeAdapter(input: AgentRunInput, signal: AbortSignal, credential?: string): Promise<AgentRunResult> {
     switch (input.agent.runtimeType) {
       case 'generic_llm':
-        return this.genericLlmRuntime.run(input, credential);
+        return this.genericLlmRuntime.run(input, credential, signal);
       case 'codex':
         return this.codexRuntime.run(input, signal);
       case 'claude_code':

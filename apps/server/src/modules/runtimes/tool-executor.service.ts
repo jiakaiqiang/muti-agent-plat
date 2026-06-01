@@ -4,9 +4,9 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import type { RuntimeArtifactOutput, RuntimeError } from '@agent-cluster/shared';
 import {
-  agentWorkspaceRoot,
   commandRuntimeAllowed,
   fileWriteRuntimeAllowed,
+  resolveWorkspaceRoot,
   runtimeTimeoutMs
 } from '../../common/runtime-config.js';
 import { CapabilitiesService } from '../capabilities/capabilities.service.js';
@@ -27,6 +27,10 @@ export type ToolExecutionContext = {
   taskId?: string;
   agentId?: string;
   agentKey?: string;
+  /** 本会话选择的工作区根目录(绝对路径);为空时回退到全局 AGENT_WORKSPACE_ROOT / 进程目录。 */
+  workspaceRoot?: string;
+  /** 用户已就本次 file_write 显式确认。为 true 时以确认替代 ALLOW_FILE_WRITE_RUNTIME 环境闸门(能力策略 + 沙箱仍生效)。 */
+  userConfirmed?: boolean;
   signal?: AbortSignal;
 };
 
@@ -80,11 +84,18 @@ export class ToolExecutorService {
     this.audit.recordCheck({ sessionId: context.sessionId, agentId: context.agentId, reason: `tool:${request.tool}` }, check);
 
     if (!check.allowed) {
-      const message = `${check.capability.name} blocked by capability policy (${check.code ?? 'CAPABILITY_BLOCKED'}).`;
-      return this.blocked(request.tool, message, { capabilityId, approvalKey: check.approvalKey });
+      // 用户已就本次 file_write 显式确认时,确认本身即视为能力授权(沙箱仍生效);其余阻止照旧。
+      const confirmedOverride =
+        context.userConfirmed &&
+        request.tool === 'file_write' &&
+        check.code === 'CAPABILITY_REQUIRES_CONFIRMATION';
+      if (!confirmedOverride) {
+        const message = `${check.capability.name} 已被能力策略阻止（${check.code ?? 'CAPABILITY_BLOCKED'}）。`;
+        return this.blocked(request.tool, message, { capabilityId, approvalKey: check.approvalKey });
+      }
     }
 
-    const gateReason = this.envGate(request.tool);
+    const gateReason = this.envGate(request.tool, context);
     if (gateReason) {
       this.emitToolEvent(context, 'tool_failed', request.tool, `${request.tool} blocked: ${gateReason}`, {
         capabilityId,
@@ -116,12 +127,12 @@ export class ToolExecutorService {
     }
   }
 
-  private envGate(tool: ToolName): string | undefined {
-    if (tool === 'file_write' && !fileWriteRuntimeAllowed()) {
-      return 'ALLOW_FILE_WRITE_RUNTIME is disabled; real file writes are not permitted.';
+  private envGate(tool: ToolName, context: ToolExecutionContext): string | undefined {
+    if (tool === 'file_write' && !context.userConfirmed && !fileWriteRuntimeAllowed()) {
+      return 'ALLOW_FILE_WRITE_RUNTIME 未开启，不允许真实写入文件。';
     }
     if ((tool === 'command_run' || tool === 'run_test') && !commandRuntimeAllowed()) {
-      return 'ALLOW_COMMAND_RUNTIME is disabled; real command execution is not permitted.';
+      return 'ALLOW_COMMAND_RUNTIME 未开启，不允许真实执行命令。';
     }
     return undefined;
   }
@@ -143,23 +154,25 @@ export class ToolExecutorService {
 
   private async fileWrite(
     request: Extract<ToolExecutionRequest, { tool: 'file_write' }>,
-    _context: ToolExecutionContext
+    context: ToolExecutionContext
   ): Promise<ToolExecutionResult> {
-    const absolutePath = this.resolveWorkspacePath(request.path);
+    const root = resolveWorkspaceRoot(context.workspaceRoot);
+    const absolutePath = this.resolveWorkspacePath(request.path, root);
     await mkdir(dirname(absolutePath), { recursive: true });
     await writeFile(absolutePath, request.content, 'utf8');
-    const relativePath = relative(agentWorkspaceRoot(), absolutePath);
+    const relativePath = relative(root, absolutePath);
     const bytes = Buffer.byteLength(request.content, 'utf8');
     return {
       tool: 'file_write',
       status: 'completed',
-      summary: `Wrote ${bytes} bytes to ${relativePath}`,
+      summary: `已写入 ${bytes} 字节到 ${relativePath}`,
       artifact: {
         type: 'file',
         title: relativePath,
         uri: absolutePath,
-        summary: request.summary ?? `Controlled file write to ${relativePath}`,
-        metadata: { tool: 'file_write', path: relativePath, bytes }
+        content: request.content,
+        summary: request.summary ?? `受控写入文件 ${relativePath}`,
+        metadata: { tool: 'file_write', path: relativePath, absolutePath, bytes }
       }
     };
   }
@@ -171,7 +184,7 @@ export class ToolExecutorService {
     context: ToolExecutionContext
   ): Promise<ToolExecutionResult> {
     if (!command) {
-      return { tool, status: 'failed', summary: 'No command was provided.', error: { code: 'UNKNOWN_ERROR', message: 'No command was provided.', retryable: false } };
+      return { tool, status: 'failed', summary: '未提供命令。', error: { code: 'UNKNOWN_ERROR', message: '未提供命令。', retryable: false } };
     }
     const result = await this.runProcess(command, args, context);
     const ok = !result.timedOut && !result.aborted && result.code === 0;
@@ -205,7 +218,7 @@ export class ToolExecutorService {
     }
     const result = await this.runProcess('git', args, context);
     const ok = !result.timedOut && !result.aborted && result.code === 0;
-    const summary = ok ? 'Collected git diff stat for the workspace.' : this.processSummary('git diff --stat', result);
+    const summary = ok ? '已收集工作区的 git diff 统计。' : this.processSummary('git diff --stat', result);
     return {
       tool: 'git_diff',
       status: ok ? 'completed' : 'failed',
@@ -222,15 +235,14 @@ export class ToolExecutorService {
     };
   }
 
-  private resolveWorkspacePath(target: string) {
+  private resolveWorkspacePath(target: string, root: string) {
     if (!target || typeof target !== 'string') {
-      throw new Error('A workspace-relative path is required.');
+      throw new Error('需要提供工作区相对路径。');
     }
-    const root = agentWorkspaceRoot();
     const absolute = resolve(root, target);
     const relativePath = relative(root, absolute);
     if (relativePath === '' || relativePath.startsWith('..') || isAbsolute(relativePath)) {
-      throw new Error(`Path escapes the agent workspace root: ${target}`);
+      throw new Error(`路径超出了 Agent 工作区根目录：${target}`);
     }
     return absolute;
   }
@@ -244,7 +256,7 @@ export class ToolExecutorService {
   private runProcess(command: string, args: string[], context: ToolExecutionContext): Promise<ProcessResult> {
     return new Promise((resolvePromise) => {
       const child = spawn(command, args, {
-        cwd: agentWorkspaceRoot(),
+        cwd: resolveWorkspaceRoot(context.workspaceRoot),
         shell: false,
         windowsHide: true
       });
@@ -290,24 +302,24 @@ export class ToolExecutorService {
 
   private processSummary(label: string, result: ProcessResult) {
     if (result.aborted) {
-      return `Cancelled before completion: ${label}`;
+      return `已在完成前取消：${label}`;
     }
     if (result.timedOut) {
-      return `Timed out after ${runtimeTimeoutMs()}ms: ${label}`;
+      return `执行超时（${runtimeTimeoutMs()}ms）：${label}`;
     }
-    return `Exited with code ${result.code}: ${label}`;
+    return `退出码 ${result.code}：${label}`;
   }
 
   private processError(result: ProcessResult): RuntimeError {
     if (result.aborted) {
-      return { code: 'RUNTIME_CANCELLED', message: 'Tool execution was cancelled.', retryable: false };
+      return { code: 'RUNTIME_CANCELLED', message: '工具执行已被取消。', retryable: false };
     }
     if (result.timedOut) {
-      return { code: 'RUNTIME_TIMEOUT', message: `Tool timed out after ${runtimeTimeoutMs()}ms.`, retryable: true };
+      return { code: 'RUNTIME_TIMEOUT', message: `工具执行超时（${runtimeTimeoutMs()}ms）。`, retryable: true };
     }
     return {
       code: 'UNKNOWN_ERROR',
-      message: result.stderr.trim() || `Process exited with code ${result.code}.`,
+      message: result.stderr.trim() || `进程退出码 ${result.code}。`,
       retryable: false
     };
   }
@@ -317,7 +329,7 @@ export class ToolExecutorService {
   }
 
   private truncate(value: string) {
-    return value.length > MAX_OUTPUT_CHARS ? `${value.slice(0, MAX_OUTPUT_CHARS)}\n…(truncated)` : value;
+    return value.length > MAX_OUTPUT_CHARS ? `${value.slice(0, MAX_OUTPUT_CHARS)}\n…（已截断）` : value;
   }
 
   private blocked(tool: ToolName, message: string, details?: Record<string, unknown>): ToolExecutionResult {

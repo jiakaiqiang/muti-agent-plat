@@ -70,7 +70,7 @@ export function mockRuntimeEnabled() {
 }
 
 export function runtimeModeLabel(runtimeType: RuntimeType) {
-  return runtimeType === 'mock' ? 'mock simulation' : runtimeType;
+  return runtimeType === 'mock' ? '模拟运行' : runtimeType;
 }
 
 export function envInt(name: string, fallback: number) {
@@ -115,6 +115,15 @@ export function agentWorkspaceRoot() {
   return configured ? resolve(configured) : process.cwd();
 }
 
+/**
+ * 解析某次工具执行应使用的工作区根目录:优先用会话选择的目录,否则回退到全局
+ * AGENT_WORKSPACE_ROOT,最后回退到进程工作目录。仅本地部署使用,允许是机器上的任意绝对目录。
+ */
+export function resolveWorkspaceRoot(sessionDir?: string) {
+  const dir = sessionDir?.trim();
+  return dir ? resolve(dir) : agentWorkspaceRoot();
+}
+
 export function codexCliCommand() {
   return process.env.CODEX_CLI_COMMAND?.trim() || 'codex';
 }
@@ -129,4 +138,12 @@ export function runtimeCliArgs(name: string): string[] {
     return [];
   }
   return raw.split(/\s+/).filter(Boolean);
+}
+
+export function feishuSendAllowed() {
+  return envFlag('ALLOW_FEISHU_SEND', false);
+}
+
+export function feishuWebhookUrl() {
+  return process.env.FEISHU_WEBHOOK_URL?.trim() || undefined;
 }

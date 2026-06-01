@@ -14,6 +14,7 @@ import { EventsService } from '../events/events.service.js';
 import { MemoryService } from '../memory/memory.service.js';
 import { OrchestratorService } from '../orchestrator/orchestrator.service.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
+import { RuntimeService } from '../runtimes/runtime.service.js';
 import { UserMessageRouterService } from '../user-message-router/user-message-router.service.js';
 
 type CreateSessionInput = {
@@ -22,6 +23,7 @@ type CreateSessionInput = {
   projectId?: string;
   tokenBudget?: number;
   knowledgeBaseIds?: string[];
+  workspaceDir?: string;
 };
 
 @Injectable()
@@ -34,6 +36,7 @@ export class SessionsService {
     private readonly memories: MemoryService,
     private readonly router: UserMessageRouterService,
     private readonly orchestrator: OrchestratorService,
+    private readonly runtime: RuntimeService,
     private readonly persistence: PersistenceService
   ) {
     const persisted = this.persistence.getCollection<SessionDetail[]>('sessions', []);
@@ -48,13 +51,20 @@ export class SessionsService {
       title: session.title,
       status: session.status,
       tokenBudget: session.tokenBudget,
-      tokenUsed: session.tokenUsed,
+      tokenUsed: this.tokenUsedFor(session.id),
       agentCount: session.participatingAgentIds.length,
       requiresUserAction: ['WAIT_USER_CONFIRM', 'WAIT_USER_DECISION'].includes(session.status),
       latestEventSummary: this.events.list(session.id).at(-1)?.content,
       createdAt: session.createdAt,
       updatedAt: session.updatedAt
     }));
+  }
+
+  /** Aggregates every runtime invocation's token usage for a session (the live token-used total). */
+  private tokenUsedFor(sessionId: string) {
+    return this.runtime
+      .listInvocations(sessionId)
+      .reduce((total, invocation) => total + (invocation.usage?.totalTokens ?? 0), 0);
   }
 
   get(sessionId: string) {
@@ -125,6 +135,7 @@ export class SessionsService {
       status: 'AGENT_DISCUSSING',
       ownerId: 'local-user',
       workspaceId: 'default-workspace',
+      workspaceDir: input.workspaceDir?.trim() || undefined,
       projectId: input.projectId,
       knowledgeBaseIds: input.knowledgeBaseIds ?? [],
       tokenBudget: input.tokenBudget,
@@ -309,9 +320,7 @@ export class SessionsService {
     this.setStatus(session, 'EXECUTING');
     try {
       const result = await this.orchestrator.confirmBrief(session, briefId);
-      if (session.status === 'EXECUTING') {
-        this.setStatus(session, 'COMPLETED');
-      }
+      this.settleAfterExecution(session, result.suspended);
       return result;
     } catch (error) {
       this.failSession(session, error, 'confirmed_execution');
@@ -319,8 +328,60 @@ export class SessionsService {
     }
   }
 
+  // 用户在「确认写入文件」卡上做出决策:写入或跳过这批文件,然后续跑剩余任务。
+  async applyWriteConfirmation(sessionId: string, confirmationId: string, approved: boolean) {
+    const session = this.get(sessionId);
+    const pending = this.orchestrator.getPendingWrite(sessionId);
+    if (!pending || pending.confirmationId !== confirmationId) {
+      throw new BadRequestException(`No pending file-write confirmation matches: ${confirmationId}`);
+    }
+    if (session.status === 'WAIT_USER_DECISION') {
+      this.setStatus(session, 'EXECUTING');
+    }
+    try {
+      const result = await this.orchestrator.applyPendingWrites(session, confirmationId, approved);
+      this.settleAfterExecution(session, result.suspended);
+      return { sessionId, confirmationId, approved };
+    } catch (error) {
+      this.failSession(session, error, 'apply_file_writes');
+      throw error;
+    }
+  }
+
+  // 一轮执行返回后统一收尾:仍需用户确认写入时停在 WAIT_USER_DECISION,否则若仍在执行则标记完成。
+  private settleAfterExecution(session: SessionDetail, suspended: boolean) {
+    if (suspended) {
+      if (session.status === 'EXECUTING') {
+        this.setStatus(session, 'WAIT_USER_DECISION');
+      }
+      return;
+    }
+    if (session.status === 'EXECUTING') {
+      this.setStatus(session, 'COMPLETED');
+    }
+  }
+
   listBriefs(sessionId: string) {
     return this.orchestrator.listBriefs(sessionId);
+  }
+
+  // 用户在交付后的飞书确认卡上选择“发送通知”：把草稿经真实 webhook 发送，并关闭对应确认卡。
+  async sendFeishuNotification(sessionId: string, artifactId: string, confirmationId?: string) {
+    const session = this.get(sessionId);
+    const result = await this.orchestrator.sendFeishuNotification(session, artifactId);
+    if (confirmationId) {
+      this.events.create({
+        sessionId,
+        type: 'user_confirmation_resolved',
+        content: result.status === 'sent' ? '用户已确认发送飞书通知' : '飞书通知发送未成功',
+        metadata: createMetadata('system_notice', {
+          confirmationId,
+          status: result.status === 'sent' ? 'approved' : 'rejected',
+          selectedOptionKey: 'approve'
+        })
+      });
+    }
+    return result;
   }
 
   control(sessionId: string, status: SessionStatus, reason?: string, confirmationId?: string) {

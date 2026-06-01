@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ElButton, ElInput } from 'element-plus'
 import type { SessionListItem } from '@/types/contracts'
 import { sessionStatusLabel } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
@@ -19,27 +20,27 @@ const emit = defineEmits<{
 <template>
   <aside class="session-sidebar">
     <header class="session-sidebar__header">
-      <button class="new-session-button" type="button" @click="emit('create')">
+      <el-button class="new-session-button" @click="emit('create')">
         <UiIcon name="plus" :size="19" :stroke-width="2.6" />
         新建会话
-      </button>
-      <button class="icon-button" type="button" title="更多">
+      </el-button>
+      <el-button class="icon-button" title="更多">
         <UiIcon name="more" :size="19" />
-      </button>
+      </el-button>
     </header>
 
     <label class="session-search">
       <UiIcon name="search" :size="18" />
-      <input type="search" placeholder="搜索会话" />
-      <button class="session-filter-button" type="button" title="筛选">
+      <el-input class="session-search__input" type="search" placeholder="搜索会话" />
+      <el-button class="session-filter-button" title="筛选">
         <UiIcon name="filter" :size="17" />
-      </button>
+      </el-button>
     </label>
 
     <div class="session-tabs">
-      <button type="button" class="active">全部</button>
-      <button type="button">我创建的</button>
-      <button type="button">收藏</button>
+      <el-button class="active">全部</el-button>
+      <el-button>我创建的</el-button>
+      <el-button>收藏</el-button>
     </div>
 
     <button
@@ -73,3 +74,52 @@ const emit = defineEmits<{
     </button>
   </aside>
 </template>
+
+<!--
+  Element Plus parity overrides.
+  The EP theme is loaded globally (main.ts), so el-button/el-input arrive with
+  EP's own box (padding, 14px font, wrapper <span>/<div>). These rules neutralise
+  exactly those EP-introduced bits so the existing global .session-* classes in
+  styles.css render the sidebar identically to the previous native markup.
+  styles.css itself is left untouched.
+-->
+<style scoped>
+/* Unwrap el-button's content <span> so icon + text rejoin the button's own
+   flex/grid layout (restores the gap and lets place-items center the icon). */
+.session-sidebar :deep(.el-button > span) {
+  display: contents;
+}
+
+/* EP adds horizontal padding to every button; our buttons are sized by their
+   own classes, so drop it. */
+.session-sidebar :deep(.new-session-button),
+.session-sidebar :deep(.icon-button),
+.session-sidebar :deep(.session-filter-button),
+.session-sidebar :deep(.session-tabs .el-button) {
+  padding: 0;
+}
+
+/* EP buttons default to 14px; the old native "新建会话" inherited the page's
+   16px. Set it on the wrapper span (the text's direct parent) so it also beats
+   the legacy `.new-session-button span { font-size: 22px }` rule. */
+.session-sidebar :deep(.new-session-button > span) {
+  font-size: 16px;
+}
+
+/* Adjacent el-buttons get an EP left margin — the tab grid handles spacing. */
+.session-sidebar :deep(.session-tabs .el-button + .el-button) {
+  margin-left: 0;
+}
+
+/* Flatten el-input back to a bare input inside the flex search row. */
+.session-sidebar :deep(.session-search__input) {
+  width: 100%;
+}
+.session-sidebar :deep(.session-search__input .el-input__wrapper) {
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+  line-height: inherit;
+}
+</style>

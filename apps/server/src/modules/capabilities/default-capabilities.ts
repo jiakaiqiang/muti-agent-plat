@@ -44,6 +44,13 @@ export const defaultCapabilities: RuntimeCapabilityDefinition[] = [
     description: '创建飞书通知草稿，不直接对外发送。'
   },
   {
+    id: 'cap-feishu-send',
+    key: 'notification.feishu_send',
+    name: '飞书发送',
+    riskLevel: 'high',
+    description: '在用户确认后，将通知草稿真实发送到飞书。'
+  },
+  {
     id: 'cap-file-write',
     key: 'tool.file_write',
     name: '文件写入',
@@ -81,5 +88,5 @@ export const defaultCapabilityIdsByAgentKey: Record<string, string[]> = {
   backend: ['cap-dry-run', 'cap-file-write', 'cap-command-run', 'cap-git-diff'],
   test: ['cap-test-report', 'cap-command-run', 'cap-run-test'],
   review: ['cap-post-review', 'cap-git-diff'],
-  notification: ['cap-feishu-draft']
+  notification: ['cap-feishu-draft', 'cap-feishu-send']
 };

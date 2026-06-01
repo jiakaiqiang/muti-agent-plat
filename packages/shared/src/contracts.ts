@@ -149,6 +149,8 @@ export type SessionDetail = {
   status: SessionStatus;
   ownerId: string;
   workspaceId: string;
+  /** 用户为本会话选择的本地目标目录(绝对路径)。为空时回退到 AGENT_WORKSPACE_ROOT 或进程工作目录。 */
+  workspaceDir?: string;
   projectId?: UUID;
   currentTaskBriefId?: UUID;
   knowledgeBaseIds?: UUID[];
@@ -466,6 +468,8 @@ export type AgentRunInput = {
   agent: RuntimeAgentProfile;
   /** Resolved model + connection the runtime should use; filled in by RuntimeService before dispatch. */
   model?: ResolvedRuntimeModel;
+  /** 本会话选择的本地工作目录(绝对路径);运行时用它解析文件读写路径,为空时回退全局配置。 */
+  workspaceDir?: string;
   contextPack: ContextPack;
   expectedOutput: ExpectedRuntimeOutput;
   budget: RuntimeBudget;
@@ -529,8 +533,30 @@ export type AgentRunResult<TOutput = RuntimeOutput> = {
   output: TOutput;
   events: AgentRuntimeEvent[];
   artifacts: RuntimeArtifactOutput[];
+  /**
+   * 运行时请求的文件写入「提案」。这些写入不会立即落盘——编排器会先暂停到 WAIT_USER_DECISION
+   * 并把 before/after 内容呈现给用户确认,确认后才由 ToolExecutor 真正写入会话目录。
+   */
+  proposedWrites?: ProposedFileWrite[];
   usage: RuntimeUsage;
   error?: RuntimeError;
+};
+
+/** 一次待确认的文件写入提案。previousContent 为目标文件的当前内容(不存在则为 undefined),用于前端 diff 预览。 */
+export type ProposedFileWrite = {
+  path: string;
+  content: string;
+  summary?: string;
+  previousContent?: string;
+};
+
+/** confirmation_card 上承载的文件写入确认载荷:用户在写盘前看到这批写入的完整 before/after 内容。 */
+export type FileWriteConfirmationPayload = {
+  confirmationId: UUID;
+  sessionId: UUID;
+  taskId?: UUID;
+  taskTitle?: string;
+  writes: ProposedFileWrite[];
 };
 
 export type RuntimeOutput =

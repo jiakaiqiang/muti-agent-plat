@@ -1,6 +1,12 @@
 import { defineStore } from 'pinia'
 import { apiDelete, apiGet, apiPage, apiPost } from '@/api/client'
-import type { SessionDetail, SessionListItem, SessionStatus, SessionViewMode } from '@/types/contracts'
+import type {
+  Artifact,
+  SessionDetail,
+  SessionListItem,
+  SessionStatus,
+  SessionViewMode
+} from '@/types/contracts'
 
 type CreateSessionInput = {
   input: string
@@ -8,6 +14,7 @@ type CreateSessionInput = {
   projectId?: string
   tokenBudget?: number
   knowledgeBaseIds?: string[]
+  workspaceDir?: string
 }
 
 export const useSessionStore = defineStore('session', {
@@ -89,6 +96,24 @@ export const useSessionStore = defineStore('session', {
     async cancelSession(sessionId: string, confirmationId?: string) {
       await apiPost(`/sessions/${sessionId}/cancel`, confirmationId ? { confirmationId } : undefined)
       this.setCurrentStatus(sessionId, 'CANCELLED')
+    },
+    async sendFeishuNotification(sessionId: string, artifactId: string, confirmationId?: string) {
+      return apiPost(`/sessions/${sessionId}/notifications/feishu`, { artifactId, confirmationId })
+    },
+    // 用户在「确认写入文件」卡上做出决策:写入(approved=true)或跳过(false),后端据此落盘并续跑剩余任务。
+    async applyWriteConfirmation(sessionId: string, confirmationId: string, approved: boolean) {
+      const result = await apiPost(`/sessions/${sessionId}/writes/${confirmationId}/apply`, { approved })
+      await this.loadSession(sessionId)
+      return result
+    },
+    // 列出某会话已产生的全部产物(供产物面板查看/下载)。
+    async fetchArtifacts(sessionId: string) {
+      const page = await apiPage<Artifact>(`/sessions/${sessionId}/artifacts`)
+      return page.items
+    },
+    // 拉取单个产物详情(含完整内容/元数据),供产物面板内联查看。
+    async fetchArtifact(artifactId: string) {
+      return apiGet<Artifact>(`/artifacts/${artifactId}`)
     },
     switchViewMode(mode: SessionViewMode) {
       this.currentViewMode = mode

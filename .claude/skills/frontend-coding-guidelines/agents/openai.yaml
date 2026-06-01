@@ -1,0 +1,4 @@
+interface:
+  display_name: "Vue3 + Element Plus 代码规范"
+  short_description: "编写 Vue 3 与 Element Plus 前端代码时遵循统一规范。"
+  default_prompt: "使用 $frontend-coding-guidelines 按统一规范完成这个 Vue 3 + Element Plus 前端开发任务。"

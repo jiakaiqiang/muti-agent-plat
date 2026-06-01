@@ -8,6 +8,7 @@ import { KnowledgeModule } from '../rag/knowledge.module.js';
 import { RuntimeModule } from '../runtimes/runtime.module.js';
 import { TasksModule } from '../tasks/tasks.module.js';
 import { OrchestratorService } from './orchestrator.service.js';
+import { FeishuNotifierService } from './feishu-notifier.service.js';
 
 @Module({
   imports: [
@@ -20,7 +21,7 @@ import { OrchestratorService } from './orchestrator.service.js';
     ArtifactsModule,
     CapabilitiesModule
   ],
-  providers: [OrchestratorService],
+  providers: [OrchestratorService, FeishuNotifierService],
   exports: [OrchestratorService]
 })
 export class OrchestratorModule {}

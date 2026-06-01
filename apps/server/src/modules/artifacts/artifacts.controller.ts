@@ -1,6 +1,11 @@
-import { Controller, Get, NotFoundException, Param } from '@nestjs/common';
+import { Controller, Get, NotFoundException, Param, Res } from '@nestjs/common';
 import { ok } from '../../common/api-response.js';
 import { ArtifactsService } from './artifacts.service.js';
+
+type DownloadResponse = {
+  setHeader: (key: string, value: string) => void;
+  send: (body: string) => void;
+};
 
 @Controller()
 export class ArtifactsController {
@@ -18,5 +23,17 @@ export class ArtifactsController {
       throw new NotFoundException(`Artifact not found: ${artifactId}`);
     }
     return ok(artifact);
+  }
+
+  @Get('artifacts/:artifactId/download')
+  download(@Param('artifactId') artifactId: string, @Res() response: DownloadResponse) {
+    const artifact = this.artifacts.getById(artifactId);
+    if (!artifact) {
+      throw new NotFoundException(`Artifact not found: ${artifactId}`);
+    }
+    const { filename, contentType, body } = this.artifacts.toDownload(artifact);
+    response.setHeader('Content-Type', contentType);
+    response.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+    response.send(body);
   }
 }

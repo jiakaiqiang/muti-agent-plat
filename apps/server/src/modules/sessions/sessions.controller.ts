@@ -17,7 +17,7 @@ export class SessionsController {
   @Post('sessions')
   create(
     @Body()
-    body: { input: string; agentIds?: string[]; projectId?: string; tokenBudget?: number; knowledgeBaseIds?: string[] }
+    body: { input: string; agentIds?: string[]; projectId?: string; tokenBudget?: number; knowledgeBaseIds?: string[]; workspaceDir?: string }
   ) {
     return this.sessions.create(body).then(ok);
   }
@@ -68,5 +68,22 @@ export class SessionsController {
   @Post('sessions/:sessionId/briefs/:briefId/reject')
   rejectBrief(@Param('sessionId') sessionId: string, @Body() body: { reason: string }) {
     return ok(this.sessions.control(sessionId, 'REVISING_BRIEF', body.reason));
+  }
+
+  @Post('sessions/:sessionId/writes/:confirmationId/apply')
+  applyWriteConfirmation(
+    @Param('sessionId') sessionId: string,
+    @Param('confirmationId') confirmationId: string,
+    @Body() body: { approved?: boolean }
+  ) {
+    return this.sessions.applyWriteConfirmation(sessionId, confirmationId, body?.approved === true).then(ok);
+  }
+
+  @Post('sessions/:sessionId/notifications/feishu')
+  sendFeishuNotification(
+    @Param('sessionId') sessionId: string,
+    @Body() body: { artifactId: string; confirmationId?: string }
+  ) {
+    return this.sessions.sendFeishuNotification(sessionId, body.artifactId, body.confirmationId).then(ok);
   }
 }

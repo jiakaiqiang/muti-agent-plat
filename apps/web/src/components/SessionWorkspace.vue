@@ -7,11 +7,13 @@ import { useModelStore } from '@/stores/model'
 import { useSessionStore } from '@/stores/session'
 import { sessionStatusLabel, type AgentCardState, type SessionStatus, type SessionViewMode } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
+import ArtifactPanel from './ArtifactPanel.vue'
 import ChatTimeline from './ChatTimeline.vue'
 import CollaborationGraphView from './CollaborationGraphView.vue'
 import CollaborationLogPanel from './CollaborationLogPanel.vue'
 import ConfirmationCard from './ConfirmationCard.vue'
 import DebugRuntimeView from './DebugRuntimeView.vue'
+import DirectoryPicker from './DirectoryPicker.vue'
 import ModelManagementPanel from './ModelManagementPanel.vue'
 import SessionSidebar from './SessionSidebar.vue'
 import UiIcon from './UiIcon.vue'
@@ -31,6 +33,7 @@ const showCreateSessionDialog = ref(false)
 const isCreatingSession = ref(false)
 const newSessionInput = ref('')
 const selectedSessionAgentIds = ref<string[]>([])
+const newSessionWorkspaceDir = ref<string | undefined>(undefined)
 const sessionCreateError = ref('')
 
 type WorkspaceSection = 'session' | 'knowledge' | 'agents' | 'settings' | 'models' | 'tools' | 'notifications'
@@ -110,6 +113,7 @@ const agents = computed(() => {
 })
 const tasks = computed(() => eventStore.taskStates(currentSessionId.value))
 const activeConfirmation = computed(() => eventStore.activeConfirmation(currentSessionId.value))
+const currentBrief = computed(() => eventStore.currentBrief(currentSessionId.value))
 const currentMode = computed(() => sessionStore.currentViewMode)
 const primaryAgent = computed(() => agents.value[0])
 const workspaceLabel = computed(() => sessionStore.currentSession?.title ?? '无活动会话')
@@ -167,11 +171,12 @@ async function deleteSessionFromSidebar(sessionId: string) {
   }
 }
 
-async function createSession(input: string, agentIds: string[]) {
+async function createSession(input: string, agentIds: string[], workspaceDir?: string) {
   const session = await sessionStore.createSession({
     input,
     agentIds,
-    tokenBudget: 30000
+    tokenBudget: 30000,
+    workspaceDir
   })
   await eventStore.loadEvents(session.id)
   eventStore.connectSse(session.id)
@@ -180,6 +185,7 @@ async function createSession(input: string, agentIds: string[]) {
 function openCreateSessionDialog() {
   sessionCreateError.value = ''
   newSessionInput.value = ''
+  newSessionWorkspaceDir.value = undefined
   selectedSessionAgentIds.value = activeAgentIds.value
   showCreateSessionDialog.value = true
 }
@@ -208,7 +214,7 @@ async function createSessionFromDialog() {
   isCreatingSession.value = true
   sessionCreateError.value = ''
   try {
-    await createSession(input, selectedSessionAgentIds.value)
+    await createSession(input, selectedSessionAgentIds.value, newSessionWorkspaceDir.value)
     showCreateSessionDialog.value = false
   } catch (error) {
     sessionCreateError.value = error instanceof Error ? error.message : '创建会话失败'
@@ -372,6 +378,46 @@ async function resolveConfirmation(optionKey: string) {
     return
   }
 
+  if (activeConfirmation.value.reason === 'apply_file_writes') {
+    await sessionStore.applyWriteConfirmation(
+      sessionId,
+      activeConfirmation.value.confirmationId,
+      optionKey === 'approve'
+    )
+    await eventStore.loadEvents(sessionId)
+    return
+  }
+
+  if (activeConfirmation.value.reason === 'send_feishu_notification') {
+    if (optionKey === 'approve' && activeConfirmation.value.relatedArtifactId) {
+      await sessionStore.sendFeishuNotification(
+        sessionId,
+        activeConfirmation.value.relatedArtifactId,
+        activeConfirmation.value.confirmationId
+      )
+      await eventStore.loadEvents(sessionId)
+      return
+    }
+    eventStore.appendEvent({
+      id: `evt-local-${Date.now()}`,
+      sessionId,
+      type: 'user_confirmation_resolved',
+      toAgentIds: [],
+      content: '用户选择暂不发送飞书通知',
+      metadata: {
+        schemaVersion: '0.1',
+        renderAs: 'system_notice',
+        payload: {
+          confirmationId: activeConfirmation.value.confirmationId,
+          status: 'rejected',
+          selectedOptionKey: optionKey
+        }
+      },
+      createdAt: new Date().toISOString()
+    })
+    return
+  }
+
   eventStore.appendEvent({
     id: `evt-local-${Date.now()}`,
     sessionId,
@@ -389,6 +435,23 @@ async function resolveConfirmation(optionKey: string) {
     },
     createdAt: new Date().toISOString()
   })
+}
+
+// 用户在简报确认卡里写下修改说明：作为一条用户消息发给后端，触发协调者重生成简报（revise_brief），
+// 随后会再次发出确认卡，由用户二次确认。
+async function reviseBrief(instruction: string) {
+  if (!sessionStore.currentSession) return
+  const sessionId = sessionStore.currentSession.id
+  isSendingMessage.value = true
+  inputError.value = ''
+  try {
+    await sessionStore.sendMessage(sessionId, instruction)
+    await eventStore.loadEvents(sessionId)
+  } catch (error) {
+    inputError.value = error instanceof Error ? error.message : '提交修改失败'
+  } finally {
+    isSendingMessage.value = false
+  }
 }
 </script>
 
@@ -490,7 +553,7 @@ async function resolveConfirmation(optionKey: string) {
 
       <div class="workspace-content">
         <div v-if="currentMode === 'chat'" class="chat-pane">
-          <ChatTimeline :messages="messages" @resolve-confirmation="resolveConfirmation" />
+          <ChatTimeline :messages="messages" :current-brief="currentBrief" @resolve-confirmation="resolveConfirmation" @revise-brief="reviseBrief" />
           <UserInputBox :busy="isSendingMessage" :error="inputError" @send="sendUserMessage" />
         </div>
         <CollaborationGraphView
@@ -530,8 +593,10 @@ async function resolveConfirmation(optionKey: string) {
       <ConfirmationCard
         v-if="activeConfirmation"
         :confirmation="activeConfirmation"
+        :current-brief="currentBrief"
         compact
         @resolve="resolveConfirmation"
+        @revise="reviseBrief"
       />
 
       <section class="panel-section agent-list-section">
@@ -589,6 +654,8 @@ async function resolveConfirmation(optionKey: string) {
           <small>{{ statusLabel(task.status) }}</small>
         </article>
       </section>
+
+      <ArtifactPanel v-if="currentSessionId" :session-id="currentSessionId" />
     </aside>
 
     <section v-else-if="activeSection === 'knowledge'" class="workspace-admin">
@@ -821,6 +888,11 @@ async function resolveConfirmation(optionKey: string) {
           <span>任务</span>
           <textarea v-model="newSessionInput" rows="4" placeholder="描述要让 Agent 协作完成的目标" />
         </label>
+        <div class="dialog-field">
+          <span>工作目录</span>
+          <DirectoryPicker v-model="newSessionWorkspaceDir" />
+          <small class="dialog-field__hint">Agent 生成的代码将写入此目录；留空则使用默认目录。</small>
+        </div>
         <div class="dialog-agent-picker">
           <span>参与 Agent</span>
           <p v-if="!agentStore.agents.length" class="empty-state">暂无 Agent，请先在右侧添加 Agent。</p>

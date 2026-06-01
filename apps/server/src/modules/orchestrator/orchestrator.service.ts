@@ -9,6 +9,7 @@ import type {
   ContextPack,
   FinalDeliveryOutput,
   PostReviewReportOutput,
+  ProposedFileWrite,
   RuntimeArtifactOutput,
   SessionDetail,
   SuggestedAgentTask,
@@ -30,13 +31,63 @@ import { MemoryService } from '../memory/memory.service.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { KnowledgeService } from '../rag/knowledge.service.js';
 import { RuntimeService } from '../runtimes/runtime.service.js';
+import { ToolExecutorService } from '../runtimes/tool-executor.service.js';
 import { TasksService } from '../tasks/tasks.service.js';
 import { agentSystemPrompt } from './agent-personas.js';
+import { FeishuNotifierService } from './feishu-notifier.service.js';
+
+// Field schema for a task brief. Without this, local models receive only "kind: task_brief" and
+// return a payload that normalizes to empty goal/scope/acceptance — leaving the requirement card blank.
+// Sending it as the expectedOutput.jsonSchema tells the model exactly which Chinese fields to fill.
+const taskBriefJsonSchema = {
+  type: 'object',
+  properties: {
+    goal: { type: 'string', description: '对用户需求的一句话理解（目标）' },
+    scope: { type: 'array', items: { type: 'string' }, description: '本次要做的范围条目' },
+    outOfScope: { type: 'array', items: { type: 'string' }, description: '明确不做的范围条目' },
+    constraints: { type: 'array', items: { type: 'string' }, description: '约束与限制' },
+    acceptanceCriteria: { type: 'array', items: { type: 'string' }, description: '验收标准' },
+    risks: { type: 'array', items: { type: 'string' }, description: '风险点' },
+    openQuestions: { type: 'array', items: { type: 'string' }, description: '真正阻塞执行的待澄清问题（通常为空）' },
+    suggestedTasks: {
+      type: 'array',
+      description: '建议拆解的执行任务',
+      items: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: '任务标题' },
+          description: { type: 'string', description: '任务说明' },
+          suggestedAgentKey: { type: 'string', description: '建议负责的 Agent key，如 backend/test' },
+          acceptanceCriteria: { type: 'array', items: { type: 'string' }, description: '该任务的验收标准' }
+        },
+        required: ['title', 'description']
+      }
+    }
+  },
+  required: ['goal', 'scope', 'acceptanceCriteria']
+} as const;
+
+/** 暂存一次待用户确认的文件写入及续跑所需的上下文。用户确认后据此真正落盘并继续剩余任务。 */
+type PendingWriteConfirmation = {
+  confirmationId: string;
+  briefId: string;
+  taskId: string;
+  taskTitle: string;
+  agentId: string;
+  runId: string;
+  output: TaskExecutionResultOutput;
+  runtimeArtifacts: RuntimeArtifactOutput[];
+  usage: AgentRunResult['usage'];
+  proposedWrites: ProposedFileWrite[];
+  remainingTaskIds: string[];
+};
 
 @Injectable()
 export class OrchestratorService {
   private readonly briefsBySession = new Map<string, TaskBrief[]>();
   private readonly suggestedTasksByBriefId = new Map<string, SuggestedAgentTask[]>();
+  /** 等待用户确认的文件写入(每会话最多一个进行中的写入确认),用于在确认后续跑剩余任务。 */
+  private readonly pendingWritesBySession = new Map<string, PendingWriteConfirmation>();
 
   constructor(
     private readonly agents: AgentsService,
@@ -47,7 +98,9 @@ export class OrchestratorService {
     private readonly memories: MemoryService,
     private readonly artifacts: ArtifactsService,
     private readonly capabilities: CapabilitiesService,
-    private readonly persistence: PersistenceService
+    private readonly persistence: PersistenceService,
+    private readonly feishu: FeishuNotifierService,
+    private readonly toolExecutor: ToolExecutorService
   ) {
     const persistedBriefs = this.persistence.getCollection<Record<string, TaskBrief[]>>('briefsBySession', {});
     for (const [sessionId, briefs] of Object.entries(persistedBriefs)) {
@@ -60,6 +113,14 @@ export class OrchestratorService {
     );
     for (const [briefId, suggestedTasks] of Object.entries(persistedSuggestedTasks)) {
       this.suggestedTasksByBriefId.set(briefId, suggestedTasks);
+    }
+
+    const persistedPendingWrites = this.persistence.getCollection<Record<string, PendingWriteConfirmation>>(
+      'pendingWritesBySession',
+      {}
+    );
+    for (const [sessionId, pending] of Object.entries(persistedPendingWrites)) {
+      this.pendingWritesBySession.set(sessionId, pending);
     }
   }
 
@@ -141,21 +202,28 @@ export class OrchestratorService {
       phase: 'brief_generation',
       agent: this.toRuntimeAgent(coordinator),
       contextPack: this.createContextPack(session, coordinator, undefined, undefined, briefFocus),
-      expectedOutput: { kind: 'task_brief', schemaVersion: '0.1' },
+      expectedOutput: { kind: 'task_brief', schemaVersion: '0.1', jsonSchema: taskBriefJsonSchema },
       budget: {}
     });
     const output = this.completedOutput<TaskBriefOutput>(result, 'task_brief');
     const suggestedTasks = output.suggestedTasks.length ? output.suggestedTasks : this.defaultSuggestedTasks();
 
+    // 本地模型即使带了字段 schema 也常返回空 task_brief，导致需求卡片空白。这里用本轮目标、协调者
+    // 的理解和团队讨论意见兜底，保证 goal/scope/验收标准始终有可读内容。
+    const contributionPoints = contributions
+      .map((entry) => `${entry.agent.name}：${entry.content}`.trim())
+      .filter((line) => line.length > 0);
     const brief: TaskBrief = {
       id: crypto.randomUUID(),
       sessionId: session.id,
       version: (this.briefsBySession.get(session.id)?.length ?? 0) + 1,
-      goal: output.goal,
-      scope: output.scope,
+      goal: output.goal?.trim() || kickoff.trim() || roundGoal,
+      scope: output.scope.length ? output.scope : contributionPoints.length ? contributionPoints : [roundGoal],
       outOfScope: output.outOfScope,
       constraints: output.constraints,
-      acceptanceCriteria: output.acceptanceCriteria,
+      acceptanceCriteria: output.acceptanceCriteria.length
+        ? output.acceptanceCriteria
+        : [`完成并交付：${roundGoal}`],
       risks: output.risks,
       openQuestions: output.openQuestions,
       confirmedByUser: false,
@@ -280,15 +348,239 @@ export class OrchestratorService {
       });
     }
 
-    await this.executeRuntimeTasks(session, brief, tasks);
-    return { brief, event, createdTasks: tasks };
+    const { suspended } = await this.executeRuntimeTasks(session, brief, tasks);
+    return { brief, event, createdTasks: tasks, suspended };
+  }
+
+  getPendingWrite(sessionId: string) {
+    return this.pendingWritesBySession.get(sessionId);
+  }
+
+  /**
+   * 暂存某任务请求的文件写入并向用户发出写入确认卡(携带每个文件的 before/after 全文,可实时预览),
+   * 同时生成 code_diff 预览产物。真正落盘推迟到 applyPendingWrites。
+   */
+  private suspendForWriteConfirmation(
+    session: SessionDetail,
+    brief: TaskBrief,
+    task: AgentTask,
+    taskAgent: Agent,
+    runId: string,
+    output: TaskExecutionResultOutput,
+    result: AgentRunResult,
+    remainingTasks: AgentTask[]
+  ) {
+    const confirmationId = crypto.randomUUID();
+    const writes = result.proposedWrites ?? [];
+
+    // 为每个待写入文件生成 code_diff 预览产物,用户在确认前即可查看/下载将要写入的内容。
+    for (const write of writes) {
+      const previewArtifact = this.artifacts.create({
+        sessionId: session.id,
+        taskId: task.id,
+        agentId: taskAgent.id,
+        type: 'code_diff',
+        title: `待写入预览：${write.path}`,
+        contentSummary: write.summary ?? `将写入 ${write.path}`,
+        metadata: {
+          phase: 'file_write_proposal',
+          status: 'pending_user_confirmation',
+          path: write.path,
+          previousContent: write.previousContent ?? '',
+          content: write.content
+        }
+      });
+      this.events.create({
+        sessionId: session.id,
+        type: 'artifact_created',
+        taskId: task.id,
+        fromAgentId: taskAgent.id,
+        content: `已生成待写入预览：${write.path}`,
+        metadata: createMetadata('artifact_card', {
+          artifactId: previewArtifact.id,
+          type: previewArtifact.type,
+          title: previewArtifact.title,
+          contentSummary: previewArtifact.contentSummary
+        })
+      });
+    }
+
+    this.pendingWritesBySession.set(session.id, {
+      confirmationId,
+      briefId: brief.id,
+      taskId: task.id,
+      taskTitle: task.title,
+      agentId: taskAgent.id,
+      runId,
+      output,
+      runtimeArtifacts: result.artifacts,
+      usage: result.usage,
+      proposedWrites: writes,
+      remainingTaskIds: remainingTasks.map((remaining) => remaining.id)
+    });
+    this.persistPendingWrites();
+
+    this.emitAgentStatus(session.id, taskAgent, 'waiting', {
+      content: `${taskAgent.name} 已准备好 ${writes.length} 处文件写入，等待用户确认。`,
+      currentTaskId: task.id,
+      currentTaskTitle: task.title,
+      thoughtSummary: '等待用户确认后写入工作目录。'
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'task_waiting',
+      taskId: task.id,
+      fromAgentId: taskAgent.id,
+      priority: 'high',
+      content: `任务「${task.title}」已生成 ${writes.length} 处文件写入，等待用户确认。`,
+      metadata: createMetadata('task_card', {
+        taskId: task.id,
+        title: task.title,
+        status: 'waiting'
+      })
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'user_confirmation_requested',
+      taskId: task.id,
+      fromAgentId: taskAgent.id,
+      priority: 'high',
+      content: `任务「${task.title}」需要写入 ${writes.length} 个文件，请确认。`,
+      metadata: createMetadata('confirmation_card', {
+        confirmationId,
+        reason: 'apply_file_writes',
+        title: '确认写入文件',
+        description: '以下文件改动将写入所选工作目录。请在确认前查看每个文件的改动内容。',
+        taskId: task.id,
+        taskTitle: task.title,
+        writes,
+        options: [
+          { key: 'approve', label: '写入文件', style: 'primary' },
+          { key: 'reject', label: '跳过写入', style: 'default' }
+        ]
+      })
+    });
+  }
+
+  /**
+   * 用户在写入确认卡上做出决策后调用:approve 则按会话目录真正写入文件并记录产物,reject 则跳过这批写入;
+   * 随后无论是否写入,都收尾当前任务并继续执行剩余任务(可能再次因下一个任务的写入而暂停)。
+   */
+  async applyPendingWrites(session: SessionDetail, confirmationId: string, approved: boolean): Promise<{ suspended: boolean }> {
+    const pending = this.pendingWritesBySession.get(session.id);
+    if (!pending || pending.confirmationId !== confirmationId) {
+      throw new Error(`No pending file-write confirmation matches: ${confirmationId}`);
+    }
+
+    const brief = this.getBrief(session.id, pending.briefId);
+    if (!brief) {
+      throw new Error(`Brief not found for pending writes: ${pending.briefId}`);
+    }
+    const task = this.tasks.list(session.id).find((item) => item.id === pending.taskId);
+    if (!task) {
+      throw new Error(`Task not found for pending writes: ${pending.taskId}`);
+    }
+    const taskAgent = this.agents.getByIdOrKey(pending.agentId);
+
+    this.pendingWritesBySession.delete(session.id);
+    this.persistPendingWrites();
+
+    this.events.create({
+      sessionId: session.id,
+      type: 'user_confirmation_resolved',
+      taskId: task.id,
+      content: approved ? '用户已确认写入文件。' : '用户已选择跳过本次文件写入。',
+      metadata: createMetadata('system_notice', {
+        confirmationId,
+        status: approved ? 'approved' : 'rejected',
+        selectedOptionKey: approved ? 'approve' : 'reject'
+      })
+    });
+
+    const appliedArtifacts: RuntimeArtifactOutput[] = [];
+    if (approved) {
+      for (const write of pending.proposedWrites) {
+        const toolResult = await this.toolExecutor.execute(
+          { tool: 'file_write', path: write.path, content: write.content, summary: write.summary },
+          {
+            runId: pending.runId,
+            sessionId: session.id,
+            taskId: task.id,
+            agentId: taskAgent.id,
+            agentKey: taskAgent.key,
+            workspaceRoot: session.workspaceDir,
+            userConfirmed: true
+          }
+        );
+        if (toolResult.artifact) {
+          appliedArtifacts.push(toolResult.artifact);
+          const fileArtifact = this.artifacts.create({
+            sessionId: session.id,
+            taskId: task.id,
+            agentId: taskAgent.id,
+            type: 'file',
+            title: toolResult.artifact.title,
+            uri: toolResult.artifact.uri,
+            contentSummary: toolResult.summary,
+            metadata: {
+              phase: 'file_write',
+              path: write.path,
+              content: write.content,
+              ...(toolResult.artifact.metadata ?? {})
+            }
+          });
+          this.events.create({
+            sessionId: session.id,
+            type: 'artifact_created',
+            taskId: task.id,
+            fromAgentId: taskAgent.id,
+            content: `已写入文件：${fileArtifact.title}`,
+            metadata: createMetadata('artifact_card', {
+              artifactId: fileArtifact.id,
+              type: fileArtifact.type,
+              title: fileArtifact.title,
+              contentSummary: fileArtifact.contentSummary
+            })
+          });
+        }
+      }
+    }
+
+    this.finalizeTask(session, task, taskAgent, pending.runId, pending.output, [
+      ...pending.runtimeArtifacts,
+      ...appliedArtifacts
+    ], pending.usage);
+
+    const remainingTasks = this.tasks
+      .list(session.id)
+      .filter((item) => pending.remainingTaskIds.includes(item.id))
+      .sort((a, b) => pending.remainingTaskIds.indexOf(a.id) - pending.remainingTaskIds.indexOf(b.id));
+    return this.runTaskQueue(session, brief, remainingTasks, 0);
+  }
+
+  private persistPendingWrites() {
+    this.persistence.setCollection('pendingWritesBySession', Object.fromEntries(this.pendingWritesBySession));
   }
 
   private async executeRuntimeTasks(session: SessionDetail, brief: TaskBrief, tasks: AgentTask[]) {
-    const backend = this.pickSessionAgent(session, ['backend'], 0);
-    const review = this.pickSessionAgent(session, ['review', 'test'], 1);
+    return this.runTaskQueue(session, brief, tasks, 0);
+  }
 
-    for (const task of tasks) {
+  /**
+   * 从 startIndex 顺序执行任务。当某个任务请求文件写入(proposedWrites)时,先暂停并发出写入确认卡,
+   * 返回 { suspended: true } 让上层把会话置为 WAIT_USER_DECISION;用户确认后由 applyPendingWrites 续跑。
+   * 全部任务执行完后进入复盘与交付,返回 { suspended: false }。
+   */
+  private async runTaskQueue(
+    session: SessionDetail,
+    brief: TaskBrief,
+    tasks: AgentTask[],
+    startIndex: number
+  ): Promise<{ suspended: boolean }> {
+    const backend = this.pickSessionAgent(session, ['backend'], 0);
+
+    for (let i = startIndex; i < tasks.length; i++) {
+      const task = tasks[i];
       const taskAgent = task.assigneeAgentId ? this.agents.getByIdOrKey(task.assigneeAgentId) : backend;
       this.tasks.update(task, { status: 'running' });
       this.emitAgentStatus(session.id, taskAgent, 'running', {
@@ -317,7 +609,7 @@ export class OrchestratorService {
         type: 'runtime_started',
         taskId: task.id,
         fromAgentId: taskAgent.id,
-        content: `${taskAgent.name} ${runtimeModeLabel(taskAgent.runtimeType)} started task execution.`,
+        content: `${taskAgent.name}（${runtimeModeLabel(taskAgent.runtimeType)}）开始执行任务。`,
         metadata: createMetadata('system_notice', {
           runtimeInvocationId: runId,
           runtimeType: taskAgent.runtimeType,
@@ -334,6 +626,7 @@ export class OrchestratorService {
         taskId: task.id,
         phase: 'task_execution',
         agent: this.toRuntimeAgent(taskAgent),
+        workspaceDir: session.workspaceDir,
         contextPack,
         expectedOutput: { kind: 'task_execution_result', schemaVersion: '0.1' },
         budget: {}
@@ -364,55 +657,80 @@ export class OrchestratorService {
         throw new Error(`Task ${task.title} ended with ${output.status}: ${output.summary}`);
       }
 
-      this.tasks.update(task, { status: 'completed', resultSummary: output.summary });
-      const executionArtifact = this.createExecutionArtifact(session.id, task, taskAgent.id, output, result.artifacts);
-      this.events.create({
-        sessionId: session.id,
-        type: 'artifact_created',
-        taskId: task.id,
-        fromAgentId: taskAgent.id,
-        content: `已创建产物：${executionArtifact.title}`,
-        metadata: createMetadata('artifact_card', {
-          artifactId: executionArtifact.id,
-          type: executionArtifact.type,
-          title: executionArtifact.title,
-          contentSummary: executionArtifact.contentSummary
-        })
-      });
-      this.events.create({
-        sessionId: session.id,
-        type: 'runtime_completed',
-        taskId: task.id,
-        fromAgentId: taskAgent.id,
-        content: `${taskAgent.name} ${runtimeModeLabel(taskAgent.runtimeType)} completed task execution.`,
-        metadata: createMetadata('system_notice', {
-          runtimeInvocationId: runId,
-          runtimeType: taskAgent.runtimeType,
-          status: 'completed',
-          usage: result.usage
-        })
-      });
-      this.events.create({
-        sessionId: session.id,
-        type: 'task_completed',
-        taskId: task.id,
-        fromAgentId: taskAgent.id,
-        content: `已完成任务：${task.title}`,
-        metadata: createMetadata('task_card', {
-          taskId: task.id,
-          title: task.title,
-          status: 'completed',
-          resultSummary: output.summary,
-          completedItems: output.completedItems,
-          risks: output.risks
-        })
-      });
-      this.emitAgentStatus(session.id, taskAgent, 'idle', {
-        content: `${taskAgent.name} 已完成任务：${task.title}`,
-        actionSummary: output.summary
-      });
+      if (result.proposedWrites?.length) {
+        this.suspendForWriteConfirmation(session, brief, task, taskAgent, runId, output, result, tasks.slice(i + 1));
+        return { suspended: true };
+      }
+
+      this.finalizeTask(session, task, taskAgent, runId, output, result.artifacts, result.usage);
     }
 
+    await this.reviewAndDeliver(session, brief);
+    return { suspended: false };
+  }
+
+  /** 为一个已完成的任务发出执行产物与完成事件(无待写入,或写入已确认应用后调用)。 */
+  private finalizeTask(
+    session: SessionDetail,
+    task: AgentTask,
+    taskAgent: Agent,
+    runId: string,
+    output: TaskExecutionResultOutput,
+    runtimeArtifacts: RuntimeArtifactOutput[],
+    usage: AgentRunResult['usage']
+  ) {
+    this.tasks.update(task, { status: 'completed', resultSummary: output.summary });
+    const executionArtifact = this.createExecutionArtifact(session.id, task, taskAgent.id, output, runtimeArtifacts);
+    this.events.create({
+      sessionId: session.id,
+      type: 'artifact_created',
+      taskId: task.id,
+      fromAgentId: taskAgent.id,
+      content: `已创建产物：${executionArtifact.title}`,
+      metadata: createMetadata('artifact_card', {
+        artifactId: executionArtifact.id,
+        type: executionArtifact.type,
+        title: executionArtifact.title,
+        contentSummary: executionArtifact.contentSummary
+      })
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'runtime_completed',
+      taskId: task.id,
+      fromAgentId: taskAgent.id,
+      content: `${taskAgent.name}（${runtimeModeLabel(taskAgent.runtimeType)}）完成任务执行。`,
+      metadata: createMetadata('system_notice', {
+        runtimeInvocationId: runId,
+        runtimeType: taskAgent.runtimeType,
+        status: 'completed',
+        usage
+      })
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'task_completed',
+      taskId: task.id,
+      fromAgentId: taskAgent.id,
+      content: `已完成任务：${task.title}`,
+      metadata: createMetadata('task_card', {
+        taskId: task.id,
+        title: task.title,
+        status: 'completed',
+        resultSummary: output.summary,
+        completedItems: output.completedItems,
+        risks: output.risks
+      })
+    });
+    this.emitAgentStatus(session.id, taskAgent, 'idle', {
+      content: `${taskAgent.name} 已完成任务：${task.title}`,
+      actionSummary: output.summary
+    });
+  }
+
+  /** 复盘执行结果是否符合已确认的任务简报,然后产出最终交付摘要与飞书通知草稿。 */
+  private async reviewAndDeliver(session: SessionDetail, brief: TaskBrief) {
+    const review = this.pickSessionAgent(session, ['review', 'test'], 1);
     this.events.create({
       sessionId: session.id,
       type: 'post_review_started',
@@ -436,13 +754,41 @@ export class OrchestratorService {
       budget: {}
     });
     const reviewOutput = this.completedOutput<PostReviewReportOutput>(reviewRun, 'post_review_report');
+    const reviewLines: string[] = [
+      '# 复盘报告',
+      '',
+      `**与简报一致性**：${reviewOutput.isConsistentWithBrief ? '✓ 一致' : '✗ 存在偏差'}`,
+      `**建议**：${reviewOutput.recommendation === 'deliver' ? '交付' : reviewOutput.recommendation === 'rework' ? '返工' : '询问用户'}`,
+      ''
+    ];
+    if (reviewOutput.matchedItems?.length) {
+      reviewLines.push('## 已完成项', '');
+      for (const item of reviewOutput.matchedItems) reviewLines.push(`- ${item}`);
+      reviewLines.push('');
+    }
+    if (reviewOutput.mismatchedItems?.length) {
+      reviewLines.push('## 偏差项', '');
+      for (const item of reviewOutput.mismatchedItems) reviewLines.push(`- ${item}`);
+      reviewLines.push('');
+    }
+    if (reviewOutput.missingItems?.length) {
+      reviewLines.push('## 缺失项', '');
+      for (const item of reviewOutput.missingItems) reviewLines.push(`- ${item}`);
+      reviewLines.push('');
+    }
+    if (reviewOutput.testResults?.length) {
+      reviewLines.push('## 测试结果', '');
+      for (const item of reviewOutput.testResults) reviewLines.push(`- ${item}`);
+      reviewLines.push('');
+    }
+    const reviewContent = reviewLines.join('\n');
     const reviewArtifact = this.artifacts.create({
       sessionId: session.id,
       agentId: review.id,
       type: 'test_report',
       title: '复盘报告',
       contentSummary: reviewOutput.recommendation,
-      metadata: reviewOutput as unknown as Record<string, unknown>
+      metadata: { ...(reviewOutput as unknown as Record<string, unknown>), content: reviewContent }
     });
     this.events.create({
       sessionId: session.id,
@@ -487,13 +833,35 @@ export class OrchestratorService {
     });
     const finalOutput = this.completedOutput<FinalDeliveryOutput>(finalRun, 'final_delivery');
     const notification = this.pickSessionAgent(session, ['notification'], 0);
+    const deliveryLines: string[] = [
+      '# 最终交付摘要',
+      '',
+      finalOutput.summary || '（无摘要）',
+      ''
+    ];
+    if (finalOutput.completedItems?.length) {
+      deliveryLines.push('## 完成项', '');
+      for (const item of finalOutput.completedItems) deliveryLines.push(`- ${item}`);
+      deliveryLines.push('');
+    }
+    if (finalOutput.incompleteItems?.length) {
+      deliveryLines.push('## 未完成项', '');
+      for (const item of finalOutput.incompleteItems) deliveryLines.push(`- ${item}`);
+      deliveryLines.push('');
+    }
+    if (finalOutput.risks?.length) {
+      deliveryLines.push('## 风险与后续建议', '');
+      for (const item of finalOutput.risks) deliveryLines.push(`- ${item}`);
+      deliveryLines.push('');
+    }
+    const deliveryContent = deliveryLines.join('\n');
     const deliveryArtifact = this.artifacts.create({
       sessionId: session.id,
       agentId: coordinator.id,
       type: 'markdown',
       title: '最终交付摘要',
       contentSummary: finalOutput.summary,
-      metadata: finalOutput as unknown as Record<string, unknown>
+      metadata: { ...(finalOutput as unknown as Record<string, unknown>), content: deliveryContent }
     });
     const notificationDraft = this.artifacts.create({
       sessionId: session.id,
@@ -554,9 +922,120 @@ export class OrchestratorService {
         relatedCapabilityId: 'cap-feishu-draft'
       })
     });
+    // 任务完成后，由协调者主动向用户收口一条完成通知（单点对话接口），让用户明确知道任务已交付。
+    const completedSummary = finalOutput.completedItems.length
+      ? finalOutput.completedItems.map((item) => `· ${item}`).join('\n')
+      : finalOutput.summary;
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      fromAgentId: coordinator.id,
+      content: `任务已全部完成并交付。\n${finalOutput.summary}\n\n完成项：\n${completedSummary}`,
+      metadata: createMetadata('chat_message', { messageKind: 'summary' })
+    });
+    // 交付完成后，征求用户是否真实发送飞书通知（默认不自动发送）。用户在确认卡点“发送通知”后，
+    // 才会调用 sendFeishuNotification 走真实 webhook 发送。
+    this.events.create({
+      sessionId: session.id,
+      type: 'user_confirmation_requested',
+      fromAgentId: notification.id,
+      content: '交付已完成，是否发送飞书通知？',
+      metadata: createMetadata('confirmation_card', {
+        confirmationId: crypto.randomUUID(),
+        reason: 'send_feishu_notification',
+        title: '发送飞书通知',
+        description: '将本次交付摘要作为飞书通知发送。确认后才会真正对外发送。',
+        relatedArtifactId: notificationDraft.id,
+        options: [
+          { key: 'approve', label: '发送通知', style: 'primary' },
+          { key: 'skip', label: '暂不发送', style: 'default' }
+        ]
+      })
+    });
     this.emitAgentStatus(session.id, coordinator, 'completed', {
       content: `${coordinator.name} 已完成最终交付。`
     });
+  }
+
+  /**
+   * 用户在交付后确认“发送飞书通知”时调用：校验通知能力，将草稿产物经真实 webhook 发送（由
+   * FeishuNotifierService 按环境闸门把关），并把结果写入事件流与产物状态。
+   */
+  async sendFeishuNotification(session: SessionDetail, artifactId: string) {
+    const artifact = this.artifacts.getById(artifactId);
+    if (!artifact || artifact.type !== 'feishu_draft') {
+      throw new Error(`Feishu draft artifact not found: ${artifactId}`);
+    }
+    const notification = this.pickSessionAgent(session, ['notification'], 0);
+
+    // 用户点击“发送通知”即视为对高危能力的确认：先记录授权，再做策略校验。
+    this.capabilities.approve('cap-feishu-send', { sessionId: session.id, agentId: notification.id, reason: 'notification.feishu_send' });
+    const check = this.capabilities.checkInvocation('cap-feishu-send', {
+      sessionId: session.id,
+      agentId: notification.id,
+      reason: 'notification.feishu_send'
+    });
+    if (!check.allowed) {
+      const message = `飞书发送被能力策略阻止（${check.code ?? 'CAPABILITY_BLOCKED'}）。`;
+      this.events.create({
+        sessionId: session.id,
+        type: 'tool_failed',
+        fromAgentId: notification.id,
+        priority: 'high',
+        content: message,
+        metadata: createMetadata('tool_card', { tool: 'feishu_send', status: 'blocked', artifactId })
+      });
+      return { status: 'blocked' as const, detail: message };
+    }
+
+    const metadata = (artifact.metadata ?? {}) as {
+      title?: string;
+      body?: { goal?: string; summary?: string; completedItems?: string[]; risks?: string[] };
+    };
+    const title = metadata.title ?? 'Agent Cluster 交付完成';
+    const text = this.buildFeishuText(metadata.body);
+    const result = await this.feishu.send({ title, text });
+
+    artifact.metadata = {
+      ...artifact.metadata,
+      status: result.status === 'sent' ? 'sent' : 'send_failed',
+      sendDetail: result.detail,
+      sentAt: result.status === 'sent' ? nowIso() : undefined
+    };
+
+    this.events.create({
+      sessionId: session.id,
+      type: result.status === 'sent' ? 'tool_completed' : 'tool_failed',
+      fromAgentId: notification.id,
+      priority: result.status === 'sent' ? 'normal' : 'high',
+      content: result.detail,
+      metadata: createMetadata('tool_card', {
+        tool: 'feishu_send',
+        status: result.status === 'sent' ? 'completed' : result.status,
+        artifactId
+      })
+    });
+    return result;
+  }
+
+  private buildFeishuText(body?: { goal?: string; summary?: string; completedItems?: string[]; risks?: string[] }): string {
+    if (!body) {
+      return '本次协作已完成。';
+    }
+    const lines: string[] = [];
+    if (body.goal) {
+      lines.push(`目标：${body.goal}`);
+    }
+    if (body.summary) {
+      lines.push(`摘要：${body.summary}`);
+    }
+    if (body.completedItems?.length) {
+      lines.push(`完成项：${body.completedItems.join('；')}`);
+    }
+    if (body.risks?.length) {
+      lines.push(`风险：${body.risks.join('；')}`);
+    }
+    return lines.join('\n') || '本次协作已完成。';
   }
 
   async handleQuestion(session: SessionDetail, question: string) {
@@ -716,6 +1195,10 @@ export class OrchestratorService {
       content: reply,
       metadata: createMetadata('chat_message', { messageKind: 'answer' })
     });
+    // 回答完成后把协调者重置为 idle，否则 sendMessage 里设置的 thinking 状态会让卡片一直显示「思考中」。
+    this.emitAgentStatus(session.id, coordinator, 'idle', {
+      content: `${coordinator.name} 已回复。`
+    });
   }
 
   /** route=ask_user：仅由 Coordinator 发出唯一一条追问，绝不让多个角色各自追问用户。 */
@@ -728,6 +1211,9 @@ export class OrchestratorService {
       fromAgentId: coordinator.id,
       content: question,
       metadata: createMetadata('chat_message', { messageKind: 'question', needsUserInput: true })
+    });
+    this.emitAgentStatus(session.id, coordinator, 'idle', {
+      content: `${coordinator.name} 正在等待你的补充。`
     });
   }
 
@@ -764,6 +1250,9 @@ export class OrchestratorService {
         handledByAgentIds: targets.map((agent) => agent.id)
       })
     });
+    this.emitAgentStatus(session.id, coordinator, 'idle', {
+      content: `${coordinator.name} 已同步并回复。`
+    });
   }
 
   /** route=revise_brief：用户补充了尚未确认简报的信息，修订简报并重新请求确认。 */
@@ -782,7 +1271,7 @@ export class OrchestratorService {
       phase: 'brief_revision',
       agent: this.toRuntimeAgent(coordinator),
       contextPack,
-      expectedOutput: { kind: 'task_brief', schemaVersion: '0.1' },
+      expectedOutput: { kind: 'task_brief', schemaVersion: '0.1', jsonSchema: taskBriefJsonSchema },
       budget: {}
     });
     const output = this.completedOutput<TaskBriefOutput>(result, 'task_brief');
@@ -792,8 +1281,9 @@ export class OrchestratorService {
       id: crypto.randomUUID(),
       sessionId: session.id,
       version: (this.briefsBySession.get(session.id)?.length ?? 0) + 1,
-      goal: output.goal,
-      scope: output.scope,
+      // 同样兜底：修订后若模型回空目标，沿用上一版目标或会话原始需求，避免需求卡片空白。
+      goal: output.goal?.trim() || previous?.goal || session.originalInput,
+      scope: output.scope.length ? output.scope : previous?.scope ?? [],
       outOfScope: output.outOfScope,
       constraints: output.constraints,
       acceptanceCriteria: output.acceptanceCriteria,
@@ -999,7 +1489,7 @@ export class OrchestratorService {
       type: 'task_created',
       taskId: task.id,
       fromAgentId: coordinator.id,
-      content: `Created task: ${task.title}`,
+      content: `已创建任务：${task.title}`,
       metadata: createMetadata('task_card', {
         taskId: task.id,
         title: task.title,
@@ -1139,16 +1629,66 @@ export class OrchestratorService {
     runtimeArtifacts: RuntimeArtifactOutput[]
   ) {
     const testAgent = this.agents.findByIdOrKey('test');
+    const isTestAgent = testAgent && agentId === testAgent.id;
+
+    // 将执行结果渲染为可读的 Markdown 文档，而非裸 JSON。
+    const lines: string[] = [
+      `# ${task.title}`,
+      '',
+      `**状态**：${output.status === 'completed' ? '已完成' : output.status === 'failed' ? '失败' : output.status}`,
+      '',
+      '## 执行摘要',
+      '',
+      output.summary || '（无摘要）',
+      ''
+    ];
+
+    if (output.completedItems?.length) {
+      lines.push('## 完成项', '');
+      for (const item of output.completedItems) {
+        lines.push(`- ${item}`);
+      }
+      lines.push('');
+    }
+
+    if (task.acceptanceCriteria?.length) {
+      lines.push('## 验收标准', '');
+      for (const criterion of task.acceptanceCriteria) {
+        lines.push(`- ${criterion}`);
+      }
+      lines.push('');
+    }
+
+    if (output.risks?.length) {
+      lines.push('## 风险与注意事项', '');
+      for (const risk of output.risks) {
+        lines.push(`- ${risk}`);
+      }
+      lines.push('');
+    }
+
+    if (runtimeArtifacts?.length) {
+      lines.push('## 运行时产物', '');
+      for (const artifact of runtimeArtifacts) {
+        lines.push(`- **${artifact.title}**${artifact.uri ? `（${artifact.uri}）` : ''}`);
+        if (artifact.summary) lines.push(`  ${artifact.summary}`);
+      }
+      lines.push('');
+    }
+
+    const content = lines.join('\n');
+
     return this.artifacts.create({
       sessionId,
       taskId: task.id,
       agentId,
-      type: testAgent && agentId === testAgent.id ? 'test_report' : 'json',
-      title: `${task.title} result`,
+      type: isTestAgent ? 'test_report' : 'markdown',
+      title: `${task.title} 执行结果`,
       contentSummary: output.summary,
       metadata: {
         phase: 'task_execution',
         status: output.status,
+        content,
         output,
         runtimeArtifacts
       }
@@ -1168,8 +1708,9 @@ export class OrchestratorService {
       .map((memory) => this.memories.toRuntimeMemory(memory));
     return {
       systemRules: [
-        'Return structured JSON that matches the expected RuntimeOutput kind.',
-        'Do not perform external side effects unless a capability policy explicitly allows it.'
+        '只返回与请求的 RuntimeOutput kind 匹配的结构化 JSON。',
+        '除非能力策略明确允许，否则不要执行任何外部副作用。',
+        '所有自然语言字段（摘要、说明、标题、理由等）一律使用中文。'
       ],
       sessionGoal: session.originalInput,
       focusMessage,
@@ -1355,16 +1896,16 @@ export class OrchestratorService {
   private defaultSuggestedTasks(): SuggestedAgentTask[] {
     return [
       {
-        title: 'Execute confirmed task brief',
-        description: 'Run the configured backend agent against the confirmed task brief.',
+        title: '执行已确认的任务简报',
+        description: '由配置的后端 Agent 依据已确认的任务简报执行。',
         suggestedAgentKey: 'backend',
-        acceptanceCriteria: ['Runtime returns a structured task_execution_result output.']
+        acceptanceCriteria: ['运行时返回结构化的 task_execution_result 输出。']
       },
       {
-        title: 'Validate execution result',
-        description: 'Run the configured test agent to validate the execution evidence.',
+        title: '验证执行结果',
+        description: '由配置的测试 Agent 验证执行证据。',
         suggestedAgentKey: 'test',
-        acceptanceCriteria: ['Validation result is represented as a structured runtime output.']
+        acceptanceCriteria: ['验证结果以结构化的运行时输出表示。']
       }
     ];
   }

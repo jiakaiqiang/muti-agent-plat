@@ -141,7 +141,9 @@ await runNpm(['run', 'build', '-w', '@agent-cluster/server']);
   }
 }
 
-// Scenario 2: enabled CLI + controlled file_write tool -> completed, real file written under workspace root.
+// Scenario 2: enabled CLI + file_write tool -> completed with a deferred write *proposal* (no direct
+// disk write). Real writes now require explicit user confirmation through the orchestrator, so a bare
+// runtime smoke must surface proposedWrites and leave the workspace untouched.
 {
   const dataFile = join(root, '.cache', 'agent-cluster', `v2-enabled-${Date.now()}.json`);
   const workspace = join(root, '.cache', `v2-ws-${Date.now()}`);
@@ -164,13 +166,18 @@ await runNpm(['run', 'build', '-w', '@agent-cluster/server']);
     const codex = await smoke(server.apiBase, 'codex');
     assert(codex.status === 'completed', `enabled codex should complete, got ${codex.status} ${JSON.stringify(codex.error)}`);
     assert(codex.usage?.model === 'codex-fake', `codex usage should come from CLI, got ${codex.usage?.model}`);
+    const proposal = (codex.proposedWrites ?? []).find((write) => write.path === 'codex-output.txt');
+    assert(proposal, 'file_write should surface as a deferred write proposal');
+    assert(
+      proposal.content.includes('written by fake coding runtime'),
+      'proposed write content mismatch'
+    );
     const written = join(workspace, 'codex-output.txt');
-    assert(existsSync(written), 'file_write tool should create the file under the workspace root');
-    assert(readFileSync(written, 'utf8').includes('written by fake coding runtime'), 'file content mismatch');
+    assert(!existsSync(written), 'runtime must NOT write to disk before user confirmation');
 
     const claude = await smoke(server.apiBase, 'claude-code');
     assert(claude.status === 'completed', `enabled claude_code should complete, got ${claude.status}`);
-    console.log('scenario 2 ok: enabled CLI runs and controlled file_write lands in workspace');
+    console.log('scenario 2 ok: CLI file_write is deferred to a confirmation proposal, not written directly');
   } finally {
     await server.stop();
     rmSync(dataFile, { force: true });

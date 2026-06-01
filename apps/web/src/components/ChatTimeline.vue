@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useAgentStore } from '@/stores/agent'
 import type {
   ArtifactEventPayload,
+  BriefEventPayload,
   ChatMessage,
   ConfirmationCardState,
   ConfirmationRequestedPayload,
@@ -14,10 +15,12 @@ import ConfirmationCard from './ConfirmationCard.vue'
 
 const props = defineProps<{
   messages: ChatMessage[]
+  currentBrief?: BriefEventPayload
 }>()
 
 const emit = defineEmits<{
   resolveConfirmation: [optionKey: string]
+  reviseBrief: [instruction: string]
 }>()
 
 const agentStore = useAgentStore()
@@ -85,8 +88,11 @@ function confirmationFromMessage(message: ChatMessage): ConfirmationCardState | 
     status: (payload.status as ConfirmationCardState['status'] | undefined) ?? 'pending',
     options: payload.options,
     relatedBriefId: payload.relatedBriefId as string | undefined,
-    relatedTaskId: payload.relatedTaskId as string | undefined,
-    relatedCapabilityId: payload.relatedCapabilityId as string | undefined
+    relatedTaskId: (payload.relatedTaskId ?? payload.taskId) as string | undefined,
+    relatedCapabilityId: payload.relatedCapabilityId as string | undefined,
+    relatedArtifactId: payload.relatedArtifactId as string | undefined,
+    taskTitle: payload.taskTitle as string | undefined,
+    writes: payload.writes
   }
 }
 
@@ -112,14 +118,14 @@ function deliveryPayload(message: ChatMessage) {
 function statusLabel(status?: string) {
   return (
     {
-      allowed: 'Allowed',
-      approved: 'Approved',
-      blocked: 'Blocked',
-      completed: 'Completed',
-      failed: 'Failed',
-      pending: 'Pending',
-      running: 'Running'
-    }[status ?? ''] ?? status ?? 'Unknown'
+      allowed: '已允许',
+      approved: '已批准',
+      blocked: '已阻止',
+      completed: '已完成',
+      failed: '失败',
+      pending: '待处理',
+      running: '执行中'
+    }[status ?? ''] ?? status ?? '未知'
   )
 }
 
@@ -146,8 +152,10 @@ function capabilityLabel(capabilityId?: string) {
         <ConfirmationCard
           v-if="confirmationFromMessage(message)"
           :confirmation="confirmationFromMessage(message)!"
+          :current-brief="props.currentBrief"
           compact
           @resolve="emit('resolveConfirmation', $event)"
+          @revise="emit('reviseBrief', $event)"
         />
 
         <template v-else>
@@ -157,15 +165,15 @@ function capabilityLabel(capabilityId?: string) {
             <h3>{{ message.payload?.goal }}</h3>
             <dl>
               <div>
-                <dt>Scope</dt>
+                <dt>范围</dt>
                 <dd>{{ listFromPayload(message, 'scope').join(', ') }}</dd>
               </div>
               <div>
-                <dt>Acceptance</dt>
+                <dt>验收标准</dt>
                 <dd>{{ listFromPayload(message, 'acceptanceCriteria').join(', ') }}</dd>
               </div>
               <div>
-                <dt>Risks</dt>
+                <dt>风险</dt>
                 <dd>{{ listFromPayload(message, 'risks').join(', ') }}</dd>
               </div>
             </dl>
@@ -174,7 +182,7 @@ function capabilityLabel(capabilityId?: string) {
           <div v-if="message.messageType === 'delivery'" class="structured-block">
             <h3>{{ message.payload?.summary }}</h3>
             <div v-if="deliveryPayload(message)?.notificationDraftArtifactId" class="inline-metadata">
-              <span>Feishu draft</span>
+              <span>飞书草稿</span>
               <strong>{{ deliveryPayload(message)?.notificationDraftArtifactId }}</strong>
             </div>
             <ul>
@@ -184,26 +192,26 @@ function capabilityLabel(capabilityId?: string) {
 
           <div v-if="toolPayload(message)" class="structured-block tool-block">
             <div class="structured-block__heading">
-              <h3>{{ toolPayload(message)?.capabilityName ?? 'Capability' }}</h3>
+              <h3>{{ toolPayload(message)?.capabilityName ?? '能力' }}</h3>
               <span class="status-pill" :class="toolPayload(message)?.status">
                 {{ statusLabel(toolPayload(message)?.status) }}
               </span>
             </div>
             <dl>
               <div>
-                <dt>Risk</dt>
-                <dd>{{ toolPayload(message)?.riskLevel ?? 'unknown' }}</dd>
+                <dt>风险等级</dt>
+                <dd>{{ toolPayload(message)?.riskLevel ?? '未知' }}</dd>
               </div>
               <div v-if="toolPayload(message)?.requiresUserConfirmation">
-                <dt>Policy</dt>
-                <dd>User confirmation required</dd>
+                <dt>策略</dt>
+                <dd>需要用户确认</dd>
               </div>
               <div v-if="toolPayload(message)?.reason">
-                <dt>Reason</dt>
+                <dt>原因</dt>
                 <dd>{{ toolPayload(message)?.reason }}</dd>
               </div>
               <div v-if="toolPayload(message)?.code">
-                <dt>Code</dt>
+                <dt>代码</dt>
                 <dd>{{ toolPayload(message)?.code }}</dd>
               </div>
             </dl>
@@ -216,7 +224,7 @@ function capabilityLabel(capabilityId?: string) {
             </div>
             <p v-if="artifactPayload(message)?.contentSummary">{{ artifactPayload(message)?.contentSummary }}</p>
             <p v-if="artifactPayload(message)?.relatedCapabilityId">
-              Capability: {{ capabilityLabel(artifactPayload(message)?.relatedCapabilityId) }}
+              能力：{{ capabilityLabel(artifactPayload(message)?.relatedCapabilityId) }}
             </p>
           </div>
 

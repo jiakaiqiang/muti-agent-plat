@@ -5,6 +5,7 @@ import { useKnowledgeStore } from '@/stores/knowledge'
 import type {
   AgentCardState,
   AgentStatusChangedPayload,
+  BriefEventPayload,
   ChatMessage,
   CollaborationEvent,
   ConfirmationCardState,
@@ -98,6 +99,17 @@ export const useEventStore = defineStore('event', {
   }),
   getters: {
     eventsForSession: (state) => (sessionId: string) => state.eventsBySessionId[sessionId] ?? [],
+    // 最新一版任务简报内容(brief_created / brief_updated),供「修改简报」时展示当前简报作为参考。
+    currentBrief: (state) => (sessionId: string): BriefEventPayload | undefined => {
+      const events = state.eventsBySessionId[sessionId] ?? []
+      for (let i = events.length - 1; i >= 0; i -= 1) {
+        const event = events[i]
+        if (event.type === 'brief_created' || event.type === 'brief_updated') {
+          return event.metadata.payload as BriefEventPayload
+        }
+      }
+      return undefined
+    },
     chatMessages: (state) => (sessionId: string): ChatMessage[] => {
       const events = state.eventsBySessionId[sessionId] ?? []
       const confirmationStatusById = confirmationStatuses(events)
@@ -227,8 +239,11 @@ export const useEventStore = defineStore('event', {
             status: 'pending',
             options: payload.options,
             relatedBriefId: payload.relatedBriefId as string | undefined,
-            relatedTaskId: payload.relatedTaskId as string | undefined,
-            relatedCapabilityId: payload.relatedCapabilityId as string | undefined
+            relatedTaskId: (payload.relatedTaskId ?? payload.taskId) as string | undefined,
+            relatedCapabilityId: payload.relatedCapabilityId as string | undefined,
+            relatedArtifactId: payload.relatedArtifactId as string | undefined,
+            taskTitle: payload.taskTitle as string | undefined,
+            writes: payload.writes
           }
         }
         if (event.type === 'user_confirmation_resolved' && card) {

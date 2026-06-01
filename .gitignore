@@ -41,6 +41,7 @@ dump.sql
 Thumbs.db
 .idea/
 .vscode/
+.claude/settings.local.json
 
 # Test reports
 playwright-report/

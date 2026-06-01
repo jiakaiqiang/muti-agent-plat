@@ -74,6 +74,10 @@ export function eventStreamUrl(sessionId: string) {
   return `${sseBaseUrl}/sessions/${sessionId}/events/stream`
 }
 
+export function artifactDownloadUrl(artifactId: string) {
+  return `${apiBaseUrl}/artifacts/${artifactId}/download`
+}
+
 export function parseSseEvent(message: MessageEvent) {
   return JSON.parse(message.data) as CollaborationEvent
 }

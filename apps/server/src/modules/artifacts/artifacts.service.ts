@@ -61,6 +61,19 @@ export class ArtifactsService {
     return undefined;
   }
 
+  /** Resolves the best downloadable representation of an artifact: raw file/diff content when present, else its JSON metadata. */
+  toDownload(artifact: Artifact): { filename: string; contentType: string; body: string } {
+    const metadata = artifact.metadata ?? {};
+    const rawContent = typeof metadata.content === 'string' ? (metadata.content as string) : undefined;
+    const isJsonLike = artifact.type === 'json' || artifact.type === 'test_report' || artifact.type === 'feishu_draft';
+    const body = rawContent ?? JSON.stringify((metadata.output as unknown) ?? metadata, null, 2);
+    const path = typeof metadata.path === 'string' ? (metadata.path as string) : undefined;
+    const baseName = (path ?? artifact.title ?? artifact.id).split(/[\\/]/).pop() || artifact.id;
+    const filename = isJsonLike && !/\.[a-z0-9]+$/i.test(baseName) ? `${baseName}.json` : baseName;
+    const contentType = isJsonLike ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8';
+    return { filename, contentType, body };
+  }
+
   private persist() {
     this.persistence.setCollection('artifactsBySession', Object.fromEntries(this.artifactsBySession));
   }

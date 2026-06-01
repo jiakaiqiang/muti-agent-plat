@@ -7,6 +7,7 @@ import type {
   EventPriority,
   KnowledgeBase,
   KnowledgeDocument,
+  ProposedFileWrite,
   RagMatchedChunk,
   RuntimeCapabilityDefinition,
   RuntimeInvocationStatus,
@@ -29,6 +30,7 @@ export type {
   EventMetadata,
   EventPriority,
   EventRenderType,
+  FileWriteConfirmationPayload,
   KnowledgeBase,
   KnowledgeDocument,
   KnowledgeScope,
@@ -38,6 +40,7 @@ export type {
   ModelFeatureFlags,
   ModelProvider,
   ModelSource,
+  ProposedFileWrite,
   RagMatchedChunk,
   RuntimeCapabilityDefinition,
   RuntimeInvocationStatus,
@@ -55,6 +58,8 @@ export type ConfirmationReason =
   | 'approve_high_risk_capability'
   | 'resolve_contract_conflict'
   | 'continue_after_budget_warning'
+  | 'send_feishu_notification'
+  | 'apply_file_writes'
 
 export type ConfirmationOption = {
   key: string
@@ -95,6 +100,9 @@ export type ConfirmationRequestedPayload = {
   title: string
   description: string
   options: ConfirmationOption[]
+  taskId?: string
+  taskTitle?: string
+  writes?: ProposedFileWrite[]
 }
 
 export type TaskEventPayload = {
@@ -234,6 +242,9 @@ export type ConfirmationCardState = {
   relatedBriefId?: string
   relatedTaskId?: string
   relatedCapabilityId?: string
+  relatedArtifactId?: string
+  taskTitle?: string
+  writes?: ProposedFileWrite[]
 }
 
 export type TaskViewState = {

@@ -1,16 +1,19 @@
 import { spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import type {
   AgentMessageOutput,
   AgentRunInput,
   AgentRunResult,
   AgentRuntimeEvent,
+  ProposedFileWrite,
   RuntimeArtifactOutput,
   RuntimeError,
   RuntimeOutput,
   RuntimeType,
   RuntimeUsage
 } from '@agent-cluster/shared';
-import { runtimeTimeoutMs } from '../../common/runtime-config.js';
+import { resolveWorkspaceRoot, runtimeTimeoutMs } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
 import type { ToolExecutionRequest, ToolExecutorService } from './tool-executor.service.js';
 
@@ -129,13 +132,20 @@ export async function runCliRuntime(
 
   const { output, toolRequests, usage } = parsed;
   const toolArtifacts: RuntimeArtifactOutput[] = [];
+  const proposedWrites: ProposedFileWrite[] = [];
   for (const request of toolRequests) {
+    // file_write 仅作为待确认提案收集(读取现有内容做 diff),不在此落盘。
+    if (request.tool === 'file_write') {
+      proposedWrites.push(await toProposedWrite(request, input));
+      continue;
+    }
     const toolResult = await toolExecutor.execute(request, {
       runId: input.runId,
       sessionId: input.sessionId,
       taskId: input.taskId,
       agentId: input.agent.id,
       agentKey: input.agent.key,
+      workspaceRoot: input.workspaceDir,
       signal
     });
     events.push({
@@ -168,7 +178,28 @@ export async function runCliRuntime(
     output,
     events,
     artifacts: toolArtifacts,
+    proposedWrites,
     usage: toUsage(usage, options.runtimeType)
+  };
+}
+
+/** Turns a file_write request into a confirmation proposal, reading existing content for diff preview. */
+async function toProposedWrite(
+  request: Extract<ToolExecutionRequest, { tool: 'file_write' }>,
+  input: AgentRunInput
+): Promise<ProposedFileWrite> {
+  const root = resolveWorkspaceRoot(input.workspaceDir);
+  let previousContent: string | undefined;
+  try {
+    previousContent = await readFile(resolve(root, request.path), 'utf8');
+  } catch {
+    previousContent = undefined;
+  }
+  return {
+    path: request.path,
+    content: request.content,
+    summary: request.summary,
+    previousContent
   };
 }
 
