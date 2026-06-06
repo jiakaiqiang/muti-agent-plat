@@ -1,0 +1,485 @@
+{
+  "schemaVersion": "0.1",
+  "session": {
+    "id": "00000000-0000-4000-8000-000000000101",
+    "title": "v1 collaboration flow",
+    "originalInput": "Build the v1 collaboration workflow",
+    "status": "COMPLETED",
+    "ownerId": "local-user",
+    "workspaceId": "default-workspace",
+    "projectId": "00000000-0000-4000-8000-000000000201",
+    "currentTaskBriefId": "00000000-0000-4000-8000-000000000301",
+    "tokenBudget": 20000,
+    "tokenUsed": 1200,
+    "participatingAgentIds": [
+      "agent-coordinator",
+      "agent-requirements",
+      "agent-backend",
+      "agent-test",
+      "agent-review"
+    ],
+    "createdAt": "2026-05-27T00:00:00.000Z",
+    "updatedAt": "2026-05-27T00:20:00.000Z"
+  },
+  "brief": {
+    "id": "00000000-0000-4000-8000-000000000301",
+    "sessionId": "00000000-0000-4000-8000-000000000101",
+    "version": 1,
+    "goal": "Deliver the v1 collaboration workflow",
+    "scope": [
+      "session creation",
+      "task brief",
+      "user confirmation",
+      "dry-run execution",
+      "post review",
+      "final delivery"
+    ],
+    "outOfScope": [
+      "multi-tenant authorization"
+    ],
+    "constraints": [
+      "follow v0.1 contracts",
+      "all events use metadata.schemaVersion 0.1"
+    ],
+    "acceptanceCriteria": [
+      "main chain reaches COMPLETED",
+      "interrupting user message creates a handling plan",
+      "RAG hit is persisted and visible"
+    ],
+    "risks": [
+      "runtime output schema drift"
+    ],
+    "openQuestions": [],
+    "confirmedByUser": true,
+    "confirmedAt": "2026-05-27T00:05:00.000Z",
+    "createdAt": "2026-05-27T00:03:00.000Z"
+  },
+  "events": [
+    {
+      "id": "evt-001",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "user_message",
+      "userMessageIntent": "command",
+      "priority": "normal",
+      "toAgentIds": [],
+      "content": "Build the v1 collaboration workflow",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "chat_message",
+        "payload": {
+          "text": "Build the v1 collaboration workflow"
+        }
+      },
+      "createdAt": "2026-05-27T00:00:00.000Z"
+    },
+    {
+      "id": "evt-002",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "session_status_changed",
+      "toAgentIds": [],
+      "content": "Session moved to agent discussion.",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "system_notice",
+        "payload": {
+          "status": "AGENT_DISCUSSING"
+        }
+      },
+      "createdAt": "2026-05-27T00:01:00.000Z"
+    },
+    {
+      "id": "evt-003",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "brief_created",
+      "fromAgentId": "agent-coordinator",
+      "toAgentIds": [],
+      "content": "Task brief v1 created.",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "brief_card",
+        "payload": {
+          "briefId": "00000000-0000-4000-8000-000000000301",
+          "version": 1,
+          "goal": "Deliver the v1 collaboration workflow",
+          "scope": [
+            "session creation",
+            "task brief",
+            "user confirmation",
+            "dry-run execution",
+            "post review",
+            "final delivery"
+          ],
+          "outOfScope": [
+            "multi-tenant authorization"
+          ],
+          "constraints": [
+            "follow v0.1 contracts"
+          ],
+          "acceptanceCriteria": [
+            "main chain reaches COMPLETED",
+            "interrupting user message creates a handling plan",
+            "RAG hit is persisted and visible"
+          ],
+          "risks": [
+            "runtime output schema drift"
+          ],
+          "openQuestions": [],
+          "requiresUserConfirmation": true
+        }
+      },
+      "createdAt": "2026-05-27T00:03:00.000Z"
+    },
+    {
+      "id": "evt-004",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "user_confirmation_requested",
+      "fromAgentId": "agent-coordinator",
+      "toAgentIds": [],
+      "content": "Please confirm task brief v1.",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "confirmation_card",
+        "payload": {
+          "confirmationId": "confirm-brief-001",
+          "reason": "confirm_task_brief",
+          "title": "Confirm task brief",
+          "description": "Confirm the collaboration workflow brief.",
+          "options": [
+            {
+              "key": "approve",
+              "label": "Confirm",
+              "style": "primary"
+            },
+            {
+              "key": "revise",
+              "label": "Revise",
+              "style": "default"
+            }
+          ]
+        }
+      },
+      "createdAt": "2026-05-27T00:04:00.000Z"
+    },
+    {
+      "id": "evt-005",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "brief_confirmed",
+      "toAgentIds": [],
+      "content": "User confirmed task brief v1.",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "system_notice",
+        "payload": {
+          "briefId": "00000000-0000-4000-8000-000000000301",
+          "confirmedByUser": true
+        }
+      },
+      "createdAt": "2026-05-27T00:05:00.000Z"
+    },
+    {
+      "id": "evt-006",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "task_created",
+      "fromAgentId": "agent-coordinator",
+      "toAgentIds": [
+        "agent-backend"
+      ],
+      "taskId": "task-dry-run-001",
+      "content": "Create dry-run implementation task.",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "task_card",
+        "payload": {
+          "taskId": "task-dry-run-001",
+          "title": "Dry-run collaboration flow",
+          "status": "pending",
+          "assigneeAgentId": "agent-backend",
+          "dependsOnTaskIds": [],
+          "acceptanceCriteria": [
+            "runtime emits started, progress, completed"
+          ]
+        }
+      },
+      "createdAt": "2026-05-27T00:06:00.000Z"
+    },
+    {
+      "id": "evt-007",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "session_status_changed",
+      "toAgentIds": [],
+      "content": "Session moved to execution.",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "system_notice",
+        "payload": {
+          "status": "EXECUTING"
+        }
+      },
+      "createdAt": "2026-05-27T00:07:00.000Z"
+    },
+    {
+      "id": "evt-008",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "runtime_started",
+      "fromAgentId": "agent-backend",
+      "toAgentIds": [],
+      "taskId": "task-dry-run-001",
+      "content": "Mock runtime started dry-run.",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "tool_card",
+        "payload": {
+          "runtimeInvocationId": "run-001",
+          "runtimeType": "mock",
+          "agentId": "agent-backend",
+          "taskId": "task-dry-run-001",
+          "status": "running"
+        }
+      },
+      "createdAt": "2026-05-27T00:08:00.000Z"
+    },
+    {
+      "id": "evt-009",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "user_message",
+      "userMessageIntent": "constraint",
+      "priority": "high",
+      "toAgentIds": [
+        "agent-coordinator"
+      ],
+      "content": "While executing, keep the dry-run non-destructive.",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "chat_message",
+        "payload": {
+          "text": "While executing, keep the dry-run non-destructive.",
+          "mentionedAgentIds": [
+            "agent-coordinator"
+          ]
+        }
+      },
+      "createdAt": "2026-05-27T00:09:00.000Z"
+    },
+    {
+      "id": "evt-010",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "agent_message",
+      "fromAgentId": "agent-coordinator",
+      "toAgentIds": [
+        "agent-backend",
+        "agent-test"
+      ],
+      "content": "User interruption routed as a high-priority constraint.",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "chat_message",
+        "payload": {
+          "messageKind": "handoff",
+          "mentionedAgentIds": [
+            "agent-backend",
+            "agent-test"
+          ],
+          "handlingPlan": {
+            "intent": "constraint",
+            "priority": "high",
+            "shouldPause": false,
+            "affectedTaskIds": [
+              "task-dry-run-001"
+            ],
+            "affectedAgentIds": [
+              "agent-backend",
+              "agent-test"
+            ],
+            "requiresBriefRevision": false,
+            "requiresUserConfirmation": false,
+            "coordinatorInstruction": "Continue execution using non-destructive dry-run behavior."
+          }
+        }
+      },
+      "createdAt": "2026-05-27T00:10:00.000Z"
+    },
+    {
+      "id": "evt-011",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "rag_retrieved",
+      "fromAgentId": "agent-test",
+      "toAgentIds": [],
+      "taskId": "task-dry-run-001",
+      "content": "Retrieved relevant v0.1 contract snippets.",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "rag_card",
+        "payload": {
+          "retrievalLogId": "rag-log-001",
+          "agentId": "agent-test",
+          "query": "v0.1 dry-run post review delivery contract",
+          "matchedChunks": [
+            {
+              "chunkId": "chunk-event-final-delivery",
+              "knowledgeBaseId": "kb-contracts",
+              "documentId": "doc-event-contract-v0.1",
+              "title": "Event Contract v0.1",
+              "snippet": "final_delivery_created renders as a delivery card",
+              "score": 0.92
+            }
+          ]
+        }
+      },
+      "createdAt": "2026-05-27T00:11:00.000Z"
+    },
+    {
+      "id": "evt-012",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "runtime_completed",
+      "fromAgentId": "agent-backend",
+      "toAgentIds": [],
+      "taskId": "task-dry-run-001",
+      "content": "Dry-run completed.",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "tool_card",
+        "payload": {
+          "runtimeInvocationId": "run-001",
+          "runtimeType": "mock",
+          "agentId": "agent-backend",
+          "taskId": "task-dry-run-001",
+          "status": "completed",
+          "tokenInput": 0,
+          "tokenOutput": 0,
+          "cost": 0
+        }
+      },
+      "createdAt": "2026-05-27T00:12:00.000Z"
+    },
+    {
+      "id": "evt-013",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "task_completed",
+      "fromAgentId": "agent-backend",
+      "toAgentIds": [],
+      "taskId": "task-dry-run-001",
+      "content": "Dry-run task completed.",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "task_card",
+        "payload": {
+          "taskId": "task-dry-run-001",
+          "title": "Dry-run collaboration flow",
+          "status": "completed",
+          "resultSummary": "Non-destructive dry-run completed."
+        }
+      },
+      "createdAt": "2026-05-27T00:13:00.000Z"
+    },
+    {
+      "id": "evt-014",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "post_review_started",
+      "fromAgentId": "agent-review",
+      "toAgentIds": [],
+      "content": "Post review started.",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "review_card",
+        "payload": {
+          "taskId": "task-dry-run-001"
+        }
+      },
+      "createdAt": "2026-05-27T00:14:00.000Z"
+    },
+    {
+      "id": "evt-015",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "post_review_completed",
+      "fromAgentId": "agent-review",
+      "toAgentIds": [],
+      "content": "Post review recommends delivery.",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "review_card",
+        "payload": {
+          "kind": "post_review_report",
+          "isConsistentWithBrief": true,
+          "matchedItems": [
+            "main chain reaches COMPLETED",
+            "interrupting user message creates a handling plan",
+            "RAG hit is persisted and visible"
+          ],
+          "mismatchedItems": [],
+          "missingItems": [],
+          "outOfScopeChanges": [],
+          "testResults": [
+            "dry-run passed"
+          ],
+          "recommendation": "deliver"
+        }
+      },
+      "createdAt": "2026-05-27T00:15:00.000Z"
+    },
+    {
+      "id": "evt-016",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "artifact_created",
+      "fromAgentId": "agent-review",
+      "toAgentIds": [],
+      "content": "Review artifact created.",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "artifact_card",
+        "payload": {
+          "artifactId": "artifact-review-001",
+          "type": "test_report",
+          "title": "Dry-run review report"
+        }
+      },
+      "createdAt": "2026-05-27T00:16:00.000Z"
+    },
+    {
+      "id": "evt-017",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "final_delivery_created",
+      "fromAgentId": "agent-coordinator",
+      "toAgentIds": [],
+      "content": "Final delivery created.",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "delivery_card",
+        "payload": {
+          "deliveryId": "delivery-001",
+          "summary": "v1 collaboration workflow dry-run delivered.",
+          "completedItems": [
+            "session creation",
+            "brief confirmation",
+            "dry-run execution",
+            "post review"
+          ],
+          "incompleteItems": [],
+          "outOfScopeChanges": [],
+          "testResults": [
+            "dry-run passed"
+          ],
+          "risks": [],
+          "artifactIds": [
+            "artifact-review-001"
+          ]
+        }
+      },
+      "createdAt": "2026-05-27T00:17:00.000Z"
+    },
+    {
+      "id": "evt-018",
+      "sessionId": "00000000-0000-4000-8000-000000000101",
+      "type": "session_status_changed",
+      "toAgentIds": [],
+      "content": "Session completed.",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "system_notice",
+        "payload": {
+          "status": "COMPLETED"
+        }
+      },
+      "createdAt": "2026-05-27T00:20:00.000Z"
+    }
+  ]
+}

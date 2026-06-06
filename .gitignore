@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.yarn/
+
+# Build outputs
+dist/
+build/
+coverage/
+.turbo/
+.vite/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+.cache/
+.codex-run/
+.playwright-cli/
+output/
+tmp/
+temp/
+uploads/
+artifacts/
+
+# Docker and database local state
+*.pid
+*.seed
+dump.sql
+*.dump
+
+# IDE and OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Test reports
+playwright-report/
+test-results/
+junit.xml

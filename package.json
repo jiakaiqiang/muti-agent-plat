@@ -1,0 +1,51 @@
+{
+  "name": "agent-cluster",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "test:harness:phase1": "node tests/harness-engineering/validate-phase1.mjs",
+    "test:harness:phase2": "node tests/harness-engineering/validate-phase2.mjs",
+    "test:harness:phase3": "node tests/harness-engineering/validate-phase3.mjs",
+    "test:harness:phase4": "node tests/harness-engineering/validate-phase4.mjs",
+    "test:harness:phase5": "node tests/harness-engineering/validate-phase5.mjs",
+    "test:harness": "npm run test:harness:phase1 && npm run test:harness:phase2 && npm run test:harness:phase3 && npm run test:harness:phase4 && npm run test:harness:phase5",
+    "test:e2e:main-chain": "node tests/e2e/run-main-chain.mjs",
+    "test:e2e:p1-behaviors": "node tests/e2e/run-p1-behaviors.mjs",
+    "test:e2e:ops": "node tests/e2e/ops-smoke.mjs",
+    "test:e2e:security": "node tests/e2e/security-smoke.mjs",
+    "test:e2e:real-data-mode": "node tests/e2e/real-data-mode-smoke.mjs",
+    "test:e2e:workspace-chrome": "node tests/e2e/workspace-chrome-regression-smoke.mjs",
+    "test:e2e:chinese-copy": "node tests/e2e/chinese-visible-copy-smoke.mjs",
+    "test:e2e:generic-llm-real": "node tests/e2e/generic-llm-real-smoke.mjs",
+    "test:e2e:postgres-persistence": "node tests/e2e/postgres-persistence-smoke.mjs",
+    "test:e2e:bullmq-ops": "node tests/e2e/bullmq-ops-smoke.mjs",
+    "test:e2e:real-agents-no-seed": "node tests/e2e/real-agents-no-seed-smoke.mjs",
+    "test:e2e:agent-create": "node tests/e2e/agent-create-smoke.mjs",
+    "test:e2e:real-session-custom-agent": "node tests/e2e/real-session-custom-agent-smoke.mjs",
+    "test:e2e:debug-memory": "node tests/e2e/debug-memory-smoke.mjs",
+    "test:e2e:persistence": "node tests/e2e/persistence-smoke.mjs",
+    "test:e2e:runtime-routing": "node tests/e2e/runtime-routing-smoke.mjs",
+    "test:e2e:runtime-model-switch": "node tests/e2e/runtime-model-switch-smoke.mjs",
+    "test:e2e:discussion-timeout-brief": "node tests/e2e/discussion-timeout-brief-smoke.mjs",
+    "test:e2e:memory-confirm": "node tests/e2e/memory-confirm-smoke.mjs",
+    "test:e2e:token-budget": "node tests/e2e/token-budget-smoke.mjs",
+    "test:e2e:task-dependency": "node tests/e2e/task-dependency-smoke.mjs",
+    "test:e2e:multi-agent-discussion": "node tests/e2e/multi-agent-discussion-smoke.mjs",
+    "lint": "npm run lint --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

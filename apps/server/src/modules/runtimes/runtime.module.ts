@@ -1,0 +1,22 @@
+import { Module } from '@nestjs/common';
+import { ClaudeCodeRuntimeAdapterService } from './claude-code-runtime-adapter.service.js';
+import { CodexRuntimeAdapterService } from './codex-runtime-adapter.service.js';
+import { GenericLlmRuntimeService } from './generic-llm-runtime.service.js';
+import { MockRuntimeService } from './mock-runtime.service.js';
+import { RuntimeModelConfigService } from './runtime-model-config.service.js';
+import { RuntimeController } from './runtime.controller.js';
+import { RuntimeService } from './runtime.service.js';
+
+@Module({
+  controllers: [RuntimeController],
+  providers: [
+    RuntimeService,
+    RuntimeModelConfigService,
+    MockRuntimeService,
+    GenericLlmRuntimeService,
+    CodexRuntimeAdapterService,
+    ClaudeCodeRuntimeAdapterService
+  ],
+  exports: [RuntimeService, RuntimeModelConfigService]
+})
+export class RuntimeModule {}
