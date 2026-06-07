@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import type { Agent, SessionDetail, SessionStatus } from '@agent-cluster/shared';
+import type { Agent, CollaborationEvent, SessionDetail, SessionStatus, SessionWorkingDirectory } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
+import { messages } from '../../common/messages.js';
 import { nowIso } from '../../common/time.js';
 import { AgentsService } from '../agents/agents.service.js';
 import { EventsService } from '../events/events.service.js';
@@ -17,11 +18,13 @@ type CreateSessionInput = {
   projectId?: string;
   tokenBudget?: number;
   knowledgeBaseIds?: string[];
+  workingDirectory?: SessionWorkingDirectory;
 };
 
 @Injectable()
 export class SessionsService {
   private readonly sessions = new Map<string, SessionDetail>();
+  private readonly briefGenerationSeqBySession = new Map<string, number>();
 
   constructor(
     private readonly agents: AgentsService,
@@ -40,18 +43,20 @@ export class SessionsService {
   }
 
   list() {
-    return [...this.sessions.values()].map((session) => ({
-      id: session.id,
-      title: session.title,
-      status: session.status,
-      tokenBudget: session.tokenBudget,
-      tokenUsed: session.tokenUsed,
-      agentCount: session.participatingAgentIds.length,
-      requiresUserAction: ['WAIT_USER_CONFIRM', 'WAIT_USER_DECISION'].includes(session.status),
-      latestEventSummary: this.events.list(session.id).at(-1)?.content,
-      createdAt: session.createdAt,
-      updatedAt: session.updatedAt
-    }));
+    return [...this.sessions.values()]
+      .sort((left, right) => this.compareSessionRecency(left, right))
+      .map((session) => ({
+        id: session.id,
+        title: session.title,
+        status: session.status,
+        tokenBudget: session.tokenBudget,
+        tokenUsed: session.tokenUsed,
+        agentCount: session.participatingAgentIds.length,
+        requiresUserAction: ['WAIT_USER_CONFIRM', 'WAIT_USER_DECISION'].includes(session.status),
+        latestEventSummary: this.events.list(session.id).at(-1)?.content,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt
+      }));
   }
 
   get(sessionId: string) {
@@ -66,6 +71,19 @@ export class SessionsService {
     return [...this.sessions.values()];
   }
 
+  delete(sessionId: string) {
+    const session = this.get(sessionId);
+    this.execution.cancel(sessionId);
+    this.sessions.delete(sessionId);
+    this.briefGenerationSeqBySession.delete(sessionId);
+    this.tasks.deleteSession(sessionId);
+    this.memories.deleteSession(sessionId);
+    this.events.deleteSession(sessionId);
+    this.orchestrator.deleteSession(sessionId);
+    this.persist();
+    return { deleted: true, sessionId: session.id };
+  }
+
   async create(input: CreateSessionInput) {
     const now = nowIso();
     const participatingAgentIds = this.agents.resolveIds(input.agentIds);
@@ -78,6 +96,7 @@ export class SessionsService {
       workspaceId: 'default-workspace',
       projectId: input.projectId,
       knowledgeBaseIds: input.knowledgeBaseIds ?? [],
+      workingDirectory: input.workingDirectory,
       tokenBudget: input.tokenBudget,
       tokenUsed: 0,
       participatingAgentIds,
@@ -93,9 +112,10 @@ export class SessionsService {
       userMessageIntent: 'clarification',
       priority: 'normal',
       content: input.input,
+      toAgentIds: participatingAgentIds,
       metadata: createMetadata('chat_message', {
         text: input.input,
-        mentionedAgentIds: []
+        mentionedAgentIds: participatingAgentIds
       })
     });
 
@@ -105,13 +125,18 @@ export class SessionsService {
   }
 
   private generateBriefInBackground(session: SessionDetail) {
+    const generationSeq = (this.briefGenerationSeqBySession.get(session.id) ?? 0) + 1;
+    this.briefGenerationSeqBySession.set(session.id, generationSeq);
     void this.orchestrator
       .discussAndCreateBrief(session)
       .then((brief) => {
+        if (this.briefGenerationSeqBySession.get(session.id) !== generationSeq) {
+          return;
+        }
         session.currentTaskBriefId = brief.id;
         this.setStatus(session, 'WAIT_USER_CONFIRM');
       })
-      .catch((error) => this.failSession(session, error, 'brief_generation'));
+      .catch((error) => this.failSessionWithFullError(session, error, 'brief_generation'));
   }
 
   async sendMessage(sessionId: string, content: string, mentionedAgentIds: string[] = []) {
@@ -148,12 +173,12 @@ export class SessionsService {
         sessionId,
         type: 'user_confirmation_requested',
         priority: 'normal',
-        content: '请确认是否写入这条长期记忆。',
+        content: 'Please confirm whether this preference should be saved as long-term memory.',
         metadata: createMetadata('confirmation_card', {
           confirmationId: crypto.randomUUID(),
           reason: 'confirm_memory_write',
-          title: '确认长期记忆',
-          description: '确认后，这条偏好会作为长期记忆候选写入当前会话。',
+          title: 'Confirm memory write',
+          description: 'After confirmation, this preference will be stored as a long-term memory candidate.',
           candidate: {
             content,
             sourceEventId: event.id,
@@ -161,53 +186,30 @@ export class SessionsService {
             confidence: 0.72
           },
           options: [
-            { key: 'approve', label: '写入记忆', style: 'primary' },
-            { key: 'reject', label: '暂不写入', style: 'default' }
+            { key: 'approve', label: 'Save memory', style: 'primary' },
+            { key: 'reject', label: 'Skip', style: 'default' }
           ]
         })
       });
     }
 
     if (handlingPlan.shouldPause) {
-      this.execution.cancel(sessionId);
-      this.setStatus(session, 'WAIT_USER_DECISION');
-      const confirmationId = crypto.randomUUID();
-      this.events.create({
-        sessionId,
-        type: 'session_status_changed',
-        priority: 'high',
-        content: '用户插话影响当前执行，已暂停相关任务并等待用户决策。',
-        metadata: createMetadata('system_notice', {
-          status: 'WAIT_USER_DECISION',
-          reason: 'executing_user_interrupt',
-          handlingPlan
-        })
-      });
-      this.events.create({
-        sessionId,
-        type: 'user_confirmation_requested',
-        priority: 'high',
-        content: '请确认如何处理执行中的新增约束。',
-        metadata: createMetadata('confirmation_card', {
-          confirmationId,
-          reason: 'resolve_contract_conflict',
-          title: '处理执行中插话',
-          description:
-            '新增约束可能影响已确认的任务契约。请选择继续执行或取消当前任务。',
-          options: [
-            { key: 'resume', label: '继续执行', style: 'primary' },
-            { key: 'cancel', label: '取消任务', style: 'danger' }
-          ],
-          handlingPlan
-        })
-      });
+      this.reopenRequirementLoop(session, content, event, handlingPlan.affectedAgentIds, 'executing_user_interrupt');
+    } else if (this.shouldReopenRequirementLoop(session.status, handlingPlan.requiresBriefRevision)) {
+      this.reopenRequirementLoop(session, content, event, handlingPlan.affectedAgentIds, 'user_requirement_supplement');
+    } else {
+      this.touchSession(session);
     }
+
 
     return { event, handlingPlan };
   }
 
   async confirmBrief(sessionId: string, briefId: string) {
     const session = this.get(sessionId);
+    if (session.currentTaskBriefId !== briefId) {
+      throw new BadRequestException(`Brief is not current: ${briefId}`);
+    }
     const { brief, tasks } = this.orchestrator.prepareExecution(session, briefId);
     session.currentTaskBriefId = brief.id;
     this.setStatus(session, 'EXECUTING');
@@ -246,10 +248,10 @@ export class SessionsService {
       priority: 'high',
       content:
         outcome.kind === 'rework'
-          ? `复盘建议返工：${reason}`
+          ? `Post-review requested rework: ${reason}`
           : outcome.kind === 'ask_user'
-            ? `执行已暂停，等待用户决策：${reason}`
-            : `执行失败：${reason}`,
+            ? `Execution paused and is waiting for user input: ${reason}`
+            : `Execution failed: ${reason}`,
       metadata: createMetadata(outcome.kind === 'failed' ? 'error_card' : 'system_notice', {
         status: nextStatus,
         outcome: outcome.kind,
@@ -273,14 +275,14 @@ export class SessionsService {
     const event = this.events.create({
       sessionId,
       type: 'session_status_changed',
-      content: reason ?? `会话状态已更新为 ${nextStatus}`,
+      content: reason ?? `Session status updated to ${nextStatus}`,
       metadata: createMetadata('system_notice', { status: nextStatus, requestedStatus: status, reason })
     });
     const confirmationEvent = confirmationId
       ? this.events.create({
           sessionId,
           type: 'user_confirmation_resolved',
-      content: `用户选择了${status === 'CANCELLED' ? '取消' : '继续'}`,
+      content: `User selected ${status === 'CANCELLED' ? 'cancel' : 'resume'}`,
           metadata: createMetadata('system_notice', {
             confirmationId,
             status: status === 'CANCELLED' ? 'rejected' : 'approved',
@@ -314,7 +316,7 @@ export class SessionsService {
     const event = this.events.create({
       sessionId,
       type: 'user_confirmation_resolved',
-      content: '长期记忆已确认写入。',
+      content: 'Long-term memory candidate has been confirmed.',
       metadata: createMetadata('system_notice', {
         confirmationId: input.confirmationId,
         status: 'approved',
@@ -323,7 +325,21 @@ export class SessionsService {
         memoryId: memory.id
       })
     });
+    this.touchSession(this.get(sessionId));
     return { memory, event };
+  }
+
+  private compareSessionRecency(left: SessionDetail, right: SessionDetail) {
+    return this.sessionRecencyTime(right) - this.sessionRecencyTime(left);
+  }
+
+  private sessionRecencyTime(session: SessionDetail) {
+    return Date.parse(session.updatedAt || session.createdAt) || Date.parse(session.createdAt) || 0;
+  }
+
+  private touchSession(session: SessionDetail) {
+    session.updatedAt = nowIso();
+    this.persist();
   }
 
   private setStatus(session: SessionDetail, status: SessionStatus) {
@@ -339,7 +355,7 @@ export class SessionsService {
       sessionId: session.id,
       type: 'session_status_changed',
       priority: 'high',
-      content: `会话在 ${phase} 阶段失败：${message}`,
+      content: `Session failed during ${phase}: ${message}`,
       metadata: createMetadata('system_notice', {
         status: 'FAILED',
         phase,
@@ -354,6 +370,41 @@ export class SessionsService {
       metadata: createMetadata('error_card', {
         phase,
         message
+      })
+    });
+  }
+
+  private failSessionWithFullError(session: SessionDetail, error: unknown, phase: string) {
+    const message = error instanceof Error ? error.message : String(error);
+    const stack = error instanceof Error ? error.stack : undefined;
+    const phaseLabel = messages.phaseLabel(phase);
+    const fullMessage = `Session failed during ${phaseLabel}: ${message}`;
+    this.setStatus(session, 'FAILED');
+    this.events.create({
+      sessionId: session.id,
+      type: 'session_status_changed',
+      priority: 'high',
+      content: fullMessage,
+      metadata: createMetadata('system_notice', {
+        status: 'FAILED',
+        phase,
+        phaseLabel,
+        message,
+        fullMessage,
+        stack
+      })
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'error_reported',
+      priority: 'high',
+      content: fullMessage,
+      metadata: createMetadata('error_card', {
+        phase,
+        phaseLabel,
+        message,
+        fullMessage,
+        stack
       })
     });
   }
@@ -380,14 +431,105 @@ export class SessionsService {
     return this.events.list(sessionId).some((event) => event.type === 'final_delivery_created');
   }
 
+  private shouldReopenRequirementLoop(status: SessionStatus, requiresBriefRevision: boolean) {
+    return (
+      requiresBriefRevision ||
+      ['AGENT_DISCUSSING', 'WAIT_USER_CONFIRM', 'REVISING_BRIEF', 'WAIT_USER_DECISION'].includes(status)
+    );
+  }
+
+  private reopenRequirementLoop(
+    session: SessionDetail,
+    content: string,
+    sourceEvent: CollaborationEvent,
+    affectedAgentIds: string[],
+    reason: string
+  ) {
+    this.execution.cancel(session.id);
+    this.tasks.cancelUnfinished(session.id, 'User supplied a new or updated requirement before task completion.');
+    const relevantAgentIds = this.relevantAgentIds(session, content, affectedAgentIds);
+    this.recordAgentRequirementContext(session, content, sourceEvent.id, relevantAgentIds);
+    this.events.create({
+      sessionId: session.id,
+      type: 'session_status_changed',
+      priority: 'high',
+      content:
+        'User input changed the working requirement. Agents will restate understanding and request confirmation before assigning work.',
+      metadata: createMetadata('system_notice', {
+        status: 'AGENT_DISCUSSING',
+        reason,
+        sourceEventId: sourceEvent.id,
+        affectedAgentIds: relevantAgentIds
+      })
+    });
+    this.setStatus(session, 'AGENT_DISCUSSING');
+    this.generateBriefInBackground(session);
+  }
+
+  private recordAgentRequirementContext(
+    session: SessionDetail,
+    content: string,
+    sourceEventId: string,
+    relevantAgentIds: string[]
+  ) {
+    for (const agentId of relevantAgentIds) {
+      const agent = this.agents.findByIdOrKey(agentId);
+      if (!agent) {
+        continue;
+      }
+      this.memories.create({
+        sessionId: session.id,
+        agentId,
+        scope: 'session',
+        content: `User requirement update relevant to ${agent.name}: ${content}`,
+        sourceEventId,
+        confidence: 0.9
+      });
+      this.events.create({
+        sessionId: session.id,
+        type: 'agent_status_changed',
+        fromAgentId: agentId,
+        content: `${agent.name} marked the user update as relevant and added it to its session context.`,
+        metadata: createMetadata('system_notice', {
+          agentId,
+          status: 'thinking',
+          thoughtSummary: 'Relevant requirement update added to agent context.',
+          actionSummary: 'Will use this update during the next understanding and execution pass.',
+          sourceEventId
+        })
+      });
+    }
+  }
+
+  private relevantAgentIds(session: SessionDetail, content: string, affectedAgentIds: string[]) {
+    const agents = this.participatingAgents(session);
+    const explicit = new Set(affectedAgentIds);
+    for (const agent of agents) {
+      if (
+        content.includes(agent.id) ||
+        content.includes(`@${agent.key}`) ||
+        content.includes(`@${agent.name}`) ||
+        new RegExp(this.escapeRegExp(agent.key), 'i').test(content) ||
+        new RegExp(this.escapeRegExp(agent.name), 'i').test(content)
+      ) {
+        explicit.add(agent.id);
+      }
+    }
+    return Array.from(explicit.size ? explicit : new Set(agents.map((agent) => agent.id)));
+  }
+
+  private escapeRegExp(value: string) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
   private resumeExecution(session: SessionDetail) {
     if (!session.currentTaskBriefId) {
-      this.applyOutcome(session.id, { kind: 'ask_user', reason: '无法恢复执行：未找到当前任务契约。' });
+      this.applyOutcome(session.id, { kind: 'ask_user', reason: 'Cannot resume execution: current task brief not found.' });
       return;
     }
     const brief = this.orchestrator.getBrief(session.id, session.currentTaskBriefId);
     if (!brief) {
-      this.applyOutcome(session.id, { kind: 'ask_user', reason: '无法恢复执行：任务契约不存在。' });
+      this.applyOutcome(session.id, { kind: 'ask_user', reason: 'Cannot resume execution: task brief does not exist.' });
       return;
     }
     this.tasks.resetStaleRunning(session.id);
@@ -396,7 +538,7 @@ export class SessionsService {
   }
 
   private titleFromInput(input: string) {
-    return input.trim().slice(0, 28) || '新协作会话';
+    return input.trim().slice(0, 28) || 'New collaboration session';
   }
 
   private participatingAgents(session: SessionDetail) {
@@ -416,7 +558,7 @@ export class SessionsService {
     }
     const fallback = agents[0];
     if (!fallback) {
-      throw new Error('当前会话没有可用的 Agent。');
+      throw new Error('Current session has no available Agent.');
     }
     return fallback;
   }
@@ -425,3 +567,4 @@ export class SessionsService {
     this.persistence.setCollection('sessions', [...this.sessions.values()]);
   }
 }
+

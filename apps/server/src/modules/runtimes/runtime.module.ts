@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AgentsModule } from '../agents/agents.module.js';
 import { ClaudeCodeRuntimeAdapterService } from './claude-code-runtime-adapter.service.js';
 import { CodexRuntimeAdapterService } from './codex-runtime-adapter.service.js';
 import { GenericLlmRuntimeService } from './generic-llm-runtime.service.js';
@@ -8,6 +9,7 @@ import { RuntimeController } from './runtime.controller.js';
 import { RuntimeService } from './runtime.service.js';
 
 @Module({
+  imports: [AgentsModule],
   controllers: [RuntimeController],
   providers: [
     RuntimeService,

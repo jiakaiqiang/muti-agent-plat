@@ -221,6 +221,7 @@ function assertAgent(agent) {
 await ensurePostgres();
 await runNpm(['run', 'build', '-w', '@agent-cluster/shared']);
 await runNpm(['run', 'build', '-w', '@agent-cluster/server']);
+const { defaultAgents } = await import('@agent-cluster/shared');
 
 let first;
 let second;
@@ -229,8 +230,13 @@ try {
   await dropSmokeTable();
   first = await startServer();
   const initial = await api(first.apiBase, '/agents');
-  if (!Array.isArray(initial.data) || initial.data.length !== 0) {
-    throw new Error(`Agent create smoke expects an empty real-agent list: ${JSON.stringify(initial)}`);
+  if (!Array.isArray(initial.data)) {
+    throw new Error(`Agent create smoke expects an agent array: ${JSON.stringify(initial)}`);
+  }
+  const initialDefaultKeys = new Set(initial.data.map((agent) => agent.key));
+  const missingDefaultKeys = defaultAgents.map((agent) => agent.key).filter((key) => !initialDefaultKeys.has(key));
+  if (missingDefaultKeys.length) {
+    throw new Error(`Agent create smoke expects built-in agents to be visible: ${missingDefaultKeys.join(', ')}`);
   }
 
   const created = await api(first.apiBase, '/agents', {
@@ -245,22 +251,24 @@ try {
   assertAgent(created.data);
 
   const listed = await api(first.apiBase, '/agents');
-  if (listed.data.length !== 1) {
+  const listedCreatedAgent = listed.data.find((agent) => agent.id === created.data.id);
+  if (!listedCreatedAgent) {
     throw new Error(`Created agent should be returned by GET /agents: ${JSON.stringify(listed)}`);
   }
-  assertAgent(listed.data[0]);
+  assertAgent(listedCreatedAgent);
 
   await stopServer(first.server);
   first = undefined;
 
   second = await startServer();
   const restored = await api(second.apiBase, '/agents');
-  if (restored.data.length !== 1) {
+  const restoredCreatedAgent = restored.data.find((agent) => agent.id === created.data.id);
+  if (!restoredCreatedAgent) {
     throw new Error(`Created agent should persist after restart: ${JSON.stringify(restored)}`);
   }
-  assertAgent(restored.data[0]);
+  assertAgent(restoredCreatedAgent);
 
-  console.log(`agent create smoke ok: ${restored.data[0].id}`);
+  console.log(`agent create smoke ok: ${restoredCreatedAgent.id}`);
 } finally {
   if (first) {
     await stopServer(first.server);

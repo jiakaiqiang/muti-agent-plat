@@ -89,6 +89,30 @@ function statusLabel(status?: string) {
 function capabilityLabel(capabilityId?: string) {
   return capabilityId ? agentStore.capabilityName(capabilityId) : undefined
 }
+
+function phaseLabel(phase?: string) {
+  return (
+    {
+      discussion: 'Agent 讨论',
+      brief_generation: '任务契约生成',
+      brief_revision: '任务契约修订',
+      task_brief: '任务契约生成',
+      task_execution: '任务执行',
+      post_review: '复盘评估',
+      final_delivery: '最终交付',
+      user_message_routing: '消息路由'
+    }[phase ?? ''] ?? phase ?? '未知阶段'
+  )
+}
+
+function errorPayload(message: ChatMessage) {
+  return message.messageType === 'error' ? (message.payload as Record<string, unknown> | undefined) : undefined
+}
+
+function errorText(message: ChatMessage, key: string) {
+  const value = errorPayload(message)?.[key]
+  return typeof value === 'string' ? value : ''
+}
 </script>
 
 <template>
@@ -115,6 +139,25 @@ function capabilityLabel(capabilityId?: string) {
 
         <template v-else>
           <p class="message-content">{{ message.content }}</p>
+
+          <div v-if="errorPayload(message)" class="structured-block error-block">
+            <div class="structured-block__heading">
+              <h3>错误详情</h3>
+              <span class="status-pill failed">{{ phaseLabel(errorText(message, 'phase')) }}</span>
+            </div>
+            <dl>
+              <div>
+                <dt>阶段</dt>
+                <dd>{{ errorText(message, 'phaseLabel') || phaseLabel(errorText(message, 'phase')) }}</dd>
+              </div>
+              <div>
+                <dt>错误</dt>
+                <dd>{{ errorText(message, 'message') || message.content }}</dd>
+              </div>
+            </dl>
+            <pre v-if="errorText(message, 'stack')" class="error-stack">{{ errorText(message, 'stack') }}</pre>
+            <pre v-else class="error-stack">{{ errorText(message, 'fullMessage') || message.content }}</pre>
+          </div>
 
           <div v-if="message.messageType === 'brief'" class="structured-block">
             <h3>{{ message.payload?.goal }}</h3>

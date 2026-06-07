@@ -108,6 +108,10 @@ withDefaults(
     <template v-else-if="name === 'check'">
       <path d="m20 6-11 11-5-5" />
     </template>
+    <template v-else-if="name === 'folder'">
+      <path d="M3 7a3 3 0 0 1 3-3h4l2 2h6a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3z" />
+      <path d="M3 10h18" />
+    </template>
     <template v-else-if="name === 'search'">
       <circle cx="11" cy="11" r="7" />
       <path d="m20 20-3.2-3.2" />

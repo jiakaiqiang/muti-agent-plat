@@ -21,7 +21,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
   readonly type = 'mock' as const;
 
   async run(input: AgentRunInput, signal?: AbortSignal): Promise<AgentRunResult> {
-    if (!mockRuntimeEnabled()) {
+    if (!mockRuntimeEnabled() && input.options?.allowMockFallback !== true) {
       return this.disabledResult(input);
     }
 

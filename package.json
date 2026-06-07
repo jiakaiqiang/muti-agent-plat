@@ -35,6 +35,8 @@
     "test:e2e:persistence": "node tests/e2e/persistence-smoke.mjs",
     "test:e2e:runtime-routing": "node tests/e2e/runtime-routing-smoke.mjs",
     "test:e2e:runtime-model-switch": "node tests/e2e/runtime-model-switch-smoke.mjs",
+    "test:e2e:requirement-revision-loop": "node tests/e2e/requirement-revision-loop-smoke.mjs",
+    "test:e2e:session-delete": "node tests/e2e/session-delete-smoke.mjs",
     "test:e2e:discussion-timeout-brief": "node tests/e2e/discussion-timeout-brief-smoke.mjs",
     "test:e2e:memory-confirm": "node tests/e2e/memory-confirm-smoke.mjs",
     "test:e2e:token-budget": "node tests/e2e/token-budget-smoke.mjs",

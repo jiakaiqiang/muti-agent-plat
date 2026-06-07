@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import { defaultAgents } from '@agent-cluster/shared'
 import { apiGet, apiPatch, apiPost } from '@/api/client'
 import type { Agent, RuntimeCapabilityDefinition } from '@/types/contracts'
 
@@ -24,6 +25,19 @@ const capabilityNameById: Record<string, string> = {
   'cap-feishu-draft': '飞书草稿'
 }
 
+function mergeWithDefaultAgents(agents: Agent[]) {
+  const merged = new Map<string, Agent>()
+  for (const agent of agents) {
+    merged.set(agent.id, agent)
+  }
+  for (const agent of defaultAgents) {
+    if (!merged.has(agent.id) && !agents.some((item) => item.key === agent.key)) {
+      merged.set(agent.id, agent)
+    }
+  }
+  return [...merged.values()]
+}
+
 export const useAgentStore = defineStore('agent', {
   state: () => ({
     agents: [] as Agent[],
@@ -40,7 +54,12 @@ export const useAgentStore = defineStore('agent', {
   },
   actions: {
     async loadAgents() {
-      this.agents = await apiGet<Agent[]>('/agents')
+      try {
+        this.agents = mergeWithDefaultAgents(await apiGet<Agent[]>('/agents'))
+      } catch (error) {
+        console.warn('Failed to load agents from API; using built-in defaults.', error)
+        this.agents = mergeWithDefaultAgents([])
+      }
     },
     async createAgent(input: CreateAgentInput) {
       const agent = await apiPost<Agent>('/agents', input)

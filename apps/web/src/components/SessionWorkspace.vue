@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useAgentStore } from '@/stores/agent'
 import { useEventStore } from '@/stores/event'
 import { useKnowledgeStore } from '@/stores/knowledge'
+import { useLocalWorkspaceStore } from '@/stores/localWorkspace'
 import { useSessionStore } from '@/stores/session'
 import { apiBaseUrl, runtimeModeLabel } from '@/config/runtime'
 import { sessionStatusLabel, type SessionStatus, type SessionViewMode } from '@/types/contracts'
@@ -23,6 +24,7 @@ const sessionStore = useSessionStore()
 const eventStore = useEventStore()
 const agentStore = useAgentStore()
 const knowledgeStore = useKnowledgeStore()
+const localWorkspaceStore = useLocalWorkspaceStore()
 
 const isSendingMessage = ref(false)
 const inputError = ref('')
@@ -33,7 +35,7 @@ const newSessionInput = ref('')
 const selectedSessionAgentIds = ref<string[]>([])
 const sessionCreateError = ref('')
 
-type WorkspaceSection = 'session' | 'agents' | 'knowledge' | 'settings' | 'models' | 'tools' | 'notifications'
+type WorkspaceSection = 'session' | 'knowledge' | 'settings' | 'models' | 'tools' | 'notifications' | 'agents'
 
 const viewModes: SessionViewMode[] = ['chat', 'workflow', 'collaboration_graph', 'debug']
 const activeSection = ref<WorkspaceSection>('session')
@@ -108,6 +110,17 @@ const primaryAgent = computed(() => agents.value[0])
 const workspaceLabel = computed(() => sessionStore.currentSession?.title ?? '无活动会话')
 const activeAgentIds = computed(() => agentStore.agents.filter((agent) => agent.status === 'active').map((agent) => agent.id))
 const runtimeDisplay = computed(() => (runtimeModeLabel === 'mock' ? 'mock' : 'real'))
+const currentWorkingDirectory = computed(
+  () =>
+    localWorkspaceStore.directoryForSession(currentSessionId.value) ??
+    sessionStore.currentSession?.workingDirectory ??
+    localWorkspaceStore.pendingDirectory
+)
+const workingDirectoryAddress = computed(() =>
+  currentWorkingDirectory.value ? `浏览器本地目录 / ${currentWorkingDirectory.value.name}` : ''
+)
+const fileApplyResult = computed(() => localWorkspaceStore.applyResultForSession(currentSessionId.value))
+const terminalStatuses = new Set<SessionStatus>(['COMPLETED', 'FAILED', 'CANCELLED'])
 
 const derivedStatus = computed(() => {
   const statusEvent = [...eventStore.eventsForSession(currentSessionId.value)]
@@ -128,12 +141,27 @@ async function selectSession(sessionId: string) {
   eventStore.connectSse(sessionId)
 }
 
+async function deleteSession(sessionId: string) {
+  const deletingCurrent = sessionStore.currentSession?.id === sessionId
+  await sessionStore.deleteSession(sessionId)
+  if (deletingCurrent) {
+    eventStore.disconnectSse()
+    const nextSessionId = sessionStore.sessions[0]?.id
+    if (nextSessionId) {
+      await selectSession(nextSessionId)
+    }
+  }
+}
+
 async function createSession(input: string, agentIds: string[]) {
+  const workingDirectory = localWorkspaceStore.pendingDirectory
   const session = await sessionStore.createSession({
     input,
     agentIds,
+    workingDirectory,
     tokenBudget: 30000
   })
+  localWorkspaceStore.bindPendingDirectoryToSession(session.id)
   await eventStore.loadEvents(session.id)
   eventStore.connectSse(session.id)
 }
@@ -142,7 +170,17 @@ function openCreateSessionDialog() {
   sessionCreateError.value = ''
   newSessionInput.value = ''
   selectedSessionAgentIds.value = activeAgentIds.value
+  localWorkspaceStore.clearPendingDirectory()
   showCreateSessionDialog.value = true
+}
+
+async function chooseWorkingDirectory() {
+  sessionCreateError.value = ''
+  try {
+    await localWorkspaceStore.choosePendingDirectory()
+  } catch (error) {
+    sessionCreateError.value = error instanceof Error ? error.message : '选择工作目录失败'
+  }
 }
 
 function toggleSessionAgent(agentId: string) {
@@ -165,7 +203,6 @@ async function createSessionFromDialog() {
     sessionCreateError.value = '请选择至少一个 Agent'
     return
   }
-
   isCreatingSession.value = true
   sessionCreateError.value = ''
   try {
@@ -175,18 +212,6 @@ async function createSessionFromDialog() {
     sessionCreateError.value = error instanceof Error ? error.message : '创建会话失败'
   } finally {
     isCreatingSession.value = false
-  }
-}
-
-async function createAgent(
-  input: { name: string; role: string; tags: string[]; capabilityIds: string[] },
-  done: (error?: string) => void
-) {
-  try {
-    await agentStore.createAgent(input)
-    done()
-  } catch (error) {
-    done(error instanceof Error ? error.message : '创建 Agent 失败')
   }
 }
 
@@ -203,9 +228,15 @@ async function sendUserMessage(content: string) {
       return
     }
 
+    if (terminalStatuses.has(sessionStore.currentSession.status)) {
+      await createSession(content, sessionStore.currentSession.participatingAgentIds)
+      return
+    }
+
     const sessionId = sessionStore.currentSession.id
-    await sessionStore.sendMessage(sessionId, content)
-    await eventStore.loadEvents(sessionId)
+    const result = await sessionStore.sendMessage(sessionId, content)
+    eventStore.appendEvent(result.event)
+    await eventStore.loadEvents(sessionId, { append: true })
   } catch (error) {
     inputError.value = error instanceof Error ? error.message : '发送失败'
   } finally {
@@ -297,6 +328,7 @@ async function resolveConfirmation(optionKey: string) {
       :current-session-id="sessionStore.currentSession?.id"
       @select="selectSession"
       @create="openCreateSessionDialog"
+      @delete="deleteSession"
     />
 
     <section v-if="activeSection === 'session'" class="workspace-main">
@@ -341,13 +373,29 @@ async function resolveConfirmation(optionKey: string) {
             </section>
           </div>
           <span v-if="currentMode !== 'chat'" class="project-chip">会话：{{ workspaceLabel }}</span>
+          <span v-if="currentWorkingDirectory" class="workspace-directory-chip" :title="currentWorkingDirectory.name">
+            <UiIcon name="folder" :size="15" />
+            {{ currentWorkingDirectory.name }}
+          </span>
+          <span
+            v-if="fileApplyResult"
+            :class="['workspace-file-status', { failed: fileApplyResult.errors.length }]"
+            :title="fileApplyResult.errors.join('\n')"
+          >
+            <UiIcon :name="fileApplyResult.errors.length ? 'x' : 'check'" :size="15" />
+            写入 {{ fileApplyResult.applied }}/{{ fileApplyResult.applied + fileApplyResult.skipped }}
+          </span>
           <span v-if="currentMode !== 'chat'" class="progress-chip">
             整体进度
             <strong>{{ progressPercent }}%</strong>
             <span><i :style="{ width: `${progressPercent}%` }"></i></span>
           </span>
           <span v-if="derivedStatus" class="session-state">{{ sessionStatusLabel[derivedStatus] }}</span>
-          <span class="runtime-chip">{{ runtimeDisplay }} · {{ apiBaseUrl }}</span>
+          <span v-if="workingDirectoryAddress" class="workspace-directory-path-chip" :title="workingDirectoryAddress">
+            <UiIcon name="folder" :size="15" />
+            {{ workingDirectoryAddress }}
+          </span>
+          <span v-else class="runtime-chip">{{ runtimeDisplay }} · {{ apiBaseUrl }}</span>
           <button
             v-for="mode in viewModes"
             :key="mode"
@@ -403,7 +451,6 @@ async function resolveConfirmation(optionKey: string) {
       :active-confirmation="activeConfirmation"
       :connected="eventStore.sseConnected"
       @resolve-confirmation="resolveConfirmation"
-      @create-agent="createAgent"
     />
 
     <section v-else-if="activeSection === 'agents'" class="workspace-admin">
@@ -578,9 +625,22 @@ async function resolveConfirmation(optionKey: string) {
           <span>任务</span>
           <textarea v-model="newSessionInput" rows="4" placeholder="描述要让 Agent 协作完成的目标" />
         </label>
+        <div class="dialog-directory-picker">
+          <span>本地工作目录</span>
+          <button type="button" @click="chooseWorkingDirectory">
+            <UiIcon name="folder" :size="16" />
+            {{ localWorkspaceStore.pendingDirectory ? '更换目录' : '选择目录' }}
+          </button>
+          <strong v-if="localWorkspaceStore.pendingDirectory" :title="localWorkspaceStore.pendingDirectory.name">
+            {{ localWorkspaceStore.pendingDirectory.name }}
+          </strong>
+          <small v-else-if="!localWorkspaceStore.supportsDirectoryPicker">
+            当前浏览器不支持选择本地目录
+          </small>
+        </div>
         <div class="dialog-agent-picker">
           <span>参与 Agent</span>
-          <p v-if="!agentStore.agents.length" class="empty-state">暂无 Agent，请先在右侧添加 Agent。</p>
+          <p v-if="!agentStore.agents.length" class="empty-state">暂无 Agent，请先到 Agent 管理添加 Agent。</p>
           <button
             v-for="agent in agentStore.agents"
             :key="agent.id"

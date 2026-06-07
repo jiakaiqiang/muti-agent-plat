@@ -29,13 +29,11 @@ const remoteApiKey = ref('')
 const saveMessage = ref('')
 
 const modelOptions = computed(() => modelStore.availableModels)
-const selectedModel = computed(
-  () => modelOptions.value.find((model) => model.id === selectedModelId.value) ?? modelStore.config?.currentModelOption
-)
+const selectedModel = computed(() => modelOptions.value.find((model) => model.id === selectedModelId.value))
 const agentsForSelectedModel = computed(() => {
-  const modelId = selectedModel.value?.id
-  if (!modelId) return []
-  return props.agents.filter((agent) => agent.runtimeType === 'generic_llm' && (agent.modelId ?? modelStore.currentModelId) === modelId)
+  const agentIds = new Set(selectedModel.value?.agents.map((agent) => agent.id) ?? [])
+  if (!agentIds.size) return []
+  return props.agents.filter((agent) => agentIds.has(agent.id))
 })
 const selectedAgent = computed(
   () => agentsForSelectedModel.value.find((agent) => agent.id === selectedAgentId.value) ?? agentsForSelectedModel.value[0]
@@ -127,6 +125,7 @@ async function bindAgentToModel(agent: Agent) {
   const modelId = selectedModel.value?.id
   if (!modelId) return
   await agentStore.updateAgent(agent.id, { modelId })
+  await modelStore.loadConfig()
   saveMessage.value = `${agent.name} 已绑定到 ${selectedModel.value?.label ?? '当前模型'}。`
 }
 
@@ -289,7 +288,7 @@ onMounted(async () => {
           </div>
           <div>
             <dt>Agent</dt>
-            <dd>{{ props.agents.filter((agent) => agent.runtimeType === 'generic_llm' && (agent.modelId ?? modelStore.currentModelId) === model.id).length }}</dd>
+            <dd>{{ model.agents.length }}</dd>
           </div>
         </dl>
         <button type="button" :disabled="modelStore.saving || modelStore.currentModelId === model.id" @click.stop="switchModel(model.id)">

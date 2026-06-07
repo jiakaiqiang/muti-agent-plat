@@ -188,7 +188,9 @@ async function runMainChain() {
     "backend",
     "test",
     "review",
-    "notification"
+    "notification",
+    "product-manager",
+    "ui-designer"
   ];
   const actualAgentKeys = new Set(agents.data.map((agent) => String(agent.key)));
   for (const key of requiredAgentKeys) {

@@ -36,7 +36,7 @@ cp .env.example .env
 - `AGENT_CLUSTER_SEED_DEFAULT_AGENTS=false`
 - `ENABLE_BULLMQ=true`
 
-如果缺少 `LLM_API_KEY` 或 `LLM_BASE_URL`，后端会把运行失败写入事件流，不会静默降级到 mock。
+如果缺少 `LLM_API_KEY` 或 `LLM_BASE_URL`，后端会使用受控 mock fallback 生成结构化任务契约，保证本地群聊输入能得到反馈。配置了真实模型连接但模型请求失败时，后端仍会把运行失败写入事件流，方便定位真实 LLM 问题。
 
 ## 启动基础设施
 
@@ -88,7 +88,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 该实现会把会话、事件、任务、Memory、RAG 知识库等现有 collection 状态写入 PostgreSQL JSONB 表，服务重启后从数据库恢复。后续若落地细粒度业务表和 migration，可在保持 API 契约不变的前提下替换底层实现。
 
-真实数据模式默认不会自动注入内置研发 Agent。Agent 列表来自 PostgreSQL 中的 `agents` collection 或 `POST /api/agents` 创建的数据。只有本地演示、合同测试或 E2E 需要默认团队时，才显式设置：
+真实数据模式默认不会把内置默认 Agent 自动写入持久化 `agents` collection，但 `GET /api/agents` 和前端 Agent 选择器仍会展示内置默认 Agent，并与 `POST /api/agents` 创建的自定义 Agent 合并显示。只有需要把默认团队显式落库时，才设置：
 
 ```bash
 AGENT_CLUSTER_SEED_DEFAULT_AGENTS=true
@@ -217,8 +217,10 @@ falling back to mock data.
 
 ## Real Agent workflow
 
-When `AGENT_CLUSTER_SEED_DEFAULT_AGENTS=false`, the app starts with an empty
-Agent list. Create Agents from the right Agent panel or through:
+When `AGENT_CLUSTER_SEED_DEFAULT_AGENTS=false`, built-in default Agents are
+still visible through `GET /api/agents` and the UI Agent selector, but they are
+not automatically written into the persisted `agents` collection. Create custom
+Agents from the right Agent panel or through:
 
 ```bash
 curl -X POST http://localhost:3000/api/agents \
@@ -226,7 +228,7 @@ curl -X POST http://localhost:3000/api/agents \
   -d "{\"name\":\"Research Agent\",\"role\":\"Collects context\",\"tags\":[\"research\"],\"capabilityIds\":[\"cap-brief\"]}"
 ```
 
-New sessions should be created with real Agent ids:
+New sessions can be created with built-in default Agent ids or custom Agent ids:
 
 ```bash
 curl -X POST http://localhost:3000/api/sessions \
@@ -234,4 +236,5 @@ curl -X POST http://localhost:3000/api/sessions \
   -d "{\"input\":\"Plan the task\",\"agentIds\":[\"<agent-id>\"],\"tokenBudget\":30000}"
 ```
 
-The UI blocks session creation until at least one real Agent exists.
+The UI uses the built-in default Agents as the minimum available team, and shows
+custom Agents alongside them when they exist.

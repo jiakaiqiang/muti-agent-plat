@@ -68,6 +68,14 @@ export class EventsService implements OnModuleDestroy {
     return this.subjectFor(sessionId).asObservable();
   }
 
+  deleteSession(sessionId: string) {
+    this.eventsBySession.delete(sessionId);
+    const subject = this.subjectsBySession.get(sessionId);
+    subject?.complete();
+    this.subjectsBySession.delete(sessionId);
+    this.schedulePersist();
+  }
+
   private subjectFor(sessionId: string) {
     const existing = this.subjectsBySession.get(sessionId);
     if (existing) {

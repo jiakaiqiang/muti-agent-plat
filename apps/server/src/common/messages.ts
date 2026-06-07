@@ -29,7 +29,19 @@ export const messages = {
   dependencyBlocked: '任务依赖存在阻塞或环路，当前没有可执行任务。',
   reviewRework: '复盘建议返工。',
   reviewAskUser: '复盘建议询问用户。',
-  runtimeError: (runtimeType: string, phase: string, message: string) => `${runtimeType} 在 ${phase} 阶段失败：${message}`,
+  phaseLabel: (phase: string) =>
+    ({
+      discussion: 'Agent 讨论',
+      brief_generation: '任务契约生成',
+      brief_revision: '任务契约修订',
+      task_brief: '任务契约生成',
+      task_execution: '任务执行',
+      post_review: '复盘',
+      final_delivery: '最终交付',
+      user_message_routing: '消息路由'
+    })[phase] ?? phase,
+  runtimeError: (runtimeType: string, phase: string, message: string) =>
+    `${runtimeType} 在 ${messages.phaseLabel(phase)} 阶段失败：${message}`,
   defaultTaskExecuteTitle: '执行已确认任务契约',
   defaultTaskExecuteDescription: '由后端 Agent 按任务契约执行结构化 dry-run。',
   defaultTaskExecuteAcceptance: '运行时返回结构化 task_execution_result 输出。',

@@ -1,6 +1,13 @@
 import { defineStore } from 'pinia'
-import { apiGet, apiPage, apiPost } from '@/api/client'
-import type { SessionDetail, SessionListItem, SessionStatus, SessionViewMode } from '@/types/contracts'
+import { apiDelete, apiGet, apiPage, apiPost } from '@/api/client'
+import type {
+  SessionDetail,
+  SessionListItem,
+  SessionStatus,
+  SessionViewMode,
+  SessionWorkingDirectory,
+  CollaborationEvent
+} from '@/types/contracts'
 
 type CreateSessionInput = {
   input: string
@@ -8,6 +15,15 @@ type CreateSessionInput = {
   projectId?: string
   tokenBudget?: number
   knowledgeBaseIds?: string[]
+  workingDirectory?: SessionWorkingDirectory
+}
+
+function sortSessionsByRecency(sessions: SessionListItem[]) {
+  return [...sessions].sort((left, right) => sessionRecencyTime(right) - sessionRecencyTime(left))
+}
+
+function sessionRecencyTime(session: SessionListItem) {
+  return Date.parse(session.updatedAt || session.createdAt) || Date.parse(session.createdAt) || 0
 }
 
 export const useSessionStore = defineStore('session', {
@@ -22,7 +38,7 @@ export const useSessionStore = defineStore('session', {
       this.loading = true
       try {
         const page = await apiPage<SessionListItem>('/sessions')
-        this.sessions = page.items
+        this.sessions = sortSessionsByRecency(page.items)
       } finally {
         this.loading = false
       }
@@ -31,7 +47,7 @@ export const useSessionStore = defineStore('session', {
       const result = await apiPost<{ session: SessionDetail }>('/sessions', input)
       const session = result.session
       this.currentSession = session
-      this.sessions = [
+      this.sessions = sortSessionsByRecency([
         {
           id: session.id,
           title: session.title,
@@ -44,7 +60,7 @@ export const useSessionStore = defineStore('session', {
           updatedAt: session.updatedAt
         },
         ...this.sessions
-      ]
+      ])
       return session
     },
     async loadSession(sessionId?: string) {
@@ -62,7 +78,14 @@ export const useSessionStore = defineStore('session', {
       }
     },
     async sendMessage(sessionId: string, content: string, mentionedAgentIds: string[] = []) {
-      return apiPost(`/sessions/${sessionId}/messages`, { content, mentionedAgentIds })
+      return apiPost<{ event: CollaborationEvent }>(`/sessions/${sessionId}/messages`, { content, mentionedAgentIds })
+    },
+    async deleteSession(sessionId: string) {
+      await apiDelete<{ deleted: boolean; sessionId: string }>(`/sessions/${sessionId}`)
+      this.sessions = this.sessions.filter((session) => session.id !== sessionId)
+      if (this.currentSession?.id === sessionId) {
+        this.currentSession = undefined
+      }
     },
     async confirmBrief(sessionId: string, briefId: string) {
       // Execution now runs in the background; confirm returns "accepted" and the
@@ -95,11 +118,12 @@ export const useSessionStore = defineStore('session', {
       this.currentViewMode = mode
     },
     setCurrentStatus(sessionId: string, status: SessionStatus) {
+      const updatedAt = new Date().toISOString()
       if (this.currentSession?.id === sessionId) {
-        this.currentSession = { ...this.currentSession, status, updatedAt: new Date().toISOString() }
+        this.currentSession = { ...this.currentSession, status, updatedAt }
       }
-      this.sessions = this.sessions.map((session) =>
-        session.id === sessionId ? { ...session, status, updatedAt: new Date().toISOString() } : session
+      this.sessions = sortSessionsByRecency(
+        this.sessions.map((session) => (session.id === sessionId ? { ...session, status, updatedAt } : session))
       )
     }
   }

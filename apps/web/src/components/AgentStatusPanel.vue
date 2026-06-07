@@ -9,14 +9,6 @@ import type {
 } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
 import ConfirmationCard from './ConfirmationCard.vue'
-import UiIcon from './UiIcon.vue'
-
-type CreateAgentInput = {
-  name: string
-  role: string
-  tags: string[]
-  capabilityIds: string[]
-}
 
 const props = defineProps<{
   agents: AgentCardState[]
@@ -29,16 +21,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   resolveConfirmation: [optionKey: string]
-  createAgent: [input: CreateAgentInput, done: (error?: string) => void]
 }>()
 
-const showAgentForm = ref(false)
-const isCreatingAgent = ref(false)
-const agentFormError = ref('')
-const agentName = ref('')
-const agentRole = ref('')
-const agentTags = ref('')
-const selectedCapabilityIds = ref<string[]>([])
 const tasksExpanded = ref(false)
 
 const agentById = computed(() => new Map(props.availableAgents.map((agent) => [agent.id, agent])))
@@ -75,70 +59,12 @@ function capabilityNames(agent: AgentCardState) {
   return agent.activeCapabilityNames.length ? agent.activeCapabilityNames : configuredNames
 }
 
-function normalizedTags() {
-  return Array.from(
-    new Set(
-      agentTags.value
-        .split(/[,\n\s]+/)
-        .map((tag) => tag.trim())
-        .filter(Boolean)
-    )
-  )
-}
-
-function toggleCapability(capabilityId: string) {
-  selectedCapabilityIds.value = selectedCapabilityIds.value.includes(capabilityId)
-    ? selectedCapabilityIds.value.filter((id) => id !== capabilityId)
-    : [...selectedCapabilityIds.value, capabilityId]
-}
-
-function resetAgentForm() {
-  agentName.value = ''
-  agentRole.value = ''
-  agentTags.value = ''
-  selectedCapabilityIds.value = []
-  agentFormError.value = ''
-}
-
-function submitAgentForm() {
-  const name = agentName.value.trim()
-  const role = agentRole.value.trim()
-  if (!name || !role) {
-    agentFormError.value = '请填写 Agent 名称和能力描述'
-    return
-  }
-
-  isCreatingAgent.value = true
-  agentFormError.value = ''
-  emit(
-    'createAgent',
-    {
-      name,
-      role,
-      tags: normalizedTags(),
-      capabilityIds: selectedCapabilityIds.value
-    },
-    (error?: string) => {
-      isCreatingAgent.value = false
-      if (error) {
-        agentFormError.value = error
-        return
-      }
-      resetAgentForm()
-      showAgentForm.value = false
-    }
-  )
-}
 </script>
 
 <template>
   <aside class="agent-panel">
     <header class="panel-header">
       <span>Agent 列表</span>
-      <button class="panel-action-button primary" type="button" @click="showAgentForm = !showAgentForm">
-        <UiIcon name="plus" :size="15" />
-        添加 Agent
-      </button>
       <span class="connection-pill" :class="{ online: connected }">{{ connected ? '实时连接' : '离线' }}</span>
     </header>
 
@@ -149,42 +75,8 @@ function submitAgentForm() {
       @resolve="emit('resolveConfirmation', $event)"
     />
 
-    <form v-if="showAgentForm" class="agent-create-form" @submit.prevent="submitAgentForm">
-      <label>
-        <span>名称</span>
-        <input v-model="agentName" type="text" placeholder="Research Agent" />
-      </label>
-      <label>
-        <span>标签</span>
-        <input v-model="agentTags" type="text" placeholder="research, market" />
-      </label>
-      <label>
-        <span>能力描述</span>
-        <textarea v-model="agentRole" rows="3" placeholder="说明这个 Agent 负责什么，以及适合处理哪些任务" />
-      </label>
-      <div class="agent-capability-picker">
-        <span>可用能力</span>
-        <button
-          v-for="capability in capabilities"
-          :key="capability.id"
-          type="button"
-          :class="{ selected: selectedCapabilityIds.includes(capability.id) }"
-          @click="toggleCapability(capability.id)"
-        >
-          {{ capability.name }}
-        </button>
-      </div>
-      <p v-if="agentFormError" class="form-error">{{ agentFormError }}</p>
-      <div class="form-actions">
-        <button type="button" @click="showAgentForm = false">取消</button>
-        <button type="submit" class="primary" :disabled="isCreatingAgent">
-          {{ isCreatingAgent ? '创建中' : '创建 Agent' }}
-        </button>
-      </div>
-    </form>
-
     <section class="panel-section agent-list-section">
-      <p v-if="!agents.length" class="empty-state">暂无 Agent，请先添加真实 Agent。</p>
+      <p v-if="!agents.length" class="empty-state">暂无 Agent，请先到 Agent 管理添加 Agent。</p>
       <article v-for="(agent, index) in agents" :key="agent.agentId" class="agent-card">
         <AgentPortrait :tone="(index % 5) + 1" :label="agent.name" size="md" />
         <div class="agent-card__body">

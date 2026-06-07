@@ -69,6 +69,17 @@ export class TasksService {
     }
   }
 
+  cancelUnfinished(sessionId: string, reason?: string) {
+    for (const task of this.unfinished(sessionId)) {
+      this.update(task, { status: 'cancelled', resultSummary: reason });
+    }
+  }
+
+  deleteSession(sessionId: string) {
+    this.tasksBySession.delete(sessionId);
+    this.persist();
+  }
+
   private persist() {
     this.persistence.setCollection('tasksBySession', Object.fromEntries(this.tasksBySession));
   }

@@ -40,25 +40,25 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       );
     }
 
-    if (genericLlmMockFallbackEnabled()) {
-      return this.runFallback(input, selectedConnection.model, signal);
-    }
-
     const missingConfig = this.missingConfig(selectedConnection);
-    if (missingConfig.length) {
-      return this.failedResult(
-        input,
-        startedAt,
-        selectedConnection.model,
-        `GenericLlmRuntime missing required config: ${missingConfig.join(', ')}`
-      );
+    if (genericLlmMockFallbackEnabled() || missingConfig.length) {
+      return this.runFallback(input, selectedConnection.model, signal);
     }
 
     return this.runOpenAiCompatible(input, selectedConnection, signal);
   }
 
   private async runFallback(input: AgentRunInput, selectedModel: string, signal?: AbortSignal): Promise<AgentRunResult> {
-    const result = await this.mockRuntime.run(input, signal);
+    const result = await this.mockRuntime.run(
+      {
+        ...input,
+        options: {
+          ...(input.options ?? {}),
+          allowMockFallback: true
+        }
+      },
+      signal
+    );
     return {
       ...result,
       runtimeType: 'generic_llm',
@@ -127,7 +127,10 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
                   input.agent.systemPrompt,
                   'Return only valid JSON matching the requested RuntimeOutput kind.',
                   `Expected kind: ${input.expectedOutput.kind}`,
-                  'Do not call tools, modify files, or perform external side effects.'
+                  'Do not call tools, modify files, or perform external side effects.',
+                  input.contextPack.workingDirectory
+                    ? 'If code or files must change, return RuntimeArtifactOutput.metadata.fileChanges with relative paths only. The browser applies those changes inside the selected local working directory.'
+                    : 'No local working directory is selected. Do not return fileChanges.'
                 ].join('\n')
               },
               {

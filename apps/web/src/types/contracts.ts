@@ -9,6 +9,7 @@ import type {
   KnowledgeDocument,
   RagMatchedChunk,
   RuntimeCapabilityDefinition,
+  RuntimeFileChange,
   RuntimeModelConfig,
   RuntimeModelCreateInput,
   RuntimeModelKind,
@@ -18,6 +19,7 @@ import type {
   RuntimeType,
   SessionDetail,
   SessionListItem,
+  SessionWorkingDirectory,
   SessionStatus,
   UserMessageIntent
 } from '@agent-cluster/shared'
@@ -39,6 +41,7 @@ export type {
   KnowledgeScope,
   RagMatchedChunk,
   RuntimeCapabilityDefinition,
+  RuntimeFileChange,
   RuntimeModelConfig,
   RuntimeModelCreateInput,
   RuntimeModelKind,
@@ -48,6 +51,7 @@ export type {
   RuntimeType,
   SessionDetail,
   SessionListItem,
+  SessionWorkingDirectory,
   SessionStatus,
   UserMessageIntent
 } from '@agent-cluster/shared'
@@ -166,6 +170,7 @@ export type ArtifactEventPayload = {
   title: string
   contentSummary?: string
   relatedCapabilityId?: string
+  fileChanges?: RuntimeFileChange[]
 }
 
 export type RagRetrievedPayload = {

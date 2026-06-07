@@ -15,6 +15,7 @@ import {
   llmProvider
 } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
+import { AgentsService } from '../agents/agents.service.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 
 type PersistedRuntimeModelOption = {
@@ -57,18 +58,16 @@ export type RuntimeModelConnection = {
 const collectionKey = 'runtimeModelConfig';
 const localDefaultBaseUrl = 'http://127.0.0.1:11434/v1';
 
-const defaultModelsByProvider: Record<RuntimeModelProvider, string[]> = {
-  'openai-compatible': ['gpt-4.1-mini', 'gpt-4.1', 'gpt-4o-mini', 'gpt-4o'],
-  ollama: ['llama3.2', 'qwen2.5', 'mistral', 'deepseek-r1']
-};
-
 @Injectable()
 export class RuntimeModelConfigService {
   private config: PersistedRuntimeModelConfig;
   private localDiscoveredModels: string[] = [];
   private localDiscoveryLoadedAt = 0;
 
-  constructor(private readonly persistence: PersistenceService) {
+  constructor(
+    private readonly persistence: PersistenceService,
+    private readonly agents: AgentsService
+  ) {
     this.config = this.persistence.getCollection<PersistedRuntimeModelConfig>(collectionKey, {});
     this.migrateLegacyConfig();
     this.persist();
@@ -86,11 +85,14 @@ export class RuntimeModelConfigService {
   private buildConfig(): RuntimeModelConfig {
     const provider = llmProvider();
     const defaultModel = llmModel();
-    const availableModels = this.availableModels(provider, defaultModel);
+    const availableModelsWithoutAgents = this.availableModels();
     const currentModelId = this.normalizeModelId(this.config.currentModelId) ?? this.defaultModelId(defaultModel);
-    const currentModelOption =
-      availableModels.find((model) => model.id === currentModelId) ??
+    const selectedModelOption =
+      availableModelsWithoutAgents.find((model) => model.id === currentModelId) ??
+      availableModelsWithoutAgents[0] ??
       this.toOption(this.createConfiguredModel(defaultModel, 'env', provider));
+    const availableModels = availableModelsWithoutAgents.map((model) => this.withAgents(model, selectedModelOption.id));
+    const currentModelOption = this.withAgents(selectedModelOption, selectedModelOption.id);
 
     return {
       provider,
@@ -188,7 +190,7 @@ export class RuntimeModelConfigService {
     return this.getConfig();
   }
 
-  private availableModels(provider: RuntimeModelProvider, defaultModel: string): RuntimeModelOption[] {
+  private availableModels(): RuntimeModelOption[] {
     const byId = new Map<string, RuntimeModelOption>();
     const add = (option: RuntimeModelOption) => {
       if (!option.id || byId.has(option.id)) {
@@ -197,29 +199,14 @@ export class RuntimeModelConfigService {
       byId.set(option.id, option);
     };
 
-    add(this.toOption(this.createConfiguredModel(defaultModel, 'env', provider)));
-    for (const model of this.parseConfiguredModels()) {
-      add(this.toOption(this.createConfiguredModel(model, 'env', provider)));
-    }
-    for (const model of defaultModelsByProvider[provider]) {
-      add(this.toOption(this.createConfiguredModel(model, 'default', provider)));
-    }
-    for (const model of [...this.localDiscoveredModels, ...defaultModelsByProvider.ollama]) {
-      add(this.toOption(this.createConfiguredModel(model, 'default', 'ollama')));
+    for (const model of this.localDiscoveredModels) {
+      add(this.toOption(this.createDiscoveredLocalModel(model)));
     }
     for (const model of this.config.models ?? []) {
       add(this.toOption(model));
     }
 
     return [...byId.values()];
-  }
-
-  private parseConfiguredModels() {
-    const raw = process.env.LLM_MODEL_OPTIONS ?? process.env.LLM_MODELS ?? '';
-    return raw
-      .split(',')
-      .map((model) => model.trim())
-      .filter(Boolean);
   }
 
   private upsertModel(input: {
@@ -276,6 +263,21 @@ export class RuntimeModelConfigService {
     };
   }
 
+  private createDiscoveredLocalModel(model: string): PersistedRuntimeModelOption {
+    const now = nowIso();
+    return {
+      id: this.modelId('local', model, this.localBaseUrl()),
+      label: model,
+      provider: 'ollama',
+      source: 'local',
+      kind: 'local',
+      model,
+      baseUrl: this.localBaseUrl(),
+      createdAt: now,
+      updatedAt: now
+    };
+  }
+
   private toOption(model: PersistedRuntimeModelOption): RuntimeModelOption {
     return {
       id: model.id,
@@ -286,9 +288,33 @@ export class RuntimeModelConfigService {
       model: model.model,
       baseUrl: model.baseUrl,
       hasApiKey: model.kind === 'remote' ? Boolean(model.apiKey ?? llmApiKey()) : false,
+      agents: [],
       createdAt: model.createdAt,
       updatedAt: model.updatedAt
     };
+  }
+
+  private withAgents(model: RuntimeModelOption, currentModelId: string): RuntimeModelOption {
+    return {
+      ...model,
+      agents: this.agentsForModel(model.id, currentModelId)
+    };
+  }
+
+  private agentsForModel(modelId: string, currentModelId: string) {
+    return this.agents
+      .list()
+      .filter((agent) => agent.runtimeType === 'generic_llm' && (agent.modelId ?? currentModelId) === modelId)
+      .map((agent) => ({
+        id: agent.id,
+        key: agent.key,
+        name: agent.name,
+        role: agent.role,
+        status: agent.status,
+        runtimeType: agent.runtimeType,
+        modelId: agent.modelId,
+        capabilityIds: agent.capabilityIds
+      }));
   }
 
   private migrateLegacyConfig() {

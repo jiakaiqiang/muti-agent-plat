@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
 import { ok } from '../../common/api-response.js';
+import type { SessionWorkingDirectory } from '@agent-cluster/shared';
 import { SessionsService } from './sessions.service.js';
 
 @Controller()
@@ -17,7 +18,14 @@ export class SessionsController {
   @Post('sessions')
   create(
     @Body()
-    body: { input: string; agentIds?: string[]; projectId?: string; tokenBudget?: number; knowledgeBaseIds?: string[] }
+    body: {
+      input: string;
+      agentIds?: string[];
+      projectId?: string;
+      tokenBudget?: number;
+      knowledgeBaseIds?: string[];
+      workingDirectory?: SessionWorkingDirectory;
+    }
   ) {
     return this.sessions.create(body).then(ok);
   }
@@ -25,6 +33,11 @@ export class SessionsController {
   @Get('sessions/:sessionId')
   detail(@Param('sessionId') sessionId: string) {
     return ok(this.sessions.get(sessionId));
+  }
+
+  @Delete('sessions/:sessionId')
+  delete(@Param('sessionId') sessionId: string) {
+    return ok(this.sessions.delete(sessionId));
   }
 
   @Post('sessions/:sessionId/messages')

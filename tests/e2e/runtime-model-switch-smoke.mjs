@@ -188,11 +188,28 @@ try {
   await waitForServer(apiBase);
 
   const initial = await api(apiBase, '/runtimes/model-config');
-  if (initial.data.currentModel !== 'initial-smoke-model') {
+  if (initial.data.defaultModel !== 'initial-smoke-model') {
     throw new Error(`Unexpected initial model config: ${JSON.stringify(initial.data)}`);
   }
-  if (!initial.data.availableModels.some((model) => model.model === 'switched-smoke-model')) {
-    throw new Error(`Configured model option was not exposed: ${JSON.stringify(initial.data.availableModels)}`);
+  if (initial.data.availableModels.some((model) => ['env', 'default'].includes(model.source))) {
+    throw new Error(`Model management should not expose env/default model presets: ${JSON.stringify(initial.data.availableModels)}`);
+  }
+  if (initial.data.availableModels.some((model) => model.model === 'switched-smoke-model')) {
+    throw new Error(`Environment model options should not be exposed in model management: ${JSON.stringify(initial.data.availableModels)}`);
+  }
+
+  const switchableConfig = await api(apiBase, '/runtimes/model-config/models', {
+    method: 'POST',
+    body: JSON.stringify({
+      kind: 'remote',
+      label: 'Switchable Smoke Model',
+      model: 'switched-smoke-model',
+      baseUrl: `http://127.0.0.1:${llmPort}/v1`,
+      apiKey: 'model-switch-smoke-key'
+    })
+  });
+  if (!switchableConfig.data.currentModelOption?.agents?.length) {
+    throw new Error(`Configured model should include its agent list: ${JSON.stringify(switchableConfig.data.currentModelOption)}`);
   }
 
   const remoteConfig = await api(apiBase, '/runtimes/model-config/models', {

@@ -69,6 +69,11 @@ export class MemoryService {
     };
   }
 
+  deleteSession(sessionId: string) {
+    this.memoriesBySession.delete(sessionId);
+    this.persist();
+  }
+
   private score(content: string, tokens: Set<string>, normalizedQuery: string) {
     if (!tokens.size) return 0;
     let score = content.includes(normalizedQuery) ? 2 : 0;

@@ -121,6 +121,29 @@ async function dropSmokeTable() {
   }
 }
 
+async function persistedAgents() {
+  const client = new Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    const result = await client.query(`select value from ${tableName} where key = $1`, ['agents']);
+    return result.rows[0]?.value ?? [];
+  } finally {
+    await client.end();
+  }
+}
+
+async function waitForPersistedAgents() {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const agents = await persistedAgents();
+    if (Array.isArray(agents)) {
+      return agents;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return persistedAgents();
+}
+
 async function waitForServer(apiBase) {
   const deadline = Date.now() + 20_000;
   let lastError;
@@ -143,6 +166,7 @@ async function waitForServer(apiBase) {
 await ensurePostgres();
 await runNpm(['run', 'build', '-w', '@agent-cluster/shared']);
 await runNpm(['run', 'build', '-w', '@agent-cluster/server']);
+const { defaultAgents } = await import('@agent-cluster/shared');
 
 const port = await findFreePort();
 const apiBase = `http://127.0.0.1:${port}/api`;
@@ -178,8 +202,15 @@ try {
   if (!Array.isArray(body.data)) {
     throw new Error(`Agent response should be an array: ${JSON.stringify(body)}`);
   }
-  if (body.data.length !== 0) {
-    throw new Error(`Real mode should not auto-seed default agents: ${JSON.stringify(body.data)}`);
+  const visibleKeys = new Set(body.data.map((agent) => agent.key));
+  const missingDefaultKeys = defaultAgents.map((agent) => agent.key).filter((key) => !visibleKeys.has(key));
+  if (missingDefaultKeys.length) {
+    throw new Error(`Built-in agents should remain visible without seeding: ${missingDefaultKeys.join(', ')}`);
+  }
+
+  const persisted = await waitForPersistedAgents();
+  if (persisted.some((agent) => defaultAgents.some((defaultAgent) => defaultAgent.key === agent.key))) {
+    throw new Error(`No-seed mode should not persist built-in agents automatically: ${JSON.stringify(persisted)}`);
   }
 
   console.log('real agents no-seed smoke ok');

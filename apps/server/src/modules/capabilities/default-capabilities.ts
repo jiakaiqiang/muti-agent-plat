@@ -1,4 +1,4 @@
-import type { RuntimeCapabilityDefinition } from '@agent-cluster/shared';
+import { defaultAgentPresets, type RuntimeCapabilityDefinition } from '@agent-cluster/shared';
 
 export const defaultCapabilities: RuntimeCapabilityDefinition[] = [
   {
@@ -59,13 +59,6 @@ export const defaultCapabilities: RuntimeCapabilityDefinition[] = [
   }
 ];
 
-export const defaultCapabilityIdsByAgentKey: Record<string, string[]> = {
-  coordinator: ['cap-brief', 'cap-router'],
-  requirements: ['cap-brief'],
-  architect: ['cap-brief'],
-  frontend: ['cap-dry-run'],
-  backend: ['cap-dry-run', 'cap-file-write', 'cap-command-run'],
-  test: ['cap-test-report', 'cap-command-run'],
-  review: ['cap-post-review'],
-  notification: ['cap-feishu-draft']
-};
+export const defaultCapabilityIdsByAgentKey: Record<string, string[]> = Object.fromEntries(
+  defaultAgentPresets.map((preset) => [preset.key, preset.capabilityIds])
+);

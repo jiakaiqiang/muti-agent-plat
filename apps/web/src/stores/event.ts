@@ -2,8 +2,10 @@ import { defineStore } from 'pinia'
 import { apiPage, eventStreamUrl, parseSseEvent } from '@/api/client'
 import { useAgentStore } from '@/stores/agent'
 import { useKnowledgeStore } from '@/stores/knowledge'
+import { useLocalWorkspaceStore } from '@/stores/localWorkspace'
 import type {
   AgentCardState,
+  ArtifactEventPayload,
   AgentStatusChangedPayload,
   ChatMessage,
   CollaborationEvent,
@@ -53,6 +55,11 @@ function senderTypeOf(event: CollaborationEvent): ChatMessage['senderType'] {
 
 function shouldRenderInTimeline(event: CollaborationEvent) {
   return eventTypeToMessageType[event.type] !== undefined || event.metadata.renderAs === 'system_notice'
+}
+
+function artifactPayload(event: CollaborationEvent): ArtifactEventPayload | undefined {
+  if (event.type !== 'artifact_created') return undefined
+  return event.metadata.payload as ArtifactEventPayload | undefined
 }
 
 function confirmationStatuses(events: CollaborationEvent[]) {
@@ -258,6 +265,9 @@ export const useEventStore = defineStore('event', {
       } else {
         this.eventsBySessionId[sessionId] = page.items
         this.lastEventIdBySessionId[sessionId] = page.items.at(-1)?.id ?? ''
+        page.items.forEach((event) => {
+          void this.applyLocalFileChanges(event)
+        })
       }
     },
     appendEvent(event: CollaborationEvent) {
@@ -265,6 +275,13 @@ export const useEventStore = defineStore('event', {
       if (events.some((item) => item.id === event.id)) return
       this.eventsBySessionId[event.sessionId] = [...events, event]
       this.lastEventIdBySessionId[event.sessionId] = event.id
+      void this.applyLocalFileChanges(event)
+    },
+    async applyLocalFileChanges(event: CollaborationEvent) {
+      const payload = artifactPayload(event)
+      if (!payload?.fileChanges?.length) return
+      const localWorkspaceStore = useLocalWorkspaceStore()
+      await localWorkspaceStore.applyArtifactFileChanges(event.sessionId, payload.artifactId, payload.fileChanges)
     },
     connectSse(sessionId: string) {
       this.disconnectSse()

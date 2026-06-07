@@ -182,6 +182,13 @@ try {
   if (!discussionMessages.some((event) => event.metadata.payload?.messageKind === 'risk')) {
     throw new Error(`Expected a risk discussion message after timeout: ${JSON.stringify(discussionMessages)}`);
   }
+  const agentStatusEvents = (await listEvents(apiBase, sessionId)).filter((event) => event.type === 'agent_status_changed');
+  if (!agentStatusEvents.some((event) => event.metadata.payload?.status === 'discussing')) {
+    throw new Error(`Expected a visible discussing agent status: ${JSON.stringify(agentStatusEvents)}`);
+  }
+  if (!agentStatusEvents.some((event) => event.metadata.payload?.status === 'waiting')) {
+    throw new Error(`Expected a visible waiting status after discussion timeout: ${JSON.stringify(agentStatusEvents)}`);
+  }
   if (!llmRequests.some((item) => item.phase === 'discussion') || !llmRequests.some((item) => item.phase === 'brief_generation')) {
     throw new Error(`Expected both discussion and brief LLM calls: ${JSON.stringify(llmRequests)}`);
   }

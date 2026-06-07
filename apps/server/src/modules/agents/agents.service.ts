@@ -6,17 +6,34 @@ import { defaultCapabilityIdsByAgentKey } from '../capabilities/default-capabili
 import { PersistenceService } from '../persistence/persistence.service.js';
 
 const truthyValues = new Set(['1', 'true', 'yes', 'on']);
+const defaultAgentsByKey = new Map(defaultAgents.map((agent) => [agent.key, agent]));
+const defaultAgentIds = new Set(defaultAgents.map((agent) => agent.id));
+const defaultAgentKeys = new Set(defaultAgentsByKey.keys());
 
 @Injectable()
 export class AgentsService {
   private readonly agents = new Map<string, Agent>();
+  private readonly persistedDefaultAgentIds = new Set<string>();
+  private readonly seedDefaultAgents: boolean;
 
   constructor(private readonly persistence: PersistenceService) {
     const persistedAgents = this.persistence.getCollection<Agent[]>('agents', []);
     const defaultRuntimeType = defaultAgentRuntimeType();
-    const defaultAgentKeys = new Set(defaultAgents.map((agent) => agent.key));
-    const seedAgents = this.defaultAgentSeedEnabled() ? defaultAgents : [];
-    for (const agent of [...seedAgents, ...persistedAgents]) {
+    this.seedDefaultAgents = this.defaultAgentSeedEnabled();
+    const persistedDefaultAgents = persistedAgents.filter((agent) => this.isDefaultAgent(agent));
+    persistedDefaultAgents.forEach((agent) => {
+      this.persistedDefaultAgentIds.add(agent.id);
+      const canonicalDefaultAgent = defaultAgentsByKey.get(agent.key);
+      if (canonicalDefaultAgent) {
+        this.persistedDefaultAgentIds.add(canonicalDefaultAgent.id);
+      }
+    });
+
+    const visibleDefaultAgents = defaultAgents.map((agent) =>
+      this.mergeSeedAgent(agent, persistedDefaultAgents.find((item) => item.id === agent.id || item.key === agent.key))
+    );
+    const persistedCustomAgents = persistedAgents.filter((agent) => !this.isDefaultAgent(agent));
+    for (const agent of [...visibleDefaultAgents, ...persistedCustomAgents]) {
       const defaultCapabilityIds = defaultCapabilityIdsByAgentKey[agent.key] ?? [];
       const runtimeType = defaultAgentKeys.has(agent.key) ? defaultRuntimeType : agent.runtimeType;
       this.agents.set(agent.id, {
@@ -87,6 +104,9 @@ export class AgentsService {
       profileMarkdown: patch.profileMarkdown?.trim() || current.profileMarkdown,
       updatedAt: new Date().toISOString()
     };
+    if (this.isDefaultAgent(updated)) {
+      this.persistedDefaultAgentIds.add(updated.id);
+    }
     this.agents.set(updated.id, updated);
     this.persist();
     return updated;
@@ -106,7 +126,14 @@ export class AgentsService {
   }
 
   private persist() {
-    this.persistence.setCollection('agents', this.list());
+    this.persistence.setCollection('agents', this.persistableAgents());
+  }
+
+  private persistableAgents() {
+    if (this.seedDefaultAgents) {
+      return this.list();
+    }
+    return this.list().filter((agent) => !this.isDefaultAgent(agent) || this.persistedDefaultAgentIds.has(agent.id));
   }
 
   private normalizeStringList(values?: string[]) {
@@ -114,6 +141,26 @@ export class AgentsService {
       return [];
     }
     return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+  }
+
+  private mergeSeedAgent(seed: Agent, persisted?: Agent): Agent {
+    if (!persisted) {
+      return seed;
+    }
+
+    return {
+      ...seed,
+      modelId: persisted.modelId,
+      runtimeType: seed.runtimeType,
+      status: persisted.status ?? seed.status,
+      defaultKnowledgeBaseIds: this.normalizeStringList(persisted.defaultKnowledgeBaseIds),
+      createdAt: persisted.createdAt ?? seed.createdAt,
+      updatedAt: seed.updatedAt
+    };
+  }
+
+  private isDefaultAgent(agent: Pick<Agent, 'id' | 'key'>) {
+    return defaultAgentIds.has(agent.id) || defaultAgentKeys.has(agent.key);
   }
 
   private uniqueAgentKey(source: string) {

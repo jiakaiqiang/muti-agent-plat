@@ -12,6 +12,7 @@ defineProps<{
 const emit = defineEmits<{
   select: [sessionId: string]
   create: []
+  delete: [sessionId: string]
 }>()
 </script>
 
@@ -41,12 +42,11 @@ const emit = defineEmits<{
       <button type="button">收藏</button>
     </div>
 
-    <button
+    <article
       v-for="(session, index) in sessions"
       :key="session.id"
       class="session-list-item"
       :class="{ active: session.id === currentSessionId }"
-      type="button"
       @click="emit('select', session.id)"
     >
       <AgentPortrait :tone="(index % 5) + 1" :label="session.title" size="md" />
@@ -59,6 +59,9 @@ const emit = defineEmits<{
         <span>{{ sessionStatusLabel[session.status] }}</span>
         <span>{{ session.tokenUsed }} / {{ session.tokenBudget ?? '∞' }}</span>
       </span>
-    </button>
+      <button class="session-delete-button" type="button" title="删除会话" @click.stop="emit('delete', session.id)">
+        <UiIcon name="trash" :size="16" />
+      </button>
+    </article>
   </aside>
 </template>

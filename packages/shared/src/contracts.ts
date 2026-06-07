@@ -70,6 +70,20 @@ export type UserMessageIntent =
   | 'knowledge_input'
   | 'preference_input';
 
+export type SessionWorkingDirectory = {
+  kind: 'browser_local';
+  id: UUID;
+  name: string;
+  selectedAt: ISODateTime;
+};
+
+export type RuntimeFileChange = {
+  path: string;
+  content?: string;
+  operation: 'create' | 'update' | 'delete';
+  encoding?: 'utf-8';
+};
+
 export type CollaborationEventType =
   | 'user_message'
   | 'agent_message'
@@ -150,6 +164,7 @@ export type SessionDetail = {
   projectId?: UUID;
   currentTaskBriefId?: UUID;
   knowledgeBaseIds?: UUID[];
+  workingDirectory?: SessionWorkingDirectory;
   tokenBudget?: number;
   tokenUsed: number;
   participatingAgentIds: UUID[];
@@ -302,9 +317,15 @@ export type RuntimeModelOption = {
   model: string;
   baseUrl?: string;
   hasApiKey: boolean;
+  agents: RuntimeModelAgent[];
   createdAt?: ISODateTime;
   updatedAt?: ISODateTime;
 };
+
+export type RuntimeModelAgent = Pick<
+  Agent,
+  'id' | 'key' | 'name' | 'role' | 'status' | 'runtimeType' | 'modelId' | 'capabilityIds'
+>;
 
 export type RuntimeModelConfig = {
   provider: RuntimeModelProvider;
@@ -402,6 +423,7 @@ export type RuntimeCapabilityDefinition = {
 export type ContextPack = {
   systemRules: string[];
   sessionGoal: string;
+  workingDirectory?: SessionWorkingDirectory;
   taskBrief?: RuntimeTaskBrief;
   currentTask?: RuntimeAgentTask;
   agentProfile: RuntimeAgentProfile;
@@ -453,7 +475,9 @@ export type RuntimeArtifactOutput = {
   content?: string;
   uri?: string;
   summary?: string;
-  metadata?: Record<string, unknown>;
+  metadata?: Record<string, unknown> & {
+    fileChanges?: RuntimeFileChange[];
+  };
 };
 
 export type RuntimeError = {

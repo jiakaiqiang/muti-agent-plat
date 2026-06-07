@@ -70,6 +70,18 @@ export class OrchestratorService {
 
   async discussAndCreateBrief(session: SessionDetail) {
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_status_changed',
+      fromAgentId: coordinator.id,
+      content: `${coordinator.name} received the requirement and is triaging the group discussion.`,
+      metadata: createMetadata('system_notice', {
+        agentId: coordinator.id,
+        status: 'thinking',
+        thoughtSummary: 'Receiving and triaging the user requirement.',
+        actionSummary: 'Preparing discussion context and asking relevant Agents to assess the requirement.'
+      })
+    });
     await this.runDiscussion(session, coordinator);
     const result = await this.runRuntime(session, {
       runId: crypto.randomUUID(),
@@ -80,7 +92,7 @@ export class OrchestratorService {
       expectedOutput: { kind: 'task_brief', schemaVersion: '0.1' },
       budget: buildBudget(session)
     });
-    const output = this.completedOutput<TaskBriefOutput>(result, 'task_brief');
+    const output = this.normalizeTaskBriefOutput(this.completedOutput<TaskBriefOutput>(result, 'task_brief'));
     const suggestedTasks = output.suggestedTasks.length ? output.suggestedTasks : this.defaultSuggestedTasks();
 
     const brief: TaskBrief = {
@@ -155,6 +167,15 @@ export class OrchestratorService {
     return this.listBriefs(sessionId).find((brief) => brief.id === briefId);
   }
 
+  deleteSession(sessionId: string) {
+    const briefs = this.briefsBySession.get(sessionId) ?? [];
+    for (const brief of briefs) {
+      this.suggestedTasksByBriefId.delete(brief.id);
+    }
+    this.briefsBySession.delete(sessionId);
+    this.persistBriefs();
+  }
+
   prepareExecution(session: SessionDetail, briefId: string): { brief: TaskBrief; tasks: AgentTask[] } {
     const brief = this.getBrief(session.id, briefId);
     if (!brief) {
@@ -226,7 +247,7 @@ export class OrchestratorService {
         return { kind: 'cancelled', reason: messages.cancelled };
       }
       if (!taskResult.ok) {
-        return { kind: 'ask_user', reason: `${messages.taskFailed(readyTask.title)}：${taskResult.message}` };
+        return { kind: 'ask_user', reason: `${messages.taskFailed(readyTask.title)}: ${taskResult.message}` };
       }
     }
 
@@ -349,6 +370,7 @@ export class OrchestratorService {
 
     this.tasks.update(task, { status: 'completed', resultSummary: output.summary });
     const executionArtifact = this.createExecutionArtifact(session.id, task, taskAgent.id, output, result.artifacts);
+    const fileChanges = this.fileChangesForArtifact(executionArtifact.metadata);
     this.events.create({
       sessionId: session.id,
       type: 'artifact_created',
@@ -359,7 +381,8 @@ export class OrchestratorService {
         artifactId: executionArtifact.id,
         type: executionArtifact.type,
         title: executionArtifact.title,
-        contentSummary: executionArtifact.contentSummary
+        contentSummary: executionArtifact.contentSummary,
+        fileChanges
       })
     });
     this.events.create({
@@ -564,15 +587,48 @@ export class OrchestratorService {
       for (const agent of participants) {
         const runId = crypto.randomUUID();
         const contextPack = this.createContextPack(session, agent);
+        this.events.create({
+          sessionId: session.id,
+          type: 'agent_status_changed',
+          fromAgentId: agent.id,
+          content: `${agent.name} is checking whether the requirement is relevant to its responsibilities.`,
+          metadata: createMetadata('system_notice', {
+            agentId: agent.id,
+            status: 'discussing',
+            thoughtSummary: 'Checking requirement relevance.',
+            actionSummary: 'Reviewing the user requirement before brief creation.',
+            waitingFor: [coordinator.id]
+          })
+        });
         const result = await this.runDiscussionRuntime(session, agent, runId, contextPack, timeoutMs);
+        const timedOut = result.error?.code === 'RUNTIME_TIMEOUT';
         const output =
           result.status === 'completed' && (result.output as { kind?: string }).kind === 'agent_message'
             ? (result.output as AgentMessageOutput)
             : ({
                 kind: 'agent_message',
                 messageKind: 'risk',
-                content: `${agent.name} 未能完成讨论：${result.error?.message ?? result.status}`
+                content: timedOut
+                  ? `${agent.name} discussion timed out; Coordinator will continue with the available context.`
+                  : `${agent.name} could not complete discussion: ${result.error?.message ?? result.status}`
               } satisfies AgentMessageOutput);
+        this.events.create({
+          sessionId: session.id,
+          type: 'agent_status_changed',
+          fromAgentId: agent.id,
+          content: timedOut
+            ? `${agent.name} did not respond before the discussion timeout.`
+            : `${agent.name} completed requirement relevance assessment.`,
+          metadata: createMetadata('system_notice', {
+            agentId: agent.id,
+            status: timedOut ? 'waiting' : 'thinking',
+            thoughtSummary: timedOut
+              ? 'Discussion timed out; waiting for a later turn or user clarification.'
+              : 'Requirement relevance assessment completed.',
+            actionSummary: output.content,
+            waitingFor: timedOut ? [coordinator.id] : []
+          })
+        });
         this.events.create({
           sessionId: session.id,
           type: 'agent_message',
@@ -590,7 +646,6 @@ export class OrchestratorService {
       }
     }
   }
-
   private async runDiscussionRuntime(
     session: SessionDetail,
     agent: Agent,
@@ -740,7 +795,7 @@ export class OrchestratorService {
       type: 'task_waiting',
       taskId: task.id,
       fromAgentId: agentId,
-      content: `任务已暂停，等待恢复：${task.title}`,
+      content: `Task paused and waiting to resume: ${task.title}`,
       metadata: createMetadata('task_card', {
         taskId: task.id,
         title: task.title,
@@ -758,20 +813,31 @@ export class OrchestratorService {
     runtimeArtifacts: RuntimeArtifactOutput[]
   ) {
     const testAgent = this.agents.findByIdOrKey('test');
+    const fileChanges = this.fileChangesFromRuntimeArtifacts([...output.changedArtifacts, ...runtimeArtifacts]);
     return this.artifacts.create({
       sessionId,
       taskId: task.id,
       agentId,
       type: testAgent && agentId === testAgent.id ? 'test_report' : 'json',
-      title: `${task.title} 执行结果`,
+      title: `${task.title} execution result`,
       contentSummary: output.summary,
       metadata: {
         phase: 'task_execution',
         status: output.status,
         output,
-        runtimeArtifacts
+        runtimeArtifacts,
+        fileChanges
       }
     });
+  }
+
+  private fileChangesFromRuntimeArtifacts(artifacts: RuntimeArtifactOutput[]) {
+    return artifacts.flatMap((artifact) => artifact.metadata?.fileChanges ?? []);
+  }
+
+  private fileChangesForArtifact(metadata: Record<string, unknown>) {
+    const fileChanges = metadata.fileChanges;
+    return Array.isArray(fileChanges) ? fileChanges : [];
   }
 
   private createContextPack(session: SessionDetail, agent: Agent, brief?: TaskBrief, task?: AgentTask): ContextPack {
@@ -781,10 +847,11 @@ export class OrchestratorService {
       .map((memory) => this.memories.toRuntimeMemory(memory));
     return {
       systemRules: [
-        '返回符合 expected RuntimeOutput kind 的结构化 JSON。',
-        '除非能力策略明确允许，否则不要执行外部副作用。'
+        'Return structured JSON matching the expected RuntimeOutput kind.',
+        'Do not perform external side effects unless explicitly allowed by capability policy.'
       ],
       sessionGoal: session.originalInput,
+      workingDirectory: session.workingDirectory,
       taskBrief: brief
         ? {
             id: brief.id,
@@ -834,7 +901,7 @@ export class OrchestratorService {
         sessionId: input.sessionId,
         type: 'error_reported',
         priority: 'high',
-        content: `Token 预算不足：预计 ${fitted.estimatedTokens} tokens，预算 ${maxInputTokens} tokens。`,
+        content: `Token budget exceeded: estimated ${fitted.estimatedTokens} tokens, max ${maxInputTokens} tokens.`,
         metadata: createMetadata('error_card', {
           code: 'TOKEN_BUDGET_EXCEEDED',
           estimatedTokens: fitted.estimatedTokens,
@@ -850,7 +917,7 @@ export class OrchestratorService {
         type: 'runtime_progress',
         taskId: input.taskId,
         fromAgentId: input.agent.id,
-        content: '上下文已按 token 预算裁剪。',
+        content: 'Context was trimmed to fit the token budget.',
         metadata: createMetadata('system_notice', {
           runtimeInvocationId: input.runId,
           code: 'TOKEN_CONTEXT_TRIMMED',
@@ -894,7 +961,7 @@ export class OrchestratorService {
       output: {
         kind: 'agent_message',
         messageKind: 'risk',
-        content: 'Token 预算不足，无法发起运行时调用。'
+        content: 'Token budget is insufficient; runtime invocation was not started.'
       } satisfies AgentMessageOutput,
       events: [],
       artifacts: [],
@@ -947,7 +1014,7 @@ export class OrchestratorService {
     }
     const fallback = agents[fallbackIndex] ?? agents[0];
     if (!fallback) {
-      throw new Error('当前会话没有可用的 Agent。');
+      throw new Error('Current session has no available Agent.');
     }
     return fallback;
   }
@@ -974,13 +1041,38 @@ export class OrchestratorService {
     }
     const output = result.output as { kind?: string };
     if (output.kind !== expectedKind) {
-      throw new Error(`期望运行时输出 kind=${expectedKind}，实际为 ${String(output.kind)}`);
+      throw new Error(`Expected runtime output kind=${expectedKind}, got ${String(output.kind)}`);
     }
     return result.output as unknown as TOutput;
   }
 
+  private normalizeTaskBriefOutput(output: TaskBriefOutput): TaskBriefOutput {
+    return {
+      ...output,
+      goal: output.goal || 'Pending confirmed task goal',
+      scope: this.stringList(output.scope),
+      outOfScope: this.stringList(output.outOfScope),
+      constraints: this.stringList(output.constraints),
+      acceptanceCriteria: this.stringList(output.acceptanceCriteria),
+      risks: this.stringList(output.risks),
+      openQuestions: this.stringList(output.openQuestions),
+      suggestedTasks: Array.isArray(output.suggestedTasks)
+        ? output.suggestedTasks.map((task) => ({
+            ...task,
+            acceptanceCriteria: this.stringList(task.acceptanceCriteria)
+          }))
+        : []
+    };
+  }
+
+  private stringList(value: unknown): string[] {
+    return Array.isArray(value) ? value.map((item) => String(item).trim()).filter(Boolean) : [];
+  }
+
   private runtimeError(result: AgentRunResult, phase: string) {
-    return new Error(messages.runtimeError(result.runtimeType, phase, result.error?.message ?? result.status));
+    return Object.assign(new Error(messages.runtimeError(result.runtimeType, phase, result.error?.message ?? result.status)), {
+      cause: result.error
+    });
   }
 
   private defaultSuggestedTasks(): SuggestedAgentTask[] {
