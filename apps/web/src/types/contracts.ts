@@ -21,6 +21,11 @@ import type {
   SessionListItem,
   SessionWorkingDirectory,
   SessionStatus,
+  SuggestedAgentTask,
+  WorkspaceFileSnapshot,
+  WorkspaceSnapshot,
+  WorkspaceSkippedReason,
+  WorkspaceTreeNode,
   UserMessageIntent
 } from '@agent-cluster/shared'
 
@@ -53,6 +58,11 @@ export type {
   SessionListItem,
   SessionWorkingDirectory,
   SessionStatus,
+  SuggestedAgentTask,
+  WorkspaceFileSnapshot,
+  WorkspaceSnapshot,
+  WorkspaceSkippedReason,
+  WorkspaceTreeNode,
   UserMessageIntent
 } from '@agent-cluster/shared'
 
@@ -63,6 +73,7 @@ export type ConfirmationReason =
   | 'approve_high_risk_capability'
   | 'resolve_contract_conflict'
   | 'confirm_memory_write'
+  | 'confirm_feishu_notification'
   | 'continue_after_budget_warning'
 
 export type ConfirmationOption = {
@@ -95,6 +106,7 @@ export type BriefEventPayload = {
   acceptanceCriteria: string[]
   risks: string[]
   openQuestions: string[]
+  suggestedTasks?: SuggestedAgentTask[]
   requiresUserConfirmation: boolean
 }
 
@@ -104,6 +116,10 @@ export type ConfirmationRequestedPayload = {
   title: string
   description: string
   options: ConfirmationOption[]
+  relatedBriefId?: string
+  relatedTaskId?: string
+  relatedCapabilityId?: string
+  relatedArtifactId?: string
   candidate?: {
     content?: string
     sourceEventId?: string
@@ -254,6 +270,7 @@ export type ConfirmationCardState = {
   relatedBriefId?: string
   relatedTaskId?: string
   relatedCapabilityId?: string
+  relatedArtifactId?: string
 }
 
 export type TaskViewState = {

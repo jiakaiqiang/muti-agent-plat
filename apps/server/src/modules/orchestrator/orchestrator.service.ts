@@ -10,13 +10,16 @@ import type {
   PostReviewReportOutput,
   RuntimeArtifactOutput,
   RuntimeError,
+  RuntimeFileChange,
   SessionDetail,
   SuggestedAgentTask,
   TaskBrief,
   TaskBriefOutput,
-  TaskExecutionResultOutput
+  TaskExecutionResultOutput,
+  WorkspaceSnapshot
 } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
+import { applyServerLocalFileChanges } from '../../common/server-file-changes.js';
 import { messages } from '../../common/messages.js';
 import { discussionTimeoutMs, runtimeModeLabel } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
@@ -70,6 +73,7 @@ export class OrchestratorService {
 
   async discussAndCreateBrief(session: SessionDetail) {
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    await this.emitWorkspaceAnalyzedEvent(session, coordinator);
     this.events.create({
       sessionId: session.id,
       type: 'agent_status_changed',
@@ -80,6 +84,18 @@ export class OrchestratorService {
         status: 'thinking',
         thoughtSummary: 'Receiving and triaging the user requirement.',
         actionSummary: 'Preparing discussion context and asking relevant Agents to assess the requirement.'
+      })
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      fromAgentId: coordinator.id,
+      toAgentIds: this.discussionParticipants(session, coordinator).map((agent) => agent.id),
+      content: `${coordinator.name} 已接收需求，将先完成需求理解与拆分，再组织其他 Agent 讨论。`,
+      metadata: createMetadata('chat_message', {
+        messageKind: 'decision',
+        coordinatorAgentId: coordinator.id,
+        phase: 'requirement_intake'
       })
     });
     await this.runDiscussion(session, coordinator);
@@ -138,6 +154,34 @@ export class OrchestratorService {
       )
     });
 
+    const briefFileChanges = this.briefFileChanges(brief, suggestedTasks);
+    const briefArtifact = this.artifacts.create({
+      sessionId: session.id,
+      agentId: coordinator.id,
+      type: 'markdown',
+      title: `任务契约 v${brief.version}`,
+      contentSummary: brief.goal,
+      metadata: {
+        phase: 'task_brief',
+        briefId: brief.id,
+        fileChanges: briefFileChanges
+      }
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'artifact_created',
+      fromAgentId: coordinator.id,
+      content: messages.artifactCreated(briefArtifact.title),
+      metadata: createMetadata('artifact_card', {
+        artifactId: briefArtifact.id,
+        type: briefArtifact.type,
+        title: briefArtifact.title,
+        contentSummary: briefArtifact.contentSummary,
+        fileChanges: briefFileChanges
+      })
+    });
+    await this.applyServerLocalArtifactChanges(session, briefFileChanges);
+
     this.events.create({
       sessionId: session.id,
       type: 'user_confirmation_requested',
@@ -157,6 +201,53 @@ export class OrchestratorService {
     });
 
     return brief;
+  }
+
+  private async emitWorkspaceAnalyzedEvent(session: SessionDetail, coordinator: Agent) {
+    const snapshot = session.workspaceSnapshot;
+    if (!snapshot) return;
+    const focus = this.workspaceFocus(session);
+    const analysis = this.workspaceAnalysis(session, snapshot, focus);
+    const fileChanges = this.workspaceAnalysisFileChanges(analysis.markdown);
+    const artifact = this.artifacts.create({
+      sessionId: session.id,
+      agentId: coordinator.id,
+      type: 'markdown',
+      title: '工作区架构分析',
+      contentSummary: analysis.summary,
+      metadata: {
+        phase: 'workspace_analysis',
+        workspace: analysis.payload,
+        fileChanges
+      }
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      fromAgentId: coordinator.id,
+      content: analysis.chatContent(coordinator.name),
+      metadata: createMetadata('chat_message', {
+        messageKind: 'decision',
+        phase: 'workspace_analysis',
+        workspace: analysis.payload,
+        artifactId: artifact.id,
+        fileChanges
+      })
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'artifact_created',
+      fromAgentId: coordinator.id,
+      content: messages.artifactCreated(artifact.title),
+      metadata: createMetadata('artifact_card', {
+        artifactId: artifact.id,
+        type: artifact.type,
+        title: artifact.title,
+        contentSummary: artifact.contentSummary,
+        fileChanges
+      })
+    });
+    await this.applyServerLocalArtifactChanges(session, fileChanges);
   }
 
   listBriefs(sessionId: string) {
@@ -186,7 +277,7 @@ export class OrchestratorService {
     brief.confirmedAt = nowIso();
     this.persistBriefs();
 
-    const agentIdByKey = new Map(this.agents.list().map((agent) => [agent.key, agent.id]));
+    const agentIdByKey = new Map(this.participatingAgents(session).map((agent) => [agent.key, agent.id]));
     const suggestions = this.suggestedTasksByBriefId.get(brief.id) ?? this.defaultSuggestedTasks();
     const tasks = this.tasks.createFromSuggestions(session.id, suggestions, agentIdByKey);
 
@@ -413,6 +504,7 @@ export class OrchestratorService {
         risks: output.risks
       })
     });
+    await this.applyServerLocalArtifactChanges(session, fileChanges);
     return { ok: true };
   }
 
@@ -440,13 +532,18 @@ export class OrchestratorService {
       throw new Error(messages.cancelled);
     }
     const reviewOutput = this.completedOutput<PostReviewReportOutput>(reviewRun, 'post_review_report');
+    const reviewFileChanges = this.reviewFileChanges(reviewOutput);
     const reviewArtifact = this.artifacts.create({
       sessionId: session.id,
       agentId: review.id,
       type: 'test_report',
       title: messages.reviewReportTitle,
       contentSummary: reviewOutput.recommendation,
-      metadata: reviewOutput as unknown as Record<string, unknown>
+      metadata: {
+        ...(reviewOutput as unknown as Record<string, unknown>),
+        phase: 'post_review',
+        fileChanges: reviewFileChanges
+      }
     });
     this.events.create({
       sessionId: session.id,
@@ -467,9 +564,11 @@ export class OrchestratorService {
         artifactId: reviewArtifact.id,
         type: reviewArtifact.type,
         title: reviewArtifact.title,
-        contentSummary: reviewArtifact.contentSummary
+        contentSummary: reviewArtifact.contentSummary,
+        fileChanges: reviewFileChanges
       })
     });
+    await this.applyServerLocalArtifactChanges(session, reviewFileChanges);
     return reviewOutput;
   }
 
@@ -491,13 +590,19 @@ export class OrchestratorService {
     }
     const finalOutput = this.completedOutput<FinalDeliveryOutput>(finalRun, 'final_delivery');
     const notification = this.pickSessionAgent(session, ['notification'], 0);
+    const deliveryFileChanges = this.finalDeliveryFileChanges(session, brief, finalOutput);
+    const notificationFileChanges = this.notificationDraftFileChanges(brief, finalOutput);
     const deliveryArtifact = this.artifacts.create({
       sessionId: session.id,
       agentId: coordinator.id,
       type: 'markdown',
-      title: messages.finalDeliveryTitle,
+      title: this.isArchitectureAnalysisSession(session, brief) ? '项目架构分析交付说明' : messages.finalDeliveryTitle,
       contentSummary: finalOutput.summary,
-      metadata: finalOutput as unknown as Record<string, unknown>
+      metadata: {
+        ...(finalOutput as unknown as Record<string, unknown>),
+        phase: 'final_delivery',
+        fileChanges: deliveryFileChanges
+      }
     });
     const notificationDraft = this.artifacts.create({
       sessionId: session.id,
@@ -518,7 +623,8 @@ export class OrchestratorService {
           completedItems: finalOutput.completedItems,
           risks: finalOutput.risks
         },
-        sourceArtifactId: deliveryArtifact.id
+        sourceArtifactId: deliveryArtifact.id,
+        fileChanges: notificationFileChanges
       }
     });
     const artifactRefs = [...this.artifacts.listBySession(session.id).map((artifact) => artifact.id)];
@@ -542,7 +648,8 @@ export class OrchestratorService {
         artifactId: deliveryArtifact.id,
         type: deliveryArtifact.type,
         title: deliveryArtifact.title,
-        contentSummary: deliveryArtifact.contentSummary
+        contentSummary: deliveryArtifact.contentSummary,
+        fileChanges: deliveryFileChanges
       })
     });
     this.events.create({
@@ -555,9 +662,30 @@ export class OrchestratorService {
         type: notificationDraft.type,
         title: notificationDraft.title,
         contentSummary: notificationDraft.contentSummary,
-        relatedCapabilityId: 'cap-feishu-draft'
+        relatedCapabilityId: 'cap-feishu-draft',
+        fileChanges: notificationFileChanges
       })
     });
+    this.events.create({
+      sessionId: session.id,
+      type: 'user_confirmation_requested',
+      fromAgentId: notification.id,
+      content: '请确认是否发送飞书通知。',
+      metadata: createMetadata('confirmation_card', {
+        confirmationId: crypto.randomUUID(),
+        reason: 'confirm_feishu_notification',
+        title: '是否发送飞书通知',
+        description: '最终交付已生成飞书通知草稿。选择发送通知会记录一次通知动作；选择不通知则仅保留草稿。',
+        relatedArtifactId: notificationDraft.id,
+        relatedCapabilityId: 'cap-feishu-draft',
+        options: [
+          { key: 'send_notification', label: '发送通知', style: 'primary' },
+          { key: 'skip_notification', label: '不通知', style: 'default' }
+        ]
+      })
+    });
+    await this.applyServerLocalArtifactChanges(session, deliveryFileChanges);
+    await this.applyServerLocalArtifactChanges(session, notificationFileChanges);
   }
 
   private emitMemoryUsedEvent(sessionId: string, taskId: string, agentId: string, contextPack: ContextPack) {
@@ -819,7 +947,7 @@ export class OrchestratorService {
       taskId: task.id,
       agentId,
       type: testAgent && agentId === testAgent.id ? 'test_report' : 'json',
-      title: `${task.title} execution result`,
+      title: `${task.title}执行结果`,
       contentSummary: output.summary,
       metadata: {
         phase: 'task_execution',
@@ -835,9 +963,367 @@ export class OrchestratorService {
     return artifacts.flatMap((artifact) => artifact.metadata?.fileChanges ?? []);
   }
 
+  private briefFileChanges(brief: TaskBrief, suggestedTasks: SuggestedAgentTask[]): RuntimeFileChange[] {
+    return [
+      {
+        path: `agent-output/brief-v${brief.version}.md`,
+        operation: 'create',
+        encoding: 'utf-8',
+        content: this.briefMarkdown(brief, suggestedTasks)
+      }
+    ];
+  }
+
+  private reviewFileChanges(review: PostReviewReportOutput): RuntimeFileChange[] {
+    return [
+      {
+        path: 'agent-output/review-report.md',
+        operation: 'create',
+        encoding: 'utf-8',
+        content: this.reviewMarkdown(review)
+      }
+    ];
+  }
+
+  private finalDeliveryFileChanges(session: SessionDetail, brief: TaskBrief, delivery: FinalDeliveryOutput): RuntimeFileChange[] {
+    if (this.isArchitectureAnalysisSession(session, brief)) {
+      const report = this.projectArchitectureAnalysisFileChange(session.id);
+      return [
+        {
+          path: 'agent-output/final-delivery.md',
+          operation: 'create',
+          encoding: 'utf-8',
+          content: this.architectureAnalysisDeliveryMarkdown(brief, delivery, report)
+        }
+      ];
+    }
+    return [
+      {
+        path: 'agent-output/final-delivery.md',
+        operation: 'create',
+        encoding: 'utf-8',
+        content: this.finalDeliveryMarkdown(brief, delivery)
+      }
+    ];
+  }
+
+  private architectureAnalysisDeliveryMarkdown(
+    brief: TaskBrief,
+    delivery: FinalDeliveryOutput,
+    report: RuntimeFileChange | undefined
+  ) {
+    return [
+      '# 项目架构分析交付说明',
+      '',
+      `任务契约 ID：${brief.id}`,
+      '',
+      '## 摘要',
+      delivery.summary,
+      '',
+      this.markdownList('已完成项', delivery.completedItems),
+      this.markdownList('未完成项', delivery.incompleteItems),
+      this.markdownList('风险', delivery.risks),
+      '## 主要产物',
+      '- agent-output/workspace-analysis.md',
+      '- agent-output/project-architecture-analysis.md',
+      '',
+      report?.content
+        ? ['## 项目架构分析报告正文', '', report.content].join('\n')
+        : '## 项目架构分析报告正文\n\n- 未在当前会话产物中找到项目架构分析报告正文，请检查任务执行阶段是否成功生成 agent-output/project-architecture-analysis.md。'
+    ].join('\n');
+  }
+
+  private notificationDraftFileChanges(brief: TaskBrief, delivery: FinalDeliveryOutput): RuntimeFileChange[] {
+    return [
+      {
+        path: 'agent-output/notification-draft.md',
+        operation: 'create',
+        encoding: 'utf-8',
+        content: this.notificationDraftMarkdown(brief, delivery)
+      }
+    ];
+  }
+
+  private workspaceAnalysisFileChanges(markdown: string): RuntimeFileChange[] {
+    return [
+      {
+        path: 'agent-output/workspace-analysis.md',
+        operation: 'create',
+        encoding: 'utf-8',
+        content: markdown
+      }
+    ];
+  }
+
+  private workspaceAnalysis(
+    session: SessionDetail,
+    snapshot: WorkspaceSnapshot,
+    focus:
+      | {
+          relevantFiles: string[];
+          possibleEntryPoints: string[];
+          detectedStack: string[];
+          rationale: string;
+        }
+      | undefined
+  ) {
+    const readableFiles = snapshot.files;
+    const entrypoints = snapshot.entrypoints ?? [];
+    const detectedStack = snapshot.detectedStack ?? [];
+    const relevantFiles = focus?.relevantFiles ?? [];
+    const skippedByReason = snapshot.skipped.reduce<Record<string, number>>((acc, item) => {
+      acc[item.reason] = (acc[item.reason] ?? 0) + 1;
+      return acc;
+    }, {});
+    const topDirectories = this.workspaceTopDirectories(snapshot);
+    const importantFiles = this.workspaceImportantFiles(snapshot, relevantFiles, entrypoints);
+    const impactedFiles = this.workspaceImpactedFiles(snapshot, relevantFiles, entrypoints);
+    const modificationPlan = impactedFiles.map((path) => this.workspaceModificationPlanItem(path, session.originalInput));
+    const summary = `已分析 ${snapshot.rootName}：扫描 ${snapshot.fileCount} 个条目，识别 ${readableFiles.length} 个可读文本文件。`;
+    const payload = {
+      rootName: snapshot.rootName,
+      fileCount: snapshot.fileCount,
+      readableFileCount: readableFiles.length,
+      skippedFileCount: snapshot.skipped.length,
+      totalBytes: snapshot.totalBytes,
+      detectedStack,
+      entrypoints,
+      relevantFiles,
+      topDirectories,
+      importantFiles,
+      impactedFiles,
+      modificationPlan,
+      skippedByReason,
+      rationale: focus?.rationale ?? '基于工作区快照、入口文件和用户需求关键词完成初步架构分析，并形成多文件影响面。'
+    };
+    const markdown = [
+      '# 工作区架构分析',
+      '',
+      `会话需求：${session.originalInput}`,
+      `工作区：${snapshot.rootName}`,
+      `扫描时间：${snapshot.scannedAt}`,
+      '',
+      '## 分析结论',
+      summary,
+      detectedStack.length ? `识别技术栈：${detectedStack.join('、')}` : '暂未识别出明确技术栈。',
+      entrypoints.length ? `入口文件：${entrypoints.join('、')}` : '暂未识别出明确入口文件。',
+      '',
+      this.markdownList('目录结构重点', topDirectories),
+      this.markdownList('重点文件', importantFiles),
+      this.markdownList('与需求相关的文件', relevantFiles),
+      this.markdownList('预计影响文件', impactedFiles),
+      this.markdownList('多文件修改计划', modificationPlan),
+      '## 扫描统计',
+      `- 扫描条目：${snapshot.fileCount}`,
+      `- 可读文本文件：${readableFiles.length}`,
+      `- 跳过条目：${snapshot.skipped.length}`,
+      `- 总字节数：${snapshot.totalBytes}`,
+      '',
+      '## 跳过原因',
+      ...(
+        Object.keys(skippedByReason).length
+          ? Object.entries(skippedByReason).map(([reason, count]) => `- ${reason}：${count}`)
+          : ['- 无']
+      ),
+      '',
+      '## 判断依据',
+      payload.rationale,
+      ''
+    ].join('\n');
+
+    return {
+      summary,
+      payload,
+      markdown,
+      chatContent: (agentName: string) =>
+        [
+          `${agentName} 已完成会话工作区架构分析，并生成阶段产物。`,
+          `工作区：${snapshot.rootName}`,
+          `扫描条目：${snapshot.fileCount}，可读文本文件：${readableFiles.length}，跳过：${snapshot.skipped.length}`,
+          `技术栈：${detectedStack.join('、') || '未识别'}`,
+          `预计影响文件：${impactedFiles.slice(0, 6).join('、') || '暂无'}`,
+          `产物文件：agent-output/workspace-analysis.md`
+        ].join('\n')
+    };
+  }
+
+  private workspaceTopDirectories(snapshot: WorkspaceSnapshot) {
+    const counts = new Map<string, number>();
+    for (const node of snapshot.tree) {
+      const top = node.path.split('/')[0];
+      if (!top || top === node.path) continue;
+      counts.set(top, (counts.get(top) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 8)
+      .map(([directory, count]) => `${directory}/（${count} 个条目）`);
+  }
+
+  private workspaceImportantFiles(snapshot: WorkspaceSnapshot, relevantFiles: string[], entrypoints: string[]) {
+    const preferred = new Set([...relevantFiles, ...entrypoints]);
+    for (const file of snapshot.files) {
+      const name = file.path.toLowerCase().split('/').at(-1) ?? file.path.toLowerCase();
+      if (['agents.md', 'claude.md', 'readme.md', 'package.json', 'tsconfig.json', 'vite.config.ts'].includes(name)) {
+        preferred.add(file.path);
+      }
+    }
+    return [...preferred].slice(0, 12);
+  }
+
+  private workspaceImpactedFiles(snapshot: WorkspaceSnapshot, relevantFiles: string[], entrypoints: string[]) {
+    const source = relevantFiles.length ? relevantFiles : entrypoints.length ? entrypoints : snapshot.files.map((file) => file.path);
+    const snapshotPaths = new Set(snapshot.files.map((file) => file.path));
+    return [...new Set(source)]
+      .filter((path) => snapshotPaths.has(path))
+      .filter((path) => !path.startsWith('agent-output/'))
+      .slice(0, 12);
+  }
+
+  private workspaceModificationPlanItem(path: string, requirement: string) {
+    const fileName = path.split('/').at(-1) ?? path;
+    const lower = fileName.toLowerCase();
+    const action =
+      lower.endsWith('.css') || lower.endsWith('.scss')
+        ? '调整样式或布局相关实现'
+        : lower.endsWith('.vue') || lower.endsWith('.tsx') || lower.endsWith('.jsx')
+          ? '调整页面组件、状态展示或交互逻辑'
+          : lower.endsWith('.ts') || lower.endsWith('.js')
+            ? '调整业务逻辑、类型或运行时处理'
+            : lower.endsWith('.md')
+              ? '同步更新文档和阶段说明'
+              : '按需求补充或更新文件内容';
+    return `${path}：${action}，确保与需求“${this.shortRequirement(requirement)}”一致。`;
+  }
+
+  private shortRequirement(requirement: string) {
+    const trimmed = requirement.trim().replace(/\s+/g, ' ');
+    return trimmed.length > 48 ? `${trimmed.slice(0, 45)}...` : trimmed;
+  }
+
+  private briefMarkdown(brief: TaskBrief, suggestedTasks: SuggestedAgentTask[]) {
+    return [
+      `# 任务契约 v${brief.version}`,
+      '',
+      `任务契约 ID：${brief.id}`,
+      '',
+      '## 目标',
+      brief.goal,
+      '',
+      this.markdownList('范围', brief.scope),
+      this.markdownList('不做范围', brief.outOfScope),
+      this.markdownList('约束', brief.constraints),
+      this.markdownList('验收标准', brief.acceptanceCriteria),
+      this.markdownList('风险', brief.risks),
+      this.markdownList('待确认问题', brief.openQuestions),
+      '## 建议任务',
+      ...(suggestedTasks.length
+        ? suggestedTasks.flatMap((task, index) => [
+            `${index + 1}. ${task.title}`,
+            `   - 描述：${task.description}`,
+            `   - 建议 Agent：${task.suggestedAgentKey ?? '未分配'}`,
+            `   - 验收：${task.acceptanceCriteria.join('；') || '无'}`
+          ])
+        : ['- 暂无建议任务。']),
+      ''
+    ].join('\n');
+  }
+
+  private reviewMarkdown(review: PostReviewReportOutput) {
+    return [
+      '# 复盘检查报告',
+      '',
+      `复盘建议：${this.reviewRecommendationLabel(review.recommendation)}`,
+      `是否符合任务契约：${review.isConsistentWithBrief ? '是' : '否'}`,
+      '',
+      this.markdownList('匹配项', review.matchedItems),
+      this.markdownList('不匹配项', review.mismatchedItems),
+      this.markdownList('缺失项', review.missingItems),
+      this.markdownList('超出范围的变更', review.outOfScopeChanges),
+      this.markdownList('测试结果', review.testResults)
+    ].join('\n');
+  }
+
+  private finalDeliveryMarkdown(brief: TaskBrief, delivery: FinalDeliveryOutput) {
+    return [
+      '# 最终交付摘要',
+      '',
+      `任务契约 ID：${brief.id}`,
+      '',
+      '## 摘要',
+      delivery.summary,
+      '',
+      this.markdownList('已完成项', delivery.completedItems),
+      this.markdownList('未完成项', delivery.incompleteItems),
+      this.markdownList('风险', delivery.risks),
+      this.markdownList('产物引用', delivery.artifactRefs)
+    ].join('\n');
+  }
+
+  private notificationDraftMarkdown(brief: TaskBrief, delivery: FinalDeliveryOutput) {
+    return [
+      '# 飞书通知草稿',
+      '',
+      `目标：${brief.goal}`,
+      '',
+      '## 摘要',
+      delivery.summary,
+      '',
+      this.markdownList('已完成项', delivery.completedItems),
+      this.markdownList('风险', delivery.risks)
+    ].join('\n');
+  }
+
+  private markdownList(title: string, values: string[]) {
+    return [`## ${title}`, ...(values.length ? values.map((value) => `- ${value}`) : ['- 无']), ''].join('\n');
+  }
+
+  private reviewRecommendationLabel(recommendation: PostReviewReportOutput['recommendation']) {
+    return (
+      {
+        deliver: '可以交付',
+        rework: '需要返工',
+        ask_user: '需要询问用户'
+      }[recommendation] ?? recommendation
+    );
+  }
+
   private fileChangesForArtifact(metadata: Record<string, unknown>) {
     const fileChanges = metadata.fileChanges;
     return Array.isArray(fileChanges) ? fileChanges : [];
+  }
+
+  private projectArchitectureAnalysisFileChange(sessionId: string) {
+    for (const artifact of this.artifacts.listBySession(sessionId)) {
+      const fileChanges = this.fileChangesForArtifact(artifact.metadata);
+      const report = fileChanges.find((change) => change.path === 'agent-output/project-architecture-analysis.md');
+      if (report) return report;
+    }
+    return undefined;
+  }
+
+  private isArchitectureAnalysisSession(session: SessionDetail, brief?: TaskBrief) {
+    return /架构|结构|目录|熟悉|分析项目|项目分析|了解项目/i.test(`${session.originalInput}\n${brief?.goal ?? ''}`);
+  }
+
+  private async applyServerLocalArtifactChanges(session: SessionDetail, fileChanges: RuntimeFileChange[]) {
+    if (session.workingDirectory?.kind !== 'server_local' || !session.workingDirectory.path || !fileChanges.length) {
+      return;
+    }
+    try {
+      await applyServerLocalFileChanges(session.workingDirectory.path, fileChanges);
+    } catch (error) {
+      this.events.create({
+        sessionId: session.id,
+        type: 'error_reported',
+        priority: 'high',
+        content: `写入本地项目资料失败：${error instanceof Error ? error.message : String(error)}`,
+        metadata: createMetadata('error_card', {
+          phase: 'artifact_file_write',
+          message: error instanceof Error ? error.message : String(error)
+        })
+      });
+    }
   }
 
   private createContextPack(session: SessionDetail, agent: Agent, brief?: TaskBrief, task?: AgentTask): ContextPack {
@@ -848,10 +1334,14 @@ export class OrchestratorService {
     return {
       systemRules: [
         'Return structured JSON matching the expected RuntimeOutput kind.',
-        'Do not perform external side effects unless explicitly allowed by capability policy.'
+        'Do not perform external side effects unless explicitly allowed by capability policy.',
+        'Analyze workspaceSnapshot before analyzing the user requirement when workspaceSnapshot is present.',
+        'Use existing workspace paths from workspaceSnapshot when proposing or applying file changes.'
       ],
       sessionGoal: session.originalInput,
       workingDirectory: session.workingDirectory,
+      workspaceSnapshot: session.workspaceSnapshot,
+      workspaceFocus: this.workspaceFocus(session),
       taskBrief: brief
         ? {
             id: brief.id,
@@ -886,6 +1376,47 @@ export class OrchestratorService {
       constraints: brief?.constraints ?? [],
       budget: buildBudget(session)
     };
+  }
+
+  private workspaceFocus(session: SessionDetail) {
+    const snapshot = session.workspaceSnapshot;
+    if (!snapshot) return undefined;
+    const relevantFiles = snapshot.files
+      .map((file) => ({
+        path: file.path,
+        score: this.workspaceFileRelevanceScore(file.path, session.originalInput)
+      }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
+      .map((item) => item.path)
+      .slice(0, 12);
+    const fallbackFiles = snapshot.files.map((file) => file.path).slice(0, 8);
+    return {
+      relevantFiles: relevantFiles.length ? relevantFiles : fallbackFiles,
+      possibleEntryPoints: snapshot.entrypoints ?? [],
+      detectedStack: snapshot.detectedStack ?? [],
+      rationale: relevantFiles.length
+        ? 'Matched workspace file paths against user requirement keywords and project entrypoints.'
+        : 'No strong keyword match was found, so the first readable workspace files are used as context.'
+    };
+  }
+
+  private isLikelyRelevantWorkspaceFile(path: string, requirement: string) {
+    return this.workspaceFileRelevanceScore(path, requirement) > 0;
+  }
+
+  private workspaceFileRelevanceScore(path: string, requirement: string) {
+    const lowerPath = path.toLowerCase();
+    const lowerRequirement = requirement.toLowerCase();
+    const fileName = lowerPath.split('/').at(-1) ?? lowerPath;
+    let score = 0;
+    if (lowerRequirement.includes(fileName)) score += 80;
+    for (const token of lowerRequirement.split(/[^a-z0-9_\-.]+/i).filter((item) => item.length >= 4)) {
+      if (lowerPath.includes(token)) score += 10;
+    }
+    if (lowerPath.startsWith('src/') || lowerPath.startsWith('apps/') || lowerPath.startsWith('packages/')) score += 5;
+    if (['agents.md', 'claude.md', 'readme.md', 'package.json'].includes(fileName)) score += 2;
+    return score;
   }
 
   private async runRuntime(inputSession: SessionDetail, input: AgentRunInput, signal?: AbortSignal) {

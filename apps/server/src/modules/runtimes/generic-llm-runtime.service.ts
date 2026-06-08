@@ -128,8 +128,18 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
                   'Return only valid JSON matching the requested RuntimeOutput kind.',
                   `Expected kind: ${input.expectedOutput.kind}`,
                   'Do not call tools, modify files, or perform external side effects.',
+                  input.contextPack.workspaceSnapshot
+                    ? 'Before analyzing the user requirement, inspect contextPack.workspaceSnapshot and contextPack.workspaceFocus. Ground the response in real workspace files and project structure.'
+                    : 'No workspace snapshot is available; say when file-level conclusions are assumptions.',
+                  'Be specific and useful. Avoid one-sentence generic output; include concrete decisions, assumptions, risks, and next actions.',
+                  input.expectedOutput.kind === 'agent_message'
+                    ? 'For agent_message, write a detailed Chinese response with 3-6 concise paragraphs or bullets covering understanding, concerns, and recommendations.'
+                    : '',
+                  input.expectedOutput.kind === 'task_execution_result'
+                    ? 'For task_execution_result, include changedArtifacts. If workspaceSnapshot is present, analyze the full impact surface and return fileChanges for every real workspace path that must change, especially all relevantFiles. Do not collapse a multi-file requirement into one file. Use agent-output only for auxiliary summaries.'
+                    : '',
                   input.contextPack.workingDirectory
-                    ? 'If code or files must change, return RuntimeArtifactOutput.metadata.fileChanges with relative paths only. The browser applies those changes inside the selected local working directory.'
+                    ? 'A local working directory is selected. Return file changes only as RuntimeArtifactOutput.metadata.fileChanges with safe relative paths. The browser applies those changes inside the selected directory.'
                     : 'No local working directory is selected. Do not return fileChanges.'
                 ].join('\n')
               },

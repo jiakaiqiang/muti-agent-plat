@@ -71,10 +71,51 @@ export type UserMessageIntent =
   | 'preference_input';
 
 export type SessionWorkingDirectory = {
-  kind: 'browser_local';
+  kind: 'browser_local' | 'server_local';
   id: UUID;
   name: string;
+  path?: string;
   selectedAt: ISODateTime;
+};
+
+export type WorkspaceSkippedReason =
+  | 'ignored_directory'
+  | 'binary'
+  | 'too_large'
+  | 'sensitive'
+  | 'limit_exceeded'
+  | 'read_error';
+
+export type WorkspaceTreeNode = {
+  path: string;
+  kind: 'file' | 'directory';
+  children?: WorkspaceTreeNode[];
+};
+
+export type WorkspaceFileSnapshot = {
+  path: string;
+  size: number;
+  language?: string;
+  content?: string;
+  summary?: string;
+};
+
+export type WorkspaceSkippedFile = {
+  path: string;
+  reason: WorkspaceSkippedReason;
+  detail?: string;
+};
+
+export type WorkspaceSnapshot = {
+  rootName: string;
+  scannedAt: ISODateTime;
+  fileCount: number;
+  totalBytes: number;
+  tree: WorkspaceTreeNode[];
+  files: WorkspaceFileSnapshot[];
+  skipped: WorkspaceSkippedFile[];
+  detectedStack?: string[];
+  entrypoints?: string[];
 };
 
 export type RuntimeFileChange = {
@@ -165,6 +206,7 @@ export type SessionDetail = {
   currentTaskBriefId?: UUID;
   knowledgeBaseIds?: UUID[];
   workingDirectory?: SessionWorkingDirectory;
+  workspaceSnapshot?: WorkspaceSnapshot;
   tokenBudget?: number;
   tokenUsed: number;
   participatingAgentIds: UUID[];
@@ -424,6 +466,13 @@ export type ContextPack = {
   systemRules: string[];
   sessionGoal: string;
   workingDirectory?: SessionWorkingDirectory;
+  workspaceSnapshot?: WorkspaceSnapshot;
+  workspaceFocus?: {
+    relevantFiles: string[];
+    possibleEntryPoints: string[];
+    detectedStack: string[];
+    rationale: string;
+  };
   taskBrief?: RuntimeTaskBrief;
   currentTask?: RuntimeAgentTask;
   agentProfile: RuntimeAgentProfile;

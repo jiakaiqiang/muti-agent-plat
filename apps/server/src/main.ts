@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module.js';
 import { loadLocalEnv } from './common/env.js';
 import { ApiExceptionFilter } from './common/api-exception.filter.js';
@@ -11,7 +12,7 @@ loadLocalEnv();
 
 const port = Number(process.env.SERVER_PORT ?? process.env.PORT ?? 3000);
 const defaultCorsOrigin =
-  'http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174';
+  'http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,http://localhost:8099,http://127.0.0.1:8099';
 
 function parseCorsOrigins(value: string | undefined) {
   return (value ?? defaultCorsOrigin)
@@ -39,9 +40,13 @@ function runtimeMode() {
 
 async function bootstrap() {
   const logger = process.env.LOG_FORMAT === 'json' ? new JsonLogger() : new Logger('Bootstrap');
-  const app = await NestFactory.create(AppModule, { logger });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false, logger });
   app.enableShutdownHooks();
+  const requestBodyLimit = process.env.HTTP_JSON_BODY_LIMIT ?? '2mb';
   const allowedOrigins = new Set(parseCorsOrigins(process.env.CORS_ORIGIN));
+
+  app.useBodyParser('json', { limit: requestBodyLimit });
+  app.useBodyParser('urlencoded', { extended: true, limit: requestBodyLimit });
 
   app.enableCors({
     origin(origin, callback) {

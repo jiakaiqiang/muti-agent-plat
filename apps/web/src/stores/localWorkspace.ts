@@ -1,5 +1,12 @@
 import { defineStore } from 'pinia'
-import type { RuntimeFileChange, SessionWorkingDirectory } from '@/types/contracts'
+import type {
+  RuntimeFileChange,
+  SessionWorkingDirectory,
+  WorkspaceFileSnapshot,
+  WorkspaceSkippedReason,
+  WorkspaceSnapshot,
+  WorkspaceTreeNode
+} from '@/types/contracts'
 
 type DirectoryHandle = FileSystemDirectoryHandle
 
@@ -14,6 +21,13 @@ type FileChangeApplyResult = {
   errors: string[]
 }
 
+export type PendingArtifactFileChanges = {
+  artifactId: string
+  title?: string
+  fileChanges: RuntimeFileChange[]
+  createdAt: string
+}
+
 type FileSystemPermissionMode = 'read' | 'readwrite'
 
 type FileSystemHandlePermissionDescriptor = {
@@ -24,6 +38,38 @@ type DirectoryPickerWindow = Window &
   typeof globalThis & {
     showDirectoryPicker?: () => Promise<DirectoryHandle>
   }
+
+const ignoredDirectories = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.cache', 'coverage'])
+const textExtensions = new Set([
+  '.css',
+  '.html',
+  '.js',
+  '.json',
+  '.jsx',
+  '.md',
+  '.mjs',
+  '.cjs',
+  '.ts',
+  '.tsx',
+  '.vue',
+  '.yml',
+  '.yaml',
+  '.txt'
+])
+const configFileNames = new Set([
+  'AGENTS.md',
+  'CLAUDE.md',
+  'README.md',
+  'package.json',
+  'tsconfig.json',
+  'vite.config.ts',
+  'vite.config.js',
+  'nest-cli.json'
+])
+const maxScannedEntries = 350
+const maxReadableFiles = 80
+const maxSingleFileBytes = 80_000
+const maxTotalContentBytes = 550_000
 
 function browserSupportsDirectoryPicker() {
   return typeof window !== 'undefined' && typeof (window as DirectoryPickerWindow).showDirectoryPicker === 'function'
@@ -84,11 +130,173 @@ async function applyFileChange(root: DirectoryHandle, change: RuntimeFileChange)
   await writable.close()
 }
 
+function extensionOf(path: string) {
+  const name = path.split('/').at(-1) ?? path
+  const index = name.lastIndexOf('.')
+  return index >= 0 ? name.slice(index).toLowerCase() : ''
+}
+
+function isSensitivePath(path: string) {
+  const name = path.split('/').at(-1)?.toLowerCase() ?? path.toLowerCase()
+  return (
+    name === '.env' ||
+    name.startsWith('.env.') ||
+    name.includes('secret') ||
+    name.includes('private-key') ||
+    name.endsWith('.pem') ||
+    name.endsWith('.key') ||
+    name.endsWith('.p12') ||
+    name.endsWith('.crt')
+  )
+}
+
+function languageForPath(path: string) {
+  const extension = extensionOf(path)
+  return (
+    {
+      '.css': 'css',
+      '.html': 'html',
+      '.js': 'javascript',
+      '.json': 'json',
+      '.jsx': 'javascriptreact',
+      '.md': 'markdown',
+      '.mjs': 'javascript',
+      '.cjs': 'javascript',
+      '.ts': 'typescript',
+      '.tsx': 'typescriptreact',
+      '.vue': 'vue',
+      '.yml': 'yaml',
+      '.yaml': 'yaml',
+      '.txt': 'text'
+    }[extension] ?? undefined
+  )
+}
+
+function shouldReadTextFile(path: string) {
+  const name = path.split('/').at(-1) ?? path
+  return configFileNames.has(name) || textExtensions.has(extensionOf(path))
+}
+
+function detectStack(files: WorkspaceFileSnapshot[]) {
+  const paths = new Set(files.map((file) => file.path))
+  const packageJson = files.find((file) => file.path.endsWith('package.json'))?.content ?? ''
+  return [
+    paths.has('package.json') ? 'node' : undefined,
+    packageJson.includes('"vue"') ? 'vue' : undefined,
+    packageJson.includes('"@nestjs/') ? 'nestjs' : undefined,
+    packageJson.includes('"vite"') ? 'vite' : undefined,
+    paths.has('tsconfig.json') ? 'typescript' : undefined
+  ].filter((item): item is string => Boolean(item))
+}
+
+function detectEntrypoints(files: WorkspaceFileSnapshot[]) {
+  const likely = [
+    'package.json',
+    'src/main.ts',
+    'src/main.tsx',
+    'src/App.vue',
+    'apps/web/src/main.ts',
+    'apps/server/src/main.ts',
+    'README.md',
+    'AGENTS.md',
+    'CLAUDE.md'
+  ]
+  const paths = new Set(files.map((file) => file.path))
+  return likely.filter((path) => paths.has(path))
+}
+
+async function scanDirectory(root: DirectoryHandle): Promise<WorkspaceSnapshot> {
+  const files: WorkspaceFileSnapshot[] = []
+  const skipped: WorkspaceSnapshot['skipped'] = []
+  const tree: WorkspaceTreeNode[] = []
+  let totalBytes = 0
+  let entryCount = 0
+  let readableCount = 0
+  let totalContentBytes = 0
+
+  async function scan(handle: DirectoryHandle, pathPrefix: string, target: WorkspaceTreeNode[]) {
+    const entries: Array<[string, FileSystemDirectoryHandle | FileSystemFileHandle]> = []
+    for await (const entry of handle.entries()) {
+      entries.push(entry)
+    }
+    entries.sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
+
+    for (const [name, child] of entries) {
+      const path = pathPrefix ? `${pathPrefix}/${name}` : name
+      if (entryCount >= maxScannedEntries) {
+        skipped.push({ path, reason: 'limit_exceeded' })
+        continue
+      }
+      entryCount += 1
+
+      if (child.kind === 'directory') {
+        const node: WorkspaceTreeNode = { path, kind: 'directory', children: [] }
+        target.push(node)
+        if (ignoredDirectories.has(name)) {
+          skipped.push({ path, reason: 'ignored_directory' })
+          continue
+        }
+        await scan(child, path, node.children ?? [])
+        continue
+      }
+
+      const node: WorkspaceTreeNode = { path, kind: 'file' }
+      target.push(node)
+      if (isSensitivePath(path)) {
+        skipped.push({ path, reason: 'sensitive' })
+        continue
+      }
+
+      try {
+        const file = await child.getFile()
+        totalBytes += file.size
+        if (!shouldReadTextFile(path)) {
+          skipped.push({ path, reason: 'binary' })
+          continue
+        }
+        if (file.size > maxSingleFileBytes) {
+          skipped.push({ path, reason: 'too_large', detail: `${file.size} bytes` })
+          continue
+        }
+        if (readableCount >= maxReadableFiles || totalContentBytes + file.size > maxTotalContentBytes) {
+          skipped.push({ path, reason: 'limit_exceeded' })
+          continue
+        }
+        const content = await file.text()
+        readableCount += 1
+        totalContentBytes += content.length
+        files.push({
+          path,
+          size: file.size,
+          language: languageForPath(path),
+          content
+        })
+      } catch (error) {
+        skipped.push({ path, reason: 'read_error', detail: error instanceof Error ? error.message : String(error) })
+      }
+    }
+  }
+
+  await scan(root, '', tree)
+  return {
+    rootName: root.name,
+    scannedAt: new Date().toISOString(),
+    fileCount: entryCount,
+    totalBytes,
+    tree,
+    files,
+    skipped,
+    detectedStack: detectStack(files),
+    entrypoints: detectEntrypoints(files)
+  }
+}
+
 export const useLocalWorkspaceStore = defineStore('localWorkspace', {
   state: () => ({
     bindingsBySessionId: {} as Record<string, WorkspaceBinding | undefined>,
     pendingBinding: undefined as WorkspaceBinding | undefined,
     appliedArtifactIds: {} as Record<string, true>,
+    pendingFileChangesBySessionId: {} as Record<string, PendingArtifactFileChanges[] | undefined>,
     lastApplyResultBySessionId: {} as Record<string, FileChangeApplyResult | undefined>
   }),
   getters: {
@@ -98,7 +306,9 @@ export const useLocalWorkspaceStore = defineStore('localWorkspace', {
     directoryForSession: (state) => (sessionId?: string) =>
       sessionId ? state.bindingsBySessionId[sessionId]?.directory : undefined,
     applyResultForSession: (state) => (sessionId?: string) =>
-      sessionId ? state.lastApplyResultBySessionId[sessionId] : undefined
+      sessionId ? state.lastApplyResultBySessionId[sessionId] : undefined,
+    pendingFileChangesForSession: (state) => (sessionId?: string) =>
+      sessionId ? state.pendingFileChangesBySessionId[sessionId] ?? [] : []
   },
   actions: {
     async choosePendingDirectory() {
@@ -125,6 +335,41 @@ export const useLocalWorkspaceStore = defineStore('localWorkspace', {
       this.bindingsBySessionId[sessionId] = this.pendingBinding
       this.pendingBinding = undefined
       return this.bindingsBySessionId[sessionId]?.directory
+    },
+    async scanPendingWorkspace() {
+      if (!this.pendingBinding) return undefined
+      const allowed = await ensurePermission(this.pendingBinding.handle)
+      if (!allowed) {
+        throw new Error('Read/write permission was not granted for the selected directory.')
+      }
+      return scanDirectory(this.pendingBinding.handle)
+    },
+    enqueueArtifactFileChanges(
+      sessionId: string,
+      artifactId: string,
+      fileChanges: RuntimeFileChange[] = [],
+      title?: string
+    ) {
+      if (!fileChanges.length || this.appliedArtifactIds[artifactId]) return
+      const queue = this.pendingFileChangesBySessionId[sessionId] ?? []
+      const existing = queue.find((item) => item.artifactId === artifactId)
+      if (existing) return
+      this.pendingFileChangesBySessionId[sessionId] = [
+        ...queue,
+        {
+          artifactId,
+          title,
+          fileChanges,
+          createdAt: new Date().toISOString()
+        }
+      ]
+    },
+    async applyQueuedFileChanges(sessionId: string) {
+      const queue = this.pendingFileChangesBySessionId[sessionId] ?? []
+      for (const item of queue) {
+        await this.applyArtifactFileChanges(sessionId, item.artifactId, item.fileChanges)
+      }
+      this.pendingFileChangesBySessionId[sessionId] = queue.filter((item) => !this.appliedArtifactIds[item.artifactId])
     },
     async applyArtifactFileChanges(sessionId: string, artifactId: string, fileChanges: RuntimeFileChange[] = []) {
       if (!fileChanges.length || this.appliedArtifactIds[artifactId]) {

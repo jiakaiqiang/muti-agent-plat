@@ -12,6 +12,7 @@ import type {
   ConfirmationCardState,
   ConfirmationRequestedPayload,
   RagRetrievedPayload,
+  RuntimeEventPayload,
   TaskEventPayload,
   TaskViewState
 } from '@/types/contracts'
@@ -22,23 +23,7 @@ const eventTypeToMessageType: Partial<Record<CollaborationEvent['type'], ChatMes
   brief_created: 'brief',
   brief_updated: 'brief',
   user_confirmation_requested: 'confirmation',
-  task_created: 'task',
-  task_claimed: 'task',
-  task_started: 'task',
-  task_waiting: 'task',
-  task_completed: 'task',
-  task_rejected: 'task',
-  task_reworked: 'task',
-  runtime_started: 'tool',
-  runtime_progress: 'tool',
-  runtime_completed: 'tool',
-  runtime_failed: 'tool',
-  tool_called: 'tool',
-  tool_completed: 'tool',
-  tool_failed: 'tool',
-  rag_retrieved: 'rag',
   artifact_created: 'artifact',
-  post_review_completed: 'review',
   final_delivery_created: 'delivery',
   error_reported: 'error'
 }
@@ -54,7 +39,11 @@ function senderTypeOf(event: CollaborationEvent): ChatMessage['senderType'] {
 }
 
 function shouldRenderInTimeline(event: CollaborationEvent) {
-  return eventTypeToMessageType[event.type] !== undefined || event.metadata.renderAs === 'system_notice'
+  if (event.type === 'agent_message') {
+    const payload = payloadOf<{ round?: number; internal?: boolean }>(event)
+    return !payload.round && !payload.internal
+  }
+  return eventTypeToMessageType[event.type] !== undefined
 }
 
 function artifactPayload(event: CollaborationEvent): ArtifactEventPayload | undefined {
@@ -96,6 +85,52 @@ function confirmationStatuses(events: CollaborationEvent[]) {
 
 const streams = new Map<string, EventSource>()
 
+const agentStatusStrength: Partial<Record<AgentCardState['status'], number>> = {
+  idle: 0,
+  discussing: 1,
+  thinking: 2,
+  waiting: 3,
+  reviewing: 4,
+  reworking: 5,
+  running: 6,
+  completed: 7,
+  failed: 8,
+  disabled: 9
+}
+
+function derivedAgentId(event: CollaborationEvent) {
+  const payload = payloadOf<{ assigneeAgentId?: string; agentId?: string }>(event)
+  return payload.assigneeAgentId ?? payload.agentId ?? event.fromAgentId
+}
+
+function statusFromEvent(event: CollaborationEvent): AgentCardState['status'] | undefined {
+  const payload = payloadOf<TaskEventPayload | RuntimeEventPayload>(event)
+  if (event.type === 'task_started' || event.type === 'runtime_started') return 'running'
+  if (event.type === 'task_waiting') return 'waiting'
+  if (event.type === 'task_reworked') return 'reworking'
+  if (event.type === 'post_review_started') return 'reviewing'
+  if (event.type === 'task_completed' || event.type === 'runtime_completed' || event.type === 'post_review_completed') {
+    return 'completed'
+  }
+  if (event.type === 'task_rejected' || event.type === 'runtime_failed') return 'failed'
+  if (event.type === 'agent_message') return 'discussing'
+  if (payload.status === 'failed') return 'failed'
+  if (payload.status === 'completed') return 'completed'
+  if (payload.status === 'running') return 'running'
+  if (payload.status === 'waiting') return 'waiting'
+  return undefined
+}
+
+function shouldApplyDerivedStatus(current: AgentCardState, nextStatus: AgentCardState['status']) {
+  if (current.status === nextStatus) return true
+  if (nextStatus === 'discussing') {
+    return (agentStatusStrength[current.status] ?? 0) <= (agentStatusStrength.discussing ?? 1)
+  }
+  if (current.status === 'disabled') return false
+  if (nextStatus === 'failed' || nextStatus === 'completed') return true
+  return current.status !== 'failed'
+}
+
 export const useEventStore = defineStore('event', {
   state: () => ({
     eventsBySessionId: {} as Record<string, CollaborationEvent[]>,
@@ -130,12 +165,13 @@ export const useEventStore = defineStore('event', {
         }
       })
     },
-    agentCards: (state) => (sessionId: string): AgentCardState[] => {
+    agentCards: (state) => (sessionId: string, participantAgentIds?: string[]): AgentCardState[] => {
       const agentStore = useAgentStore()
       const knowledgeStore = useKnowledgeStore()
       const cards = new Map<string, AgentCardState>()
+      const participantIds = participantAgentIds?.length ? new Set(participantAgentIds) : undefined
 
-      agentStore.agents.forEach((agent) => {
+      agentStore.agents.filter((agent) => !participantIds || participantIds.has(agent.id)).forEach((agent) => {
         cards.set(agent.id, {
           agentId: agent.id,
           name: agent.name,
@@ -182,6 +218,39 @@ export const useEventStore = defineStore('event', {
             cards.set(payload.agentId, {
               ...current,
               usedRagSnippets: [...snippets, ...current.usedRagSnippets].slice(0, 3),
+              recentLogs: [event.content, ...current.recentLogs].slice(0, 4),
+              updatedAt: event.createdAt
+            })
+          }
+        }
+
+        const nextStatus = statusFromEvent(event)
+        const agentId = derivedAgentId(event)
+        if (agentId && nextStatus) {
+          const current = cards.get(agentId)
+          if (current && shouldApplyDerivedStatus(current, nextStatus)) {
+            const payload = payloadOf<TaskEventPayload | RuntimeEventPayload>(event)
+            cards.set(agentId, {
+              ...current,
+              status: nextStatus,
+              currentTaskId: payload.taskId ?? event.taskId ?? current.currentTaskId,
+              currentTaskTitle: 'title' in payload && payload.title ? payload.title : current.currentTaskTitle,
+              actionSummary: 'progressMessage' in payload ? payload.progressMessage ?? current.actionSummary : current.actionSummary,
+              recentLogs: [event.content, ...current.recentLogs].slice(0, 4),
+              updatedAt: event.createdAt
+            })
+          }
+        }
+
+        if (event.type === 'artifact_created') {
+          const payload = artifactPayload(event)
+          const agentId = event.fromAgentId
+          if (payload && agentId) {
+            const current = cards.get(agentId)
+            if (!current) continue
+            cards.set(agentId, {
+              ...current,
+              artifactIds: [payload.artifactId, ...current.artifactIds].slice(0, 6),
               recentLogs: [event.content, ...current.recentLogs].slice(0, 4),
               updatedAt: event.createdAt
             })
@@ -236,7 +305,8 @@ export const useEventStore = defineStore('event', {
             candidate: payload.candidate,
             relatedBriefId: payload.relatedBriefId as string | undefined,
             relatedTaskId: payload.relatedTaskId as string | undefined,
-            relatedCapabilityId: payload.relatedCapabilityId as string | undefined
+            relatedCapabilityId: payload.relatedCapabilityId as string | undefined,
+            relatedArtifactId: payload.relatedArtifactId as string | undefined
           }
         }
         if (event.type === 'user_confirmation_resolved' && card) {
@@ -281,7 +351,17 @@ export const useEventStore = defineStore('event', {
       const payload = artifactPayload(event)
       if (!payload?.fileChanges?.length) return
       const localWorkspaceStore = useLocalWorkspaceStore()
-      await localWorkspaceStore.applyArtifactFileChanges(event.sessionId, payload.artifactId, payload.fileChanges)
+      localWorkspaceStore.enqueueArtifactFileChanges(
+        event.sessionId,
+        payload.artifactId,
+        payload.fileChanges,
+        payload.title
+      )
+    },
+    async replayLocalFileChanges(sessionId: string) {
+      for (const event of this.eventsBySessionId[sessionId] ?? []) {
+        await this.applyLocalFileChanges(event)
+      }
     },
     connectSse(sessionId: string) {
       this.disconnectSse()

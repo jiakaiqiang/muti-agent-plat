@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
 import { ok } from '../../common/api-response.js';
-import type { SessionWorkingDirectory } from '@agent-cluster/shared';
+import type { SessionWorkingDirectory, WorkspaceSnapshot } from '@agent-cluster/shared';
 import { SessionsService } from './sessions.service.js';
 
 @Controller()
@@ -25,6 +25,7 @@ export class SessionsController {
       tokenBudget?: number;
       knowledgeBaseIds?: string[];
       workingDirectory?: SessionWorkingDirectory;
+      workspaceSnapshot?: WorkspaceSnapshot;
     }
   ) {
     return this.sessions.create(body).then(ok);
@@ -82,7 +83,24 @@ export class SessionsController {
   }
 
   @Post('sessions/:sessionId/briefs/:briefId/reject')
-  rejectBrief(@Param('sessionId') sessionId: string, @Body() body: { reason: string }) {
-    return ok(this.sessions.control(sessionId, 'REVISING_BRIEF', body.reason));
+  rejectBrief(
+    @Param('sessionId') sessionId: string,
+    @Param('briefId') briefId: string,
+    @Body() body: { reason?: string; userMessage?: string; confirmationId?: string }
+  ) {
+    return ok(this.sessions.reviseBrief(sessionId, briefId, body));
+  }
+
+  @Post('sessions/:sessionId/notifications/feishu/decision')
+  decideFeishuNotification(
+    @Param('sessionId') sessionId: string,
+    @Body()
+    body: {
+      confirmationId?: string;
+      notificationDraftArtifactId?: string;
+      decision: 'send_notification' | 'skip_notification';
+    }
+  ) {
+    return ok(this.sessions.decideFeishuNotification(sessionId, body));
   }
 }

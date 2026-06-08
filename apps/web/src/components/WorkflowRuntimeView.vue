@@ -20,6 +20,7 @@ type WorkflowStage = {
   agent: string
   points: string[]
   eventTypes: CollaborationEvent['type'][]
+  successEventTypes: CollaborationEvent['type'][]
 }
 
 const selectedStageKey = ref<WorkflowStageKey>('requirements')
@@ -51,35 +52,40 @@ const stages: WorkflowStage[] = [
     title: '需求分析',
     agent: 'Agent 01',
     points: ['收集需求', '目标拆解', '明确约束'],
-    eventTypes: ['user_message', 'agent_message', 'brief_created', 'brief_updated']
+    eventTypes: ['user_message', 'agent_message', 'brief_created', 'brief_updated'],
+    successEventTypes: ['brief_created', 'brief_updated']
   },
   {
     key: 'strategy',
     title: '策略规划',
     agent: 'Agent 02',
     points: ['制定总体策略', '渠道规划', '资源分配'],
-    eventTypes: ['user_confirmation_requested', 'user_confirmation_resolved', 'brief_confirmed', 'brief_rejected']
+    eventTypes: ['user_confirmation_requested', 'user_confirmation_resolved', 'brief_confirmed', 'brief_rejected'],
+    successEventTypes: ['brief_confirmed']
   },
   {
     key: 'creative',
     title: '内容创意',
     agent: 'Agent 03',
     points: ['创意构思', '文案撰写', '素材建议'],
-    eventTypes: ['task_created', 'task_claimed', 'task_started', 'task_waiting']
+    eventTypes: ['task_created', 'task_claimed', 'task_started', 'task_waiting'],
+    successEventTypes: ['task_started']
   },
   {
     key: 'data',
     title: '数据分析',
     agent: 'Agent 04',
     points: ['数据建模', '效果预测', '风险评估'],
-    eventTypes: ['runtime_started', 'runtime_progress', 'runtime_completed', 'runtime_failed', 'post_review_started', 'post_review_completed']
+    eventTypes: ['runtime_started', 'runtime_progress', 'runtime_completed', 'runtime_failed', 'post_review_started', 'post_review_completed'],
+    successEventTypes: ['runtime_completed', 'post_review_completed']
   },
   {
     key: 'execution',
     title: '执行跟进',
     agent: 'Agent 05',
     points: ['执行计划制定', '进度跟踪', '成果汇报'],
-    eventTypes: ['tool_called', 'tool_completed', 'tool_failed', 'artifact_created', 'final_delivery_created']
+    eventTypes: ['tool_called', 'tool_completed', 'tool_failed', 'artifact_created', 'final_delivery_created'],
+    successEventTypes: ['artifact_created', 'final_delivery_created']
   }
 ]
 
@@ -108,12 +114,28 @@ function stageEvents(stage: WorkflowStage) {
   return props.events.filter((event) => stage.eventTypes.includes(event.type))
 }
 
+function stageSuccessEvents(stage: WorkflowStage) {
+  return props.events.filter((event) => stage.successEventTypes.includes(event.type))
+}
+
 function stageState(stage: WorkflowStage) {
   if (stage.key === selectedStageKey.value) return 'selected'
   if (stage.key === 'execution' && props.status === 'COMPLETED') return 'completed'
-  if (stageEvents(stage).length > 0) return stage.key === 'data' || stage.key === 'execution' ? 'completed' : 'active'
+  if (stageSuccessEvents(stage).length > 0) return 'completed'
+  if (stageEvents(stage).length > 0) return 'active'
   return 'pending'
 }
+
+function stageStatusText(stage: WorkflowStage) {
+  const state = stageState(stage)
+  if (state === 'completed') return '已成功'
+  if (state === 'selected' || state === 'active') return '进行中'
+  return '等待中'
+}
+
+const finalOutputCompleted = computed(() =>
+  props.status === 'COMPLETED' || props.events.some((event) => event.type === 'final_delivery_created')
+)
 
 function statusLabel(status?: string) {
   return (
@@ -234,12 +256,12 @@ function statusLabel(status?: string) {
           >
             <span>{{ index + 1 }}</span>
             <strong>{{ stage.title }}</strong>
-            <small>{{ stageState(stage) === 'completed' ? '已完成' : stageState(stage) === 'selected' || stageState(stage) === 'active' ? '进行中' : '等待中' }}</small>
+            <small>{{ stageStatusText(stage) }}</small>
           </button>
-          <button class="workflow-stage-chip final-output" type="button">
+          <button class="workflow-stage-chip final-output" :class="{ completed: finalOutputCompleted }" type="button">
             <UiIcon name="check" :size="18" />
             <strong>最终输出</strong>
-            <small>待完成</small>
+            <small>{{ finalOutputCompleted ? '已成功' : '待完成' }}</small>
           </button>
         </section>
       </main>

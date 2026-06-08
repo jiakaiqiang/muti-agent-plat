@@ -1,8 +1,16 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import type { Agent, CollaborationEvent, SessionDetail, SessionStatus, SessionWorkingDirectory } from '@agent-cluster/shared';
+import type {
+  Agent,
+  CollaborationEvent,
+  SessionDetail,
+  SessionStatus,
+  SessionWorkingDirectory,
+  WorkspaceSnapshot
+} from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
 import { messages } from '../../common/messages.js';
 import { nowIso } from '../../common/time.js';
+import { extractServerWorkspacePath, scanServerWorkspace } from '../../common/workspace-scanner.js';
 import { AgentsService } from '../agents/agents.service.js';
 import { EventsService } from '../events/events.service.js';
 import { MemoryService } from '../memory/memory.service.js';
@@ -19,6 +27,7 @@ type CreateSessionInput = {
   tokenBudget?: number;
   knowledgeBaseIds?: string[];
   workingDirectory?: SessionWorkingDirectory;
+  workspaceSnapshot?: WorkspaceSnapshot;
 };
 
 @Injectable()
@@ -87,6 +96,7 @@ export class SessionsService {
   async create(input: CreateSessionInput) {
     const now = nowIso();
     const participatingAgentIds = this.agents.resolveIds(input.agentIds);
+    const workspaceBinding = await this.resolveWorkspaceBinding(input);
     const session: SessionDetail = {
       id: crypto.randomUUID(),
       title: this.titleFromInput(input.input),
@@ -96,7 +106,8 @@ export class SessionsService {
       workspaceId: 'default-workspace',
       projectId: input.projectId,
       knowledgeBaseIds: input.knowledgeBaseIds ?? [],
-      workingDirectory: input.workingDirectory,
+      workingDirectory: workspaceBinding.workingDirectory,
+      workspaceSnapshot: workspaceBinding.workspaceSnapshot,
       tokenBudget: input.tokenBudget,
       tokenUsed: 0,
       participatingAgentIds,
@@ -122,6 +133,33 @@ export class SessionsService {
     this.generateBriefInBackground(session);
 
     return { session, firstEvent };
+  }
+
+  private async resolveWorkspaceBinding(input: CreateSessionInput) {
+    if (input.workspaceSnapshot) {
+      return {
+        workingDirectory: input.workingDirectory,
+        workspaceSnapshot: input.workspaceSnapshot
+      };
+    }
+
+    const path = extractServerWorkspacePath(input.input);
+    if (!path) {
+      return {
+        workingDirectory: input.workingDirectory,
+        workspaceSnapshot: undefined
+      };
+    }
+
+    try {
+      return await scanServerWorkspace(path);
+    } catch (error) {
+      return {
+        workingDirectory: input.workingDirectory,
+        workspaceSnapshot: undefined,
+        scanError: error instanceof Error ? error.message : String(error)
+      };
+    }
   }
 
   private generateBriefInBackground(session: SessionDetail) {
@@ -193,7 +231,9 @@ export class SessionsService {
       });
     }
 
-    if (handlingPlan.shouldPause) {
+    if (handlingPlan.intent === 'preference_input') {
+      this.touchSession(session);
+    } else if (handlingPlan.shouldPause) {
       this.reopenRequirementLoop(session, content, event, handlingPlan.affectedAgentIds, 'executing_user_interrupt');
     } else if (this.shouldReopenRequirementLoop(session.status, handlingPlan.requiresBriefRevision)) {
       this.reopenRequirementLoop(session, content, event, handlingPlan.affectedAgentIds, 'user_requirement_supplement');
@@ -215,6 +255,65 @@ export class SessionsService {
     this.setStatus(session, 'EXECUTING');
     this.execution.start(session, brief, tasks, (outcome) => this.applyOutcome(session.id, outcome));
     return { accepted: true, sessionId: session.id, status: session.status, createdTasks: tasks };
+  }
+
+  reviseBrief(
+    sessionId: string,
+    briefId: string,
+    input: { reason?: string; userMessage?: string; confirmationId?: string } = {}
+  ) {
+    const session = this.get(sessionId);
+    if (session.currentTaskBriefId !== briefId) {
+      throw new BadRequestException(`Brief is not current: ${briefId}`);
+    }
+    const brief = this.orchestrator.getBrief(session.id, briefId);
+    if (!brief) {
+      throw new BadRequestException(`Brief not found: ${briefId}`);
+    }
+
+    const content = (input.userMessage || input.reason || '用户要求修改当前任务契约。').trim();
+    const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    const userEvent = this.events.create({
+      sessionId,
+      type: 'user_message',
+      userMessageIntent: 'correction',
+      priority: 'high',
+      content,
+      toAgentIds: [coordinator.id],
+      metadata: createMetadata('chat_message', {
+        text: content,
+        mentionedAgentIds: [coordinator.id],
+        relatedBriefId: briefId,
+        revisionOfBriefId: briefId
+      })
+    });
+
+    this.events.create({
+      sessionId,
+      type: 'user_confirmation_resolved',
+      content: '用户选择修改当前任务契约。',
+      metadata: createMetadata('system_notice', {
+        confirmationId: input.confirmationId,
+        status: 'rejected',
+        selectedOptionKey: 'revise',
+        relatedBriefId: briefId
+      })
+    });
+
+    this.events.create({
+      sessionId,
+      type: 'brief_rejected',
+      fromAgentId: coordinator.id,
+      content: '当前任务契约已进入修订，Coordinator 将基于用户修改重新组织讨论。',
+      metadata: createMetadata('system_notice', {
+        briefId,
+        reason: content,
+        coordinatorAgentId: coordinator.id
+      })
+    });
+
+    this.reopenRequirementLoop(session, content, userEvent, [coordinator.id], 'brief_revision_requested');
+    return { accepted: true, sessionId: session.id, status: session.status, event: userEvent };
   }
 
   /** Applied when the background execution pipeline finishes. */
@@ -329,6 +428,57 @@ export class SessionsService {
     return { memory, event };
   }
 
+  decideFeishuNotification(
+    sessionId: string,
+    input: {
+      confirmationId?: string;
+      notificationDraftArtifactId?: string;
+      decision: 'send_notification' | 'skip_notification';
+    }
+  ) {
+    const session = this.get(sessionId);
+    const approved = input.decision === 'send_notification';
+    const resolvedEvent = this.events.create({
+      sessionId,
+      type: 'user_confirmation_resolved',
+      content: approved ? '用户确认发送飞书通知。' : '用户选择不发送飞书通知。',
+      metadata: createMetadata('system_notice', {
+        confirmationId: input.confirmationId,
+        status: approved ? 'approved' : 'rejected',
+        selectedOptionKey: input.decision,
+        reason: 'confirm_feishu_notification',
+        notificationDraftArtifactId: input.notificationDraftArtifactId
+      })
+    });
+    const notificationEvent = approved
+      ? this.events.create({
+          sessionId,
+          type: 'tool_completed',
+          content: '飞书通知已确认发送（dry-run 记录）。',
+          metadata: createMetadata('tool_card', {
+            invocationId: crypto.randomUUID(),
+            capabilityId: 'cap-feishu-draft',
+            capabilityKey: 'notification.feishu_draft',
+            capabilityName: '飞书通知',
+            riskLevel: 'medium',
+            status: 'completed',
+            approvalKey: input.confirmationId,
+            outputSummary: '用户已确认发送飞书通知；当前实现记录 dry-run 通知动作，不直接调用外部飞书接口。'
+          })
+        })
+      : this.events.create({
+          sessionId,
+          type: 'agent_message',
+          content: '已按用户选择跳过飞书通知，仅保留通知草稿供后续查看。',
+          metadata: createMetadata('chat_message', {
+            messageKind: 'decision',
+            relatedArtifactIds: input.notificationDraftArtifactId ? [input.notificationDraftArtifactId] : []
+          })
+        });
+    this.touchSession(session);
+    return { session, resolvedEvent, notificationEvent };
+  }
+
   private compareSessionRecency(left: SessionDetail, right: SessionDetail) {
     return this.sessionRecencyTime(right) - this.sessionRecencyTime(left);
   }
@@ -355,7 +505,7 @@ export class SessionsService {
       sessionId: session.id,
       type: 'session_status_changed',
       priority: 'high',
-      content: `Session failed during ${phase}: ${message}`,
+      content: `会话在${messages.phaseLabel(phase)}阶段失败：${message}`,
       metadata: createMetadata('system_notice', {
         status: 'FAILED',
         phase,
@@ -378,7 +528,7 @@ export class SessionsService {
     const message = error instanceof Error ? error.message : String(error);
     const stack = error instanceof Error ? error.stack : undefined;
     const phaseLabel = messages.phaseLabel(phase);
-    const fullMessage = `Session failed during ${phaseLabel}: ${message}`;
+    const fullMessage = `会话在${phaseLabel}阶段失败：${message}`;
     this.setStatus(session, 'FAILED');
     this.events.create({
       sessionId: session.id,
@@ -538,7 +688,7 @@ export class SessionsService {
   }
 
   private titleFromInput(input: string) {
-    return input.trim().slice(0, 28) || 'New collaboration session';
+    return input.trim().slice(0, 28) || '新协作会话';
   }
 
   private participatingAgents(session: SessionDetail) {

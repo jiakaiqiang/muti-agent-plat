@@ -92,6 +92,7 @@
 | --- | --- |
 | `docs/agent-cluster-prd-v1.md` | 产品需求与范围 |
 | `docs/agent-cluster-system-design-v1.md` | 系统设计 |
+| `docs/workspace-aware-chat-agent-design-v1.md` | 聊天室 Agent 借鉴 Codex/Claude 工作区感知模型的产品与系统设计 |
 | `docs/agent-team-implementation-breakdown-v1.md` | Agent 团队实现拆解 |
 | `docs/feature-inventory-and-status-v1.md` | 功能清单与当前状态 |
 | `docs/project-analysis.md` | 项目分析 |

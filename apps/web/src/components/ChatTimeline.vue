@@ -7,6 +7,7 @@ import type {
   ConfirmationCardState,
   ConfirmationRequestedPayload,
   FinalDeliveryPayload,
+  RuntimeFileChange,
   ToolEventPayload
 } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
@@ -49,7 +50,8 @@ function confirmationFromMessage(message: ChatMessage): ConfirmationCardState | 
     options: payload.options,
     relatedBriefId: payload.relatedBriefId as string | undefined,
     relatedTaskId: payload.relatedTaskId as string | undefined,
-    relatedCapabilityId: payload.relatedCapabilityId as string | undefined
+    relatedCapabilityId: payload.relatedCapabilityId as string | undefined,
+    relatedArtifactId: payload.relatedArtifactId as string | undefined
   }
 }
 
@@ -66,6 +68,56 @@ function toolPayload(message: ChatMessage) {
 
 function artifactPayload(message: ChatMessage) {
   return message.messageType === 'artifact' ? (message.payload as ArtifactEventPayload | undefined) : undefined
+}
+
+function artifactFileChanges(message: ChatMessage): RuntimeFileChange[] {
+  return artifactPayload(message)?.fileChanges ?? []
+}
+
+function projectAnalysisReportChange(message: ChatMessage) {
+  const payload = artifactPayload(message)
+  if (!payload) return undefined
+  return artifactFileChanges(message).find((change) => {
+    const title = payload.title ?? ''
+    return (
+      change.path === 'agent-output/project-architecture-analysis.md' ||
+      title.includes('项目架构分析') ||
+      title.includes('工作区架构分析')
+    )
+  })
+}
+
+function workspaceAnalysisPayload(message: ChatMessage) {
+  if (message.payload?.phase !== 'workspace_analysis') return undefined
+  const workspace = message.payload.workspace as Record<string, unknown> | undefined
+  return workspace
+}
+
+function workspaceList(workspace: Record<string, unknown> | undefined, key: string) {
+  const value = workspace?.[key]
+  return Array.isArray(value) ? value.map(String) : []
+}
+
+function workspaceNumber(workspace: Record<string, unknown> | undefined, key: string) {
+  const value = workspace?.[key]
+  return typeof value === 'number' ? value : 0
+}
+
+function fileOperationLabel(operation: RuntimeFileChange['operation']) {
+  return (
+    {
+      create: '新增',
+      update: '修改',
+      delete: '删除'
+    }[operation] ?? operation
+  )
+}
+
+function fileChangePreview(change: RuntimeFileChange) {
+  if (change.operation === 'delete') return '该文件将在选择的目录中删除。'
+  const content = change.content?.trim()
+  if (!content) return '该文件变更没有提供内容预览。'
+  return content.length > 1200 ? `${content.slice(0, 1200)}...` : content
 }
 
 function deliveryPayload(message: ChatMessage) {
@@ -100,6 +152,7 @@ function phaseLabel(phase?: string) {
       task_execution: '任务执行',
       post_review: '复盘评估',
       final_delivery: '最终交付',
+      workspace_analysis: '工作区分析',
       user_message_routing: '消息路由'
     }[phase ?? ''] ?? phase ?? '未知阶段'
   )
@@ -139,6 +192,44 @@ function errorText(message: ChatMessage, key: string) {
 
         <template v-else>
           <p class="message-content">{{ message.content }}</p>
+
+          <div v-if="workspaceAnalysisPayload(message)" class="structured-block workspace-analysis-block">
+            <div class="structured-block__heading">
+              <h3>工作区分析</h3>
+              <span class="status-pill completed">已完成</span>
+            </div>
+            <dl>
+              <div>
+                <dt>工作区</dt>
+                <dd>{{ workspaceAnalysisPayload(message)?.rootName }}</dd>
+              </div>
+              <div>
+                <dt>扫描条目</dt>
+                <dd>{{ workspaceNumber(workspaceAnalysisPayload(message), 'fileCount') }}</dd>
+              </div>
+              <div>
+                <dt>可读文件</dt>
+                <dd>{{ workspaceNumber(workspaceAnalysisPayload(message), 'readableFileCount') }}</dd>
+              </div>
+              <div>
+                <dt>跳过</dt>
+                <dd>{{ workspaceNumber(workspaceAnalysisPayload(message), 'skippedFileCount') }}</dd>
+              </div>
+              <div>
+                <dt>技术栈</dt>
+                <dd>{{ workspaceList(workspaceAnalysisPayload(message), 'detectedStack').join(', ') || '未识别' }}</dd>
+              </div>
+            </dl>
+            <div v-if="workspaceList(workspaceAnalysisPayload(message), 'relevantFiles').length" class="workspace-file-chips">
+              <strong>重点文件</strong>
+              <code
+                v-for="file in workspaceList(workspaceAnalysisPayload(message), 'relevantFiles').slice(0, 8)"
+                :key="file"
+              >
+                {{ file }}
+              </code>
+            </div>
+          </div>
 
           <div v-if="errorPayload(message)" class="structured-block error-block">
             <div class="structured-block__heading">
@@ -224,6 +315,27 @@ function errorText(message: ChatMessage, key: string) {
             <p v-if="artifactPayload(message)?.relatedCapabilityId">
               Capability: {{ capabilityLabel(artifactPayload(message)?.relatedCapabilityId) }}
             </p>
+            <article v-if="projectAnalysisReportChange(message)" class="project-analysis-report">
+              <header>
+                <span class="file-operation create">报告</span>
+                <code>{{ projectAnalysisReportChange(message)?.path }}</code>
+              </header>
+              <pre class="file-change-preview project-analysis-preview">{{ fileChangePreview(projectAnalysisReportChange(message)!) }}</pre>
+            </article>
+            <div v-if="artifactFileChanges(message).length" class="file-change-list">
+              <h4>文件修改</h4>
+              <article
+                v-for="change in artifactFileChanges(message)"
+                :key="`${change.operation}:${change.path}`"
+                class="file-change-item"
+              >
+                <header>
+                  <span class="file-operation" :class="change.operation">{{ fileOperationLabel(change.operation) }}</span>
+                  <code>{{ change.path }}</code>
+                </header>
+                <pre class="file-change-preview">{{ fileChangePreview(change) }}</pre>
+              </article>
+            </div>
           </div>
 
           <div v-if="message.messageType === 'rag'" class="structured-block">

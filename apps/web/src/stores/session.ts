@@ -6,6 +6,7 @@ import type {
   SessionStatus,
   SessionViewMode,
   SessionWorkingDirectory,
+  WorkspaceSnapshot,
   CollaborationEvent
 } from '@/types/contracts'
 
@@ -16,6 +17,7 @@ type CreateSessionInput = {
   tokenBudget?: number
   knowledgeBaseIds?: string[]
   workingDirectory?: SessionWorkingDirectory
+  workspaceSnapshot?: WorkspaceSnapshot
 }
 
 function sortSessionsByRecency(sessions: SessionListItem[]) {
@@ -96,6 +98,18 @@ export const useSessionStore = defineStore('session', {
       await this.loadSession(sessionId)
       return result
     },
+    async reviseBrief(
+      sessionId: string,
+      briefId: string,
+      input: { userMessage: string; confirmationId?: string; reason?: string }
+    ) {
+      const result = await apiPost<{ accepted: boolean; status: SessionStatus }>(
+        `/sessions/${sessionId}/briefs/${briefId}/reject`,
+        input
+      )
+      await this.loadSession(sessionId)
+      return result
+    },
     async pauseSession(sessionId: string, confirmationId?: string) {
       await apiPost(`/sessions/${sessionId}/pause`, confirmationId ? { confirmationId } : undefined)
       this.setCurrentStatus(sessionId, 'WAIT_USER_DECISION')
@@ -113,6 +127,16 @@ export const useSessionStore = defineStore('session', {
       input: { content: string; confirmationId?: string; sourceEventId?: string; confidence?: number }
     ) {
       return apiPost(`/sessions/${sessionId}/memories/confirm`, input)
+    },
+    async decideFeishuNotification(
+      sessionId: string,
+      input: {
+        confirmationId?: string
+        notificationDraftArtifactId?: string
+        decision: 'send_notification' | 'skip_notification'
+      }
+    ) {
+      return apiPost(`/sessions/${sessionId}/notifications/feishu/decision`, input)
     },
     switchViewMode(mode: SessionViewMode) {
       this.currentViewMode = mode

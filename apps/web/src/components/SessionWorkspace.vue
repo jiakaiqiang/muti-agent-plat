@@ -6,7 +6,13 @@ import { useKnowledgeStore } from '@/stores/knowledge'
 import { useLocalWorkspaceStore } from '@/stores/localWorkspace'
 import { useSessionStore } from '@/stores/session'
 import { apiBaseUrl, runtimeModeLabel } from '@/config/runtime'
-import { sessionStatusLabel, type SessionStatus, type SessionViewMode } from '@/types/contracts'
+import {
+  sessionStatusLabel,
+  type BriefEventPayload,
+  type SessionStatus,
+  type SessionViewMode,
+  type WorkspaceSnapshot
+} from '@/types/contracts'
 import AgentManager from './AgentManager.vue'
 import AgentStatusPanel from './AgentStatusPanel.vue'
 import AgentPortrait from './AgentPortrait.vue'
@@ -34,6 +40,12 @@ const isCreatingSession = ref(false)
 const newSessionInput = ref('')
 const selectedSessionAgentIds = ref<string[]>([])
 const sessionCreateError = ref('')
+const sessionScanStatus = ref<'idle' | 'scanning' | 'completed' | 'failed'>('idle')
+const sessionScanSummary = ref<WorkspaceSnapshot | undefined>()
+const showBriefRevisionDialog = ref(false)
+const briefRevisionInput = ref('')
+const briefRevisionError = ref('')
+const isSubmittingBriefRevision = ref(false)
 
 type WorkspaceSection = 'session' | 'knowledge' | 'settings' | 'models' | 'tools' | 'notifications' | 'agents'
 
@@ -102,7 +114,9 @@ onMounted(async () => {
 const currentSessionId = computed(() => sessionStore.currentSession?.id ?? '')
 const events = computed(() => eventStore.eventsForSession(currentSessionId.value))
 const messages = computed(() => eventStore.chatMessages(currentSessionId.value))
-const agents = computed(() => eventStore.agentCards(currentSessionId.value))
+const agents = computed(() =>
+  eventStore.agentCards(currentSessionId.value, sessionStore.currentSession?.participatingAgentIds)
+)
 const tasks = computed(() => eventStore.taskStates(currentSessionId.value))
 const activeConfirmation = computed(() => eventStore.activeConfirmation(currentSessionId.value))
 const currentMode = computed(() => sessionStore.currentViewMode)
@@ -119,8 +133,21 @@ const currentWorkingDirectory = computed(
 const workingDirectoryAddress = computed(() =>
   currentWorkingDirectory.value ? `浏览器本地目录 / ${currentWorkingDirectory.value.name}` : ''
 )
+const pendingFileChanges = computed(() => localWorkspaceStore.pendingFileChangesForSession(currentSessionId.value))
+const pendingFileChangeCount = computed(() =>
+  pendingFileChanges.value.reduce((total, item) => total + item.fileChanges.length, 0)
+)
 const fileApplyResult = computed(() => localWorkspaceStore.applyResultForSession(currentSessionId.value))
 const terminalStatuses = new Set<SessionStatus>(['COMPLETED', 'FAILED', 'CANCELLED'])
+
+const activeBriefPayload = computed(() => {
+  const briefId = activeConfirmation.value?.relatedBriefId
+  if (!briefId) return undefined
+  return [...eventStore.eventsForSession(currentSessionId.value)]
+    .reverse()
+    .map((event) => event.metadata.payload as (BriefEventPayload & Record<string, unknown>) | undefined)
+    .find((payload) => payload?.briefId === briefId)
+})
 
 const derivedStatus = computed(() => {
   const statusEvent = [...eventStore.eventsForSession(currentSessionId.value)]
@@ -155,14 +182,24 @@ async function deleteSession(sessionId: string) {
 
 async function createSession(input: string, agentIds: string[]) {
   const workingDirectory = localWorkspaceStore.pendingDirectory
+  let workspaceSnapshot: WorkspaceSnapshot | undefined
+  if (workingDirectory) {
+    sessionScanStatus.value = 'scanning'
+    sessionScanSummary.value = undefined
+    workspaceSnapshot = await localWorkspaceStore.scanPendingWorkspace()
+    sessionScanSummary.value = workspaceSnapshot
+    sessionScanStatus.value = 'completed'
+  }
   const session = await sessionStore.createSession({
     input,
     agentIds,
     workingDirectory,
+    workspaceSnapshot,
     tokenBudget: 30000
   })
   localWorkspaceStore.bindPendingDirectoryToSession(session.id)
   await eventStore.loadEvents(session.id)
+  await eventStore.replayLocalFileChanges(session.id)
   eventStore.connectSse(session.id)
 }
 
@@ -170,6 +207,8 @@ function openCreateSessionDialog() {
   sessionCreateError.value = ''
   newSessionInput.value = ''
   selectedSessionAgentIds.value = activeAgentIds.value
+  sessionScanStatus.value = 'idle'
+  sessionScanSummary.value = undefined
   localWorkspaceStore.clearPendingDirectory()
   showCreateSessionDialog.value = true
 }
@@ -178,6 +217,8 @@ async function chooseWorkingDirectory() {
   sessionCreateError.value = ''
   try {
     await localWorkspaceStore.choosePendingDirectory()
+    sessionScanStatus.value = 'idle'
+    sessionScanSummary.value = undefined
   } catch (error) {
     sessionCreateError.value = error instanceof Error ? error.message : '选择工作目录失败'
   }
@@ -209,6 +250,7 @@ async function createSessionFromDialog() {
     await createSession(input, selectedSessionAgentIds.value)
     showCreateSessionDialog.value = false
   } catch (error) {
+    sessionScanStatus.value = 'failed'
     sessionCreateError.value = error instanceof Error ? error.message : '创建会话失败'
   } finally {
     isCreatingSession.value = false
@@ -253,6 +295,11 @@ async function resolveConfirmation(optionKey: string) {
     return
   }
 
+  if (optionKey === 'revise' && activeConfirmation.value.relatedBriefId) {
+    openBriefRevisionDialog()
+    return
+  }
+
   if (activeConfirmation.value.reason === 'resolve_contract_conflict') {
     if (optionKey === 'resume') {
       await sessionStore.resumeSession(sessionId, activeConfirmation.value.confirmationId)
@@ -276,6 +323,18 @@ async function resolveConfirmation(optionKey: string) {
     }
   }
 
+  if (activeConfirmation.value.reason === 'confirm_feishu_notification') {
+    if (optionKey === 'send_notification' || optionKey === 'skip_notification') {
+      await sessionStore.decideFeishuNotification(sessionId, {
+        confirmationId: activeConfirmation.value.confirmationId,
+        notificationDraftArtifactId: activeConfirmation.value.relatedArtifactId,
+        decision: optionKey
+      })
+      await eventStore.loadEvents(sessionId)
+      return
+    }
+  }
+
   eventStore.appendEvent({
     id: `evt-local-${Date.now()}`,
     sessionId,
@@ -293,6 +352,72 @@ async function resolveConfirmation(optionKey: string) {
     },
     createdAt: new Date().toISOString()
   })
+}
+
+function formatBriefForRevision(brief?: BriefEventPayload) {
+  if (!brief) {
+    return sessionStore.currentSession?.originalInput ?? ''
+  }
+  return [
+    `目标：${brief.goal}`,
+    '',
+    '范围：',
+    ...brief.scope.map((item) => `- ${item}`),
+    '',
+    '不在范围：',
+    ...brief.outOfScope.map((item) => `- ${item}`),
+    '',
+    '约束：',
+    ...brief.constraints.map((item) => `- ${item}`),
+    '',
+    '验收标准：',
+    ...brief.acceptanceCriteria.map((item) => `- ${item}`),
+    '',
+    '风险：',
+    ...brief.risks.map((item) => `- ${item}`),
+    '',
+    '未决问题：',
+    ...brief.openQuestions.map((item) => `- ${item}`),
+    '',
+    '任务拆分：',
+    ...(brief.suggestedTasks ?? []).map((task, index) => `${index + 1}. ${task.title}：${task.description}`)
+  ].join('\n')
+}
+
+function openBriefRevisionDialog() {
+  briefRevisionError.value = ''
+  briefRevisionInput.value = formatBriefForRevision(activeBriefPayload.value)
+  showBriefRevisionDialog.value = true
+}
+
+async function submitBriefRevision() {
+  if (!sessionStore.currentSession || !activeConfirmation.value?.relatedBriefId) return
+  const userMessage = briefRevisionInput.value.trim()
+  if (!userMessage) {
+    briefRevisionError.value = '请填写修改后的需求'
+    return
+  }
+  isSubmittingBriefRevision.value = true
+  briefRevisionError.value = ''
+  try {
+    const sessionId = sessionStore.currentSession.id
+    await sessionStore.reviseBrief(sessionId, activeConfirmation.value.relatedBriefId, {
+      userMessage,
+      confirmationId: activeConfirmation.value.confirmationId,
+      reason: '用户修改任务契约'
+    })
+    showBriefRevisionDialog.value = false
+    await eventStore.loadEvents(sessionId)
+  } catch (error) {
+    briefRevisionError.value = error instanceof Error ? error.message : '提交修改失败'
+  } finally {
+    isSubmittingBriefRevision.value = false
+  }
+}
+
+async function applyPendingFileChanges() {
+  if (!sessionStore.currentSession) return
+  await localWorkspaceStore.applyQueuedFileChanges(sessionStore.currentSession.id)
 }
 </script>
 
@@ -377,6 +502,16 @@ async function resolveConfirmation(optionKey: string) {
             <UiIcon name="folder" :size="15" />
             {{ currentWorkingDirectory.name }}
           </span>
+          <button
+            v-if="pendingFileChangeCount"
+            type="button"
+            class="workspace-file-apply-button"
+            title="查看聊天中的文件变更预览后写入本地工作区"
+            @click="applyPendingFileChanges"
+          >
+            <UiIcon name="check" :size="15" />
+            确认写入 {{ pendingFileChangeCount }} 项
+          </button>
           <span
             v-if="fileApplyResult"
             :class="['workspace-file-status', { failed: fileApplyResult.errors.length }]"
@@ -638,6 +773,54 @@ async function resolveConfirmation(optionKey: string) {
             当前浏览器不支持选择本地目录
           </small>
         </div>
+        <section
+          v-if="localWorkspaceStore.pendingDirectory || sessionScanStatus !== 'idle'"
+          class="workspace-scan-summary"
+        >
+          <header>
+            <strong>工作区读取</strong>
+            <span :class="['status-pill', sessionScanStatus]">
+              {{
+                sessionScanStatus === 'scanning'
+                  ? '扫描中'
+                  : sessionScanStatus === 'completed'
+                    ? '已完成'
+                    : sessionScanStatus === 'failed'
+                      ? '失败'
+                      : '待创建时扫描'
+              }}
+            </span>
+          </header>
+          <p v-if="sessionScanStatus === 'idle'">
+            创建会话时会先读取目录结构、可读文本文件、技术栈信号和跳过原因，再下发给 Coordinator。
+          </p>
+          <p v-else-if="sessionScanStatus === 'scanning'">正在读取工作区上下文，稍等一下。</p>
+          <dl v-if="sessionScanSummary">
+            <div>
+              <dt>工作区</dt>
+              <dd>{{ sessionScanSummary.rootName }}</dd>
+            </div>
+            <div>
+              <dt>扫描条目</dt>
+              <dd>{{ sessionScanSummary.fileCount }}</dd>
+            </div>
+            <div>
+              <dt>可读文件</dt>
+              <dd>{{ sessionScanSummary.files.length }}</dd>
+            </div>
+            <div>
+              <dt>跳过</dt>
+              <dd>{{ sessionScanSummary.skipped.length }}</dd>
+            </div>
+            <div>
+              <dt>技术栈</dt>
+              <dd>{{ sessionScanSummary.detectedStack?.join(', ') || '未识别' }}</dd>
+            </div>
+          </dl>
+          <p v-if="sessionScanSummary?.skipped.some((file) => file.reason === 'sensitive')" class="scan-warning">
+            已跳过 .env、密钥、证书等敏感文件。
+          </p>
+        </section>
         <div class="dialog-agent-picker">
           <span>参与 Agent</span>
           <p v-if="!agentStore.agents.length" class="empty-state">暂无 Agent，请先到 Agent 管理添加 Agent。</p>
@@ -657,6 +840,31 @@ async function resolveConfirmation(optionKey: string) {
           <button type="button" @click="showCreateSessionDialog = false">取消</button>
           <button type="submit" class="primary" :disabled="isCreatingSession">
             {{ isCreatingSession ? '创建中' : '创建会话' }}
+          </button>
+        </footer>
+      </form>
+    </section>
+
+    <section v-if="showBriefRevisionDialog" class="modal-backdrop" aria-label="修改任务契约">
+      <form class="modal-panel brief-revision-dialog" @submit.prevent="submitBriefRevision">
+        <header>
+          <div>
+            <h2>修改任务契约</h2>
+            <p>基于 Coordinator 输出的需求理解和拆分调整，提交后会重新组织 Agent 讨论。</p>
+          </div>
+          <button type="button" class="modal-close-button" @click="showBriefRevisionDialog = false">
+            <UiIcon name="x" :size="18" />
+          </button>
+        </header>
+        <label class="dialog-field">
+          <span>修改后的需求</span>
+          <textarea v-model="briefRevisionInput" rows="14" />
+        </label>
+        <p v-if="briefRevisionError" class="form-error">{{ briefRevisionError }}</p>
+        <footer class="form-actions">
+          <button type="button" @click="showBriefRevisionDialog = false">取消</button>
+          <button type="submit" class="primary" :disabled="isSubmittingBriefRevision">
+            {{ isSubmittingBriefRevision ? '提交中' : '提交修改' }}
           </button>
         </footer>
       </form>
