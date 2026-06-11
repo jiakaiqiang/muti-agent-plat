@@ -1,5 +1,9 @@
 # Human Intervention Binding
 
+> 最后修改时间：2026-06-11 14:47:47 +08:00
+> 修改人：Codex
+> 修改的 Agent：Codex
+
 1. Call /check before a risky action.
 2. If CAPABILITY_REQUIRES_CONFIRMATION appears, surface approvalKey.
 3. Record reason, scope, risk, and options.

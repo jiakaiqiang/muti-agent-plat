@@ -69,6 +69,14 @@ export class TasksService {
     }
   }
 
+  resetForRework(sessionId: string) {
+    for (const task of this.list(sessionId)) {
+      if (task.status !== 'cancelled') {
+        this.update(task, { status: 'reworking' });
+      }
+    }
+  }
+
   cancelUnfinished(sessionId: string, reason?: string) {
     for (const task of this.unfinished(sessionId)) {
       this.update(task, { status: 'cancelled', resultSummary: reason });

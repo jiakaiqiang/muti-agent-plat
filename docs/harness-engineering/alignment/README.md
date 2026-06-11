@@ -1,5 +1,9 @@
 # Phase 2 Runtime Alignment
 
+> 最后修改时间：2026-06-11 14:47:47 +08:00
+> 修改人：Codex
+> 修改的 Agent：Codex
+
 ## 工程化 positioning
 
 Runtime Alignment maps an existing collaboration process to Harness Engineering. It is not feature work, not API design, and not a project-only convention. Agent Cluster is the current reference instance; the method is reusable for any team that coordinates agents, humans, tools, stages, decisions, and delivery memory.

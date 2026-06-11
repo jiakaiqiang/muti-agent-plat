@@ -918,6 +918,18 @@ textarea:disabled {
   line-height: 1.65;
 }
 
+.discussion-message-meta {
+  display: inline-flex;
+  width: fit-content;
+  margin-bottom: 8px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #eef5ff;
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .structured-block {
   display: grid;
   gap: 10px;
@@ -1707,6 +1719,52 @@ textarea:disabled {
   color: var(--light-muted);
   font-size: 12px;
   line-height: 1.45;
+}
+
+.task-artifacts {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-artifacts li {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.task-artifacts strong {
+  color: var(--light-text);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.task-artifacts span {
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.task-artifacts p {
+  margin: 0;
+}
+
+.mode-collaboration_graph .task-artifacts li,
+.mode-workflow .task-artifacts li {
+  border-color: rgba(80, 145, 255, 0.2);
+  background: rgba(12, 27, 55, 0.58);
+}
+
+.mode-collaboration_graph .task-artifacts strong,
+.mode-workflow .task-artifacts strong {
+  color: var(--dark-text);
 }
 
 .workspace-admin {

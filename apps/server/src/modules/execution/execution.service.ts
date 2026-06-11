@@ -46,16 +46,22 @@ export class ExecutionService {
     const controller = new AbortController();
     const done = this.orchestrator
       .runPipeline(session, brief, tasks, controller.signal)
-      .then((outcome) => onOutcome(outcome))
-      .catch((error) => {
+      .catch((error): ExecutionOutcome => {
         this.logger.error(`Execution pipeline crashed for session ${session.id}: ${String(error)}`);
-        onOutcome({ kind: 'failed', reason: error instanceof Error ? error.message : String(error) });
+        return { kind: 'failed', reason: error instanceof Error ? error.message : String(error) };
       })
-      .finally(() => {
+      .then((outcome) => {
+        // Release the slot before onOutcome so the callback can immediately
+        // start a follow-up run (e.g. automatic rework) without being blocked
+        // by the "already running" guard.
         const current = this.running.get(session.id);
         if (current?.controller === controller) {
           this.running.delete(session.id);
         }
+        onOutcome(outcome);
+      })
+      .catch((error) => {
+        this.logger.error(`Execution outcome handling failed for session ${session.id}: ${String(error)}`);
       });
     this.running.set(session.id, { controller, done });
     void done;
@@ -63,6 +69,9 @@ export class ExecutionService {
 
   cancel(sessionId: string) {
     this.running.get(sessionId)?.controller.abort();
+    if (bullMqEnabled()) {
+      this.executionQueue.cancel(sessionId);
+    }
   }
 
   isRunning(sessionId: string) {

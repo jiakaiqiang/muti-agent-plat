@@ -34,9 +34,9 @@ docs/ai-agent-context/tool-workflow-rules.md
 
 - AI 工具工作方式：`docs/ai-agent-context/`
 - Harness Engineering 规程：`docs/harness-engineering/`
-- 产品范围：`docs/agent-cluster-prd-v1.md`
-- 系统设计：`docs/agent-cluster-system-design-v1.md`
-- 功能状态：`docs/feature-inventory-and-status-v1.md`
+- 产品范围：`docs/product/agent-cluster-prd-v1.md`
+- 系统设计：`docs/design/agent-cluster-system-design-v1.md`
+- 功能状态：`docs/analysis/feature-inventory-and-status-v1.md`
 - 合同：`docs/contracts/`
 - 质量验收：`docs/quality/`
 - 运维开发：`docs/devops/`

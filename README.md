@@ -1,6 +1,6 @@
 # Agent Cluster
 
-Agent Cluster is a multi-agent collaboration system. The v1 implementation follows the contracts in [docs/contracts](./docs/contracts) and the phased implementation plan in [docs/agent-team-implementation-breakdown-v1.md](./docs/agent-team-implementation-breakdown-v1.md).
+Agent Cluster is a multi-agent collaboration system. The v1 implementation follows the contracts in [docs/contracts](./docs/contracts) and the phased implementation plan in [docs/implementation/agent-team-implementation-breakdown-v1.md](./docs/implementation/agent-team-implementation-breakdown-v1.md).
 
 ## Workspace
 
@@ -8,7 +8,7 @@ Agent Cluster is a multi-agent collaboration system. The v1 implementation follo
 - `apps/web`: Vue 3 frontend.
 - `packages/shared`: shared TypeScript contract types.
 - `tests`: contract and E2E test skeletons.
-- `docs`: PRD, system design, contracts, QA, and operations docs.
+- `docs`: classified product, design, analysis, contracts, QA, and operations docs. Start with [docs/README.md](./docs/README.md).
 
 ## Development Order
 

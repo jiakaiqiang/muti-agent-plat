@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import type {
   Agent,
+  AgentTask,
   CollaborationEvent,
   SessionDetail,
   SessionStatus,
@@ -9,6 +10,7 @@ import type {
 } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
 import { messages } from '../../common/messages.js';
+import { reworkMaxRounds } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
 import { extractServerWorkspacePath, scanServerWorkspace } from '../../common/workspace-scanner.js';
 import { AgentsService } from '../agents/agents.service.js';
@@ -211,12 +213,12 @@ export class SessionsService {
         sessionId,
         type: 'user_confirmation_requested',
         priority: 'normal',
-        content: 'Please confirm whether this preference should be saved as long-term memory.',
+        content: messages.confirmMemoryWrite,
         metadata: createMetadata('confirmation_card', {
           confirmationId: crypto.randomUUID(),
           reason: 'confirm_memory_write',
-          title: 'Confirm memory write',
-          description: 'After confirmation, this preference will be stored as a long-term memory candidate.',
+          title: messages.confirmMemoryWriteTitle,
+          description: messages.confirmMemoryWriteDescription,
           candidate: {
             content,
             sourceEventId: event.id,
@@ -224,8 +226,8 @@ export class SessionsService {
             confidence: 0.72
           },
           options: [
-            { key: 'approve', label: 'Save memory', style: 'primary' },
-            { key: 'reject', label: 'Skip', style: 'default' }
+            { key: 'approve', label: messages.saveMemory, style: 'primary' },
+            { key: 'reject', label: messages.skipMemory, style: 'default' }
           ]
         })
       });
@@ -234,7 +236,52 @@ export class SessionsService {
     if (handlingPlan.intent === 'preference_input') {
       this.touchSession(session);
     } else if (handlingPlan.shouldPause) {
-      this.reopenRequirementLoop(session, content, event, handlingPlan.affectedAgentIds, 'executing_user_interrupt');
+      const relevantAgentIds = this.relevantAgentIds(session, content, handlingPlan.affectedAgentIds);
+      this.recordAgentRequirementContext(session, content, event.id, relevantAgentIds);
+
+      // 创建插话任务并立即标记完成（插话内容已通过记忆分发给相关 agent）
+      const assignedAgentId = relevantAgentIds[0] || this.pickSessionAgent(session, ['coordinator']).id;
+      const interruptTask: AgentTask = {
+        id: crypto.randomUUID(),
+        sessionId: session.id,
+        title: '处理用户执行中插话',
+        description: content,
+        status: 'completed',
+        assigneeAgentId: assignedAgentId,
+        dependsOnTaskIds: [],
+        acceptanceCriteria: [],
+        resultSummary: '已将插话内容分发给相关 Agent 作为执行上下文。',
+        createdAt: nowIso(),
+        updatedAt: nowIso()
+      };
+      this.tasks.list(session.id).push(interruptTask);
+
+      this.events.create({
+        sessionId: session.id,
+        type: 'task_created',
+        fromAgentId: assignedAgentId,
+        content: `任务已创建：${interruptTask.title}`,
+        metadata: createMetadata('system_notice', {
+          taskId: interruptTask.id,
+          title: interruptTask.title,
+          assigneeAgentId: assignedAgentId
+        })
+      });
+
+      this.events.create({
+        sessionId: session.id,
+        type: 'session_status_changed',
+        priority: 'high',
+        content: `执行中收到用户插话，已创建任务 [${interruptTask.title}] 并分发给相关 Agent。`,
+        metadata: createMetadata('system_notice', {
+          status: session.status,
+          reason: 'executing_user_interrupt_task_created',
+          sourceEventId: event.id,
+          affectedAgentIds: relevantAgentIds,
+          taskId: interruptTask.id
+        })
+      });
+      this.touchSession(session);
     } else if (this.shouldReopenRequirementLoop(session.status, handlingPlan.requiresBriefRevision)) {
       this.reopenRequirementLoop(session, content, event, handlingPlan.affectedAgentIds, 'user_requirement_supplement');
     } else {
@@ -347,16 +394,80 @@ export class SessionsService {
       priority: 'high',
       content:
         outcome.kind === 'rework'
-          ? `Post-review requested rework: ${reason}`
+          ? messages.outcomeRework(reason)
           : outcome.kind === 'ask_user'
-            ? `Execution paused and is waiting for user input: ${reason}`
-            : `Execution failed: ${reason}`,
+            ? messages.outcomeAskUser(reason)
+            : messages.outcomeFailed(reason),
       metadata: createMetadata(outcome.kind === 'failed' ? 'error_card' : 'system_notice', {
         status: nextStatus,
         outcome: outcome.kind,
         reason
       })
     });
+    if (outcome.kind === 'rework') {
+      this.startRework(session, reason);
+    }
+  }
+
+  /**
+   * Automatically re-drives execution after a post-review `rework` outcome.
+   * Bounded by REWORK_MAX_ROUNDS (default 1); beyond the limit the session is
+   * handed to the user instead of looping.
+   */
+  private startRework(session: SessionDetail, reason: string) {
+    const reworkRounds = this.events
+      .list(session.id)
+      .filter(
+        (event) =>
+          event.type === 'session_status_changed' &&
+          (event.metadata?.payload as { outcome?: string } | undefined)?.outcome === 'rework'
+      ).length;
+    const maxRounds = reworkMaxRounds();
+    if (reworkRounds > maxRounds) {
+      this.setStatus(session, 'WAIT_USER_DECISION');
+      this.events.create({
+        sessionId: session.id,
+        type: 'user_confirmation_requested',
+        priority: 'high',
+        content: messages.reworkLimitReached(maxRounds),
+        metadata: createMetadata('confirmation_card', {
+          confirmationId: crypto.randomUUID(),
+          reason: 'rework_limit_reached',
+          title: messages.reworkLimitTitle,
+          description: `${messages.reworkLimitReached(maxRounds)}${reason ? ` 复盘意见：${reason}` : ''}`,
+          options: [
+            { key: 'resume', label: messages.reworkResume, style: 'primary' },
+            { key: 'cancel', label: messages.reworkCancel, style: 'default' }
+          ]
+        })
+      });
+      return;
+    }
+
+    const brief = session.currentTaskBriefId
+      ? this.orchestrator.getBrief(session.id, session.currentTaskBriefId)
+      : undefined;
+    if (!brief) {
+      this.applyOutcome(session.id, { kind: 'ask_user', reason: messages.reworkBriefMissing });
+      return;
+    }
+
+    this.tasks.resetForRework(session.id);
+    this.events.create({
+      sessionId: session.id,
+      type: 'session_status_changed',
+      priority: 'high',
+      content: messages.reworkStarted(reworkRounds, maxRounds),
+      metadata: createMetadata('system_notice', {
+        status: 'REWORKING',
+        reworkRound: reworkRounds,
+        maxReworkRounds: maxRounds,
+        reason
+      })
+    });
+    this.execution.start(session, brief, this.tasks.unfinished(session.id), (outcome) =>
+      this.applyOutcome(session.id, outcome)
+    );
   }
 
   listBriefs(sessionId: string) {
@@ -374,14 +485,14 @@ export class SessionsService {
     const event = this.events.create({
       sessionId,
       type: 'session_status_changed',
-      content: reason ?? `Session status updated to ${nextStatus}`,
+      content: reason ?? messages.sessionStatusUpdated(nextStatus),
       metadata: createMetadata('system_notice', { status: nextStatus, requestedStatus: status, reason })
     });
     const confirmationEvent = confirmationId
       ? this.events.create({
           sessionId,
           type: 'user_confirmation_resolved',
-      content: `User selected ${status === 'CANCELLED' ? 'cancel' : 'resume'}`,
+          content: status === 'CANCELLED' ? messages.userSelectedCancel : messages.userSelectedResume,
           metadata: createMetadata('system_notice', {
             confirmationId,
             status: status === 'CANCELLED' ? 'rejected' : 'approved',
@@ -415,7 +526,7 @@ export class SessionsService {
     const event = this.events.create({
       sessionId,
       type: 'user_confirmation_resolved',
-      content: 'Long-term memory candidate has been confirmed.',
+      content: messages.memoryConfirmed,
       metadata: createMetadata('system_notice', {
         confirmationId: input.confirmationId,
         status: 'approved',
@@ -566,7 +677,7 @@ export class SessionsService {
       REVISING_BRIEF: ['WAIT_USER_CONFIRM', 'CANCELLED'],
       EXECUTING: ['WAIT_USER_DECISION', 'CANCELLED'],
       POST_REVIEW: ['WAIT_USER_DECISION', 'CANCELLED'],
-      REWORKING: ['WAIT_USER_DECISION', 'CANCELLED'],
+      REWORKING: ['WAIT_USER_DECISION', 'CANCELLED', 'EXECUTING'],
       WAIT_USER_DECISION: ['EXECUTING', 'CANCELLED'],
       COMPLETED: [],
       FAILED: [],
@@ -596,15 +707,14 @@ export class SessionsService {
     reason: string
   ) {
     this.execution.cancel(session.id);
-    this.tasks.cancelUnfinished(session.id, 'User supplied a new or updated requirement before task completion.');
+    this.tasks.cancelUnfinished(session.id, messages.requirementChangedCancelTasks);
     const relevantAgentIds = this.relevantAgentIds(session, content, affectedAgentIds);
     this.recordAgentRequirementContext(session, content, sourceEvent.id, relevantAgentIds);
     this.events.create({
       sessionId: session.id,
       type: 'session_status_changed',
       priority: 'high',
-      content:
-        'User input changed the working requirement. Agents will restate understanding and request confirmation before assigning work.',
+      content: messages.requirementChangedNotice,
       metadata: createMetadata('system_notice', {
         status: 'AGENT_DISCUSSING',
         reason,
@@ -631,7 +741,7 @@ export class SessionsService {
         sessionId: session.id,
         agentId,
         scope: 'session',
-        content: `User requirement update relevant to ${agent.name}: ${content}`,
+        content: messages.requirementUpdateForAgent(agent.name, content),
         sourceEventId,
         confidence: 0.9
       });
@@ -639,12 +749,12 @@ export class SessionsService {
         sessionId: session.id,
         type: 'agent_status_changed',
         fromAgentId: agentId,
-        content: `${agent.name} marked the user update as relevant and added it to its session context.`,
+        content: messages.agentMarkedUpdateRelevant(agent.name),
         metadata: createMetadata('system_notice', {
           agentId,
           status: 'thinking',
-          thoughtSummary: 'Relevant requirement update added to agent context.',
-          actionSummary: 'Will use this update during the next understanding and execution pass.',
+          thoughtSummary: messages.agentUpdateThought,
+          actionSummary: messages.agentUpdateAction,
           sourceEventId
         })
       });
@@ -674,12 +784,12 @@ export class SessionsService {
 
   private resumeExecution(session: SessionDetail) {
     if (!session.currentTaskBriefId) {
-      this.applyOutcome(session.id, { kind: 'ask_user', reason: 'Cannot resume execution: current task brief not found.' });
+      this.applyOutcome(session.id, { kind: 'ask_user', reason: messages.resumeBriefMissing });
       return;
     }
     const brief = this.orchestrator.getBrief(session.id, session.currentTaskBriefId);
     if (!brief) {
-      this.applyOutcome(session.id, { kind: 'ask_user', reason: 'Cannot resume execution: task brief does not exist.' });
+      this.applyOutcome(session.id, { kind: 'ask_user', reason: messages.resumeBriefMissing });
       return;
     }
     this.tasks.resetStaleRunning(session.id);
@@ -708,7 +818,7 @@ export class SessionsService {
     }
     const fallback = agents[0];
     if (!fallback) {
-      throw new Error('Current session has no available Agent.');
+      throw new Error(messages.noAvailableAgent);
     }
     return fallback;
   }

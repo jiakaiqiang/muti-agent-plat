@@ -40,10 +40,27 @@ function senderTypeOf(event: CollaborationEvent): ChatMessage['senderType'] {
 
 function shouldRenderInTimeline(event: CollaborationEvent) {
   if (event.type === 'agent_message') {
-    const payload = payloadOf<{ round?: number; internal?: boolean }>(event)
-    return !payload.round && !payload.internal
+    const payload = payloadOf<{ internal?: boolean }>(event)
+    return !payload.internal
   }
   return eventTypeToMessageType[event.type] !== undefined
+}
+
+function discussionProgress(events: CollaborationEvent[]) {
+  const discussingAgents = new Set<string>()
+  let messageCount = 0
+  let maxRound = 0
+  for (const event of events) {
+    if (event.type === 'agent_message') {
+      const payload = payloadOf<{ round?: number }>(event)
+      if (payload.round) {
+        if (event.fromAgentId) discussingAgents.add(event.fromAgentId)
+        messageCount++
+        if (payload.round > maxRound) maxRound = payload.round
+      }
+    }
+  }
+  return { agentCount: discussingAgents.size, messageCount, currentRound: maxRound }
 }
 
 function artifactPayload(event: CollaborationEvent): ArtifactEventPayload | undefined {
@@ -140,6 +157,7 @@ export const useEventStore = defineStore('event', {
   }),
   getters: {
     eventsForSession: (state) => (sessionId: string) => state.eventsBySessionId[sessionId] ?? [],
+    discussionProgress: (state) => (sessionId: string) => discussionProgress(state.eventsBySessionId[sessionId] ?? []),
     chatMessages: (state) => (sessionId: string): ChatMessage[] => {
       const events = state.eventsBySessionId[sessionId] ?? []
       const confirmationStatusById = confirmationStatuses(events)
@@ -273,22 +291,46 @@ export const useEventStore = defineStore('event', {
     },
     taskStates: (state) => (sessionId: string): TaskViewState[] => {
       const tasks = new Map<string, TaskViewState>()
+      const artifactsByTaskId = new Map<string, TaskViewState['artifacts']>()
       for (const event of state.eventsBySessionId[sessionId] ?? []) {
+        if (event.type === 'artifact_created') {
+          const taskId = event.taskId
+          const payload = artifactPayload(event)
+          if (taskId && payload) {
+            const artifacts = artifactsByTaskId.get(taskId) ?? []
+            artifactsByTaskId.set(taskId, [
+              ...artifacts,
+              {
+                artifactId: payload.artifactId,
+                type: payload.type,
+                title: payload.title,
+                contentSummary: payload.contentSummary,
+                fileChangeCount: payload.fileChanges?.length ?? 0
+              }
+            ])
+          }
+        }
+
         if (!event.type.startsWith('task_')) continue
         const payload = payloadOf<TaskEventPayload>(event)
         const taskId = payload.taskId ?? event.taskId
         if (!taskId) continue
+        const current = tasks.get(taskId)
         tasks.set(taskId, {
           taskId,
-          title: payload.title,
+          title: payload.title ?? current?.title ?? taskId,
           status: payload.status,
-          assigneeAgentId: payload.assigneeAgentId,
-          dependsOnTaskIds: payload.dependsOnTaskIds ?? [],
-          acceptanceCriteria: payload.acceptanceCriteria ?? [],
-          resultSummary: payload.resultSummary
+          assigneeAgentId: payload.assigneeAgentId ?? current?.assigneeAgentId,
+          dependsOnTaskIds: payload.dependsOnTaskIds ?? current?.dependsOnTaskIds ?? [],
+          acceptanceCriteria: payload.acceptanceCriteria ?? current?.acceptanceCriteria ?? [],
+          resultSummary: payload.resultSummary ?? current?.resultSummary,
+          artifacts: artifactsByTaskId.get(taskId) ?? current?.artifacts ?? []
         })
       }
-      return [...tasks.values()]
+      return [...tasks.values()].map((task) => ({
+        ...task,
+        artifacts: artifactsByTaskId.get(task.taskId) ?? task.artifacts
+      }))
     },
     activeConfirmation: (state) => (sessionId: string): ConfirmationCardState | undefined => {
       let card: ConfirmationCardState | undefined

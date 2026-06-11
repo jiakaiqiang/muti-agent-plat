@@ -2,7 +2,7 @@
 
 ## 1. 文档目标
 
-本文档基于 [Agent Cluster 协作系统设计文档 v1](./agent-cluster-system-design-v1.md)，使用 Agent Team 的方式，对系统实施进行拆分设计。
+本文档基于 [Agent Cluster 协作系统设计文档 v1](../design/agent-cluster-system-design-v1.md)，使用 Agent Team 的方式，对系统实施进行拆分设计。
 
 这里的 Agent Team 指研发实施过程中的协作团队，而不是系统运行时的业务 Agent。
 

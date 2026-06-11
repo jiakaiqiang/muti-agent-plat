@@ -1,5 +1,9 @@
 ﻿# Review Report 评审报告模板
 
+> 最后修改时间：2026-06-11 14:47:47 +08:00
+> 修改人：Codex
+> 修改的 Agent：Codex
+
 > 规程来源：[README.md](../README.md) §7 Agent Role Protocol、§11 Feedback Loop
 > 阶段：`review`　产出 Agent：`review`
 > 输入：全过程产物　输出：Approve / Rework / Ask User

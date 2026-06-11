@@ -78,12 +78,12 @@ export class OrchestratorService {
       sessionId: session.id,
       type: 'agent_status_changed',
       fromAgentId: coordinator.id,
-      content: `${coordinator.name} received the requirement and is triaging the group discussion.`,
+      content: messages.coordinatorIntakeStatus(coordinator.name),
       metadata: createMetadata('system_notice', {
         agentId: coordinator.id,
         status: 'thinking',
-        thoughtSummary: 'Receiving and triaging the user requirement.',
-        actionSummary: 'Preparing discussion context and asking relevant Agents to assess the requirement.'
+        thoughtSummary: messages.coordinatorIntakeThought,
+        actionSummary: messages.coordinatorIntakeAction
       })
     });
     this.events.create({
@@ -313,13 +313,13 @@ export class OrchestratorService {
     tasks: AgentTask[],
     signal?: AbortSignal
   ): Promise<ExecutionOutcome> {
-    const allTasks = this.tasks.list(session.id);
-    const executableTasks = allTasks.length ? allTasks : tasks;
     while (true) {
       if (signal?.aborted) {
         return { kind: 'cancelled', reason: messages.cancelled };
       }
 
+      const allTasks = this.tasks.list(session.id);
+      const executableTasks = allTasks.length ? allTasks : tasks;
       const remaining = executableTasks.filter((task) => !this.isTerminalTask(task));
       if (!remaining.length) {
         break;
@@ -719,12 +719,12 @@ export class OrchestratorService {
           sessionId: session.id,
           type: 'agent_status_changed',
           fromAgentId: agent.id,
-          content: `${agent.name} is checking whether the requirement is relevant to its responsibilities.`,
+          content: messages.discussionCheckingStatus(agent.name),
           metadata: createMetadata('system_notice', {
             agentId: agent.id,
             status: 'discussing',
-            thoughtSummary: 'Checking requirement relevance.',
-            actionSummary: 'Reviewing the user requirement before brief creation.',
+            thoughtSummary: messages.discussionCheckingThought,
+            actionSummary: messages.discussionCheckingAction,
             waitingFor: [coordinator.id]
           })
         });
@@ -737,22 +737,20 @@ export class OrchestratorService {
                 kind: 'agent_message',
                 messageKind: 'risk',
                 content: timedOut
-                  ? `${agent.name} discussion timed out; Coordinator will continue with the available context.`
-                  : `${agent.name} could not complete discussion: ${result.error?.message ?? result.status}`
+                  ? messages.discussionTimedOutMessage(agent.name)
+                  : messages.discussionFailedMessage(agent.name, result.error?.message ?? result.status)
               } satisfies AgentMessageOutput);
         this.events.create({
           sessionId: session.id,
           type: 'agent_status_changed',
           fromAgentId: agent.id,
           content: timedOut
-            ? `${agent.name} did not respond before the discussion timeout.`
-            : `${agent.name} completed requirement relevance assessment.`,
+            ? messages.discussionTimedOutStatus(agent.name)
+            : messages.discussionCompletedStatus(agent.name),
           metadata: createMetadata('system_notice', {
             agentId: agent.id,
             status: timedOut ? 'waiting' : 'thinking',
-            thoughtSummary: timedOut
-              ? 'Discussion timed out; waiting for a later turn or user clarification.'
-              : 'Requirement relevance assessment completed.',
+            thoughtSummary: timedOut ? messages.discussionTimedOutThought : messages.discussionCompletedThought,
             actionSummary: output.content,
             waitingFor: timedOut ? [coordinator.id] : []
           })
@@ -923,7 +921,7 @@ export class OrchestratorService {
       type: 'task_waiting',
       taskId: task.id,
       fromAgentId: agentId,
-      content: `Task paused and waiting to resume: ${task.title}`,
+      content: messages.taskPausedWaiting(task.title),
       metadata: createMetadata('task_card', {
         taskId: task.id,
         title: task.title,
@@ -1432,7 +1430,7 @@ export class OrchestratorService {
         sessionId: input.sessionId,
         type: 'error_reported',
         priority: 'high',
-        content: `Token budget exceeded: estimated ${fitted.estimatedTokens} tokens, max ${maxInputTokens} tokens.`,
+        content: messages.tokenBudgetExceeded(fitted.estimatedTokens, maxInputTokens),
         metadata: createMetadata('error_card', {
           code: 'TOKEN_BUDGET_EXCEEDED',
           estimatedTokens: fitted.estimatedTokens,
@@ -1448,7 +1446,7 @@ export class OrchestratorService {
         type: 'runtime_progress',
         taskId: input.taskId,
         fromAgentId: input.agent.id,
-        content: 'Context was trimmed to fit the token budget.',
+        content: messages.tokenContextTrimmed,
         metadata: createMetadata('system_notice', {
           runtimeInvocationId: input.runId,
           code: 'TOKEN_CONTEXT_TRIMMED',
@@ -1492,7 +1490,7 @@ export class OrchestratorService {
       output: {
         kind: 'agent_message',
         messageKind: 'risk',
-        content: 'Token budget is insufficient; runtime invocation was not started.'
+        content: messages.tokenBudgetInsufficient
       } satisfies AgentMessageOutput,
       events: [],
       artifacts: [],
@@ -1545,7 +1543,7 @@ export class OrchestratorService {
     }
     const fallback = agents[fallbackIndex] ?? agents[0];
     if (!fallback) {
-      throw new Error('Current session has no available Agent.');
+      throw new Error(messages.noAvailableAgent);
     }
     return fallback;
   }

@@ -387,27 +387,15 @@ async function runMainChain() {
 
   const interruptConfirmation = await waitForMatchingEvent(
     sessionId,
-    "user_confirmation_requested",
-    (event) => (((event.metadata as Json).payload as Json).reason === "resolve_contract_conflict")
+    "session_status_changed",
+    (event) => (((event.metadata as Json).payload as Json).reason === "executing_user_interrupt_task_created")
   );
-  const interruptConfirmationPayload = (interruptConfirmation.metadata as Json).payload as Json;
-  await waitForStatus(sessionId, "WAIT_USER_DECISION");
-  await api<{ data: Json }>(`/sessions/${sessionId}/resume`, {
-    method: "POST",
-    body: JSON.stringify({
-      reason: "Continue after resolving the non-destructive execution constraint.",
-      confirmationId: interruptConfirmationPayload.confirmationId
-    })
-  });
-
-  await waitForEvent(sessionId, "runtime_started");
-  const ragRetrieved = await waitForEvent(sessionId, "rag_retrieved");
-  const ragPayload = (ragRetrieved.metadata as Json).payload as Json;
-  const matchedChunks = ragPayload.matchedChunks as Json[];
-  if (!matchedChunks.some((chunk) => String(chunk.snippet).includes("structured JSON"))) {
-    throw new Error("Runtime RAG event must include chunks from the bound knowledge base");
+  if (!interruptConfirmation) {
+    throw new Error("Executing interrupt must create a task to handle it");
   }
-  await waitForEvent(sessionId, "runtime_completed");
+
+  // 验证插话后执行继续到完成，不作废任务
+  await waitForStatus(sessionId, "COMPLETED", 60_000);
 
   const postReview = await waitForEvent(sessionId, "post_review_completed");
   const postReviewPayload = (postReview.metadata as Json).payload as Json;

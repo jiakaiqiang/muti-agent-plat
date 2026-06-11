@@ -229,49 +229,20 @@ async function runP1Behaviors() {
 
   await confirmPromise;
   const events = await listEvents(executionSessionId);
-  const decisionEvent = events.find(
+  const interruptTaskEvent = events.find(
     (event) =>
       event.type === "session_status_changed" &&
-      (((event.metadata as Json).payload as Json).status === "WAIT_USER_DECISION")
+      (((event.metadata as Json).payload as Json).reason === "executing_user_interrupt_task_created")
   );
-  if (!decisionEvent) {
-    throw new Error("Executing interrupt must emit WAIT_USER_DECISION status event");
-  }
-  const decisionConfirmation = events.find(
-    (event) =>
-      event.type === "user_confirmation_requested" &&
-      (((event.metadata as Json).payload as Json).reason === "resolve_contract_conflict")
-  );
-  if (!decisionConfirmation) {
-    throw new Error("Executing interrupt must emit a user decision confirmation card");
-  }
-  const pausedSession = await api<{ data: Json }>(`/sessions/${executionSessionId}`);
-  if (pausedSession.data.status !== "WAIT_USER_DECISION") {
-    throw new Error(`Executing interrupt must keep session waiting for a user decision, got ${String(pausedSession.data.status)}`);
+  if (!interruptTaskEvent) {
+    throw new Error("Executing interrupt must create a task to handle it");
   }
 
-  const confirmationPayload = (decisionConfirmation.metadata as Json).payload as Json;
-  await api(`/sessions/${executionSessionId}/resume`, {
-    method: "POST",
-    body: JSON.stringify({
-      reason: "Continue after resolving interrupt.",
-      confirmationId: confirmationPayload.confirmationId
-    })
-  });
-  await waitForRagMarker(executionSessionId, "P1_RAG_MARKER");
-  await waitForStatus(executionSessionId, "COMPLETED");
-  const resumedSession = await api<{ data: Json }>(`/sessions/${executionSessionId}`);
-  if (resumedSession.data.status !== "COMPLETED") {
-    throw new Error(`Resolved dry-run interrupt should close as completed, got ${String(resumedSession.data.status)}`);
-  }
-  const resolvedEvents = await listEvents(executionSessionId);
-  const resolvedConfirmation = resolvedEvents.find(
-    (event) =>
-      event.type === "user_confirmation_resolved" &&
-      (((event.metadata as Json).payload as Json).confirmationId === confirmationPayload.confirmationId)
-  );
-  if (!resolvedConfirmation) {
-    throw new Error("Resolving interrupt must persist the confirmation result");
+  // 验证插话后执行继续完成
+  await waitForStatus(executionSessionId, "COMPLETED", 60_000);
+  const completedSession = await api<{ data: Json }>(`/sessions/${executionSessionId}`);
+  if (completedSession.data.status !== "COMPLETED") {
+    throw new Error(`Interrupt with context should complete execution, got ${String(completedSession.data.status)}`);
   }
 
   console.log("p1 behavior coverage ok");

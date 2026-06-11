@@ -2,7 +2,7 @@
 
 ## 1. 文档目标
 
-本文档基于 [Agent Cluster 协作系统 PRD v1](./agent-cluster-prd-v1.md)，给出第一版可落地的系统设计。
+本文档基于 [Agent Cluster 协作系统 PRD v1](../product/agent-cluster-prd-v1.md)，给出第一版可落地的系统设计。
 
 设计重点：
 

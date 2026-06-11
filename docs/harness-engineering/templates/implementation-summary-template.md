@@ -1,5 +1,9 @@
 ﻿# Implementation Summary 实现摘要模板
 
+> 最后修改时间：2026-06-11 14:47:47 +08:00
+> 修改人：Codex
+> 修改的 Agent：Codex
+
 > 规程来源：[README.md](../README.md) §8 Stage Workflow、§9 Tool Governance
 > 阶段：`implementation`　产出 Agent：`backend` / `frontend` / `notification`
 > 输入：Task Plan + Tool Policy　输出：Implementation Summary

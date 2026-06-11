@@ -23,6 +23,7 @@ const repoRoot = path.resolve(here, '..', '..');
 const dir = path.join(repoRoot, 'docs', 'harness-engineering', 'prompt-context');
 const contractsPath = path.join(repoRoot, 'packages', 'shared', 'src', 'contracts.ts');
 const agentsPath = path.join(repoRoot, 'packages', 'shared', 'src', 'default-agents.ts');
+const agentPresetsPath = path.join(repoRoot, 'packages', 'shared', 'src', 'default-agent-presets.ts');
 
 // ---- Parse source for reality sync ----
 function parseUnion(source, typeName) {
@@ -36,7 +37,7 @@ function parseObjectFields(source, typeName) {
 }
 
 const contractsSrc = await readFile(contractsPath, 'utf8');
-const agentsSrc = await readFile(agentsPath, 'utf8');
+const agentsSrc = `${await readFile(agentsPath, 'utf8')}\n${await readFile(agentPresetsPath, 'utf8')}`;
 const contextPackFields = parseObjectFields(contractsSrc, 'ContextPack');
 const agentRunPhases = parseUnion(contractsSrc, 'AgentRunPhase');
 const agentKeys = [...agentsSrc.matchAll(/key: '([^']+)'/g)].map((x) => x[1]);

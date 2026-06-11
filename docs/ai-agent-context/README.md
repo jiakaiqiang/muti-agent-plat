@@ -21,11 +21,11 @@
 | 只询问 Harness Engineering | `harness-engineering-protocol.md` | `docs/harness-engineering/README.md` |
 | Claude/Codex 工作流维护 | `tool-workflow-rules.md`, `harness-engineering-protocol.md` | `.claude/CLAUDE.md`, `AGENTS.md` |
 | 后端 API、会话、编排、运行时 | `project-map.md` | `docs/contracts/api-contract-v0.1.md`, `docs/contracts/runtime-contract-v0.1.md` |
-| 前端页面、交互、状态展示 | `project-map.md` | `docs/ui-style-guide-v1.md`, `docs/contracts/ui-state-contract-v0.1.md` |
+| 前端页面、交互、状态展示 | `project-map.md` | `docs/design/ui-style-guide-v1.md`, `docs/contracts/ui-state-contract-v0.1.md` |
 | 共享类型、事件、数据合同 | `project-map.md` | `docs/contracts/README.md`, `packages/shared/src/contracts.ts` |
 | 测试、验收、质量闭环 | `project-map.md` | `docs/quality/`, `tests/e2e/`, `tests/harness-engineering/` |
 | 本地开发、CI、部署、运维 | `project-map.md` | `docs/devops/`, `.github/workflows/ci.yml` |
-| 产品范围、功能状态、计划 | `project-map.md` | `docs/agent-cluster-prd-v1.md`, `docs/feature-inventory-and-status-v1.md`, `docs/remediation-plan-v1.md` |
+| 产品范围、功能状态、计划 | `project-map.md` | `docs/product/agent-cluster-prd-v1.md`, `docs/analysis/feature-inventory-and-status-v1.md`, `docs/roadmap/remediation-plan-v1.md` |
 
 ## 推荐读取顺序
 

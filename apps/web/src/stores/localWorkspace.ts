@@ -336,6 +336,13 @@ export const useLocalWorkspaceStore = defineStore('localWorkspace', {
       this.pendingBinding = undefined
       return this.bindingsBySessionId[sessionId]?.directory
     },
+    reusePendingDirectoryFromSession(sessionId?: string) {
+      if (this.pendingBinding) return this.pendingBinding.directory
+      const binding = sessionId ? this.bindingsBySessionId[sessionId] : undefined
+      if (!binding) return undefined
+      this.pendingBinding = binding
+      return this.pendingBinding.directory
+    },
     async scanPendingWorkspace() {
       if (!this.pendingBinding) return undefined
       const allowed = await ensurePermission(this.pendingBinding.handle)

@@ -158,6 +158,27 @@ function phaseLabel(phase?: string) {
   )
 }
 
+function discussionRound(message: ChatMessage) {
+  const round = message.payload?.round
+  return typeof round === 'number' ? round : undefined
+}
+
+function messageKindLabel(message: ChatMessage) {
+  const kind = message.payload?.messageKind
+  if (typeof kind !== 'string') return undefined
+  return (
+    {
+      discussion: 'Agent 讨论',
+      answer: '答复',
+      handoff: '交接',
+      progress: '进展',
+      risk: '风险',
+      decision: '决策',
+      summary: '总结'
+    }[kind] ?? kind
+  )
+}
+
 function errorPayload(message: ChatMessage) {
   return message.messageType === 'error' ? (message.payload as Record<string, unknown> | undefined) : undefined
 }
@@ -191,6 +212,9 @@ function errorText(message: ChatMessage, key: string) {
         />
 
         <template v-else>
+          <div v-if="discussionRound(message)" class="discussion-message-meta">
+            第 {{ discussionRound(message) }} 轮 · {{ messageKindLabel(message) ?? 'Agent 讨论' }}
+          </div>
           <p class="message-content">{{ message.content }}</p>
 
           <div v-if="workspaceAnalysisPayload(message)" class="structured-block workspace-analysis-block">

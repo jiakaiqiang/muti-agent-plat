@@ -79,6 +79,14 @@ export function discussionTimeoutMs() {
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 30_000;
 }
 
+export function reworkMaxRounds() {
+  const parsed = Number(process.env.REWORK_MAX_ROUNDS ?? 1);
+  if (!Number.isFinite(parsed)) {
+    return 1;
+  }
+  return Math.max(0, Math.min(3, Math.floor(parsed)));
+}
+
 export function mockRuntimeEnabled() {
   return envFlag('MOCK_RUNTIME_ENABLED', false);
 }

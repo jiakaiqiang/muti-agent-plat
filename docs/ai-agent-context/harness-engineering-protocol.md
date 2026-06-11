@@ -115,8 +115,8 @@ npm run build
 
 - AI 工具工作方式：`docs/ai-agent-context/`
 - Harness 规程：`docs/harness-engineering/`
-- 产品范围：`docs/agent-cluster-prd-v1.md`
-- 功能状态：`docs/feature-inventory-and-status-v1.md`
+- 产品范围：`docs/product/agent-cluster-prd-v1.md`
+- 功能状态：`docs/analysis/feature-inventory-and-status-v1.md`
 - 合同：`docs/contracts/`
 - 运维：`docs/devops/`
 

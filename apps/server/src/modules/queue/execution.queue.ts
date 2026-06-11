@@ -17,6 +17,8 @@ export type ExecutionJobData = {
 export class ExecutionQueue implements OnModuleDestroy {
   private readonly logger = new Logger(ExecutionQueue.name);
   private readonly queue?: Queue<ExecutionJobData>;
+  /** Job-level abort controllers so cancel works while the worker runs in-process. */
+  private readonly abortControllers = new Map<string, AbortController>();
 
   constructor() {
     if (bullMqEnabled()) {
@@ -25,6 +27,22 @@ export class ExecutionQueue implements OnModuleDestroy {
         prefix: bullMqPrefix()
       });
     }
+  }
+
+  registerAbortController(sessionId: string) {
+    const controller = new AbortController();
+    this.abortControllers.set(sessionId, controller);
+    return controller;
+  }
+
+  releaseAbortController(sessionId: string, controller: AbortController) {
+    if (this.abortControllers.get(sessionId) === controller) {
+      this.abortControllers.delete(sessionId);
+    }
+  }
+
+  cancel(sessionId: string) {
+    this.abortControllers.get(sessionId)?.abort();
   }
 
   async enqueue(data: ExecutionJobData) {

@@ -46,6 +46,9 @@
     "test:e2e:token-budget": "node tests/e2e/token-budget-smoke.mjs",
     "test:e2e:task-dependency": "node tests/e2e/task-dependency-smoke.mjs",
     "test:e2e:multi-agent-discussion": "node tests/e2e/multi-agent-discussion-smoke.mjs",
+    "test:e2e:rework-loop": "node tests/e2e/rework-loop-smoke.mjs",
+    "test:e2e:cancel": "node tests/e2e/cancel-smoke.mjs",
+    "test:e2e:recovery": "node tests/e2e/recovery-smoke.mjs",
     "lint": "npm run lint --workspaces --if-present"
   },
   "engines": {

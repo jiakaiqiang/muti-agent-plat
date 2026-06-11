@@ -1,4 +1,4 @@
-﻿# 项目地图
+# 项目地图
 
 本文档用于帮助 Codex、Claude 等 AI 工程代理根据用户需求精准定位项目上下文。
 
@@ -65,15 +65,15 @@
 
 | 需求关键词 | 主要路径 | 相关文档/测试 |
 | --- | --- | --- |
-| 工作台整体布局 | `apps/web/src/components/SessionWorkspace.vue` | `docs/ui-style-guide-v1.md` |
+| 工作台整体布局 | `apps/web/src/components/SessionWorkspace.vue` | `docs/design/ui-style-guide-v1.md` |
 | 会话侧栏 | `apps/web/src/components/SessionSidebar.vue` | `apps/web/src/stores/session.ts` |
 | 聊天时间线、事件展示 | `apps/web/src/components/ChatTimeline.vue` | `docs/contracts/event-contract-v0.1.md` |
 | 用户输入框 | `apps/web/src/components/UserInputBox.vue` | `tests/e2e/chinese-visible-copy-smoke.mjs` |
-| Agent 状态、画像、图谱 | `apps/web/src/components/AgentStatusPanel.vue`, `AgentPortrait.vue`, `CollaborationGraphView.vue` | `docs/agent-cluster-system-design-v1.md` |
+| Agent 状态、画像、图谱 | `apps/web/src/components/AgentStatusPanel.vue`, `AgentPortrait.vue`, `CollaborationGraphView.vue` | `docs/design/agent-cluster-system-design-v1.md` |
 | 运行时模型管理 | `apps/web/src/components/RuntimeModelManager.vue` | `apps/web/src/stores/runtimeModel.ts`, `tests/e2e/runtime-model-switch-smoke.mjs` |
 | 运行时过程展示 | `apps/web/src/components/WorkflowRuntimeView.vue`, `DebugRuntimeView.vue` | `docs/contracts/runtime-contract-v0.1.md` |
 | 确认卡片 | `apps/web/src/components/ConfirmationCard.vue` | `tests/e2e/memory-confirm-smoke.mjs` |
-| 样式 | `apps/web/src/styles.css` | `docs/ui-style-guide-v1.md` |
+| 样式 | `apps/web/src/styles.css` | `docs/design/ui-style-guide-v1.md` |
 | API 客户端 | `apps/web/src/api/client.ts` | `docs/contracts/api-contract-v0.1.md` |
 
 ## 共享包地图
@@ -90,14 +90,16 @@
 
 | 路径 | 用途 |
 | --- | --- |
-| `docs/agent-cluster-prd-v1.md` | 产品需求与范围 |
-| `docs/agent-cluster-system-design-v1.md` | 系统设计 |
-| `docs/workspace-aware-chat-agent-design-v1.md` | 聊天室 Agent 借鉴 Codex/Claude 工作区感知模型的产品与系统设计 |
-| `docs/agent-team-implementation-breakdown-v1.md` | Agent 团队实现拆解 |
-| `docs/feature-inventory-and-status-v1.md` | 功能清单与当前状态 |
-| `docs/project-analysis.md` | 项目分析 |
-| `docs/remediation-plan-v1.md` | 修复计划 |
-| `docs/remediation-execution-plan-batch2-3.md` | 修复执行计划 |
+| `docs/README.md` | 文档分类索引 |
+| `docs/product/agent-cluster-prd-v1.md` | 产品需求与范围 |
+| `docs/design/agent-cluster-system-design-v1.md` | 系统设计 |
+| `docs/design/workspace-aware-chat-agent-design-v1.md` | 聊天室 Agent 借鉴 Codex/Claude 工作区感知模型的产品与系统设计 |
+| `docs/design/ui-style-guide-v1.md` | 前端 UI 风格规范 |
+| `docs/implementation/agent-team-implementation-breakdown-v1.md` | Agent 团队实现拆解 |
+| `docs/analysis/feature-inventory-and-status-v1.md` | 功能清单与当前状态 |
+| `docs/analysis/project-analysis.md` | 项目分析 |
+| `docs/roadmap/remediation-plan-v1.md` | 修复计划 |
+| `docs/roadmap/remediation-execution-plan-batch2-3.md` | 修复执行计划 |
 | `docs/contracts/` | API、事件、数据、运行时、UI 状态合同 |
 | `docs/quality/` | 验收矩阵与质量报告 |
 | `docs/devops/` | 本地开发、CI、发布检查 |
@@ -120,15 +122,24 @@
 | Runtime 路由 | `npm run test:e2e:runtime-routing` |
 | Runtime 模型切换 | `npm run test:e2e:runtime-model-switch` |
 | 任务依赖 | `npm run test:e2e:task-dependency` |
+| 多 Agent 讨论 | `npm run test:e2e:multi-agent-discussion` |
+| 自动返工 | `npm run test:e2e:rework-loop` |
+| 取消/中断 | `npm run test:e2e:cancel` |
+| 启动恢复 | `npm run test:e2e:recovery` |
 | 记忆确认 | `npm run test:e2e:memory-confirm` |
-
+| Token 预算 | `npm run test:e2e:token-budget` |
+| 工作区快照 | `npm run test:e2e:workspace-snapshot-payload` |
+| 工作区 fileChanges | `npm run test:e2e:artifact-file-changes` |
+| Server-local 项目分析 | `npm run test:e2e:server-local-project-analysis` |
+| Postgres 持久化 | `npm run test:e2e:postgres-persistence` |
+| BullMQ 队列 | `npm run test:e2e:bullmq-ops` |
 ## 需求到上下文的路由
 
 | 如果用户说 | 优先读取 |
 | --- | --- |
 | “实现一个功能” | 本文档、Harness 协议、相关 app/package、合同、测试 |
-| “看看现在实现了什么” | `docs/feature-inventory-and-status-v1.md`, `docs/project-analysis.md`, 相关代码 |
-| “补齐未完成项” | `docs/remediation-plan-v1.md`, `docs/remediation-execution-plan-batch2-3.md`, 功能状态文档 |
+| “看看现在实现了什么” | `docs/analysis/feature-inventory-and-status-v1.md`, `docs/analysis/project-analysis.md`, 相关代码 |
+| “补齐未完成项” | `docs/roadmap/remediation-plan-v1.md`, `docs/roadmap/remediation-execution-plan-batch2-3.md`, 功能状态文档 |
 | “优化前端体验” | 前端地图、UI 风格文档、相关组件 |
 | “调整 API/事件/类型” | 合同文档、`packages/shared/src/contracts.ts`、前后端调用点 |
 | “改 Agent 协作/编排” | Orchestrator、sessions、tasks、events、runtime、Harness alignment 文档 |
@@ -143,13 +154,12 @@
 | --- | --- |
 | AI 工具如何执行任务 | `docs/ai-agent-context/` |
 | Harness Engineering 规程 | `docs/harness-engineering/` |
-| 产品范围和目标 | `docs/agent-cluster-prd-v1.md` |
-| 系统设计 | `docs/agent-cluster-system-design-v1.md` |
-| 功能状态 | `docs/feature-inventory-and-status-v1.md` |
+| 产品范围和目标 | `docs/product/agent-cluster-prd-v1.md` |
+| 系统设计 | `docs/design/agent-cluster-system-design-v1.md` |
+| 功能状态 | `docs/analysis/feature-inventory-and-status-v1.md` |
 | 合同与数据结构 | `docs/contracts/` |
-| UI 风格 | `docs/ui-style-guide-v1.md` |
+| UI 风格 | `docs/design/ui-style-guide-v1.md` |
 | 质量验收 | `docs/quality/` |
 | 运维和本地开发 | `docs/devops/` |
 
 新增永久记忆前，先判断它属于哪一类。不要把所有记忆都堆到 `AGENTS.md` 或 `.claude/CLAUDE.md`。
-

@@ -36,7 +36,7 @@ cp .env.example .env
 - `AGENT_CLUSTER_SEED_DEFAULT_AGENTS=false`
 - `ENABLE_BULLMQ=true`
 
-如果缺少 `LLM_API_KEY` 或 `LLM_BASE_URL`，后端会使用受控 mock fallback 生成结构化任务契约，保证本地群聊输入能得到反馈。配置了真实模型连接但模型请求失败时，后端仍会把运行失败写入事件流，方便定位真实 LLM 问题。
+如果缺少 `LLM_API_KEY` 或 `LLM_BASE_URL`，后端会显式返回运行时配置错误并写入事件流，不会静默回退到 mock。只有显式设置 `LLM_MOCK_FALLBACK=true` 或 mock 演示模式时，`generic_llm` 才会使用 mock fallback。
 
 ## 启动基础设施
 
@@ -107,6 +107,7 @@ redis-server --appendonly yes
 - `ENABLE_BULLMQ=true`
 - `REDIS_URL`
 - `BULLMQ_PREFIX`
+- `QUEUE_ATTEMPTS`
 - `QUEUE_CONCURRENCY`
 
 队列命名建议与系统设计保持一致：
@@ -118,7 +119,7 @@ redis-server --appendonly yes
 - `notification-queue`
 - `post-review-queue`
 
-启用 `ENABLE_BULLMQ=true` 后，`GET /api/ops/queues` 会连接 Redis/BullMQ 并返回每个队列的 `waiting`、`active`、`completed`、`failed` 数值。未启用时该接口仍返回 disabled 状态，方便本地无 Redis 时启动后端。
+启用 `ENABLE_BULLMQ=true` 后，确认任务契约会把执行投递到 `agent-task-queue`，同进程 `ExecutionWorker` 会消费 job。`GET /api/ops/queues` 会连接 Redis/BullMQ 并返回每个队列的 `waiting`、`active`、`completed`、`failed` 数值。未启用时该接口仍返回 disabled 状态，后端改用进程内后台执行和 `RecoveryService` 启动恢复。
 
 ## 应用启动建议
 

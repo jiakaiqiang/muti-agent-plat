@@ -281,6 +281,15 @@ export type TaskViewState = {
   dependsOnTaskIds: string[]
   acceptanceCriteria: string[]
   resultSummary?: string
+  artifacts: TaskArtifactSummary[]
+}
+
+export type TaskArtifactSummary = {
+  artifactId: string
+  type: string
+  title: string
+  contentSummary?: string
+  fileChangeCount: number
 }
 
 export const sessionStatusLabel: Record<SessionStatus, string> = {

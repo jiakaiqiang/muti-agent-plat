@@ -59,6 +59,11 @@ function capabilityNames(agent: AgentCardState) {
   return agent.activeCapabilityNames.length ? agent.activeCapabilityNames : configuredNames
 }
 
+function artifactMeta(artifact: TaskViewState['artifacts'][number]) {
+  const fileChangeText = artifact.fileChangeCount ? ` · ${artifact.fileChangeCount} 个文件变更` : ''
+  return `${artifact.type}${fileChangeText}`
+}
+
 </script>
 
 <template>
@@ -88,8 +93,6 @@ function capabilityNames(agent: AgentCardState) {
             <span class="agent-status" :class="agent.status">{{ statusLabel(agent.status) }}</span>
           </div>
           <p v-if="agent.currentTaskTitle" class="agent-task">{{ agent.currentTaskTitle }}</p>
-          <p v-if="agent.thoughtSummary" class="agent-summary">{{ agent.thoughtSummary }}</p>
-          <p v-if="agent.actionSummary" class="agent-summary muted">{{ agent.actionSummary }}</p>
           <div class="agent-meter">
             <span :style="{ width: agent.status === 'running' ? '66%' : agent.status === 'completed' ? '100%' : '18%' }"></span>
           </div>
@@ -124,6 +127,13 @@ function capabilityNames(agent: AgentCardState) {
           <p v-if="tasksExpanded">{{ task.resultSummary ?? statusLabel(task.status) }}</p>
           <ul v-if="tasksExpanded && task.acceptanceCriteria.length" class="task-criteria">
             <li v-for="item in task.acceptanceCriteria" :key="item">{{ item }}</li>
+          </ul>
+          <ul v-if="task.artifacts.length" class="task-artifacts">
+            <li v-for="artifact in task.artifacts" :key="artifact.artifactId">
+              <strong>{{ artifact.title }}</strong>
+              <span>{{ artifactMeta(artifact) }}</span>
+              <p v-if="tasksExpanded && artifact.contentSummary">{{ artifact.contentSummary }}</p>
+            </li>
           </ul>
         </div>
         <small>{{ statusLabel(task.status) }}</small>

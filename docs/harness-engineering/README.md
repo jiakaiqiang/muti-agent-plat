@@ -1,9 +1,12 @@
 # Agent Cluster Harness Engineering 工程化体系
 
+> 最后修改时间：2026-06-11 14:47:47 +08:00
+> 修改人：Codex
+> 修改的 Agent：Codex
+
 ## 适用范围
 
 这套方法论不只服务于 Agent Cluster；Agent Cluster 只是当前实例。它也适用于其他多 Agent 协作、AI/人工混合交付、自动化研发流程和需要阶段治理的知识工作。
-
 
 Harness Engineering 不是测试、不是系统功能、不是某个模块。
 

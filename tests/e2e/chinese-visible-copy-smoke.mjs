@@ -29,7 +29,25 @@ const forbiddenVisibleCopy = [
   /Agent Collaboration Workspace/,
   /Generate Task Brief|Route User Message|Generate Test Report|Command Execution/,
   /Mock data/,
-  /falling back to mock data/i
+  /falling back to mock data/i,
+  /Post-review requested rework/,
+  /Execution paused and is waiting/,
+  /Execution failed:/,
+  /Session status updated to/,
+  /User selected (cancel|resume)/,
+  /Confirm memory write/,
+  /Save memory/,
+  /Long-term memory candidate has been confirmed/,
+  /received the requirement and is triaging/,
+  /relevance assessment/,
+  /discussion timed out/,
+  /Task paused and waiting to resume/,
+  /Token budget (exceeded|is insufficient)/,
+  /Context was trimmed/,
+  /marked the user update as relevant/,
+  /User input changed the working requirement/,
+  /Cannot resume execution/,
+  /Current session has no available Agent/
 ];
 
 const requiredCopy = [

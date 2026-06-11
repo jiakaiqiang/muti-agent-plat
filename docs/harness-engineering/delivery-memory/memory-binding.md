@@ -1,5 +1,9 @@
 # Memory Binding
 
+> 最后修改时间：2026-06-11 14:47:47 +08:00
+> 修改人：Codex
+> 修改的 Agent：Codex
+
 ## 作用域绑定
 
 | MemoryScope | meaning | rule |

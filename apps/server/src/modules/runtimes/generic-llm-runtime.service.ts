@@ -40,9 +40,19 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       );
     }
 
-    const missingConfig = this.missingConfig(selectedConnection);
-    if (genericLlmMockFallbackEnabled() || missingConfig.length) {
+    if (genericLlmMockFallbackEnabled()) {
       return this.runFallback(input, selectedConnection.model, signal);
+    }
+
+    const missingConfig = this.missingConfig(selectedConnection);
+    if (missingConfig.length) {
+      return this.failedResult(
+        input,
+        startedAt,
+        selectedConnection.model,
+        `通用大模型未配置（缺少 ${missingConfig.join('、')}），本次执行已中止而不会回退到模拟运行时。请在 .env 设置 LLM_PROVIDER/LLM_MODEL/LLM_API_KEY/LLM_BASE_URL，或在运行时模型管理中添加并选择可用模型；如需本地演示模式，请显式设置 LLM_MOCK_FALLBACK=true。`,
+        'CAPABILITY_BLOCKED'
+      );
     }
 
     return this.runOpenAiCompatible(input, selectedConnection, signal);
@@ -133,7 +143,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
                     : 'No workspace snapshot is available; say when file-level conclusions are assumptions.',
                   'Be specific and useful. Avoid one-sentence generic output; include concrete decisions, assumptions, risks, and next actions.',
                   input.expectedOutput.kind === 'agent_message'
-                    ? 'For agent_message, write a detailed Chinese response with 3-6 concise paragraphs or bullets covering understanding, concerns, and recommendations.'
+                    ? 'For agent_message, the "content" field must be one plain-text string (never an object or array). Write a detailed Chinese response with 3-6 concise paragraphs or bullets covering understanding, concerns, and recommendations.'
                     : '',
                   input.expectedOutput.kind === 'task_execution_result'
                     ? 'For task_execution_result, include changedArtifacts. If workspaceSnapshot is present, analyze the full impact surface and return fileChanges for every real workspace path that must change, especially all relevantFiles. Do not collapse a multi-file requirement into one file. Use agent-output only for auxiliary summaries.'
@@ -187,6 +197,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
             'OUTPUT_SCHEMA_INVALID'
           );
         }
+        output = this.normalizeOutput(output);
 
         return {
           runId: input.runId,
@@ -239,6 +250,30 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     }
 
     return this.failedResult(input, startedAt, selectedModel, lastMessage, lastCode);
+  }
+
+  /** Small local models sometimes return nested objects where the contract expects plain text. */
+  private normalizeOutput(output: RuntimeOutput): RuntimeOutput {
+    if (output.kind === 'agent_message' && typeof output.content !== 'string') {
+      const fallbackFields = { ...(output as unknown as Record<string, unknown>) };
+      delete fallbackFields.kind;
+      delete fallbackFields.messageKind;
+      delete fallbackFields.content;
+      const normalized = this.toPlainText(output.content).trim() || this.toPlainText(fallbackFields).trim();
+      return { ...output, content: normalized };
+    }
+    return output;
+  }
+
+  private toPlainText(value: unknown): string {
+    if (typeof value === 'string') return value;
+    if (Array.isArray(value)) return value.map((item) => this.toPlainText(item)).join('\n');
+    if (value && typeof value === 'object') {
+      return Object.entries(value as Record<string, unknown>)
+        .map(([key, item]) => `${key}: ${this.toPlainText(item)}`)
+        .join('\n');
+    }
+    return String(value ?? '');
   }
 
   private upstreamTimeoutMessage(signal?: AbortSignal) {
@@ -325,7 +360,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       error: {
         code,
         message,
-        retryable: !['OUTPUT_SCHEMA_INVALID', 'RUNTIME_CANCELLED'].includes(code)
+        retryable: !['OUTPUT_SCHEMA_INVALID', 'RUNTIME_CANCELLED', 'CAPABILITY_BLOCKED'].includes(code)
       }
     };
   }

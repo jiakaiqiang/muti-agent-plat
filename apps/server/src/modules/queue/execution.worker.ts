@@ -10,6 +10,7 @@ import {
 import { OrchestratorService } from '../orchestrator/orchestrator.service.js';
 import { SessionsService } from '../sessions/sessions.service.js';
 import { TasksService } from '../tasks/tasks.service.js';
+import { ExecutionQueue } from './execution.queue.js';
 import type { ExecutionJobData } from './execution.queue.js';
 
 @Injectable()
@@ -21,7 +22,8 @@ export class ExecutionWorker implements OnModuleInit, OnModuleDestroy {
     private readonly orchestrator: OrchestratorService,
     @Inject(forwardRef(() => SessionsService))
     private readonly sessions: SessionsService,
-    private readonly tasks: TasksService
+    private readonly tasks: TasksService,
+    private readonly executionQueue: ExecutionQueue
   ) {}
 
   onModuleInit() {
@@ -47,8 +49,13 @@ export class ExecutionWorker implements OnModuleInit, OnModuleDestroy {
 
         this.tasks.resetStaleRunning(sessionId);
         const unfinishedTasks = this.tasks.unfinished(sessionId);
-        const outcome = await this.orchestrator.runPipeline(session, brief, unfinishedTasks);
-        this.sessions.applyOutcome(sessionId, outcome);
+        const controller = this.executionQueue.registerAbortController(sessionId);
+        try {
+          const outcome = await this.orchestrator.runPipeline(session, brief, unfinishedTasks, controller.signal);
+          this.sessions.applyOutcome(sessionId, outcome);
+        } finally {
+          this.executionQueue.releaseAbortController(sessionId, controller);
+        }
       },
       {
         connection: redisConnectionOptions(),

@@ -77,7 +77,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
       };
     }
 
-    const output = this.outputFor(input);
+    const output = this.applyReviewRecommendationOverride(this.outputFor(input));
     return {
       runId: input.runId,
       runtimeType: 'mock',
@@ -105,8 +105,24 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
     };
   }
 
-  private async optionalDelay(signal?: AbortSignal) {
-    const delayMs = Number(process.env.MOCK_RUNTIME_DELAY_MS ?? 0);
+  /** Test hook: MOCK_REVIEW_RECOMMENDATION=rework|ask_user forces the mock post-review verdict. */
+  private applyReviewRecommendationOverride(output: RuntimeOutput): RuntimeOutput {
+    const override = process.env.MOCK_REVIEW_RECOMMENDATION?.trim();
+    if (!override || output.kind !== 'post_review_report') {
+      return output;
+    }
+    if (override !== 'rework' && override !== 'ask_user') {
+      return output;
+    }
+    return {
+      ...output,
+      isConsistentWithBrief: false,
+      mismatchedItems: output.mismatchedItems.length ? output.mismatchedItems : ['模拟复盘发现执行结果与契约不一致。'],
+      recommendation: override
+    };
+  }
+
+  private async optionalDelay(signal?: AbortSignal) {    const delayMs = Number(process.env.MOCK_RUNTIME_DELAY_MS ?? 0);
     if (!Number.isFinite(delayMs) || delayMs <= 0) return true;
     return new Promise<boolean>((resolve) => {
       if (signal?.aborted) {

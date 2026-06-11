@@ -1,5 +1,9 @@
 # Artifacts Alignment
 
+> 最后修改时间：2026-06-11 14:47:47 +08:00
+> 修改人：Codex
+> 修改的 Agent：Codex
+
 ## Purpose
 
 Artifacts store materials. Harness Engineering needs an additional semantic layer named harnessArtifactType so the same material can be understood across projects.

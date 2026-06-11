@@ -156,6 +156,8 @@ const derivedStatus = computed(() => {
   return (statusEvent?.metadata.payload?.status as SessionStatus | undefined) ?? sessionStore.currentSession?.status
 })
 
+const discussion = computed(() => eventStore.discussionProgress(currentSessionId.value))
+
 const completedTaskCount = computed(() => tasks.value.filter((task) => task.status === 'completed').length)
 const progressPercent = computed(() => {
   if (!tasks.value.length) return 0
@@ -271,6 +273,7 @@ async function sendUserMessage(content: string) {
     }
 
     if (terminalStatuses.has(sessionStore.currentSession.status)) {
+      localWorkspaceStore.reusePendingDirectoryFromSession(sessionStore.currentSession.id)
       await createSession(content, sessionStore.currentSession.participatingAgentIds)
       return
     }
@@ -525,7 +528,12 @@ async function applyPendingFileChanges() {
             <strong>{{ progressPercent }}%</strong>
             <span><i :style="{ width: `${progressPercent}%` }"></i></span>
           </span>
-          <span v-if="derivedStatus" class="session-state">{{ sessionStatusLabel[derivedStatus] }}</span>
+          <span v-if="derivedStatus" class="session-state">
+            {{ sessionStatusLabel[derivedStatus] }}
+            <span v-if="derivedStatus === 'AGENT_DISCUSSING' && discussion.messageCount > 0">
+              · {{ discussion.agentCount }} 个 Agent 讨论中，已有 {{ discussion.messageCount }} 条意见
+            </span>
+          </span>
           <span v-if="workingDirectoryAddress" class="workspace-directory-path-chip" :title="workingDirectoryAddress">
             <UiIcon name="folder" :size="15" />
             {{ workingDirectoryAddress }}

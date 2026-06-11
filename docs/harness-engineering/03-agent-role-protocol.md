@@ -1,5 +1,9 @@
 # 03 Agent Role Protocol Agent 角色协议
 
+> 最后修改时间：2026-06-11 14:47:47 +08:00
+> 修改人：Codex
+> 修改的 Agent：Codex
+
 ## 目的
 
 规定 Agent 的角色边界，避免越权、串阶段、直接跳实现。

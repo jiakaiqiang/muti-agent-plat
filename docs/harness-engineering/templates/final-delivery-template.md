@@ -1,5 +1,9 @@
 ﻿# Final Delivery 最终交付模板
 
+> 最后修改时间：2026-06-11 14:47:47 +08:00
+> 修改人：Codex
+> 修改的 Agent：Codex
+
 > 规程来源：[README.md](../README.md) §8 Stage Workflow、§12 Delivery Memory
 > 阶段：`delivery`　产出 Agent：`coordinator` / `notification`
 > 输入：全部产物　输出：Final Delivery

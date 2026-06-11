@@ -22,12 +22,15 @@ export class EventsService implements OnModuleDestroy {
   private readonly subjectsBySession = new Map<string, Subject<CollaborationEvent>>();
   private persistTimer?: NodeJS.Timeout;
   private persistDirty = false;
+  private readonly flushOnProcessExit = () => this.flushPersist();
 
   constructor(private readonly persistence: PersistenceService) {
     const persisted = this.persistence.getCollection<Record<string, CollaborationEvent[]>>('eventsBySession', {});
     for (const [sessionId, events] of Object.entries(persisted)) {
       this.eventsBySession.set(sessionId, events);
     }
+    // OnModuleDestroy only runs on graceful shutdown; 'exit' also covers process.exit and post-crash termination.
+    process.on('exit', this.flushOnProcessExit);
   }
 
   create<TPayload extends Record<string, unknown> = Record<string, unknown>>(
@@ -87,6 +90,7 @@ export class EventsService implements OnModuleDestroy {
   }
 
   onModuleDestroy() {
+    process.removeListener('exit', this.flushOnProcessExit);
     this.flushPersist();
   }
 

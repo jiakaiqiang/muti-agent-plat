@@ -68,7 +68,7 @@ try {
   const agentContextEvents = events.filter(
     (event) =>
       event.type === 'agent_status_changed' &&
-      event.metadata.payload?.thoughtSummary === 'Relevant requirement update added to agent context.'
+      event.metadata.payload?.thoughtSummary === '已将相关需求更新加入 Agent 上下文。'
   );
   if (!agentContextEvents.length) {
     throw new Error('Expected at least one agent to add the supplement to its session context');

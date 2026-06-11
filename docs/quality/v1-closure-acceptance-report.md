@@ -4,14 +4,16 @@
 
 验收结论：带风险可交付。
 
+> 2026-06-11 更新：本报告保留 v1 闭环验收结论。当前工作树已在 v1 之后补充后台执行、队列、恢复、runtime 路由、任务依赖、自动返工、token 预算、记忆确认和工作区 fileChanges 等 v1+ hardening 能力；最新状态以 [v1-acceptance-matrix.md](./v1-acceptance-matrix.md) 和 [feature-inventory-and-status-v1.md](../analysis/feature-inventory-and-status-v1.md) 为准。
+
 本轮验收覆盖文档计划 Step 10 的 P1 项：UX 验收、数据一致性验收、安全验收、发布建议。核心闭环、P1 自动化回归和浏览器人工验收均已通过。
 
 ## 1. 验收范围
 
 依据：
 
-- [agent-cluster-prd-v1.md](../agent-cluster-prd-v1.md)
-- [agent-cluster-system-design-v1.md](../agent-cluster-system-design-v1.md)
+- [agent-cluster-prd-v1.md](../product/agent-cluster-prd-v1.md)
+- [agent-cluster-system-design-v1.md](../design/agent-cluster-system-design-v1.md)
 - [v1-acceptance-matrix.md](./v1-acceptance-matrix.md)
 - [v0.1-contract-test-plan.md](../../tests/contracts/v0.1-contract-test-plan.md)
 
