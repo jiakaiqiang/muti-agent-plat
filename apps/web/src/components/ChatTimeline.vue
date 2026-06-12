@@ -8,13 +8,16 @@ import type {
   ConfirmationRequestedPayload,
   FinalDeliveryPayload,
   RuntimeFileChange,
-  ToolEventPayload
+  TaskEventPayload,
+  ToolEventPayload,
+  WorkspaceSnapshot
 } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
 import ConfirmationCard from './ConfirmationCard.vue'
 
 const props = defineProps<{
   messages: ChatMessage[]
+  workspaceSnapshot?: WorkspaceSnapshot
 }>()
 
 const emit = defineEmits<{
@@ -28,6 +31,10 @@ function senderLabel(message: ChatMessage) {
   if (message.senderType === 'user') return '你'
   if (message.senderType === 'agent') return agentStore.agentName(message.senderAgentId)
   return '系统'
+}
+
+function agentName(agentId?: string) {
+  return agentId ? agentStore.agentName(agentId) : ''
 }
 
 function agentTone(message: ChatMessage) {
@@ -66,12 +73,35 @@ function toolPayload(message: ChatMessage) {
   return payload?.capabilityId || payload?.capabilityName ? payload : undefined
 }
 
+function taskPayload(message: ChatMessage) {
+  return message.messageType === 'task' ? (message.payload as TaskEventPayload | undefined) : undefined
+}
+
 function artifactPayload(message: ChatMessage) {
   return message.messageType === 'artifact' ? (message.payload as ArtifactEventPayload | undefined) : undefined
 }
 
 function artifactFileChanges(message: ChatMessage): RuntimeFileChange[] {
   return artifactPayload(message)?.fileChanges ?? []
+}
+
+function runtimeTestArtifacts(message: ChatMessage) {
+  return (artifactPayload(message)?.runtimeArtifacts ?? []).filter((artifact) => artifact.type === 'test_report')
+}
+
+function runtimeArtifactStatus(artifact: { metadata?: Record<string, unknown> }) {
+  const status = artifact.metadata?.status
+  return typeof status === 'string' ? status : 'unknown'
+}
+
+function runtimeArtifactCommand(artifact: { metadata?: Record<string, unknown> }) {
+  const command = artifact.metadata?.command
+  return typeof command === 'string' ? command : undefined
+}
+
+function runtimeArtifactContent(content?: string) {
+  if (!content) return ''
+  return content.length > 1200 ? `${content.slice(0, 1200)}...` : content
 }
 
 function projectAnalysisReportChange(message: ChatMessage) {
@@ -120,6 +150,71 @@ function fileChangePreview(change: RuntimeFileChange) {
   return content.length > 1200 ? `${content.slice(0, 1200)}...` : content
 }
 
+type DiffRow = {
+  kind: 'equal' | 'add' | 'remove' | 'meta'
+  text: string
+}
+
+function workspaceFileContent(path: string) {
+  return props.workspaceSnapshot?.files.find((file) => file.path === path)?.content
+}
+
+function splitLines(content: string) {
+  return content.replace(/\r\n/g, '\n').split('\n')
+}
+
+function compactDiffRows(before: string, after: string): DiffRow[] {
+  const beforeLines = splitLines(before)
+  const afterLines = splitLines(after)
+  let prefix = 0
+  while (prefix < beforeLines.length && prefix < afterLines.length && beforeLines[prefix] === afterLines[prefix]) {
+    prefix += 1
+  }
+
+  let beforeSuffix = beforeLines.length - 1
+  let afterSuffix = afterLines.length - 1
+  while (
+    beforeSuffix >= prefix &&
+    afterSuffix >= prefix &&
+    beforeLines[beforeSuffix] === afterLines[afterSuffix]
+  ) {
+    beforeSuffix -= 1
+    afterSuffix -= 1
+  }
+
+  return [
+    ...beforeLines.slice(0, prefix).map((text) => ({ kind: 'equal' as const, text })),
+    ...beforeLines.slice(prefix, beforeSuffix + 1).map((text) => ({ kind: 'remove' as const, text })),
+    ...afterLines.slice(prefix, afterSuffix + 1).map((text) => ({ kind: 'add' as const, text })),
+    ...afterLines.slice(afterSuffix + 1).map((text) => ({ kind: 'equal' as const, text }))
+  ]
+}
+
+function fileChangeDiffRows(change: RuntimeFileChange): DiffRow[] {
+  const before = change.operation === 'create' ? '' : workspaceFileContent(change.path)
+  const after = change.operation === 'delete' ? '' : change.content ?? ''
+
+  if (before === undefined && change.operation !== 'create') {
+    return [
+      { kind: 'meta', text: '原始内容不在当前工作区快照中，只展示 runtime 生成的目标内容。' },
+      ...splitLines(after).map((text) => ({ kind: 'add' as const, text }))
+    ]
+  }
+
+  return compactDiffRows(before ?? '', after)
+}
+
+function diffPrefix(kind: DiffRow['kind']) {
+  return (
+    {
+      add: '+',
+      remove: '-',
+      equal: ' ',
+      meta: '!'
+    }[kind] ?? ' '
+  )
+}
+
 function deliveryPayload(message: ChatMessage) {
   return message.messageType === 'delivery' ? (message.payload as FinalDeliveryPayload | undefined) : undefined
 }
@@ -130,10 +225,13 @@ function statusLabel(status?: string) {
       allowed: 'Allowed',
       approved: 'Approved',
       blocked: 'Blocked',
+      claimed: '已接受',
       completed: 'Completed',
       failed: 'Failed',
       pending: 'Pending',
-      running: 'Running'
+      reworking: '返工中',
+      running: 'Running',
+      waiting: 'Waiting'
     }[status ?? ''] ?? status ?? 'Unknown'
   )
 }
@@ -153,7 +251,10 @@ function phaseLabel(phase?: string) {
       post_review: '复盘评估',
       final_delivery: '最终交付',
       workspace_analysis: '工作区分析',
-      user_message_routing: '消息路由'
+      user_message_routing: '消息路由',
+      task_claim_decision: '接单决策',
+      task_claim_declined: '拒单转派',
+      agent_runtime_communication: 'Agent 通信'
     }[phase ?? ''] ?? phase ?? '未知阶段'
   )
 }
@@ -186,6 +287,35 @@ function errorPayload(message: ChatMessage) {
 function errorText(message: ChatMessage, key: string) {
   const value = errorPayload(message)?.[key]
   return typeof value === 'string' ? value : ''
+}
+
+function reviewPayload(message: ChatMessage) {
+  return message.messageType === 'review' ? message.payload : undefined
+}
+
+function routingPlan(message: ChatMessage) {
+  if (message.payload?.phase !== 'user_message_routing') return undefined
+  return message.payload.handlingPlan as
+    | {
+        intent?: string
+        priority?: string
+        shouldPause?: boolean
+        affectedTaskIds?: string[]
+        affectedAgentIds?: string[]
+        requiresBriefRevision?: boolean
+        requiresUserConfirmation?: boolean
+        coordinatorInstruction?: string
+      }
+    | undefined
+}
+
+function routingAgentNames(message: ChatMessage) {
+  const plan = routingPlan(message)
+  return (plan?.affectedAgentIds ?? message.toAgentIds ?? []).map((agentId) => agentName(agentId))
+}
+
+function yesNo(value?: boolean) {
+  return value ? '是' : '否'
 }
 </script>
 
@@ -255,6 +385,42 @@ function errorText(message: ChatMessage, key: string) {
             </div>
           </div>
 
+          <div v-if="routingPlan(message)" class="structured-block routing-block">
+            <div class="structured-block__heading">
+              <h3>补充需求路由</h3>
+              <span class="status-pill running">{{ routingPlan(message)?.priority ?? 'normal' }}</span>
+            </div>
+            <dl>
+              <div>
+                <dt>意图</dt>
+                <dd>{{ routingPlan(message)?.intent ?? 'constraint' }}</dd>
+              </div>
+              <div>
+                <dt>暂停当前执行</dt>
+                <dd>{{ yesNo(routingPlan(message)?.shouldPause) }}</dd>
+              </div>
+              <div>
+                <dt>重订任务契约</dt>
+                <dd>{{ yesNo(routingPlan(message)?.requiresBriefRevision) }}</dd>
+              </div>
+              <div>
+                <dt>需要用户确认</dt>
+                <dd>{{ yesNo(routingPlan(message)?.requiresUserConfirmation) }}</dd>
+              </div>
+            </dl>
+            <div v-if="routingAgentNames(message).length" class="routing-chip-list">
+              <strong>已同步 Agent</strong>
+              <span v-for="name in routingAgentNames(message)" :key="name">{{ name }}</span>
+            </div>
+            <div v-if="routingPlan(message)?.affectedTaskIds?.length" class="routing-chip-list">
+              <strong>关联任务</strong>
+              <code v-for="taskId in routingPlan(message)?.affectedTaskIds" :key="taskId">{{ taskId }}</code>
+            </div>
+            <p v-if="routingPlan(message)?.coordinatorInstruction" class="routing-instruction">
+              {{ routingPlan(message)?.coordinatorInstruction }}
+            </p>
+          </div>
+
           <div v-if="errorPayload(message)" class="structured-block error-block">
             <div class="structured-block__heading">
               <h3>错误详情</h3>
@@ -292,6 +458,29 @@ function errorText(message: ChatMessage, key: string) {
             </dl>
           </div>
 
+          <div v-if="taskPayload(message)" class="structured-block task-block">
+            <div class="structured-block__heading">
+              <h3>{{ taskPayload(message)?.title ?? message.content }}</h3>
+              <span class="status-pill" :class="taskPayload(message)?.status">
+                {{ statusLabel(taskPayload(message)?.status) }}
+              </span>
+            </div>
+            <p v-if="taskPayload(message)?.description">{{ taskPayload(message)?.description }}</p>
+            <dl>
+              <div v-if="taskPayload(message)?.assigneeAgentId">
+                <dt>Agent</dt>
+                <dd>{{ agentName(taskPayload(message)?.assigneeAgentId) }}</dd>
+              </div>
+              <div v-if="taskPayload(message)?.resultSummary">
+                <dt>结果</dt>
+                <dd>{{ taskPayload(message)?.resultSummary }}</dd>
+              </div>
+            </dl>
+            <ul v-if="taskPayload(message)?.acceptanceCriteria?.length">
+              <li v-for="item in taskPayload(message)?.acceptanceCriteria" :key="item">{{ item }}</li>
+            </ul>
+          </div>
+
           <div v-if="message.messageType === 'delivery'" class="structured-block">
             <h3>{{ message.payload?.summary }}</h3>
             <div v-if="deliveryPayload(message)?.notificationDraftArtifactId" class="inline-metadata">
@@ -300,6 +489,27 @@ function errorText(message: ChatMessage, key: string) {
             </div>
             <ul>
               <li v-for="item in listFromPayload(message, 'completedItems')" :key="String(item)">{{ item }}</li>
+            </ul>
+          </div>
+
+          <div v-if="reviewPayload(message)" class="structured-block review-block">
+            <div class="structured-block__heading">
+              <h3>复盘结果</h3>
+              <span class="status-pill" :class="String(reviewPayload(message)?.recommendation ?? 'running')">
+                {{ reviewPayload(message)?.recommendation ?? '进行中' }}
+              </span>
+            </div>
+            <p>{{ message.content }}</p>
+            <ul>
+              <li v-for="item in listFromPayload(message, 'matchedItems')" :key="`matched-${String(item)}`">
+                {{ item }}
+              </li>
+              <li v-for="item in listFromPayload(message, 'missingItems')" :key="`missing-${String(item)}`">
+                缺失：{{ item }}
+              </li>
+              <li v-for="item in listFromPayload(message, 'testResults')" :key="`test-${String(item)}`">
+                测试：{{ item }}
+              </li>
             </ul>
           </div>
 
@@ -339,6 +549,18 @@ function errorText(message: ChatMessage, key: string) {
             <p v-if="artifactPayload(message)?.relatedCapabilityId">
               Capability: {{ capabilityLabel(artifactPayload(message)?.relatedCapabilityId) }}
             </p>
+            <div v-if="runtimeTestArtifacts(message).length" class="runtime-test-report-list">
+              <h4>测试报告</h4>
+              <article v-for="artifact in runtimeTestArtifacts(message)" :key="`${artifact.title}:${runtimeArtifactCommand(artifact) ?? ''}`">
+                <header>
+                  <strong>{{ artifact.title }}</strong>
+                  <span :class="['status-pill', runtimeArtifactStatus(artifact)]">{{ runtimeArtifactStatus(artifact) }}</span>
+                </header>
+                <p v-if="artifact.summary">{{ artifact.summary }}</p>
+                <code v-if="runtimeArtifactCommand(artifact)">{{ runtimeArtifactCommand(artifact) }}</code>
+                <pre v-if="artifact.content">{{ runtimeArtifactContent(artifact.content) }}</pre>
+              </article>
+            </div>
             <article v-if="projectAnalysisReportChange(message)" class="project-analysis-report">
               <header>
                 <span class="file-operation create">报告</span>
@@ -357,7 +579,11 @@ function errorText(message: ChatMessage, key: string) {
                   <span class="file-operation" :class="change.operation">{{ fileOperationLabel(change.operation) }}</span>
                   <code>{{ change.path }}</code>
                 </header>
-                <pre class="file-change-preview">{{ fileChangePreview(change) }}</pre>
+                <pre class="file-change-diff" aria-label="文件变更 diff"><span
+                  v-for="(row, index) in fileChangeDiffRows(change)"
+                  :key="`${change.path}:${index}`"
+                  :class="['diff-line', row.kind]"
+                ><b>{{ diffPrefix(row.kind) }}</b>{{ row.text }}</span></pre>
               </article>
             </div>
           </div>

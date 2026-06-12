@@ -1,8 +1,8 @@
 # 10 Agent Working Protocol 第三阶段 Agent 工作协议
 
-> 最后修改时间：2026-06-11 14:47:47 +08:00
-> 修改人：Codex
-> 修改的 Agent：Codex
+> 最后修改时间：2026-06-12 11:20:34 +08:00
+> 修改人：Claude
+> 修改的 Agent：Claude
 
 ## 目的
 
@@ -62,27 +62,14 @@ Delivery Agent 只输出结果，不沉淀经验
 07-feedback-loop.md
 08-delivery-memory.md
 09-phase-two-alignment.md
-alignment/phase-two-alignment-report.md
+alignment/gap-analysis.md
 ```
 
 ## 第三阶段输出
 
-第三阶段建议产出：
+7 个 Agent 的工作协议直接内联于本文档下方各节（负责 / 不负责 / 必须输入 / 必须输出 / 返工触发），不单独拆分到外部目录。
 
-```text
-docs/harness-engineering/agent-instructions/
-  requirements-agent.md
-  architect-agent.md
-  coordinator-agent.md
-  implementation-agent.md
-  verification-agent.md
-  review-agent.md
-  delivery-agent.md
-```
-
-这些文件不是代码，也不是系统提示词实现。
-
-它们是 Agent 工作协议草案，用来指导后续如何调整 Agent 提示词、协作规程和人工评审标准。
+这些协议不是代码，也不是系统提示词实现。它们是 Agent 工作协议，用来指导后续如何调整 Agent 提示词、协作规程和人工评审标准。
 
 ## 通用 Agent 工作协议
 
@@ -95,7 +82,7 @@ docs/harness-engineering/agent-instructions/
 4. 不绕过工具治理。
 5. 不把待确认问题当成已确认事实。
 6. 不用口头总结替代结构化交接产物。
-7. 发现上游问题时，通过 Feedback Loop 回退。
+7. 发现上游问题时，按 [07-feedback-loop.md](./07-feedback-loop.md) 的 Signal 分类回退，不原地修复跨阶段问题。
 8. 结束阶段时，必须说明产物、风险、未决问题和下游注意事项。
 ```
 
@@ -182,6 +169,7 @@ Intent Contract
 
 ```text
 Design Plan
+Architecture Constraints（module_boundaries / dependency_direction / contract_stability / allowed_change_scope / forbidden_change_scope / invariants）
 影响范围
 风险与缓解
 验收标准覆盖关系
@@ -233,7 +221,7 @@ Context Protocol
 Task Plan
 Agent 分配
 依赖顺序
-允许范围
+允许范围（allowedPaths）与禁止范围（forbiddenPaths，由 Architecture Constraints 转换而来）
 工具风险提示
 ```
 
@@ -274,7 +262,7 @@ Agent 分配
 ```text
 Task Plan
 Design Plan
-允许范围
+允许范围（allowedPaths）与禁止范围（forbiddenPaths）
 工具治理规则
 验收标准
 ```

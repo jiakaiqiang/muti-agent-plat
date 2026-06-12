@@ -1,8 +1,8 @@
 ﻿# Runtime Context Contract
 
-> 最后修改时间：2026-06-11
-> 修改人：Codex
-> 修改的 Agent：Codex
+> 最后修改时间：2026-06-12 11:20:34 +08:00
+> 修改人：Claude Code
+> 修改的 Agent：Claude Code
 
 ## Purpose
 
@@ -41,6 +41,7 @@ Top-level fields currently covered by this contract:
 | discussion | sessionGoal, agentProfile, constraints, relevantEvents, workingDirectory, workspaceSnapshot, workspaceFocus | Full implementation logs or unrelated artifacts. |
 | brief_generation | sessionGoal, relevantEvents, relevantMemories, ragSnippets, workingDirectory, workspaceSnapshot, workspaceFocus | Unconfirmed implementation details or hidden side effects. |
 | brief_revision | previous taskBrief, user feedback, relevantEvents, relevantMemories, workspaceFocus | Unrelated tool output. |
+| task_acceptance | taskBrief, currentTask, agentProfile, constraints, budget | Other agents' unrelated tasks or full event history. |
 | task_execution | taskBrief, currentTask, capabilities, artifacts, constraints, budget, workingDirectory, workspaceSnapshot, workspaceFocus | Other agents' unrelated tasks or unapproved external side effects. |
 | post_review | taskBrief, artifacts, relevantEvents, verification evidence, budget | Unverified guesses or private speculation. |
 | final_delivery | review result, artifacts, risks, memory candidates, budget | Private speculation or unconfirmed external send actions. |

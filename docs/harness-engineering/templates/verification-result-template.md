@@ -1,10 +1,10 @@
 ﻿# Verification Result 验证结果模板
 
-> 最后修改时间：2026-06-11 14:47:47 +08:00
-> 修改人：Codex
-> 修改的 Agent：Codex
+> 最后修改时间：2026-06-12 11:20:34 +08:00
+> 修改人：Claude Code
+> 修改的 Agent：Claude Code
 
-> 规程来源：[README.md](../README.md) §7 Agent Role Protocol、§8 Stage Workflow
+> 规程来源：[03-agent-role-protocol.md](../03-agent-role-protocol.md)、[04-stage-workflow.md](../04-stage-workflow.md)
 > 阶段：`verification`　产出 Agent：`test`
 > 输入：Intent Contract + Implementation Summary　输出：Verification Result
 

@@ -145,8 +145,11 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
                   input.expectedOutput.kind === 'agent_message'
                     ? 'For agent_message, the "content" field must be one plain-text string (never an object or array). Write a detailed Chinese response with 3-6 concise paragraphs or bullets covering understanding, concerns, and recommendations.'
                     : '',
+                  input.expectedOutput.kind === 'task_claim_decision'
+                    ? 'For task_claim_decision, decide whether this agent should accept the currentTask. Return accepted, reason, optional confidence, optional alternativeAgentKeys/alternativeAgentIds, and optional agentMessages for handoff or coordination.'
+                    : '',
                   input.expectedOutput.kind === 'task_execution_result'
-                    ? 'For task_execution_result, include changedArtifacts. If workspaceSnapshot is present, analyze the full impact surface and return fileChanges for every real workspace path that must change, especially all relevantFiles. Do not collapse a multi-file requirement into one file. Use agent-output only for auxiliary summaries.'
+                    ? 'For task_execution_result, include changedArtifacts. If workspaceSnapshot is present, analyze the full impact surface and return fileChanges for every real workspace path that must change, especially all relevantFiles. Do not collapse a multi-file requirement into one file. Use agent-output only for auxiliary summaries. Include optional agentMessages when progress, risks, questions, or handoffs should be sent to other agents; target them with targetAgentKeys such as coordinator, frontend, backend, test, review.'
                     : '',
                   input.contextPack.workingDirectory
                     ? 'A local working directory is selected. Return file changes only as RuntimeArtifactOutput.metadata.fileChanges with safe relative paths. The browser applies those changes inside the selected directory.'

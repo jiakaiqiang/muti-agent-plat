@@ -554,13 +554,19 @@ async function applyPendingFileChanges() {
 
       <div class="workspace-content">
         <div v-if="currentMode === 'chat'" class="chat-pane">
-          <ChatTimeline :messages="messages" @resolve-confirmation="resolveConfirmation" />
+          <ChatTimeline
+            :messages="messages"
+            :workspace-snapshot="sessionStore.currentSession?.workspaceSnapshot"
+            @resolve-confirmation="resolveConfirmation"
+          />
           <UserInputBox :busy="isSendingMessage" :error="inputError" @send="sendUserMessage" />
         </div>
         <CollaborationGraphView
           v-else-if="currentMode === 'collaboration_graph'"
           :events="events"
           :agents="agents"
+          :current-mode="currentMode"
+          @switch-view="sessionStore.switchViewMode"
         />
         <WorkflowRuntimeView
           v-else-if="currentMode === 'workflow'"
@@ -570,6 +576,8 @@ async function applyPendingFileChanges() {
           :active-confirmation="activeConfirmation"
           :status="derivedStatus"
           :session-title="workspaceLabel"
+          :current-mode="currentMode"
+          @switch-view="sessionStore.switchViewMode"
         />
         <DebugRuntimeView
           v-else

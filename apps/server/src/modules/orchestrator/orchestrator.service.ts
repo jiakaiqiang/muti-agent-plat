@@ -15,6 +15,7 @@ import type {
   SuggestedAgentTask,
   TaskBrief,
   TaskBriefOutput,
+  TaskClaimDecisionOutput,
   TaskExecutionResultOutput,
   WorkspaceSnapshot
 } from '@agent-cluster/shared';
@@ -325,20 +326,26 @@ export class OrchestratorService {
         break;
       }
 
-      const readyTask = remaining.find((task) => this.isTaskReady(task, executableTasks));
-      if (!readyTask) {
+      const readyTasks = remaining.filter((task) => this.isTaskReady(task, executableTasks));
+      if (!readyTasks.length) {
         return {
           kind: 'ask_user',
           reason: messages.dependencyBlocked
         };
       }
 
-      const taskResult = await this.runOneTask(session, brief, readyTask, signal);
+      const taskResults = await Promise.all(
+        readyTasks.map(async (task) => ({
+          task,
+          result: await this.runOneTask(session, brief, task, signal)
+        }))
+      );
       if (signal?.aborted) {
         return { kind: 'cancelled', reason: messages.cancelled };
       }
-      if (!taskResult.ok) {
-        return { kind: 'ask_user', reason: `${messages.taskFailed(readyTask.title)}: ${taskResult.message}` };
+      const failedTask = taskResults.find((item) => !item.result.ok);
+      if (failedTask && !failedTask.result.ok) {
+        return { kind: 'ask_user', reason: `${messages.taskFailed(failedTask.task.title)}: ${failedTask.result.message}` };
       }
     }
 
@@ -380,10 +387,52 @@ export class OrchestratorService {
     session: SessionDetail,
     brief: TaskBrief,
     task: AgentTask,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    attemptedAgentIds = new Set<string>()
   ): Promise<{ ok: true } | { ok: false; message: string }> {
     const backend = this.pickSessionAgent(session, ['backend'], 0);
+    const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
     const taskAgent = task.assigneeAgentId ? this.agents.getByIdOrKey(task.assigneeAgentId) : backend;
+    const claim = await this.resolveTaskClaim(session, brief, task, taskAgent, coordinator, signal, attemptedAgentIds);
+    if (!claim.ok) {
+      return { ok: false, message: claim.message };
+    }
+    if (claim.agent.id !== taskAgent.id) {
+      return this.runOneTask(session, brief, task, signal, attemptedAgentIds);
+    }
+    this.tasks.update(task, { status: 'claimed' });
+    this.events.create({
+      sessionId: session.id,
+      type: 'task_claimed',
+      taskId: task.id,
+      fromAgentId: taskAgent.id,
+      toAgentIds: [coordinator.id],
+      content: `${taskAgent.name} 已接受任务：${task.title}`,
+      metadata: createMetadata('task_card', {
+        taskId: task.id,
+        title: task.title,
+        status: 'claimed',
+        assigneeAgentId: taskAgent.id,
+        dependsOnTaskIds: task.dependsOnTaskIds,
+        acceptanceCriteria: task.acceptanceCriteria
+      })
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      taskId: task.id,
+      fromAgentId: taskAgent.id,
+      toAgentIds: [coordinator.id],
+      content: claim.decision.reason,
+      metadata: createMetadata('chat_message', {
+        messageKind: 'decision',
+        phase: 'task_acceptance',
+        relatedTaskIds: [task.id],
+        mentionedAgentIds: [coordinator.id],
+        claimDecision: claim.decision,
+        runtimeInvocationId: claim.runId
+      })
+    });
     this.tasks.update(task, { status: 'running' });
     this.events.create({
       sessionId: session.id,
@@ -473,9 +522,11 @@ export class OrchestratorService {
         type: executionArtifact.type,
         title: executionArtifact.title,
         contentSummary: executionArtifact.contentSummary,
+        runtimeArtifacts: executionArtifact.metadata.runtimeArtifacts,
         fileChanges
       })
     });
+    this.emitRuntimeAgentMessages(session, task, taskAgent, output.agentMessages ?? [], runId);
     this.events.create({
       sessionId: session.id,
       type: 'runtime_completed',
@@ -504,8 +555,244 @@ export class OrchestratorService {
         risks: output.risks
       })
     });
-    await this.applyServerLocalArtifactChanges(session, fileChanges);
+    this.emitTaskHandoff(session, task, taskAgent, output.summary);
+    await this.applyServerLocalArtifactChanges(session, fileChanges, {
+      allowSourceFileChanges: this.canApplySourceFileChanges(taskAgent)
+    });
     return { ok: true };
+  }
+
+  private async resolveTaskClaim(
+    session: SessionDetail,
+    brief: TaskBrief,
+    task: AgentTask,
+    candidate: Agent,
+    coordinator: Agent,
+    signal: AbortSignal | undefined,
+    attemptedAgentIds: Set<string>
+  ): Promise<
+    | { ok: true; agent: Agent; decision: TaskClaimDecisionOutput; runId: string }
+    | { ok: false; message: string }
+  > {
+    if (attemptedAgentIds.has(candidate.id)) {
+      return { ok: true, agent: candidate, decision: this.fallbackClaimDecision(candidate, task), runId: crypto.randomUUID() };
+    }
+    attemptedAgentIds.add(candidate.id);
+    const runId = crypto.randomUUID();
+    const contextPack = this.createContextPack(session, candidate, brief, task);
+    const result = await this.runRuntime(
+      session,
+      {
+        runId,
+        sessionId: session.id,
+        taskId: task.id,
+        phase: 'task_acceptance',
+        agent: this.toRuntimeAgent(candidate),
+        contextPack,
+        expectedOutput: { kind: 'task_claim_decision', schemaVersion: '0.1' },
+        budget: contextPack.budget
+      },
+      signal
+    );
+    if (signal?.aborted) {
+      return { ok: false, message: messages.cancelled };
+    }
+    const decision =
+      result.status === 'completed' && (result.output as { kind?: string }).kind === 'task_claim_decision'
+        ? (result.output as TaskClaimDecisionOutput)
+        : this.fallbackClaimDecision(candidate, task, result.error?.message ?? result.status);
+
+    this.emitTaskClaimDecisionEvent(session, task, candidate, coordinator, decision, runId);
+    this.emitRuntimeAgentMessages(session, task, candidate, decision.agentMessages ?? [], runId);
+
+    if (decision.accepted) {
+      return { ok: true, agent: candidate, decision, runId };
+    }
+
+    const alternative = this.findAlternativeClaimAgent(session, decision, attemptedAgentIds);
+    if (!alternative) {
+      this.tasks.update(task, { status: 'waiting', resultSummary: decision.reason });
+      this.events.create({
+        sessionId: session.id,
+        type: 'task_waiting',
+        taskId: task.id,
+        fromAgentId: candidate.id,
+        toAgentIds: [coordinator.id],
+        content: `任务等待重新分配：${task.title}`,
+        metadata: createMetadata('task_card', {
+          taskId: task.id,
+          title: task.title,
+          status: 'waiting',
+          assigneeAgentId: candidate.id,
+          resultSummary: decision.reason
+        })
+      });
+      return { ok: false, message: decision.reason };
+    }
+
+    this.tasks.update(task, {
+      status: 'pending',
+      assigneeAgentId: alternative.id,
+      resultSummary: `${candidate.name} declined; reassigned to ${alternative.name}. ${decision.reason}`
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'task_waiting',
+      taskId: task.id,
+      fromAgentId: candidate.id,
+      toAgentIds: [alternative.id, coordinator.id],
+      content: `任务转派：${task.title} -> ${alternative.name}`,
+      metadata: createMetadata('task_card', {
+        taskId: task.id,
+        title: task.title,
+        status: 'pending',
+        assigneeAgentId: alternative.id,
+        previousAssigneeAgentId: candidate.id,
+        resultSummary: decision.reason
+      })
+    });
+    return { ok: true, agent: alternative, decision, runId };
+  }
+
+  private emitTaskClaimDecisionEvent(
+    session: SessionDetail,
+    task: AgentTask,
+    candidate: Agent,
+    coordinator: Agent,
+    decision: TaskClaimDecisionOutput,
+    runId: string
+  ) {
+    const alternativeAgentIds = this.claimDecisionAlternativeIds(session, decision);
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      taskId: task.id,
+      fromAgentId: candidate.id,
+      toAgentIds: Array.from(new Set([coordinator.id, ...alternativeAgentIds])),
+      content: decision.reason,
+      metadata: createMetadata('chat_message', {
+        messageKind: decision.accepted ? 'decision' : 'handoff',
+        phase: decision.accepted ? 'task_claim_decision' : 'task_claim_declined',
+        relatedTaskIds: [task.id],
+        mentionedAgentIds: alternativeAgentIds.length ? alternativeAgentIds : [coordinator.id],
+        claimDecision: decision,
+        runtimeInvocationId: runId
+      })
+    });
+  }
+
+  private fallbackClaimDecision(candidate: Agent, task: AgentTask, fallbackReason?: string): TaskClaimDecisionOutput {
+    return {
+      kind: 'task_claim_decision',
+      accepted: true,
+      reason:
+        fallbackReason && fallbackReason !== 'completed'
+          ? `${candidate.name} accepts "${task.title}" by fallback because claim decision failed: ${fallbackReason}`
+          : `${candidate.name} accepts "${task.title}".`,
+      confidence: 0.5
+    };
+  }
+
+  private findAlternativeClaimAgent(
+    session: SessionDetail,
+    decision: TaskClaimDecisionOutput,
+    attemptedAgentIds: Set<string>
+  ) {
+    const participants = this.participatingAgents(session);
+    const hints = [...(decision.alternativeAgentIds ?? []), ...(decision.alternativeAgentKeys ?? [])];
+    for (const hint of hints) {
+      const agent = participants.find((candidate) => candidate.id === hint || candidate.key === hint);
+      if (agent && !attemptedAgentIds.has(agent.id)) {
+        return agent;
+      }
+    }
+    return undefined;
+  }
+
+  private claimDecisionAlternativeIds(session: SessionDetail, decision: TaskClaimDecisionOutput) {
+    const participants = this.participatingAgents(session);
+    return [...(decision.alternativeAgentIds ?? []), ...(decision.alternativeAgentKeys ?? [])]
+      .map((hint) => participants.find((agent) => agent.id === hint || agent.key === hint)?.id)
+      .filter((agentId): agentId is string => Boolean(agentId));
+  }
+
+  private emitRuntimeAgentMessages(
+    session: SessionDetail,
+    task: AgentTask,
+    fromAgent: Agent,
+    messages: AgentMessageOutput[],
+    runtimeInvocationId: string
+  ) {
+    for (const message of messages) {
+      const toAgentIds = this.resolveRuntimeMessageTargetAgentIds(session, fromAgent, message);
+      if (!toAgentIds.length) {
+        continue;
+      }
+      this.events.create({
+        sessionId: session.id,
+        type: 'agent_message',
+        taskId: task.id,
+        fromAgentId: fromAgent.id,
+        toAgentIds,
+        content: message.content,
+        metadata: createMetadata('chat_message', {
+          messageKind: message.messageKind,
+          phase: 'agent_runtime_communication',
+          relatedTaskIds: Array.from(new Set([task.id, ...(message.relatedTaskIds ?? [])])),
+          mentionedAgentIds: toAgentIds,
+          runtimeInvocationId
+        })
+      });
+    }
+  }
+
+  private resolveRuntimeMessageTargetAgentIds(session: SessionDetail, fromAgent: Agent, message: AgentMessageOutput) {
+    const participants = this.participatingAgents(session);
+    const targetHints = [...(message.targetAgentIds ?? []), ...(message.mentionedAgentIds ?? [])];
+    for (const key of message.targetAgentKeys ?? []) {
+      targetHints.push(key);
+    }
+    const resolved = targetHints
+      .map((target) => {
+        const participant = participants.find((agent) => agent.id === target || agent.key === target);
+        return participant?.id;
+      })
+      .filter((agentId): agentId is string => Boolean(agentId) && agentId !== fromAgent.id);
+    return Array.from(new Set(resolved));
+  }
+
+  private emitTaskHandoff(
+    session: SessionDetail,
+    completedTask: AgentTask,
+    completedBy: Agent,
+    resultSummary: string
+  ) {
+    const downstreamAgentIds = this.tasks
+      .list(session.id)
+      .filter((task) => task.dependsOnTaskIds.includes(completedTask.id) && !this.isTerminalTask(task))
+      .map((task) => task.assigneeAgentId)
+      .filter((agentId): agentId is string => Boolean(agentId));
+    const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
+    const toAgentIds = Array.from(new Set(downstreamAgentIds.length ? downstreamAgentIds : [coordinator.id]));
+    const targetNames = toAgentIds
+      .map((agentId) => this.agents.findByIdOrKey(agentId)?.name)
+      .filter(Boolean)
+      .join('、');
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      taskId: completedTask.id,
+      fromAgentId: completedBy.id,
+      toAgentIds,
+      content: `${completedBy.name}：任务「${completedTask.title}」已完成，交接给 ${targetNames || 'Coordinator'}。摘要：${resultSummary}`,
+      metadata: createMetadata('chat_message', {
+        messageKind: 'handoff',
+        phase: 'task_handoff',
+        relatedTaskIds: [completedTask.id],
+        mentionedAgentIds: toAgentIds,
+        resultSummary
+      })
+    });
   }
 
   private async runPostReview(session: SessionDetail, brief: TaskBrief, signal?: AbortSignal): Promise<PostReviewReportOutput> {
@@ -958,7 +1245,20 @@ export class OrchestratorService {
   }
 
   private fileChangesFromRuntimeArtifacts(artifacts: RuntimeArtifactOutput[]) {
-    return artifacts.flatMap((artifact) => artifact.metadata?.fileChanges ?? []);
+    const seen = new Set<string>();
+    return artifacts.flatMap((artifact) => artifact.metadata?.fileChanges ?? []).filter((change) => {
+      const key = [
+        change.path,
+        change.operation,
+        change.source ?? '',
+        change.content ?? ''
+      ].join('\u0000');
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
   }
 
   private briefFileChanges(brief: TaskBrief, suggestedTasks: SuggestedAgentTask[]): RuntimeFileChange[] {
@@ -1304,12 +1604,24 @@ export class OrchestratorService {
     return /架构|结构|目录|熟悉|分析项目|项目分析|了解项目/i.test(`${session.originalInput}\n${brief?.goal ?? ''}`);
   }
 
-  private async applyServerLocalArtifactChanges(session: SessionDetail, fileChanges: RuntimeFileChange[]) {
+  private async applyServerLocalArtifactChanges(
+    session: SessionDetail,
+    fileChanges: RuntimeFileChange[],
+    options: { allowSourceFileChanges?: boolean } = {}
+  ) {
     if (session.workingDirectory?.kind !== 'server_local' || !session.workingDirectory.path || !fileChanges.length) {
       return;
     }
+    const applicableFileChanges = fileChanges.filter(
+      (change) =>
+        this.isStageArtifactFileChange(change) ||
+        (options.allowSourceFileChanges && this.isTrustedActualSourceFileChange(change))
+    );
+    if (!applicableFileChanges.length) {
+      return;
+    }
     try {
-      await applyServerLocalFileChanges(session.workingDirectory.path, fileChanges);
+      await applyServerLocalFileChanges(session.workingDirectory.path, applicableFileChanges);
     } catch (error) {
       this.events.create({
         sessionId: session.id,
@@ -1322,6 +1634,19 @@ export class OrchestratorService {
         })
       });
     }
+  }
+
+  private canApplySourceFileChanges(agent: Agent) {
+    return agent.capabilityIds.includes('cap-file-write') && ['claude_code', 'codex'].includes(agent.runtimeType);
+  }
+
+  private isStageArtifactFileChange(change: RuntimeFileChange) {
+    const normalizedPath = change.path.replace(/\\/g, '/').replace(/^\.\//, '');
+    return normalizedPath.startsWith('agent-output/');
+  }
+
+  private isTrustedActualSourceFileChange(change: RuntimeFileChange) {
+    return !this.isStageArtifactFileChange(change) && change.source === 'actual_filesystem_snapshot';
   }
 
   private createContextPack(session: SessionDetail, agent: Agent, brief?: TaskBrief, task?: AgentTask): ContextPack {

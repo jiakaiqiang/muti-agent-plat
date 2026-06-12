@@ -1,8 +1,9 @@
 # 11 Delivery Memory Practice 第四阶段交付记忆与复盘机制
 
-> 最后修改时间：2026-06-11 14:47:47 +08:00
-> 修改人：Codex
-> 修改的 Agent：Codex
+> 最后修改时间：2026-06-12 11:20:34 +08:00
+> 修改人：Claude Code
+> 修改的 Agent：Claude Code
+> 本文档属于 reference 层：记录 Agent Cluster 的阶段对齐实践，不定义 Harness 本体。
 
 ## 目的
 

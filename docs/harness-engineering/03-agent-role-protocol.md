@@ -98,6 +98,15 @@
 - 说明完成项、未完成项、风险
 - 沉淀交付记忆
 
+## 架构边界责任
+
+所有角色共同遵守本次任务的 Architecture Constraints（产出与转换见 [04-stage-workflow.md](./04-stage-workflow.md)）：
+
+- Architect Agent 负责产出架构约束。
+- Coordinator Agent 把约束转换为 `allowedPaths` / `forbiddenPaths`。
+- Implementation Agent 不得以“顺手修”绕过架构约束；发现约束本身有误时走 `architecture_signal` 返工，不原地改设计。
+- Review Agent 检查交付是否破坏架构不变量。
+
 ## 硬规则
 
 - Agent 不能越权。

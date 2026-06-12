@@ -6,15 +6,15 @@ export class UserMessageRouterService {
   route(message: string, status: SessionStatus): UserMessageHandlingPlan {
     const intent = this.detectIntent(message);
     const isExecuting = ['EXECUTING', 'REWORKING', 'POST_REVIEW'].includes(status);
-    const isConstraint = intent === 'constraint' || /不要|不能|保持|禁止|non-destructive|dry-run/i.test(message);
+    const isConstraint = intent === 'constraint' || this.constraintPattern().test(message);
 
     return {
       intent,
       priority: isConstraint ? 'high' : 'normal',
-      shouldPause: isExecuting && (intent === 'constraint' || intent === 'correction'),
+      shouldPause: isExecuting && (isConstraint || intent === 'correction'),
       affectedTaskIds: [],
       affectedAgentIds: [],
-      requiresBriefRevision: !isExecuting && (intent === 'clarification' || intent === 'constraint'),
+      requiresBriefRevision: !isExecuting && (intent === 'clarification' || isConstraint),
       requiresUserConfirmation: false,
       coordinatorInstruction: isConstraint
         ? '将用户新增约束同步给相关 Agent，并检查是否影响已确认任务契约。'
@@ -26,7 +26,7 @@ export class UserMessageRouterService {
     if (/暂停|继续|重试|cancel|pause|resume/i.test(message)) {
       return 'command';
     }
-    if (/不要|不能|保持|禁止|must not|keep|non-destructive|dry-run/i.test(message)) {
+    if (this.constraintPattern().test(message)) {
       return 'constraint';
     }
     if (/不对|错了|重新|改成|correction/i.test(message)) {
@@ -42,5 +42,9 @@ export class UserMessageRouterService {
       return 'knowledge_input';
     }
     return 'clarification';
+  }
+
+  private constraintPattern() {
+    return /不要|不能|保持|禁止|必须|补充|需求|约束|must not|keep|non-destructive|dry-run|supplemental|requirement|constraint/i;
   }
 }

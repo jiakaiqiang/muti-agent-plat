@@ -121,8 +121,10 @@ export type WorkspaceSnapshot = {
 export type RuntimeFileChange = {
   path: string;
   content?: string;
+  previousContent?: string | null;
   operation: 'create' | 'update' | 'delete';
   encoding?: 'utf-8';
+  source?: 'stage_artifact' | 'runtime_proposed_change' | 'actual_filesystem_snapshot';
 };
 
 export type CollaborationEventType =
@@ -489,6 +491,7 @@ export type AgentRunPhase =
   | 'discussion'
   | 'brief_generation'
   | 'brief_revision'
+  | 'task_acceptance'
   | 'task_execution'
   | 'post_review'
   | 'final_delivery'
@@ -509,6 +512,7 @@ export type AgentRunInput = {
 export type ExpectedRuntimeOutput = {
   kind:
     | 'agent_message'
+    | 'task_claim_decision'
     | 'task_brief'
     | 'task_execution_result'
     | 'post_review_report'
@@ -571,6 +575,7 @@ export type AgentRunResult<TOutput = RuntimeOutput> = {
 
 export type RuntimeOutput =
   | AgentMessageOutput
+  | TaskClaimDecisionOutput
   | TaskBriefOutput
   | TaskExecutionResultOutput
   | PostReviewReportOutput
@@ -581,8 +586,20 @@ export type AgentMessageOutput = {
   kind: 'agent_message';
   messageKind: 'discussion' | 'answer' | 'handoff' | 'progress' | 'risk' | 'decision' | 'summary';
   content: string;
+  targetAgentIds?: UUID[];
+  targetAgentKeys?: string[];
   mentionedAgentIds?: UUID[];
   relatedTaskIds?: UUID[];
+};
+
+export type TaskClaimDecisionOutput = {
+  kind: 'task_claim_decision';
+  accepted: boolean;
+  reason: string;
+  confidence?: number;
+  alternativeAgentKeys?: string[];
+  alternativeAgentIds?: UUID[];
+  agentMessages?: AgentMessageOutput[];
 };
 
 export type SuggestedAgentTask = {
@@ -611,6 +628,7 @@ export type TaskExecutionResultOutput = {
   summary: string;
   completedItems: string[];
   changedArtifacts: RuntimeArtifactOutput[];
+  agentMessages?: AgentMessageOutput[];
   nextSuggestedActions: string[];
   risks: string[];
 };

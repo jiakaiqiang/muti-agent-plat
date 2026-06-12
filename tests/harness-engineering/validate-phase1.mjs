@@ -21,17 +21,35 @@ const repoRoot = path.resolve(here, '..', '..');
 const docsDir = path.join(repoRoot, 'docs', 'harness-engineering');
 const templatesDir = path.join(docsDir, 'templates');
 
-// The eight engineering protocols (README §核心规程). Each file must exist and
-// carry its protocol name in the H1 title plus a "## 目的" section.
+// Core engineering protocols. Each file must exist and carry its protocol name
+// in the H1 title plus the required section markers for its phase.
 const protocols = [
+  { file: '00-boundary-and-principles.md', name: 'Boundary and Principles', sections: ['## 硬规则'] },
   { file: '01-intent-contract.md', name: 'Intent Contract' },
-  { file: '02-context-protocol.md', name: 'Context Protocol' },
-  { file: '03-agent-role-protocol.md', name: 'Agent Role Protocol' },
-  { file: '04-stage-workflow.md', name: 'Stage Workflow' },
-  { file: '05-tool-governance.md', name: 'Tool Governance' },
+  {
+    file: '02-context-protocol.md', name: 'Context Protocol',
+    sections: ['## 上下文条目模型', '## 上下文生命周期', '## 上下文污染处理', '## 阶段入口检查']
+  },
+  { file: '03-agent-role-protocol.md', name: 'Agent Role Protocol', sections: ['## 架构边界责任'] },
+  {
+    file: '04-stage-workflow.md', name: 'Stage Workflow',
+    sections: ['Architecture Constraints', 'forbidden_change_scope', '架构不变量未被破坏']
+  },
+  {
+    file: '05-tool-governance.md', name: 'Tool Governance',
+    sections: ['forbiddenPaths', 'architecture_signal', 'role_boundary_signal']
+  },
   { file: '06-human-intervention.md', name: 'Human Intervention' },
-  { file: '07-feedback-loop.md', name: 'Feedback Loop' },
-  { file: '08-delivery-memory.md', name: 'Delivery Memory' }
+  {
+    file: '07-feedback-loop.md', name: 'Feedback Loop',
+    sections: ['Signal', '## 闭环标准', 'memory_signal', 'entropy_signal']
+  },
+  { file: '08-delivery-memory.md', name: 'Delivery Memory' },
+  { file: '10-agent-working-protocol.md', name: 'Agent Working Protocol' },
+  {
+    file: '12-continuous-governance.md', name: 'Continuous Governance',
+    sections: ['## 熵管理', '## 反扩张规则', 'quarantine']
+  }
 ];
 
 // The seven stage artifact templates under templates/. Each embeds copy-ready
@@ -43,11 +61,11 @@ const templates = [
   },
   {
     file: 'design-plan-template.md', artifact: 'design_plan', stage: 'design',
-    sections: ['## 方案概述', '## 架构与模块边界', '## 影响范围', '## 契约影响', '## 备选方案', '## 对验收标准的覆盖']
+    sections: ['## 方案概述', '## 架构与模块边界', 'Architecture Constraints', 'forbidden_change_scope', '## 影响范围', '## 契约影响', '## 备选方案', '## 对验收标准的覆盖']
   },
   {
     file: 'task-plan-template.md', artifact: 'task_plan', stage: 'planning',
-    sections: ['## 任务拆解', '## 依赖关系', '## 范围与权限总览', 'allowedPaths', 'toolPolicy']
+    sections: ['## 任务拆解', '## 依赖关系', '## 范围与权限总览', 'allowedPaths', 'forbiddenPaths', 'toolPolicy']
   },
   {
     file: 'implementation-summary-template.md', artifact: 'implementation_summary', stage: 'implementation',
@@ -90,6 +108,9 @@ async function readOrNull(full) {
     const checks = [{ label: 'file exists', ok: true }];
     for (const p of protocols) checks.push({ label: `links ${p.file}`, ok: has(content, p.file) });
     checks.push({ label: 'mentions templates/', ok: has(content, 'templates/') });
+    checks.push({ label: 'section: ## 文档分层', ok: has(content, '## 文档分层') });
+    checks.push({ label: 'section: ## 四要素总览', ok: has(content, '## 四要素总览') });
+    checks.push({ label: 'links boundary doc', ok: has(content, '00-boundary-and-principles.md') });
     for (const t of templates) checks.push({ label: `lists ${t.file}`, ok: has(content, t.file) });
     record('README.md', checks);
   }
@@ -105,7 +126,8 @@ for (const p of protocols) {
   record(p.file, [
     { label: 'file exists', ok: true },
     { label: `title: ${p.name}`, ok: has(content, p.name) },
-    { label: 'section: ## 目的', ok: has(content, '## 目的') }
+    { label: 'section: ## 目的', ok: p.file === '00-boundary-and-principles.md' || has(content, '## 目的') },
+    ...((p.sections ?? []).map((s) => ({ label: `marker: ${s}`, ok: has(content, s) })))
   ]);
 }
 

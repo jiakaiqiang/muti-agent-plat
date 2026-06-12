@@ -1,8 +1,8 @@
 # 12 Continuous Governance 第五阶段持续治理与演进
 
-> 最后修改时间：2026-06-11 14:47:47 +08:00
-> 修改人：Codex
-> 修改的 Agent：Codex
+> 最后修改时间：2026-06-12 11:20:34 +08:00
+> 修改人：Claude Code
+> 修改的 Agent：Claude Code
 
 ## 目的
 
@@ -45,6 +45,38 @@ Agent 开始越权
 ```
 
 第五阶段要建立一套定期复查和演进规则。
+
+## 熵管理
+
+Harness 熵 = 使 Agent 更难稳定完成任务的无序因素。
+
+| 熵类型 | 表现 |
+| --- | --- |
+| context_entropy | 上下文过载、冲突、过期、噪音 |
+| architecture_entropy | 边界模糊、职责扩散、依赖方向混乱 |
+| rule_entropy | 规程重复、冲突、过期、难以执行 |
+| memory_entropy | 长期记忆污染、重复、过期、来源不明 |
+| scope_entropy | 任务范围膨胀、非目标失效 |
+| behavior_entropy | Agent 越权、跳阶段、自由发挥 |
+| tool_entropy | 工具调用无记录、风险分级失真 |
+
+降熵动作复用“治理决策类型”词表，不另立动作清单。
+
+熵阈值：出现以下任一情况时，必须先降熵再推进，不得带病推进：
+
+- conflict 或 stale 上下文条目正在影响当前阶段决策。
+- 同一任务内第 2 次出现 entropy_signal。
+
+## 反扩张规则
+
+新增任何 Harness 文档前必须先回答四问：
+
+1. 是否可以修改已有文档解决？
+2. 是否会制造重复规则？
+3. 属于 core、templates 还是 reference？
+4. 是否有明确维护者和过期条件？
+
+任何一问不通过，不新增文档。
 
 ## 治理对象
 
@@ -335,20 +367,9 @@ Delivery 无法追溯全过程
 
 ## 治理产物
 
-第五阶段建议形成这些工程产物：
+治理结论默认记录在本文档的变更记录和交付回复中，不预设独立文件。
 
-```text
-docs/harness-engineering/governance/
-  delivery-review-checklist.md
-  weekly-governance-review.md
-  monthly-governance-review.md
-  agent-behavior-drift-checklist.md
-  context-drift-checklist.md
-  memory-quality-review.md
-  rule-change-log.md
-```
-
-这些仍然是工程治理文件，不是代码、不是测试、不是系统功能。
+只有当某类治理检查反复执行、本文档承载不下时，才按"反扩张规则"四问新增清单文件，且新增时必须声明维护者和过期条件。
 
 ## 规程变更规则
 
@@ -364,6 +385,8 @@ Harness Engineering 规程可以演进，但不能随意改。
 是否需要更新 Agent 工作协议
 是否需要更新模板
 ```
+
+规程新增或修改强制章节时，必须在同一批改动中更新 `tests/harness-engineering/` 对应脚本的标记检查。
 
 规程变更记录建议包含：
 
@@ -387,6 +410,11 @@ split       规程过大，需要拆分
 merge       规程重复，需要合并
 deprecate   规程过期，需要废弃
 escalate    问题严重，需要人工决策
+trim        裁剪无关上下文或冗余规则
+stale       标记过期记忆或结论
+quarantine  隔离未确认信息
+rollback    回退到正确阶段
+summarize   将复杂过程压缩成结构化产物
 ```
 
 ## 第五阶段不做什么

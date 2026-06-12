@@ -52,6 +52,30 @@ try {
     throw new Error('Unsupported runtime must not silently fall back to mock execution');
   }
 
+  await api(server.apiBase, '/agents/backend', {
+    method: 'PATCH',
+    body: JSON.stringify({ runtimeType: 'claude_code' })
+  });
+
+  const { sessionId: claudeSessionId, briefId: claudeBriefId } = await createSessionAndWaitForBrief(
+    server.apiBase,
+    'Claude Code runtime must be explicitly enabled before it can edit server-local files.'
+  );
+  await api(server.apiBase, `/sessions/${claudeSessionId}/briefs/${claudeBriefId}/confirm`, { method: 'POST' });
+  await waitForStatus(server.apiBase, claudeSessionId, 'WAIT_USER_DECISION');
+
+  const claudeBlocked = await waitForMatchingEvent(
+    server.apiBase,
+    claudeSessionId,
+    'runtime_failed',
+    (event) =>
+      event.metadata.payload.code === 'CAPABILITY_BLOCKED' &&
+      String(event.metadata.payload.message).includes('CLAUDE_CODE_ENABLED=true')
+  );
+  if (!claudeBlocked) {
+    throw new Error('Claude Code runtime must fail closed until explicitly enabled');
+  }
+
   console.log('runtime routing smoke ok');
 } finally {
   if (server) {

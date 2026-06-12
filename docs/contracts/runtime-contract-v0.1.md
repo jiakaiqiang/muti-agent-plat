@@ -4,6 +4,8 @@
 
 本契约定义 Agent Runtime 的统一输入输出。v1 先实现 `MockRuntime` 和 `GenericLlmRuntime`，后续 `CodexRuntime`、`ClaudeCodeRuntime` 必须兼容本接口。
 
+当前 TypeScript 合同源以 `packages/shared/src/contracts.ts` 为准；本文档用于解释合同语义，字段变更后必须同步更新。
+
 ## 2. Runtime 类型
 
 ```ts
@@ -48,6 +50,7 @@ type AgentRunPhase =
   | 'discussion'
   | 'brief_generation'
   | 'brief_revision'
+  | 'task_acceptance'
   | 'task_execution'
   | 'post_review'
   | 'final_delivery'
@@ -72,6 +75,14 @@ type RuntimeAgentProfile = {
 type ContextPack = {
   systemRules: string[]
   sessionGoal: string
+  workingDirectory?: SessionWorkingDirectory
+  workspaceSnapshot?: WorkspaceSnapshot
+  workspaceFocus?: {
+    relevantFiles: string[]
+    possibleEntryPoints: string[]
+    detectedStack: string[]
+    rationale: string
+  }
   taskBrief?: RuntimeTaskBrief
   currentTask?: RuntimeAgentTask
   agentProfile: RuntimeAgentProfile
@@ -92,6 +103,7 @@ type ContextPack = {
 - `relevantMemories` 必须来自 Memory API 或自动沉淀的可追溯记忆项。
 - `constraints` 必须显式传入。
 - `ragSnippets` 必须包含来源。
+- `workingDirectory`、`workspaceSnapshot` 和 `workspaceFocus` 是工作区感知输入；它们用于约束和解释文件级判断，不等于授权 Runtime 越界写入。
 
 ## 6. ExpectedRuntimeOutput
 
@@ -99,6 +111,7 @@ type ContextPack = {
 type ExpectedRuntimeOutput = {
   kind:
     | 'agent_message'
+    | 'task_claim_decision'
     | 'task_brief'
     | 'task_execution_result'
     | 'post_review_report'
@@ -139,6 +152,7 @@ type RuntimeInvocationStatus =
 ```ts
 type RuntimeOutput =
   | AgentMessageOutput
+  | TaskClaimDecisionOutput
   | TaskBriefOutput
   | TaskExecutionResultOutput
   | PostReviewReportOutput
@@ -165,7 +179,21 @@ type AgentMessageOutput = {
 }
 ```
 
-### 8.2 TaskBriefOutput
+### 8.2 TaskClaimDecisionOutput
+
+```ts
+type TaskClaimDecisionOutput = {
+  kind: 'task_claim_decision'
+  accepted: boolean
+  reason: string
+  confidence: number
+  alternativeAgentIds?: string[]
+  alternativeAgentKeys?: string[]
+  agentMessages?: AgentMessageOutput[]
+}
+```
+
+### 8.3 TaskBriefOutput
 
 ```ts
 type TaskBriefOutput = {
@@ -189,7 +217,7 @@ type SuggestedAgentTask = {
 }
 ```
 
-### 8.3 TaskExecutionResultOutput
+### 8.4 TaskExecutionResultOutput
 
 ```ts
 type TaskExecutionResultOutput = {
@@ -203,7 +231,7 @@ type TaskExecutionResultOutput = {
 }
 ```
 
-### 8.4 PostReviewReportOutput
+### 8.5 PostReviewReportOutput
 
 ```ts
 type PostReviewReportOutput = {
@@ -218,7 +246,7 @@ type PostReviewReportOutput = {
 }
 ```
 
-### 8.5 FinalDeliveryOutput
+### 8.6 FinalDeliveryOutput
 
 ```ts
 type FinalDeliveryOutput = {
@@ -231,7 +259,7 @@ type FinalDeliveryOutput = {
 }
 ```
 
-### 8.6 UserMessageHandlingPlanOutput
+### 8.7 UserMessageHandlingPlanOutput
 
 ```ts
 type UserMessageHandlingPlanOutput = {

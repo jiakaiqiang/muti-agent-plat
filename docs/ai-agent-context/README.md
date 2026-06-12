@@ -18,7 +18,8 @@
 | 用户任务类型 | 必读文档 | 视情况加载 |
 | --- | --- | --- |
 | 任意需求、功能、修复、重构 | `project-map.md`, `harness-engineering-protocol.md` | 相关代码区、测试、合同文档 |
-| 只询问 Harness Engineering | `harness-engineering-protocol.md` | `docs/harness-engineering/README.md` |
+| 只询问 Harness Engineering | `harness-engineering-protocol.md` | `docs/harness-engineering/README.md`, `docs/harness-engineering/00-boundary-and-principles.md` |
+| 讨论或维护 Harness 本体 | `harness-engineering-protocol.md`, `docs/harness-engineering/00-boundary-and-principles.md` | `docs/harness-engineering/README.md`, 相关编号规程 |
 | Claude/Codex 工作流维护 | `tool-workflow-rules.md`, `harness-engineering-protocol.md` | `.claude/CLAUDE.md`, `AGENTS.md` |
 | 后端 API、会话、编排、运行时 | `project-map.md` | `docs/contracts/api-contract-v0.1.md`, `docs/contracts/runtime-contract-v0.1.md` |
 | 前端页面、交互、状态展示 | `project-map.md` | `docs/design/ui-style-guide-v1.md`, `docs/contracts/ui-state-contract-v0.1.md` |

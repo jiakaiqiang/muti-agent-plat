@@ -22,8 +22,25 @@ const eventTypeToMessageType: Partial<Record<CollaborationEvent['type'], ChatMes
   agent_message: 'text',
   brief_created: 'brief',
   brief_updated: 'brief',
+  task_created: 'task',
+  task_claimed: 'task',
+  task_started: 'task',
+  task_waiting: 'task',
+  task_completed: 'task',
+  task_rejected: 'task',
+  task_reworked: 'task',
   user_confirmation_requested: 'confirmation',
+  runtime_started: 'task',
+  runtime_progress: 'task',
+  runtime_completed: 'task',
+  runtime_failed: 'error',
+  tool_called: 'tool',
+  tool_completed: 'tool',
+  tool_failed: 'tool',
+  rag_retrieved: 'rag',
   artifact_created: 'artifact',
+  post_review_started: 'review',
+  post_review_completed: 'review',
   final_delivery_created: 'delivery',
   error_reported: 'error'
 }
@@ -122,6 +139,7 @@ function derivedAgentId(event: CollaborationEvent) {
 
 function statusFromEvent(event: CollaborationEvent): AgentCardState['status'] | undefined {
   const payload = payloadOf<TaskEventPayload | RuntimeEventPayload>(event)
+  if (event.type === 'task_claimed') return 'thinking'
   if (event.type === 'task_started' || event.type === 'runtime_started') return 'running'
   if (event.type === 'task_waiting') return 'waiting'
   if (event.type === 'task_reworked') return 'reworking'

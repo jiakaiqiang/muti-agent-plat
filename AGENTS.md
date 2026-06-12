@@ -5,6 +5,9 @@
 ## 必须先做
 
 - 默认使用 Harness Engineering 完成用户任务。
+- Harness Engineering 是约束 AI Agent 交付行为的外部工程模型，不是业务系统功能，边界见 `docs/harness-engineering/00-boundary-and-principles.md`。
+- 除非用户明确要求产品化，否则不要把 Harness 写成后端模块、前端页面、API、数据库或运行时能力。
+- Agent Cluster 的代码实现只是 Harness 的参考实例，不是定义来源。
 - 先判断用户是在询问、讨论、review、排查、验证，还是要求实现。
 - 用户明确说“只询问”“先讨论”“不要写代码”“不需要改代码”时，不要编辑文件。
 - 不确定需求落点时，先读取项目地图，不要直接实现。
@@ -27,6 +30,7 @@ docs/ai-agent-context/tool-workflow-rules.md
 - 只讨论工具工作流：读 `tool-workflow-rules.md` 和 `harness-engineering-protocol.md`。
 - 只询问项目情况：读 `project-map.md` 和相关项目文档，不编辑文件。
 - 涉及具体模块：只读取项目地图指向的相关代码、合同、测试和文档。
+- 讨论或维护 Harness 本体：读 `docs/harness-engineering/00-boundary-and-principles.md` 和 `docs/harness-engineering/README.md`。
 
 ## 永久记忆位置
 

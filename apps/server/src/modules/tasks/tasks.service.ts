@@ -49,6 +49,12 @@ export class TasksService {
     return this.tasksBySession.get(sessionId) ?? [];
   }
 
+  add(task: AgentTask) {
+    this.tasksBySession.set(task.sessionId, [...this.list(task.sessionId), task]);
+    this.persist();
+    return task;
+  }
+
   update(task: AgentTask, patch: Partial<AgentTask>) {
     Object.assign(task, patch, { updatedAt: nowIso() });
     this.persist();

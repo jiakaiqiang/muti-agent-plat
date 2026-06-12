@@ -1,10 +1,10 @@
 ﻿# Final Delivery 最终交付模板
 
-> 最后修改时间：2026-06-11 14:47:47 +08:00
-> 修改人：Codex
-> 修改的 Agent：Codex
+> 最后修改时间：2026-06-12 11:20:34 +08:00
+> 修改人：Claude Code
+> 修改的 Agent：Claude Code
 
-> 规程来源：[README.md](../README.md) §8 Stage Workflow、§12 Delivery Memory
+> 规程来源：[04-stage-workflow.md](../04-stage-workflow.md)、[08-delivery-memory.md](../08-delivery-memory.md)
 > 阶段：`delivery`　产出 Agent：`coordinator` / `notification`
 > 输入：全部产物　输出：Final Delivery
 
@@ -13,7 +13,7 @@
 - 这是 Delivery 阶段的最终交付产物，用于向用户说明交付结果和剩余风险。
 - 本模板只约束工程交付内容；如后续接入系统功能，可再映射到事件或 artifact。
 - Notification Agent 仅创建 `feishu_draft` 草稿，**不直接对外发送**；外发需显式确认（见 [05-tool-governance.md](../05-tool-governance.md)）。
-- 交付不是结束：必须按 §12 同步沉淀 Delivery Memory。
+- 交付不是结束：必须按 [08-delivery-memory.md](../08-delivery-memory.md) 同步沉淀 Delivery Memory。
 
 ---
 
@@ -54,14 +54,14 @@ reviewReportRef: <评审报告编号或标题>
 ## 关联产物 (Artifacts)
 - intent_contract / design_plan / task_plan / implementation_summary / verification_summary / review_report 的引用列表。
 
-## 交付记忆沉淀 (Delivery Memory) — 见 README §12
+## 交付记忆沉淀 (Delivery Memory) — 见 [08-delivery-memory.md](../08-delivery-memory.md)
 - 能力域 (capability domain): ...
 - 涉及代码路径: ...
 - 被采用的设计决策: ...
 - 出现过的失败模式: ...
 - 有效的验证方式: ...
 - 需要记住的用户偏好: ...
-- 沉淀位置: docs/harness-engineering/runs/ | docs/project-map.md | docs/known-failures.md | docs/agent-guidelines.md
+- 沉淀位置: docs/harness-engineering/runs/ | docs/ai-agent-context/project-map.md | docs/design/ | docs/quality/ | docs/ai-agent-context/
 ```
 
 ---
@@ -71,7 +71,7 @@ reviewReportRef: <评审报告编号或标题>
 - 七个交付小节齐全；“已完成项”可逐条追溯到 Intent Contract 验收标准。
 - “范围外改动”要么为 `无`，要么每条均已获确认。
 - “关联产物”列出全过程产物引用，形成可追溯链。
-- “交付记忆沉淀”已填写并指明沉淀位置（[README.md](../README.md) §12）。
+- “交付记忆沉淀”已填写并指明沉淀位置（见 [08-delivery-memory.md](../08-delivery-memory.md) 与 [knowledge-deposit.md](../delivery-memory/knowledge-deposit.md)）。
 - 仅在 Review `decision = approve` 后才允许 `status = delivered`。
 
 ## 交接 (Handoff)

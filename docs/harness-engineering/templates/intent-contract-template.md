@@ -1,10 +1,10 @@
 ﻿# Intent Contract 需求契约模板
 
-> 最后修改时间：2026-06-11 14:47:47 +08:00
-> 修改人：Codex
-> 修改的 Agent：Codex
+> 最后修改时间：2026-06-12 11:20:34 +08:00
+> 修改人：Claude Code
+> 修改的 Agent：Claude Code
 
-> 规程来源：[README.md](../README.md) §5 Intent Contract、§8 Stage Workflow
+> 规程来源：[01-intent-contract.md](../01-intent-contract.md)、[04-stage-workflow.md](../04-stage-workflow.md)
 > 阶段：`requirement`　产出 Agent：`requirements`
 > 工程规则：**没有 Intent Contract，不进入设计。**
 

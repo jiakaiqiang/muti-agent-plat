@@ -48,12 +48,21 @@ Requirement
 输出：
 
 - Design Plan
+- Architecture Constraints
 
 退出条件：
 
 - 每条验收标准都有设计覆盖。
 - 影响范围明确。
 - 风险与取舍明确。
+- 已产出本次任务必须遵守的 Architecture Constraints：
+  - `module_boundaries`：模块边界。
+  - `ownership_boundaries`：所属职责边界。
+  - `dependency_direction`：依赖方向。
+  - `contract_stability`：契约稳定性。
+  - `allowed_change_scope`：允许修改范围。
+  - `forbidden_change_scope`：禁止修改范围。
+  - `invariants`：不变量。
 
 ### Planning
 
@@ -70,6 +79,7 @@ Requirement
 - 任务有负责人。
 - 任务有依赖关系。
 - 任务有允许范围。
+- 架构约束已转换为 `allowedPaths` / `forbiddenPaths`。
 - 任务有验收标准。
 
 ### Implementation
@@ -118,6 +128,7 @@ Requirement
 退出条件：
 
 - 评审结论明确。
+- 架构不变量未被破坏。
 - 如需返工，目标阶段明确。
 
 ### Delivery

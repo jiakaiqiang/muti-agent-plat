@@ -4,6 +4,17 @@
 
 本契约定义 v1 最小可开发数据模型。后端 migration、前端 mock、测试 fixtures 需要以此为准。
 
+当前 TypeScript 结构以 `packages/shared/src/contracts.ts` 为准。本文档中的 SQL 表结构是目标关系模型；当前实现仍允许使用 file JSON 或 PostgreSQL JSONB collection 作为持久化后端，具体状态见 [功能清单与当前状态](../analysis/feature-inventory-and-status-v1.md)。
+
+### 1.1 当前实现状态
+
+截至 `agent-cluster@0.1.0` 当前工作树：
+
+- 默认持久化可使用本地 file JSON 快照。
+- PostgreSQL 后端使用 JSONB collection 单 key upsert 保存集合状态，尚未拆分为本文第 4 节的细粒度关系表。
+- RAG 当前使用关键词检索；`knowledge_chunks.embedding` 和 pgvector 属于目标模型和后续迁移范围。
+- `capability_invocations` 的目标表语义当前主要由 capability 审计事件和 Runtime invocation log 承载。
+
 ## 2. 命名约定
 
 - 数据库字段使用 `snake_case`。
@@ -82,6 +93,8 @@ type ArtifactType =
 ```
 
 ## 4. 最小表结构
+
+本节是目标关系模型，用于后续 migration 拆分和查询能力增强；不表示当前 PostgreSQL backend 已经以这些表逐项落地。
 
 ### 4.1 sessions
 

@@ -186,6 +186,13 @@ export type ArtifactEventPayload = {
   title: string
   contentSummary?: string
   relatedCapabilityId?: string
+  runtimeArtifacts?: Array<{
+    type: string
+    title: string
+    summary?: string
+    content?: string
+    metadata?: Record<string, unknown>
+  }>
   fileChanges?: RuntimeFileChange[]
 }
 

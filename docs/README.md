@@ -14,7 +14,7 @@
 | `contracts/` | 合同文档 | API、事件、运行时、数据、UI 状态合同 |
 | `quality/` | 质量与验收 | 验收矩阵、闭环验收报告 |
 | `devops/` | 运维开发 | 本地开发、CI、发布检查 |
-| `harness-engineering/` | 工程协议 | Harness Engineering 规程、模板、对齐文档 |
+| `harness-engineering/` | 工程协议 | Harness Engineering 约束模型，按 core / templates / reference 三层组织 |
 | `ai-agent-context/` | AI 代理上下文 | Codex/Claude 条件加载入口与项目地图 |
 
 ## 推荐阅读路径

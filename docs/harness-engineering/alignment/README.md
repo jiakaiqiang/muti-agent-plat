@@ -1,5 +1,7 @@
 # Phase 2 Runtime Alignment
 
+> 本目录属于 reference 层：解释 Agent Cluster 如何映射 Harness，不定义 Harness 本体。
+
 > 最后修改时间：2026-06-11 14:47:47 +08:00
 > 修改人：Codex
 > 修改的 Agent：Codex

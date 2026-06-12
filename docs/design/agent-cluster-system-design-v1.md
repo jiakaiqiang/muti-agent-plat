@@ -13,6 +13,14 @@
 - 支持 Memory、Context、Token、MCP/技能的统一治理。
 - 支持接入 Codex、Claude Code、通用 LLM、MCP Tool 等不同 Runtime。
 
+### 1.1 文档状态与边界
+
+本文档描述 Agent Cluster 的产品系统架构，包含目标架构和分期落地路线。它不是 Harness Engineering 本体定义。
+
+Agent Cluster 中的 `ContextPack`、`Capability`、`RuntimeInvocation`、`Memory`、`SessionStatus` 等概念，是业务系统对 Harness Engineering 的 reference 映射；它们不构成其他项目使用 Harness 时必须实现的 API、模块、数据库表或 UI。
+
+当前实现状态以 [功能清单与当前状态](../analysis/feature-inventory-and-status-v1.md) 为准。本文中 PostgreSQL 细表、pgvector、真实 Codex/Claude/MCP/Human Runtime、真实飞书发送和独立 Token/Notification/Context 模块等内容，除非在当前状态文档中标记为已完成，否则应理解为目标态或后续版本范围。
+
 ## 2. 技术栈
 
 前端：
@@ -91,6 +99,18 @@ Runtime Layer
   ├─ Local Tool Adapter
   └─ Feishu Adapter
 ```
+
+### 3.1 当前实现架构校准
+
+截至 `agent-cluster@0.1.0` 当前工作树，实际实现是 v1+ 工程闭环，而不是上图中全部目标组件都已生产化：
+
+- 后端已有 `sessions`、`orchestrator`、`execution`、`runtimes`、`capabilities`、`memory`、`rag`、`tasks`、`events`、`artifacts`、`debug`、`queue`、`recovery`、`persistence` 等模块。
+- `ContextPack` 主要由 Orchestrator 组装，并通过 Runtime invocation/debug 记录暴露；尚未拆成独立 `Context Module`。
+- Token 预算由 common token 逻辑、Runtime preflight 和 session usage 回写承载；尚未拆成独立 `Token Budget Module`。
+- 飞书通知目前是 `feishu_draft` artifact 与 dry-run 确认事件；尚未拆成真实外发的 `Notification Module`。
+- `mock` 和 `generic_llm` Runtime 可运行；`codex`、`claude_code` adapter 已注册但真实执行仍显式失败；`mcp_tool`、`human` 仍为合同预留。
+- RAG 当前是本地关键词检索和 ContextPack 注入；pgvector/embedding 属于后续增强。
+- PostgreSQL 当前作为 JSONB collection 持久化后端；本文 SQL 细表是目标数据模型，不代表当前 migration 已拆分到关系表。
 
 ## 4. 核心设计原则
 

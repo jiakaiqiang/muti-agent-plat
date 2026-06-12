@@ -1,10 +1,10 @@
 ﻿# Review Report 评审报告模板
 
-> 最后修改时间：2026-06-11 14:47:47 +08:00
-> 修改人：Codex
-> 修改的 Agent：Codex
+> 最后修改时间：2026-06-12 11:20:34 +08:00
+> 修改人：Claude Code
+> 修改的 Agent：Claude Code
 
-> 规程来源：[README.md](../README.md) §7 Agent Role Protocol、§11 Feedback Loop
+> 规程来源：[03-agent-role-protocol.md](../03-agent-role-protocol.md)、[07-feedback-loop.md](../07-feedback-loop.md)
 > 阶段：`review`　产出 Agent：`review`
 > 输入：全过程产物　输出：Approve / Rework / Ask User
 
@@ -52,7 +52,7 @@ createdAt: <ISO 8601>
 - F1：维度（需求/设计/实现/验证/范围/权限）— 严重度（blocker/major/minor）— 描述 — 证据。
 
 ## 范围变化 (Scope Changes)
-- 评审中是否发现范围扩大/缩小；若有，必须走 Human Intervention（见 README §10）。
+- 评审中是否发现范围扩大/缩小；若有，必须走 Human Intervention（见 [06-human-intervention.md](../06-human-intervention.md)）。
 
 ## 决策 (Decision)
 - decision: approve | rework | ask_user | fail

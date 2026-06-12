@@ -1,8 +1,8 @@
 # 02 Context Protocol 上下文协议
 
-> 最后修改时间：2026-06-11 14:47:47 +08:00
-> 修改人：Codex
-> 修改的 Agent：Codex
+> 最后修改时间：2026-06-12 11:20:34 +08:00
+> 修改人：Claude Code
+> 修改的 Agent：Claude Code
 
 ## 目的
 
@@ -19,6 +19,55 @@
 - Verification Agent
 - Review Agent
 - Delivery Agent
+
+## 上下文条目模型
+
+每条进入阶段的上下文按两个维度标注：
+
+来源（source）：
+
+- user：用户输入与用户确认。
+- project：项目事实，包括代码、合同、文档、测试。
+- tool：工具观察结果，包括命令输出、测试结果、检索结果。
+- memory：交付记忆与历史产物。
+- inference：Agent 推断、假设、未确认想法。
+
+状态（state）：
+
+- active：可作为当前决策依据。
+- stale：已过期，不得作为决策依据。
+- conflict：与其他条目冲突，处理前不得使用。
+
+`inference` 来源的条目默认不可作为验收依据，除非被 `user` 确认或 `tool` 验证。
+
+## 上下文生命周期
+
+```text
+collect -> filter -> bind_to_stage -> use -> verify -> retain / drop / stale
+```
+
+- collect：只从允许的来源收集。
+- filter：裁剪到当前阶段最小必要集合。
+- bind_to_stage：与阶段产物绑定，可追溯。
+- verify：进入下一阶段前核对状态标注。
+- retain / drop / stale：阶段结束时决定保留、丢弃或标记过期。
+
+## 上下文污染处理
+
+| 污染类型 | 处理 |
+| --- | --- |
+| 冲突（conflict） | 当前阶段重建 Context，必要时升级人工确认 |
+| 过期（stale） | 标记 stale，不作为决策依据 |
+| 范围诱导 | 回到 Requirement 或 Design 确认 |
+| 噪音过载 | 裁剪到当前阶段最小必要上下文 |
+
+## 阶段入口检查
+
+进入任一阶段前回答三问：
+
+1. 本阶段的决策依据来自哪些来源（source）？
+2. 是否存在未处理的 conflict 或 stale 条目？
+3. 是否已裁剪与本阶段无关的上下文？
 
 ## 阶段上下文
 
@@ -106,7 +155,7 @@
 
 - 当前阶段上下文足以完成该阶段任务。
 - 上下文没有明显越界。
-- 上下文中区分了事实、假设和待确认问题。
+- 上下文条目已按来源（source）和状态（state）标注，inference 条目未被当作事实使用。
 
 ## 返工条件
 

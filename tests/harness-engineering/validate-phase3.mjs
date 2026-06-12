@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Harness Engineering — Phase 3 (Prompt & Context Conformance) validator.
 //
-// Phase 3 (docs/harness-engineering/README.md roadmap) makes Agent prompts and
-// runtime context obey Context Protocol (02) and Agent Role Protocol (03). The
+// Reference Binding Phase 3 makes Agent prompts and runtime context obey
+// Context Protocol (02) and Agent Role Protocol (03). The
 // deliverable is conformance SPECS, not prompt/code changes — so this validates
 // the spec docs and REALITY-SYNCS them against source: it parses the ContextPack
 // fields + AgentRunPhase from contracts.ts and the agent keys from
@@ -31,9 +31,36 @@ function parseUnion(source, typeName) {
   return m ? [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]) : [];
 }
 function parseObjectFields(source, typeName) {
-  const m = source.match(new RegExp(`export type ${typeName}\\s*=\\s*{([\\s\\S]*?)};`));
-  if (!m) return [];
-  return [...m[1].matchAll(/^\s*([a-zA-Z][a-zA-Z0-9]*)\??:/gm)].map((x) => x[1]);
+  const start = source.search(new RegExp(`export type ${typeName}\\s*=\\s*{`));
+  if (start < 0) return [];
+
+  const open = source.indexOf('{', start);
+  let depth = 0;
+  let body = '';
+  for (let i = open; i < source.length; i += 1) {
+    const char = source[i];
+    if (char === '{') {
+      depth += 1;
+      if (depth === 1) continue;
+    }
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) break;
+    }
+    if (depth >= 1) body += char;
+  }
+
+  const fields = [];
+  let lineDepth = 0;
+  for (const line of body.split('\n')) {
+    const field = lineDepth === 0 ? line.match(/^\s*([a-zA-Z][a-zA-Z0-9]*)\??:/) : null;
+    if (field) fields.push(field[1]);
+    for (const char of line) {
+      if (char === '{') lineDepth += 1;
+      if (char === '}') lineDepth -= 1;
+    }
+  }
+  return fields;
 }
 
 const contractsSrc = await readFile(contractsPath, 'utf8');

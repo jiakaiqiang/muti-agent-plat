@@ -1198,6 +1198,246 @@ textarea:disabled {
   overflow-wrap: anywhere;
 }
 
+.file-change-diff {
+  display: grid;
+  max-height: 340px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 0;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 8px;
+  background: #0f172a;
+  color: #dbeafe;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.diff-line {
+  display: block;
+  min-width: max-content;
+  padding: 0 10px;
+}
+
+.diff-line b {
+  display: inline-block;
+  width: 18px;
+  margin-right: 6px;
+  color: #94a3b8;
+  font-weight: 700;
+}
+
+.diff-line.add {
+  background: rgba(34, 197, 94, 0.18);
+  color: #dcfce7;
+}
+
+.diff-line.add b {
+  color: #86efac;
+}
+
+.diff-line.remove {
+  background: rgba(239, 68, 68, 0.18);
+  color: #fee2e2;
+}
+
+.diff-line.remove b {
+  color: #fca5a5;
+}
+
+.diff-line.meta {
+  background: rgba(251, 191, 36, 0.18);
+  color: #fef3c7;
+}
+
+.routing-block {
+  border-color: #bae6fd;
+  background: #f0f9ff;
+}
+
+.routing-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.routing-chip-list strong {
+  color: #0f172a;
+  font-size: 12px;
+}
+
+.routing-chip-list span,
+.routing-chip-list code {
+  padding: 3px 8px;
+  border: 1px solid #bae6fd;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #075985;
+  font-size: 12px;
+}
+
+.routing-instruction {
+  margin: 10px 0 0;
+  padding: 10px;
+  border-left: 3px solid #0284c7;
+  background: #ffffff;
+  color: #334155;
+}
+
+.communication-flow-list em {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #ecfeff;
+  color: #0e7490;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.communication-flow-meta,
+.communication-phase-summary,
+.workflow-event-meta,
+.workflow-signal-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.communication-flow-meta {
+  justify-content: flex-end;
+}
+
+.communication-flow-meta span,
+.communication-phase-summary span,
+.workflow-event-meta span {
+  padding: 3px 8px;
+  border: 1px solid #bae6fd;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #075985;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.workflow-signal-strip {
+  margin-top: 14px;
+}
+
+.workflow-signal-strip article {
+  display: grid;
+  min-width: 104px;
+  padding: 10px 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.workflow-signal-strip span {
+  color: #475569;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.workflow-signal-strip strong {
+  color: #0f172a;
+  font-size: 18px;
+}
+
+.runtime-test-report-list {
+  display: grid;
+  gap: 9px;
+  margin-top: 10px;
+}
+
+.runtime-test-report-list article {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  background: #f0fdf4;
+}
+
+.runtime-test-report-list header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.runtime-test-report-list p {
+  margin: 0;
+  color: #166534;
+}
+
+.runtime-test-report-list code,
+.runtime-test-report-list pre {
+  margin: 0;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #14532d;
+  overflow: auto;
+}
+
+.workflow-stage-events {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.workflow-stage-events header,
+.workflow-stage-events article {
+  display: grid;
+  gap: 4px;
+}
+
+.workflow-stage-events header {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+}
+
+.workflow-stage-events h3,
+.workflow-stage-events p {
+  margin: 0;
+}
+
+.workflow-stage-events header span {
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.workflow-stage-events article {
+  padding: 9px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.workflow-stage-events article strong {
+  color: #0f172a;
+  font-size: 12px;
+}
+
+.workflow-stage-events article p,
+.workflow-stage-events > p {
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .confirmation-card {
   display: grid;
   gap: 12px;
@@ -2748,6 +2988,15 @@ textarea:disabled {
   background: linear-gradient(145deg, rgba(12, 27, 55, 0.92), color-mix(in srgb, var(--agent) 17%, transparent));
   box-shadow: 0 0 30px color-mix(in srgb, var(--agent) 22%, transparent);
   color: var(--dark-text);
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  cursor: grab;
+  touch-action: none;
+}
+
+.agent-graph-node:active,
+.workflow-agent-node:active {
+  cursor: grabbing;
 }
 
 .agent-graph-node h3,
@@ -2795,6 +3044,12 @@ textarea:disabled {
   color: #70ffc1;
 }
 
+.agent-node-traffic {
+  color: var(--dark-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .node-1 { left: 7%; top: 20%; }
 .node-2 { left: 40%; top: 12%; }
 .node-3 { right: 7%; top: 20%; }
@@ -2829,6 +3084,56 @@ textarea:disabled {
 .line-4 { left: 32%; bottom: 22%; width: 30%; }
 .line-5 { right: 29%; top: 58%; width: 24%; transform: rotate(90deg); transform-origin: right; }
 
+.agent-graph-links,
+.workflow-agent-links {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.agent-graph-links.editable-links,
+.workflow-agent-links.editable-links {
+  z-index: 4;
+}
+
+.edge-drag-handle {
+  fill: #ffffff;
+  stroke: var(--neon-green);
+  stroke-width: 0.35;
+  cursor: grab;
+  filter: drop-shadow(0 0 5px rgba(25, 229, 143, 0.65));
+  pointer-events: auto;
+}
+
+.edge-drag-handle:active {
+  cursor: grabbing;
+}
+
+.agent-graph-links line,
+.workflow-agent-links line {
+  stroke: rgba(34, 211, 238, 0.42);
+  stroke-width: 0.38;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 5px rgba(34, 211, 238, 0.45));
+  pointer-events: auto;
+  cursor: grab;
+}
+
+.agent-graph-links line.highlighted,
+.workflow-agent-links line.highlighted {
+  stroke: rgba(25, 229, 143, 0.78);
+  stroke-width: 0.55;
+  filter: drop-shadow(0 0 8px rgba(25, 229, 143, 0.58));
+}
+
+.edge-drag-line:active {
+  cursor: grabbing;
+}
+
+.communication-flow-list,
 .realtime-status-table,
 .dark-log-strip {
   display: grid;
@@ -2840,9 +3145,38 @@ textarea:disabled {
   background: var(--dark-panel);
 }
 
+.communication-flow-list h3,
 .realtime-status-table h3,
 .dark-log-strip h3 {
   margin: 0 0 6px;
+}
+
+.communication-flow-list article {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) auto minmax(120px, 0.8fr) minmax(0, 2fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 44px;
+  border-top: 1px solid rgba(120, 170, 255, 0.13);
+  color: var(--dark-muted);
+}
+
+.communication-flow-list strong {
+  color: var(--dark-text);
+}
+
+.communication-flow-list span {
+  display: inline-grid;
+  place-items: center;
+  min-width: 54px;
+  padding: 3px 8px;
+  border: 1px solid rgba(29, 155, 255, 0.34);
+  border-radius: 999px;
+  color: var(--neon-blue);
+}
+
+.communication-flow-list p {
+  margin: 0;
 }
 
 .realtime-status-table article {
@@ -3744,14 +4078,6 @@ textarea:disabled {
   color: var(--dark-text);
 }
 
-.mode-workflow .workspace-header {
-  display: none;
-}
-
-.mode-workflow .workspace-main {
-  grid-template-rows: minmax(0, 1fr);
-}
-
 .mode-workflow .workspace-content {
   background: #020817;
 }
@@ -3766,10 +4092,15 @@ textarea:disabled {
 
 .mode-workflow .workflow-topbar {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
   gap: 14px;
-  padding-bottom: 16px;
+  margin-bottom: 16px;
+  padding: 16px 18px;
+  border: 1px solid var(--dark-border);
+  border-radius: 14px;
+  background: var(--dark-panel);
+  box-shadow: 0 0 26px rgba(29, 155, 255, 0.08);
 }
 
 .mode-workflow .workflow-topbar h2 {
@@ -3777,6 +4108,29 @@ textarea:disabled {
   min-width: 260px;
   color: var(--dark-text);
   font-size: 28px;
+}
+
+.graph-view-switcher,
+.workflow-mode-switcher {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.mode-collaboration_graph .graph-view-switcher,
+.mode-workflow .workflow-mode-switcher {
+  padding: 6px;
+  border: 1px solid rgba(120, 170, 255, 0.16);
+  border-radius: 10px;
+  background: rgba(12, 27, 55, 0.72);
+}
+
+.mode-collaboration_graph .graph-view-switcher .mode-button,
+.mode-workflow .workflow-mode-switcher .mode-button {
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
 }
 
 .mode-workflow .project-chip,
@@ -3894,6 +4248,78 @@ textarea:disabled {
   font-weight: 800;
 }
 
+.mode-collaboration_graph .workspace-content,
+.mode-collaboration_graph .communication-flow-list,
+.mode-collaboration_graph .realtime-status-table,
+.mode-collaboration_graph .dark-log-strip,
+.mode-collaboration_graph .agent-popover,
+.mode-workflow .workspace-content,
+.mode-workflow .workflow-agent-rail,
+.mode-workflow .workflow-canvas,
+.mode-workflow .workflow-stage-events,
+.mode-workflow .dark-log-strip {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(34, 211, 238, 0.5) rgba(7, 18, 38, 0.28);
+}
+
+.mode-collaboration_graph .workspace-content::-webkit-scrollbar,
+.mode-collaboration_graph .communication-flow-list::-webkit-scrollbar,
+.mode-collaboration_graph .realtime-status-table::-webkit-scrollbar,
+.mode-collaboration_graph .dark-log-strip::-webkit-scrollbar,
+.mode-collaboration_graph .agent-popover::-webkit-scrollbar,
+.mode-workflow .workspace-content::-webkit-scrollbar,
+.mode-workflow .workflow-agent-rail::-webkit-scrollbar,
+.mode-workflow .workflow-canvas::-webkit-scrollbar,
+.mode-workflow .workflow-stage-events::-webkit-scrollbar,
+.mode-workflow .dark-log-strip::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.mode-collaboration_graph .workspace-content::-webkit-scrollbar-track,
+.mode-collaboration_graph .communication-flow-list::-webkit-scrollbar-track,
+.mode-collaboration_graph .realtime-status-table::-webkit-scrollbar-track,
+.mode-collaboration_graph .dark-log-strip::-webkit-scrollbar-track,
+.mode-collaboration_graph .agent-popover::-webkit-scrollbar-track,
+.mode-workflow .workspace-content::-webkit-scrollbar-track,
+.mode-workflow .workflow-agent-rail::-webkit-scrollbar-track,
+.mode-workflow .workflow-canvas::-webkit-scrollbar-track,
+.mode-workflow .workflow-stage-events::-webkit-scrollbar-track,
+.mode-workflow .dark-log-strip::-webkit-scrollbar-track {
+  background: rgba(7, 18, 38, 0.28);
+  border-radius: 999px;
+}
+
+.mode-collaboration_graph .workspace-content::-webkit-scrollbar-thumb,
+.mode-collaboration_graph .communication-flow-list::-webkit-scrollbar-thumb,
+.mode-collaboration_graph .realtime-status-table::-webkit-scrollbar-thumb,
+.mode-collaboration_graph .dark-log-strip::-webkit-scrollbar-thumb,
+.mode-collaboration_graph .agent-popover::-webkit-scrollbar-thumb,
+.mode-workflow .workspace-content::-webkit-scrollbar-thumb,
+.mode-workflow .workflow-agent-rail::-webkit-scrollbar-thumb,
+.mode-workflow .workflow-canvas::-webkit-scrollbar-thumb,
+.mode-workflow .workflow-stage-events::-webkit-scrollbar-thumb,
+.mode-workflow .dark-log-strip::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(29, 155, 255, 0.82), rgba(34, 211, 238, 0.72));
+  background-clip: padding-box;
+}
+
+.mode-collaboration_graph .workspace-content::-webkit-scrollbar-thumb:hover,
+.mode-collaboration_graph .communication-flow-list::-webkit-scrollbar-thumb:hover,
+.mode-collaboration_graph .realtime-status-table::-webkit-scrollbar-thumb:hover,
+.mode-collaboration_graph .dark-log-strip::-webkit-scrollbar-thumb:hover,
+.mode-collaboration_graph .agent-popover::-webkit-scrollbar-thumb:hover,
+.mode-workflow .workspace-content::-webkit-scrollbar-thumb:hover,
+.mode-workflow .workflow-agent-rail::-webkit-scrollbar-thumb:hover,
+.mode-workflow .workflow-canvas::-webkit-scrollbar-thumb:hover,
+.mode-workflow .workflow-stage-events::-webkit-scrollbar-thumb:hover,
+.mode-workflow .dark-log-strip::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(25, 229, 143, 0.86), rgba(29, 155, 255, 0.82));
+  background-clip: padding-box;
+}
+
 .mode-workflow .workflow-map {
   min-height: 600px;
   background:
@@ -3911,6 +4337,21 @@ textarea:disabled {
   background: linear-gradient(145deg, rgba(12, 27, 55, 0.92), color-mix(in srgb, var(--agent) 16%, transparent));
   color: var(--dark-text);
   box-shadow: 0 0 24px color-mix(in srgb, var(--agent) 22%, transparent);
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  cursor: grab;
+  touch-action: none;
+}
+
+.mode-workflow .workflow-agent-node.running,
+.mode-workflow .workflow-agent-node.thinking,
+.mode-workflow .workflow-agent-node.discussing,
+.mode-workflow .workflow-agent-node.reviewing,
+.mode-workflow .workflow-agent-node.reworking {
+  border-color: color-mix(in srgb, var(--agent) 84%, #ffffff 16%);
+  box-shadow:
+    0 0 26px color-mix(in srgb, var(--agent) 28%, transparent),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
 }
 
 .mode-workflow .workflow-node header {
@@ -3935,6 +4376,10 @@ textarea:disabled {
 .mode-workflow .workflow-node li,
 .mode-workflow .workflow-output p {
   color: var(--dark-muted);
+}
+
+.mode-workflow .workflow-agent-links {
+  z-index: 1;
 }
 
 .mode-workflow .workflow-node-1 { left: 5%; top: 16%; }
@@ -4003,6 +4448,51 @@ textarea:disabled {
 
 .mode-workflow .workflow-stage-chip.final-output svg {
   color: var(--danger);
+}
+
+.mode-workflow .workflow-signal-strip article {
+  border-color: rgba(120, 170, 255, 0.16);
+  background: rgba(12, 27, 55, 0.72);
+}
+
+.mode-workflow .workflow-signal-strip span {
+  color: var(--dark-muted);
+}
+
+.mode-workflow .workflow-signal-strip strong {
+  color: var(--dark-text);
+}
+
+.mode-workflow .workflow-stage-events {
+  border-color: rgba(120, 170, 255, 0.16);
+  background: rgba(7, 18, 38, 0.82);
+  box-shadow: inset 0 0 0 1px rgba(29, 155, 255, 0.04);
+}
+
+.mode-workflow .workflow-stage-events header {
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(120, 170, 255, 0.13);
+}
+
+.mode-workflow .workflow-stage-events header span,
+.mode-workflow .workflow-event-meta span {
+  border-color: rgba(34, 211, 238, 0.28);
+  background: rgba(29, 155, 255, 0.12);
+  color: #8bd8ff;
+}
+
+.mode-workflow .workflow-stage-events article {
+  border-color: rgba(120, 170, 255, 0.14);
+  background: rgba(12, 27, 55, 0.72);
+}
+
+.mode-workflow .workflow-stage-events article strong {
+  color: var(--dark-text);
+}
+
+.mode-workflow .workflow-stage-events article p,
+.mode-workflow .workflow-stage-events > p {
+  color: var(--dark-muted);
 }
 
 .mode-workflow .workflow-event-card__detail {

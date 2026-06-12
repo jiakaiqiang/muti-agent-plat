@@ -1,10 +1,10 @@
 ﻿# Design Plan 设计方案模板
 
-> 最后修改时间：2026-06-11 14:47:47 +08:00
-> 修改人：Codex
-> 修改的 Agent：Codex
+> 最后修改时间：2026-06-12 11:20:34 +08:00
+> 修改人：Claude Code
+> 修改的 Agent：Claude Code
 
-> 规程来源：[README.md](../README.md) §6 Context Protocol、§8 Stage Workflow
+> 规程来源：[02-context-protocol.md](../02-context-protocol.md)、[04-stage-workflow.md](../04-stage-workflow.md)
 > 阶段：`design`　产出 Agent：`architect`
 > 输入：Intent Contract + Project Context　输出：Design Plan
 
@@ -39,6 +39,14 @@ intentContractRef: <需求契约编号或标题>
 ## 架构与模块边界 (Architecture & Module Boundaries)
 - 涉及哪些模块（如 apps/server/src/modules/*、apps/web、packages/shared）。
 - 模块职责与边界，新增 / 修改 / 复用。
+- Architecture Constraints:
+  - module_boundaries: <模块边界>
+  - ownership_boundaries: <所属职责边界>
+  - dependency_direction: <依赖方向>
+  - contract_stability: <契约稳定性>
+  - allowed_change_scope: <允许修改范围>
+  - forbidden_change_scope: <禁止修改范围>
+  - invariants: <不变量>
 
 ## 影响范围 (Impact Scope)
 - 受影响的代码路径（目录 / 文件级）。
@@ -78,4 +86,3 @@ intentContractRef: <需求契约编号或标题>
 
 - 下游消费者：Coordinator Agent（Planning 阶段）。
 - 若发现 Intent Contract 不足以支撑设计：按 [07-feedback-loop.md](../07-feedback-loop.md) 回退到 `requirement`。
-

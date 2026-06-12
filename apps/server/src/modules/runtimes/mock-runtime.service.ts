@@ -8,6 +8,7 @@ import type {
   PostReviewReportOutput,
   RuntimeUsage,
   RuntimeOutput,
+  TaskClaimDecisionOutput,
   TaskBriefOutput,
   TaskExecutionResultOutput,
   UserMessageHandlingPlanOutput,
@@ -225,9 +226,14 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
         : ['The output directly addresses the user requirement.', 'The result can be reviewed by the user.'];
 
     switch (input.expectedOutput.kind) {
+      case 'task_claim_decision':
+        return this.taskClaimDecision(input, goal, taskTitle);
       case 'task_brief':
         if (isArchitectureAnalysis) {
           return this.architectureAnalysisBrief(input, goal);
+        }
+        if (process.env.MOCK_PARALLEL_TASKS === 'true') {
+          return this.parallelImplementationBrief(goal);
         }
         return {
           kind: 'task_brief',
@@ -279,6 +285,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
             'Preserved reviewable completion notes, risks, and next actions.'
           ],
           changedArtifacts: [this.requirementAwareExecutionFileArtifact(input)],
+          agentMessages: this.runtimeAgentMessages(input, goal, taskTitle),
           nextSuggestedActions: ['Inspect the generated file under agent-output.', 'Run the review stage against the same requirement.'],
           risks: []
         } satisfies TaskExecutionResultOutput;
@@ -392,6 +399,87 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
           suggestedAgentKey: 'review',
           dependsOnTaskTitles: ['生成项目架构分析报告'],
           acceptanceCriteria: ['复核结论指出报告是否足够帮助用户熟悉项目。']
+        }
+      ]
+    };
+  }
+
+  private taskClaimDecision(input: AgentRunInput, goal: string, taskTitle: string): TaskClaimDecisionOutput {
+    const shouldDecline =
+      process.env.MOCK_DECLINE_FRONTEND_TASK === 'true' &&
+      input.agent.key === 'frontend' &&
+      /frontend/i.test(taskTitle);
+    if (shouldDecline) {
+      return {
+        kind: 'task_claim_decision',
+        accepted: false,
+        reason: `${input.agent.name} cannot take "${taskTitle}" and recommends Backend for this run.`,
+        confidence: 0.86,
+        alternativeAgentKeys: ['backend'],
+        agentMessages: [
+          {
+            kind: 'agent_message',
+            messageKind: 'handoff',
+            content: `${input.agent.name} declines "${taskTitle}" and asks Backend to take it over.`,
+            targetAgentKeys: ['backend']
+          }
+        ]
+      };
+    }
+    return {
+      kind: 'task_claim_decision',
+      accepted: true,
+      reason: `${input.agent.name} accepts "${taskTitle}" for requirement: ${goal}`,
+      confidence: 0.92,
+      agentMessages: [
+        {
+          kind: 'agent_message',
+          messageKind: 'decision',
+          content: `${input.agent.name} accepts "${taskTitle}" and will produce reviewable artifacts.`,
+          targetAgentKeys: ['coordinator']
+        }
+      ]
+    };
+  }
+
+  private parallelImplementationBrief(goal: string): TaskBriefOutput {
+    const frontendTitle = `Frontend implementation: ${this.shortText(goal, 48)}`;
+    const backendTitle = `Backend implementation: ${this.shortText(goal, 48)}`;
+    return {
+      kind: 'task_brief',
+      goal,
+      scope: [
+        `Implement independent frontend and backend work for: ${goal}`,
+        'Let multiple coding agents claim ready tasks in the same execution wave.',
+        'Review both outputs before final delivery.'
+      ],
+      outOfScope: ['Do not deploy or call external services.'],
+      constraints: ['Keep generated changes reviewable through artifact fileChanges.'],
+      acceptanceCriteria: [
+        'Frontend and backend tasks can start without depending on each other.',
+        'A review task waits for both implementation tasks.'
+      ],
+      risks: ['Mock runtime proves orchestration behavior, not production code quality.'],
+      openQuestions: [],
+      suggestedTasks: [
+        {
+          title: frontendTitle,
+          description: `Prepare frontend-facing changes for: ${goal}`,
+          suggestedAgentKey: 'frontend',
+          acceptanceCriteria: ['Frontend task produces a task_execution_result artifact.']
+        },
+        {
+          title: backendTitle,
+          description: `Prepare backend-facing changes for: ${goal}`,
+          suggestedAgentKey: 'backend',
+          acceptanceCriteria: ['Backend task produces a task_execution_result artifact.']
+        },
+        {
+          title: `Review parallel implementation: ${this.shortText(goal, 42)}`,
+          description: 'Review the combined frontend and backend outputs.',
+          suggestedAgentKey: 'test',
+          dependsOnTaskTitles: [frontendTitle, backendTitle],
+          acceptanceCriteria: ['Review starts only after both implementation tasks complete.']
         }
       ]
     };
@@ -710,6 +798,21 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
         fileChanges
       }
     } satisfies import('@agent-cluster/shared').RuntimeArtifactOutput;
+  }
+
+  private runtimeAgentMessages(input: AgentRunInput, goal: string, taskTitle: string): AgentMessageOutput[] | undefined {
+    if (process.env.MOCK_RUNTIME_AGENT_COMMUNICATION !== 'true') {
+      return undefined;
+    }
+    return [
+      {
+        kind: 'agent_message',
+        messageKind: 'progress',
+        content: `${input.agent.name} requests peer review for "${taskTitle}" before final delivery. Requirement: ${goal}`,
+        targetAgentKeys: ['test', 'review'],
+        relatedTaskIds: input.taskId ? [input.taskId] : []
+      }
+    ];
   }
 
   private workspaceTargetPaths(input: AgentRunInput) {

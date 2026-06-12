@@ -55,6 +55,7 @@ Implementation：
 - 只能在任务允许范围内修改。
 - 范围内写入属于中风险，必须留痕。
 - 越界写入属于高风险，必须确认。
+- 越界写入（超出 `allowedPaths` 或命中 `forbiddenPaths`）同时构成工具风险和架构约束破坏，按 `architecture_signal` 或 `role_boundary_signal` 返工，不得静默继续。
 
 Verification：
 

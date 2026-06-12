@@ -1,8 +1,8 @@
 # Orchestrator Alignment
 
-> 最后修改时间：2026-06-11 14:47:47 +08:00
-> 修改人：Codex
-> 修改的 Agent：Codex
+> 最后修改时间：2026-06-12 11:20:34 +08:00
+> 修改人：Claude Code
+> 修改的 Agent：Claude Code
 
 ## Purpose
 
@@ -15,6 +15,7 @@ This document maps orchestration behavior to a reusable Harness execution model.
 | discussion | requirement/design | Discussion summary, risks, and open questions. |
 | brief_generation | requirement | Intent contract or task brief. |
 | brief_revision | requirement | Revised brief with change reason. |
+| task_acceptance | planning/implementation handoff | Task claim decision (accept or decline) with reason. |
 | task_execution | implementation | Implementation summary and produced artifacts. |
 | post_review | review | Review report with an explicit decision. |
 | final_delivery | delivery | Final delivery and memory candidates. |

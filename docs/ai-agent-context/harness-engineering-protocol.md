@@ -2,7 +2,13 @@
 
 本文档定义 AI 工程代理在完成任务时如何默认使用 Harness Engineering。
 
-Harness Engineering 是任务执行协议，不是业务运行时代码。除非用户明确要求实现系统级能力，否则不要把它写成后端模块、前端页面或产品功能。
+## 边界原则
+
+Harness Engineering 约束 AI 工程代理如何完成任务，不约束业务系统必须实现什么功能。完整边界见 `docs/harness-engineering/00-boundary-and-principles.md`。
+
+用户要求整理、讨论、维护或改进 Harness 时，默认只处理：协议、模板、Rubric、Agent 工作纪律、上下文加载规则、工具使用规则、交付记忆规则。
+
+不默认新增：后端模块、前端页面、API、数据库表、产品审批流、runtime adapter。只有用户明确要求“把某个 Harness 约束产品化”时，才进入业务实现设计。
 
 ## 默认行为
 
@@ -33,6 +39,12 @@ Requirement
 
 ## 阶段约束
 
+每个阶段进入前先回答三问（详见 `docs/harness-engineering/02-context-protocol.md`）：
+
+1. 本阶段的决策依据来自哪些来源（user / project / tool / memory / inference）？
+2. 是否存在未处理的 conflict 或 stale 上下文？
+3. 是否已裁剪与本阶段无关的上下文？
+
 ### Requirement
 
 形成 Intent Contract，至少包含：
@@ -55,13 +67,14 @@ Requirement
 - 读取相关合同、设计文档、代码和测试。
 - 说明设计取舍。
 - 标记高风险点。
+- 产出本次任务的 Architecture Constraints：允许修改范围、禁止修改范围、不变量（详见 `docs/harness-engineering/04-stage-workflow.md`）。
 
 ### Planning
 
 形成短计划：
 
 - 要查看什么。
-- 要改什么。
+- 要改什么（架构约束转换为 allowedPaths / forbiddenPaths）。
 - 如何验证。
 - 哪些点需要人工确认。
 
@@ -97,8 +110,11 @@ npm run build
 
 - 是否满足验收标准。
 - 是否发生范围漂移。
+- 是否破坏架构约束或不变量。
 - 是否影响合同或共享类型。
 - 是否需要补测试或补文档。
+
+失败或返工时按 `docs/harness-engineering/07-feedback-loop.md` 的 Signal 路由分类回退；返工以闭环说明结束（修正了什么、为何问题不再存在、是否影响下游）。同一 Signal 且同一目标阶段的返工出现第 2 次时，必须停下来问用户。
 
 ### Delivery
 
@@ -145,6 +161,7 @@ docs/harness-engineering/
 常用入口：
 
 - `docs/harness-engineering/README.md`
+- `docs/harness-engineering/00-boundary-and-principles.md`
 - `docs/harness-engineering/01-intent-contract.md`
 - `docs/harness-engineering/02-context-protocol.md`
 - `docs/harness-engineering/04-stage-workflow.md`
@@ -153,4 +170,5 @@ docs/harness-engineering/
 - `docs/harness-engineering/07-feedback-loop.md`
 - `docs/harness-engineering/08-delivery-memory.md`
 - `docs/harness-engineering/10-agent-working-protocol.md`
+- `docs/harness-engineering/12-continuous-governance.md`
 

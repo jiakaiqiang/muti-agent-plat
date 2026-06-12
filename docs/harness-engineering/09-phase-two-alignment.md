@@ -1,8 +1,9 @@
 # 09 Phase Two Alignment 第二阶段对齐方案
 
-> 最后修改时间：2026-06-11 14:47:47 +08:00
-> 修改人：Codex
-> 修改的 Agent：Codex
+> 最后修改时间：2026-06-12 11:20:34 +08:00
+> 修改人：Claude Code
+> 修改的 Agent：Claude Code
+> 本文档属于 reference 层：记录 Agent Cluster 的阶段对齐实践，不定义 Harness 本体。
 
 ## 目的
 
@@ -79,11 +80,7 @@ Agent 上下文边界不清
 
 如果不满足，不应该直接进入设计或任务拆解。
 
-第二阶段产物：
-
-```text
-docs/harness-engineering/alignment/intent-contract-alignment.md
-```
+对齐记录归入：[alignment/session-alignment.md](./alignment/session-alignment.md)（brief 生成、用户输入对齐）。
 
 内容记录：
 
@@ -107,11 +104,7 @@ Review Agent 是否看到全过程产物
 Delivery Agent 是否看到评审结论和剩余风险
 ```
 
-第二阶段产物：
-
-```text
-docs/harness-engineering/alignment/context-alignment.md
-```
+对齐记录归入：[alignment/orchestrator-alignment.md](./alignment/orchestrator-alignment.md)（context pack 按阶段注入）。
 
 内容记录：
 
@@ -138,11 +131,7 @@ Review Agent 是否给出明确返工目标
 Delivery Agent 是否只是总结而没有沉淀记忆
 ```
 
-第二阶段产物：
-
-```text
-docs/harness-engineering/alignment/agent-role-alignment.md
-```
+对齐记录归入：[alignment/orchestrator-alignment.md](./alignment/orchestrator-alignment.md)（AgentRunPhase 与角色边界）。
 
 ### Step 4：对齐阶段交接
 
@@ -158,11 +147,7 @@ post review 是否能支撑 Review Report
 final delivery 是否能支撑 Delivery Memory
 ```
 
-第二阶段产物：
-
-```text
-docs/harness-engineering/alignment/stage-workflow-alignment.md
-```
+对齐记录归入：[alignment/orchestrator-alignment.md](./alignment/orchestrator-alignment.md) 与 [alignment/artifacts-alignment.md](./alignment/artifacts-alignment.md)（阶段交接产物）。
 
 ### Step 5：对齐工具治理
 
@@ -178,11 +163,7 @@ docs/harness-engineering/alignment/stage-workflow-alignment.md
 外部发送是否仍保持草稿优先
 ```
 
-第二阶段产物：
-
-```text
-docs/harness-engineering/alignment/tool-governance-alignment.md
-```
+对齐记录归入：[capability-binding/tool-governance-binding.md](./capability-binding/tool-governance-binding.md)。
 
 ### Step 6：对齐人工干预
 
@@ -197,11 +178,7 @@ docs/harness-engineering/alignment/tool-governance-alignment.md
 确认后回到哪个阶段
 ```
 
-第二阶段产物：
-
-```text
-docs/harness-engineering/alignment/human-intervention-alignment.md
-```
+对齐记录归入：[capability-binding/human-intervention-binding.md](./capability-binding/human-intervention-binding.md)。
 
 ### Step 7：对齐反馈返工
 
@@ -219,11 +196,7 @@ docs/harness-engineering/alignment/human-intervention-alignment.md
 上下文问题
 ```
 
-第二阶段产物：
-
-```text
-docs/harness-engineering/alignment/feedback-loop-alignment.md
-```
+对齐记录归入：[alignment/orchestrator-alignment.md](./alignment/orchestrator-alignment.md)（ExecutionOutcome 与返工路由）。
 
 ### Step 8：对齐交付记忆
 
@@ -240,21 +213,13 @@ docs/harness-engineering/alignment/feedback-loop-alignment.md
 用户偏好是否记录
 ```
 
-第二阶段产物：
-
-```text
-docs/harness-engineering/alignment/delivery-memory-alignment.md
-```
+对齐记录归入：[delivery-memory/memory-binding.md](./delivery-memory/memory-binding.md)。
 
 ## 第二阶段输出
 
-第二阶段最终应该产出一个对齐报告：
+第二阶段的对齐结论汇总在：[alignment/gap-analysis.md](./alignment/gap-analysis.md)。
 
-```text
-docs/harness-engineering/alignment/phase-two-alignment-report.md
-```
-
-报告结构：
+汇总应覆盖：
 
 ```text
 1. 当前流程对齐程度

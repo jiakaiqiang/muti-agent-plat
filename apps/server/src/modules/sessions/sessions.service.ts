@@ -254,17 +254,38 @@ export class SessionsService {
         createdAt: nowIso(),
         updatedAt: nowIso()
       };
-      this.tasks.list(session.id).push(interruptTask);
+      this.tasks.add(interruptTask);
 
       this.events.create({
         sessionId: session.id,
         type: 'task_created',
+        taskId: interruptTask.id,
         fromAgentId: assignedAgentId,
+        toAgentIds: relevantAgentIds,
         content: `任务已创建：${interruptTask.title}`,
-        metadata: createMetadata('system_notice', {
+        metadata: createMetadata('task_card', {
           taskId: interruptTask.id,
           title: interruptTask.title,
-          assigneeAgentId: assignedAgentId
+          description: interruptTask.description,
+          status: interruptTask.status,
+          assigneeAgentId: assignedAgentId,
+          acceptanceCriteria: interruptTask.acceptanceCriteria
+        })
+      });
+
+      this.events.create({
+        sessionId: session.id,
+        type: 'agent_message',
+        taskId: interruptTask.id,
+        fromAgentId: coordinator.id,
+        toAgentIds: relevantAgentIds,
+        content: `Coordinator：收到用户执行中补充要求，已同步给相关 Agent，并会注入后续任务上下文。补充内容：${content}`,
+        metadata: createMetadata('chat_message', {
+          messageKind: 'handoff',
+          phase: 'user_message_routing',
+          relatedTaskIds: [interruptTask.id],
+          mentionedAgentIds: relevantAgentIds,
+          handlingPlan
         })
       });
 
@@ -281,6 +302,7 @@ export class SessionsService {
           taskId: interruptTask.id
         })
       });
+      this.restartExecutionWithUpdatedContext(session, event.id, relevantAgentIds, interruptTask.id);
       this.touchSession(session);
     } else if (this.shouldReopenRequirementLoop(session.status, handlingPlan.requiresBriefRevision)) {
       this.reopenRequirementLoop(session, content, event, handlingPlan.affectedAgentIds, 'user_requirement_supplement');
@@ -794,6 +816,46 @@ export class SessionsService {
     }
     this.tasks.resetStaleRunning(session.id);
     const unfinishedTasks = this.tasks.unfinished(session.id);
+    this.execution.start(session, brief, unfinishedTasks, (outcome) => this.applyOutcome(session.id, outcome));
+  }
+
+  private restartExecutionWithUpdatedContext(
+    session: SessionDetail,
+    sourceEventId: string,
+    affectedAgentIds: string[],
+    interruptTaskId: string
+  ) {
+    if (session.status !== 'EXECUTING' || !this.execution.isRunning(session.id)) {
+      return;
+    }
+    const brief = session.currentTaskBriefId
+      ? this.orchestrator.getBrief(session.id, session.currentTaskBriefId)
+      : undefined;
+    if (!brief) {
+      this.applyOutcome(session.id, { kind: 'ask_user', reason: messages.resumeBriefMissing });
+      return;
+    }
+
+    const unfinishedTasks = this.tasks.unfinished(session.id).filter((task) => task.id !== interruptTaskId);
+    if (!unfinishedTasks.length) {
+      return;
+    }
+
+    this.execution.cancel(session.id);
+    this.events.create({
+      sessionId: session.id,
+      type: 'session_status_changed',
+      priority: 'high',
+      content: '执行中补充需求已写入相关 Agent 上下文，正在重调度未完成任务。',
+      metadata: createMetadata('system_notice', {
+        status: session.status,
+        reason: 'executing_user_interrupt_rescheduled',
+        sourceEventId,
+        affectedAgentIds,
+        interruptTaskId,
+        affectedTaskIds: unfinishedTasks.map((task) => task.id)
+      })
+    });
     this.execution.start(session, brief, unfinishedTasks, (outcome) => this.applyOutcome(session.id, outcome));
   }
 

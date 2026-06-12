@@ -360,6 +360,12 @@ async function runMainChain() {
   }
   const briefConfirmedEvent = await waitForEvent(sessionId, "brief_confirmed");
   expectContractEvent(briefConfirmedEvent, "brief_confirmed");
+  const taskClaimedEvent = await waitForEvent(sessionId, "task_claimed");
+  expectContractEvent(taskClaimedEvent, "task_claimed");
+  const taskClaimedPayload = (taskClaimedEvent.metadata as Json).payload as Json;
+  if (taskClaimedPayload.status !== "claimed" || typeof taskClaimedEvent.fromAgentId !== "string") {
+    throw new Error("Task acceptance must be recorded as a claimed task with the accepting Agent");
+  }
   const briefsAfterConfirm = await api<{ data: Json[] }>(`/sessions/${sessionId}/briefs`);
   const confirmedBrief = briefsAfterConfirm.data.find((brief) => brief.id === briefId) as Json | undefined;
   if (!confirmedBrief || confirmedBrief.confirmedByUser !== true) {
@@ -393,9 +399,27 @@ async function runMainChain() {
   if (!interruptConfirmation) {
     throw new Error("Executing interrupt must create a task to handle it");
   }
+  const interruptHandoff = await waitForMatchingEvent(
+    sessionId,
+    "agent_message",
+    (event) => (((event.metadata as Json).payload as Json).phase === "user_message_routing")
+  );
+  if (!Array.isArray(interruptHandoff.toAgentIds) || interruptHandoff.toAgentIds.length === 0) {
+    throw new Error("Executing user interrupt must be visibly routed to affected Agents");
+  }
 
   // 验证插话后执行继续到完成，不作废任务
   await waitForStatus(sessionId, "COMPLETED", 60_000);
+
+  const taskHandoff = await waitForMatchingEvent(
+    sessionId,
+    "agent_message",
+    (event) => (((event.metadata as Json).payload as Json).phase === "task_handoff")
+  );
+  const taskHandoffPayload = (taskHandoff.metadata as Json).payload as Json;
+  if (!Array.isArray(taskHandoffPayload.mentionedAgentIds) || taskHandoffPayload.mentionedAgentIds.length === 0) {
+    throw new Error("Completed tasks must produce a visible Agent handoff communication");
+  }
 
   const postReview = await waitForEvent(sessionId, "post_review_completed");
   const postReviewPayload = (postReview.metadata as Json).payload as Json;

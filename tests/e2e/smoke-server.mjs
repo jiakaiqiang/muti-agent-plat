@@ -175,6 +175,9 @@ export async function createSessionAndWaitForBrief(apiBase, input, extra = {}) {
     })
   });
   const sessionId = created.data.session.id;
-  const briefEvent = await waitForEvent(apiBase, sessionId, 'brief_created');
-  return { sessionId, briefId: briefEvent.metadata.payload.briefId };
+  const session = await waitForStatus(apiBase, sessionId, 'WAIT_USER_CONFIRM');
+  const briefId =
+    session.currentTaskBriefId ??
+    (await waitForEvent(apiBase, sessionId, 'brief_created')).metadata.payload.briefId;
+  return { sessionId, briefId };
 }
