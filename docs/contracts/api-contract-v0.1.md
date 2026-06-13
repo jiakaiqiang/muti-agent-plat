@@ -445,7 +445,7 @@ POST /api/knowledge-bases/:knowledgeBaseId/documents
 ```ts
 type CreateKnowledgeDocumentRequest = {
   title: string
-  sourceType: 'text' | 'markdown' | 'file' | 'feishu_doc'
+  sourceType: 'text' | 'markdown' | 'file' | 'feishu_doc' | 'meeting_note' | 'data_table' | 'external_reference'
   content?: string
   sourceUri?: string
   metadata?: Record<string, unknown>
@@ -566,6 +566,7 @@ GET /api/sessions/:sessionId/debug/context-packs
 GET /api/sessions/:sessionId/debug/runtime-invocations
 GET /api/sessions/:sessionId/debug/rag-retrievals
 GET /api/sessions/:sessionId/debug/token-usage
+GET /api/sessions/:sessionId/debug/summary-memory
 ```
 
 规则：
@@ -574,6 +575,7 @@ GET /api/sessions/:sessionId/debug/token-usage
 - `runtime-invocations` 返回调用状态、阶段、Agent、usage 和 Context Pack 摘要。
 - `rag-retrievals` 从 `rag_retrieved` 事件派生可追溯检索记录。
 - `token-usage` 汇总 Runtime invocation 的 token usage。
+- `summary-memory` 返回关键阶段沉淀的 `summary_memory_checkpoint` artifact，用于长链路续跑和裁剪后追溯。
 
 ## 12. Capabilities API
 

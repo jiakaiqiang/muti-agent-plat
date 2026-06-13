@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import type { KnowledgeDocument } from '@agent-cluster/shared';
 import { ok } from '../../common/api-response.js';
 import { KnowledgeService } from './knowledge.service.js';
 
@@ -19,7 +20,7 @@ export class KnowledgeController {
   @Post(':knowledgeBaseId/documents')
   createDocument(
     @Param('knowledgeBaseId') knowledgeBaseId: string,
-    @Body() body: { title: string; sourceType: 'text' | 'markdown' | 'file' | 'feishu_doc'; sourceUri?: string; content?: string }
+    @Body() body: { title: string; sourceType: KnowledgeDocument['sourceType']; sourceUri?: string; content?: string }
   ) {
     return ok(this.knowledge.createDocument(knowledgeBaseId, body));
   }

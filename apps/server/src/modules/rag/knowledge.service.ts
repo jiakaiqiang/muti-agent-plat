@@ -122,6 +122,8 @@ export class KnowledgeService {
         knowledgeBaseId: document.knowledgeBaseId,
         documentId: document.id,
         title: document.title,
+        sourceType: document.sourceType,
+        sourceUri: document.sourceUri,
         snippet,
         normalizedText: this.normalize(snippet),
         score: 0

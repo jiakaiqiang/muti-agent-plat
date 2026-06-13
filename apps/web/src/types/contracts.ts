@@ -136,6 +136,19 @@ export type TaskEventPayload = {
   dependsOnTaskIds?: string[]
   acceptanceCriteria?: string[]
   resultSummary?: string
+  requestedContext?: RuntimeContextRequest
+}
+
+export type RuntimeContextRequest = {
+  reason?: string
+  requestedRefs?: Array<{
+    type?: string
+    label?: string
+    ref?: string
+  }>
+  requestedPaths?: string[]
+  requestedCommands?: string[]
+  followUpInstruction?: string
 }
 
 export type AgentStatusChangedPayload = {
@@ -161,6 +174,7 @@ export type RuntimeEventPayload = {
   tokenOutput?: number
   cost?: number
   error?: RuntimeError
+  requestedContext?: RuntimeContextRequest
 }
 
 export type ToolEventPayload = {

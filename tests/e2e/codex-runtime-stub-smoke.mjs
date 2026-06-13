@@ -62,6 +62,7 @@ try {
 
   server = await startSmokeServer('codex-runtime-stub-smoke', {
     DISCUSSION_MAX_ROUNDS: '0',
+    REQUIRE_USER_CONFIRMATION: 'false',
     CODEX_RUNTIME_ENABLED: 'true',
     CODEX_RUNTIME_COMMAND: 'node',
     CODEX_RUNTIME_ARGS_JSON: JSON.stringify([stubScript]),

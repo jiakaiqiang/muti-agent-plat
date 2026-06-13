@@ -138,6 +138,12 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
                   'Return only valid JSON matching the requested RuntimeOutput kind.',
                   `Expected kind: ${input.expectedOutput.kind}`,
                   'Do not call tools, modify files, or perform external side effects.',
+                  'Use contextPack.taskContext as the Task Context Pack: follow its stagePlan read/do/validate items, taskMap, evidenceSelection.selectedRefs/evidenceRefs, validationRules, and agentResponsibilities. Keep conclusions traceable to those fields.',
+                  'Use contextPack.projectMap when present as the structured project index; prefer its modules, sourceRefs, validationCommands, and riskBoundaries over guessing project layout.',
+                  'Treat taskContext.evidenceSelection.omittedRefs as intentionally excluded context; ask for more evidence instead of inventing details when selected evidence is insufficient.',
+                  'When selected evidence is insufficient for the expected output, return the expected JSON kind with status "blocked" when supported, summary explaining the gap, and requestedContext containing reason, requestedRefs, requestedPaths, requestedCommands, and followUpInstruction. Do not fabricate file contents, APIs, test results, or logs.',
+                  'Use contextPack.continuationState to resume or hand off work consistently across phases, agents, pauses, validation, review, and final delivery.',
+                  'For non-coding tasks, validate fact consistency, scope consistency, traceability, and delivery completeness instead of inventing implementation evidence.',
                   input.contextPack.workspaceSnapshot
                     ? 'Before analyzing the user requirement, inspect contextPack.workspaceSnapshot and contextPack.workspaceFocus. Ground the response in real workspace files and project structure.'
                     : 'No workspace snapshot is available; say when file-level conclusions are assumptions.',
@@ -149,7 +155,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
                     ? 'For task_claim_decision, decide whether this agent should accept the currentTask. Return accepted, reason, optional confidence, optional alternativeAgentKeys/alternativeAgentIds, and optional agentMessages for handoff or coordination.'
                     : '',
                   input.expectedOutput.kind === 'task_execution_result'
-                    ? 'For task_execution_result, include changedArtifacts. If workspaceSnapshot is present, analyze the full impact surface and return fileChanges for every real workspace path that must change, especially all relevantFiles. Do not collapse a multi-file requirement into one file. Use agent-output only for auxiliary summaries. Include optional agentMessages when progress, risks, questions, or handoffs should be sent to other agents; target them with targetAgentKeys such as coordinator, frontend, backend, test, review.'
+                    ? 'For task_execution_result, include changedArtifacts. If this is a validation task or the agent is the Validation Agent, include a test_report artifact with metadata.validationEvidence mapping each taskContext.validationRules item to verdicts and taskContext.evidenceRefs, plus validatorAgentKey, validatorAgentId, and independentFromAgentKeys from taskContext.agentResponsibilities. If workspaceSnapshot is present, analyze the full impact surface and return fileChanges for every real workspace path that must change, especially all relevantFiles. Do not collapse a multi-file requirement into one file. Use agent-output only for auxiliary summaries. Include optional agentMessages when progress, risks, questions, or handoffs should be sent to other agents; target them with targetAgentKeys such as coordinator, frontend, backend, test, review.'
                     : '',
                   input.contextPack.workingDirectory
                     ? 'A local working directory is selected. Return file changes only as RuntimeArtifactOutput.metadata.fileChanges with safe relative paths. The browser applies those changes inside the selected directory.'

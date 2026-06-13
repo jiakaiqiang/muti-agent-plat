@@ -233,8 +233,13 @@ type RuntimeEventPayload = {
   tokenOutput?: number
   cost?: number
   error?: RuntimeError
+  requestedContext?: RuntimeContextRequest
 }
 ```
+
+When `error.code='CONTEXT_INSUFFICIENT'`, `runtime_failed` should render as a visible waiting/blocking card and include the same `requestedContext` on the payload for debug and retry planning.
+
+For real coding runtimes, `runtime_started` must be emitted only after `cap-file-write` preflight passes. If the preflight blocks `codex` or `claude_code`, emit `task_waiting` with `relatedCapabilityId='cap-file-write'`; no `runtime_started` event should be created for that blocked invocation.
 
 ### 6.8 tool_called / tool_completed / tool_failed
 

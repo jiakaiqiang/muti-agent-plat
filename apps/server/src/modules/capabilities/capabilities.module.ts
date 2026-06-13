@@ -8,6 +8,6 @@ import { CapabilitiesService } from './capabilities.service.js';
   imports: [EventsModule],
   controllers: [CapabilitiesController],
   providers: [CapabilitiesService, CapabilityAuditService],
-  exports: [CapabilitiesService]
+  exports: [CapabilitiesService, CapabilityAuditService]
 })
 export class CapabilitiesModule {}

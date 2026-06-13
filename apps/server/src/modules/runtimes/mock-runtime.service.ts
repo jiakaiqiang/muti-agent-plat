@@ -8,11 +8,16 @@ import type {
   PostReviewReportOutput,
   RuntimeUsage,
   RuntimeOutput,
+  RuntimeContextRequest,
   TaskClaimDecisionOutput,
   TaskBriefOutput,
   TaskExecutionResultOutput,
   UserMessageHandlingPlanOutput,
-  RuntimeFileChange
+  RuntimeArtifactOutput,
+  RuntimeFileChange,
+  TaskEvidenceRef,
+  ValidationEvidenceReport,
+  ValidationEvidenceVerdict
 } from '@agent-cluster/shared';
 import { mockRuntimeEnabled } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
@@ -76,6 +81,14 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
           }
         }
       };
+    }
+
+    if (
+      input.options?.scenario === 'context_insufficient' ||
+      ((process.env.MOCK_CONTEXT_INSUFFICIENT === 'true' || this.shouldRequestContextOnce(input)) &&
+        input.expectedOutput.kind === 'task_execution_result')
+    ) {
+      return this.contextInsufficientResult(input);
     }
 
     const output = this.applyReviewRecommendationOverride(this.outputFor(input));
@@ -210,6 +223,78 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
     };
   }
 
+  private contextInsufficientResult(input: AgentRunInput): AgentRunResult {
+    const requestedContext: RuntimeContextRequest = {
+      reason: 'Selected evidence does not include enough concrete workspace material to complete the current phase safely.',
+      requestedRefs: [
+        {
+          type: 'workspace_file',
+          label: 'Relevant source file content',
+          ref: input.contextPack.workspaceFocus?.relevantFiles[0] ?? input.contextPack.taskContext.evidenceRefs[0]?.ref
+        }
+      ],
+      requestedPaths: input.contextPack.workspaceFocus?.relevantFiles.slice(0, 3) ?? [],
+      requestedCommands: input.contextPack.workspaceFocus?.validationCommands.slice(0, 2) ?? [],
+      followUpInstruction: 'Rebuild the Context Pack with the requested files or validation evidence before retrying this runtime phase.'
+    };
+    return {
+      runId: input.runId,
+      runtimeType: 'mock',
+      status: 'blocked',
+      output: {
+        kind: 'task_execution_result',
+        status: 'blocked',
+        summary: requestedContext.reason,
+        completedItems: [],
+        changedArtifacts: [],
+        requestedContext,
+        nextSuggestedActions: [requestedContext.followUpInstruction ?? 'Add the requested context and retry.'],
+        risks: ['Continuing without the requested context could produce fabricated file-level conclusions.']
+      } satisfies TaskExecutionResultOutput,
+      events: [
+        {
+          runId: input.runId,
+          type: 'runtime_started',
+          content: `${input.agent.name} started ${input.phase}`,
+          createdAt: nowIso()
+        },
+        {
+          runId: input.runId,
+          type: 'runtime_failed',
+          content: `${input.agent.name} requested more context during ${input.phase}`,
+          metadata: { code: 'CONTEXT_INSUFFICIENT', requestedContext },
+          createdAt: nowIso()
+        }
+      ],
+      artifacts: [],
+      usage: {
+        ...this.usageFor(input),
+        model: 'mock'
+      },
+      error: {
+        code: 'CONTEXT_INSUFFICIENT',
+        message: requestedContext.reason,
+        retryable: true,
+        requestedContext
+      }
+    };
+  }
+
+  private shouldRequestContextOnce(input: AgentRunInput) {
+    if (process.env.MOCK_CONTEXT_INSUFFICIENT_ONCE !== 'true') {
+      return false;
+    }
+    const taskTitle = input.contextPack.currentTask?.title ?? input.contextPack.sessionGoal;
+    const alreadySupplemented =
+      input.contextPack.relevantMemories.some(
+        (memory) => memory.content.includes('Supplemental context request') && memory.content.includes(taskTitle)
+      ) ||
+      input.contextPack.relevantEvents.some(
+        (event) => event.type === 'agent_message' && event.summary.includes('Supplemental context request recorded')
+      );
+    return !alreadySupplemented;
+  }
+
   private outputFor(input: AgentRunInput): RuntimeOutput {
     return this.requirementAwareOutputFor(input);
   }
@@ -217,6 +302,8 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
   private requirementAwareOutputFor(input: AgentRunInput): RuntimeOutput {
     const goal = this.goal(input);
     const isArchitectureAnalysis = this.isArchitectureAnalysisRequest(goal);
+    const taskDomain = input.contextPack.taskContext?.domain ?? 'coding';
+    const taskIntent = input.contextPack.taskContext?.intent ?? 'implementation';
     const taskTitle = input.contextPack.currentTask?.title ?? goal;
     const taskDescription = input.contextPack.currentTask?.description ?? `Handle the user requirement: ${goal}`;
     const acceptanceCriteria = input.contextPack.currentTask?.acceptanceCriteria?.length
@@ -234,6 +321,12 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
         }
         if (process.env.MOCK_PARALLEL_TASKS === 'true') {
           return this.parallelImplementationBrief(goal);
+        }
+        if (taskDomain === 'non_coding') {
+          return this.nonCodingBrief(goal, taskIntent);
+        }
+        if (taskDomain === 'mixed') {
+          return this.mixedTaskBrief(goal, taskIntent);
         }
         return {
           kind: 'task_brief',
@@ -275,6 +368,12 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
         if (isArchitectureAnalysis) {
           return this.architectureAnalysisExecutionResult(input, goal);
         }
+        if (taskDomain === 'non_coding') {
+          return this.nonCodingExecutionResult(input, goal, taskTitle);
+        }
+        if (this.isValidationRun(input, taskTitle)) {
+          return this.validationExecutionResult(input, goal, taskTitle);
+        }
         return {
           kind: 'task_execution_result',
           status: 'completed',
@@ -302,6 +401,22 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
             recommendation: 'deliver'
           } satisfies PostReviewReportOutput;
         }
+        if (taskDomain === 'non_coding') {
+          return {
+            kind: 'post_review_report',
+            isConsistentWithBrief: true,
+            matchedItems: [
+              `Analysis output references the non-coding goal: ${goal}`,
+              'Validation evidence covers fact consistency, scope consistency, traceability, and delivery completeness.',
+              'No source-code implementation evidence was required for this non-coding task.'
+            ],
+            mismatchedItems: [],
+            missingItems: [],
+            outOfScopeChanges: [],
+            testResults: ['Non-coding validation evidence reviewed successfully.'],
+            recommendation: 'deliver'
+          } satisfies PostReviewReportOutput;
+        }
         return {
           kind: 'post_review_report',
           isConsistentWithBrief: true,
@@ -322,6 +437,20 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
             kind: 'final_delivery',
             summary: `已完成项目架构分析：${goal}`,
             completedItems: ['生成工作区架构分析', '生成项目架构分析报告', '完成分析结果复核'],
+            incompleteItems: [],
+            risks: [],
+            artifactRefs: []
+          } satisfies FinalDeliveryOutput;
+        }
+        if (taskDomain === 'non_coding') {
+          return {
+            kind: 'final_delivery',
+            summary: `Completed the non-coding multi-agent workflow for: ${goal}`,
+            completedItems: [
+              `Created a structured analysis or plan for: ${goal}`,
+              'Completed independent validation for fact consistency, scope consistency, traceability, and delivery completeness.',
+              'Completed Review Agent risk and boundary check before delivery.'
+            ],
             incompleteItems: [],
             risks: [],
             artifactRefs: []
@@ -405,6 +534,16 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
   }
 
   private taskClaimDecision(input: AgentRunInput, goal: string, taskTitle: string): TaskClaimDecisionOutput {
+    const domain = input.contextPack.taskContext?.domain ?? 'coding';
+    if (domain === 'non_coding' && ['backend', 'frontend'].includes(input.agent.key)) {
+      return {
+        kind: 'task_claim_decision',
+        accepted: false,
+        reason: `${input.agent.name} recommends assigning "${taskTitle}" to a planning/analysis role for this non-coding task.`,
+        confidence: 0.88,
+        alternativeAgentKeys: ['requirements', 'product-manager', 'test', 'review']
+      };
+    }
     const shouldDecline =
       process.env.MOCK_DECLINE_FRONTEND_TASK === 'true' &&
       input.agent.key === 'frontend' &&
@@ -480,6 +619,296 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
           suggestedAgentKey: 'test',
           dependsOnTaskTitles: [frontendTitle, backendTitle],
           acceptanceCriteria: ['Review starts only after both implementation tasks complete.']
+        }
+      ]
+    };
+  }
+
+  private nonCodingBrief(goal: string, taskIntent: string): TaskBriefOutput {
+    const leadAgent = taskIntent === 'planning' ? 'product-manager' : 'requirements';
+    const analysisTitle = `Analyze request: ${this.shortText(goal, 52)}`;
+    const validationTitle = `Validate analysis: ${this.shortText(goal, 48)}`;
+    return {
+      kind: 'task_brief',
+      goal,
+      scope: [
+        `Analyze and structure the non-coding task: ${goal}`,
+        'Produce a clear recommendation, plan, or explanation.',
+        'Validate the result for factual consistency, scope consistency, traceability, and delivery completeness.',
+        'Review the result for completeness, assumptions, and risks.'
+      ],
+      outOfScope: ['Do not create unnecessary source-code edits for a non-coding task.'],
+      constraints: ['Keep outputs traceable to the original goal and explicit assumptions.'],
+      acceptanceCriteria: [
+        'The output directly addresses the user goal with a structured explanation or plan.',
+        'Open questions, risks, and next steps are visible.',
+        'Validation maps conclusions back to evidence and states any missing evidence.',
+        'Review output confirms completeness and scope control.'
+      ],
+      risks: ['A non-coding task may still reference implementation details that need later coding follow-up.'],
+      openQuestions: [],
+      suggestedTasks: [
+        {
+          title: analysisTitle,
+          description: `Structure the request, assumptions, and recommendation for: ${goal}`,
+          suggestedAgentKey: leadAgent,
+          acceptanceCriteria: ['The result includes scope, assumptions, and a concrete recommendation.']
+        },
+        {
+          title: validationTitle,
+          description: 'Validate facts, scope, traceability, and completeness against the Task Context Pack.',
+          suggestedAgentKey: 'test',
+          dependsOnTaskTitles: [analysisTitle],
+          acceptanceCriteria: ['The validation output identifies evidence used, gaps, and remaining risks.']
+        },
+        {
+          title: `Review analysis: ${this.shortText(goal, 48)}`,
+          description: 'Check completeness, risks, and consistency of the analysis output.',
+          suggestedAgentKey: 'review',
+          dependsOnTaskTitles: [validationTitle],
+          acceptanceCriteria: ['The review identifies covered items, risks, and any remaining open questions.']
+        }
+      ]
+    };
+  }
+
+  private nonCodingExecutionResult(input: AgentRunInput, goal: string, taskTitle: string): TaskExecutionResultOutput {
+    const isValidation = this.isValidationRun(input, taskTitle);
+    const isReview = input.agent.key === 'review' || /^(review|复核|评审)\b/i.test(taskTitle.trim());
+    const artifactTitle = isValidation
+      ? 'Non-coding validation evidence'
+      : isReview
+        ? 'Non-coding review report'
+        : 'Non-coding analysis output';
+    const changedArtifact = isValidation
+      ? this.validationEvidenceArtifact(input, goal, taskTitle, artifactTitle)
+      : {
+          type: 'markdown' as const,
+          title: artifactTitle,
+          summary: `${artifactTitle} for ${this.shortText(goal, 80)}`,
+          content: [
+            `# ${artifactTitle}`,
+            '',
+            `Goal: ${goal}`,
+            `Task: ${taskTitle}`,
+            '',
+            '## Evidence',
+            ...input.contextPack.taskContext.evidenceRefs.slice(0, 8).map((item) => `- ${item.type}: ${item.label}`),
+            '',
+            '## Validation Rules',
+            ...input.contextPack.taskContext.validationRules.map((rule) => `- ${rule.label}: ${rule.evidenceRequired}`)
+          ].join('\n')
+        } satisfies RuntimeArtifactOutput;
+    return {
+      kind: 'task_execution_result',
+      status: 'completed',
+      summary: `${input.agent.name} completed ${taskTitle} for non-coding goal: ${goal}`,
+      completedItems: isValidation
+        ? [
+            'Checked fact consistency against taskContext.evidenceRefs.',
+            'Checked scope consistency against the brief and Domain Map.',
+            'Checked traceability and delivery completeness.'
+          ]
+        : [
+            `Structured the non-coding request: ${goal}`,
+            'Recorded assumptions, evidence references, risks, and next actions.',
+            'Kept the output independent from source-code changes.'
+          ],
+      changedArtifacts: [changedArtifact],
+      agentMessages: this.runtimeAgentMessages(input, goal, taskTitle),
+      nextSuggestedActions: isValidation
+        ? ['Send validation evidence to the Review Agent.', 'Resolve any missing evidence before final delivery.']
+        : ['Run independent validation against the analysis output.', 'Keep final delivery tied to the Domain Map.'],
+      risks: []
+    };
+  }
+
+  private validationExecutionResult(input: AgentRunInput, goal: string, taskTitle: string): TaskExecutionResultOutput {
+    const artifact = this.validationEvidenceArtifact(input, goal, taskTitle);
+    const report = artifact.metadata?.validationEvidence;
+    const warnings = report?.verdicts.filter((verdict) => verdict.status !== 'passed') ?? [];
+    return {
+      kind: 'task_execution_result',
+      status: report?.overallStatus === 'failed' ? 'needs_review' : 'completed',
+      summary: `${input.agent.name} validated "${taskTitle}" with rule-to-evidence traceability for: ${goal}`,
+      completedItems: report?.verdicts.map((verdict) => `Validation rule "${verdict.ruleLabel}" => ${verdict.status}.`) ?? [
+        'Generated validation evidence report.'
+      ],
+      changedArtifacts: [artifact],
+      agentMessages: this.runtimeAgentMessages(input, goal, taskTitle),
+      nextSuggestedActions:
+        report?.overallStatus === 'failed'
+          ? ['Route failed validation rules to the Review Agent.', 'Add missing evidence before final delivery.']
+          : ['Send validation evidence to the Review Agent.', 'Keep final delivery linked to the validation report.'],
+      risks: warnings.map((verdict) => `Validation rule "${verdict.ruleLabel}" needs attention: ${verdict.missingEvidence?.join('; ') ?? 'see notes'}.`)
+    };
+  }
+
+  private validationEvidenceArtifact(
+    input: AgentRunInput,
+    goal: string,
+    taskTitle: string,
+    title = 'Validation evidence report'
+  ): RuntimeArtifactOutput {
+    const report = this.validationEvidenceReport(input, taskTitle);
+    return {
+      type: 'test_report',
+      title,
+      summary: `Validation evidence report for ${this.shortText(goal, 80)} (${report.overallStatus}).`,
+      content: [
+        `# ${title}`,
+        '',
+        `Goal: ${goal}`,
+        `Task: ${taskTitle}`,
+        `Domain: ${report.domain}`,
+        `Overall: ${report.overallStatus}`,
+        '',
+        '## Verdicts',
+        ...report.verdicts.map((verdict) => {
+          const evidenceLabels = verdict.evidenceRefs.map((ref) => `${ref.type}:${ref.label}`).join(', ') || 'none';
+          return `- ${verdict.ruleLabel}: ${verdict.status}; evidence=${evidenceLabels}`;
+        }),
+        '',
+        '## Evidence Refs',
+        ...report.evidenceRefs.map((ref) => `- ${ref.type}: ${ref.label}${ref.ref ? ` (${ref.ref})` : ''}`)
+      ].join('\n'),
+      metadata: {
+        validationEvidence: report
+      }
+    };
+  }
+
+  private validationEvidenceReport(input: AgentRunInput, taskTitle: string): ValidationEvidenceReport {
+    const context = input.contextPack.taskContext;
+    const evidenceRefs = context.evidenceRefs.slice(0, 16);
+    const validationResponsibility = context.agentResponsibilities.find((responsibility) => responsibility.role === 'validation');
+    const verdicts: ValidationEvidenceVerdict[] = context.validationRules.map((rule) => {
+      const directEvidence = this.evidenceForValidationRule(rule.label, evidenceRefs);
+      const evidenceForRule = (directEvidence.length ? directEvidence : evidenceRefs.slice(0, 3)).slice(0, 6);
+      const status: ValidationEvidenceVerdict['status'] = directEvidence.length ? 'passed' : evidenceForRule.length ? 'warning' : 'failed';
+      return {
+        ruleLabel: rule.label,
+        status,
+        evidenceRefs: evidenceForRule,
+        notes: [
+          `Requires: ${rule.evidenceRequired}`,
+          directEvidence.length
+            ? `Matched ${directEvidence.length} direct evidence reference(s).`
+            : 'No direct evidence type matched; linked fallback evidence for Review Agent inspection.'
+        ],
+        missingEvidence: status === 'passed' ? undefined : [rule.evidenceRequired]
+      };
+    });
+    const overallStatus = verdicts.some((verdict) => verdict.status === 'failed')
+      ? 'failed'
+      : verdicts.some((verdict) => verdict.status === 'warning')
+        ? 'warning'
+        : 'passed';
+    return {
+      kind: 'validation_evidence_report',
+      domain: context.domain,
+      intent: context.intent,
+      stage: context.currentStage,
+      taskTitle,
+      validatorAgentKey: input.agent.key,
+      validatorAgentId: input.agent.id,
+      independentFromAgentKeys: validationResponsibility?.independentFrom ?? [],
+      rules: context.validationRules,
+      evidenceRefs,
+      verdicts,
+      overallStatus
+    };
+  }
+
+  private evidenceForValidationRule(ruleLabel: string, evidenceRefs: TaskEvidenceRef[]): TaskEvidenceRef[] {
+    const label = ruleLabel.toLowerCase();
+    const byType = (types: Array<TaskEvidenceRef['type']>) => {
+      const allowed = new Set(types);
+      return this.uniqueEvidenceRefs(evidenceRefs.filter((ref) => allowed.has(ref.type))).slice(0, 6);
+    };
+    if (label.includes('fact')) {
+      return byType(['user_input', 'document_fragment', 'external_reference', 'memory', 'meeting_note', 'data_table', 'historical_decision']);
+    }
+    if (label.includes('scope')) {
+      return byType(['user_input', 'historical_decision', 'event_log', 'artifact', 'memory']);
+    }
+    if (label.includes('trace')) {
+      return this.uniqueEvidenceRefs(evidenceRefs).slice(0, 6);
+    }
+    if (label.includes('delivery')) {
+      return byType(['artifact', 'test', 'event_log', 'user_input', 'memory']);
+    }
+    if (label.includes('typecheck') || label.includes('unit') || label.includes('test') || label.includes('build') || label.includes('e2e') || label.includes('smoke')) {
+      return byType(['test', 'log', 'diff', 'artifact', 'workspace_snapshot', 'workspace_file', 'event_log']);
+    }
+    if (label.includes('reasoning')) {
+      return byType(['artifact', 'event_log', 'user_input', 'memory', 'workspace_snapshot']);
+    }
+    return this.uniqueEvidenceRefs(evidenceRefs).slice(0, 6);
+  }
+
+  private uniqueEvidenceRefs(evidenceRefs: TaskEvidenceRef[]) {
+    const seen = new Set<string>();
+    const unique: TaskEvidenceRef[] = [];
+    for (const ref of evidenceRefs) {
+      const key = `${ref.type}:${ref.label}:${ref.ref ?? ''}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      unique.push(ref);
+    }
+    return unique;
+  }
+
+  private isValidationRun(input: AgentRunInput, taskTitle: string) {
+    return (
+      input.agent.key === 'test' ||
+      /^(validate|validating|verify|verification|e2e|smoke)\b/i.test(taskTitle.trim()) ||
+      taskTitle.trim().startsWith('验证')
+    );
+  }
+
+  private mixedTaskBrief(goal: string, taskIntent: string): TaskBriefOutput {
+    const planningTitle = `Plan mixed task: ${this.shortText(goal, 50)}`;
+    const implementationTitle = `Implement mixed task: ${this.shortText(goal, 48)}`;
+    return {
+      kind: 'task_brief',
+      goal,
+      scope: [
+        `Handle a mixed task combining analysis/planning and implementation: ${goal}`,
+        'Create a structured plan before implementation.',
+        'Validate both the reasoning and the implementation result.'
+      ],
+      outOfScope: ['Do not skip the planning phase for a mixed task.'],
+      constraints: ['Keep planning output and implementation output traceable to the same goal.'],
+      acceptanceCriteria: [
+        'A planning artifact exists before implementation starts.',
+        'Implementation output follows the agreed plan.',
+        'Validation checks both reasoning and execution evidence.'
+      ],
+      risks: ['Mixed tasks can drift if the planning and implementation phases are not linked clearly.'],
+      openQuestions: [],
+      suggestedTasks: [
+        {
+          title: planningTitle,
+          description: `Clarify the plan, scope, and implementation path for: ${goal}`,
+          suggestedAgentKey: taskIntent === 'planning' ? 'product-manager' : 'requirements',
+          acceptanceCriteria: ['The planning output includes scope, constraints, and implementation approach.']
+        },
+        {
+          title: implementationTitle,
+          description: `Produce reviewable implementation artifacts for: ${goal}`,
+          suggestedAgentKey: 'backend',
+          dependsOnTaskTitles: [planningTitle],
+          acceptanceCriteria: ['Implementation output includes concrete artifacts and file changes when needed.']
+        },
+        {
+          title: `Validate mixed task: ${this.shortText(goal, 44)}`,
+          description: 'Validate both the planning rationale and the implementation output.',
+          suggestedAgentKey: 'test',
+          dependsOnTaskTitles: [implementationTitle],
+          acceptanceCriteria: ['Validation covers plan consistency and execution evidence.']
         }
       ]
     };
@@ -817,9 +1246,12 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
 
   private workspaceTargetPaths(input: AgentRunInput) {
     const snapshotPaths = new Set(input.contextPack.workspaceSnapshot?.files.map((file) => file.path) ?? []);
-    const candidates = input.contextPack.workspaceFocus?.relevantFiles?.length
-      ? input.contextPack.workspaceFocus.relevantFiles
-      : input.contextPack.workspaceSnapshot?.files.map((file) => file.path) ?? [];
+    const focus = input.contextPack.workspaceFocus;
+    const candidates = focus?.impactedFiles?.length
+      ? focus.impactedFiles
+      : focus?.relevantFiles?.length
+        ? focus.relevantFiles
+        : input.contextPack.workspaceSnapshot?.files.map((file) => file.path) ?? [];
     return [...new Set(candidates)]
       .filter((path) => snapshotPaths.has(path))
       .filter((path) => !path.startsWith('agent-output/'))

@@ -70,6 +70,35 @@ export type UserMessageIntent =
   | 'knowledge_input'
   | 'preference_input';
 
+export type TaskDomain = 'coding' | 'non_coding' | 'mixed';
+export type TaskIntent =
+  | 'inquiry'
+  | 'analysis'
+  | 'implementation'
+  | 'planning'
+  | 'troubleshooting'
+  | 'review'
+  | 'validation'
+  | 'delivery'
+  | 'qa';
+export type EvidenceSourceType =
+  | 'project_map'
+  | 'workspace_snapshot'
+  | 'workspace_file'
+  | 'workspace_symbol'
+  | 'log'
+  | 'test'
+  | 'diff'
+  | 'event_log'
+  | 'memory'
+  | 'artifact'
+  | 'user_input'
+  | 'external_reference'
+  | 'document_fragment'
+  | 'meeting_note'
+  | 'data_table'
+  | 'historical_decision';
+
 export type SessionWorkingDirectory = {
   kind: 'browser_local' | 'server_local';
   id: UUID;
@@ -116,6 +145,28 @@ export type WorkspaceSnapshot = {
   skipped: WorkspaceSkippedFile[];
   detectedStack?: string[];
   entrypoints?: string[];
+};
+
+export type ProjectMapSource = 'static' | 'generated' | 'merged';
+
+export type ProjectMapModule = {
+  name: string;
+  path: string;
+  responsibility: string;
+  entrypoints: string[];
+  contracts: string[];
+  tests: string[];
+  commonTasks: string[];
+};
+
+export type ProjectMap = {
+  source: ProjectMapSource;
+  modules: ProjectMapModule[];
+  validationCommands: string[];
+  riskBoundaries: string[];
+  memoryLocations: string[];
+  sourceRefs: string[];
+  generatedAt: ISODateTime;
 };
 
 export type RuntimeFileChange = {
@@ -211,6 +262,8 @@ export type SessionDetail = {
   workspaceSnapshot?: WorkspaceSnapshot;
   tokenBudget?: number;
   tokenUsed: number;
+  taskDomain?: TaskDomain;
+  taskIntent?: TaskIntent;
   participatingAgentIds: UUID[];
   createdAt: ISODateTime;
   updatedAt: ISODateTime;
@@ -292,7 +345,7 @@ export type KnowledgeDocument = {
   id: UUID;
   knowledgeBaseId: UUID;
   title: string;
-  sourceType: 'text' | 'markdown' | 'file' | 'feishu_doc';
+  sourceType: 'text' | 'markdown' | 'file' | 'feishu_doc' | 'meeting_note' | 'data_table' | 'external_reference';
   sourceUri?: string;
   status: 'pending' | 'indexing' | 'ready' | 'failed';
   createdAt: ISODateTime;
@@ -304,6 +357,8 @@ export type RagMatchedChunk = {
   knowledgeBaseId: UUID;
   documentId: UUID;
   title: string;
+  sourceType?: KnowledgeDocument['sourceType'];
+  sourceUri?: string;
   snippet: string;
   score: number;
 };
@@ -464,15 +519,151 @@ export type RuntimeCapabilityDefinition = {
   description?: string;
 };
 
+export type TaskEvidenceRef = {
+  type: EvidenceSourceType;
+  label: string;
+  ref?: string;
+  estimatedTokens?: number;
+  selectionReason?: string;
+  omissionReason?: string;
+};
+
+export type EvidenceSelectionStrategy = 'coding_minimal' | 'non_coding_minimal' | 'mixed_minimal';
+
+export type TaskEvidenceSelection = {
+  phase: AgentRunPhase;
+  strategy: EvidenceSelectionStrategy;
+  query: string;
+  maxEvidenceRefs: number;
+  selectedCount: number;
+  omittedCount: number;
+  selectedTypes: EvidenceSourceType[];
+  omittedTypes: EvidenceSourceType[];
+  selectedRefs: TaskEvidenceRef[];
+  omittedRefs: TaskEvidenceRef[];
+  rules: string[];
+};
+
+export type TaskMapKind = 'project_map' | 'domain_map';
+export type TaskMapItemType = 'module' | 'boundary' | 'entrypoint' | 'key_material' | 'validation_path';
+
+export type TaskMapItem = {
+  type: TaskMapItemType;
+  label: string;
+  ref?: string;
+  reason?: string;
+};
+
+export type TaskMap = {
+  kind: TaskMapKind;
+  summary: string;
+  items: TaskMapItem[];
+};
+
+export type TaskValidationRule = {
+  label: string;
+  evidenceRequired: string;
+};
+
+export type TaskStagePlanItem = {
+  action: 'read' | 'do' | 'validate';
+  label: string;
+  refs?: string[];
+  reason?: string;
+};
+
+export type TaskStagePlan = {
+  phase: AgentRunPhase;
+  read: TaskStagePlanItem[];
+  do: TaskStagePlanItem[];
+  validate: TaskStagePlanItem[];
+};
+
+export type AgentResponsibility = {
+  role: 'execution' | 'review' | 'validation';
+  agentKey: string;
+  independentFrom?: string[];
+};
+
+export type SummaryMemory = {
+  goal: string;
+  currentState: string;
+  confirmedFacts: string[];
+  completed: string[];
+  decisions: string[];
+  openQuestions: string[];
+  risks: string[];
+  nextSteps: string[];
+  checkpointRefs?: UUID[];
+  sourceEventIds?: UUID[];
+  sourceArtifactIds?: UUID[];
+  sourceMemoryIds?: UUID[];
+};
+
+export type SummaryMemoryCheckpoint = {
+  kind: 'summary_memory_checkpoint';
+  checkpointId: UUID;
+  sessionId: UUID;
+  phase: AgentRunPhase;
+  taskId?: UUID;
+  agentId?: UUID;
+  summaryMemory: SummaryMemory;
+  sourceEventIds: UUID[];
+  sourceArtifactIds: UUID[];
+  sourceMemoryIds: UUID[];
+  createdAt: ISODateTime;
+};
+
+export type TaskContinuationState = {
+  phase: AgentRunPhase;
+  sessionStatus: SessionStatus;
+  activeTaskId?: UUID;
+  activeAgentKey?: string;
+  lastCheckpointRef?: UUID;
+  pendingTaskIds: UUID[];
+  runningTaskIds: UUID[];
+  completedTaskIds: UUID[];
+  blockedTaskIds: UUID[];
+  nextAgentKeys: string[];
+  handoffRefs: UUID[];
+  sourceEventIds: UUID[];
+  sourceArtifactIds: UUID[];
+  resumeHints: string[];
+};
+
+export type TaskContext = {
+  domain: TaskDomain;
+  intent: TaskIntent;
+  currentStage: AgentRunPhase;
+  taskMap: TaskMap;
+  stagePlan: TaskStagePlan;
+  executionMode: 'single_agent' | 'multi_agent';
+  validationMode: 'runtime_checks' | 'human_review' | 'mixed';
+  requiresCodeChanges: boolean;
+  requiresExternalEvidence: boolean;
+  validationRules: TaskValidationRule[];
+  agentResponsibilities: AgentResponsibility[];
+  evidenceSelection: TaskEvidenceSelection;
+  evidenceRefs: TaskEvidenceRef[];
+};
+
 export type ContextPack = {
   systemRules: string[];
   sessionGoal: string;
+  taskContext: TaskContext;
+  summaryMemory: SummaryMemory;
+  continuationState: TaskContinuationState;
   workingDirectory?: SessionWorkingDirectory;
   workspaceSnapshot?: WorkspaceSnapshot;
+  projectMap?: ProjectMap;
   workspaceFocus?: {
     relevantFiles: string[];
+    impactedFiles: string[];
+    testFiles: string[];
+    configFiles: string[];
     possibleEntryPoints: string[];
     detectedStack: string[];
+    validationCommands: string[];
     rationale: string;
   };
   taskBrief?: RuntimeTaskBrief;
@@ -496,6 +687,31 @@ export type AgentRunPhase =
   | 'post_review'
   | 'final_delivery'
   | 'user_message_routing';
+
+export type ValidationVerdictStatus = 'passed' | 'warning' | 'failed' | 'not_applicable';
+
+export type ValidationEvidenceVerdict = {
+  ruleLabel: string;
+  status: ValidationVerdictStatus;
+  evidenceRefs: TaskEvidenceRef[];
+  notes: string[];
+  missingEvidence?: string[];
+};
+
+export type ValidationEvidenceReport = {
+  kind: 'validation_evidence_report';
+  domain: TaskDomain;
+  intent: TaskIntent;
+  stage: AgentRunPhase;
+  taskTitle?: string;
+  validatorAgentKey: string;
+  validatorAgentId?: UUID;
+  independentFromAgentKeys: string[];
+  rules: TaskValidationRule[];
+  evidenceRefs: TaskEvidenceRef[];
+  verdicts: ValidationEvidenceVerdict[];
+  overallStatus: Exclude<ValidationVerdictStatus, 'not_applicable'>;
+};
 
 export type AgentRunInput = {
   runId: UUID;
@@ -530,7 +746,17 @@ export type RuntimeArtifactOutput = {
   summary?: string;
   metadata?: Record<string, unknown> & {
     fileChanges?: RuntimeFileChange[];
+    validationEvidence?: ValidationEvidenceReport;
+    summaryMemoryCheckpoint?: SummaryMemoryCheckpoint;
   };
+};
+
+export type RuntimeContextRequest = {
+  reason: string;
+  requestedRefs: TaskEvidenceRef[];
+  requestedPaths?: string[];
+  requestedCommands?: string[];
+  followUpInstruction?: string;
 };
 
 export type RuntimeError = {
@@ -540,10 +766,12 @@ export type RuntimeError = {
     | 'MODEL_ERROR'
     | 'OUTPUT_SCHEMA_INVALID'
     | 'CAPABILITY_BLOCKED'
+    | 'CONTEXT_INSUFFICIENT'
     | 'TOKEN_BUDGET_EXCEEDED'
     | 'UNKNOWN_ERROR';
   message: string;
   retryable: boolean;
+  requestedContext?: RuntimeContextRequest;
   details?: Record<string, unknown>;
 };
 
@@ -628,6 +856,7 @@ export type TaskExecutionResultOutput = {
   summary: string;
   completedItems: string[];
   changedArtifacts: RuntimeArtifactOutput[];
+  requestedContext?: RuntimeContextRequest;
   agentMessages?: AgentMessageOutput[];
   nextSuggestedActions: string[];
   risks: string[];

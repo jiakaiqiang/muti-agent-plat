@@ -454,9 +454,11 @@ async function applyPendingFileChanges() {
       v-if="activeSection === 'session'"
       :sessions="sessionStore.sessions"
       :current-session-id="sessionStore.currentSession?.id"
+      :favorite-session-ids="sessionStore.favoriteSessionIds"
       @select="selectSession"
       @create="openCreateSessionDialog"
       @delete="deleteSession"
+      @toggle-favorite="sessionStore.toggleFavoriteSession"
     />
 
     <section v-if="activeSection === 'session'" class="workspace-main">

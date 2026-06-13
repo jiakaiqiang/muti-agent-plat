@@ -16,12 +16,19 @@ Top-level fields currently covered by this contract:
 | --- | --- | --- |
 | systemRules | Non-negotiable runtime behavior rules. | Must include side-effect and workspace grounding rules. |
 | sessionGoal | User's original or current goal. | Always present. |
+| taskContext | Task Context Pack for the current invocation. | Carries task domain/intent, current stage, Project Map or Domain Map, stage plan, evidence selection, evidence refs, validation rules, and Execution/Validation/Review responsibilities. |
+| summaryMemory | Compact continuation memory for long chains. | Carries current goal, current state, confirmed facts, completed work, decisions, open questions, risks, and next steps. |
+| continuationState | Structured runtime continuation state. | Carries current phase/status, active task/agent, task queues, latest checkpoint, handoff refs, source refs, next agents, and resume hints. |
 | workingDirectory | Selected workspace binding. | Present when browser or server-local workspace is attached. |
 | workspaceSnapshot | Scanned workspace tree/files. | May be trimmed by token budget before runtime invocation. |
-| workspaceFocus | Relevance summary for the current requirement. | Contains `relevantFiles`, `possibleEntryPoints`, `detectedStack`, and `rationale`. |
+| workspaceFocus | Relevance summary for the current requirement. | Contains `relevantFiles`, `impactedFiles`, `testFiles`, `configFiles`, `possibleEntryPoints`, `detectedStack`, `validationCommands`, and `rationale`. |
 | relevantFiles | Workspace files likely related to the requirement. | Nested under `workspaceFocus`. |
+| impactedFiles | Files likely to be changed or inspected for the current implementation surface. | Nested under `workspaceFocus`; should be compact and derived from selected relevant files plus entrypoints. |
+| testFiles | Test or smoke files related to the implementation surface. | Nested under `workspaceFocus`; should guide validation without loading all tests. |
+| configFiles | Project instructions and build/runtime config files. | Nested under `workspaceFocus`; useful as Project Map key materials. |
 | possibleEntryPoints | Candidate project entrypoints. | Nested under `workspaceFocus`. |
 | detectedStack | Inferred tech stack from workspace scan. | Nested under `workspaceFocus`. |
+| validationCommands | Detected package scripts such as typecheck, test, build, e2e, smoke, or lint. | Nested under `workspaceFocus`; useful as Project Map validation paths. |
 | rationale | Why the workspace focus was selected. | Nested under `workspaceFocus`; assumptions must stay explicit. |
 | taskBrief | Confirmed or draft task brief for the phase. | Required for execution/review/delivery phases. |
 | currentTask | Current task being executed. | Required for `task_execution`. |
@@ -38,22 +45,58 @@ Top-level fields currently covered by this contract:
 
 | AgentRunPhase | Should see | 不应该看到 |
 | --- | --- | --- |
-| discussion | sessionGoal, agentProfile, constraints, relevantEvents, workingDirectory, workspaceSnapshot, workspaceFocus | Full implementation logs or unrelated artifacts. |
-| brief_generation | sessionGoal, relevantEvents, relevantMemories, ragSnippets, workingDirectory, workspaceSnapshot, workspaceFocus | Unconfirmed implementation details or hidden side effects. |
-| brief_revision | previous taskBrief, user feedback, relevantEvents, relevantMemories, workspaceFocus | Unrelated tool output. |
-| task_acceptance | taskBrief, currentTask, agentProfile, constraints, budget | Other agents' unrelated tasks or full event history. |
-| task_execution | taskBrief, currentTask, capabilities, artifacts, constraints, budget, workingDirectory, workspaceSnapshot, workspaceFocus | Other agents' unrelated tasks or unapproved external side effects. |
-| post_review | taskBrief, artifacts, relevantEvents, verification evidence, budget | Unverified guesses or private speculation. |
-| final_delivery | review result, artifacts, risks, memory candidates, budget | Private speculation or unconfirmed external send actions. |
-| user_message_routing | current state, user message, relevantEvents, constraints | Full history noise or irrelevant workspace contents. |
+| discussion | sessionGoal, taskContext, summaryMemory, continuationState, agentProfile, constraints, relevantEvents, workingDirectory, workspaceSnapshot, workspaceFocus | Full implementation logs or unrelated artifacts. |
+| brief_generation | sessionGoal, taskContext, summaryMemory, continuationState, relevantEvents, relevantMemories, ragSnippets, workingDirectory, workspaceSnapshot, workspaceFocus | Unconfirmed implementation details or hidden side effects. |
+| brief_revision | previous taskBrief, user feedback, taskContext, summaryMemory, continuationState, relevantEvents, relevantMemories, workspaceFocus | Unrelated tool output. |
+| task_acceptance | taskBrief, currentTask, taskContext, summaryMemory, continuationState, agentProfile, constraints, budget | Other agents' unrelated tasks or full event history. |
+| task_execution | taskBrief, currentTask, taskContext, summaryMemory, continuationState, capabilities, artifacts, constraints, budget, workingDirectory, workspaceSnapshot, workspaceFocus | Other agents' unrelated tasks or unapproved external side effects. |
+| post_review | taskBrief, taskContext, summaryMemory, continuationState, artifacts, relevantEvents, verification evidence, budget | Unverified guesses or private speculation. |
+| final_delivery | review result, taskContext, summaryMemory, continuationState, artifacts, risks, memory candidates, budget | Private speculation or unconfirmed external send actions. |
+| user_message_routing | current state, user message, taskContext, summaryMemory, continuationState, relevantEvents, constraints | Full history noise or irrelevant workspace contents. |
+
+## Task Context Pack rules
+
+- `taskContext.domain` is `coding`, `non_coding`, or `mixed`; the skeleton stays shared, while maps, evidence, and validation rules diverge by domain.
+- `taskContext.intent` covers inquiry, analysis, implementation, planning, troubleshooting, review, validation, delivery, and qa.
+- Coding and mixed tasks use `taskContext.taskMap.kind=project_map`; non-coding tasks use `domain_map`.
+- Project Map entries should expose modules, boundaries, entrypoints, key materials, and validation paths without loading the whole repository.
+- Domain Map entries should expose topic boundaries, key materials, decision records, and validation paths without free-form guessing.
+- Task Map `key_material` entries should be derived from `taskContext.evidenceSelection.selectedRefs` when available, so the map shows the exact evidence slice currently available to the Agent.
+- `taskContext.stagePlan` must state what the current phase should read, do, and validate. `read` items should cite current map/evidence refs, `do` items should stay inside the phase boundary, and `validate` items should mirror `taskContext.validationRules`.
+- `taskContext.evidenceSelection` must explain how candidate evidence was reduced to the minimal selected set for the current phase. It should include strategy, query, max refs, selected/omitted counts, selected/omitted types, selected refs, a small omitted-ref sample, selection rules, token estimates, and selected/omitted reasons.
+- `taskContext.evidenceRefs` must equal `taskContext.evidenceSelection.selectedRefs`. Runtime agents should cite selected refs and treat omitted refs as unavailable context.
+- `taskContext.evidenceRefs` is the minimum evidence set for the current invocation. Coding refs may include files, symbols, logs, tests, and diffs; non-coding refs may include document fragments, meeting notes, data tables, external references, and historical decisions.
+- If the selected refs are insufficient, Runtime agents must return `CONTEXT_INSUFFICIENT` or a blocked `TaskExecutionResultOutput.requestedContext` with the missing refs, paths, commands, and reason. They must not infer unread file contents, APIs, logs, or test results.
+- RAG hits and relevant memories should also be mirrored into `taskContext.evidenceRefs` using their source type (`document_fragment`, `meeting_note`, `data_table`, `external_reference`) and `memory`, so agents can cite the same compact evidence set after context trimming.
+- Artifact `fileChanges` should be mirrored into `taskContext.evidenceRefs` as `diff` refs when available.
+- `taskContext.agentResponsibilities` must name Execution, Validation, and Review responsibilities. Validation and Review must be independent from Execution when more than one agent is available.
+- `taskContext.validationRules` defines the evidence needed to close the loop. Coding rules cover typecheck/test/build/e2e; non-coding rules cover fact consistency, scope consistency, traceability, and delivery completeness.
+- Validation Agent `test_report` artifacts should include `metadata.validationEvidence`, recording validator agent identity, independent-from agent keys, and every validation rule mapped to cited evidence refs, verdict status, notes, and missing evidence. This keeps validation traceable after context trimming or cross-agent handoff.
+
+## Summary memory rules
+
+- `summaryMemory.currentState` should be sufficient to resume after context compaction.
+- `summaryMemory.confirmedFacts` must only contain facts grounded in user input, project state, events, artifacts, memory, RAG, or workspace scans.
+- `summaryMemory.completed`, `decisions`, `openQuestions`, `risks`, and `nextSteps` are compact continuation state, not a replacement for authoritative evidence.
+- Key stage boundaries should persist a `summary_memory_checkpoint` artifact and a matching Memory item. Later Context Packs should merge the latest checkpoint and retain `checkpointRefs`, `sourceEventIds`, `sourceArtifactIds`, and `sourceMemoryIds` for auditability after context trimming.
+
+## Continuation state rules
+
+- `continuationState.phase` and `sessionStatus` must match the current runtime invocation and session.
+- `activeTaskId` and `activeAgentKey` identify the current handoff target when a task is being accepted or executed.
+- `pendingTaskIds`, `runningTaskIds`, `completedTaskIds`, and `blockedTaskIds` provide the minimal task queue state needed to resume without reloading the full task/event history.
+- `lastCheckpointRef`, `handoffRefs`, `sourceEventIds`, and `sourceArtifactIds` keep pause/resume, review, validation, and final delivery traceable.
+- `resumeHints` should be compact operational instructions, not new facts; facts still belong in `summaryMemory` or evidence refs.
 
 ## Workspace context rules
 
 - `workingDirectory` indicates where file changes may be proposed or applied; it is not permission to write outside that root.
 - `workspaceSnapshot` can include tree, file metadata, summaries, and limited content. Runtime prompts must ground file-level conclusions in this data when present.
-- `workspaceFocus.relevantFiles` guides impact analysis, but the Agent must still state uncertainty when the snapshot is incomplete.
-- `possibleEntryPoints`, `detectedStack`, and `rationale` should be used to explain why a task affects specific files.
+- `workspaceFocus.relevantFiles` guides impact analysis, while `impactedFiles` narrows the likely modification surface. The Agent must still state uncertainty when the snapshot is incomplete.
+- `testFiles` and `validationCommands` should be used to choose scoped validation before broader typecheck/test/build/e2e runs.
+- `configFiles`, `possibleEntryPoints`, `detectedStack`, and `rationale` should be used to explain why a task affects specific files.
 - Token preflight may remove or truncate workspace file contents. Agents must not pretend omitted content was read.
+- For real `codex` and `claude_code` runtime execution, ContextPack delivery is separate from permission. Orchestrator must pass `cap-file-write` preflight before launching a source-writing runtime, and a blocked preflight must leave the task waiting without starting the runtime process.
 
 ## Token and trimming rules
 

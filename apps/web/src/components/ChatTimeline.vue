@@ -7,6 +7,7 @@ import type {
   ConfirmationCardState,
   ConfirmationRequestedPayload,
   FinalDeliveryPayload,
+  RuntimeContextRequest,
   RuntimeFileChange,
   TaskEventPayload,
   ToolEventPayload,
@@ -75,6 +76,23 @@ function toolPayload(message: ChatMessage) {
 
 function taskPayload(message: ChatMessage) {
   return message.messageType === 'task' ? (message.payload as TaskEventPayload | undefined) : undefined
+}
+
+function requestedContextPayload(message: ChatMessage): RuntimeContextRequest | undefined {
+  const payload = message.payload as { requestedContext?: RuntimeContextRequest; error?: { requestedContext?: RuntimeContextRequest } } | undefined
+  return payload?.requestedContext ?? payload?.error?.requestedContext
+}
+
+function requestedContextRefs(message: ChatMessage) {
+  return requestedContextPayload(message)?.requestedRefs ?? []
+}
+
+function requestedContextPaths(message: ChatMessage) {
+  return requestedContextPayload(message)?.requestedPaths ?? []
+}
+
+function requestedContextCommands(message: ChatMessage) {
+  return requestedContextPayload(message)?.requestedCommands ?? []
 }
 
 function artifactPayload(message: ChatMessage) {
@@ -419,6 +437,37 @@ function yesNo(value?: boolean) {
             <p v-if="routingPlan(message)?.coordinatorInstruction" class="routing-instruction">
               {{ routingPlan(message)?.coordinatorInstruction }}
             </p>
+          </div>
+
+          <div v-if="requestedContextPayload(message)" class="structured-block context-request-block">
+            <div class="structured-block__heading">
+              <h3>Context request</h3>
+              <span class="status-pill waiting">Waiting</span>
+            </div>
+            <dl>
+              <div v-if="requestedContextPayload(message)?.reason">
+                <dt>Reason</dt>
+                <dd>{{ requestedContextPayload(message)?.reason }}</dd>
+              </div>
+              <div v-if="requestedContextPayload(message)?.followUpInstruction">
+                <dt>Next instruction</dt>
+                <dd>{{ requestedContextPayload(message)?.followUpInstruction }}</dd>
+              </div>
+            </dl>
+            <div v-if="requestedContextRefs(message).length" class="context-request-list">
+              <strong>Requested refs</strong>
+              <code v-for="ref in requestedContextRefs(message)" :key="`${ref.type ?? 'ref'}:${ref.ref ?? ref.label}`">
+                {{ [ref.type, ref.label, ref.ref].filter(Boolean).join(' / ') }}
+              </code>
+            </div>
+            <div v-if="requestedContextPaths(message).length" class="context-request-list">
+              <strong>Requested paths</strong>
+              <code v-for="path in requestedContextPaths(message)" :key="path">{{ path }}</code>
+            </div>
+            <div v-if="requestedContextCommands(message).length" class="context-request-list">
+              <strong>Requested commands</strong>
+              <code v-for="command in requestedContextCommands(message)" :key="command">{{ command }}</code>
+            </div>
           </div>
 
           <div v-if="errorPayload(message)" class="structured-block error-block">

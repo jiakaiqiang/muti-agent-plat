@@ -5,6 +5,46 @@ export function estimateTokens(value: unknown) {
   return Math.ceil(text.length / 4);
 }
 
+export type ContextTokenBreakdown = {
+  systemRules: number;
+  sessionGoal: number;
+  taskContext: number;
+  summaryMemory: number;
+  continuationState: number;
+  workingDirectory: number;
+  workspaceSnapshot: number;
+  projectMap: number;
+  workspaceFocus: number;
+  taskBrief: number;
+  currentTask: number;
+  agentProfile: number;
+  relevantEvents: number;
+  relevantMemories: number;
+  ragSnippets: number;
+  artifacts: number;
+  capabilities: number;
+  constraints: number;
+  budget: number;
+  total: number;
+};
+
+export type ContextTrimStage = {
+  name: 'initial' | 'focused' | 'compact' | 'minimal';
+  estimatedTokens: number;
+  breakdown: ContextTokenBreakdown;
+};
+
+export type ContextBudgetDiagnostics = {
+  stages: ContextTrimStage[];
+  dominantSections: Array<{ key: keyof ContextTokenBreakdown; tokens: number }>;
+  workspaceFileCount: number;
+  workspaceTreeCount: number;
+  relevantEventCount: number;
+  artifactCount: number;
+  ragSnippetCount: number;
+  memoryCount: number;
+};
+
 export function buildBudget(session: SessionDetail): RuntimeBudget {
   const total = normalizeBudget(session.tokenBudget ?? Number(process.env.TOKEN_BUDGET_DEFAULT ?? 100_000));
   return {
@@ -14,57 +54,84 @@ export function buildBudget(session: SessionDetail): RuntimeBudget {
   };
 }
 
-export function fitContextToBudget(contextPack: ContextPack): { contextPack: ContextPack; estimatedTokens: number; trimmed: boolean } {
+export function fitContextToBudget(contextPack: ContextPack): {
+  contextPack: ContextPack;
+  estimatedTokens: number;
+  trimmed: boolean;
+  diagnostics: ContextBudgetDiagnostics;
+} {
   const maxInputTokens = contextPack.budget.maxInputTokens;
   let next = contextPack;
   let estimatedTokens = estimateTokens(next);
+  const stages: ContextTrimStage[] = [
+    {
+      name: 'initial',
+      estimatedTokens,
+      breakdown: contextTokenBreakdown(next)
+    }
+  ];
   let trimmed = false;
 
   if (!maxInputTokens || estimatedTokens <= maxInputTokens) {
-    return { contextPack: next, estimatedTokens, trimmed };
+    return { contextPack: next, estimatedTokens, trimmed, diagnostics: buildDiagnostics(next, stages) };
   }
 
   next = trimContext(next, {
-    relevantEventCount: 4,
-    ragSnippetCount: 2,
+    relevantEventCount: 6,
+    ragSnippetCount: 3,
     artifactCount: 3,
-    workspaceContentFileCount: 6,
-    workspaceContentCharsPerFile: 4_000,
-    workspaceTotalContentChars: 14_000,
-    workspaceTreeNodeLimit: 160
+    workspaceContentFileCount: 5,
+    workspaceContentCharsPerFile: 2_400,
+    workspaceTotalContentChars: 8_000,
+    workspaceTreeNodeLimit: 120
   });
   estimatedTokens = estimateTokens(next);
+  stages.push({
+    name: 'focused',
+    estimatedTokens,
+    breakdown: contextTokenBreakdown(next)
+  });
   trimmed = true;
 
   if (estimatedTokens <= maxInputTokens) {
-    return { contextPack: next, estimatedTokens, trimmed };
+    return { contextPack: next, estimatedTokens, trimmed, diagnostics: buildDiagnostics(next, stages) };
   }
 
   next = trimContext(next, {
     relevantEventCount: 0,
     ragSnippetCount: 0,
     artifactCount: 2,
-    workspaceContentFileCount: 4,
-    workspaceContentCharsPerFile: 1_200,
-    workspaceTotalContentChars: 4_800,
-    workspaceTreeNodeLimit: 80
+    workspaceContentFileCount: 2,
+    workspaceContentCharsPerFile: 600,
+    workspaceTotalContentChars: 1_200,
+    workspaceTreeNodeLimit: 60
   });
   estimatedTokens = estimateTokens(next);
+  stages.push({
+    name: 'compact',
+    estimatedTokens,
+    breakdown: contextTokenBreakdown(next)
+  });
   if (estimatedTokens <= maxInputTokens) {
-    return { contextPack: next, estimatedTokens, trimmed };
+    return { contextPack: next, estimatedTokens, trimmed, diagnostics: buildDiagnostics(next, stages) };
   }
 
   next = trimContext(next, {
     relevantEventCount: 0,
     ragSnippetCount: 0,
-    artifactCount: 1,
+    artifactCount: 0,
     workspaceContentFileCount: 0,
     workspaceContentCharsPerFile: 0,
     workspaceTotalContentChars: 0,
-    workspaceTreeNodeLimit: 40
+    workspaceTreeNodeLimit: 24
   });
   estimatedTokens = estimateTokens(next);
-  return { contextPack: next, estimatedTokens, trimmed };
+  stages.push({
+    name: 'minimal',
+    estimatedTokens,
+    breakdown: contextTokenBreakdown(next)
+  });
+  return { contextPack: next, estimatedTokens, trimmed, diagnostics: buildDiagnostics(next, stages) };
 }
 
 type TrimOptions = {
@@ -156,4 +223,68 @@ function compactTree(tree: WorkspaceSnapshot['tree'], limit: number) {
 
 function normalizeBudget(value: number) {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : 100_000;
+}
+
+function contextTokenBreakdown(contextPack: ContextPack): ContextTokenBreakdown {
+  const breakdown = {
+    systemRules: estimateTokens(contextPack.systemRules),
+    sessionGoal: estimateTokens(contextPack.sessionGoal),
+    taskContext: estimateTokens(contextPack.taskContext),
+    summaryMemory: estimateTokens(contextPack.summaryMemory),
+    continuationState: estimateTokens(contextPack.continuationState),
+    workingDirectory: estimateTokens(contextPack.workingDirectory),
+    workspaceSnapshot: estimateTokens(contextPack.workspaceSnapshot),
+    projectMap: estimateTokens(contextPack.projectMap),
+    workspaceFocus: estimateTokens(contextPack.workspaceFocus),
+    taskBrief: estimateTokens(contextPack.taskBrief),
+    currentTask: estimateTokens(contextPack.currentTask),
+    agentProfile: estimateTokens(contextPack.agentProfile),
+    relevantEvents: estimateTokens(contextPack.relevantEvents),
+    relevantMemories: estimateTokens(contextPack.relevantMemories),
+    ragSnippets: estimateTokens(contextPack.ragSnippets),
+    artifacts: estimateTokens(contextPack.artifacts),
+    capabilities: estimateTokens(contextPack.capabilities),
+    constraints: estimateTokens(contextPack.constraints),
+    budget: estimateTokens(contextPack.budget),
+    total: 0
+  } satisfies ContextTokenBreakdown;
+  breakdown.total =
+    breakdown.systemRules +
+    breakdown.sessionGoal +
+    breakdown.taskContext +
+    breakdown.summaryMemory +
+    breakdown.continuationState +
+    breakdown.workingDirectory +
+    breakdown.workspaceSnapshot +
+    breakdown.projectMap +
+    breakdown.workspaceFocus +
+    breakdown.taskBrief +
+    breakdown.currentTask +
+    breakdown.agentProfile +
+    breakdown.relevantEvents +
+    breakdown.relevantMemories +
+    breakdown.ragSnippets +
+    breakdown.artifacts +
+    breakdown.capabilities +
+    breakdown.constraints +
+    breakdown.budget;
+  return breakdown;
+}
+
+function buildDiagnostics(contextPack: ContextPack, stages: ContextTrimStage[]): ContextBudgetDiagnostics {
+  const latest = stages.at(-1)?.breakdown ?? contextTokenBreakdown(contextPack);
+  return {
+    stages,
+    dominantSections: Object.entries(latest)
+      .filter(([key]) => key !== 'total')
+      .map(([key, tokens]) => ({ key: key as keyof ContextTokenBreakdown, tokens }))
+      .sort((left, right) => right.tokens - left.tokens)
+      .slice(0, 5),
+    workspaceFileCount: contextPack.workspaceSnapshot?.files.length ?? 0,
+    workspaceTreeCount: contextPack.workspaceSnapshot?.tree.length ?? 0,
+    relevantEventCount: contextPack.relevantEvents.length,
+    artifactCount: contextPack.artifacts.length,
+    ragSnippetCount: contextPack.ragSnippets.length,
+    memoryCount: contextPack.relevantMemories.length
+  };
 }

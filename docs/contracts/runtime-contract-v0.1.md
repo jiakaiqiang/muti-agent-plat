@@ -75,12 +75,19 @@ type RuntimeAgentProfile = {
 type ContextPack = {
   systemRules: string[]
   sessionGoal: string
+  taskContext: TaskContext
+  summaryMemory: SummaryMemory
+  continuationState: TaskContinuationState
   workingDirectory?: SessionWorkingDirectory
   workspaceSnapshot?: WorkspaceSnapshot
   workspaceFocus?: {
     relevantFiles: string[]
+    impactedFiles: string[]
+    testFiles: string[]
+    configFiles: string[]
     possibleEntryPoints: string[]
     detectedStack: string[]
+    validationCommands: string[]
     rationale: string
   }
   taskBrief?: RuntimeTaskBrief
@@ -96,10 +103,164 @@ type ContextPack = {
 }
 ```
 
+```ts
+type TaskContext = {
+  domain: 'coding' | 'non_coding' | 'mixed'
+  intent:
+    | 'inquiry'
+    | 'analysis'
+    | 'implementation'
+    | 'planning'
+    | 'troubleshooting'
+    | 'review'
+    | 'validation'
+    | 'delivery'
+    | 'qa'
+  currentStage: AgentRunPhase
+  taskMap: {
+    kind: 'project_map' | 'domain_map'
+    summary: string
+    items: Array<{
+      type: 'module' | 'boundary' | 'entrypoint' | 'key_material' | 'validation_path'
+      label: string
+      ref?: string
+      reason?: string
+    }>
+  }
+  stagePlan: {
+    phase: AgentRunPhase
+    read: Array<{
+      action: 'read'
+      label: string
+      refs?: string[]
+      reason?: string
+    }>
+    do: Array<{
+      action: 'do'
+      label: string
+      refs?: string[]
+      reason?: string
+    }>
+    validate: Array<{
+      action: 'validate'
+      label: string
+      refs?: string[]
+      reason?: string
+    }>
+  }
+  executionMode: 'single_agent' | 'multi_agent'
+  validationMode: 'runtime_checks' | 'human_review' | 'mixed'
+  requiresCodeChanges: boolean
+  requiresExternalEvidence: boolean
+  validationRules: Array<{ label: string; evidenceRequired: string }>
+  agentResponsibilities: Array<{
+    role: 'execution' | 'review' | 'validation'
+    agentKey: string
+    independentFrom?: string[]
+  }>
+  evidenceSelection: {
+    phase: AgentRunPhase
+    strategy: 'coding_minimal' | 'non_coding_minimal' | 'mixed_minimal'
+    query: string
+    maxEvidenceRefs: number
+    selectedCount: number
+    omittedCount: number
+    selectedTypes: EvidenceSourceType[]
+    omittedTypes: EvidenceSourceType[]
+    selectedRefs: TaskEvidenceRef[]
+    omittedRefs: TaskEvidenceRef[]
+    rules: string[]
+  }
+  evidenceRefs: Array<{
+    type:
+      | 'workspace_snapshot'
+      | 'workspace_file'
+      | 'workspace_symbol'
+      | 'log'
+      | 'test'
+      | 'diff'
+      | 'event_log'
+      | 'memory'
+      | 'artifact'
+      | 'user_input'
+      | 'external_reference'
+      | 'document_fragment'
+      | 'meeting_note'
+      | 'data_table'
+      | 'historical_decision'
+    label: string
+    ref?: string
+    estimatedTokens?: number
+    selectionReason?: string
+    omissionReason?: string
+  }>
+}
+
+type SummaryMemory = {
+  goal: string
+  currentState: string
+  confirmedFacts: string[]
+  completed: string[]
+  decisions: string[]
+  openQuestions: string[]
+  risks: string[]
+  nextSteps: string[]
+  checkpointRefs?: string[]
+  sourceEventIds?: string[]
+  sourceArtifactIds?: string[]
+  sourceMemoryIds?: string[]
+}
+
+type SummaryMemoryCheckpoint = {
+  kind: 'summary_memory_checkpoint'
+  checkpointId: string
+  sessionId: string
+  phase: AgentRunPhase
+  taskId?: string
+  agentId?: string
+  summaryMemory: SummaryMemory
+  sourceEventIds: string[]
+  sourceArtifactIds: string[]
+  sourceMemoryIds: string[]
+  createdAt: string
+}
+
+type TaskContinuationState = {
+  phase: AgentRunPhase
+  sessionStatus: SessionStatus
+  activeTaskId?: string
+  activeAgentKey?: string
+  lastCheckpointRef?: string
+  pendingTaskIds: string[]
+  runningTaskIds: string[]
+  completedTaskIds: string[]
+  blockedTaskIds: string[]
+  nextAgentKeys: string[]
+  handoffRefs: string[]
+  sourceEventIds: string[]
+  sourceArtifactIds: string[]
+  resumeHints: string[]
+}
+```
+
+Summary memory checkpoint 规则：
+- 每个关键阶段完成后应沉淀 `SummaryMemoryCheckpoint`，至少覆盖 brief generation、task execution、post review、final delivery。
+- Checkpoint 应同时写入 artifact metadata（`summaryMemoryCheckpoint`）和 Memory（`sourceMemoryIds`），前者用于审计追溯，后者用于后续 Context Pack 检索和长链路续跑。
+- 后续 Context Pack 的 `summaryMemory` 应合并最近 checkpoint 的 confirmed facts、completed items、decisions、open questions、risks、next steps，并保留 `checkpointRefs` / `source*Ids`。
+
 规则：
 
 - Runtime 不应收到完整群聊历史。
 - `taskBrief` 优先级高于长期 Memory 和 RAG。
+- `taskContext` 是当前调用的 Task Context Pack，必须包含任务地图、最小证据、验证规则和 Execution/Validation/Review 分工。
+- `taskContext.taskMap.items` 必须包含当前阶段可用的模块/边界/入口/关键资料/验证路径；其中 `key_material` 应优先来自 `taskContext.evidenceSelection.selectedRefs`，避免把整仓或整库资料一次性塞入 runtime。
+- 编程任务的 `workspaceFocus` 应区分 `relevantFiles`、`impactedFiles`、`testFiles`、`configFiles`、`possibleEntryPoints` 和 `validationCommands`；Project Map 应把影响文件映射为模块、配置文件映射为关键资料、测试文件和验证命令映射为验证路径。
+- `taskContext.stagePlan` 是当前阶段的显式编排计划，必须拆成 `read` / `do` / `validate` 三组；每个 item 应说明动作标签、引用的 map/evidence/artifact refs，以及为什么本阶段需要它。
+- `taskContext.evidenceSelection` 记录候选证据如何被裁剪为最小证据集，包括选择策略、query、上限、selected/omitted counts、selected/omitted types、selected refs、少量 omitted refs、选择规则、证据 token 估算和 selected/omitted 原因。
+- `taskContext.evidenceRefs` 必须等于 `taskContext.evidenceSelection.selectedRefs`，Runtime 只能把 selected refs 视为当前阶段已注入证据；如果不足，应请求更多证据而不是臆造 omitted 内容。
+- `taskContext.evidenceRefs` 必须同步关键 RAG 命中、相关 Memory、artifact fileChanges、错误日志和测试/复盘证据，作为裁剪后仍可追溯的最小证据索引；RAG 命中应按 `sourceType` 映射为 `document_fragment`、`meeting_note`、`data_table` 或 `external_reference`。
+- `summaryMemory` 是长链路续跑摘要，只沉淀已确认事实、当前状态、已完成事项、未决问题、风险和下一步。
+- `continuationState` 是任务切换/续跑状态，必须包含当前 phase、session status、active task/agent、任务队列状态、最近 checkpoint、handoff refs、source refs 和 resume hints；它用于跨阶段、跨 agent、暂停/恢复后的状态一致性。
 - `relevantMemories` 必须来自 Memory API 或自动沉淀的可追溯记忆项。
 - `constraints` 必须显式传入。
 - `ragSnippets` 必须包含来源。
@@ -226,10 +387,13 @@ type TaskExecutionResultOutput = {
   summary: string
   completedItems: string[]
   changedArtifacts: RuntimeArtifactOutput[]
+  requestedContext?: RuntimeContextRequest
   nextSuggestedActions: string[]
   risks: string[]
 }
 ```
+
+When `status='blocked'` because the selected Context Pack is not enough to produce a grounded answer, Runtime should set `requestedContext` instead of guessing.
 
 ### 8.5 PostReviewReportOutput
 
@@ -320,9 +484,39 @@ type RuntimeArtifactOutput = {
   content?: string
   uri?: string
   summary?: string
-  metadata?: Record<string, unknown>
+  metadata?: Record<string, unknown> & {
+    fileChanges?: RuntimeFileChange[]
+    validationEvidence?: ValidationEvidenceReport
+    summaryMemoryCheckpoint?: SummaryMemoryCheckpoint
+  }
+}
+
+type ValidationEvidenceReport = {
+  kind: 'validation_evidence_report'
+  domain: 'coding' | 'non_coding' | 'mixed'
+  intent: TaskContext['intent']
+  stage: AgentRunPhase
+  taskTitle?: string
+  validatorAgentKey: string
+  validatorAgentId?: string
+  independentFromAgentKeys: string[]
+  rules: TaskValidationRule[]
+  evidenceRefs: TaskEvidenceRef[]
+  verdicts: Array<{
+    ruleLabel: string
+    status: 'passed' | 'warning' | 'failed' | 'not_applicable'
+    evidenceRefs: TaskEvidenceRef[]
+    notes: string[]
+    missingEvidence?: string[]
+  }>
+  overallStatus: 'passed' | 'warning' | 'failed'
 }
 ```
+
+规则：
+- Validation Agent 输出 `test_report` 时，应在 `metadata.validationEvidence` 中保存验证 Agent 身份、独立于哪些 Agent、规则、证据引用和 verdict 映射。
+- 每个 verdict 必须对应 `taskContext.validationRules` 中的一条规则，并引用 `taskContext.evidenceRefs`、artifact、日志、测试或检索证据。
+- 非编程任务的验证报告应覆盖事实一致性、范围一致性、结论可追溯性、交付完整性；编程/混合任务应覆盖 typecheck/test/build/e2e 或等价证据。
 
 ## 11. Usage 与预算
 
@@ -396,6 +590,14 @@ CodexRuntime 和 ClaudeCodeRuntime 接入时必须遵守：
 - 必须返回 artifact，包括 diff、测试结果或执行摘要。
 - v1 仅预留 `CodexRuntimeAdapter` 和 `ClaudeCodeRuntimeAdapter` 文件结构，真实执行能力后续版本接入。
 
+Additional real coding runtime rules:
+
+- Before launching `codex` or `claude_code` for a source-writing task, Orchestrator must run a `cap-file-write` preflight through Capability Module and record the check in capability audit.
+- If the preflight is blocked, Runtime must not be started. The task should move to `waiting`, emit `task_waiting`, and include `relatedCapabilityId='cap-file-write'`.
+- A successful preflight does not grant unlimited access. The adapter still receives only the trimmed Context Pack, not the full project or full event stream.
+- Runtime filesystem changes must be captured from before/after snapshots and attached as `actual_filesystem_snapshot` fileChanges or equivalent runtime artifacts.
+- Runtime command execution and test execution must remain auditable and must not bypass Capability Module policy.
+
 ## 15. 错误结构
 
 ```ts
@@ -406,13 +608,27 @@ type RuntimeError = {
     | 'MODEL_ERROR'
     | 'OUTPUT_SCHEMA_INVALID'
     | 'CAPABILITY_BLOCKED'
+    | 'CONTEXT_INSUFFICIENT'
     | 'TOKEN_BUDGET_EXCEEDED'
     | 'UNKNOWN_ERROR'
   message: string
   retryable: boolean
+  requestedContext?: RuntimeContextRequest
   details?: Record<string, unknown>
 }
 ```
+
+```ts
+type RuntimeContextRequest = {
+  reason: string
+  requestedRefs: TaskEvidenceRef[]
+  requestedPaths?: string[]
+  requestedCommands?: string[]
+  followUpInstruction?: string
+}
+```
+
+`CONTEXT_INSUFFICIENT` means Runtime could identify the missing evidence and should be retried after Context Router / Evidence Selector rebuild a smaller supplemental Context Pack. The Orchestrator should surface this as a visible waiting/blocking card, not as an opaque model failure.
 
 ## 16. 校验规则
 

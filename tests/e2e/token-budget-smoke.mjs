@@ -42,6 +42,13 @@ try {
     'error_reported',
     (event) => event.metadata.payload.code === 'TOKEN_BUDGET_EXCEEDED'
   );
+  const tinyEvents = await api(server.apiBase, `/sessions/${tinySessionId}/events`);
+  const budgetError = tinyEvents.data.items.find(
+    (event) => event.type === 'error_reported' && event.metadata.payload?.code === 'TOKEN_BUDGET_EXCEEDED'
+  );
+  if (!budgetError?.metadata?.payload?.diagnostics?.dominantSections?.length) {
+    throw new Error(`Expected token budget diagnostics on failure: ${JSON.stringify(budgetError)}`);
+  }
 
   console.log('token budget smoke ok');
 } finally {

@@ -62,6 +62,7 @@ assertNotIncludes(workflow, '.slice(0, 8)', 'Workflow real agent sync');
 assertNotIncludes(workflow, '.slice(-6)', 'Workflow view');
 
 const workspace = read('apps/web/src/components/SessionWorkspace.vue');
+const timeline = read('apps/web/src/components/ChatTimeline.vue');
 const styles = read('apps/web/src/styles.css');
 for (const mode of ['chat', 'workflow', 'collaboration_graph', 'debug']) {
   assertIncludes(workspace, mode, 'Workspace view mode switcher');
@@ -72,5 +73,20 @@ assertIncludes(workspace, '@switch-view="sessionStore.switchViewMode"', 'Workspa
 assertNotIncludes(styles, '.mode-workflow .workspace-header {\n  display: none;', 'Workflow view mode switcher');
 assertIncludes(styles, 'graph-view-switcher', 'Graph view switcher styles');
 assertIncludes(styles, 'scrollbar-color', 'Themed scrollbar styles');
+
+for (const signal of [
+  'requestedContextPayload',
+  'requestedContextRefs',
+  'requestedContextPaths',
+  'requestedContextCommands',
+  'context-request-block',
+  'Requested refs',
+  'Requested paths',
+  'Requested commands'
+]) {
+  assertIncludes(timeline, signal, 'Chat timeline context request visibility');
+}
+assertIncludes(styles, 'context-request-block', 'Context request block styles');
+assertIncludes(styles, 'context-request-list', 'Context request list styles');
 
 console.log('ui collaboration visibility smoke ok');

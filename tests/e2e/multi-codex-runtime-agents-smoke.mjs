@@ -85,6 +85,7 @@ try {
     DISCUSSION_MAX_ROUNDS: '0',
     MOCK_PARALLEL_TASKS: 'true',
     MOCK_DECLINE_FRONTEND_TASK: 'false',
+    REQUIRE_USER_CONFIRMATION: 'false',
     CODEX_RUNTIME_ENABLED: 'true',
     CODEX_RUNTIME_COMMAND: 'node',
     CODEX_RUNTIME_ARGS_JSON: JSON.stringify([stubScript]),
@@ -134,34 +135,6 @@ try {
   await waitForStatus(server.apiBase, sessionId, 'COMPLETED', 90_000);
 
   const events = await listEvents(server.apiBase, sessionId);
-  const codexCompletions = events.filter(
-    (event) => event.type === 'runtime_completed' && event.metadata.payload?.runtimeType === 'codex'
-  );
-  const codexTaskIds = new Set(codexCompletions.map((event) => event.taskId).filter(Boolean));
-  if (codexTaskIds.size < 2) {
-    throw new Error(`Expected at least two Codex coding tasks, got ${codexTaskIds.size}`);
-  }
-
-  const acceptedClaims = events.filter(
-    (event) =>
-      event.type === 'agent_message' &&
-      event.metadata.payload?.phase === 'task_claim_decision' &&
-      event.metadata.payload?.claimDecision?.accepted === true
-  );
-  if (acceptedClaims.length < 2) {
-    throw new Error(`Expected two autonomous claim decisions, got ${acceptedClaims.length}`);
-  }
-
-  const runtimeCommunications = events.filter(
-    (event) => event.type === 'agent_message' && event.metadata.payload?.phase === 'agent_runtime_communication'
-  );
-  if (runtimeCommunications.length < 2) {
-    throw new Error(`Expected both coding agents to communicate during runtime, got ${runtimeCommunications.length}`);
-  }
-
-  const fileChanges = events
-    .filter((event) => event.type === 'artifact_created' && codexTaskIds.has(event.taskId))
-    .flatMap((event) => event.metadata.payload?.fileChanges ?? []);
   const eventDebug = () =>
     JSON.stringify(
       events
@@ -187,6 +160,34 @@ try {
       null,
       2
     );
+  const codexCompletions = events.filter(
+    (event) => event.type === 'runtime_completed' && event.metadata.payload?.runtimeType === 'codex'
+  );
+  const codexTaskIds = new Set(codexCompletions.map((event) => event.taskId).filter(Boolean));
+  if (codexTaskIds.size < 2) {
+    throw new Error(`Expected at least two Codex coding tasks, got ${codexTaskIds.size}. Events: ${eventDebug()}`);
+  }
+
+  const acceptedClaims = events.filter(
+    (event) =>
+      event.type === 'agent_message' &&
+      event.metadata.payload?.phase === 'task_claim_decision' &&
+      event.metadata.payload?.claimDecision?.accepted === true
+  );
+  if (acceptedClaims.length < 2) {
+    throw new Error(`Expected two autonomous claim decisions, got ${acceptedClaims.length}`);
+  }
+
+  const runtimeCommunications = events.filter(
+    (event) => event.type === 'agent_message' && event.metadata.payload?.phase === 'agent_runtime_communication'
+  );
+  if (runtimeCommunications.length < 2) {
+    throw new Error(`Expected both coding agents to communicate during runtime, got ${runtimeCommunications.length}`);
+  }
+
+  const fileChanges = events
+    .filter((event) => event.type === 'artifact_created' && codexTaskIds.has(event.taskId))
+    .flatMap((event) => event.metadata.payload?.fileChanges ?? []);
   for (const path of ['src/frontend.txt', 'src/backend.txt', 'src/frontend-generated.txt', 'src/backend-generated.txt']) {
     const change = fileChanges.find((item) => item.path === path && item.source === 'actual_filesystem_snapshot');
     if (!change) {

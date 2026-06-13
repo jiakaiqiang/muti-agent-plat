@@ -5,6 +5,8 @@ import type {
   CollaborationEvent,
   SessionDetail,
   SessionStatus,
+  TaskDomain,
+  TaskIntent,
   SessionWorkingDirectory,
   WorkspaceSnapshot
 } from '@agent-cluster/shared';
@@ -112,6 +114,8 @@ export class SessionsService {
       workspaceSnapshot: workspaceBinding.workspaceSnapshot,
       tokenBudget: input.tokenBudget,
       tokenUsed: 0,
+      taskDomain: this.detectTaskDomain(input.input, workspaceBinding.workspaceSnapshot),
+      taskIntent: this.detectTaskIntent(input.input),
       participatingAgentIds,
       createdAt: now,
       updatedAt: now
@@ -861,6 +865,34 @@ export class SessionsService {
 
   private titleFromInput(input: string) {
     return input.trim().slice(0, 28) || '新协作会话';
+  }
+
+  private detectTaskDomain(input: string, workspaceSnapshot?: WorkspaceSnapshot): TaskDomain {
+    const hasWorkspaceCode = Boolean(
+      workspaceSnapshot?.files.some((file) => /\.(ts|tsx|js|jsx|vue|py|java|go|rs|css|scss|sql)$/i.test(file.path))
+    );
+    const hasCodeSignals =
+      hasWorkspaceCode ||
+      /(代码|编码|实现|修复|测试|build|bug|接口|前端|后端|组件|workflow|graph|session|agent|runtime|adapter|model|llm|mcp|codex|claude|repo|项目|工程|开发)/i.test(
+        input
+      );
+    const hasNonCodingSignals =
+      /(需求|方案|分析|调研|汇报|计划|prd|文档|总结|review|验证|竞品|研究|流程|制度|规范)/i.test(input);
+    if (hasCodeSignals && hasNonCodingSignals) return 'mixed';
+    if (hasCodeSignals) return 'coding';
+    return 'non_coding';
+  }
+
+  private detectTaskIntent(input: string): TaskIntent {
+    if (/(交付|发布说明|最终说明|delivery|deliver)/i.test(input)) return 'delivery';
+    if (/(验证|验收|测试|check|smoke|build|typecheck)/i.test(input)) return 'validation';
+    if (/(review|复盘|审查|评审)/i.test(input)) return 'review';
+    if (/(排查|诊断|定位|故障|报错|失败|troubleshoot|debug)/i.test(input)) return 'troubleshooting';
+    if (/(计划|规划|拆解|roadmap|milestone)/i.test(input)) return 'planning';
+    if (/(分析|调研|理解|熟悉|研究|总结)/i.test(input)) return 'analysis';
+    if (/(只问|询问|问题|为什么|如何|怎么|\?|？|咨询|说明|问答)/i.test(input)) return 'inquiry';
+    if (/(qa)/i.test(input)) return 'qa';
+    return 'implementation';
   }
 
   private participatingAgents(session: SessionDetail) {

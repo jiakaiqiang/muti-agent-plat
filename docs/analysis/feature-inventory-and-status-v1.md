@@ -49,6 +49,7 @@ packages/shared
 | BullMQ 队列 | 完成 | `ENABLE_BULLMQ=true` 时执行入 `agent-task-queue`，worker 消费并使用 job id 保证幂等；`GET /api/ops/queues` 读取队列计数。 |
 | 状态机与复盘 | 完成 | `runPipeline` 返回 `delivered/rework/ask_user/cancelled/failed`；`applyOutcome` 消费复盘建议，自动返工受 `REWORK_MAX_ROUNDS` 限制。 |
 | 任务依赖 | 完成 | `SuggestedAgentTask.dependsOnTaskTitles` 会解析为 `dependsOnTaskIds`，执行时只选择依赖已完成的 ready task。 |
+| 统一任务上下文 | 完成 | 会话创建识别 `taskDomain/taskIntent`；`ContextPack.taskContext` 组装 Project Map/Domain Map（模块/边界/入口/关键资料/验证路径）、显式 `stagePlan(read/do/validate)`、`evidenceSelection` 最小证据选择结果、验证规则和 Execution/Validation/Review 分工；编程任务的 `workspaceFocus` 区分相关文件、影响文件、测试文件、配置文件、入口和验证命令，并映射到 Project Map 模块/关键资料/验证路径；Task Map 的 `key_material` 会引用已选证据而非整仓/整库加载；非编程 RAG 命中会按 `sourceType` 映射为文档片段、会议记录、数据表或外部资料证据；Validation Agent 的 `validationEvidence` 会记录验证者身份、独立于哪些 Agent，以及规则到证据的 verdict 映射；`summaryMemory` 支持长链路续跑摘要，并在关键阶段沉淀 `summary_memory_checkpoint` artifact + Memory；`continuationState` 记录 active task/agent、任务队列、handoff refs、checkpoint refs 和 resume hints，供跨阶段/跨 agent 续跑复用。 |
 | Runtime 路由 | 完成 | `RuntimeService` 使用注册表派发 `mock/generic_llm/codex/claude_code`；未实现或未注册 runtime 显式 failed，不再静默回退 mock。 |
 | Generic LLM | 完成 | OpenAI-compatible/Ollama endpoint；缺配置时失败可见；支持超时、退避重试、取消信号和结构化 JSON 输出校验。 |
 | Mock Runtime | 完成 | 支持确定性 dry-run、延迟、失败率、工作区 fileChanges 和多种输出 kind，供本地/e2e 使用。 |
@@ -62,7 +63,7 @@ packages/shared
 | 飞书通知 | 部分 | 最终交付会创建 `feishu_draft` artifact 和确认卡；确认后记录 dry-run tool 完成事件；不会调用真实飞书接口。 |
 | 前端工作台 | 完成 | 三栏工作台、群聊、工作流、协作图、debug、Agent/Knowledge/Model/Tool/Notification 管理入口和中文可见文案。 |
 | 持久化 | 部分 | file backend 原子 rename；PostgreSQL backend 使用常驻 `pg.Pool` 和 JSONB collection 单 key upsert；尚未拆成细粒度关系表。 |
-| 可观测性 | 完成 | 启动日志输出 runtime/persistence/data/BullMQ/recovery；debug API 暴露 context packs、runtime invocations、RAG 和 token usage。 |
+| 可观测性 | 完成 | 启动日志输出 runtime/persistence/data/BullMQ/recovery；debug API 暴露 context packs、runtime invocations、Task Context Pack 摘要、RAG 和 token usage。 |
 | Token 预算 | 完成 | `buildBudget`、`fitContextToBudget` 做估算、裁剪和超预算失败事件；runtime usage 回写 `session.tokenUsed`。 |
 
 ## 4. 当前主流程

@@ -62,6 +62,7 @@ try {
 
   server = await startSmokeServer('claude-code-runtime-stub-smoke', {
     DISCUSSION_MAX_ROUNDS: '0',
+    REQUIRE_USER_CONFIRMATION: 'false',
     CLAUDE_CODE_ENABLED: 'true',
     CLAUDE_CODE_COMMAND: stubCommand,
     CLAUDE_CODE_PROMPT_MODE: 'file',

@@ -7,7 +7,9 @@ import { MemoryModule } from '../memory/memory.module.js';
 import { KnowledgeModule } from '../rag/knowledge.module.js';
 import { RuntimeModule } from '../runtimes/runtime.module.js';
 import { TasksModule } from '../tasks/tasks.module.js';
+import { ContextRouterService } from './context-router.service.js';
 import { OrchestratorService } from './orchestrator.service.js';
+import { ProjectMapService } from './project-map.service.js';
 
 @Module({
   imports: [
@@ -20,7 +22,7 @@ import { OrchestratorService } from './orchestrator.service.js';
     ArtifactsModule,
     CapabilitiesModule
   ],
-  providers: [OrchestratorService],
-  exports: [OrchestratorService]
+  providers: [ContextRouterService, ProjectMapService, OrchestratorService],
+  exports: [ContextRouterService, ProjectMapService, OrchestratorService]
 })
 export class OrchestratorModule {}

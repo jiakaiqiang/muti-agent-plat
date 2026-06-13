@@ -20,6 +20,25 @@ type CreateSessionInput = {
   workspaceSnapshot?: WorkspaceSnapshot
 }
 
+const favoriteStorageKey = 'agent-cluster.favorite-session-ids'
+
+function loadFavoriteSessionIds() {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = window.localStorage.getItem(favoriteStorageKey)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.map((item) => String(item)) : []
+  } catch {
+    return []
+  }
+}
+
+function persistFavoriteSessionIds(ids: string[]) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(favoriteStorageKey, JSON.stringify(ids))
+}
+
 function sortSessionsByRecency(sessions: SessionListItem[]) {
   return [...sessions].sort((left, right) => sessionRecencyTime(right) - sessionRecencyTime(left))
 }
@@ -33,8 +52,12 @@ export const useSessionStore = defineStore('session', {
     sessions: [] as SessionListItem[],
     currentSession: undefined as SessionDetail | undefined,
     currentViewMode: 'chat' as SessionViewMode,
-    loading: false
+    loading: false,
+    favoriteSessionIds: loadFavoriteSessionIds() as string[]
   }),
+  getters: {
+    isFavorite: (state) => (sessionId: string) => state.favoriteSessionIds.includes(sessionId)
+  },
   actions: {
     async loadSessions() {
       this.loading = true
@@ -85,9 +108,17 @@ export const useSessionStore = defineStore('session', {
     async deleteSession(sessionId: string) {
       await apiDelete<{ deleted: boolean; sessionId: string }>(`/sessions/${sessionId}`)
       this.sessions = this.sessions.filter((session) => session.id !== sessionId)
+      this.favoriteSessionIds = this.favoriteSessionIds.filter((id) => id !== sessionId)
+      persistFavoriteSessionIds(this.favoriteSessionIds)
       if (this.currentSession?.id === sessionId) {
         this.currentSession = undefined
       }
+    },
+    toggleFavoriteSession(sessionId: string) {
+      this.favoriteSessionIds = this.favoriteSessionIds.includes(sessionId)
+        ? this.favoriteSessionIds.filter((id) => id !== sessionId)
+        : [...this.favoriteSessionIds, sessionId]
+      persistFavoriteSessionIds(this.favoriteSessionIds)
     },
     async confirmBrief(sessionId: string, briefId: string) {
       // Execution now runs in the background; confirm returns "accepted" and the
