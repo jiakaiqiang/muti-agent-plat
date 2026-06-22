@@ -8,6 +8,7 @@ import { RuntimeModelConfigService } from './runtime-model-config.service.js';
 import { RuntimeController } from './runtime.controller.js';
 import { RuntimeRegistryService } from './runtime-registry.service.js';
 import { RuntimeService } from './runtime.service.js';
+import { FileReaderTool } from '../tools/builtin/file-reader.tool.js';
 import { ToolRegistryService } from '../tools/tool-registry.service.js';
 
 @Module({
@@ -16,6 +17,7 @@ import { ToolRegistryService } from '../tools/tool-registry.service.js';
   providers: [
     RuntimeService,
     RuntimeRegistryService,
+    FileReaderTool,
     ToolRegistryService,
     RuntimeModelConfigService,
     MockRuntimeService,
@@ -23,6 +25,6 @@ import { ToolRegistryService } from '../tools/tool-registry.service.js';
     CodexRuntimeAdapterService,
     ClaudeCodeRuntimeAdapterService
   ],
-  exports: [RuntimeService, RuntimeRegistryService, ToolRegistryService, RuntimeModelConfigService]
+  exports: [RuntimeService, RuntimeRegistryService, ToolRegistryService, FileReaderTool, RuntimeModelConfigService]
 })
 export class RuntimeModule {}
