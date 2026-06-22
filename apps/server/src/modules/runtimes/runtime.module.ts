@@ -8,6 +8,7 @@ import { RuntimeModelConfigService } from './runtime-model-config.service.js';
 import { RuntimeController } from './runtime.controller.js';
 import { RuntimeRegistryService } from './runtime-registry.service.js';
 import { RuntimeService } from './runtime.service.js';
+import { ToolRegistryService } from '../tools/tool-registry.service.js';
 
 @Module({
   imports: [AgentsModule],
@@ -15,12 +16,13 @@ import { RuntimeService } from './runtime.service.js';
   providers: [
     RuntimeService,
     RuntimeRegistryService,
+    ToolRegistryService,
     RuntimeModelConfigService,
     MockRuntimeService,
     GenericLlmRuntimeService,
     CodexRuntimeAdapterService,
     ClaudeCodeRuntimeAdapterService
   ],
-  exports: [RuntimeService, RuntimeRegistryService, RuntimeModelConfigService]
+  exports: [RuntimeService, RuntimeRegistryService, ToolRegistryService, RuntimeModelConfigService]
 })
 export class RuntimeModule {}
