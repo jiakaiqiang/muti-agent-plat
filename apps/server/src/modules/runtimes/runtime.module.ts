@@ -6,6 +6,7 @@ import { GenericLlmRuntimeService } from './generic-llm-runtime.service.js';
 import { MockRuntimeService } from './mock-runtime.service.js';
 import { RuntimeModelConfigService } from './runtime-model-config.service.js';
 import { RuntimeController } from './runtime.controller.js';
+import { RuntimeRegistryService } from './runtime-registry.service.js';
 import { RuntimeService } from './runtime.service.js';
 
 @Module({
@@ -13,12 +14,13 @@ import { RuntimeService } from './runtime.service.js';
   controllers: [RuntimeController],
   providers: [
     RuntimeService,
+    RuntimeRegistryService,
     RuntimeModelConfigService,
     MockRuntimeService,
     GenericLlmRuntimeService,
     CodexRuntimeAdapterService,
     ClaudeCodeRuntimeAdapterService
   ],
-  exports: [RuntimeService, RuntimeModelConfigService]
+  exports: [RuntimeService, RuntimeRegistryService, RuntimeModelConfigService]
 })
 export class RuntimeModule {}

@@ -6,6 +6,7 @@ import { ClaudeCodeRuntimeAdapterService } from './claude-code-runtime-adapter.s
 import { CodexRuntimeAdapterService } from './codex-runtime-adapter.service.js';
 import { GenericLlmRuntimeService } from './generic-llm-runtime.service.js';
 import { MockRuntimeService } from './mock-runtime.service.js';
+import { RuntimeRegistryService } from './runtime-registry.service.js';
 
 export type RuntimeInvocationLog = {
   id: string;
@@ -28,10 +29,10 @@ export type RuntimeInvocationLog = {
 @Injectable()
 export class RuntimeService {
   private readonly invocationsBySession = new Map<string, RuntimeInvocationLog[]>();
-  private readonly adapters = new Map<RuntimeType, AgentRuntimeAdapter>();
 
   constructor(
     private readonly persistence: PersistenceService,
+    private readonly registry: RuntimeRegistryService,
     private readonly mockRuntime: MockRuntimeService,
     private readonly genericLlmRuntime: GenericLlmRuntimeService,
     private readonly codexRuntime: CodexRuntimeAdapterService,
@@ -42,15 +43,15 @@ export class RuntimeService {
       this.invocationsBySession.set(sessionId, invocations);
     }
 
-    this.adapters.set(this.mockRuntime.type, this.mockRuntime);
-    this.adapters.set(this.genericLlmRuntime.type, this.genericLlmRuntime);
-    this.adapters.set(this.codexRuntime.type, this.codexRuntime);
-    this.adapters.set(this.claudeCodeRuntime.type, this.claudeCodeRuntime);
+    void this.registry.registerAdapter(this.mockRuntime);
+    void this.registry.registerAdapter(this.genericLlmRuntime);
+    void this.registry.registerAdapter(this.codexRuntime);
+    void this.registry.registerAdapter(this.claudeCodeRuntime);
   }
 
   async run(input: AgentRunInput, signal?: AbortSignal) {
     const startedAt = nowIso();
-    const adapter = this.adapters.get(input.agent.runtimeType);
+    const adapter = this.registry.getAdapter(input.agent.runtimeType);
     let result: AgentRunResult;
     if (!adapter) {
       result = this.unsupportedResult(input, `Unsupported runtime: ${input.agent.runtimeType}`);
