@@ -3,6 +3,7 @@ import type { AgentMessageOutput, AgentRunInput, AgentRunResult, AgentRuntimeAda
 import { nowIso } from '../../common/time.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { ClaudeCodeRuntimeAdapterService } from './claude-code-runtime-adapter.service.js';
+import { CodeReaderRuntimeAdapterService } from './code-reader-runtime-adapter.service.js';
 import { CodexRuntimeAdapterService } from './codex-runtime-adapter.service.js';
 import { GenericLlmRuntimeService } from './generic-llm-runtime.service.js';
 import { MockRuntimeService } from './mock-runtime.service.js';
@@ -36,7 +37,8 @@ export class RuntimeService {
     private readonly mockRuntime: MockRuntimeService,
     private readonly genericLlmRuntime: GenericLlmRuntimeService,
     private readonly codexRuntime: CodexRuntimeAdapterService,
-    private readonly claudeCodeRuntime: ClaudeCodeRuntimeAdapterService
+    private readonly claudeCodeRuntime: ClaudeCodeRuntimeAdapterService,
+    private readonly codeReaderRuntime: CodeReaderRuntimeAdapterService
   ) {
     const persisted = this.persistence.getCollection<Record<string, RuntimeInvocationLog[]>>('runtimeInvocationsBySession', {});
     for (const [sessionId, invocations] of Object.entries(persisted)) {
@@ -47,6 +49,7 @@ export class RuntimeService {
     void this.registry.registerAdapter(this.genericLlmRuntime);
     void this.registry.registerAdapter(this.codexRuntime);
     void this.registry.registerAdapter(this.claudeCodeRuntime);
+    void this.registry.registerAdapter(this.codeReaderRuntime);
   }
 
   async run(input: AgentRunInput, signal?: AbortSignal) {

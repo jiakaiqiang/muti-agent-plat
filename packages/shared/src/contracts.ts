@@ -41,6 +41,7 @@ export type AgentStatus =
 export type RuntimeType =
   | 'mock'
   | 'generic_llm'
+  | 'code_reader'
   | 'codex'
   | 'claude_code'
   | 'mcp_tool'

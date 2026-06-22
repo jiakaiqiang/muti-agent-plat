@@ -3,6 +3,15 @@ import type { RuntimeType } from '@agent-cluster/shared';
 export type LlmProvider = 'openai-compatible' | 'ollama';
 
 const truthyValues = new Set(['1', 'true', 'yes', 'on']);
+const runtimeTypes = new Set<RuntimeType>([
+  'mock',
+  'generic_llm',
+  'code_reader',
+  'codex',
+  'claude_code',
+  'mcp_tool',
+  'human'
+]);
 const mockFallbackValues = new Set(['1', 'true', 'yes', 'on', 'mock']);
 const defaultAgentRuntimeTypes = new Set<RuntimeType>(['mock', 'generic_llm']);
 const ollamaProviderValues = new Set(['ollama', 'local-ollama']);
@@ -23,6 +32,10 @@ export function defaultAgentRuntimeType(): RuntimeType {
   }
   return 'generic_llm';
 }
+export function isRuntimeType(value: unknown): value is RuntimeType {
+  return typeof value === 'string' && runtimeTypes.has(value as RuntimeType);
+}
+
 
 export function llmProvider(): LlmProvider {
   const configured = process.env.LLM_PROVIDER?.trim().toLowerCase();
@@ -96,6 +109,7 @@ export function runtimeModeLabel(runtimeType: RuntimeType) {
     {
       mock: '模拟运行时',
       generic_llm: '通用大模型',
+      code_reader: 'Code Reader',
       codex: 'Codex',
       claude_code: 'Claude Code',
       mcp_tool: 'MCP 工具',

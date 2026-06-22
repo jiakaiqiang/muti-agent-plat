@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AgentsModule } from '../agents/agents.module.js';
 import { ClaudeCodeRuntimeAdapterService } from './claude-code-runtime-adapter.service.js';
+import { CodeReaderRuntimeAdapterService } from './code-reader-runtime-adapter.service.js';
 import { CodexRuntimeAdapterService } from './codex-runtime-adapter.service.js';
 import { GenericLlmRuntimeService } from './generic-llm-runtime.service.js';
 import { MockRuntimeService } from './mock-runtime.service.js';
@@ -19,12 +20,13 @@ import { ToolRegistryService } from '../tools/tool-registry.service.js';
     RuntimeRegistryService,
     FileReaderTool,
     ToolRegistryService,
+    CodeReaderRuntimeAdapterService,
     RuntimeModelConfigService,
     MockRuntimeService,
     GenericLlmRuntimeService,
     CodexRuntimeAdapterService,
     ClaudeCodeRuntimeAdapterService
   ],
-  exports: [RuntimeService, RuntimeRegistryService, ToolRegistryService, FileReaderTool, RuntimeModelConfigService]
+  exports: [RuntimeService, RuntimeRegistryService, ToolRegistryService, FileReaderTool, CodeReaderRuntimeAdapterService, RuntimeModelConfigService]
 })
 export class RuntimeModule {}
