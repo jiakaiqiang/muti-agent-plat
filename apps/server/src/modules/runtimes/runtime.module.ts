@@ -8,6 +8,7 @@ import { MockRuntimeService } from './mock-runtime.service.js';
 import { RuntimeModelConfigService } from './runtime-model-config.service.js';
 import { RuntimeController } from './runtime.controller.js';
 import { RuntimeRegistryService } from './runtime-registry.service.js';
+import { RuntimeSmartRouterService } from './runtime-smart-router.service.js';
 import { RuntimeService } from './runtime.service.js';
 import { FileReaderTool } from '../tools/builtin/file-reader.tool.js';
 import { ToolRegistryService } from '../tools/tool-registry.service.js';
@@ -20,6 +21,7 @@ import { ToolRegistryService } from '../tools/tool-registry.service.js';
     RuntimeRegistryService,
     FileReaderTool,
     ToolRegistryService,
+    RuntimeSmartRouterService,
     CodeReaderRuntimeAdapterService,
     RuntimeModelConfigService,
     MockRuntimeService,
@@ -27,6 +29,6 @@ import { ToolRegistryService } from '../tools/tool-registry.service.js';
     CodexRuntimeAdapterService,
     ClaudeCodeRuntimeAdapterService
   ],
-  exports: [RuntimeService, RuntimeRegistryService, ToolRegistryService, FileReaderTool, CodeReaderRuntimeAdapterService, RuntimeModelConfigService]
+  exports: [RuntimeService, RuntimeRegistryService, RuntimeSmartRouterService, ToolRegistryService, FileReaderTool, CodeReaderRuntimeAdapterService, RuntimeModelConfigService]
 })
 export class RuntimeModule {}
