@@ -165,6 +165,7 @@ test('RuntimeService resolves adapters through RuntimeRegistryService', async ()
   const codex = makeAdapter('codex', 'external');
   const claude = makeAdapter('claude_code', 'external');
   const codeReader = makeAdapter('code_reader', 'internal');
+  const testRunner = makeAdapter('test_runner', 'internal');
   await registry.registerAdapter(mock);
 
   const service = new RuntimeService(
@@ -174,7 +175,8 @@ test('RuntimeService resolves adapters through RuntimeRegistryService', async ()
     generic as never,
     codex as never,
     claude as never,
-    codeReader as never
+    codeReader as never,
+    testRunner as never
   );
 
   const result = await service.run(makeRunInput('mock'));

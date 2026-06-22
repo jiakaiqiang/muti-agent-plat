@@ -42,6 +42,7 @@ export type RuntimeType =
   | 'mock'
   | 'generic_llm'
   | 'code_reader'
+  | 'test_runner'
   | 'codex'
   | 'claude_code'
   | 'mcp_tool'

@@ -6,6 +6,8 @@ export function runtimeTypeLabel(runtimeType?: RuntimeType | string) {
     {
       mock: '模拟运行时',
       generic_llm: '通用大模型',
+      code_reader: 'Code Reader',
+      test_runner: 'Test Runner',
       codex: 'Codex',
       claude_code: 'Claude Code',
       mcp_tool: 'MCP 工具',

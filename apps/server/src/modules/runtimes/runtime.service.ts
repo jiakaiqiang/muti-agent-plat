@@ -8,6 +8,7 @@ import { CodexRuntimeAdapterService } from './codex-runtime-adapter.service.js';
 import { GenericLlmRuntimeService } from './generic-llm-runtime.service.js';
 import { MockRuntimeService } from './mock-runtime.service.js';
 import { RuntimeRegistryService } from './runtime-registry.service.js';
+import { TestRunnerRuntimeAdapterService } from './test-runner-runtime-adapter.service.js';
 
 export type RuntimeInvocationLog = {
   id: string;
@@ -38,7 +39,8 @@ export class RuntimeService {
     private readonly genericLlmRuntime: GenericLlmRuntimeService,
     private readonly codexRuntime: CodexRuntimeAdapterService,
     private readonly claudeCodeRuntime: ClaudeCodeRuntimeAdapterService,
-    private readonly codeReaderRuntime: CodeReaderRuntimeAdapterService
+    private readonly codeReaderRuntime: CodeReaderRuntimeAdapterService,
+    private readonly testRunnerRuntime: TestRunnerRuntimeAdapterService
   ) {
     const persisted = this.persistence.getCollection<Record<string, RuntimeInvocationLog[]>>('runtimeInvocationsBySession', {});
     for (const [sessionId, invocations] of Object.entries(persisted)) {
@@ -50,6 +52,7 @@ export class RuntimeService {
     void this.registry.registerAdapter(this.codexRuntime);
     void this.registry.registerAdapter(this.claudeCodeRuntime);
     void this.registry.registerAdapter(this.codeReaderRuntime);
+    void this.registry.registerAdapter(this.testRunnerRuntime);
   }
 
   async run(input: AgentRunInput, signal?: AbortSignal) {
