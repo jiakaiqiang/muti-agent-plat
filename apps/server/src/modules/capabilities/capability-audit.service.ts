@@ -22,6 +22,8 @@ type CapabilityApprovalResult = {
   approvalKey: string;
 };
 
+type ToolAuditPayload = Record<string, unknown>;
+
 @Injectable()
 export class CapabilityAuditService {
   constructor(private readonly events: EventsService) {}
@@ -86,6 +88,54 @@ export class CapabilityAuditService {
           status: 'approved',
           allowed: true,
           requiresUserConfirmation: false
+        }
+      }
+    });
+  }
+
+  recordToolCompleted(input: CapabilityAuditInput, output: ToolAuditPayload) {
+    if (!input.sessionId) {
+      return;
+    }
+
+    this.events.create({
+      sessionId: input.sessionId,
+      type: 'tool_completed',
+      fromAgentId: input.agentId,
+      priority: 'normal',
+      content: input.reason ? `${input.reason} completed.` : 'Tool invocation completed.',
+      metadata: {
+        schemaVersion: '0.1',
+        renderAs: 'tool_card',
+        payload: {
+          agentId: input.agentId,
+          reason: input.reason,
+          status: 'completed',
+          output
+        }
+      }
+    });
+  }
+
+  recordToolFailed(input: CapabilityAuditInput, error: string) {
+    if (!input.sessionId) {
+      return;
+    }
+
+    this.events.create({
+      sessionId: input.sessionId,
+      type: 'tool_failed',
+      fromAgentId: input.agentId,
+      priority: 'high',
+      content: input.reason ? `${input.reason} failed.` : 'Tool invocation failed.',
+      metadata: {
+        schemaVersion: '0.1',
+        renderAs: 'tool_card',
+        payload: {
+          agentId: input.agentId,
+          reason: input.reason,
+          status: 'failed',
+          error
         }
       }
     });
