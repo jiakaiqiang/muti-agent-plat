@@ -46,6 +46,32 @@ export type RuntimeType =
   | 'mcp_tool'
   | 'human';
 
+/** Classifies whether a Runtime is provided by this system or an external provider. */
+export type RuntimeAdapterCategory = 'external' | 'internal';
+
+/** Describes a Runtime Adapter for registry, routing, and operator visibility. */
+export type RuntimeAdapterMetadata = {
+  readonly name: string;
+  readonly version: string;
+  readonly category: RuntimeAdapterCategory;
+  readonly provider: string;
+  readonly capabilityIds: readonly UUID[];
+};
+
+/** Result returned by a Runtime Adapter availability preflight. */
+export type RuntimeAvailability = {
+  available: boolean;
+  reason?: string;
+};
+
+/** Health snapshot used by Runtime registries and smart routing. */
+export type RuntimeHealthStatus = {
+  status: 'healthy' | 'degraded' | 'unhealthy';
+  latency?: number;
+  lastCheckAt: ISODateTime;
+  message?: string;
+};
+
 export type KnowledgeScope = 'global' | 'project' | 'session' | 'agent' | 'role_type';
 export type CapabilityRiskLevel = 'low' | 'medium' | 'high';
 
@@ -888,7 +914,10 @@ export type UserMessageHandlingPlanOutput = UserMessageHandlingPlan & {
 
 export type AgentRuntimeAdapter = {
   type: RuntimeType;
+  metadata?: RuntimeAdapterMetadata;
   run(input: AgentRunInput, signal?: AbortSignal): Promise<AgentRunResult>;
   stream?: (runId: UUID) => AsyncIterable<AgentRuntimeEvent>;
   cancel?: (runId: UUID) => Promise<void>;
+  checkAvailability?: () => Promise<RuntimeAvailability>;
+  healthCheck?: () => Promise<RuntimeHealthStatus>;
 };
