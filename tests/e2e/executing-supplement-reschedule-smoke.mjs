@@ -35,8 +35,8 @@ try {
   await api(server.apiBase, `/sessions/${sessionId}/messages`, {
     method: 'POST',
     body: JSON.stringify({
-      content: 'While executing, add this supplemental constraint to the active backend task context.',
-      mentionedAgentIds: ['backend']
+      content: 'While executing, add this supplemental constraint to the active task context.',
+      mentionedAgentIds: []
     })
   });
 

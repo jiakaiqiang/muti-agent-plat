@@ -74,6 +74,28 @@ export type RuntimeHealthStatus = {
   message?: string;
 };
 
+export type RuntimeSelectionSource =
+  | 'agent_override'
+  | 'session_override'
+  | 'project_default'
+  | 'global_default';
+
+export type EngineeringRuntimeSelection = {
+  effectiveRuntimeType: RuntimeType;
+  source: RuntimeSelectionSource;
+  agentRuntimeType?: RuntimeType;
+  sessionRuntimeType?: RuntimeType;
+  projectRuntimeType?: RuntimeType;
+  globalRuntimeType: RuntimeType;
+  reason: string;
+};
+
+export type EngineeringRuntimeConfig = {
+  sessionDefaultRuntimeType?: RuntimeType;
+  projectDefaultRuntimeType?: RuntimeType;
+  agentRuntimeOverrides?: Record<string, RuntimeType>;
+};
+
 export type KnowledgeScope = 'global' | 'project' | 'session' | 'agent' | 'role_type';
 export type CapabilityRiskLevel = 'low' | 'medium' | 'high';
 
@@ -288,6 +310,14 @@ export type SessionDetail = {
   knowledgeBaseIds?: UUID[];
   workingDirectory?: SessionWorkingDirectory;
   workspaceSnapshot?: WorkspaceSnapshot;
+  engineeringRuntime?: EngineeringRuntimeConfig;
+  supplementalContextRequests?: Array<{
+    id: UUID;
+    taskId: UUID;
+    agentId: UUID;
+    requestedContext: RuntimeContextRequest;
+    createdAt: ISODateTime;
+  }>;
   tokenBudget?: number;
   tokenUsed: number;
   taskDomain?: TaskDomain;
@@ -495,6 +525,8 @@ export type RuntimeAgentProfile = {
   profileMarkdown?: string;
   systemPrompt: string;
   runtimeType: RuntimeType;
+  configuredRuntimeType?: RuntimeType;
+  runtimeSelection?: EngineeringRuntimeSelection;
   modelId?: string;
   capabilityIds: UUID[];
 };
@@ -683,6 +715,29 @@ export type ContextPack = {
   continuationState: TaskContinuationState;
   workingDirectory?: SessionWorkingDirectory;
   workspaceSnapshot?: WorkspaceSnapshot;
+  workspaceManifest?: {
+    rootName: string;
+    fileCount: number;
+    readableFileCount: number;
+    skippedFileCount: number;
+    tree: WorkspaceSnapshot['tree'];
+    files: Array<Omit<WorkspaceFileSnapshot, 'content'> & { contentLength?: number }>;
+    detectedStack?: string[];
+    entrypoints?: string[];
+  };
+  selectedEvidenceContents?: Array<{
+    type: TaskEvidenceRef['type'];
+    label: string;
+    ref?: string;
+    source: 'workspace_file' | 'rag' | 'memory' | 'artifact' | 'event' | 'project_map' | 'workspace_manifest';
+    content?: string;
+    summary?: string;
+    contentLength?: number;
+    truncated?: boolean;
+    tokenEstimate?: number;
+    selectionReason?: string;
+  }>;
+  runtimeSelection?: EngineeringRuntimeSelection;
   projectMap?: ProjectMap;
   workspaceFocus?: {
     relevantFiles: string[];
@@ -704,6 +759,21 @@ export type ContextPack = {
   capabilities: RuntimeCapabilityDefinition[];
   constraints: string[];
   budget: RuntimeBudget;
+  /**
+   * Pull-mode workspace tools the agent may invoke during execution. Only
+   * populated when the runtime actually supports the custom tool-call protocol
+   * (currently `generic_llm` against a server_local working directory). Other
+   * runtimes ignore this field. See docs/design/executing-pull-context-design-v1.md.
+   */
+  availableTools?: WorkspaceToolDescriptor[];
+};
+
+export type WorkspaceToolName = 'read_file';
+
+export type WorkspaceToolDescriptor = {
+  name: WorkspaceToolName;
+  description: string;
+  inputSchema: Record<string, unknown>;
 };
 
 export type AgentRunPhase =

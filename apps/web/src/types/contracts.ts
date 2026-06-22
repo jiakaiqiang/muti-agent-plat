@@ -4,6 +4,7 @@ import type {
   AgentTaskStatus,
   CapabilityRiskLevel,
   CollaborationEvent,
+  EngineeringRuntimeSelection,
   EventPriority,
   KnowledgeBase,
   KnowledgeDocument,
@@ -38,6 +39,8 @@ export type {
   CapabilityRiskLevel,
   CollaborationEvent,
   CollaborationEventType,
+  EngineeringRuntimeConfig,
+  EngineeringRuntimeSelection,
   EventMetadata,
   EventPriority,
   EventRenderType,
@@ -89,6 +92,7 @@ export type RuntimeError = {
     | 'MODEL_ERROR'
     | 'OUTPUT_SCHEMA_INVALID'
     | 'CAPABILITY_BLOCKED'
+    | 'CONTEXT_INSUFFICIENT'
     | 'TOKEN_BUDGET_EXCEEDED'
     | 'UNKNOWN_ERROR'
   message: string
@@ -166,6 +170,7 @@ export type AgentStatusChangedPayload = {
 export type RuntimeEventPayload = {
   runtimeInvocationId: string
   runtimeType: RuntimeType
+  runtimeSelection?: EngineeringRuntimeSelection
   agentId: string
   taskId?: string
   status: RuntimeInvocationStatus

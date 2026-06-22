@@ -17,6 +17,7 @@ import { FileReaderTool } from '../tools/builtin/file-reader.tool.js';
 import { FileWriterTool } from '../tools/builtin/file-writer.tool.js';
 import { TestRunnerTool } from '../tools/builtin/test-runner.tool.js';
 import { ToolRegistryService } from '../tools/tool-registry.service.js';
+import { WorkspaceToolsService } from './workspace-tools.service.js';
 
 @Module({
   imports: [AgentsModule, CapabilitiesModule],
@@ -24,20 +25,34 @@ import { ToolRegistryService } from '../tools/tool-registry.service.js';
   providers: [
     RuntimeService,
     RuntimeRegistryService,
-    FileReaderTool,
-    FileWriterTool,
-    CodeSearchTool,
-    TestRunnerTool,
-    ToolRegistryService,
     RuntimeSmartRouterService,
     TestRunnerRuntimeAdapterService,
-    CodeReaderRuntimeAdapterService,
+    ToolRegistryService,
+    CodeSearchTool,
+    FileReaderTool,
+    FileWriterTool,
+    TestRunnerTool,
     RuntimeModelConfigService,
     MockRuntimeService,
     GenericLlmRuntimeService,
+    CodeReaderRuntimeAdapterService,
     CodexRuntimeAdapterService,
-    ClaudeCodeRuntimeAdapterService
+    ClaudeCodeRuntimeAdapterService,
+    WorkspaceToolsService
   ],
-  exports: [RuntimeService, RuntimeRegistryService, RuntimeSmartRouterService, TestRunnerRuntimeAdapterService, ToolRegistryService, CodeSearchTool, FileReaderTool, FileWriterTool, TestRunnerTool, CodeReaderRuntimeAdapterService, RuntimeModelConfigService]
+  exports: [
+    RuntimeService,
+    RuntimeRegistryService,
+    RuntimeSmartRouterService,
+    TestRunnerRuntimeAdapterService,
+    ToolRegistryService,
+    CodeSearchTool,
+    FileReaderTool,
+    FileWriterTool,
+    TestRunnerTool,
+    CodeReaderRuntimeAdapterService,
+    RuntimeModelConfigService,
+    WorkspaceToolsService
+  ]
 })
 export class RuntimeModule {}

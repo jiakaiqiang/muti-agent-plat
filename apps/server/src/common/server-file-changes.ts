@@ -1,6 +1,7 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { dirname, join, normalize, resolve, sep } from 'node:path';
+import { dirname } from 'node:path';
 import type { RuntimeFileChange } from '@agent-cluster/shared';
+import { safeJoin } from './path-safety.js';
 
 export async function applyServerLocalFileChanges(rootPath: string, fileChanges: RuntimeFileChange[]) {
   for (const change of fileChanges) {
@@ -13,15 +14,6 @@ export async function applyServerLocalFileChanges(rootPath: string, fileChanges:
     await mkdir(dirname(targetPath), { recursive: true });
     await writeFile(targetPath, change.content ?? '', change.encoding ?? 'utf-8');
   }
-}
-
-function safeJoin(rootPath: string, relativePath: string) {
-  const normalizedRoot = resolve(rootPath);
-  const normalizedTarget = resolve(join(normalizedRoot, normalize(relativePath)));
-  if (normalizedTarget !== normalizedRoot && !normalizedTarget.startsWith(`${normalizedRoot}${sep}`)) {
-    throw new Error(`文件变更路径必须位于工作目录内：${relativePath}`);
-  }
-  return normalizedTarget;
 }
 
 async function assertNoUnexpectedOverwrite(targetPath: string, change: RuntimeFileChange) {

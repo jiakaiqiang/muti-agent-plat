@@ -33,7 +33,13 @@ try {
           { path: 'package.json', kind: 'file' }
         ],
         files: [
-          { path: 'src/index.ts', size: 64, language: 'typescript', summary: 'Entry file summary only.' },
+          {
+            path: 'src/index.ts',
+            size: 64,
+            language: 'typescript',
+            content: 'export const supplementalRetryMarker = "REQUESTED_SOURCE_CONTEXT_7421";',
+            summary: 'Entry file summary only.'
+          },
           {
             path: 'package.json',
             size: 128,
@@ -90,6 +96,27 @@ try {
   );
   if (!blockedInvocation || !completedInvocation) {
     throw new Error(`Expected blocked and completed debug invocations for retry: ${JSON.stringify(invocations)}`);
+  }
+
+  const contextPacks = await api(server.apiBase, `/sessions/${sessionId}/debug/context-packs`);
+  const retriedPack = contextPacks.data.items
+    .filter((item) => item.taskId === failedTaskId)
+    .at(-1)?.contextPack;
+  const selectedContents = retriedPack?.selectedEvidenceContents ?? [];
+  const requestedSource = selectedContents.find((item) => item.ref === 'src/index.ts');
+  if (!requestedSource?.content?.includes('REQUESTED_SOURCE_CONTEXT_7421')) {
+    throw new Error(`Expected requested source path content to be injected on retry: ${JSON.stringify(selectedContents)}`);
+  }
+  const selectedRefs = retriedPack?.taskContext?.evidenceSelection?.selectedRefs ?? [];
+  const requestedRef = selectedRefs.find((item) => item.ref === 'src/index.ts');
+  if (!requestedRef?.selectionReason?.includes('Requested by runtime after CONTEXT_INSUFFICIENT')) {
+    throw new Error(`Expected requested source path to be selected with supplemental reason: ${JSON.stringify(selectedRefs)}`);
+  }
+  if ((retriedPack?.workspaceManifest?.files.length ?? 0) > 20) {
+    throw new Error(`Expected manifest to stay compact after retry: ${JSON.stringify(retriedPack?.workspaceManifest)}`);
+  }
+  if ((retriedPack?.selectedEvidenceContents?.length ?? 0) > 3) {
+    throw new Error(`Expected selected evidence contents to stay compact after retry: ${JSON.stringify(retriedPack?.selectedEvidenceContents)}`);
   }
 
   console.log('context insufficient retry smoke ok');

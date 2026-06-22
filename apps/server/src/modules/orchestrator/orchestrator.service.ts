@@ -7,15 +7,18 @@ import type {
   AgentRunResult,
   AgentTask,
   ContextPack,
+  EngineeringRuntimeSelection,
   SummaryMemory,
   SummaryMemoryCheckpoint,
   TaskContext,
   FinalDeliveryOutput,
   PostReviewReportOutput,
   RuntimeArtifactOutput,
+  RuntimeBudget,
   RuntimeContextRequest,
   RuntimeError,
   RuntimeFileChange,
+  RuntimeType,
   SessionDetail,
   SuggestedAgentTask,
   TaskBrief,
@@ -23,12 +26,22 @@ import type {
   TaskClaimDecisionOutput,
   TaskExecutionResultOutput,
   ValidationEvidenceReport,
-  WorkspaceSnapshot
+  WorkspaceSnapshot,
+  WorkspaceToolDescriptor
 } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
 import { applyServerLocalFileChanges } from '../../common/server-file-changes.js';
 import { messages } from '../../common/messages.js';
-import { discussionTimeoutMs, runtimeModeLabel } from '../../common/runtime-config.js';
+import {
+  defaultAgentRuntimeType,
+  defaultEngineeringRuntimeType,
+  discussionTimeoutMs,
+  genericLlmMockFallbackEnabled,
+  llmLocalMaxInputTokens,
+  llmLocalMaxOutputTokens,
+  projectDefaultEngineeringRuntimeType,
+  runtimeModeLabel
+} from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
 import { buildBudget, fitContextToBudget } from '../../common/token.js';
 import { AgentsService } from '../agents/agents.service.js';
@@ -39,6 +52,7 @@ import { EventsService } from '../events/events.service.js';
 import { MemoryService } from '../memory/memory.service.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { KnowledgeService } from '../rag/knowledge.service.js';
+import { RuntimeModelConfigService } from '../runtimes/runtime-model-config.service.js';
 import { RuntimeService } from '../runtimes/runtime.service.js';
 import { TasksService } from '../tasks/tasks.service.js';
 import { ContextRouterService } from './context-router.service.js';
@@ -68,7 +82,8 @@ export class OrchestratorService {
     private readonly capabilityAudit: CapabilityAuditService,
     private readonly persistence: PersistenceService,
     private readonly contextRouter: ContextRouterService,
-    private readonly projectMap: ProjectMapService
+    private readonly projectMap: ProjectMapService,
+    private readonly runtimeModels: RuntimeModelConfigService
   ) {
     const persistedBriefs = this.persistence.getCollection<Record<string, TaskBrief[]>>('briefsBySession', {});
     for (const [sessionId, briefs] of Object.entries(persistedBriefs)) {
@@ -342,6 +357,12 @@ export class OrchestratorService {
 
       const readyTasks = remaining.filter((task) => this.isTaskReady(task, executableTasks));
       if (!readyTasks.length) {
+        // A cancelled pipeline must not report ask_user; otherwise a user
+        // interrupt that just called execution.cancel + execution.start would
+        // race with this branch and trap the session at WAIT_USER_DECISION.
+        if (signal?.aborted) {
+          return { kind: 'cancelled', reason: messages.cancelled };
+        }
         return {
           kind: 'ask_user',
           reason: messages.dependencyBlocked
@@ -408,7 +429,9 @@ export class OrchestratorService {
     const backend = this.pickSessionAgent(session, ['backend'], 0);
     const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
     const taskAgent = task.assigneeAgentId ? this.agents.getByIdOrKey(task.assigneeAgentId) : backend;
-    const runtimePreflight = this.preflightCodingRuntimeSourceWrite(session, task, taskAgent);
+    const executionRuntimeSelection = this.selectEngineeringRuntime(session, taskAgent);
+    const executionRuntimeType = executionRuntimeSelection.effectiveRuntimeType;
+    const runtimePreflight = this.preflightCodingRuntimeSourceWrite(session, task, taskAgent, executionRuntimeType);
     if (!runtimePreflight.allowed) {
       this.tasks.update(task, { status: 'waiting', resultSummary: runtimePreflight.message });
       this.events.create({
@@ -489,15 +512,16 @@ export class OrchestratorService {
       type: 'runtime_started',
       taskId: task.id,
       fromAgentId: taskAgent.id,
-      content: messages.runtimeStarted(taskAgent.name, runtimeModeLabel(taskAgent.runtimeType)),
+      content: messages.runtimeStarted(taskAgent.name, runtimeModeLabel(executionRuntimeType)),
       metadata: createMetadata('system_notice', {
         runtimeInvocationId: runId,
-        runtimeType: taskAgent.runtimeType,
+        runtimeType: executionRuntimeType,
+        runtimeSelection: executionRuntimeSelection,
         status: 'running'
       })
     });
 
-    const contextPack = this.createContextPack(session, taskAgent, brief, task, 'task_execution');
+    const contextPack = this.createContextPack(session, taskAgent, brief, task, 'task_execution', executionRuntimeSelection);
     this.emitMemoryUsedEvent(session.id, task.id, taskAgent.id, contextPack);
 
     const result = await this.runRuntime(session, {
@@ -505,7 +529,7 @@ export class OrchestratorService {
       sessionId: session.id,
       taskId: task.id,
       phase: 'task_execution',
-      agent: this.toRuntimeAgent(taskAgent),
+      agent: this.toRuntimeAgent(taskAgent, executionRuntimeSelection),
       contextPack,
       expectedOutput: { kind: 'task_execution_result', schemaVersion: '0.1' },
       budget: contextPack.budget
@@ -513,7 +537,7 @@ export class OrchestratorService {
 
     if (signal?.aborted) {
       const message = messages.cancelled;
-      this.markTaskCancelled(session.id, task, taskAgent.id, runId, message, taskAgent.runtimeType);
+      this.markTaskCancelled(session.id, task, taskAgent.id, runId, message, executionRuntimeType);
       return { ok: false, message };
     }
 
@@ -527,7 +551,7 @@ export class OrchestratorService {
         taskAgent.id,
         runId,
         message,
-        taskAgent.runtimeType,
+        executionRuntimeType,
         code,
         requestedContext
       );
@@ -562,7 +586,7 @@ export class OrchestratorService {
         taskAgent.id,
         runId,
         output.summary,
-        taskAgent.runtimeType,
+        executionRuntimeType,
         code,
         output.requestedContext
       );
@@ -598,10 +622,11 @@ export class OrchestratorService {
       type: 'runtime_completed',
       taskId: task.id,
       fromAgentId: taskAgent.id,
-      content: messages.runtimeCompleted(taskAgent.name, runtimeModeLabel(taskAgent.runtimeType)),
+      content: messages.runtimeCompleted(taskAgent.name, runtimeModeLabel(executionRuntimeType)),
       metadata: createMetadata('system_notice', {
         runtimeInvocationId: runId,
-        runtimeType: taskAgent.runtimeType,
+        runtimeType: executionRuntimeType,
+        runtimeSelection: executionRuntimeSelection,
         status: 'completed',
         usage: result.usage
       })
@@ -624,7 +649,7 @@ export class OrchestratorService {
     this.emitTaskHandoff(session, task, taskAgent, output.summary);
     this.createSummaryMemoryCheckpoint(session, taskAgent, 'task_execution', brief, task);
     await this.applyServerLocalArtifactChanges(session, fileChanges, {
-      allowSourceFileChanges: this.canApplySourceFileChanges(taskAgent)
+      allowSourceFileChanges: this.canApplySourceFileChanges(taskAgent, executionRuntimeType)
     });
     return { ok: true };
   }
@@ -646,7 +671,8 @@ export class OrchestratorService {
     }
     attemptedAgentIds.add(candidate.id);
     const runId = crypto.randomUUID();
-    const contextPack = this.createContextPack(session, candidate, brief, task, 'task_acceptance');
+    const runtimeSelection = this.selectEngineeringRuntime(session, candidate);
+    const contextPack = this.createContextPack(session, candidate, brief, task, 'task_acceptance', runtimeSelection);
     const result = await this.runRuntime(
       session,
       {
@@ -654,7 +680,7 @@ export class OrchestratorService {
         sessionId: session.id,
         taskId: task.id,
         phase: 'task_acceptance',
-        agent: this.toRuntimeAgent(candidate),
+        agent: this.toRuntimeAgent(candidate, runtimeSelection),
         contextPack,
         expectedOutput: { kind: 'task_claim_decision', schemaVersion: '0.1' },
         budget: contextPack.budget
@@ -669,7 +695,7 @@ export class OrchestratorService {
         ? (result.output as TaskClaimDecisionOutput)
         : this.fallbackClaimDecision(candidate, task, result.error?.message ?? result.status);
 
-    this.emitTaskClaimDecisionEvent(session, task, candidate, coordinator, decision, runId);
+    this.emitTaskClaimDecisionEvent(session, task, candidate, coordinator, decision, runId, runtimeSelection);
     this.emitRuntimeAgentMessages(session, task, candidate, decision.agentMessages ?? [], runId);
 
     if (decision.accepted) {
@@ -727,7 +753,8 @@ export class OrchestratorService {
     candidate: Agent,
     coordinator: Agent,
     decision: TaskClaimDecisionOutput,
-    runId: string
+    runId: string,
+    runtimeSelection: EngineeringRuntimeSelection
   ) {
     const alternativeAgentIds = this.claimDecisionAlternativeIds(session, decision);
     this.events.create({
@@ -743,7 +770,9 @@ export class OrchestratorService {
         relatedTaskIds: [task.id],
         mentionedAgentIds: alternativeAgentIds.length ? alternativeAgentIds : [coordinator.id],
         claimDecision: decision,
-        runtimeInvocationId: runId
+        runtimeInvocationId: runId,
+        runtimeType: runtimeSelection.effectiveRuntimeType,
+        runtimeSelection
       })
     });
   }
@@ -1292,27 +1321,32 @@ export class OrchestratorService {
     });
   }
 
-  private preflightCodingRuntimeSourceWrite(session: SessionDetail, task: AgentTask, agent: Agent) {
-    if (!['codex', 'claude_code'].includes(agent.runtimeType)) {
+  private preflightCodingRuntimeSourceWrite(
+    session: SessionDetail,
+    task: AgentTask,
+    agent: Agent,
+    runtimeType: RuntimeType
+  ) {
+    if (!['codex', 'claude_code'].includes(runtimeType)) {
       return { allowed: true, message: '' };
     }
     if (!agent.capabilityIds.includes('cap-file-write')) {
       return {
         allowed: false,
-        message: `${agent.name} cannot start ${agent.runtimeType} for "${task.title}" because cap-file-write is not assigned.`
+        message: `${agent.name} cannot start ${runtimeType} for "${task.title}" because cap-file-write is not assigned.`
       };
     }
     const input = {
       sessionId: session.id,
       agentId: agent.id,
-      reason: `Start ${agent.runtimeType} for task "${task.title}" with permission to edit files inside the selected server_local workspace.`
+      reason: `Start ${runtimeType} for task "${task.title}" with permission to edit files inside the selected server_local workspace.`
     };
     const result = this.capabilities.checkInvocation('cap-file-write', input);
     this.capabilityAudit.recordCheck(input, result);
     if (!result.allowed) {
       return {
         allowed: false,
-        message: `${agent.name} is waiting for file-write approval before starting ${agent.runtimeType} for "${task.title}".`
+        message: `${agent.name} is waiting for file-write approval before starting ${runtimeType} for "${task.title}".`
       };
     }
     return { allowed: true, message: '' };
@@ -1333,6 +1367,16 @@ export class OrchestratorService {
     requestedContext: RuntimeContextRequest | undefined
   ) {
     if (!requestedContext) return;
+    session.supplementalContextRequests = [
+      ...(session.supplementalContextRequests ?? []),
+      {
+        id: crypto.randomUUID(),
+        taskId: task.id,
+        agentId,
+        requestedContext,
+        createdAt: nowIso()
+      }
+    ].slice(-12);
     const requestedRefs = requestedContext.requestedRefs
       .map((ref) => `${ref.type}:${ref.ref ?? ref.label}`)
       .filter(Boolean)
@@ -1803,8 +1847,8 @@ export class OrchestratorService {
     }
   }
 
-  private canApplySourceFileChanges(agent: Agent) {
-    return agent.capabilityIds.includes('cap-file-write') && ['claude_code', 'codex'].includes(agent.runtimeType);
+  private canApplySourceFileChanges(agent: Agent, runtimeType: RuntimeType) {
+    return agent.capabilityIds.includes('cap-file-write') && ['claude_code', 'codex'].includes(runtimeType);
   }
 
   private isStageArtifactFileChange(change: RuntimeFileChange) {
@@ -1816,17 +1860,42 @@ export class OrchestratorService {
     return !this.isStageArtifactFileChange(change) && change.source === 'actual_filesystem_snapshot';
   }
 
+  private uniqueMemories<TMemory extends { id: string }>(memories: TMemory[]) {
+    const seen = new Set<string>();
+    return memories.filter((memory) => {
+      if (seen.has(memory.id)) {
+        return false;
+      }
+      seen.add(memory.id);
+      return true;
+    });
+  }
+
   private createContextPack(
     session: SessionDetail,
     agent: Agent,
     brief?: TaskBrief,
     task?: AgentTask,
-    phase: AgentRunPhase = 'discussion'
+    phase: AgentRunPhase = 'discussion',
+    runtimeSelection?: EngineeringRuntimeSelection
   ): ContextPack {
     const ragSnippets = task ? this.searchAgentKnowledge(session, agent, task.title) : [];
-    const relevantMemories = this.memories
-      .search(session.id, [session.originalInput, brief?.goal, task?.title, task?.description].filter(Boolean).join(' '), agent.id)
-      .map((memory) => this.memories.toRuntimeMemory(memory));
+    const searchedMemories = this.memories.search(
+      session.id,
+      [session.originalInput, brief?.goal, task?.title, task?.description].filter(Boolean).join(' '),
+      agent.id
+    );
+    const recentAgentSessionMemories =
+      phase === 'task_execution'
+        ? this.memories
+            .list(session.id)
+            .filter((memory) => memory.scope === 'session' && (!memory.agentId || memory.agentId === agent.id))
+            .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+            .slice(0, 4)
+        : [];
+    const relevantMemories = this.uniqueMemories([...searchedMemories, ...recentAgentSessionMemories]).map((memory) =>
+      this.memories.toRuntimeMemory(memory)
+    );
     const workspaceFocus = this.projectMap.workspaceFocus(session);
     const projectMap = this.projectMap.buildProjectMap(session, workspaceFocus);
     const taskContext = this.contextRouter.route({
@@ -1843,19 +1912,23 @@ export class OrchestratorService {
       participatingAgentKeys: this.participatingAgents(session).map((item) => item.key)
     });
     const summaryMemory = this.createSummaryMemory(session, brief, task, phase);
+    const runtimeAgent = this.toRuntimeAgent(agent, runtimeSelection);
     return {
       systemRules: [
         'Return structured JSON matching the expected RuntimeOutput kind.',
         'Do not perform external side effects unless explicitly allowed by capability policy.',
-        'Analyze workspaceSnapshot before analyzing the user requirement when workspaceSnapshot is present.',
-        'Use existing workspace paths from workspaceSnapshot when proposing or applying file changes.'
+        'Use workspaceManifest for project structure and selectedEvidenceContents for readable evidence content.',
+        'Treat taskContext.evidenceRefs as the selected minimal evidence set; request more context instead of inferring omitted file contents.'
       ],
       sessionGoal: session.originalInput,
       taskContext,
       summaryMemory,
       continuationState: this.createContinuationState(session, agent, task, phase, taskContext, summaryMemory),
       workingDirectory: session.workingDirectory,
-      workspaceSnapshot: session.workspaceSnapshot,
+      workspaceSnapshot: this.runtimeWorkspaceSnapshot(session.workspaceSnapshot),
+      workspaceManifest: this.createWorkspaceManifest(session.workspaceSnapshot),
+      selectedEvidenceContents: this.createSelectedEvidenceContents(session, taskContext),
+      runtimeSelection,
       projectMap,
       workspaceFocus,
       taskBrief: brief
@@ -1873,7 +1946,7 @@ export class OrchestratorService {
           }
         : undefined,
       currentTask: task,
-      agentProfile: this.toRuntimeAgent(agent),
+      agentProfile: runtimeAgent,
       relevantEvents: this.events.list(session.id).slice(-12).map((event) => ({
         eventId: event.id,
         type: event.type,
@@ -1890,8 +1963,195 @@ export class OrchestratorService {
       })),
       capabilities: this.capabilities.resolve(agent.capabilityIds),
       constraints: brief?.constraints ?? [],
-      budget: buildBudget(session)
+      budget: buildBudget(session),
+      availableTools: this.availableToolsFor(session, phase, runtimeSelection)
     };
+  }
+
+  /**
+   * Returns the workspace tool descriptors a runtime is allowed to invoke
+   * during this phase. Pull-mode tools are scoped to:
+   *  - generic_llm runtime only (codex/claude already drive their own CLI tools)
+   *  - server_local working directory with a real filesystem path
+   *  - task_acceptance / task_execution phases (not discussion/post_review)
+   */
+  private availableToolsFor(
+    session: SessionDetail,
+    phase: AgentRunPhase,
+    runtimeSelection?: EngineeringRuntimeSelection
+  ): WorkspaceToolDescriptor[] | undefined {
+    if (phase !== 'task_acceptance' && phase !== 'task_execution') return undefined;
+    const runtimeType = runtimeSelection?.effectiveRuntimeType;
+    if (runtimeType !== 'generic_llm') return undefined;
+    const wd = session.workingDirectory;
+    if (!wd || wd.kind !== 'server_local' || !wd.path) return undefined;
+    return [
+      {
+        name: 'read_file',
+        description:
+          'Read a UTF-8 text file under the working directory. Path must be relative, must point to a non-binary file, and must not be a sensitive credential/key/.env file. Output is capped at 32KB; truncated reads are flagged.',
+        inputSchema: {
+          type: 'object',
+          required: ['path'],
+          properties: {
+            path: {
+              type: 'string',
+              description: 'Relative path under the working directory, e.g. "apps/server/src/main.ts".'
+            }
+          },
+          additionalProperties: false
+        }
+      }
+    ];
+  }
+
+  private runtimeWorkspaceSnapshot(snapshot: SessionDetail['workspaceSnapshot']): SessionDetail['workspaceSnapshot'] {
+    if (!snapshot) return undefined;
+    return {
+      ...snapshot,
+      files: snapshot.files.map((file) => this.workspaceFileWithoutRuntimeContent(file))
+    };
+  }
+
+  private createWorkspaceManifest(snapshot: SessionDetail['workspaceSnapshot']): ContextPack['workspaceManifest'] {
+    if (!snapshot) return undefined;
+    return {
+      rootName: snapshot.rootName,
+      fileCount: snapshot.fileCount,
+      readableFileCount: snapshot.files.length,
+      skippedFileCount: snapshot.skipped.length,
+      tree: snapshot.tree,
+      files: snapshot.files.map((file) => this.workspaceFileWithoutRuntimeContent(file)),
+      detectedStack: snapshot.detectedStack,
+      entrypoints: snapshot.entrypoints
+    };
+  }
+
+  private workspaceFileWithoutRuntimeContent(file: NonNullable<SessionDetail['workspaceSnapshot']>['files'][number]) {
+    const { content: _content, ...rest } = file;
+    return {
+      ...rest,
+      contentLength: file.content?.length,
+      summary:
+        file.summary ??
+        (file.content ? `Content omitted from workspaceSnapshot; selected evidence content is injected separately.` : undefined)
+    };
+  }
+
+  private createSelectedEvidenceContents(session: SessionDetail, taskContext: TaskContext): ContextPack['selectedEvidenceContents'] {
+    const contents: NonNullable<ContextPack['selectedEvidenceContents']> = [];
+    for (const evidence of taskContext.evidenceRefs) {
+      const entry = this.selectedEvidenceContent(session, evidence);
+      if (!entry) continue;
+      contents.push({
+        ...entry,
+        type: evidence.type,
+        label: evidence.label,
+        ref: evidence.ref,
+        tokenEstimate: Math.max(1, Math.ceil(JSON.stringify(entry).length / 4)),
+        selectionReason: evidence.selectionReason
+      });
+    }
+    return contents;
+  }
+
+  private selectedEvidenceContent(
+    session: SessionDetail,
+    evidence: TaskContext['evidenceRefs'][number]
+  ): Omit<NonNullable<ContextPack['selectedEvidenceContents']>[number], 'type' | 'label' | 'ref' | 'tokenEstimate' | 'selectionReason'> | undefined {
+    const ref = evidence.ref;
+    if (evidence.type === 'workspace_snapshot') {
+      return {
+        source: 'workspace_manifest',
+        summary: session.workspaceSnapshot
+          ? `${session.workspaceSnapshot.rootName}: ${session.workspaceSnapshot.files.length} readable files, ${session.workspaceSnapshot.skipped.length} skipped.`
+          : undefined
+      };
+    }
+    if ((evidence.type === 'workspace_file' || evidence.type === 'test' || evidence.type === 'workspace_symbol') && ref) {
+      const file = session.workspaceSnapshot?.files.find((item) => item.path === ref);
+      if (!file) return undefined;
+      return this.workspaceEvidenceContent(file);
+    }
+    if (evidence.type === 'memory' && ref) {
+      const memory = this.memories.list(session.id).find((item) => item.id === ref);
+      return memory
+        ? {
+            source: 'memory',
+            content: memory.content,
+            contentLength: memory.content.length
+          }
+        : undefined;
+    }
+    if ((evidence.type === 'document_fragment' || evidence.type === 'meeting_note' || evidence.type === 'data_table' || evidence.type === 'external_reference') && ref) {
+      const chunk = (session.knowledgeBaseIds ?? [])
+        .flatMap((knowledgeBaseId) => this.knowledge.search(knowledgeBaseId, evidence.label))
+        .find((item) => item.chunkId === ref);
+      return chunk
+        ? {
+            source: 'rag',
+            content: chunk.snippet,
+            summary: chunk.title,
+            contentLength: chunk.snippet.length
+          }
+        : undefined;
+    }
+    if ((evidence.type === 'artifact' || evidence.type === 'diff') && ref) {
+      const artifact = this.artifacts.listBySession(session.id).find((item) => {
+        const fileChanges = this.metadataFileChanges(item.metadata);
+        return item.id === ref || fileChanges.some((change) => change.path === ref);
+      });
+      const content = artifact ? artifact.contentSummary ?? JSON.stringify(this.metadataFileChanges(artifact.metadata)) : undefined;
+      return artifact
+        ? {
+            source: 'artifact',
+            summary: artifact.contentSummary,
+            content,
+            contentLength: content?.length ?? 0
+          }
+        : undefined;
+    }
+    if ((evidence.type === 'event_log' || evidence.type === 'historical_decision' || evidence.type === 'log') && ref) {
+      const event = this.events.list(session.id).find((item) => item.id === ref);
+      return event
+        ? {
+            source: 'event',
+            content: event.content,
+            summary: event.type,
+            contentLength: event.content.length
+          }
+        : undefined;
+    }
+    if (evidence.type === 'project_map') {
+      return {
+        source: 'project_map',
+        summary: evidence.label
+      };
+    }
+    return undefined;
+  }
+
+  private workspaceEvidenceContent(file: NonNullable<SessionDetail['workspaceSnapshot']>['files'][number]) {
+    const maxChars = 8_000;
+    const content = file.content ?? file.summary ?? '';
+    return {
+      source: 'workspace_file' as const,
+      content: content.slice(0, maxChars),
+      summary: file.summary,
+      contentLength: content.length,
+      truncated: content.length > maxChars
+    };
+  }
+
+  private metadataFileChanges(metadata: Record<string, unknown>): RuntimeFileChange[] {
+    const value = metadata.fileChanges;
+    if (!Array.isArray(value)) return [];
+    return value.filter(
+      (item): item is RuntimeFileChange =>
+        Boolean(item) &&
+        typeof (item as RuntimeFileChange).path === 'string' &&
+        typeof (item as RuntimeFileChange).operation === 'string'
+    );
   }
 
   private createTaskContext(
@@ -3022,23 +3282,33 @@ export class OrchestratorService {
   }
 
   private async runRuntime(inputSession: SessionDetail, input: AgentRunInput, signal?: AbortSignal) {
+    const budget = this.runtimeBudgetForInput(input);
     const contextPack = {
       ...input.contextPack,
-      budget: input.budget
+      budget
     };
     const fitted = fitContextToBudget(contextPack);
     const maxInputTokens = fitted.contextPack.budget.maxInputTokens;
     if (maxInputTokens && fitted.estimatedTokens > maxInputTokens) {
       const result = this.tokenBudgetExceededResult(input, fitted.estimatedTokens, maxInputTokens);
+      const fileCount = inputSession.workspaceSnapshot?.fileCount || 0;
+      const finalStage = fitted.diagnostics.stages.at(-1);
+
       this.events.create({
         sessionId: input.sessionId,
         type: 'error_reported',
         priority: 'high',
-        content: messages.tokenBudgetExceeded(fitted.estimatedTokens, maxInputTokens),
+        content: messages.tokenBudgetExceeded(fitted.estimatedTokens, maxInputTokens) +
+                 '\n\n' + messages.tokenBudgetTooLow(fitted.estimatedTokens, maxInputTokens, fileCount) +
+                 '\n\n' + messages.tokenBudgetSuggestion(fileCount) +
+                 `\n\n已尝试裁剪至 ${finalStage?.name || 'unknown'} 阶段，仍无法满足预算。`,
         metadata: createMetadata('error_card', {
           code: 'TOKEN_BUDGET_EXCEEDED',
           estimatedTokens: fitted.estimatedTokens,
           maxInputTokens,
+          fileCount,
+          trimStage: finalStage?.name,
+          suggestedBudget: fileCount < 100 ? 150_000 : fileCount < 300 ? 300_000 : 500_000,
           diagnostics: fitted.diagnostics
         })
       });
@@ -3046,17 +3316,19 @@ export class OrchestratorService {
     }
 
     if (fitted.trimmed) {
+      const finalStage = fitted.diagnostics.stages.at(-1);
       this.events.create({
         sessionId: input.sessionId,
         type: 'runtime_progress',
         taskId: input.taskId,
         fromAgentId: input.agent.id,
-        content: messages.tokenContextTrimmed,
+        content: `上下文已裁剪至 ${finalStage?.name || 'unknown'} 阶段 (${fitted.estimatedTokens} tokens)`,
         metadata: createMetadata('system_notice', {
           runtimeInvocationId: input.runId,
           code: 'TOKEN_CONTEXT_TRIMMED',
           estimatedTokens: fitted.estimatedTokens,
           maxInputTokens,
+          trimStage: finalStage?.name,
           diagnostics: fitted.diagnostics
         })
       });
@@ -3072,6 +3344,36 @@ export class OrchestratorService {
     );
     this.recordTokenUsage(inputSession, result);
     return result;
+  }
+
+  private runtimeBudgetForInput(input: AgentRunInput): RuntimeBudget {
+    if (input.agent.runtimeType !== 'generic_llm') {
+      return input.budget;
+    }
+
+    // Mock fallback path never calls a real local LLM, so the local-cap (4k) is
+    // a phantom limit that traps test harnesses with realistic context sizes.
+    if (genericLlmMockFallbackEnabled()) {
+      return input.budget;
+    }
+
+    const connection = this.runtimeModels.connectionForModelId(input.agent.modelId);
+    if (connection.kind !== 'local') {
+      return input.budget;
+    }
+
+    const maxInputTokens = this.capBudgetValue(input.budget.maxInputTokens, llmLocalMaxInputTokens());
+    const maxOutputTokens = this.capBudgetValue(input.budget.maxOutputTokens, llmLocalMaxOutputTokens());
+    return {
+      ...input.budget,
+      maxInputTokens,
+      maxOutputTokens,
+      maxTotalTokens: this.capBudgetValue(input.budget.maxTotalTokens, maxInputTokens + maxOutputTokens)
+    };
+  }
+
+  private capBudgetValue(value: number | undefined, cap: number) {
+    return value && value > 0 ? Math.min(value, cap) : cap;
   }
 
   private recordTokenUsage(session: SessionDetail, result: AgentRunResult) {
@@ -3119,7 +3421,64 @@ export class OrchestratorService {
     };
   }
 
-  private toRuntimeAgent(agent: Agent) {
+  private selectEngineeringRuntime(session: SessionDetail, agent: Agent): EngineeringRuntimeSelection {
+    const globalRuntimeType = defaultEngineeringRuntimeType();
+    const defaultAgentRuntime = defaultAgentRuntimeType();
+    const projectRuntimeType =
+      session.engineeringRuntime?.projectDefaultRuntimeType ?? projectDefaultEngineeringRuntimeType();
+    const sessionRuntimeType = session.engineeringRuntime?.sessionDefaultRuntimeType;
+    const agentOverride = session.engineeringRuntime?.agentRuntimeOverrides?.[agent.id] ??
+      session.engineeringRuntime?.agentRuntimeOverrides?.[agent.key];
+    const agentRuntimeType = agentOverride ?? agent.runtimeType;
+    const hasAgentOverride = Boolean(agentOverride) || agent.runtimeType !== defaultAgentRuntime;
+
+    if (hasAgentOverride) {
+      return {
+        effectiveRuntimeType: agentRuntimeType,
+        source: 'agent_override',
+        agentRuntimeType,
+        sessionRuntimeType,
+        projectRuntimeType,
+        globalRuntimeType,
+        reason: agentOverride
+          ? `Agent runtime override for ${agent.key} was provided by the session.`
+          : `Agent ${agent.key} runtimeType differs from the default agent runtime.`
+      };
+    }
+
+    if (sessionRuntimeType) {
+      return {
+        effectiveRuntimeType: sessionRuntimeType,
+        source: 'session_override',
+        agentRuntimeType,
+        sessionRuntimeType,
+        projectRuntimeType,
+        globalRuntimeType,
+        reason: 'Session engineering runtime override has priority over project and global defaults.'
+      };
+    }
+
+    if (projectRuntimeType) {
+      return {
+        effectiveRuntimeType: projectRuntimeType,
+        source: 'project_default',
+        agentRuntimeType,
+        projectRuntimeType,
+        globalRuntimeType,
+        reason: 'Project default engineering runtime is used because no agent or session override was set.'
+      };
+    }
+
+    return {
+      effectiveRuntimeType: globalRuntimeType,
+      source: 'global_default',
+      agentRuntimeType,
+      globalRuntimeType,
+      reason: 'Global engineering runtime default is used.'
+    };
+  }
+
+  private toRuntimeAgent(agent: Agent, runtimeSelection?: EngineeringRuntimeSelection) {
     return {
       id: agent.id,
       key: agent.key,
@@ -3127,7 +3486,9 @@ export class OrchestratorService {
       role: agent.role,
       profileMarkdown: agent.profileMarkdown,
       systemPrompt: agent.profileMarkdown?.trim() || `${agent.name}: ${agent.role}`,
-      runtimeType: agent.runtimeType,
+      runtimeType: runtimeSelection?.effectiveRuntimeType ?? agent.runtimeType,
+      configuredRuntimeType: agent.runtimeType,
+      runtimeSelection,
       modelId: agent.modelId,
       capabilityIds: agent.capabilityIds
     };

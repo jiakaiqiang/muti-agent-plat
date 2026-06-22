@@ -4,11 +4,13 @@ import { useAgentStore } from '@/stores/agent'
 import { useEventStore } from '@/stores/event'
 import { useKnowledgeStore } from '@/stores/knowledge'
 import { useLocalWorkspaceStore } from '@/stores/localWorkspace'
+import type { ReviewableFileChange } from '@/stores/localWorkspace'
 import { useSessionStore } from '@/stores/session'
 import { apiBaseUrl, runtimeModeLabel } from '@/config/runtime'
 import {
   sessionStatusLabel,
   type BriefEventPayload,
+  type RuntimeType,
   type SessionStatus,
   type SessionViewMode,
   type WorkspaceSnapshot
@@ -17,11 +19,13 @@ import AgentManager from './AgentManager.vue'
 import AgentStatusPanel from './AgentStatusPanel.vue'
 import AgentPortrait from './AgentPortrait.vue'
 import ChatTimeline from './ChatTimeline.vue'
+import CollaborationTaskBoard from './CollaborationTaskBoard.vue'
 import CollaborationGraphView from './CollaborationGraphView.vue'
 import CollaborationLogPanel from './CollaborationLogPanel.vue'
 import DebugRuntimeView from './DebugRuntimeView.vue'
 import RuntimeModelManager from './RuntimeModelManager.vue'
 import SessionSidebar from './SessionSidebar.vue'
+import TokenUsageIndicator from './TokenUsageIndicator.vue'
 import UiIcon from './UiIcon.vue'
 import UserInputBox from './UserInputBox.vue'
 import WorkflowRuntimeView from './WorkflowRuntimeView.vue'
@@ -42,10 +46,51 @@ const selectedSessionAgentIds = ref<string[]>([])
 const sessionCreateError = ref('')
 const sessionScanStatus = ref<'idle' | 'scanning' | 'completed' | 'failed'>('idle')
 const sessionScanSummary = ref<WorkspaceSnapshot | undefined>()
+const sessionRuntimeType = ref<RuntimeType | ''>('')
+
+const sessionRuntimeOptions: { value: RuntimeType | ''; label: string }[] = [
+  { value: '', label: '跟随系统默认' },
+  { value: 'generic_llm', label: '通用大模型（讨论/分析）' },
+  { value: 'codex', label: 'Codex（读写真实代码）' },
+  { value: 'claude_code', label: 'Claude Code（读写真实代码）' }
+]
 const showBriefRevisionDialog = ref(false)
 const briefRevisionInput = ref('')
 const briefRevisionError = ref('')
 const isSubmittingBriefRevision = ref(false)
+
+const showFileReviewDialog = ref(false)
+const reviewChanges = ref<ReviewableFileChange[]>([])
+const selectedChangePaths = ref<string[]>([])
+const isReviewLoading = ref(false)
+const isApplyingReview = ref(false)
+
+type FileReviewDiffRow = { kind: 'equal' | 'add' | 'remove'; text: string }
+
+function diffLines(before: string, after: string): FileReviewDiffRow[] {
+  const beforeLines = before.replace(/\r\n/g, '\n').split('\n')
+  const afterLines = after.replace(/\r\n/g, '\n').split('\n')
+  let prefix = 0
+  while (prefix < beforeLines.length && prefix < afterLines.length && beforeLines[prefix] === afterLines[prefix]) {
+    prefix += 1
+  }
+  let beforeSuffix = beforeLines.length - 1
+  let afterSuffix = afterLines.length - 1
+  while (
+    beforeSuffix >= prefix &&
+    afterSuffix >= prefix &&
+    beforeLines[beforeSuffix] === afterLines[afterSuffix]
+  ) {
+    beforeSuffix -= 1
+    afterSuffix -= 1
+  }
+  return [
+    ...beforeLines.slice(0, prefix).map((text) => ({ kind: 'equal' as const, text })),
+    ...beforeLines.slice(prefix, beforeSuffix + 1).map((text) => ({ kind: 'remove' as const, text })),
+    ...afterLines.slice(prefix, afterSuffix + 1).map((text) => ({ kind: 'add' as const, text })),
+    ...afterLines.slice(afterSuffix + 1).map((text) => ({ kind: 'equal' as const, text }))
+  ]
+}
 
 type WorkspaceSection = 'session' | 'knowledge' | 'settings' | 'models' | 'tools' | 'notifications' | 'agents'
 
@@ -72,7 +117,7 @@ function viewModeLabel(mode: SessionViewMode) {
       chat: '对话',
       collaboration_graph: '协同看板',
       workflow: '工作流',
-      debug: '调试'
+      debug: '审计'
     } satisfies Record<SessionViewMode, string>
   )[mode]
 }
@@ -149,6 +194,14 @@ const activeBriefPayload = computed(() => {
     .find((payload) => payload?.briefId === briefId)
 })
 
+const latestBriefPayload = computed(() => {
+  return [...eventStore.eventsForSession(currentSessionId.value)]
+    .reverse()
+    .filter((event) => event.type === 'brief_created' || event.type === 'brief_updated')
+    .map((event) => event.metadata.payload as (BriefEventPayload & Record<string, unknown>) | undefined)
+    .find((payload) => payload?.goal)
+})
+
 const derivedStatus = computed(() => {
   const statusEvent = [...eventStore.eventsForSession(currentSessionId.value)]
     .reverse()
@@ -182,7 +235,7 @@ async function deleteSession(sessionId: string) {
   }
 }
 
-async function createSession(input: string, agentIds: string[]) {
+async function createSession(input: string, agentIds: string[], engineeringRuntimeType?: RuntimeType) {
   const workingDirectory = localWorkspaceStore.pendingDirectory
   let workspaceSnapshot: WorkspaceSnapshot | undefined
   if (workingDirectory) {
@@ -197,7 +250,8 @@ async function createSession(input: string, agentIds: string[]) {
     agentIds,
     workingDirectory,
     workspaceSnapshot,
-    tokenBudget: 30000
+    tokenBudget: 30000,
+    ...(engineeringRuntimeType ? { engineeringRuntimeType } : {})
   })
   localWorkspaceStore.bindPendingDirectoryToSession(session.id)
   await eventStore.loadEvents(session.id)
@@ -211,6 +265,7 @@ function openCreateSessionDialog() {
   selectedSessionAgentIds.value = activeAgentIds.value
   sessionScanStatus.value = 'idle'
   sessionScanSummary.value = undefined
+  sessionRuntimeType.value = ''
   localWorkspaceStore.clearPendingDirectory()
   showCreateSessionDialog.value = true
 }
@@ -249,7 +304,7 @@ async function createSessionFromDialog() {
   isCreatingSession.value = true
   sessionCreateError.value = ''
   try {
-    await createSession(input, selectedSessionAgentIds.value)
+    await createSession(input, selectedSessionAgentIds.value, sessionRuntimeType.value || undefined)
     showCreateSessionDialog.value = false
   } catch (error) {
     sessionScanStatus.value = 'failed'
@@ -420,7 +475,52 @@ async function submitBriefRevision() {
 
 async function applyPendingFileChanges() {
   if (!sessionStore.currentSession) return
-  await localWorkspaceStore.applyQueuedFileChanges(sessionStore.currentSession.id)
+  isReviewLoading.value = true
+  try {
+    const changes = await localWorkspaceStore.reviewPendingFileChanges(sessionStore.currentSession.id)
+    reviewChanges.value = changes
+    // Default selection: everything except conflicts (user can opt back in).
+    selectedChangePaths.value = changes.filter((item) => !item.conflict).map((item) => item.change.path)
+    showFileReviewDialog.value = true
+  } finally {
+    isReviewLoading.value = false
+  }
+}
+
+function toggleReviewPath(path: string) {
+  selectedChangePaths.value = selectedChangePaths.value.includes(path)
+    ? selectedChangePaths.value.filter((item) => item !== path)
+    : [...selectedChangePaths.value, path]
+}
+
+function selectAllReviewPaths() {
+  selectedChangePaths.value = reviewChanges.value.map((item) => item.change.path)
+}
+
+function clearReviewSelection() {
+  selectedChangePaths.value = []
+}
+
+async function confirmFileReview() {
+  if (!sessionStore.currentSession || !selectedChangePaths.value.length) return
+  isApplyingReview.value = true
+  try {
+    await localWorkspaceStore.applySelectedFileChanges(sessionStore.currentSession.id, selectedChangePaths.value)
+    showFileReviewDialog.value = false
+    reviewChanges.value = []
+    selectedChangePaths.value = []
+  } finally {
+    isApplyingReview.value = false
+  }
+}
+
+function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
+  const before =
+    item.change.operation === 'create'
+      ? ''
+      : item.currentContent ?? item.change.previousContent ?? ''
+  const after = item.change.operation === 'delete' ? '' : item.change.content ?? ''
+  return diffLines(before, after)
 }
 </script>
 
@@ -556,6 +656,15 @@ async function applyPendingFileChanges() {
 
       <div class="workspace-content">
         <div v-if="currentMode === 'chat'" class="chat-pane">
+          <CollaborationTaskBoard
+            :brief="activeBriefPayload ?? latestBriefPayload"
+            :tasks="tasks"
+            :agents="agents"
+            :events="events"
+            :active-confirmation="activeConfirmation"
+            @resolve-confirmation="resolveConfirmation"
+          />
+          <TokenUsageIndicator :session-id="currentSessionId" />
           <ChatTimeline
             :messages="messages"
             :workspace-snapshot="sessionStore.currentSession?.workspaceSnapshot"
@@ -593,7 +702,7 @@ async function applyPendingFileChanges() {
       v-if="activeSection === 'session' && (currentMode === 'collaboration_graph' || currentMode === 'workflow' || currentMode === 'debug')"
       :events="events"
       :agents="agents"
-      :title="currentMode === 'workflow' ? '对话 / 任务日志（实时）' : currentMode === 'debug' ? '调试事件流' : '对话 / 消息日志'"
+      :title="currentMode === 'workflow' ? '对话 / 任务日志（实时）' : currentMode === 'debug' ? '审计事件流' : '对话 / 消息日志'"
     />
     <AgentStatusPanel
       v-else-if="activeSection === 'session'"
@@ -763,6 +872,70 @@ async function applyPendingFileChanges() {
       </div>
     </section>
 
+    <section v-if="showFileReviewDialog" class="modal-backdrop" aria-label="文件写回审阅">
+      <div class="modal-panel session-create-dialog">
+        <header>
+          <div>
+            <h2>审阅文件写回</h2>
+            <p>逐项查看 diff，勾选要写入本地工作区的文件。冲突项默认不勾选。</p>
+          </div>
+          <button type="button" class="modal-close-button" @click="showFileReviewDialog = false">
+            <UiIcon name="x" :size="18" />
+          </button>
+        </header>
+        <div class="dialog-field">
+          <span>已选 {{ selectedChangePaths.length }} / {{ reviewChanges.length }} 项</span>
+          <div style="display:flex; gap:8px;">
+            <button type="button" @click="selectAllReviewPaths">全选</button>
+            <button type="button" @click="clearReviewSelection">清空</button>
+          </div>
+        </div>
+        <div v-if="isReviewLoading">正在读取磁盘当前内容做冲突检测，稍候。</div>
+        <div v-else-if="!reviewChanges.length" class="empty-state">没有待写入的文件变更。</div>
+        <ul v-else style="list-style:none; padding:0; margin:0; max-height:60vh; overflow:auto;">
+          <li
+            v-for="item in reviewChanges"
+            :key="`${item.artifactId}::${item.change.path}`"
+            style="border:1px solid var(--border, #ddd); border-radius:6px; padding:10px; margin-bottom:10px;"
+          >
+            <label style="display:flex; align-items:flex-start; gap:8px; cursor:pointer;">
+              <input
+                type="checkbox"
+                :checked="selectedChangePaths.includes(item.change.path)"
+                @change="toggleReviewPath(item.change.path)"
+              />
+              <div style="flex:1; min-width:0;">
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                  <strong style="word-break:break-all;">{{ item.change.path }}</strong>
+                  <span class="tag">{{ item.change.operation }}</span>
+                  <span v-if="item.conflict" class="tag" style="color:#b00;">磁盘已变化（冲突）</span>
+                  <span v-if="item.artifactTitle" class="tag muted">{{ item.artifactTitle }}</span>
+                </div>
+                <pre
+                  style="margin:8px 0 0; padding:8px; background:#0b0b0b08; border-radius:4px; max-height:240px; overflow:auto; font-size:12px; white-space:pre-wrap;"
+                ><span
+                    v-for="(row, index) in reviewDiffRows(item)"
+                    :key="index"
+                    :style="{ display:'block', color: row.kind === 'add' ? '#0a7' : row.kind === 'remove' ? '#b00' : 'inherit' }"
+                  >{{ row.kind === 'add' ? '+ ' : row.kind === 'remove' ? '- ' : '  ' }}{{ row.text }}</span></pre>
+              </div>
+            </label>
+          </li>
+        </ul>
+        <footer class="form-actions">
+          <button type="button" @click="showFileReviewDialog = false">取消</button>
+          <button
+            type="button"
+            class="primary"
+            :disabled="!selectedChangePaths.length || isApplyingReview"
+            @click="confirmFileReview"
+          >
+            {{ isApplyingReview ? '写入中' : `写入 ${selectedChangePaths.length} 项` }}
+          </button>
+        </footer>
+      </div>
+    </section>
+
     <section v-if="showCreateSessionDialog" class="modal-backdrop" aria-label="新建会话">
       <form class="modal-panel session-create-dialog" @submit.prevent="createSessionFromDialog">
         <header>
@@ -791,6 +964,17 @@ async function applyPendingFileChanges() {
             当前浏览器不支持选择本地目录
           </small>
         </div>
+        <label class="dialog-field">
+          <span>执行运行时</span>
+          <select v-model="sessionRuntimeType">
+            <option v-for="option in sessionRuntimeOptions" :key="option.value" :value="option.value">
+              {{ option.label }}
+            </option>
+          </select>
+          <small v-if="sessionRuntimeType === 'codex' || sessionRuntimeType === 'claude_code'">
+            该运行时可读取并真实修改所选目录里的文件，需后端启用对应开关，高风险操作仍需确认。
+          </small>
+        </label>
         <section
           v-if="localWorkspaceStore.pendingDirectory || sessionScanStatus !== 'idle'"
           class="workspace-scan-summary"

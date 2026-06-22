@@ -1176,12 +1176,11 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
     const fallbackPath = `agent-output/${fileName}.md`;
     const fileChanges: RuntimeFileChange[] = targetPaths.length
       ? targetPaths.map((path) => {
-          const targetFile = input.contextPack.workspaceSnapshot?.files.find((file) => file.path === path);
           return {
             path,
             operation: 'update',
             content: this.updatedWorkspaceFileContent({
-              originalContent: targetFile?.content ?? '',
+              originalContent: this.selectedWorkspaceEvidenceContent(input, path),
               path,
               agentName: input.agent.name,
               phase: input.phase,
@@ -1256,6 +1255,14 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
       .filter((path) => snapshotPaths.has(path))
       .filter((path) => !path.startsWith('agent-output/'))
       .slice(0, 6);
+  }
+
+  private selectedWorkspaceEvidenceContent(input: AgentRunInput, path: string) {
+    return (
+      input.contextPack.selectedEvidenceContents?.find(
+        (item) => item.source === 'workspace_file' && (item.ref === path || item.label === path)
+      )?.content ?? ''
+    );
   }
 
   private multiFileExecutionSummary(input: {

@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
 import { ok } from '../../common/api-response.js';
-import type { SessionWorkingDirectory, WorkspaceSnapshot } from '@agent-cluster/shared';
+import type { EngineeringRuntimeConfig, RuntimeType, SessionWorkingDirectory, WorkspaceSnapshot } from '@agent-cluster/shared';
 import { SessionsService } from './sessions.service.js';
 
 @Controller()
@@ -26,6 +26,8 @@ export class SessionsController {
       knowledgeBaseIds?: string[];
       workingDirectory?: SessionWorkingDirectory;
       workspaceSnapshot?: WorkspaceSnapshot;
+      engineeringRuntimeType?: RuntimeType;
+      engineeringRuntime?: EngineeringRuntimeConfig;
     }
   ) {
     return this.sessions.create(body).then(ok);

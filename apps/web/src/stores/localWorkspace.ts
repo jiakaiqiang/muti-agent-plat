@@ -28,6 +28,17 @@ export type PendingArtifactFileChanges = {
   createdAt: string
 }
 
+/** A single change flattened out of its artifact, annotated for the review dialog. */
+export type ReviewableFileChange = {
+  artifactId: string
+  artifactTitle?: string
+  change: RuntimeFileChange
+  /** Current on-disk content (undefined if the file does not exist). */
+  currentContent?: string
+  /** True when the file on disk differs from what the change expected to overwrite. */
+  conflict: boolean
+}
+
 type FileSystemPermissionMode = 'read' | 'readwrite'
 
 type FileSystemHandlePermissionDescriptor = {
@@ -128,6 +139,54 @@ async function applyFileChange(root: DirectoryHandle, change: RuntimeFileChange)
   const writable = await file.createWritable()
   await writable.write(change.content ?? '')
   await writable.close()
+}
+
+/** Reads the current on-disk content of a file, or undefined if it does not exist. */
+async function readCurrentContent(root: DirectoryHandle, path: string): Promise<string | undefined> {
+  let parts: string[]
+  try {
+    parts = safePathParts(path)
+  } catch {
+    return undefined
+  }
+  const name = parts.at(-1)
+  if (!name) return undefined
+  try {
+    let current = root
+    for (const part of parts.slice(0, -1)) {
+      current = await current.getDirectoryHandle(part, { create: false })
+    }
+    const fileHandle = await current.getFileHandle(name, { create: false })
+    const file = await fileHandle.getFile()
+    return await file.text()
+  } catch {
+    return undefined
+  }
+}
+
+function normalizeContent(value?: string | null) {
+  return (value ?? '').replace(/\r\n/g, '\n')
+}
+
+/**
+ * A conflict means the on-disk file no longer matches what the change expected.
+ * - create: a file already exists with different content.
+ * - update: disk differs from the change's previousContent (someone else edited it).
+ * - delete: disk differs from previousContent.
+ * When previousContent is absent we cannot prove a conflict, so we report none.
+ */
+function detectConflict(change: RuntimeFileChange, currentContent?: string): boolean {
+  if (change.operation === 'create') {
+    return currentContent !== undefined && normalizeContent(currentContent) !== normalizeContent(change.content)
+  }
+  if (change.previousContent === undefined || change.previousContent === null) {
+    return false
+  }
+  if (currentContent === undefined) {
+    // The file the change expected to modify/delete is gone.
+    return true
+  }
+  return normalizeContent(currentContent) !== normalizeContent(change.previousContent)
 }
 
 function extensionOf(path: string) {
@@ -423,6 +482,84 @@ export const useLocalWorkspaceStore = defineStore('localWorkspace', {
         skipped: fileChanges.length - applied,
         errors
       }
+    },
+    /**
+     * Reads on-disk content for every queued change and flags conflicts so the
+     * user can review per-file diffs before writing. A conflict means the file
+     * on disk no longer matches what the change expected to overwrite.
+     */
+    async reviewPendingFileChanges(sessionId: string): Promise<ReviewableFileChange[]> {
+      const queue = this.pendingFileChangesBySessionId[sessionId] ?? []
+      const binding = this.bindingsBySessionId[sessionId]
+      const reviewable: ReviewableFileChange[] = []
+      for (const item of queue) {
+        if (this.appliedArtifactIds[item.artifactId]) continue
+        for (const change of item.fileChanges) {
+          const currentContent = binding ? await readCurrentContent(binding.handle, change.path) : undefined
+          reviewable.push({
+            artifactId: item.artifactId,
+            artifactTitle: item.title,
+            change,
+            currentContent,
+            conflict: detectConflict(change, currentContent)
+          })
+        }
+      }
+      return reviewable
+    },
+    /**
+     * Writes only the changes the user selected (by path). Skips the rest and
+     * keeps the queue entry alive when an artifact is only partially applied.
+     */
+    async applySelectedFileChanges(sessionId: string, selectedPaths: string[]) {
+      const selected = new Set(selectedPaths)
+      const binding = this.bindingsBySessionId[sessionId]
+      if (!binding) {
+        this.lastApplyResultBySessionId[sessionId] = {
+          applied: 0,
+          skipped: selected.size,
+          errors: ['No local directory permission is available for this session. Select the working directory again.']
+        }
+        return
+      }
+      const allowed = await ensurePermission(binding.handle)
+      if (!allowed) {
+        this.lastApplyResultBySessionId[sessionId] = {
+          applied: 0,
+          skipped: selected.size,
+          errors: ['The browser did not grant write permission for this directory.']
+        }
+        return
+      }
+
+      const queue = this.pendingFileChangesBySessionId[sessionId] ?? []
+      const errors: string[] = []
+      let applied = 0
+      let skipped = 0
+      for (const item of queue) {
+        if (this.appliedArtifactIds[item.artifactId]) continue
+        let appliedInArtifact = 0
+        for (const change of item.fileChanges) {
+          if (!selected.has(change.path)) {
+            skipped += 1
+            continue
+          }
+          try {
+            await applyFileChange(binding.handle, change)
+            applied += 1
+            appliedInArtifact += 1
+          } catch (error) {
+            errors.push(`${change.path}: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
+        // Mark the artifact fully applied only when every change in it was written.
+        if (appliedInArtifact === item.fileChanges.length && !errors.length) {
+          this.appliedArtifactIds[item.artifactId] = true
+        }
+      }
+
+      this.pendingFileChangesBySessionId[sessionId] = queue.filter((item) => !this.appliedArtifactIds[item.artifactId])
+      this.lastApplyResultBySessionId[sessionId] = { applied, skipped, errors }
     }
   }
 })

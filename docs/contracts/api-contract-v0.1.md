@@ -90,8 +90,16 @@ type CreateSessionRequest = {
   projectId?: string
   tokenBudget?: number
   knowledgeBaseIds?: string[]
+  engineeringRuntimeType?: RuntimeType
+  engineeringRuntime?: {
+    sessionDefaultRuntimeType?: RuntimeType
+    projectDefaultRuntimeType?: RuntimeType
+    agentRuntimeOverrides?: Record<string, RuntimeType>
+  }
 }
 ```
+
+`engineeringRuntimeType` 是 `engineeringRuntime.sessionDefaultRuntimeType` 的便捷写法。运行时选择优先级为 Agent override > Session override > Project default > Global default；最终选择会写入 Runtime Debug 的 `runtimeSelection`。
 
 响应：
 
@@ -120,6 +128,11 @@ type SessionDetail = {
   workspaceId: string
   projectId?: string
   currentTaskBriefId?: string
+  engineeringRuntime?: {
+    sessionDefaultRuntimeType?: RuntimeType
+    projectDefaultRuntimeType?: RuntimeType
+    agentRuntimeOverrides?: Record<string, RuntimeType>
+  }
   tokenBudget?: number
   tokenUsed: number
   participatingAgentIds: string[]

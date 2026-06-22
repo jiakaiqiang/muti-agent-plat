@@ -3,6 +3,7 @@ import type { RuntimeType } from '@agent-cluster/shared';
 export type LlmProvider = 'openai-compatible' | 'ollama';
 
 const truthyValues = new Set(['1', 'true', 'yes', 'on']);
+const mockFallbackValues = new Set(['1', 'true', 'yes', 'on', 'mock']);
 const runtimeTypes = new Set<RuntimeType>([
   'mock',
   'generic_llm',
@@ -13,7 +14,6 @@ const runtimeTypes = new Set<RuntimeType>([
   'mcp_tool',
   'human'
 ]);
-const mockFallbackValues = new Set(['1', 'true', 'yes', 'on', 'mock']);
 const defaultAgentRuntimeTypes = new Set<RuntimeType>(['mock', 'generic_llm']);
 const ollamaProviderValues = new Set(['ollama', 'local-ollama']);
 const openAiDefaultBaseUrl = 'https://api.openai.com/v1';
@@ -33,10 +33,31 @@ export function defaultAgentRuntimeType(): RuntimeType {
   }
   return 'generic_llm';
 }
+
 export function isRuntimeType(value: unknown): value is RuntimeType {
   return typeof value === 'string' && runtimeTypes.has(value as RuntimeType);
 }
 
+function configuredRuntimeType(...names: string[]) {
+  for (const name of names) {
+    const configured = process.env[name]?.trim();
+    if (isRuntimeType(configured)) {
+      return configured;
+    }
+  }
+  return undefined;
+}
+
+export function defaultEngineeringRuntimeType(): RuntimeType {
+  return (
+    configuredRuntimeType('DEFAULT_ENGINEERING_RUNTIME_TYPE', 'ENGINEERING_RUNTIME_TYPE') ??
+    defaultAgentRuntimeType()
+  );
+}
+
+export function projectDefaultEngineeringRuntimeType(): RuntimeType | undefined {
+  return configuredRuntimeType('PROJECT_DEFAULT_ENGINEERING_RUNTIME_TYPE');
+}
 
 export function llmProvider(): LlmProvider {
   const configured = process.env.LLM_PROVIDER?.trim().toLowerCase();
@@ -86,6 +107,21 @@ export function llmTimeoutMs() {
 export function llmMaxRetries() {
   const parsed = Number(process.env.LLM_MAX_RETRIES ?? 2);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 2;
+}
+
+export function llmLocalMaxInputTokens() {
+  const parsed = Number(process.env.LLM_LOCAL_MAX_INPUT_TOKENS ?? 4_000);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 4_000;
+}
+
+export function llmLocalMaxOutputTokens() {
+  const parsed = Number(process.env.LLM_LOCAL_MAX_OUTPUT_TOKENS ?? 1_024);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 1_024;
+}
+
+export function llmLocalNumCtx() {
+  const parsed = Number(process.env.LLM_LOCAL_NUM_CTX ?? 8_192);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 8_192;
 }
 
 export function discussionTimeoutMs() {

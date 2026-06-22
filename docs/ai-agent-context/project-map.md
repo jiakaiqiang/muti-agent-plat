@@ -93,6 +93,8 @@
 | `docs/README.md` | 文档分类索引 |
 | `docs/product/agent-cluster-prd-v1.md` | 产品需求与范围 |
 | `docs/design/agent-cluster-system-design-v1.md` | 系统设计 |
+| `docs/design/codex-style-agent-collaboration-architecture-v1.md` | 可切换 Engineering Runtime 的群聊协作架构与 token 预算防线 |
+| `docs/ai-agent-context/pluggable-engineering-runtime-memory.md` | 群聊 Agent、ContextPack、Engineering Runtime 与 token 预算的长期架构记忆 |
 | `docs/design/workspace-aware-chat-agent-design-v1.md` | 聊天室 Agent 借鉴 Codex/Claude 工作区感知模型的产品与系统设计 |
 | `docs/design/ui-style-guide-v1.md` | 前端 UI 风格规范 |
 | `docs/implementation/agent-team-implementation-breakdown-v1.md` | Agent 团队实现拆解 |
@@ -120,6 +122,7 @@
 | 安全冒烟 | `npm run test:e2e:security` |
 | 中文可见文案 | `npm run test:e2e:chinese-copy` |
 | Runtime 路由 | `npm run test:e2e:runtime-routing` |
+| Engineering Runtime 选择 | `npm run test:e2e:engineering-runtime-selection` |
 | Runtime 模型切换 | `npm run test:e2e:runtime-model-switch` |
 | 任务依赖 | `npm run test:e2e:task-dependency` |
 | 多 Agent 讨论 | `npm run test:e2e:multi-agent-discussion` |
@@ -143,6 +146,7 @@
 | “优化前端体验” | 前端地图、UI 风格文档、相关组件 |
 | “调整 API/事件/类型” | 合同文档、`packages/shared/src/contracts.ts`、前后端调用点 |
 | “改 Agent 协作/编排” | Orchestrator、sessions、tasks、events、runtime、Harness alignment 文档 |
+| “改群聊 Agent/ContextPack/token 预算/Engineering Runtime” | `docs/ai-agent-context/pluggable-engineering-runtime-memory.md`, `docs/design/codex-style-agent-collaboration-architecture-v1.md`, `docs/design/context-router-target-design-v1.md` |
 | “改 Runtime/模型配置” | runtimes 模块、runtime contract、runtime e2e |
 | “改记忆/RAG/知识库” | memory、rag、delivery-memory 文档、相关 e2e |
 | “改 Codex/Claude 工作方式” | `AGENTS.md`, `.claude/CLAUDE.md`, `docs/ai-agent-context/` |
@@ -153,6 +157,7 @@
 | 记忆类型 | 维护位置 |
 | --- | --- |
 | AI 工具如何执行任务 | `docs/ai-agent-context/` |
+| 群聊 Agent、ContextPack、Engineering Runtime 与 token 预算 | `docs/ai-agent-context/pluggable-engineering-runtime-memory.md` |
 | Harness Engineering 规程 | `docs/harness-engineering/` |
 | 产品范围和目标 | `docs/product/agent-cluster-prd-v1.md` |
 | 系统设计 | `docs/design/agent-cluster-system-design-v1.md` |

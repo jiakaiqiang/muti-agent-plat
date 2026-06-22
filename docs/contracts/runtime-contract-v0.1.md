@@ -18,6 +18,37 @@ type RuntimeType =
   | 'human'
 ```
 
+Engineering Runtime 选择记录：
+
+```ts
+type RuntimeSelectionSource =
+  | 'agent_override'
+  | 'session_override'
+  | 'project_default'
+  | 'global_default'
+
+type EngineeringRuntimeSelection = {
+  effectiveRuntimeType: RuntimeType
+  source: RuntimeSelectionSource
+  agentRuntimeType?: RuntimeType
+  sessionRuntimeType?: RuntimeType
+  projectRuntimeType?: RuntimeType
+  globalRuntimeType: RuntimeType
+  reason: string
+}
+```
+
+选择优先级：
+
+```text
+Agent override
+  > Session override
+  > Project default
+  > Global default
+```
+
+当前实现中，Agent override 可以来自 session 的 `engineeringRuntime.agentRuntimeOverrides`，也可以来自 Agent 自身显式配置的 `runtimeType`。Session override 来自创建会话时的 `engineeringRuntimeType` 或 `engineeringRuntime.sessionDefaultRuntimeType`。Project default 可来自 session 配置或 `PROJECT_DEFAULT_ENGINEERING_RUNTIME_TYPE`。Global default 可来自 `DEFAULT_ENGINEERING_RUNTIME_TYPE`、`ENGINEERING_RUNTIME_TYPE`，否则回退到默认 Agent runtime。
+
 ## 3. 统一 Adapter 接口
 
 ```ts
@@ -65,6 +96,8 @@ type RuntimeAgentProfile = {
   role: string
   systemPrompt: string
   runtimeType: RuntimeType
+  configuredRuntimeType?: RuntimeType
+  runtimeSelection?: EngineeringRuntimeSelection
   capabilityIds: string[]
 }
 ```
@@ -80,6 +113,35 @@ type ContextPack = {
   continuationState: TaskContinuationState
   workingDirectory?: SessionWorkingDirectory
   workspaceSnapshot?: WorkspaceSnapshot
+  workspaceManifest?: {
+    rootName: string
+    fileCount: number
+    readableFileCount: number
+    skippedFileCount: number
+    tree: WorkspaceSnapshot['tree']
+    files: Array<{
+      path: string
+      size: number
+      readable: boolean
+      contentLength?: number
+      summary?: string
+    }>
+    detectedStack: string[]
+    entrypoints: string[]
+  }
+  selectedEvidenceContents?: Array<{
+    type: EvidenceSourceType
+    label: string
+    ref?: string
+    source?: string
+    content?: string
+    summary?: string
+    contentLength?: number
+    truncated?: boolean
+    tokenEstimate?: number
+    selectionReason?: string
+  }>
+  runtimeSelection?: EngineeringRuntimeSelection
   workspaceFocus?: {
     relevantFiles: string[]
     impactedFiles: string[]
@@ -264,7 +326,11 @@ Summary memory checkpoint 规则：
 - `relevantMemories` 必须来自 Memory API 或自动沉淀的可追溯记忆项。
 - `constraints` 必须显式传入。
 - `ragSnippets` 必须包含来源。
-- `workingDirectory`、`workspaceSnapshot` 和 `workspaceFocus` 是工作区感知输入；它们用于约束和解释文件级判断，不等于授权 Runtime 越界写入。
+- `workingDirectory`、`workspaceManifest`、`selectedEvidenceContents`、`workspaceSnapshot` 和 `workspaceFocus` 是工作区感知输入；它们用于约束和解释文件级判断，不等于授权 Runtime 越界写入。
+- `workspaceManifest` is the preferred runtime structure input. It may expose tree, paths, sizes, readability, content length, detected stack, and entrypoints, but it must not expose file bodies.
+- `selectedEvidenceContents` is the preferred runtime readable-content input. It must be derived from `taskContext.evidenceSelection.selectedRefs`, trimmed by token budget, and auditable by source/ref.
+- Runtime-facing `workspaceSnapshot` is retained for compatibility as a manifest-style fallback. New runtimes must not rely on `workspaceSnapshot.files[].content` being present.
+- `runtimeSelection` records why the current invocation used its effective adapter. Debug views and runtime invocation summaries must preserve this source/reason so runtime switching remains auditable.
 
 ## 6. ExpectedRuntimeOutput
 
@@ -588,10 +654,12 @@ CodexRuntime 和 ClaudeCodeRuntime 接入时必须遵守：
 - 必须支持 timeout。
 - 最好支持 cancel；如果不支持，需要在 Adapter 中标记。
 - 必须返回 artifact，包括 diff、测试结果或执行摘要。
-- v1 仅预留 `CodexRuntimeAdapter` 和 `ClaudeCodeRuntimeAdapter` 文件结构，真实执行能力后续版本接入。
+- 当前已有 `CodexRuntimeAdapter` 和 `ClaudeCodeRuntimeAdapter` 的受控本地 CLI 接入骨架，默认关闭；真实执行必须显式启用并经过 capability preflight。
 
 Additional real coding runtime rules:
 
+- Orchestrator selects the effective engineering runtime before `task_acceptance` and `task_execution`, then passes that effective runtime through `AgentRunInput.agent.runtimeType`.
+- Runtime selection must change only the adapter implementation. It must not bypass task brief confirmation, task state transitions, Context Router, token budget, capability audit, or delivery flow.
 - Before launching `codex` or `claude_code` for a source-writing task, Orchestrator must run a `cap-file-write` preflight through Capability Module and record the check in capability audit.
 - If the preflight is blocked, Runtime must not be started. The task should move to `waiting`, emit `task_waiting`, and include `relatedCapabilityId='cap-file-write'`.
 - A successful preflight does not grant unlimited access. The adapter still receives only the trimmed Context Pack, not the full project or full event stream.
@@ -629,6 +697,14 @@ type RuntimeContextRequest = {
 ```
 
 `CONTEXT_INSUFFICIENT` means Runtime could identify the missing evidence and should be retried after Context Router / Evidence Selector rebuild a smaller supplemental Context Pack. The Orchestrator should surface this as a visible waiting/blocking card, not as an opaque model failure.
+
+Supplemental context retry rules:
+
+- Orchestrator must persist each `requestedContext` on the session as a supplemental context request for the affected task.
+- Context Router must convert requested refs, paths, and commands into high-priority candidate evidence for the retry.
+- Evidence Selector must keep those requested refs selected before ordinary workspace focus candidates when retrying the same task.
+- Context Pack Builder must inject readable content for selected requested workspace files through `selectedEvidenceContents`, while keeping `workspaceManifest` metadata-only.
+- The visible chat timeline should keep a `context_supplement` event so users can see why the task was retried.
 
 ## 16. 校验规则
 

@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { defaultAgents } from '@agent-cluster/shared'
 import { apiGet, apiPatch, apiPost } from '@/api/client'
-import type { Agent, RuntimeCapabilityDefinition } from '@/types/contracts'
+import type { Agent, RuntimeCapabilityDefinition, RuntimeType } from '@/types/contracts'
 
 type CreateAgentInput = {
   name: string
@@ -9,10 +9,11 @@ type CreateAgentInput = {
   tags?: string[]
   capabilityIds?: string[]
   modelId?: string
+  runtimeType?: RuntimeType
 }
 
 type UpdateAgentInput = Partial<
-  Pick<Agent, 'name' | 'role' | 'tags' | 'capabilityIds' | 'status' | 'modelId' | 'profileMarkdown'>
+  Pick<Agent, 'name' | 'role' | 'tags' | 'capabilityIds' | 'status' | 'modelId' | 'runtimeType' | 'profileMarkdown'>
 >
 
 const capabilityNameById: Record<string, string> = {

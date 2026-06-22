@@ -3,16 +3,18 @@ import type {
   Agent,
   AgentTask,
   CollaborationEvent,
+  EngineeringRuntimeConfig,
   SessionDetail,
   SessionStatus,
   TaskDomain,
   TaskIntent,
+  RuntimeType,
   SessionWorkingDirectory,
   WorkspaceSnapshot
 } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
 import { messages } from '../../common/messages.js';
-import { reworkMaxRounds } from '../../common/runtime-config.js';
+import { isRuntimeType, reworkMaxRounds } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
 import { extractServerWorkspacePath, scanServerWorkspace } from '../../common/workspace-scanner.js';
 import { AgentsService } from '../agents/agents.service.js';
@@ -32,6 +34,8 @@ type CreateSessionInput = {
   knowledgeBaseIds?: string[];
   workingDirectory?: SessionWorkingDirectory;
   workspaceSnapshot?: WorkspaceSnapshot;
+  engineeringRuntimeType?: RuntimeType;
+  engineeringRuntime?: EngineeringRuntimeConfig;
 };
 
 @Injectable()
@@ -112,6 +116,7 @@ export class SessionsService {
       knowledgeBaseIds: input.knowledgeBaseIds ?? [],
       workingDirectory: workspaceBinding.workingDirectory,
       workspaceSnapshot: workspaceBinding.workspaceSnapshot,
+      engineeringRuntime: this.normalizeEngineeringRuntime(input),
       tokenBudget: input.tokenBudget,
       tokenUsed: 0,
       taskDomain: this.detectTaskDomain(input.input, workspaceBinding.workspaceSnapshot),
@@ -398,7 +403,13 @@ export class SessionsService {
     if (outcome.kind === 'cancelled') {
       return;
     }
-    if (session.status === 'WAIT_USER_DECISION' && outcome.kind !== 'ask_user') {
+    if (
+      session.status === 'WAIT_USER_DECISION' &&
+      outcome.kind !== 'ask_user' &&
+      outcome.kind !== 'delivered'
+    ) {
+      // delivered 是终态权威结果（执行真的完成了），允许它覆盖之前由竞态
+      // 进入的 WAIT_USER_DECISION；其他非 ask_user 结果（rework/failed）继续被吞。
       return;
     }
     const nextStatus: SessionStatus =
@@ -821,6 +832,23 @@ export class SessionsService {
     this.tasks.resetStaleRunning(session.id);
     const unfinishedTasks = this.tasks.unfinished(session.id);
     this.execution.start(session, brief, unfinishedTasks, (outcome) => this.applyOutcome(session.id, outcome));
+  }
+
+  private normalizeEngineeringRuntime(input: CreateSessionInput): EngineeringRuntimeConfig | undefined {
+    const sessionDefaultRuntimeType =
+      input.engineeringRuntimeType ?? input.engineeringRuntime?.sessionDefaultRuntimeType;
+    const projectDefaultRuntimeType = input.engineeringRuntime?.projectDefaultRuntimeType;
+    const agentRuntimeOverrides = Object.fromEntries(
+      Object.entries(input.engineeringRuntime?.agentRuntimeOverrides ?? {}).filter(([, runtimeType]) =>
+        isRuntimeType(runtimeType)
+      )
+    );
+    const config: EngineeringRuntimeConfig = {
+      ...(isRuntimeType(sessionDefaultRuntimeType) ? { sessionDefaultRuntimeType } : {}),
+      ...(isRuntimeType(projectDefaultRuntimeType) ? { projectDefaultRuntimeType } : {}),
+      ...(Object.keys(agentRuntimeOverrides).length ? { agentRuntimeOverrides } : {})
+    };
+    return Object.keys(config).length ? config : undefined;
   }
 
   private restartExecutionWithUpdatedContext(

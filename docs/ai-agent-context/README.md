@@ -27,6 +27,7 @@
 | 测试、验收、质量闭环 | `project-map.md` | `docs/quality/`, `tests/e2e/`, `tests/harness-engineering/` |
 | 本地开发、CI、部署、运维 | `project-map.md` | `docs/devops/`, `.github/workflows/ci.yml` |
 | 产品范围、功能状态、计划 | `project-map.md` | `docs/product/agent-cluster-prd-v1.md`, `docs/analysis/feature-inventory-and-status-v1.md`, `docs/roadmap/remediation-plan-v1.md` |
+| 群聊 Agent、ContextPack、Engineering Runtime、token 预算 | `project-map.md`, `pluggable-engineering-runtime-memory.md` | `docs/design/codex-style-agent-collaboration-architecture-v1.md`, `docs/design/context-router-target-design-v1.md` |
 
 ## 推荐读取顺序
 

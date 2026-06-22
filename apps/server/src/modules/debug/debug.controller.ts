@@ -40,6 +40,10 @@ export class DebugController {
         contextPackSummary: {
           sessionGoal: contextPack.sessionGoal,
           agentKey: contextPack.agentProfile.key,
+          configuredRuntimeType: contextPack.agentProfile.configuredRuntimeType,
+          effectiveRuntimeType: contextPack.agentProfile.runtimeType,
+          runtimeSelectionSource: contextPack.runtimeSelection?.source,
+          runtimeSelectionReason: contextPack.runtimeSelection?.reason,
           taskDomain: contextPack.taskContext.domain,
           taskIntent: contextPack.taskContext.intent,
           currentStage: contextPack.taskContext.currentStage,

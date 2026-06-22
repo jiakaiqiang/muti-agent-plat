@@ -1,5 +1,12 @@
 # Context Router 目标设计 v1
 
+## 0. 产品定位
+
+Context Router 不是 Agent Cluster 的产品主角。Agent Cluster 的主目标见
+`docs/design/agent-collaboration-target-design-v1.md`：用户在群聊式工作区中完成需求讨论、任务拆解、分工执行、验证、复盘和交付。
+
+本文档只定义支撑该主链路的后台上下文治理能力。Project Map、Context Router、Evidence Selection、Summary Memory、Token Budget 和 Capability Audit 应服务于更准确的任务拆解、更可靠的 Agent 分工和更安全的执行边界。它们主要出现在 debug/audit 视图中；只有当上下文不足、权限阻塞、验证失败或需要用户确认时，才进入主聊天时间线。
+
 ## 1. 目标
 
 本文档定义如何将 Codex 式“入口规则、项目地图、按需读取、最小证据、摘要续跑”的上下文治理思想应用到 Agent Cluster。

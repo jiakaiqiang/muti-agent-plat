@@ -20,7 +20,9 @@ Top-level fields currently covered by this contract:
 | summaryMemory | Compact continuation memory for long chains. | Carries current goal, current state, confirmed facts, completed work, decisions, open questions, risks, and next steps. |
 | continuationState | Structured runtime continuation state. | Carries current phase/status, active task/agent, task queues, latest checkpoint, handoff refs, source refs, next agents, and resume hints. |
 | workingDirectory | Selected workspace binding. | Present when browser or server-local workspace is attached. |
-| workspaceSnapshot | Scanned workspace tree/files. | May be trimmed by token budget before runtime invocation. |
+| workspaceManifest | Runtime-facing workspace structure and file metadata. | Preferred structure input. Exposes tree, paths, sizes, readability, content length, stack, and entrypoints without file bodies. |
+| selectedEvidenceContents | Runtime-readable selected evidence content. | Preferred content input. Derived from selected evidence refs and trimmed by token budget. |
+| workspaceSnapshot | Compatibility workspace tree/files fallback. | Runtime-facing snapshots are manifest-style and may omit all file bodies. New runtime behavior should not rely on `files[].content`. |
 | workspaceFocus | Relevance summary for the current requirement. | Contains `relevantFiles`, `impactedFiles`, `testFiles`, `configFiles`, `possibleEntryPoints`, `detectedStack`, `validationCommands`, and `rationale`. |
 | relevantFiles | Workspace files likely related to the requirement. | Nested under `workspaceFocus`. |
 | impactedFiles | Files likely to be changed or inspected for the current implementation surface. | Nested under `workspaceFocus`; should be compact and derived from selected relevant files plus entrypoints. |
@@ -45,11 +47,11 @@ Top-level fields currently covered by this contract:
 
 | AgentRunPhase | Should see | 不应该看到 |
 | --- | --- | --- |
-| discussion | sessionGoal, taskContext, summaryMemory, continuationState, agentProfile, constraints, relevantEvents, workingDirectory, workspaceSnapshot, workspaceFocus | Full implementation logs or unrelated artifacts. |
-| brief_generation | sessionGoal, taskContext, summaryMemory, continuationState, relevantEvents, relevantMemories, ragSnippets, workingDirectory, workspaceSnapshot, workspaceFocus | Unconfirmed implementation details or hidden side effects. |
+| discussion | sessionGoal, taskContext, summaryMemory, continuationState, agentProfile, constraints, relevantEvents, workingDirectory, workspaceManifest, selectedEvidenceContents, workspaceFocus | Full implementation logs, full workspace file bodies, or unrelated artifacts. |
+| brief_generation | sessionGoal, taskContext, summaryMemory, continuationState, relevantEvents, relevantMemories, ragSnippets, workingDirectory, workspaceManifest, selectedEvidenceContents, workspaceFocus | Unconfirmed implementation details, full workspace file bodies, or hidden side effects. |
 | brief_revision | previous taskBrief, user feedback, taskContext, summaryMemory, continuationState, relevantEvents, relevantMemories, workspaceFocus | Unrelated tool output. |
 | task_acceptance | taskBrief, currentTask, taskContext, summaryMemory, continuationState, agentProfile, constraints, budget | Other agents' unrelated tasks or full event history. |
-| task_execution | taskBrief, currentTask, taskContext, summaryMemory, continuationState, capabilities, artifacts, constraints, budget, workingDirectory, workspaceSnapshot, workspaceFocus | Other agents' unrelated tasks or unapproved external side effects. |
+| task_execution | taskBrief, currentTask, taskContext, summaryMemory, continuationState, capabilities, artifacts, constraints, budget, workingDirectory, workspaceManifest, selectedEvidenceContents, workspaceFocus | Other agents' unrelated tasks, full workspace file bodies, or unapproved external side effects. |
 | post_review | taskBrief, taskContext, summaryMemory, continuationState, artifacts, relevantEvents, verification evidence, budget | Unverified guesses or private speculation. |
 | final_delivery | review result, taskContext, summaryMemory, continuationState, artifacts, risks, memory candidates, budget | Private speculation or unconfirmed external send actions. |
 | user_message_routing | current state, user message, taskContext, summaryMemory, continuationState, relevantEvents, constraints | Full history noise or irrelevant workspace contents. |
@@ -67,6 +69,7 @@ Top-level fields currently covered by this contract:
 - `taskContext.evidenceRefs` must equal `taskContext.evidenceSelection.selectedRefs`. Runtime agents should cite selected refs and treat omitted refs as unavailable context.
 - `taskContext.evidenceRefs` is the minimum evidence set for the current invocation. Coding refs may include files, symbols, logs, tests, and diffs; non-coding refs may include document fragments, meeting notes, data tables, external references, and historical decisions.
 - If the selected refs are insufficient, Runtime agents must return `CONTEXT_INSUFFICIENT` or a blocked `TaskExecutionResultOutput.requestedContext` with the missing refs, paths, commands, and reason. They must not infer unread file contents, APIs, logs, or test results.
+- When Runtime returns `CONTEXT_INSUFFICIENT`, Orchestrator must persist the requested refs, paths, and commands on the session as task-scoped supplemental context. The retry Context Pack must promote those requested items into selected evidence and inject readable requested workspace file content through `selectedEvidenceContents`.
 - RAG hits and relevant memories should also be mirrored into `taskContext.evidenceRefs` using their source type (`document_fragment`, `meeting_note`, `data_table`, `external_reference`) and `memory`, so agents can cite the same compact evidence set after context trimming.
 - Artifact `fileChanges` should be mirrored into `taskContext.evidenceRefs` as `diff` refs when available.
 - `taskContext.agentResponsibilities` must name Execution, Validation, and Review responsibilities. Validation and Review must be independent from Execution when more than one agent is available.
@@ -91,17 +94,19 @@ Top-level fields currently covered by this contract:
 ## Workspace context rules
 
 - `workingDirectory` indicates where file changes may be proposed or applied; it is not permission to write outside that root.
-- `workspaceSnapshot` can include tree, file metadata, summaries, and limited content. Runtime prompts must ground file-level conclusions in this data when present.
+- `workspaceManifest` can include tree, file metadata, summaries, detected stack, and entrypoints. It must not include file bodies.
+- `selectedEvidenceContents` is the only default workspace-derived readable content channel for runtime prompts. It must be derived from `taskContext.evidenceSelection.selectedRefs`, token-trimmed, and traceable by source/ref.
+- `workspaceSnapshot` is retained for compatibility as a manifest-style fallback. Runtime prompts must not assume `workspaceSnapshot.files[].content` is present.
 - `workspaceFocus.relevantFiles` guides impact analysis, while `impactedFiles` narrows the likely modification surface. The Agent must still state uncertainty when the snapshot is incomplete.
 - `testFiles` and `validationCommands` should be used to choose scoped validation before broader typecheck/test/build/e2e runs.
 - `configFiles`, `possibleEntryPoints`, `detectedStack`, and `rationale` should be used to explain why a task affects specific files.
-- Token preflight may remove or truncate workspace file contents. Agents must not pretend omitted content was read.
+- Token preflight may remove or truncate selected evidence contents. Agents must not pretend omitted or manifest-only content was read.
 - For real `codex` and `claude_code` runtime execution, ContextPack delivery is separate from permission. Orchestrator must pass `cap-file-write` preflight before launching a source-writing runtime, and a blocked preflight must leave the task waiting without starting the runtime process.
 
 ## Token and trimming rules
 
 - `budget.maxInputTokens` limits context sent to runtime.
-- If context exceeds budget, the system first trims `relevantEvents`, `ragSnippets`, `artifacts`, and workspace contents.
+- If context exceeds budget, the system first trims `relevantEvents`, `ragSnippets`, `artifacts`, and `selectedEvidenceContents`.
 - If still over budget, runtime receives a `TOKEN_BUDGET_EXCEEDED` failure rather than an oversized prompt.
 - Debug APIs must expose enough context and token usage for verification without leaking unrelated data.
 
@@ -110,5 +115,5 @@ Top-level fields currently covered by this contract:
 - Every phase has explicit context boundaries.
 - Irrelevant data is excluded.
 - Unconfirmed assumptions are labeled.
-- Workspace-derived conclusions cite `workspaceSnapshot` or `workspaceFocus` rather than guessing.
+- Workspace-derived structural conclusions cite `workspaceManifest` or `workspaceFocus`; content-specific conclusions cite `selectedEvidenceContents` or other selected refs rather than guessing.
 - Context can be traced back to upstream artifacts, events, memory, RAG, or workspace scan evidence.

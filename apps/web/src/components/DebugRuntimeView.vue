@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { apiGet } from '@/api/client'
-import type { CollaborationEvent } from '@/types/contracts'
+import type { CollaborationEvent, EngineeringRuntimeSelection } from '@/types/contracts'
 import { runtimeTypeLabel } from '@/utils/runtimeLabels'
 import UiIcon from './UiIcon.vue'
 
@@ -118,6 +118,32 @@ type DebugContextPack = {
     sourceRefs?: string[]
     generatedAt?: string
   }
+  workspaceManifest?: {
+    rootName?: string
+    fileCount?: number
+    readableFileCount?: number
+    skippedFileCount?: number
+    detectedStack?: string[]
+    entrypoints?: string[]
+    files?: Array<{
+      path: string
+      size?: number
+      readable?: boolean
+      contentLength?: number
+    }>
+  }
+  selectedEvidenceContents?: Array<{
+    type: string
+    label: string
+    ref?: string
+    source?: string
+    content?: string
+    summary?: string
+    contentLength?: number
+    truncated?: boolean
+    tokenEstimate?: number
+    selectionReason?: string
+  }>
   summaryMemory?: {
     goal?: string
     currentState?: string
@@ -157,7 +183,11 @@ type DebugContextPack = {
     key?: string
     name?: string
     role?: string
+    runtimeType?: string
+    configuredRuntimeType?: string
+    runtimeSelection?: EngineeringRuntimeSelection
   }
+  runtimeSelection?: EngineeringRuntimeSelection
   relevantEvents?: unknown[]
   relevantMemories?: Array<{
     id: string
@@ -229,6 +259,10 @@ type RuntimeInvocationItem = {
   contextPackSummary: {
     sessionGoal: string
     agentKey: string
+    configuredRuntimeType?: string
+    effectiveRuntimeType?: string
+    runtimeSelectionSource?: string
+    runtimeSelectionReason?: string
     taskDomain: string
     taskIntent: string
     currentStage: string
@@ -354,7 +388,7 @@ async function loadDebugData() {
     tokenUsage.value = tokenData
     selectedInvocationId.value = contextPackPage.items.at(-1)?.invocationId ?? ''
   } catch (caught) {
-    error.value = caught instanceof Error ? caught.message : '调试数据加载失败'
+    error.value = caught instanceof Error ? caught.message : '审计数据加载失败'
   } finally {
     loading.value = false
   }
@@ -410,8 +444,8 @@ watch(() => props.sessionId, loadDebugData, { immediate: true })
   <section class="debug-view">
     <header class="debug-topbar">
       <div>
-        <h2>Context Pack 调试台</h2>
-        <p>Runtime、Memory、RAG、Token</p>
+        <h2>上下文审计台</h2>
+        <p>辅助查看 Context Pack、Runtime、Memory、RAG 与 Token 决策，不替代群聊协作主流程。</p>
       </div>
       <div class="debug-actions">
         <span>{{ latestUpdatedAt }}</span>
@@ -506,6 +540,20 @@ watch(() => props.sessionId, loadDebugData, { immediate: true })
             <article>
               <h4>Agent</h4>
               <p>{{ selectedContextPack.contextPack.agentProfile?.name }} · {{ selectedContextPack.contextPack.agentProfile?.role }}</p>
+            </article>
+            <article>
+              <h4>Runtime Selection</h4>
+              <p>
+                {{ runtimeTypeLabel(selectedContextPack.contextPack.agentProfile?.runtimeType) }}
+                ·
+                {{ selectedContextPack.contextPack.runtimeSelection?.source ?? 'agent_config' }}
+              </p>
+              <small v-if="selectedContextPack.contextPack.agentProfile?.configuredRuntimeType">
+                configured: {{ runtimeTypeLabel(selectedContextPack.contextPack.agentProfile.configuredRuntimeType) }}
+              </small>
+              <small v-if="selectedContextPack.contextPack.runtimeSelection?.reason">
+                {{ selectedContextPack.contextPack.runtimeSelection.reason }}
+              </small>
             </article>
             <article>
               <h4>任务类型</h4>
@@ -687,6 +735,49 @@ watch(() => props.sessionId, loadDebugData, { immediate: true })
                   <small v-if="item.ref">{{ item.ref }}</small>
                   <small v-if="item.estimatedTokens">tokens: {{ item.estimatedTokens }}</small>
                   <small v-if="item.omissionReason">{{ item.omissionReason }}</small>
+                </li>
+              </ul>
+            </article>
+            <article>
+              <h4>Workspace Manifest</h4>
+              <p>
+                {{ selectedContextPack.contextPack.workspaceManifest?.rootName ?? '-' }}
+                /
+                {{ selectedContextPack.contextPack.workspaceManifest?.fileCount ?? 0 }} files
+              </p>
+              <small>
+                readable {{ selectedContextPack.contextPack.workspaceManifest?.readableFileCount ?? 0 }}
+                /
+                skipped {{ selectedContextPack.contextPack.workspaceManifest?.skippedFileCount ?? 0 }}
+              </small>
+              <ul class="debug-list">
+                <li v-for="entry in selectedContextPack.contextPack.workspaceManifest?.entrypoints ?? []" :key="`manifest-entry-${entry}`">
+                  <strong>entrypoint</strong>
+                  <p>{{ entry }}</p>
+                </li>
+                <li
+                  v-for="file in selectedContextPack.contextPack.workspaceManifest?.files?.slice(0, 8) ?? []"
+                  :key="`manifest-file-${file.path}`"
+                >
+                  <strong>{{ file.readable ? 'readable' : 'metadata' }}</strong>
+                  <p>{{ file.path }}</p>
+                  <small v-if="file.contentLength !== undefined">content length: {{ file.contentLength }}</small>
+                </li>
+              </ul>
+            </article>
+            <article>
+              <h4>Selected Evidence Contents</h4>
+              <p>{{ selectedContextPack.contextPack.selectedEvidenceContents?.length ?? 0 }} injected content items</p>
+              <ul class="debug-list">
+                <li
+                  v-for="item in selectedContextPack.contextPack.selectedEvidenceContents ?? []"
+                  :key="`selected-content-${item.type}-${item.label}-${item.ref ?? ''}`"
+                >
+                  <strong>{{ item.type }}</strong>
+                  <p>{{ item.label }}</p>
+                  <small v-if="item.ref">{{ item.ref }}</small>
+                  <small v-if="item.tokenEstimate">tokens: {{ item.tokenEstimate }}</small>
+                  <small v-if="item.truncated">truncated</small>
                 </li>
               </ul>
             </article>

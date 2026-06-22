@@ -55,6 +55,14 @@ export const messages = {
   tokenBudgetExceeded: (estimated: number, max: number) => `Token 预算超限：估算 ${estimated} tokens，上限 ${max} tokens。`,
   tokenContextTrimmed: '上下文已按 Token 预算裁剪。',
   tokenBudgetInsufficient: 'Token 预算不足，未启动运行时调用。',
+  tokenBudgetSuggestion: (fileCount: number) => {
+    if (fileCount < 20) return '建议 Token 预算：50,000（小型项目）';
+    if (fileCount < 100) return '建议 Token 预算：150,000（中型项目）';
+    if (fileCount < 300) return '建议 Token 预算：300,000（大型项目）';
+    return '建议 Token 预算：500,000+（超大型项目）';
+  },
+  tokenBudgetTooLow: (required: number, current: number, fileCount: number) =>
+    `当前 Token 预算 (${current}) 不足以处理该项目（${fileCount} 个文件）。需要至少 ${Math.ceil(required * 1.2)} tokens。`,
   confirmMemoryWrite: '请确认是否将该偏好保存为长期记忆。',
   confirmMemoryWriteTitle: '确认写入记忆',
   confirmMemoryWriteDescription: '确认后，该偏好将作为长期记忆候选保存。',

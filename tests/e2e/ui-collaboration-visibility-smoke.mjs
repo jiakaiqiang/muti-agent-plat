@@ -63,7 +63,12 @@ assertNotIncludes(workflow, '.slice(-6)', 'Workflow view');
 
 const workspace = read('apps/web/src/components/SessionWorkspace.vue');
 const timeline = read('apps/web/src/components/ChatTimeline.vue');
+const taskBoard = read('apps/web/src/components/CollaborationTaskBoard.vue');
+const debugView = read('apps/web/src/components/DebugRuntimeView.vue');
 const styles = read('apps/web/src/styles.css');
+const designIndex = read('docs/design/README.md');
+const collaborationTarget = read('docs/design/agent-collaboration-target-design-v1.md');
+const contextRouterTarget = read('docs/design/context-router-target-design-v1.md');
 for (const mode of ['chat', 'workflow', 'collaboration_graph', 'debug']) {
   assertIncludes(workspace, mode, 'Workspace view mode switcher');
 }
@@ -88,5 +93,38 @@ for (const signal of [
 }
 assertIncludes(styles, 'context-request-block', 'Context request block styles');
 assertIncludes(styles, 'context-request-list', 'Context request list styles');
+
+assertIncludes(workspace, "debug: '审计'", 'Workspace labels debug as audit support');
+assertIncludes(workspace, '审计事件流', 'Workspace log labels audit as support view');
+assertIncludes(debugView, '上下文审计台', 'Debug view is positioned as audit');
+assertIncludes(debugView, '不替代群聊协作主流程', 'Debug view does not replace collaboration mainline');
+assertIncludes(debugView, 'Workspace Manifest', 'Debug view exposes workspace manifest as audit data');
+assertIncludes(debugView, 'Selected Evidence Contents', 'Debug view exposes selected injected content as audit data');
+assertIncludes(designIndex, 'agent-collaboration-target-design-v1.md', 'Design index collaboration target');
+assertIncludes(collaborationTarget, 'Context governance is a supporting capability', 'Collaboration target positions context governance');
+assertIncludes(contextRouterTarget, 'Context Router 不是 Agent Cluster 的产品主角', 'Context router support positioning');
+
+assertIncludes(workspace, '<CollaborationTaskBoard', 'Chat mainline includes collaboration task board');
+assertIncludes(taskBoard, 'Task Brief', 'Task board surfaces task brief');
+assertIncludes(taskBoard, 'Task Decomposition', 'Task board surfaces task decomposition');
+assertIncludes(taskBoard, 'Discussion Evidence', 'Task board surfaces group-chat discussion evidence');
+assertIncludes(taskBoard, 'discussionAgentCount', 'Task board counts discussion participants');
+assertIncludes(taskBoard, 'discussionRoundCount', 'Task board counts discussion rounds');
+assertIncludes(taskBoard, 'decisionEvents', 'Task board surfaces decisions, risks, handoffs, and summaries');
+assertIncludes(taskBoard, 'suggestedTasks', 'Task board surfaces suggested tasks before confirmation');
+assertIncludes(taskBoard, 'Proposed', 'Task board labels pre-confirmation suggested tasks');
+assertIncludes(taskBoard, 'dependsOnTaskTitles', 'Task board surfaces suggested task dependencies');
+assertIncludes(taskBoard, 'Review & Delivery', 'Task board surfaces review and delivery');
+assertIncludes(taskBoard, 'acceptanceCoverage', 'Task board links delivery back to acceptance coverage');
+assertIncludes(taskBoard, 'validationItems', 'Task board surfaces validation evidence');
+assertIncludes(taskBoard, 'deliveryEvidence', 'Task board surfaces artifact-backed delivery evidence');
+assertIncludes(taskBoard, 'remainingRisks', 'Task board surfaces incomplete items and risks');
+assertIncludes(taskBoard, 'Delivery Evidence', 'Task board labels delivery evidence for the user');
+assertIncludes(taskBoard, 'Needs Attention', 'Task board labels remaining risks for the user');
+assertIncludes(taskBoard, 'activeConfirmation?.relatedBriefId', 'Task board surfaces user confirmation gate');
+assertIncludes(taskBoard, '<ConfirmationCard', 'Task board renders the brief confirmation card inline');
+assertIncludes(taskBoard, "emit('resolveConfirmation'", 'Task board emits confirmation decisions');
+assertIncludes(workspace, '@resolve-confirmation="resolveConfirmation"', 'Workspace handles task board confirmation decisions');
+assertIncludes(taskBoard, 'context_supplement', 'Task board surfaces supplemental context events');
 
 console.log('ui collaboration visibility smoke ok');

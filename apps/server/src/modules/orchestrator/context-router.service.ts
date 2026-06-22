@@ -44,9 +44,11 @@ export class ContextRouterService {
       ],
       16
     );
+    const supplementalEvidenceRefs = this.supplementalEvidenceRefs(session, task?.id);
     const validationRules = this.createValidationRules(domain, intent);
     const candidateEvidenceRefs: TaskContext['evidenceRefs'] = [
       { type: 'user_input', label: 'session.originalInput' },
+      ...supplementalEvidenceRefs,
       ...(projectMap
         ? [
             {
@@ -486,6 +488,7 @@ export class ContextRouterService {
     ref: TaskContext['evidenceRefs'][number],
     score: number
   ) {
+    if (ref.selectionReason) return ref.selectionReason;
     if (ref.type === 'user_input') return 'Always selected because the user goal anchors every phase.';
     if (ref.type === 'project_map') return 'Selected to keep repository/module routing explicit without loading the whole project.';
     if (ref.type === 'workspace_snapshot') return 'Selected to ground file-level reasoning in the scanned workspace.';
@@ -505,6 +508,7 @@ export class ContextRouterService {
     task: AgentTask | undefined,
     ref: TaskContext['evidenceRefs'][number]
   ) {
+    if (ref.selectionReason?.startsWith('Requested by runtime')) return 260;
     let score = ref.type === 'user_input' ? 120 : ref.ref && task?.id === ref.ref ? 115 : 20;
     const codingPriority = new Map<TaskContext['evidenceRefs'][number]['type'], number>([
       ['workspace_snapshot', 90],
@@ -538,6 +542,30 @@ export class ContextRouterService {
     }
     if (intent === 'troubleshooting' && ['log', 'test', 'diff', 'event_log'].includes(ref.type)) score += 16;
     return score;
+  }
+
+  private supplementalEvidenceRefs(session: SessionDetail, taskId?: string): TaskContext['evidenceRefs'] {
+    const requests = (session.supplementalContextRequests ?? []).filter((request) => !taskId || request.taskId === taskId);
+    return requests.flatMap((request) => {
+      const reason = `Requested by runtime after CONTEXT_INSUFFICIENT: ${request.requestedContext.reason}`;
+      const requestedRefs = request.requestedContext.requestedRefs.map((ref) => ({
+        ...ref,
+        selectionReason: reason
+      }));
+      const requestedPaths = (request.requestedContext.requestedPaths ?? []).map((path) => ({
+        type: 'workspace_file' as const,
+        label: path,
+        ref: path,
+        selectionReason: reason
+      }));
+      const requestedCommands = (request.requestedContext.requestedCommands ?? []).map((command) => ({
+        type: 'test' as const,
+        label: `requested command: ${command}`,
+        ref: command,
+        selectionReason: reason
+      }));
+      return [...requestedRefs, ...requestedPaths, ...requestedCommands];
+    });
   }
 
   private createTaskMap(

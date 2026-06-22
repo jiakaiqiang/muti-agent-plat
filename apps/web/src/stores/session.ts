@@ -2,6 +2,8 @@ import { defineStore } from 'pinia'
 import { apiDelete, apiGet, apiPage, apiPost } from '@/api/client'
 import type {
   SessionDetail,
+  EngineeringRuntimeConfig,
+  RuntimeType,
   SessionListItem,
   SessionStatus,
   SessionViewMode,
@@ -18,6 +20,8 @@ type CreateSessionInput = {
   knowledgeBaseIds?: string[]
   workingDirectory?: SessionWorkingDirectory
   workspaceSnapshot?: WorkspaceSnapshot
+  engineeringRuntimeType?: RuntimeType
+  engineeringRuntime?: EngineeringRuntimeConfig
 }
 
 const favoriteStorageKey = 'agent-cluster.favorite-session-ids'

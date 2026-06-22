@@ -1,71 +1,71 @@
 {
-  "completed": 0,
-  "rounds": 0,
+  "completed": 13,
+  "rounds": 13,
   "tasks": [
     {
       "id": "TASK-001",
       "plan": "docs/tasks/TASK-001-runtime-adapter-interface.md",
-      "status": "pending"
+      "status": "done"
     },
     {
       "id": "TASK-002",
       "plan": "docs/tasks/TASK-002-runtime-registry-service.md",
-      "status": "pending"
+      "status": "done"
     },
     {
       "id": "TASK-003",
       "plan": "docs/tasks/TASK-003-tool-interface.md",
-      "status": "pending"
+      "status": "done"
     },
     {
       "id": "TASK-004",
       "plan": "docs/tasks/TASK-004-tool-registry-service.md",
-      "status": "pending"
+      "status": "done"
     },
     {
       "id": "TASK-005",
       "plan": "docs/tasks/TASK-005-file-reader-tool.md",
-      "status": "pending"
+      "status": "done"
     },
     {
       "id": "TASK-006",
       "plan": "docs/tasks/TASK-006-capability-tool-mapping.md",
-      "status": "pending"
+      "status": "done"
     },
     {
       "id": "TASK-007",
       "plan": "docs/tasks/TASK-007-code-reader-agent.md",
-      "status": "pending"
+      "status": "done"
     },
     {
       "id": "TASK-008",
       "plan": "docs/tasks/TASK-008-runtime-smart-router.md",
-      "status": "pending"
+      "status": "done"
     },
     {
       "id": "TASK-009",
       "plan": "docs/tasks/TASK-009-task-index-readme.md",
-      "status": "pending"
+      "status": "done"
     },
     {
       "id": "TASK-010",
       "plan": "docs/tasks/TASK-010-file-writer-tool.md",
-      "status": "pending"
+      "status": "done"
     },
     {
       "id": "TASK-011",
       "plan": "docs/tasks/TASK-011-code-search-tool.md",
-      "status": "pending"
+      "status": "done"
     },
     {
       "id": "TASK-012",
       "plan": "docs/tasks/TASK-012-test-runner-tool.md",
-      "status": "pending"
+      "status": "done"
     },
     {
       "id": "TASK-013",
       "plan": "docs/tasks/TASK-013-test-runner-agent.md",
-      "status": "pending"
+      "status": "done"
     }
   ]
 }

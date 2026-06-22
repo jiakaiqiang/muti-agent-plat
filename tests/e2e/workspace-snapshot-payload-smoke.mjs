@@ -89,6 +89,23 @@ try {
     throw new Error(`Expected workspace context to be compacted before runtime: ${tokenBudgetExceeded.content}`);
   }
 
+  const contextPacks = await api(server.apiBase, `/sessions/${manyFilesSessionId}/debug/context-packs`);
+  const invocation = contextPacks.data.items.find((item) => item.contextPack?.workspaceManifest && item.contextPack?.selectedEvidenceContents);
+  if (!invocation) {
+    throw new Error(`Expected a runtime invocation with manifest and selected evidence: ${JSON.stringify(contextPacks)}`);
+  }
+  const manifest = invocation.contextPack.workspaceManifest;
+  if (!manifest || manifest.files.length > 80 || manifest.tree.length > 121) {
+    throw new Error(`workspaceManifest should be compacted: ${JSON.stringify(manifest)}`);
+  }
+  const selectedEvidence = invocation.contextPack.selectedEvidenceContents ?? [];
+  if (selectedEvidence.length > 8) {
+    throw new Error(`selectedEvidenceContents must be bounded: ${selectedEvidence.length}`);
+  }
+  if (selectedEvidence.some((item) => item.content && item.content.length > 4000)) {
+    throw new Error(`selectedEvidenceContents content must be trimmed: ${JSON.stringify(selectedEvidence)}`);
+  }
+
   console.log('workspace snapshot payload smoke ok');
 } finally {
   if (server) {

@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useAgentStore } from '@/stores/agent'
 import { useRuntimeModelStore } from '@/stores/runtimeModel'
-import type { Agent, RuntimeCapabilityDefinition } from '@/types/contracts'
+import type { Agent, RuntimeCapabilityDefinition, RuntimeType } from '@/types/contracts'
 import { runtimeTypeLabel } from '@/utils/runtimeLabels'
 import UiIcon from './UiIcon.vue'
 
@@ -11,8 +11,16 @@ type AgentFormState = {
   role: string
   tags: string
   modelId: string
+  runtimeType: RuntimeType | ''
   capabilityIds: string[]
 }
+
+const agentRuntimeOptions: { value: RuntimeType | ''; label: string }[] = [
+  { value: '', label: '跟随系统默认' },
+  { value: 'generic_llm', label: '通用大模型' },
+  { value: 'codex', label: 'Codex（读写真实代码）' },
+  { value: 'claude_code', label: 'Claude Code（读写真实代码）' }
+]
 
 const props = defineProps<{
   agents: Agent[]
@@ -37,6 +45,7 @@ function emptyForm(): AgentFormState {
     role: '',
     tags: '',
     modelId: modelStore.currentModelId,
+    runtimeType: '',
     capabilityIds: []
   }
 }
@@ -47,6 +56,7 @@ function formFromAgent(agent: Agent): AgentFormState {
     role: agent.role,
     tags: agent.tags?.join(', ') ?? '',
     modelId: agent.modelId ?? modelStore.currentModelId,
+    runtimeType: agent.runtimeType ?? '',
     capabilityIds: [...agent.capabilityIds]
   }
 }
@@ -120,6 +130,7 @@ async function createAgent() {
       role,
       tags: normalizedTags(createForm.value.tags),
       modelId: createForm.value.modelId || undefined,
+      runtimeType: createForm.value.runtimeType || undefined,
       capabilityIds: createForm.value.capabilityIds
     })
     cancelCreate()
@@ -148,6 +159,7 @@ async function updateAgent(agent: Agent) {
       role,
       tags: normalizedTags(form.tags),
       modelId: form.modelId || undefined,
+      runtimeType: form.runtimeType || undefined,
       capabilityIds: form.capabilityIds
     })
     cancelEdit()
@@ -227,6 +239,14 @@ onMounted(async () => {
           </option>
         </select>
       </label>
+      <label>
+        <span>执行运行时</span>
+        <select v-model="createForm.runtimeType">
+          <option v-for="option in agentRuntimeOptions" :key="option.value" :value="option.value">
+            {{ option.label }}
+          </option>
+        </select>
+      </label>
       <label class="span-2">
         <span>能力描述</span>
         <textarea v-model="createForm.role" rows="3" placeholder="说明这个 Agent 负责什么，以及适合处理哪些任务" />
@@ -270,6 +290,14 @@ onMounted(async () => {
                 <option value="">跟随默认模型</option>
                 <option v-for="model in modelStore.availableModels" :key="model.id" :value="model.id">
                   {{ model.label }}
+                </option>
+              </select>
+            </label>
+            <label>
+              <span>执行运行时</span>
+              <select v-model="editForms[agent.id].runtimeType">
+                <option v-for="option in agentRuntimeOptions" :key="option.value" :value="option.value">
+                  {{ option.label }}
                 </option>
               </select>
             </label>

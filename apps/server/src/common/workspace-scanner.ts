@@ -8,6 +8,7 @@ import type {
   WorkspaceTreeNode
 } from '@agent-cluster/shared';
 import { nowIso } from './time.js';
+import { isSensitivePath } from './path-safety.js';
 
 const ignoredDirectories = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.cache', 'coverage']);
 const textExtensions = new Set(['.css', '.html', '.js', '.json', '.jsx', '.md', '.mjs', '.cjs', '.ts', '.tsx', '.vue', '.yml', '.yaml', '.txt']);
@@ -131,11 +132,6 @@ export function extractServerWorkspacePath(input: string) {
 
 function extensionOf(path: string) {
   return extname(path).toLowerCase();
-}
-
-function isSensitivePath(path: string) {
-  const name = path.split('/').at(-1)?.toLowerCase() ?? path.toLowerCase();
-  return name === '.env' || name.startsWith('.env.') || name.includes('secret') || name.includes('private-key') || name.endsWith('.pem') || name.endsWith('.key') || name.endsWith('.p12') || name.endsWith('.crt');
 }
 
 function shouldReadTextFile(path: string) {

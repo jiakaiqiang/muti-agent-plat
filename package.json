@@ -25,8 +25,14 @@
     "test:e2e:real-data-mode": "node tests/e2e/real-data-mode-smoke.mjs",
     "test:e2e:workspace-chrome": "node tests/e2e/workspace-chrome-regression-smoke.mjs",
     "test:e2e:ui-collaboration-visibility": "node tests/e2e/ui-collaboration-visibility-smoke.mjs",
+    "test:e2e:browser-collaboration-task-board": "node tests/e2e/browser-collaboration-task-board-smoke.mjs",
+    "test:e2e:browser-brief-revision": "node tests/e2e/browser-brief-revision-smoke.mjs",
+    "test:e2e:browser-context-insufficient-retry": "node tests/e2e/browser-context-insufficient-retry-smoke.mjs",
+    "test:e2e:browser-executing-user-interrupt": "node tests/e2e/browser-executing-user-interrupt-smoke.mjs",
     "test:e2e:chinese-copy": "node tests/e2e/chinese-visible-copy-smoke.mjs",
     "test:e2e:generic-llm-real": "node tests/e2e/generic-llm-real-smoke.mjs",
+    "test:e2e:generic-llm-ollama-local": "node tests/e2e/generic-llm-ollama-local-smoke.mjs",
+    "test:e2e:generic-llm-response-shapes": "node tests/e2e/generic-llm-response-shapes-smoke.mjs",
     "test:e2e:postgres-persistence": "node tests/e2e/postgres-persistence-smoke.mjs",
     "test:e2e:bullmq-ops": "node tests/e2e/bullmq-ops-smoke.mjs",
     "test:e2e:real-agents-no-seed": "node tests/e2e/real-agents-no-seed-smoke.mjs",
@@ -36,6 +42,7 @@
     "test:e2e:persistence": "node tests/e2e/persistence-smoke.mjs",
     "test:e2e:runtime-routing": "node tests/e2e/runtime-routing-smoke.mjs",
     "test:e2e:runtime-agent-communication": "node tests/e2e/runtime-agent-communication-smoke.mjs",
+    "test:e2e:engineering-runtime-selection": "node tests/e2e/engineering-runtime-selection-smoke.mjs",
     "test:e2e:task-claim-decision": "node tests/e2e/task-claim-decision-smoke.mjs",
     "test:e2e:codex-runtime-stub": "node tests/e2e/codex-runtime-stub-smoke.mjs",
     "test:e2e:codex-runtime-capability-preflight": "node tests/e2e/codex-runtime-capability-preflight-smoke.mjs",
@@ -51,6 +58,9 @@
     "test:e2e:artifact-file-changes": "node tests/e2e/artifact-file-changes-smoke.mjs",
     "test:e2e:server-local-project-analysis": "node tests/e2e/server-local-project-analysis-smoke.mjs",
     "test:e2e:workspace-snapshot-payload": "node tests/e2e/workspace-snapshot-payload-smoke.mjs",
+    "test:e2e:workspace-tools-pull": "node tests/e2e/workspace-tools-pull-smoke.mjs",
+    "test:e2e:tool-loop-ollama": "node tests/e2e/tool-loop-ollama-smoke.mjs",
+    "test:e2e:tool-loop-minimal": "node tests/e2e/tool-loop-minimal-smoke.mjs",
     "test:e2e:session-agent-isolation": "node tests/e2e/session-agent-isolation-smoke.mjs",
     "test:e2e:session-delete": "node tests/e2e/session-delete-smoke.mjs",
     "test:e2e:discussion-timeout-brief": "node tests/e2e/discussion-timeout-brief-smoke.mjs",
@@ -58,6 +68,7 @@
     "test:e2e:token-budget": "node tests/e2e/token-budget-smoke.mjs",
     "test:e2e:context-insufficient": "node tests/e2e/context-insufficient-smoke.mjs",
     "test:e2e:context-insufficient-retry": "node tests/e2e/context-insufficient-retry-smoke.mjs",
+    "test:e2e:selected-evidence-content": "node tests/e2e/selected-evidence-content-smoke.mjs",
     "test:e2e:unified-task-context": "node tests/e2e/unified-task-context-smoke.mjs",
     "test:e2e:debug-task-context-view": "node tests/e2e/debug-task-context-view-smoke.mjs",
     "test:e2e:task-dependency": "node tests/e2e/task-dependency-smoke.mjs",
@@ -71,6 +82,7 @@
     "node": ">=20"
   },
   "devDependencies": {
+    "playwright": "^1.60.0",
     "typescript": "^5.6.3"
   }
 }
