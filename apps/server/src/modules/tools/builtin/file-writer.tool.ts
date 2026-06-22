@@ -1,8 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import type { RuntimeFileChange } from '@agent-cluster/shared';
 import { applyServerLocalFileChanges } from '../../../common/server-file-changes.js';
-import type { CapabilitiesService } from '../../capabilities/capabilities.service.js';
-import type { CapabilityAuditService } from '../../capabilities/capability-audit.service.js';
+import { CapabilitiesService } from '../../capabilities/capabilities.service.js';
+import { CapabilityAuditService } from '../../capabilities/capability-audit.service.js';
 import type { Tool, ToolExecutionContext, ToolResult } from '../tool.interface.js';
 
 type FileWriterOperation = RuntimeFileChange['operation'];
@@ -47,6 +47,7 @@ export class FileWriterTool implements Tool {
 
   constructor(
     private readonly capabilities: CapabilitiesService,
+    @Optional()
     private readonly audit?: CapabilityAuditService
   ) {}
 

@@ -2,9 +2,9 @@ import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { Injectable } from '@nestjs/common';
-import type { CapabilitiesService } from '../../capabilities/capabilities.service.js';
-import type { CapabilityAuditService } from '../../capabilities/capability-audit.service.js';
+import { Injectable, Optional } from '@nestjs/common';
+import { CapabilitiesService } from '../../capabilities/capabilities.service.js';
+import { CapabilityAuditService } from '../../capabilities/capability-audit.service.js';
 import type { Tool, ToolExecutionContext, ToolResult } from '../tool.interface.js';
 
 const execFileAsync = promisify(execFile);
@@ -65,6 +65,7 @@ export class TestRunnerTool implements Tool {
 
   constructor(
     private readonly capabilities: CapabilitiesService,
+    @Optional()
     private readonly audit?: CapabilityAuditService
   ) {}
 
