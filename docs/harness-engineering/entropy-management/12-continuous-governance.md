@@ -455,3 +455,51 @@ summarize   将复杂过程压缩成结构化产物
 ```
 
 完成第五阶段后，Harness Engineering 不再只是一次性文档，而是一套可长期维护的 Agent 工程协作体系。
+
+## 回写动作清单
+
+本节定义当治理评审给出 `adjust` / `split` / `merge` / `deprecate` 决策后，治理结论如何回写到其他三个控制面。对应闭环模型中的边 ⑥（→ Context）、边 ⑦（→ Architecture）、边 ⑧（→ Feedback）。
+
+### 边 ⑥ 回写 Context（上下文工程）
+
+| 触发漂移 | 回写对象 | 回写动作 |
+| --- | --- | --- |
+| Intent Contract 模板形式化 | `../context-engineering/01-intent-contract.md` | 调整验收标准要求、补充非目标字段示例 |
+| 阶段上下文缺失或越界 | `../context-engineering/02-context-protocol.md` | 调整对应阶段的"应该看到 / 不应该看到"列表 |
+| Prompt 漂移、Agent 系统提示退化 | `../context-engineering/prompt-context/` | 更新 prompt 契约、补充上下文组装样例 |
+| 返工信号重组上下文未生效 | `../context-engineering/02-context-protocol.md` 返工信号入口 | 增补缺失字段或重组规则 |
+
+### 边 ⑦ 回写 Architecture（架构约束）
+
+| 触发漂移 | 回写对象 | 回写动作 |
+| --- | --- | --- |
+| Agent 越权、边界模糊 | `../architecture-constraints/03-agent-role-protocol.md` | 调整角色边界、补充越权示例 |
+| 阶段交接缺产物或跳阶段 | `../architecture-constraints/04-stage-workflow.md` | 调整准入 / 退出条件、补充交接清单 |
+| 工具风险等级不匹配实际后果 | `../architecture-constraints/05-tool-governance.md` + `../architecture-constraints/capability-binding/` | 同步调整风险分级与工具绑定，两处必须同时改 |
+| Agent 工作协议过时 | `../architecture-constraints/10-agent-working-protocol.md` | 更新 Agent 必须输入 / 输出 / 返工触发 |
+
+### 边 ⑧ 回写 Feedback（反馈循环）
+
+| 触发漂移 | 回写对象 | 回写动作 |
+| --- | --- | --- |
+| 出现现有路由表无法分类的失败 | `../feedback-loop/07-feedback-loop.md` 返工路由 | 新增问题类型与对应回退阶段 |
+| 连续返工不收敛阈值不合适 | `../feedback-loop/07-feedback-loop.md` 硬规则 | 调整次数阈值，同步更新 `../feedback-loop/06-human-intervention.md` 触发条件 |
+| 人工介入触发条件遗漏 | `../feedback-loop/06-human-intervention.md` | 新增触发场景与确认字段 |
+| 字段映射与对接出现脱节 | `../feedback-loop/07-feedback-loop.md` 字段映射表 | 与 `02` 和 `08` 同步对齐字段名 |
+
+### 回写硬规则
+
+- 回写动作必须基于至少 2 次交付的同类漂移证据，单次现象不触发回写。
+- 每次回写必须在 `docs/harness-engineering/governance/rule-change-log.md` 中记录：触发漂移、证据来源（交付编号或记忆条目）、影响范围、回写位置、迁移建议。
+- 跨控制面影响的回写必须一次性完成。例如工具风险等级调整必须同时改 `05` 和 `../architecture-constraints/capability-binding/`，不允许只改其一。
+- 回写后必须在下一次治理节奏中验证是否生效，未生效则升级为 `escalate`。
+
+### 闭环可观测性
+
+为证明长闭环成立，治理报告必须包含：
+
+- 本次治理回写了哪些规程（按边 ⑥⑦⑧ 分类列出）。
+- 回写动作的证据来源（哪些 Delivery Memory 条目支撑）。
+- 上次治理的回写动作在本次复查中是否仍有效。
+
+回写动作数长期为零时，长闭环判定为开环，需进入 `escalate`。

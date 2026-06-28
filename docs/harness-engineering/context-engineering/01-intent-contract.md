@@ -1,8 +1,6 @@
 # 01 Intent Contract 需求契约
 
-> 最后修改时间：2026-06-11 14:47:47 +08:00
-> 修改人：Codex
-> 修改的 Agent：Codex
+> **工程化定位** · 控制面: Context Engineering · 权威来源: 本文件 · 修改触发: 经 12 Governance 边 ⑥ 回写
 
 ## 目的
 

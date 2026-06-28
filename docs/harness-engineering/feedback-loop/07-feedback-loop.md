@@ -54,3 +54,32 @@
 - 不能用实现补救需求不清。
 - 不能用测试结论替代评审结论。
 - 同一 Signal 且同一目标阶段的返工出现第 2 次时，必须进入 Human Intervention，不得第 3 次自行返工。
+
+## 返工信号对外契约
+
+本节定义返工记录如何作为信号发送给下游控制面。对应闭环模型中的边 ③（Feedback → Context）、边 ④（Feedback → Architecture）、边 ⑤（Feedback → Entropy）。
+
+### 字段映射
+
+返工记录在对外发送时使用统一字段名，与 `../context-engineering/02-context-protocol.md` 的返工信号入口对齐：
+
+| 07 记录字段 | 对外信号字段 | 消费方 |
+| --- | --- | --- |
+| 问题类型 | 失败分类 | Context / Entropy |
+| 目标阶段 | 回退目标阶段 | Context |
+| 证据 | 证据 | Context / Architecture |
+| 上下文缺口 | 上下文缺口 | Context |
+| 需要修正的产物 | 待修正产物 | Architecture |
+| 期望修正结果 | 期望修正结果 | Context / Architecture |
+
+### 信号去向
+
+- 失败分类为 `需求目标不清` / `验收标准不可判断` / `上下文不足或错误`：信号发往 Context（边 ③）。
+- 失败分类为 `架构或边界错误` / `任务拆解错误` / `实现越界`：信号同时发往 Context 与 Architecture（边 ③ + 边 ④）。
+- 任意返工：必须沉淀进 Delivery Memory（边 ⑤），由 `../entropy-management/08-delivery-memory.md` 接收。
+
+### 硬规则
+
+- 一次返工只允许一个目标阶段，不允许同时回退到多个阶段。
+- 返工记录不得跳过对外信号字段，缺字段时不得对外发出。
+- 同一问题在 3 次返工内未收敛，必须进入 Human Intervention，不得继续走 Feedback 循环。

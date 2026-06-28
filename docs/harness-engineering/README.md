@@ -55,16 +55,16 @@ Harness Engineering 的约束模型按四要素组织：
 | 编号 | 规程 | 作用 |
 | --- | --- | --- |
 | 00 | [Boundary and Principles](./00-boundary-and-principles.md) | 定义 Harness 的边界：约束 AI Agent，而不是业务系统功能 |
-| 01 | [Intent Contract](./01-intent-contract.md) | 把用户需求变成可交接、可评审、可验收的需求契约 |
-| 02 | [Context Protocol](./02-context-protocol.md) | 规定每个阶段的 Agent 应该看到哪些上下文 |
-| 03 | [Agent Role Protocol](./03-agent-role-protocol.md) | 规定 Agent 角色边界和越权处理 |
-| 04 | [Stage Workflow](./04-stage-workflow.md) | 规定阶段顺序、准入条件、退出条件和交接产物 |
-| 05 | [Tool Governance](./05-tool-governance.md) | 规定工具使用风险等级、留痕和人工确认要求 |
-| 06 | [Human Intervention](./06-human-intervention.md) | 规定什么时候必须让用户或人工决策介入 |
-| 07 | [Feedback Loop](./07-feedback-loop.md) | 规定失败如何分类，以及应该回到哪个阶段 |
-| 08 | [Delivery Memory](./08-delivery-memory.md) | 规定交付结束后如何沉淀项目知识 |
-| 10 | [Agent Working Protocol](./10-agent-working-protocol.md) | 把规程固化为每个 Agent 的输入、产出和异常处理协议 |
-| 12 | [Continuous Governance](./12-continuous-governance.md) | 持续治理、熵管理与规程演进 |
+| 01 | [Intent Contract](./context-engineering/01-intent-contract.md) | 把用户需求变成可交接、可评审、可验收的需求契约 |
+| 02 | [Context Protocol](./context-engineering/02-context-protocol.md) | 规定每个阶段的 Agent 应该看到哪些上下文 |
+| 03 | [Agent Role Protocol](./architecture-constraints/03-agent-role-protocol.md) | 规定 Agent 角色边界和越权处理 |
+| 04 | [Stage Workflow](./architecture-constraints/04-stage-workflow.md) | 规定阶段顺序、准入条件、退出条件和交接产物 |
+| 05 | [Tool Governance](./architecture-constraints/05-tool-governance.md) | 规定工具使用风险等级、留痕和人工确认要求 |
+| 06 | [Human Intervention](./feedback-loop/06-human-intervention.md) | 规定什么时候必须让用户或人工决策介入 |
+| 07 | [Feedback Loop](./feedback-loop/07-feedback-loop.md) | 规定失败如何分类，以及应该回到哪个阶段 |
+| 08 | [Delivery Memory](./entropy-management/08-delivery-memory.md) | 规定交付结束后如何沉淀项目知识 |
+| 10 | [Agent Working Protocol](./architecture-constraints/10-agent-working-protocol.md) | 把规程固化为每个 Agent 的输入、产出和异常处理协议 |
+| 12 | [Continuous Governance](./entropy-management/12-continuous-governance.md) | 持续治理、熵管理与规程演进 |
 
 ## 附录模板
 
@@ -88,10 +88,10 @@ templates/
 | 阶段 | 目标 | 说明文档 |
 | --- | --- | --- |
 | 第一阶段 | 建立 8 个核心规程与 7 个模板，不实现系统功能 | 本目录 `01`-`08`、`templates/` |
-| 第二阶段 | 让 Agent Cluster 现有协作流程对齐规程 | [09-phase-two-alignment.md](./09-phase-two-alignment.md) |
-| 第三阶段 | 把规程固化为每个 Agent 的工作协议 | [10-agent-working-protocol.md](./10-agent-working-protocol.md) |
-| 第四阶段 | 建立交付记忆与复盘机制 | [11-delivery-memory-practice.md](./11-delivery-memory-practice.md) |
-| 第五阶段 | 建立持续治理与演进机制 | [12-continuous-governance.md](./12-continuous-governance.md) |
+| 第二阶段 | 让 Agent Cluster 现有协作流程对齐规程 | [09-phase-two-alignment.md](./legacy/09-phase-two-alignment.md) |
+| 第三阶段 | 把规程固化为每个 Agent 的工作协议 | [10-agent-working-protocol.md](./architecture-constraints/10-agent-working-protocol.md) |
+| 第四阶段 | 建立交付记忆与复盘机制 | [11-delivery-memory-practice.md](./entropy-management/11-delivery-memory-practice.md) |
+| 第五阶段 | 建立持续治理与演进机制 | [12-continuous-governance.md](./entropy-management/12-continuous-governance.md) |
 
 ## 使用方式
 

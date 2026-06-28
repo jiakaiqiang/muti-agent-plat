@@ -20,7 +20,7 @@ import path from 'node:path';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..');
-const dir = path.join(repoRoot, 'docs', 'harness-engineering', 'prompt-context');
+const dir = path.join(repoRoot, 'docs', 'harness-engineering', 'context-engineering', 'prompt-context');
 const contractsPath = path.join(repoRoot, 'packages', 'shared', 'src', 'contracts.ts');
 const agentsPath = path.join(repoRoot, 'packages', 'shared', 'src', 'default-agents.ts');
 const agentPresetsPath = path.join(repoRoot, 'packages', 'shared', 'src', 'default-agent-presets.ts');

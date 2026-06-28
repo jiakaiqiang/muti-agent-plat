@@ -1,8 +1,6 @@
 # 10 Agent Working Protocol 第三阶段 Agent 工作协议
 
-> 最后修改时间：2026-06-12 11:20:34 +08:00
-> 修改人：Claude
-> 修改的 Agent：Claude
+> **工程化定位** · 控制面: Architecture Constraints · 权威来源: 本文件 · 修改触发: 经 12 Governance 边 ⑦ 回写
 
 ## 目的
 
@@ -50,26 +48,44 @@ Delivery Agent 只输出结果，不沉淀经验
 第二阶段：现有协作流程已完成对齐评估
 ```
 
-第三阶段输入：
+第三阶段输入（路径以 `.claude/harness-engineering/` 为根，物理拆分到四控制面目录）：
 
 ```text
-01-intent-contract.md
-02-context-protocol.md
-03-agent-role-protocol.md
-04-stage-workflow.md
-05-tool-governance.md
-06-human-intervention.md
-07-feedback-loop.md
-08-delivery-memory.md
-09-phase-two-alignment.md
-alignment/gap-analysis.md
+context-engineering/01-intent-contract.md
+context-engineering/02-context-protocol.md
+architecture-constraints/03-agent-role-protocol.md
+architecture-constraints/04-stage-workflow.md
+architecture-constraints/05-tool-governance.md
+feedback-loop/06-human-intervention.md
+feedback-loop/07-feedback-loop.md
+entropy-management/08-delivery-memory.md
+legacy/09-phase-two-alignment.md
+alignment/phase-two-alignment-report.md
 ```
 
 ## 第三阶段输出
 
-7 个 Agent 的工作协议直接内联于本文档下方各节（负责 / 不负责 / 必须输入 / 必须输出 / 返工触发），不单独拆分到外部目录。
+第三阶段建议产出：
 
-这些协议不是代码，也不是系统提示词实现。它们是 Agent 工作协议，用来指导后续如何调整 Agent 提示词、协作规程和人工评审标准。
+```text
+docs/harness-engineering/agent-instructions/
+  requirement-agent.md
+  architect-agent.md
+  coordinator-agent.md
+  implementation-agent.md
+  verification-agent.md
+  review-agent.md
+  delivery-agent.md
+```
+
+这些文件不是代码，也不是系统提示词实现。
+
+它们是 Agent 工作协议草案，用来指导后续如何调整 Agent 提示词、协作规程和人工评审标准。
+
+## 边界引用
+
+所有 Agent 的角色边界（负责 / 不负责 / 硬规则 / 标准命名表）以 [`03-agent-role-protocol.md`](./03-agent-role-protocol.md) 为权威。本文件不再重复定义，专注于执行层：必须输入、必须输出、返工触发。
+
 
 ## 通用 Agent 工作协议
 
@@ -82,31 +98,11 @@ alignment/gap-analysis.md
 4. 不绕过工具治理。
 5. 不把待确认问题当成已确认事实。
 6. 不用口头总结替代结构化交接产物。
-7. 发现上游问题时，按 [07-feedback-loop.md](./07-feedback-loop.md) 的 Signal 分类回退，不原地修复跨阶段问题。
+7. 发现上游问题时，通过 Feedback Loop 回退。
 8. 结束阶段时，必须说明产物、风险、未决问题和下游注意事项。
 ```
 
-## Requirements Agent 工作协议
-
-### 负责
-
-```text
-澄清用户需求
-形成 Intent Contract
-识别非目标
-识别约束
-形成可判断的验收标准
-标记待确认问题
-```
-
-### 不负责
-
-```text
-不做技术设计
-不拆实现任务
-不承诺实现方案
-不假设用户没有确认的范围
-```
+## Requirement Agent 工作协议
 
 ### 必须输入
 
@@ -135,26 +131,6 @@ Intent Contract
 
 ## Architect Agent 工作协议
 
-### 负责
-
-```text
-基于 Intent Contract 设计方案
-识别影响范围
-识别模块边界
-说明设计取舍
-识别风险
-映射验收标准到设计
-```
-
-### 不负责
-
-```text
-不直接写代码
-不修改需求目标
-不扩大范围
-不跳过备选方案讨论
-```
-
 ### 必须输入
 
 ```text
@@ -169,7 +145,6 @@ Intent Contract
 
 ```text
 Design Plan
-Architecture Constraints（module_boundaries / dependency_direction / contract_stability / allowed_change_scope / forbidden_change_scope / invariants）
 影响范围
 风险与缓解
 验收标准覆盖关系
@@ -187,25 +162,6 @@ Architecture Constraints（module_boundaries / dependency_direction / contract_s
 
 ## Coordinator Agent 工作协议
 
-### 负责
-
-```text
-把 Design Plan 拆成任务
-分配合适 Agent
-定义任务依赖
-定义允许范围
-定义阶段交接顺序
-汇总交付过程
-```
-
-### 不负责
-
-```text
-不替代 Architect 做设计决策
-不替代 Review 做独立评审
-不修改需求契约
-```
-
 ### 必须输入
 
 ```text
@@ -221,7 +177,7 @@ Context Protocol
 Task Plan
 Agent 分配
 依赖顺序
-允许范围（allowedPaths）与禁止范围（forbiddenPaths，由 Architecture Constraints 转换而来）
+允许范围
 工具风险提示
 ```
 
@@ -236,33 +192,12 @@ Agent 分配
 
 ## Implementation Agent 工作协议
 
-### 负责
-
-```text
-按 Task Plan 执行
-保持在允许范围内
-记录实现摘要
-记录范围偏差
-记录工具使用
-标记待验证项
-```
-
-### 不负责
-
-```text
-不改需求
-不改设计目标
-不顺手扩大范围
-不绕过工具治理
-不把未确认风险当成已解决
-```
-
 ### 必须输入
 
 ```text
 Task Plan
 Design Plan
-允许范围（allowedPaths）与禁止范围（forbiddenPaths）
+允许范围
 工具治理规则
 验收标准
 ```
@@ -287,25 +222,6 @@ Implementation Summary
 ```
 
 ## Verification Agent 工作协议
-
-### 负责
-
-```text
-收集验收证据
-逐条检查验收标准
-判断 pass / fail / blocked
-记录证据
-记录缺陷
-建议返工分类
-```
-
-### 不负责
-
-```text
-不主导需求变更
-不替代 Review 做最终决策
-不只跑测试命令就结束
-```
 
 ### 必须输入
 
@@ -336,25 +252,6 @@ Verification Result
 ```
 
 ## Review Agent 工作协议
-
-### 负责
-
-```text
-独立评审全过程产物
-判断需求、设计、实现、验证是否一致
-识别范围变化
-识别未处理风险
-给出 approve / rework / ask_user / fail
-指定返工目标阶段
-```
-
-### 不负责
-
-```text
-不直接修复问题
-不替代用户确认范围变化
-不忽略 blocker 或 major 风险
-```
 
 ### 必须输入
 
@@ -390,26 +287,6 @@ Review Report
 ```
 
 ## Delivery Agent 工作协议
-
-### 负责
-
-```text
-汇总最终交付
-说明完成项
-说明未完成项
-说明剩余风险
-说明后续建议
-沉淀 Delivery Memory
-```
-
-### 不负责
-
-```text
-不掩盖未完成项
-不把未确认风险写成已解决
-不直接外发高风险通知
-不跳过交付记忆
-```
 
 ### 必须输入
 

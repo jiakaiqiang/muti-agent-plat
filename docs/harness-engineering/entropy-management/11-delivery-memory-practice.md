@@ -1,9 +1,6 @@
 # 11 Delivery Memory Practice 第四阶段交付记忆与复盘机制
 
-> 最后修改时间：2026-06-12 11:20:34 +08:00
-> 修改人：Claude Code
-> 修改的 Agent：Claude Code
-> 本文档属于 reference 层：记录 Agent Cluster 的阶段对齐实践，不定义 Harness 本体。
+> **工程化定位** · 控制面: Entropy Management · 权威来源: 本文件 · 修改触发: 长闭环自身演化
 
 ## 目的
 
@@ -30,7 +27,7 @@
 
 ## 第四阶段要解决的问题
 
-如果没有交付记忆机制，Agent Cluster 会出现：
+如果没有交付记忆机制，本项目会出现：
 
 ```text
 每次都重新理解项目
@@ -46,7 +43,7 @@
 
 ## 交付记忆的分类
 
-交付记忆分为五类。
+5 类记忆的权威定义见 [`08-delivery-memory.md`](./08-delivery-memory.md)。本文件不重复列出标题，下面展开各类的"应该沉淀 / 不应该沉淀 / 复盘问题"。
 
 ```text
 1. Project Knowledge      项目知识
@@ -225,7 +222,7 @@ Agent 越权模式
 
 ## 记忆写入规则
 
-写入长期记忆前，必须通过四个判断：
+写入规则的权威定义见 [`08-delivery-memory.md`](./08-delivery-memory.md)。本文件不重复定义，下面只补充复盘视角的四个判断问句：
 
 ```text
 1. 是否可复用？

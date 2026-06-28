@@ -1,9 +1,10 @@
 # 09 Phase Two Alignment 第二阶段对齐方案
 
-> 最后修改时间：2026-06-12 11:20:34 +08:00
-> 修改人：Claude Code
-> 修改的 Agent：Claude Code
-> 本文档属于 reference 层：记录 Agent Cluster 的阶段对齐实践，不定义 Harness 本体。
+> **工程化定位** · 历史归档（legacy/）· 不再演化，仅供查阅 · 第二阶段对齐结论已被四控制面架构取代
+
+> **执行状态：未启动**
+>
+> 本文档约定的 8 份对齐产物（`docs/harness-engineering/alignment/*.md`）目前尚未生成。`.claude/harness-engineering/alignment/` 下现存的 6 份文件（README / artifacts / events / gap / orchestrator / session）是早期占位，与本文档要求的命名不对应，需在第二阶段正式启动时重新规整。审计依据见 `docs/harness-engineering/agent-体系审计与改进方案.md` 问题 10。
 
 ## 目的
 
@@ -12,7 +13,7 @@
 第二阶段的目标是：
 
 ```text
-把现有 Agent Cluster 的协作方式，对齐第一阶段定义的 8 个 Harness Engineering 规程。
+把本项目现有的协作方式，对齐第一阶段定义的 8 个 Harness Engineering 规程。
 ```
 
 也就是说，不急着改变系统，而是先改变 Agent 协作时的工程纪律。
@@ -80,7 +81,11 @@ Agent 上下文边界不清
 
 如果不满足，不应该直接进入设计或任务拆解。
 
-对齐记录归入：[alignment/session-alignment.md](./alignment/session-alignment.md)（brief 生成、用户输入对齐）。
+第二阶段产物：
+
+```text
+docs/harness-engineering/alignment/intent-contract-alignment.md
+```
 
 内容记录：
 
@@ -104,7 +109,11 @@ Review Agent 是否看到全过程产物
 Delivery Agent 是否看到评审结论和剩余风险
 ```
 
-对齐记录归入：[alignment/orchestrator-alignment.md](./alignment/orchestrator-alignment.md)（context pack 按阶段注入）。
+第二阶段产物：
+
+```text
+docs/harness-engineering/alignment/context-alignment.md
+```
 
 内容记录：
 
@@ -131,7 +140,11 @@ Review Agent 是否给出明确返工目标
 Delivery Agent 是否只是总结而没有沉淀记忆
 ```
 
-对齐记录归入：[alignment/orchestrator-alignment.md](./alignment/orchestrator-alignment.md)（AgentRunPhase 与角色边界）。
+第二阶段产物：
+
+```text
+docs/harness-engineering/alignment/agent-role-alignment.md
+```
 
 ### Step 4：对齐阶段交接
 
@@ -147,7 +160,11 @@ post review 是否能支撑 Review Report
 final delivery 是否能支撑 Delivery Memory
 ```
 
-对齐记录归入：[alignment/orchestrator-alignment.md](./alignment/orchestrator-alignment.md) 与 [alignment/artifacts-alignment.md](./alignment/artifacts-alignment.md)（阶段交接产物）。
+第二阶段产物：
+
+```text
+docs/harness-engineering/alignment/stage-workflow-alignment.md
+```
 
 ### Step 5：对齐工具治理
 
@@ -163,7 +180,11 @@ final delivery 是否能支撑 Delivery Memory
 外部发送是否仍保持草稿优先
 ```
 
-对齐记录归入：[capability-binding/tool-governance-binding.md](./capability-binding/tool-governance-binding.md)。
+第二阶段产物：
+
+```text
+docs/harness-engineering/alignment/tool-governance-alignment.md
+```
 
 ### Step 6：对齐人工干预
 
@@ -178,7 +199,11 @@ final delivery 是否能支撑 Delivery Memory
 确认后回到哪个阶段
 ```
 
-对齐记录归入：[capability-binding/human-intervention-binding.md](./capability-binding/human-intervention-binding.md)。
+第二阶段产物：
+
+```text
+docs/harness-engineering/alignment/human-intervention-alignment.md
+```
 
 ### Step 7：对齐反馈返工
 
@@ -196,7 +221,11 @@ final delivery 是否能支撑 Delivery Memory
 上下文问题
 ```
 
-对齐记录归入：[alignment/orchestrator-alignment.md](./alignment/orchestrator-alignment.md)（ExecutionOutcome 与返工路由）。
+第二阶段产物：
+
+```text
+docs/harness-engineering/alignment/feedback-loop-alignment.md
+```
 
 ### Step 8：对齐交付记忆
 
@@ -213,13 +242,21 @@ final delivery 是否能支撑 Delivery Memory
 用户偏好是否记录
 ```
 
-对齐记录归入：[delivery-memory/memory-binding.md](./delivery-memory/memory-binding.md)。
+第二阶段产物：
+
+```text
+docs/harness-engineering/alignment/delivery-memory-alignment.md
+```
 
 ## 第二阶段输出
 
-第二阶段的对齐结论汇总在：[alignment/gap-analysis.md](./alignment/gap-analysis.md)。
+第二阶段最终应该产出一个对齐报告：
 
-汇总应覆盖：
+```text
+docs/harness-engineering/alignment/phase-two-alignment-report.md
+```
+
+报告结构：
 
 ```text
 1. 当前流程对齐程度
@@ -262,7 +299,7 @@ final delivery 是否能支撑 Delivery Memory
 第二阶段完成的标志不是“代码跑通”，而是：
 
 ```text
-现有 Agent Cluster 流程能被 8 个规程解释和约束。
+本项目现有流程能被 8 个规程解释和约束。
 每个阶段都知道自己输入什么、输出什么、何时继续、何时返工。
 每个 Agent 都知道自己的角色边界。
 每类失败都能被归类到正确返工路径。

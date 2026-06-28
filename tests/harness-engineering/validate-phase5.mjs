@@ -22,9 +22,9 @@ import path from 'node:path';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..');
 const harnessDir = path.join(repoRoot, 'docs', 'harness-engineering');
-const dir = path.join(harnessDir, 'delivery-memory');
+const dir = path.join(harnessDir, 'entropy-management', 'delivery-memory');
 const contractsPath = path.join(repoRoot, 'packages', 'shared', 'src', 'contracts.ts');
-const protocolPath = path.join(harnessDir, '08-delivery-memory.md');
+const protocolPath = path.join(harnessDir, 'entropy-management', '08-delivery-memory.md');
 const templatePath = path.join(harnessDir, 'templates', 'final-delivery-template.md');
 
 // ---- Parse the three sources of truth ----

@@ -117,3 +117,9 @@ Top-level fields currently covered by this contract:
 - Unconfirmed assumptions are labeled.
 - Workspace-derived structural conclusions cite `workspaceManifest` or `workspaceFocus`; content-specific conclusions cite `selectedEvidenceContents` or other selected refs rather than guessing.
 - Context can be traced back to upstream artifacts, events, memory, RAG, or workspace scan evidence.
+
+## 运行时选择 / 项目地图 / 可用工具
+
+- `runtimeSelection` (Engineering Runtime Selection): identifies the currently selected runtime profile for the active agent run. Optional; populated when the project enables runtime selection.
+- `projectMap` (Project Map): structured project topology surfaced to the agent prompt. Optional; populated when cross-module navigation is needed for the active task.
+- `availableTools` (Workspace Tool Descriptors): the tool surface available to the agent at prompt construction time. Optional; populated when the runtime resolves a tool catalog for the workspace.

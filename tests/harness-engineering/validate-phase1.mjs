@@ -25,29 +25,29 @@ const templatesDir = path.join(docsDir, 'templates');
 // in the H1 title plus the required section markers for its phase.
 const protocols = [
   { file: '00-boundary-and-principles.md', name: 'Boundary and Principles', sections: ['## 硬规则'] },
-  { file: '01-intent-contract.md', name: 'Intent Contract' },
+  { file: 'context-engineering/01-intent-contract.md', name: 'Intent Contract' },
   {
-    file: '02-context-protocol.md', name: 'Context Protocol',
+    file: 'context-engineering/02-context-protocol.md', name: 'Context Protocol',
     sections: ['## 上下文条目模型', '## 上下文生命周期', '## 上下文污染处理', '## 阶段入口检查']
   },
-  { file: '03-agent-role-protocol.md', name: 'Agent Role Protocol', sections: ['## 架构边界责任'] },
+  { file: 'architecture-constraints/03-agent-role-protocol.md', name: 'Agent Role Protocol', sections: ['## 架构边界责任'] },
   {
-    file: '04-stage-workflow.md', name: 'Stage Workflow',
+    file: 'architecture-constraints/04-stage-workflow.md', name: 'Stage Workflow',
     sections: ['Architecture Constraints', 'forbidden_change_scope', '架构不变量未被破坏']
   },
   {
-    file: '05-tool-governance.md', name: 'Tool Governance',
+    file: 'architecture-constraints/05-tool-governance.md', name: 'Tool Governance',
     sections: ['forbiddenPaths', 'architecture_signal', 'role_boundary_signal']
   },
-  { file: '06-human-intervention.md', name: 'Human Intervention' },
+  { file: 'feedback-loop/06-human-intervention.md', name: 'Human Intervention' },
   {
-    file: '07-feedback-loop.md', name: 'Feedback Loop',
+    file: 'feedback-loop/07-feedback-loop.md', name: 'Feedback Loop',
     sections: ['Signal', '## 闭环标准', 'memory_signal', 'entropy_signal']
   },
-  { file: '08-delivery-memory.md', name: 'Delivery Memory' },
-  { file: '10-agent-working-protocol.md', name: 'Agent Working Protocol' },
+  { file: 'entropy-management/08-delivery-memory.md', name: 'Delivery Memory' },
+  { file: 'architecture-constraints/10-agent-working-protocol.md', name: 'Agent Working Protocol' },
   {
-    file: '12-continuous-governance.md', name: 'Continuous Governance',
+    file: 'entropy-management/12-continuous-governance.md', name: 'Continuous Governance',
     sections: ['## 熵管理', '## 反扩张规则', 'quarantine']
   }
 ];

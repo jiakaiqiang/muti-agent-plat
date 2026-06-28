@@ -19,7 +19,7 @@ import path from 'node:path';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..');
-const dir = path.join(repoRoot, 'docs', 'harness-engineering', 'capability-binding');
+const dir = path.join(repoRoot, 'docs', 'harness-engineering', 'architecture-constraints', 'capability-binding');
 const capsPath = path.join(repoRoot, 'apps', 'server', 'src', 'modules', 'capabilities', 'default-capabilities.ts');
 
 // ---- Parse capabilities source for reality sync ----

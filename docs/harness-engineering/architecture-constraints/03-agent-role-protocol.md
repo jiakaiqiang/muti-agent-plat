@@ -114,3 +114,30 @@
 - 需求变更只能回到 Requirement 阶段。
 - 设计变更只能回到 Design 阶段。
 - 实现阶段不能自行扩大任务范围。
+
+## 边界违规信号入口
+
+本节定义当反馈循环（`../feedback-loop/07-feedback-loop.md`）发现 Agent 越权、产物违规或工具误用时，Architecture 控制面如何接收信号并演化边界。对应闭环模型中的边 ④（Feedback → Architecture）。
+
+### 接收字段
+
+来自 Feedback 的边界违规信号必须携带：
+
+- `失败分类`：架构或边界错误 / 任务拆解错误 / 实现越界 / 工具误用
+- `待修正产物`：哪个阶段的哪个产物违反了边界
+- `证据`：评审或验证发现的具体违规点
+- `期望修正结果`：违规如何被纠正
+
+### 响应分级
+
+按违规性质分三级，**不在同一通道处理**：
+
+- 一级 单次违规：本次任务内修复，不改边界规则。由 Implementation Agent 或 Coordinator Agent 在当前阶段闭环。
+- 二级 临时调整：本次任务需临时放宽或收紧边界，必须通过 Human Intervention（`../feedback-loop/06-human-intervention.md`）确认，且不写入本文件的长期规则。
+- 三级 系统性违规：同一类违规在多次任务中复现，作为边界规则演化候选，沉淀进 Delivery Memory（边 ⑤），由 Continuous Governance（`../entropy-management/12-continuous-governance.md`）决定是否回写本文件。
+
+### 硬规则
+
+- 本文件的"角色边界"和"标准命名表"的长期修改只能由 12 Governance 的回写动作触发（边 ⑦），不允许在单次任务中直接修改。
+- 单次违规修复必须保留记录，供 Governance 检测系统性违规。
+- 工具误用的边界调整必须同步更新 `05-tool-governance.md` 与 `capability-binding/`，不允许只改本文件。

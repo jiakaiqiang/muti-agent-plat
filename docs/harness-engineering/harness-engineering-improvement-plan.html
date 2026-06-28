@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Harness Engineering 改进建议与实施方案</title>
+    <style>
+      :root {
+        --primary: #409eff;
+        --primary-dark: #2563eb;
+        --bg: #f8fafc;
+        --surface: #ffffff;
+        --surface-soft: #f1f5f9;
+        --text: #1e293b;
+        --muted: #64748b;
+        --border: #e2e8f0;
+        --warning: #f59e0b;
+        --danger: #ef4444;
+        --success: #10b981;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+        line-height: 1.65;
+      }
+
+      header,
+      main {
+        width: min(1120px, calc(100% - 32px));
+        margin: 0 auto;
+      }
+
+      header {
+        padding: 36px 0 20px;
+      }
+
+      .eyebrow {
+        color: var(--primary-dark);
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0;
+        margin-bottom: 8px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 30px;
+        line-height: 1.25;
+      }
+
+      .meta {
+        margin-top: 12px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      main {
+        padding: 8px 0 48px;
+      }
+
+      section {
+        margin-top: 16px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 22px;
+      }
+
+      h2 {
+        margin: 0 0 14px;
+        font-size: 20px;
+        line-height: 1.35;
+      }
+
+      h3 {
+        margin: 18px 0 8px;
+        font-size: 16px;
+      }
+
+      p {
+        margin: 8px 0;
+      }
+
+      ul,
+      ol {
+        margin: 8px 0 0;
+        padding-left: 22px;
+      }
+
+      li {
+        margin: 6px 0;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 12px;
+        font-size: 14px;
+      }
+
+      th,
+      td {
+        border: 1px solid var(--border);
+        padding: 10px 12px;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        background: var(--surface-soft);
+        font-weight: 700;
+      }
+
+      code {
+        background: #eef2ff;
+        color: #334155;
+        border-radius: 4px;
+        padding: 2px 5px;
+        font-family: Consolas, "Liberation Mono", monospace;
+        font-size: 0.92em;
+      }
+
+      .summary-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 14px;
+      }
+
+      .metric {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 14px;
+        background: #fbfdff;
+      }
+
+      .metric strong {
+        display: block;
+        font-size: 18px;
+        line-height: 1.2;
+      }
+
+      .metric span {
+        display: block;
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .tag {
+        display: inline-block;
+        border-radius: 999px;
+        padding: 2px 8px;
+        font-size: 12px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      .tag.high {
+        background: #fee2e2;
+        color: #991b1b;
+      }
+
+      .tag.medium {
+        background: #fef3c7;
+        color: #92400e;
+      }
+
+      .tag.low {
+        background: #dcfce7;
+        color: #166534;
+      }
+
+      .callout {
+        border-left: 4px solid var(--primary);
+        background: #eff6ff;
+        padding: 12px 14px;
+        border-radius: 6px;
+        margin-top: 12px;
+      }
+
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 12px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: #ffffff;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      @media (max-width: 840px) {
+        .summary-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 560px) {
+        header,
+        main {
+          width: min(100% - 20px, 1120px);
+        }
+
+        h1 {
+          font-size: 24px;
+        }
+
+        section {
+          padding: 16px;
+        }
+
+        .summary-grid {
+          grid-template-columns: 1fr;
+        }
+
+        table {
+          display: block;
+          overflow-x: auto;
+          white-space: nowrap;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="eyebrow">Harness Engineering / 改进建议与实施方案</div>
+      <h1>从阶段式文档堆叠，重构为四控制面工程体系</h1>
+      <div class="meta">日期：2026-06-27 · 状态：建议方案 · 范围：.claude/harness-engineering/ 文档体系</div>
+      <div class="status">目标：降低冗余，强化约束，让 Harness Engineering 作为 AI 系统工程化规程稳定演进。</div>
+    </header>
+
+    <main>
+      <section>
+        <h2>1. 结论摘要</h2>
+        <p>
+          当前 Harness Engineering 的内容方向是正确的，但信息架构仍以 <code>01-12</code>
+          阶段编号为主线，导致核心规则、落地方案、运行时对齐、复盘治理混在同一层级。建议将主结构调整为四个控制面：
+          <strong>上下文工程、架构约束、反馈循环、熵管理</strong>。
+        </p>
+        <div class="summary-grid">
+          <div class="metric">
+            <strong>4 个控制面</strong>
+            <span>作为 Harness Engineering 的一级架构</span>
+          </div>
+          <div class="metric">
+            <strong>01-12 降级</strong>
+            <span>从主目录主线降级为来源文档或 legacy</span>
+          </div>
+          <div class="metric">
+            <strong>保留旧引用</strong>
+            <span>第一阶段不删除旧文件，降低破坏性</span>
+          </div>
+          <div class="metric">
+            <strong>先逻辑后物理</strong>
+            <span>先建立新入口，再逐步迁移内容</span>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>2. 当前问题评估</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>问题</th>
+              <th>严重级别</th>
+              <th>表现</th>
+              <th>影响</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>主结构按阶段编号组织</td>
+              <td><span class="tag high">高</span></td>
+              <td><code>01-08</code> 是核心规程，<code>09-12</code> 又追加为阶段目标。</td>
+              <td>读者容易把 Harness 理解为阶段文档集合，而不是工程控制体系。</td>
+            </tr>
+            <tr>
+              <td>规则与实践存在重复感</td>
+              <td><span class="tag high">高</span></td>
+              <td><code>08-delivery-memory</code> 与 <code>11-delivery-memory-practice</code>、<code>03-agent-role</code> 与 <code>10-agent-working-protocol</code> 职责接近。</td>
+              <td>后续维护时容易多处修改同一规则，产生漂移。</td>
+            </tr>
+            <tr>
+              <td>alignment / binding 被当成独立阶段</td>
+              <td><span class="tag medium">中</span></td>
+              <td><code>alignment</code>、<code>prompt-context</code>、<code>capability-binding</code>、<code>delivery-memory</code> 以 Phase 2-5 命名。</td>
+              <td>它们本应是四控制面的运行时映射层，而不是并列思想轴。</td>
+            </tr>
+            <tr>
+              <td>产物格式契约需要更新</td>
+              <td><span class="tag medium">中</span></td>
+              <td><code>artifacts-alignment.md</code> 仍将 markdown 作为可读交付默认格式。</td>
+              <td>与当前“可阅读交付物默认 HTML”的工具规则不一致。</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>3. 目标信息架构</h2>
+        <p>建议将 Harness Engineering 的一级目录改为控制面，而不是阶段编号。</p>
+        <table>
+          <thead>
+            <tr>
+              <th>控制面</th>
+              <th>职责</th>
+              <th>吸收现有内容</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>context-engineering/</code></td>
+              <td>管理需求表达、上下文构造、提示词上下文、阶段输入。</td>
+              <td><code>01-intent-contract</code>、<code>02-context-protocol</code>、<code>prompt-context/*</code></td>
+            </tr>
+            <tr>
+              <td><code>architecture-constraints/</code></td>
+              <td>管理 Agent 边界、阶段流转、工具能力、产物契约。</td>
+              <td><code>03-agent-role-protocol</code>、<code>04-stage-workflow</code>、<code>05-tool-governance</code>、<code>capability-binding/*</code>、<code>artifacts-alignment</code></td>
+            </tr>
+            <tr>
+              <td><code>feedback-loop/</code></td>
+              <td>管理人工干预、验证评审、失败分类、返工路由。</td>
+              <td><code>06-human-intervention</code>、<code>07-feedback-loop</code>、verification/review 模板、<code>orchestrator-alignment</code> 中的 outcome 规则</td>
+            </tr>
+            <tr>
+              <td><code>entropy-management/</code></td>
+              <td>管理交付记忆、知识沉淀、复盘、漂移检查、持续治理。</td>
+              <td><code>08-delivery-memory</code>、<code>11-delivery-memory-practice</code>、<code>12-continuous-governance</code>、<code>delivery-memory/*</code></td>
+            </tr>
+            <tr>
+              <td><code>runtime-alignment/</code></td>
+              <td>记录现有系统如何映射到四控制面。</td>
+              <td><code>alignment/session</code>、<code>events</code>、<code>orchestrator</code>、运行时 payload 约束</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="callout">
+          <strong>原则：</strong>每条权威规则只保留一个主位置。旧文件可以作为来源引用或迁移记录存在，但不能继续作为同级主规程重复定义规则。
+        </div>
+      </section>
+
+      <section>
+        <h2>4. 推荐目录结构</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>目录 / 文件</th>
+              <th>用途</th>
+              <th>落地方式</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>README.md</code></td>
+              <td>总入口，解释四控制面、使用方式、迁移状态。</td>
+              <td>重写结构，不删除现有历史说明。</td>
+            </tr>
+            <tr>
+              <td><code>principles.md</code></td>
+              <td>定义 Harness Engineering 的工程原则：约束、可追溯、可返工、控熵。</td>
+              <td>新增。</td>
+            </tr>
+            <tr>
+              <td><code>context-engineering/</code></td>
+              <td>上下文工程控制面。</td>
+              <td>先新增 README，引用现有 01/02/prompt-context。</td>
+            </tr>
+            <tr>
+              <td><code>architecture-constraints/</code></td>
+              <td>架构约束控制面。</td>
+              <td>先新增 README，引用现有 03/04/05/capability-binding/artifact。</td>
+            </tr>
+            <tr>
+              <td><code>feedback-loop/</code></td>
+              <td>反馈循环控制面。</td>
+              <td>先新增 README，引用现有 06/07/review/verification。</td>
+            </tr>
+            <tr>
+              <td><code>entropy-management/</code></td>
+              <td>熵管理控制面。</td>
+              <td>先新增 README，引用现有 08/11/12/delivery-memory。</td>
+            </tr>
+            <tr>
+              <td><code>runtime-alignment/</code></td>
+              <td>运行时映射层，不作为思想轴。</td>
+              <td>由现有 <code>alignment/</code> 迁移或重命名。</td>
+            </tr>
+            <tr>
+              <td><code>legacy/</code></td>
+              <td>保留阶段式旧文档和迁移记录。</td>
+              <td>第二阶段再移动，第一阶段不动文件路径。</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>5. 实施方案</h2>
+        <h3>阶段 A：建立新信息架构，不移动旧文件</h3>
+        <ol>
+          <li>重写 <code>.claude/harness-engineering/README.md</code>，将四控制面作为主入口。</li>
+          <li>新增四个控制面目录及 README：<code>context-engineering</code>、<code>architecture-constraints</code>、<code>feedback-loop</code>、<code>entropy-management</code>。</li>
+          <li>每个控制面 README 只做职责定义和旧文件映射，不复制旧规则全文。</li>
+          <li>更新 <code>alignment/README.md</code>，明确它是运行时映射层，不是独立控制面。</li>
+        </ol>
+
+        <h3>阶段 B：去重和权威规则收敛</h3>
+        <ol>
+          <li>为每条规则标记唯一权威位置，例如“交付记忆写入规则”归 <code>entropy-management</code>。</li>
+          <li>将 <code>03</code> 与 <code>10</code> 的重复内容拆分：03 保留边界原则，10 保留执行手册。</li>
+          <li>将 <code>08</code> 与 <code>11</code> 的重复内容拆分：08 保留原则，11 保留复盘流程。</li>
+          <li>在旧文件头部增加“权威来源 / 被哪个控制面管理”的说明。</li>
+        </ol>
+
+        <h3>阶段 C：运行时契约对齐</h3>
+        <ol>
+          <li>更新 <code>artifacts-alignment.md</code>：补充 <code>html</code> ArtifactType，并区分 storage type、harnessArtifactType、deliveryFormat。</li>
+          <li>更新 <code>orchestrator-alignment.md</code>：将 <code>ExecutionOutcome</code> 归入反馈循环状态机。</li>
+          <li>更新 <code>prompt-context</code>：将其归入上下文工程，不再作为独立 Phase 3 主线。</li>
+          <li>更新 <code>capability-binding</code>：将其归入架构约束和反馈循环交界处。</li>
+        </ol>
+
+        <h3>阶段 D：物理迁移和清理</h3>
+        <ol>
+          <li>在新结构稳定后，移动旧文件到控制面目录或 <code>legacy/</code>。</li>
+          <li>批量修正相对链接。</li>
+          <li>删除重复段落，保留引用关系。</li>
+          <li>执行一次文档审计，确保没有两个文件同时定义同一条权威规则。</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>6. 关键改动清单</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>文件</th>
+              <th>建议动作</th>
+              <th>原因</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>.claude/harness-engineering/README.md</code></td>
+              <td>重写为四控制面总入口。</td>
+              <td>消除阶段式主线造成的冗余感。</td>
+            </tr>
+            <tr>
+              <td><code>.claude/harness-engineering/alignment/README.md</code></td>
+              <td>改名或说明为 runtime alignment。</td>
+              <td>避免将 alignment 误解为第五个思想轴。</td>
+            </tr>
+            <tr>
+              <td><code>.claude/harness-engineering/alignment/artifacts-alignment.md</code></td>
+              <td>补充 HTML 交付格式，并拆分格式语义。</td>
+              <td>与工具工作流的 HTML 默认交付规则保持一致。</td>
+            </tr>
+            <tr>
+              <td><code>.claude/harness-engineering/03-agent-role-protocol.md</code></td>
+              <td>保留角色边界，不展开执行步骤。</td>
+              <td>避免和 10 工作协议重复。</td>
+            </tr>
+            <tr>
+              <td><code>.claude/harness-engineering/10-agent-working-protocol.md</code></td>
+              <td>定位为 Agent 执行手册。</td>
+              <td>从原则层下沉到操作层。</td>
+            </tr>
+            <tr>
+              <td><code>.claude/harness-engineering/08-delivery-memory.md</code></td>
+              <td>保留交付记忆原则。</td>
+              <td>避免和 11 复盘实践重复。</td>
+            </tr>
+            <tr>
+              <td><code>.claude/harness-engineering/11-delivery-memory-practice.md</code></td>
+              <td>定位为熵管理下的复盘流程。</td>
+              <td>明确“原则”和“流程”的层级差异。</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>7. 风险与控制</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>风险</th>
+              <th>控制方式</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>一次性移动大量文件导致链接断裂。</td>
+              <td>第一阶段只新增入口和映射，不移动旧文件；第二阶段再做物理迁移。</td>
+            </tr>
+            <tr>
+              <td>新旧体系并存导致更混乱。</td>
+              <td>README 明确“新结构是权威入口，旧 01-12 是来源文档”。</td>
+            </tr>
+            <tr>
+              <td>四控制面边界仍然模糊。</td>
+              <td>为每个目录写入“负责 / 不负责 / 权威规则类型”。</td>
+            </tr>
+            <tr>
+              <td>文档格式规则与 artifact 契约继续冲突。</td>
+              <td>优先更新 artifacts-alignment，加入 HTML 和 deliveryFormat 概念。</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>8. 验收标准</h2>
+        <ul>
+          <li>Harness Engineering README 首屏能说明四控制面，而不是先展示 <code>01-12</code> 阶段列表。</li>
+          <li>每个控制面都有明确的“负责 / 不负责 / 管理哪些旧文件”。</li>
+          <li>每条核心规则能找到唯一权威位置。</li>
+          <li><code>alignment</code>、<code>prompt-context</code>、<code>capability-binding</code>、<code>delivery-memory</code> 不再作为独立思想轴解释。</li>
+          <li>可阅读交付物的 artifact 契约与默认 HTML 规则一致。</li>
+          <li>旧文件路径在迁移前仍可访问，不破坏现有引用。</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>9. 推荐下一步</h2>
+        <ol>
+          <li>先执行阶段 A：新增四控制面目录和 README，重写总 README。</li>
+          <li>再执行阶段 C 的关键契约修正：优先更新 <code>artifacts-alignment.md</code>。</li>
+          <li>最后再做阶段 B/D 的去重和物理迁移。</li>
+        </ol>
+        <div class="callout">
+          建议不要一开始就移动 <code>01-12</code> 文件。先让新信息架构成为权威入口，等引用关系稳定后再做目录迁移。
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
