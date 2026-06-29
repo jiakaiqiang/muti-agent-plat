@@ -1,27 +1,27 @@
-# Artifacts Alignment
+# Artifacts Alignment 产物对齐
 
 > 最后修改时间：2026-06-11 14:47:47 +08:00
 > 修改人：Codex
 > 修改的 Agent：Codex
 
-## Purpose
+## 目的
 
-Artifacts store materials. Harness Engineering needs an additional semantic layer named harnessArtifactType so the same material can be understood across projects.
+`Artifacts` 只存储物料本身。Harness Engineering 还需要一层额外语义 `harnessArtifactType`，让同一份物料在不同项目里也能被一致解释。
 
-## ArtifactType storage matrix
+## ArtifactType 存储矩阵
 
-| ArtifactType | Usage |
+| ArtifactType | 用途 |
 | --- | --- |
-| text | Short notes or decision summaries. |
-| markdown | Human-readable contracts, plans, reviews, and delivery. |
-| json | Machine-readable contracts or evidence. |
-| code_diff | Implementation evidence. |
-| test_report | Verification evidence. |
-| feishu_draft | External notification draft. |
-| url | External reference. |
-| file | Workspace file artifact. |
+| text | 短笔记或决策摘要。 |
+| markdown | 人类可读的契约、计划、评审、交付。 |
+| json | 机器可读的契约或证据。 |
+| code_diff | 实现证据。 |
+| test_report | 验证证据。 |
+| feishu_draft | 外发通知草稿。 |
+| url | 外部引用。 |
+| file | 工作区文件产物。 |
 
-## harnessArtifactType semantics
+## harnessArtifactType 工程语义
 
 - intent_contract
 - design_plan
@@ -31,6 +31,6 @@ Artifacts store materials. Harness Engineering needs an additional semantic laye
 - review_report
 - final_delivery
 
-## Rule
+## 规则
 
-ArtifactType answers how the artifact is stored. harnessArtifactType answers what role it plays in the engineering workflow.
+`ArtifactType` 回答"物料怎么存储"。`harnessArtifactType` 回答"在工程流程中扮演什么角色"。

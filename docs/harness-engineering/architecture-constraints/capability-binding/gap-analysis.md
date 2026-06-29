@@ -1,21 +1,21 @@
-# Phase 4 Gap Analysis
+# Phase 4 Gap Analysis 差距分析
 
 > 最后修改时间：2026-06-11 14:47:47 +08:00
 > 修改人：Codex
 > 修改的 Agent：Codex
 
-- 完整: capability governance is fully auditable.
-- 部分: capability exists but engineering semantics are incomplete.
-- 缺失: audit binding is missing.
+- 完整：能力治理具备完整可审计性。
+- 部分：能力已存在，但工程语义不完整。
+- 缺失：审计绑定尚未建立。
 
-| ID | Status | Gap |
+| ID | 状态 | 差距 |
 | --- | --- | --- |
-| Q1 | 部分 | checkInvocation should record affected stage. |
-| Q2 | 部分 | approvalKey should be linked to execution evidence. |
-| Q3 | 缺失 | capability_invocations needs reusable audit semantics. |
-| Q4 | 部分 | risk examples should be maintained across projects. |
-| Q5 | 缺失 | file write, command run, and external send need one confirmation template. |
+| Q1 | 部分 | `checkInvocation` 应记录所影响的阶段。 |
+| Q2 | 部分 | `approvalKey` 应与执行证据建立关联。 |
+| Q3 | 缺失 | `capability_invocations` 需要可复用的审计语义。 |
+| Q4 | 部分 | 风险示例应跨项目持续维护。 |
+| Q5 | 缺失 | 文件写入、命令执行、外发通知需要统一的确认模板。 |
 
-## Definition of Done
+## 完成定义
 
-Capability Binding is complete when every risky action can answer who requested it, why, risk level, confirmation result, and evidence.
+当每个高风险动作都能回答"谁发起、为什么、风险等级、确认结果、证据在哪"这五个问题时，Capability Binding 才算完整。

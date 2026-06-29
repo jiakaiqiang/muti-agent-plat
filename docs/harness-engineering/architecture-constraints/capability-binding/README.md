@@ -1,4 +1,4 @@
-# Phase 4 Capability Binding
+# Phase 4 Capability Binding 能力绑定
 
 > 本目录属于 reference 层：解释 Agent Cluster 如何映射 Harness，不定义 Harness 本体。
 
@@ -6,9 +6,9 @@
 > 修改人：Codex
 > 修改的 Agent：Codex
 
-## 工程化 positioning
+## 工程化定位
 
-This directory binds Tool Governance and Human Intervention to capability semantics. It documents resolve, checkInvocation, approve, ENABLE_HIGH_RISK_TOOLS, and REQUIRE_USER_CONFIRMATION without implementing a new permission system.
+本目录把"工具治理"和"人工干预"两条规程绑定到 capability 语义上。它说明 `resolve`、`checkInvocation`、`approve`、`ENABLE_HIGH_RISK_TOOLS`、`REQUIRE_USER_CONFIRMATION` 这些既有概念如何承载 Harness 要求，并不引入新的权限系统。
 
 - tool-governance-binding.md
 - human-intervention-binding.md

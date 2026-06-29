@@ -1,29 +1,29 @@
-# Session Alignment
+# Session Alignment 会话状态对齐
 
 > 最后修改时间：2026-06-11 14:47:47 +08:00
 > 修改人：Codex
 > 修改的 Agent：Codex
 
-## Purpose
+## 目的
 
-This document maps SessionStatus to Harness stages. The same mapping can be reused by another project even when its state names differ.
+本文档把 `SessionStatus` 映射到 Harness 的阶段。即使其他项目的状态命名不同，也能复用同一套映射。
 
-## State matrix
+## 状态矩阵
 
-| SessionStatus | Harness stage | Meaning |
+| SessionStatus | Harness 阶段 | 含义 |
 | --- | --- | --- |
-| DRAFT_INPUT | requirement | Input exists but no intent contract is ready. |
-| AGENT_DISCUSSING | requirement/design | Agents are clarifying the goal and constraints. |
-| WAIT_USER_CONFIRM | human_intervention | The brief is ready and waits for user confirmation. |
-| REVISING_BRIEF | requirement | The intent contract needs revision. |
-| EXECUTING | implementation | The confirmed plan is being executed. |
-| POST_REVIEW | review | Outputs are being checked against intent and evidence. |
-| REWORKING | implementation/verification | A defined rework target is being handled. |
-| WAIT_USER_DECISION | human_intervention | Scope, risk, or permission needs a human decision. |
-| COMPLETED | delivery | Delivery is complete and memory can be deposited. |
-| FAILED | feedback | Failure must be routed by 07-feedback-loop. |
-| CANCELLED | terminal | This round was explicitly stopped. |
+| DRAFT_INPUT | requirement | 输入已存在，但还没形成 intent contract。 |
+| AGENT_DISCUSSING | requirement / design | Agent 正在澄清目标与约束。 |
+| WAIT_USER_CONFIRM | human_intervention | brief 就绪，等待用户确认。 |
+| REVISING_BRIEF | requirement | intent contract 需要修订。 |
+| EXECUTING | implementation | 已确认的计划正在执行。 |
+| POST_REVIEW | review | 正在比对产出与意图、证据。 |
+| REWORKING | implementation / verification | 正在处理明确的返工目标。 |
+| WAIT_USER_DECISION | human_intervention | 范围、风险或权限需要人工决策。 |
+| COMPLETED | delivery | 交付完成，可沉淀记忆。 |
+| FAILED | feedback | 失败必须经 07-feedback-loop 路由。 |
+| CANCELLED | terminal | 本轮被显式终止。 |
 
-## WAIT_USER_CONFIRM rule
+## WAIT_USER_CONFIRM 规则
 
-WAIT_USER_CONFIRM is an engineering gate, not just a UI state. It requires goal, scope, constraints, acceptance criteria, risks, and open questions to be visible.
+`WAIT_USER_CONFIRM` 是工程闸口，不只是 UI 状态。进入该状态时，必须能看到目标、范围、约束、验收标准、风险与待解决问题。

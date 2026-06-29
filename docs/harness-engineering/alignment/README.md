@@ -1,4 +1,4 @@
-# Phase 2 Runtime Alignment
+# Phase 2 Runtime Alignment 运行时对齐
 
 > 本目录属于 reference 层：解释 Agent Cluster 如何映射 Harness，不定义 Harness 本体。
 
@@ -6,20 +6,20 @@
 > 修改人：Codex
 > 修改的 Agent：Codex
 
-## 工程化 positioning
+## 工程化定位
 
-Runtime Alignment maps an existing collaboration process to Harness Engineering. It is not feature work, not API design, and not a project-only convention. Agent Cluster is the current reference instance; the method is reusable for any team that coordinates agents, humans, tools, stages, decisions, and delivery memory.
+Runtime Alignment 把一套既有的协作流程对齐到 Harness Engineering 上。它不是功能开发，不是 API 设计，也不是某个项目独有的约定。Agent Cluster 是当前参考实例；这套方法同样适用于任何需要协调 Agent、人工、工具、阶段、决策与交付记忆的团队。
 
 ## 对齐结论矩阵
 
-| Object | Degree | Notes |
+| 对象 | 程度 | 说明 |
 | --- | --- | --- |
-| SessionStatus | 部分 | WAIT_USER_CONFIRM, EXECUTING, COMPLETED, FAILED, and CANCELLED already carry stage meaning, while review and rework still need sharper governance semantics. |
-| AgentRunPhase | 部分 | discussion, brief_generation, brief_revision, task_execution, post_review, final_delivery, and user_message_routing map to the stage workflow. |
-| Events | 部分 | metadata.payload should carry structured decisions instead of relying on chat content alone. |
-| Artifacts | 部分 | ArtifactType stores the material; harnessArtifactType should express the engineering role. |
+| SessionStatus | 部分 | WAIT_USER_CONFIRM、EXECUTING、COMPLETED、FAILED、CANCELLED 已经具备阶段含义，review 与 rework 还需要更清晰的治理语义。 |
+| AgentRunPhase | 部分 | discussion、brief_generation、brief_revision、task_execution、post_review、final_delivery、user_message_routing 已映射到阶段工作流。 |
+| Events | 部分 | metadata.payload 应承载结构化决策，而不是只依赖聊天内容。 |
+| Artifacts | 部分 | ArtifactType 表达物料形式，harnessArtifactType 表达工程角色。 |
 
-## Source documents
+## 来源文档
 
 - session-alignment.md
 - orchestrator-alignment.md
@@ -29,8 +29,8 @@ Runtime Alignment maps an existing collaboration process to Harness Engineering.
 
 ## metadata.payload
 
-All reusable implementations should put stage, decision, targetStage, artifactId, confirmationId, and harnessArtifactType in metadata.payload when those facts exist.
+所有可复用实现都应把 `stage`、`decision`、`targetStage`、`artifactId`、`confirmationId`、`harnessArtifactType` 这些事实放进 `metadata.payload`（如果存在的话）。
 
 ## 后续阶段
 
-Phase 3 binds prompt/context behavior, Phase 4 binds capability governance, and Phase 5 binds delivery memory.
+Phase 3 绑定 prompt / context 行为，Phase 4 绑定 capability 治理，Phase 5 绑定交付记忆。

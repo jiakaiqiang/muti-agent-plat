@@ -1,14 +1,14 @@
-# Events Alignment
+# Events Alignment 事件对齐
 
 > 最后修改时间：2026-06-11 14:47:47 +08:00
 > 修改人：Codex
 > 修改的 Agent：Codex
 
-## Purpose
+## 目的
 
-Events are the audit trail for Harness Engineering. They should carry stage transitions, decisions, tool usage, confirmations, and delivery memory evidence.
+事件是 Harness Engineering 的审计轨迹。它们应承载阶段流转、决策、工具调用、人工确认与交付记忆证据。
 
-## CollaborationEventType stage signals
+## CollaborationEventType 阶段信号
 
 - brief_created
 - brief_confirmed
@@ -23,6 +23,6 @@ Events are the audit trail for Harness Engineering. They should carry stage tran
 
 ## harness_decision_made
 
-Projects should reserve the logical event meaning harness_decision_made. It may be a real event type or a metadata.payload decision record.
+各项目都应保留 `harness_decision_made` 这个逻辑事件语义。它可以是一种真实的事件类型，也可以表现为 `metadata.payload` 中的一条决策记录。
 
-Recommended payload fields: decisionType, sourceStage, targetStage, reason, evidenceEventIds, confirmationId, artifactId.
+推荐 payload 字段：`decisionType`、`sourceStage`、`targetStage`、`reason`、`evidenceEventIds`、`confirmationId`、`artifactId`。
