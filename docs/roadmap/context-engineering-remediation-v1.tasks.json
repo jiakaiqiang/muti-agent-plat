@@ -1,0 +1,399 @@
+{
+  "$schema": "./context-engineering-remediation-v1.tasks.schema.json",
+  "plan": "docs/roadmap/context-engineering-remediation-v1.md",
+  "version": 1,
+  "createdAt": "2026-06-29",
+  "updatedAt": "2026-06-29",
+  "currentTaskId": "T01",
+  "summary": {
+    "total": 15,
+    "pending": 15,
+    "in_progress": 0,
+    "completed": 0,
+    "failed": 0
+  },
+  "tasks": [
+    {
+      "id": "T01",
+      "title": "WorkspaceManifestCoverage 类型 + 合同测试",
+      "stage": "A",
+      "priority": "P0",
+      "estimateMinutes": 15,
+      "status": "pending",
+      "goal": "在 packages/shared 中定义 WorkspaceManifestCoverage 类型,并把它挂到 WorkspaceManifest 上,作为暴露扫描盲区的合同基础。",
+      "expected": [
+        "packages/shared/src/contracts.ts 中存在 WorkspaceManifestCoverage 类型,包含 totalEntriesSeen / scannedEntries / readableFiles / skippedByReason 四个字段。",
+        "WorkspaceManifest 增加可选字段 coverage: WorkspaceManifestCoverage。",
+        "对应的 vitest 合同测试通过。"
+      ],
+      "steps": [
+        "1. 写一个 vitest 用例 packages/shared/src/__tests__/workspace-manifest-coverage.contract.test.ts,断言 WorkspaceManifestCoverage 字段齐全且 WorkspaceManifest.coverage 为可选 — 此时应失败。",
+        "2. 在 packages/shared/src/contracts.ts 添加 WorkspaceManifestCoverage,并在 WorkspaceManifest 加 coverage 字段。",
+        "3. 重跑 vitest 直到通过。"
+      ],
+      "verification": [
+        "npm --workspace @agent-cluster/shared run test"
+      ],
+      "result": null,
+      "failureReason": null,
+      "notes": []
+    },
+    {
+      "id": "T02",
+      "title": "scanServerWorkspace 计算 coverage",
+      "stage": "A",
+      "priority": "P0",
+      "estimateMinutes": 20,
+      "status": "pending",
+      "goal": "服务端 workspace-scanner 在扫描结束时输出 coverage,统计 totalEntriesSeen / scannedEntries / readableFiles / skippedByReason。",
+      "expected": [
+        "apps/server/src/common/workspace-scanner.ts 的扫描返回值包含 coverage 字段。",
+        "skipped[] 已有的 reason 全部聚合到 skippedByReason 计数中。",
+        "vitest 用例覆盖 limit_exceeded / too_large / sensitive / ignored_directory 至少 4 种 reason。"
+      ],
+      "steps": [
+        "1. 在 apps/server/src/common/__tests__/workspace-scanner.coverage.test.ts 写 vitest 用例,构造一个 tmpdir,包含正常文件 / 超大文件 / 敏感文件(.env)/ 忽略目录(node_modules),断言返回的 coverage 各项与 skippedByReason 对应正确。",
+        "2. 修改 scanServerWorkspace,在 finalize 阶段聚合 skipped[] 并写入 coverage。",
+        "3. 运行测试直到通过。"
+      ],
+      "verification": [
+        "npm --workspace @agent-cluster/server run test -- workspace-scanner.coverage"
+      ],
+      "result": null,
+      "failureReason": null,
+      "notes": []
+    },
+    {
+      "id": "T03",
+      "title": "浏览器 localWorkspace 计算 coverage",
+      "stage": "A",
+      "priority": "P0",
+      "estimateMinutes": 20,
+      "status": "pending",
+      "goal": "apps/web 端 localWorkspace.scanDirectory 与服务端口径一致,在扫描结果上挂 coverage。",
+      "expected": [
+        "apps/web/src/stores/localWorkspace.ts 的 scanDirectory 返回值含 coverage。",
+        "skipped reason 与服务端保持同一枚举(limit_exceeded / too_large / sensitive / ignored_directory / binary / read_error)。",
+        "对应 vitest 测试通过,使用伪造的 DirectoryHandle。"
+      ],
+      "steps": [
+        "1. 在 apps/web/src/stores/__tests__/localWorkspace.coverage.test.ts 写测试,模拟一个含正常文件/.env/超大文件的 handle,断言 coverage 数值。",
+        "2. 修改 scanDirectory 聚合 skipped 到 coverage。",
+        "3. 跑测试到通过。"
+      ],
+      "verification": [
+        "npm --workspace @agent-cluster/web run test -- localWorkspace.coverage"
+      ],
+      "result": null,
+      "failureReason": null,
+      "notes": []
+    },
+    {
+      "id": "T04",
+      "title": "createWorkspaceManifest 注入 coverage 并暴露给 prompt",
+      "stage": "A",
+      "priority": "P0",
+      "estimateMinutes": 15,
+      "status": "pending",
+      "goal": "orchestrator 在装配 workspaceManifest 时把 coverage 直通到 ContextPack,并在 systemRules / prompt 文案里告知 runtime 用 CONTEXT_INSUFFICIENT 拉取缺失内容。",
+      "expected": [
+        "createWorkspaceManifest 输出含 coverage。",
+        "ContextPack.systemRules 包含一句类似 '工作区扫描仅覆盖 X/Y,缺信息请返回 CONTEXT_INSUFFICIENT.requestedPaths' 的提示(coverage 存在时)。",
+        "对应 orchestrator 单测通过。"
+      ],
+      "steps": [
+        "1. 在 apps/server/src/modules/orchestrator/__tests__/context-pack.coverage.test.ts 写测试,提供伪造 session.workspaceSnapshot 含 coverage,断言 contextPack.workspaceManifest.coverage 与 systemRules 的提示文案存在。",
+        "2. 修改 orchestrator.service.ts 中 createWorkspaceManifest 与 systemRules 拼装。",
+        "3. 跑测试到通过。"
+      ],
+      "verification": [
+        "npm --workspace @agent-cluster/server run test -- context-pack.coverage"
+      ],
+      "result": null,
+      "failureReason": null,
+      "notes": []
+    },
+    {
+      "id": "T05",
+      "title": "CONTEXT_INSUFFICIENT 重试次数配置化",
+      "stage": "B",
+      "priority": "P0",
+      "estimateMinutes": 20,
+      "status": "pending",
+      "goal": "把 canRetryWithSupplementalContext 的单次硬上限改成可配置,默认 3 次,可通过环境变量覆盖。",
+      "expected": [
+        "env: AGENT_CLUSTER_CONTEXT_INSUFFICIENT_MAX_RETRIES,默认值 3。",
+        "canRetryWithSupplementalContext 读取该配置。",
+        "session.supplementalContextRequests 上记录 retryCount,达到上限后返回 false。",
+        "对应单测覆盖 0 / 1 / 边界 / 越界四种情况。"
+      ],
+      "steps": [
+        "1. 在 orchestrator __tests__ 写测试,断言重试 3 次允许、第 4 次拒绝,且环境变量可覆盖。",
+        "2. 修改 runtime-config / env.ts 暴露配置。",
+        "3. 修改 canRetryWithSupplementalContext 与 recordSupplementalContextRequest。",
+        "4. 跑测试到通过。"
+      ],
+      "verification": [
+        "npm --workspace @agent-cluster/server run test -- supplemental-context-retry"
+      ],
+      "result": null,
+      "failureReason": null,
+      "notes": []
+    },
+    {
+      "id": "T06",
+      "title": "requestedContext dedupe",
+      "stage": "B",
+      "priority": "P0",
+      "estimateMinutes": 15,
+      "status": "pending",
+      "goal": "supplementalContextRequests 入库前做 dedupe,重复请求同一 ref/path/command 直接合并、不增加 retryCount。",
+      "expected": [
+        "recordSupplementalContextRequest 中相同(ref+kind)的请求不重复入库。",
+        "若本轮没有新 ref/path/command,canRetryWithSupplementalContext 返回 false 且原因记录在 session 上。",
+        "单测覆盖 dedupe + 空新增 两种情况。"
+      ],
+      "steps": [
+        "1. 写测试覆盖 dedupe 行为与'空新增视为不可重试'。",
+        "2. 修改 recordSupplementalContextRequest 和 canRetryWithSupplementalContext。",
+        "3. 跑测试到通过。"
+      ],
+      "verification": [
+        "npm --workspace @agent-cluster/server run test -- supplemental-context-dedupe"
+      ],
+      "result": null,
+      "failureReason": null,
+      "notes": []
+    },
+    {
+      "id": "T07",
+      "title": "e2e: 多轮 CONTEXT_INSUFFICIENT 验证",
+      "stage": "B",
+      "priority": "P0",
+      "estimateMinutes": 20,
+      "status": "pending",
+      "goal": "新增/扩展 e2e smoke,驱动 mock runtime 连续两次返回 CONTEXT_INSUFFICIENT(每次请求不同 ref),验证 orchestrator 都装配新 evidence 并最终交付成功。",
+      "expected": [
+        "新增 tests/e2e/context-insufficient-multi-retry-smoke.mjs(若 context-insufficient-retry-smoke 已覆盖,则扩展之)。",
+        "脚本在 mock runtime 下跑通且断言重试 2 次后 task 成功。",
+        "npm scripts 增加 test:e2e:context-insufficient-multi-retry。"
+      ],
+      "steps": [
+        "1. 先在脚本里以 expected 失败方式断言行为(未实现时跑不通),提交。",
+        "2. 若需要 mock runtime 配合,补充 mock 控制开关(参考现有 context-insufficient-retry-smoke)。",
+        "3. 跑通脚本。"
+      ],
+      "verification": [
+        "node tests/e2e/context-insufficient-multi-retry-smoke.mjs"
+      ],
+      "result": null,
+      "failureReason": null,
+      "notes": []
+    },
+    {
+      "id": "T08",
+      "title": "workspaceEvidenceContent 智能截断接口 + 单测",
+      "stage": "C",
+      "priority": "P0",
+      "estimateMinutes": 20,
+      "status": "pending",
+      "goal": "为 workspaceEvidenceContent 抽出 truncateContentForEvidence(path, content, budget) 纯函数,并定义 truncatedHint 字段。",
+      "expected": [
+        "新增 apps/server/src/common/evidence-truncation.ts(纯函数,无 Nest 依赖)。",
+        "返回 { content, truncated, truncatedHint?: { strategy, originalBytes, keptBytes, droppedRanges? } }。",
+        "对 TS/JS/MD/纯文本/二进制 fallback 五种输入有单测。"
+      ],
+      "steps": [
+        "1. 在 apps/server/src/common/__tests__/evidence-truncation.test.ts 写测试覆盖五种输入。",
+        "2. 实现 truncateContentForEvidence 骨架(策略可以是默认 slice,后续 task 替换)。",
+        "3. 让现有 workspaceEvidenceContent 调用它(暂保留旧行为)。",
+        "4. 跑测试到通过。"
+      ],
+      "verification": [
+        "npm --workspace @agent-cluster/server run test -- evidence-truncation"
+      ],
+      "result": null,
+      "failureReason": null,
+      "notes": []
+    },
+    {
+      "id": "T09",
+      "title": "TS/JS 智能截断实现",
+      "stage": "C",
+      "priority": "P0",
+      "estimateMinutes": 20,
+      "status": "pending",
+      "goal": "TS/JS/Vue 文件优先保留 import / export / 命中关键字相关函数体,再回退 8KB slice。",
+      "expected": [
+        "evidence-truncation.ts 中 strategy='ts-symbol-window' 实现完成。",
+        "对一份 ~30KB 的样本 TS 文件,在 query='SessionService' 时,输出包含 SessionService 类定义且 keptBytes <= budget。",
+        "单测覆盖 query 命中、query 不命中(回退 slice)两种。"
+      ],
+      "steps": [
+        "1. 在 evidence-truncation.test.ts 加 ts-symbol-window 用例(可用 fixture 文件)。",
+        "2. 实现简化版符号窗口:正则匹配 export (function|class|const|interface|type),按命中位置截窗。",
+        "3. 跑测试到通过。"
+      ],
+      "verification": [
+        "npm --workspace @agent-cluster/server run test -- evidence-truncation"
+      ],
+      "result": null,
+      "failureReason": null,
+      "notes": []
+    },
+    {
+      "id": "T10",
+      "title": "Markdown 按 H2 截断 + truncatedHint",
+      "stage": "C",
+      "priority": "P0",
+      "estimateMinutes": 20,
+      "status": "pending",
+      "goal": "Markdown 文件按 H2(##) 段落组装到 budget,truncatedHint 写明保留的章节标题与被丢章节标题。",
+      "expected": [
+        "strategy='md-section-window' 实现完成。",
+        "truncatedHint.keptSections / droppedSections 字段在测试中可读。",
+        "selectedEvidenceContents 通过 e2e debug 接口能看到 truncatedHint。"
+      ],
+      "steps": [
+        "1. 写 md-section-window 测试,fixture 含 4 个 H2 段落,budget 只够 2 个。",
+        "2. 实现 md 截断,优先保留含 query 词的段落。",
+        "3. 跑测试到通过。",
+        "4. 确认 workspaceEvidenceContent 把 truncatedHint 透传到 selectedEvidenceContents 项。"
+      ],
+      "verification": [
+        "npm --workspace @agent-cluster/server run test -- evidence-truncation"
+      ],
+      "result": null,
+      "failureReason": null,
+      "notes": []
+    },
+    {
+      "id": "T11",
+      "title": "token.ts navigation_only stage 类型/接口 + 单测",
+      "stage": "D",
+      "priority": "P0",
+      "estimateMinutes": 20,
+      "status": "pending",
+      "goal": "为 fitContextToBudget 增加 'navigation_only' 阶段类型与 diagnostics 字段,把它作为 emergency 之后的最后一级。",
+      "expected": [
+        "FitStage 枚举/字符串联合包含 'navigation_only'。",
+        "diagnostics 含 stagesTried、droppedSections、finalStage。",
+        "单测断言枚举与 diagnostics 字段(实现可暂返回 emergency 行为)。"
+      ],
+      "steps": [
+        "1. 在 token.ts 旁的 __tests__ 写测试,断言 stage 名称和 diagnostics shape。",
+        "2. 修改 token.ts 类型与 diagnostics 返回。",
+        "3. 跑测试到通过。"
+      ],
+      "verification": [
+        "npm --workspace @agent-cluster/server run test -- token-fit"
+      ],
+      "result": null,
+      "failureReason": null,
+      "notes": []
+    },
+    {
+      "id": "T12",
+      "title": "navigation_only stage 实现",
+      "stage": "D",
+      "priority": "P0",
+      "estimateMinutes": 20,
+      "status": "pending",
+      "goal": "emergency 仍然超 budget 时,降级到 navigation_only:清空 selectedEvidenceContents,workspaceManifest 只保留 root+entrypoints+validationCommands,systemRules.contextDegraded=true。",
+      "expected": [
+        "对一份 250KB workspaceManifest + 100KB selectedEvidenceContents 输入,navigation_only 输出 < 8KB。",
+        "ContextPack.systemRules 含 contextDegraded=true 提示。",
+        "单测覆盖 navigation_only 触发条件与产出。"
+      ],
+      "steps": [
+        "1. 在 token.fit.test.ts 写大输入测试,断言进入 navigation_only 且体积达标。",
+        "2. 在 trimContext 中实现 navigation_only 分支。",
+        "3. 跑测试到通过。"
+      ],
+      "verification": [
+        "npm --workspace @agent-cluster/server run test -- token-fit"
+      ],
+      "result": null,
+      "failureReason": null,
+      "notes": []
+    },
+    {
+      "id": "T13",
+      "title": "e2e: 极大目录场景验证",
+      "stage": "D",
+      "priority": "P0",
+      "estimateMinutes": 20,
+      "status": "pending",
+      "goal": "新增 e2e tests/e2e/large-workspace-navigation-only-smoke.mjs:伪造一个 1000 文件、约 5MB 的 workspaceSnapshot,跑 mock runtime task_execution,断言进入 navigation_only 且任务成功。",
+      "expected": [
+        "脚本通过 internal debug API 注入大 workspaceSnapshot。",
+        "脚本断言事件流出现 contextDegraded=true,没有 TOKEN_BUDGET_EXCEEDED。",
+        "npm scripts 增加 test:e2e:large-workspace-navigation-only。"
+      ],
+      "steps": [
+        "1. 写脚本骨架,使用现有 ops/debug 接口(参考 debug-task-context-view-smoke.mjs)。",
+        "2. 跑脚本,失败则迭代。"
+      ],
+      "verification": [
+        "node tests/e2e/large-workspace-navigation-only-smoke.mjs"
+      ],
+      "result": null,
+      "failureReason": null,
+      "notes": []
+    },
+    {
+      "id": "T14",
+      "title": "文档同步",
+      "stage": "E",
+      "priority": "P0",
+      "estimateMinutes": 20,
+      "status": "pending",
+      "goal": "把 coverage / retry / 智能截断 / navigation_only 写进 runtime-context-contract.md、02-context-protocol.md、pluggable-engineering-runtime-memory.md。",
+      "expected": [
+        "三份文档新增/修改的小节明确引用本方案 ID。",
+        "test:harness:phase1 仍然通过(文档校验)。"
+      ],
+      "steps": [
+        "1. 修改 docs/harness-engineering/context-engineering/prompt-context/runtime-context-contract.md。",
+        "2. 修改 docs/harness-engineering/context-engineering/02-context-protocol.md。",
+        "3. 修改 docs/ai-agent-context/pluggable-engineering-runtime-memory.md。",
+        "4. 跑 harness phase1 校验。"
+      ],
+      "verification": [
+        "npm run test:harness:phase1"
+      ],
+      "result": null,
+      "failureReason": null,
+      "notes": []
+    },
+    {
+      "id": "T15",
+      "title": "全量回归",
+      "stage": "E",
+      "priority": "P0",
+      "estimateMinutes": 20,
+      "status": "pending",
+      "goal": "执行 typecheck + 全 workspace test + harness 全 phase + 本批新增 e2e。",
+      "expected": [
+        "npm run typecheck 通过。",
+        "npm run test 通过。",
+        "npm run test:harness 通过。",
+        "T07、T13 的两个新 e2e 通过。"
+      ],
+      "steps": [
+        "1. 按顺序运行四组命令,失败按 task 拆分回退修复。",
+        "2. 记录命令时长与产物到 result。"
+      ],
+      "verification": [
+        "npm run typecheck",
+        "npm run test",
+        "npm run test:harness",
+        "node tests/e2e/context-insufficient-multi-retry-smoke.mjs",
+        "node tests/e2e/large-workspace-navigation-only-smoke.mjs"
+      ],
+      "result": null,
+      "failureReason": null,
+      "notes": []
+    }
+  ]
+}
