@@ -4,9 +4,15 @@ import type {
   AgentRunInput,
   AgentRunResult,
   AgentRuntimeAdapter,
+  FinalDeliveryOutput,
+  PostReviewReportOutput,
   RuntimeError,
+  RuntimeArtifactOutput,
+  RuntimeContextRequest,
   RuntimeOutput,
-  RuntimeUsage
+  RuntimeUsage,
+  TaskClaimDecisionOutput,
+  UserMessageHandlingPlanOutput
 } from '@agent-cluster/shared';
 import {
   genericLlmMockFallbackEnabled,
@@ -735,6 +741,14 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     if (record.kind === expectedKind) {
       return record as RuntimeOutput;
     }
+    if (typeof record.kind === 'string') {
+      return undefined;
+    }
+
+    const directOutput = this.coerceRuntimeOutputWithoutKind(record, expectedKind);
+    if (directOutput && this.isDirectRuntimeOutputShape(record, expectedKind)) {
+      return directOutput;
+    }
 
     for (const key of ['output', 'result', 'final_output', 'data', 'content', 'message', 'text', 'output_text', 'value']) {
       const output = this.toRuntimeOutput(record[key], expectedKind, depth + 1);
@@ -743,7 +757,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       }
     }
 
-    return undefined;
+    return directOutput;
   }
 
   private parseRuntimeOutputText(content: string, expectedKind: RuntimeOutputKind, depth: number) {
@@ -752,9 +766,11 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       return undefined;
     }
 
+    let sawExplicitWrongKind = false;
     for (const candidate of this.jsonTextCandidates(trimmed)) {
       try {
         const parsed = JSON.parse(candidate) as unknown;
+        sawExplicitWrongKind ||= this.hasExplicitWrongKind(parsed, expectedKind);
         const output = this.toRuntimeOutput(parsed, expectedKind, depth + 1);
         if (output) {
           return output;
@@ -764,7 +780,267 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       }
     }
 
+    if (expectedKind === 'agent_message' && !sawExplicitWrongKind) {
+      return {
+        kind: 'agent_message',
+        messageKind: 'summary',
+        content: trimmed
+      } satisfies AgentMessageOutput;
+    }
+
     return undefined;
+  }
+
+  private coerceRuntimeOutputWithoutKind(
+    record: Record<string, unknown>,
+    expectedKind: RuntimeOutputKind
+  ): RuntimeOutput | undefined {
+    if (expectedKind === 'agent_message') {
+      const content = this.firstPlainText(record.content, record.message, record.text, record.output_text, record.value).trim();
+      if (!content) {
+        return undefined;
+      }
+      return {
+        kind: 'agent_message',
+        messageKind: this.asAgentMessageKind(record.messageKind),
+        content,
+        targetAgentIds: this.optionalStringArray(record.targetAgentIds),
+        targetAgentKeys: this.optionalStringArray(record.targetAgentKeys),
+        mentionedAgentIds: this.optionalStringArray(record.mentionedAgentIds),
+        relatedTaskIds: this.optionalStringArray(record.relatedTaskIds)
+      } satisfies AgentMessageOutput;
+    }
+
+    if (expectedKind === 'task_brief') {
+      const goal = this.firstPlainText(record.goal, record.summary, record.content).trim();
+      if (!goal) {
+        return undefined;
+      }
+      return {
+        kind: 'task_brief',
+        goal,
+        scope: this.stringArray(record.scope),
+        outOfScope: this.stringArray(record.outOfScope),
+        constraints: this.stringArray(record.constraints),
+        acceptanceCriteria: this.stringArray(record.acceptanceCriteria),
+        risks: this.stringArray(record.risks),
+        openQuestions: this.stringArray(record.openQuestions),
+        suggestedTasks: Array.isArray(record.suggestedTasks) ? (record.suggestedTasks as never[]) : []
+      };
+    }
+
+    if (expectedKind === 'task_execution_result') {
+      const summary = this.firstPlainText(record.summary, record.content, record.message, record.text).trim();
+      if (!summary) {
+        return undefined;
+      }
+      return {
+        kind: 'task_execution_result',
+        status: this.asTaskExecutionStatus(record.status),
+        summary,
+        completedItems: this.stringArray(record.completedItems),
+        changedArtifacts: this.artifacts(record.changedArtifacts),
+        requestedContext: this.optionalContextRequest(record.requestedContext),
+        agentMessages: this.agentMessages(record.agentMessages),
+        nextSuggestedActions: this.stringArray(record.nextSuggestedActions),
+        risks: this.stringArray(record.risks)
+      };
+    }
+
+    if (expectedKind === 'task_claim_decision') {
+      const reason = this.firstPlainText(record.reason, record.summary, record.content, record.message).trim();
+      if (!reason && typeof record.accepted !== 'boolean') {
+        return undefined;
+      }
+      return {
+        kind: 'task_claim_decision',
+        accepted: typeof record.accepted === 'boolean' ? record.accepted : true,
+        reason: reason || 'Model returned a claim decision without a reason.',
+        confidence: typeof record.confidence === 'number' ? record.confidence : undefined,
+        alternativeAgentKeys: this.optionalStringArray(record.alternativeAgentKeys),
+        alternativeAgentIds: this.optionalStringArray(record.alternativeAgentIds),
+        agentMessages: this.agentMessages(record.agentMessages)
+      } satisfies TaskClaimDecisionOutput;
+    }
+
+    if (expectedKind === 'post_review_report') {
+      const recommendation = this.asPostReviewRecommendation(record.recommendation);
+      if (!recommendation && record.isConsistentWithBrief === undefined) {
+        return undefined;
+      }
+      return {
+        kind: 'post_review_report',
+        isConsistentWithBrief: record.isConsistentWithBrief !== false,
+        matchedItems: this.stringArray(record.matchedItems),
+        mismatchedItems: this.stringArray(record.mismatchedItems),
+        missingItems: this.stringArray(record.missingItems),
+        outOfScopeChanges: this.stringArray(record.outOfScopeChanges),
+        testResults: this.stringArray(record.testResults),
+        recommendation: recommendation ?? 'ask_user'
+      } satisfies PostReviewReportOutput;
+    }
+
+    if (expectedKind === 'final_delivery') {
+      const summary = this.firstPlainText(record.summary, record.content, record.message, record.text).trim();
+      if (!summary) {
+        return undefined;
+      }
+      return {
+        kind: 'final_delivery',
+        summary,
+        completedItems: this.stringArray(record.completedItems),
+        incompleteItems: this.stringArray(record.incompleteItems),
+        risks: this.stringArray(record.risks),
+        artifactRefs: this.stringArray(record.artifactRefs)
+      } satisfies FinalDeliveryOutput;
+    }
+
+    if (expectedKind === 'user_message_handling_plan') {
+      const coordinatorInstruction = this.firstPlainText(
+        record.coordinatorInstruction,
+        record.instruction,
+        record.summary,
+        record.content
+      ).trim();
+      if (!coordinatorInstruction && !record.intent) {
+        return undefined;
+      }
+      return {
+        kind: 'user_message_handling_plan',
+        intent: this.asUserMessageIntent(record.intent),
+        priority: this.asEventPriority(record.priority),
+        shouldPause: record.shouldPause === true,
+        affectedTaskIds: this.stringArray(record.affectedTaskIds),
+        affectedAgentIds: this.stringArray(record.affectedAgentIds),
+        requiresBriefRevision: record.requiresBriefRevision === true,
+        requiresUserConfirmation: record.requiresUserConfirmation === true,
+        coordinatorInstruction: coordinatorInstruction || 'Handle the user message according to the current session state.'
+      } satisfies UserMessageHandlingPlanOutput;
+    }
+
+    return undefined;
+  }
+
+  private isDirectRuntimeOutputShape(record: Record<string, unknown>, expectedKind: RuntimeOutputKind) {
+    if (expectedKind === 'agent_message') {
+      return (
+        record.content !== undefined ||
+        record.messageKind !== undefined ||
+        record.targetAgentKeys !== undefined ||
+        record.targetAgentIds !== undefined
+      );
+    }
+    if (expectedKind === 'task_brief') {
+      return record.goal !== undefined || record.acceptanceCriteria !== undefined || record.suggestedTasks !== undefined;
+    }
+    if (expectedKind === 'task_execution_result') {
+      return record.summary !== undefined || record.status !== undefined || record.completedItems !== undefined;
+    }
+    if (expectedKind === 'task_claim_decision') {
+      return record.accepted !== undefined || record.reason !== undefined;
+    }
+    if (expectedKind === 'post_review_report') {
+      return record.recommendation !== undefined || record.isConsistentWithBrief !== undefined;
+    }
+    if (expectedKind === 'final_delivery') {
+      return record.summary !== undefined || record.completedItems !== undefined || record.artifactRefs !== undefined;
+    }
+    return record.intent !== undefined || record.coordinatorInstruction !== undefined;
+  }
+
+  private hasExplicitWrongKind(value: unknown, expectedKind: RuntimeOutputKind, depth = 0): boolean {
+    if (depth > 4 || value === undefined || value === null) {
+      return false;
+    }
+    if (Array.isArray(value)) {
+      return value.some((item) => this.hasExplicitWrongKind(item, expectedKind, depth + 1));
+    }
+    if (typeof value !== 'object') {
+      return false;
+    }
+    const record = value as Record<string, unknown>;
+    if (typeof record.kind === 'string') {
+      return record.kind !== expectedKind;
+    }
+    return ['output', 'result', 'final_output', 'data', 'content', 'message', 'text', 'output_text', 'value'].some((key) =>
+      this.hasExplicitWrongKind(record[key], expectedKind, depth + 1)
+    );
+  }
+
+  private firstPlainText(...values: unknown[]) {
+    for (const value of values) {
+      const text = this.toPlainText(value).trim();
+      if (text) {
+        return text;
+      }
+    }
+    return '';
+  }
+
+  private stringArray(value: unknown): string[] {
+    return this.optionalStringArray(value) ?? [];
+  }
+
+  private optionalStringArray(value: unknown): string[] | undefined {
+    if (value === undefined || value === null) {
+      return undefined;
+    }
+    const values = Array.isArray(value) ? value : [value];
+    return values.map((item) => this.toPlainText(item).trim()).filter(Boolean);
+  }
+
+  private agentMessages(value: unknown): AgentMessageOutput[] | undefined {
+    if (!Array.isArray(value)) {
+      return undefined;
+    }
+    const messages = value
+      .map((item) =>
+        item && typeof item === 'object'
+          ? this.coerceRuntimeOutputWithoutKind(item as Record<string, unknown>, 'agent_message')
+          : this.toRuntimeOutput(item, 'agent_message')
+      )
+      .filter((item): item is AgentMessageOutput => item?.kind === 'agent_message');
+    return messages.length ? messages : undefined;
+  }
+
+  private artifacts(value: unknown): RuntimeArtifactOutput[] {
+    return Array.isArray(value) ? (value as RuntimeArtifactOutput[]) : [];
+  }
+
+  private optionalContextRequest(value: unknown): RuntimeContextRequest | undefined {
+    return value && typeof value === 'object' && !Array.isArray(value) ? (value as RuntimeContextRequest) : undefined;
+  }
+
+  private asAgentMessageKind(value: unknown): AgentMessageOutput['messageKind'] {
+    return ['discussion', 'answer', 'handoff', 'progress', 'risk', 'decision', 'summary'].includes(String(value))
+      ? (value as AgentMessageOutput['messageKind'])
+      : 'summary';
+  }
+
+  private asTaskExecutionStatus(value: unknown) {
+    return ['completed', 'failed', 'blocked', 'needs_review'].includes(String(value))
+      ? (value as 'completed' | 'failed' | 'blocked' | 'needs_review')
+      : 'completed';
+  }
+
+  private asPostReviewRecommendation(value: unknown) {
+    return ['deliver', 'rework', 'ask_user'].includes(String(value))
+      ? (value as 'deliver' | 'rework' | 'ask_user')
+      : undefined;
+  }
+
+  private asUserMessageIntent(value: unknown) {
+    return ['clarification', 'constraint', 'command', 'question', 'correction', 'knowledge_input', 'preference_input'].includes(
+      String(value)
+    )
+      ? (value as UserMessageHandlingPlanOutput['intent'])
+      : 'question';
+  }
+
+  private asEventPriority(value: unknown) {
+    return ['low', 'normal', 'high', 'critical'].includes(String(value))
+      ? (value as UserMessageHandlingPlanOutput['priority'])
+      : 'normal';
   }
 
   private jsonTextCandidates(content: string) {

@@ -47,6 +47,7 @@ const sessionCreateError = ref('')
 const sessionScanStatus = ref<'idle' | 'scanning' | 'completed' | 'failed'>('idle')
 const sessionScanSummary = ref<WorkspaceSnapshot | undefined>()
 const sessionRuntimeType = ref<RuntimeType | ''>('')
+const workspaceDirectoryRequiredMessage = '请先选择本地工作目录'
 
 const sessionRuntimeOptions: { value: RuntimeType | ''; label: string }[] = [
   { value: '', label: '跟随系统默认' },
@@ -299,6 +300,10 @@ async function createSessionFromDialog() {
   }
   if (!selectedSessionAgentIds.value.length) {
     sessionCreateError.value = '请选择至少一个 Agent'
+    return
+  }
+  if (!localWorkspaceStore.pendingDirectory) {
+    sessionCreateError.value = workspaceDirectoryRequiredMessage
     return
   }
   isCreatingSession.value = true
@@ -962,6 +967,9 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
           </strong>
           <small v-else-if="!localWorkspaceStore.supportsDirectoryPicker">
             当前浏览器不支持选择本地目录
+          </small>
+          <small v-else class="directory-required-message">
+            {{ workspaceDirectoryRequiredMessage }}
           </small>
         </div>
         <label class="dialog-field">
