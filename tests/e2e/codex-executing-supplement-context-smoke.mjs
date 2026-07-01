@@ -59,7 +59,7 @@ try {
       "import { setTimeout as delay } from 'node:timers/promises';",
       "const prompt = process.env.AGENT_CLUSTER_PROMPT_FILE ? readFileSync(process.env.AGENT_CLUSTER_PROMPT_FILE, 'utf8') : (process.argv.at(-1) ?? '');",
       "const requiredKind = process.env.AGENT_CLUSTER_EXPECTED_OUTPUT_KIND ?? 'task_execution_result';",
-      "if (requiredKind === 'task_claim_decision') {",
+      "if (requiredKind === 'task_acceptance_decision' || requiredKind === 'task_claim_decision') {",
       '  console.log(JSON.stringify({',
       "    kind: 'task_claim_decision',",
       '    accepted: true,',

@@ -190,3 +190,37 @@ collect -> filter -> bind_to_stage -> use -> verify -> retain / drop / stale
 - 上下文缺口字段中列出的项已被补齐。
 - 上一次失败的证据可以在新上下文中被定位、判断或反驳。
 - 重组动作被记录，可被后续 Governance 检测（对应边 ⑥）。
+
+## 工作区覆盖盲区与 CONTEXT_INSUFFICIENT 协议（Context Engineering Remediation v1）
+
+实现细则参考 `prompt-context/runtime-context-contract.md`，治理方案 `docs/roadmap/context-engineering-remediation-v1.md`。
+
+### 工作区扫描覆盖（`workspaceManifest.coverage`）
+
+扫描端（服务端与浏览器端）必须在 finalize 阶段把 `skipped[]` 聚合成 `WorkspaceManifestCoverage = { totalEntriesSeen, scannedEntries, readableFiles, skippedByReason }`，并随 `WorkspaceSnapshot` / `ContextPack.workspaceManifest` 透传给运行时。
+
+- `WorkspaceSkippedReason` 同一份枚举：`ignored_directory | binary | too_large | sensitive | limit_exceeded | read_error`。
+- 当扫描盲区存在（`scannedEntries < totalEntriesSeen` 或 `skippedByReason` 有计数）时，上下文协议自动在 `systemRules` 追加 CONTEXT_INSUFFICIENT 提示，要求运行时通过 `requestedPaths` 显式拉取缺失内容，不允许凭空推断。
+
+### 运行时回填重试预算
+
+- 单会话允许的连续 CONTEXT_INSUFFICIENT 重试次数受 `AGENT_CLUSTER_CONTEXT_INSUFFICIENT_MAX_RETRIES` 控制，默认 3。
+- `supplementalContextRequests` 入库前必须 dedupe：相同 `(refKind+ref/label)`、相同 `requestedPaths`、相同 `requestedCommands` 不重复落库，整轮全是重复的请求直接拒绝重试，并在 `session.events` 落 `agent_message{phase:'context_supplement', rejectionReason:'duplicate_request'}`。
+- runtime 收到 `requestedContext` 后只能补充新条目；不允许把已经被 supply 过的 ref/path/command 重新打包。
+
+### Token preflight：`navigation_only` 终极兜底
+
+裁剪阶段链：`initial → focused → compact → minimal → ultra-minimal → emergency → navigation_only`。
+
+- 上下文协议要求 emergency 仍越 `budget.maxInputTokens` 时必须降级到 `navigation_only`，禁止直接抛 `TOKEN_BUDGET_EXCEEDED`。
+- `navigation_only` 产出：`workspaceManifest` 仅保 `rootName + entrypoints + detectedStack`，`workspaceFocus` 仅保 `relevantFiles + possibleEntryPoints + validationCommands`，`selectedEvidenceContents / projectMap / relevantEvents / relevantMemories / ragSnippets / artifacts` 全清空，`taskContext / currentTask / taskBrief / agentProfile / summaryMemory` 压扁到 id/title/status 级别。
+- `systemRules` 末尾必须追加 `contextDegraded=true: ...`，告知 runtime 必须通过 CONTEXT_INSUFFICIENT.requestedPaths 主动取回需要的文件，禁止凭空推断。
+- diagnostics 新增 `stagesTried[]` / `finalStage` / `droppedSections[]`，供 Governance 与 debug 接口追踪降级路径。
+
+### selectedEvidenceContents 智能截断 hint
+
+`workspaceEvidenceContent` 使用 `truncateContentForEvidence(path, content, budget, { query? })` 截断文件内容，并把 `truncatedHint` 透传到 `selectedEvidenceContents[].truncatedHint`。
+
+- 策略：`slice | ts-symbol-window | md-section-window`。
+- TS/JS/Vue 在 query 命中时保留 imports + 命中符号体；Markdown 按 H2 章节装填 + 命中优先；其它走 slice。
+- Hint 字段：`{ strategy, originalBytes, keptBytes, droppedRanges?, keptSections?, droppedSections? }`。debug 接口必须暴露该字段以便人工或自动审计裁剪是否丢了关键信息。

@@ -118,7 +118,7 @@ Runtime Layer
 
 系统底层以 `collaboration_events` 作为事实源。
 
-群聊消息、Agent 状态变化、任务创建、任务认领、工具调用、用户确认、RAG 命中、复盘结论都写入事件流。
+群聊消息、Agent 状态变化、任务创建、任务分配、任务接受、工具调用、用户确认、RAG 命中、复盘结论都写入事件流。
 
 三种视图都基于事件流渲染：
 
@@ -238,7 +238,11 @@ user_message
 agent_message
 agent_mention
 task_created
+task_assigned
+task_accepted
 task_claimed
+task_blocked
+task_reassigned
 task_started
 task_completed
 task_rejected
@@ -257,6 +261,15 @@ post_review_started
 post_review_completed
 final_delivery_created
 ```
+
+任务流转规则：
+
+- 第一阶段使用 `coordinator_controlled`：Coordinator 是唯一任务分配、改派写入方。
+- `task_assigned` 表示 Coordinator 已指定负责 Agent。
+- `task_accepted` 表示子 Agent 接受被分配任务；`task_claimed` 仅保留为旧兼容事件，语义同“已接受”。
+- `task_blocked` 表示子 Agent 无法继续，只能回报原因、缺失上下文和 `handoffSuggestion`。
+- `task_reassigned` 必须由 Coordinator 写入，子 Agent 之间不自动转派。
+- 任务规划阶段已经确定的 `assignmentReason`、`contextRequirements`、`verificationPlan`、`riskNotes`、`requiresUserConfirmation` 应随任务事件和 UI 状态一起传递，保证用户不仅能看到状态，还能理解“为什么这样分配、执行前缺什么、如何验证、是否需要先确认”。
 
 ### 5.4 User Message Router Module
 
@@ -324,16 +337,20 @@ Orchestrator 不直接做模型推理，而是调度 Agent Runtime。
 - 管理动态任务池。
 - 管理任务依赖。
 - 管理任务状态。
-- 支持 Agent 认领任务或 Coordinator 指派任务。
+- 支持 Coordinator 指派和改派任务。
+- 记录子 Agent 的接受、阻塞、拒绝和建议交接。
 - 记录任务结果和验收状态。
 
 任务状态：
 
 ```text
 pending
+assigned
+accepted
 claimed
 running
 waiting
+blocked
 reviewing
 rejected
 reworking
@@ -341,6 +358,8 @@ completed
 cancelled
 failed
 ```
+
+`claimed` 为旧兼容状态，展示和业务语义均按“已接受”处理，不表示子 Agent 自由抢任务。
 
 ### 5.7 Context Module
 
@@ -541,7 +560,7 @@ runtime_invocation
   -> POST /sessions/:id/briefs/:briefId/confirm
   -> 写入 brief_confirmed 事件
   -> Orchestrator 根据 Task Brief 创建 Agent Tasks
-  -> 写入 task_created 事件
+  -> 写入 task_created / task_assigned 事件
   -> Session 状态变为 EXECUTING
   -> BullMQ 投递可执行任务
 ```
@@ -550,8 +569,12 @@ runtime_invocation
 
 ```text
 Worker 获取任务
-  -> Task Module 锁定任务
+  -> 读取 Coordinator 已分配任务
   -> Context Module 组装 Context Pack
+  -> Runtime Module 请求 task_acceptance_decision
+  -> accepted 后进入执行
+  -> blocked/rejected 时 Coordinator 自动处理一次
+  -> 自动处理仍失败则进入 WAIT_USER_DECISION
   -> Token Budget Module 预检
   -> Capability Module 注入可用能力
   -> Runtime Module 调用对应 Runtime
@@ -559,6 +582,7 @@ Worker 获取任务
   -> 写入 collaboration_events
   -> 写入 artifacts / capability_invocations
   -> 更新 task 状态
+  -> task 事件 payload 保留 assignmentReason/contextRequirements/verificationPlan/riskNotes/requiresUserConfirmation
   -> Orchestrator 判断下一个可执行任务
 ```
 

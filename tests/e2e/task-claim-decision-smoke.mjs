@@ -29,7 +29,7 @@ try {
   server = await startSmokeServer('task-claim-decision-smoke', {
     DISCUSSION_MAX_ROUNDS: '0',
     MOCK_PARALLEL_TASKS: 'true',
-    MOCK_DECLINE_FRONTEND_TASK: 'true'
+    MOCK_REJECT_ACCEPTANCE_AGENT_KEYS: 'requirements'
   });
 
   const { sessionId, briefId } = await createSessionAndWaitForBrief(
@@ -46,7 +46,7 @@ try {
     server.apiBase,
     sessionId,
     'agent_message',
-    (event) => event.metadata.payload?.phase === 'task_claim_declined',
+    (event) => event.metadata.payload?.phase === 'task_acceptance_blocked',
     30_000
   );
 
@@ -59,14 +59,17 @@ try {
   if (declined.metadata.payload?.claimDecision?.accepted !== false) {
     throw new Error('Declined claim decision payload must set accepted=false.');
   }
-  if (!declined.metadata.payload?.claimDecision?.alternativeAgentKeys?.includes('backend')) {
-    throw new Error('Declined claim decision must recommend backend as an alternative.');
+  if (declined.metadata.payload?.acceptanceDecision?.status !== 'rejected') {
+    throw new Error('Acceptance decision payload must set status=rejected.');
+  }
+  if (!declined.metadata.payload?.handoffSuggestion?.reason) {
+    throw new Error('Declined claim decision must expose a handoffSuggestion for Coordinator review.');
   }
 
   const reassignment = await waitForMatchingEvent(
     server.apiBase,
     sessionId,
-    'task_waiting',
+    'task_reassigned',
     (event) =>
       event.taskId === declined.taskId &&
       event.metadata.payload?.previousAssigneeAgentId === declined.fromAgentId &&
@@ -94,7 +97,8 @@ try {
     (event) =>
       event.taskId === declined.taskId &&
       event.fromAgentId === claimed.fromAgentId &&
-      event.metadata.payload?.phase === 'task_claim_decision' &&
+      event.metadata.payload?.phase === 'task_acceptance_decision' &&
+      event.metadata.payload?.acceptanceDecision?.status === 'accepted' &&
       event.metadata.payload?.claimDecision?.accepted === true,
     30_000
   );

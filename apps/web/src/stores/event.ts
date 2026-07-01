@@ -23,7 +23,11 @@ const eventTypeToMessageType: Partial<Record<CollaborationEvent['type'], ChatMes
   brief_created: 'brief',
   brief_updated: 'brief',
   task_created: 'task',
+  task_assigned: 'task',
+  task_accepted: 'task',
   task_claimed: 'task',
+  task_blocked: 'task',
+  task_reassigned: 'task',
   task_started: 'task',
   task_waiting: 'task',
   task_completed: 'task',
@@ -139,9 +143,10 @@ function derivedAgentId(event: CollaborationEvent) {
 
 function statusFromEvent(event: CollaborationEvent): AgentCardState['status'] | undefined {
   const payload = payloadOf<TaskEventPayload | RuntimeEventPayload>(event)
-  if (event.type === 'task_claimed') return 'thinking'
+  if (event.type === 'task_assigned') return 'thinking'
+  if (event.type === 'task_accepted' || event.type === 'task_claimed' || event.type === 'task_reassigned') return 'thinking'
   if (event.type === 'task_started' || event.type === 'runtime_started') return 'running'
-  if (event.type === 'task_waiting') return 'waiting'
+  if (event.type === 'task_waiting' || event.type === 'task_blocked') return 'waiting'
   if (event.type === 'task_reworked') return 'reworking'
   if (event.type === 'post_review_started') return 'reviewing'
   if (event.type === 'task_completed' || event.type === 'runtime_completed' || event.type === 'post_review_completed') {
@@ -152,7 +157,8 @@ function statusFromEvent(event: CollaborationEvent): AgentCardState['status'] | 
   if (payload.status === 'failed') return 'failed'
   if (payload.status === 'completed') return 'completed'
   if (payload.status === 'running') return 'running'
-  if (payload.status === 'waiting') return 'waiting'
+  if (payload.status === 'waiting' || payload.status === 'blocked') return 'waiting'
+  if (payload.status === 'assigned' || payload.status === 'accepted' || payload.status === 'claimed') return 'thinking'
   return undefined
 }
 
@@ -338,7 +344,16 @@ export const useEventStore = defineStore('event', {
           taskId,
           title: payload.title ?? current?.title ?? taskId,
           status: payload.status,
+          assignedByAgentId: payload.assignedByAgentId ?? current?.assignedByAgentId,
           assigneeAgentId: payload.assigneeAgentId ?? current?.assigneeAgentId,
+          routingMode: payload.routingMode ?? current?.routingMode,
+          autoResolutionAttempted: payload.autoResolutionAttempted ?? current?.autoResolutionAttempted,
+          assignmentReason: payload.assignmentReason ?? current?.assignmentReason,
+          contextRequirements: payload.contextRequirements ?? current?.contextRequirements ?? [],
+          verificationPlan: payload.verificationPlan ?? current?.verificationPlan ?? [],
+          riskNotes: payload.riskNotes ?? current?.riskNotes ?? [],
+          requiresUserConfirmation: payload.requiresUserConfirmation ?? current?.requiresUserConfirmation,
+          handoffSuggestion: payload.handoffSuggestion ?? current?.handoffSuggestion,
           dependsOnTaskIds: payload.dependsOnTaskIds ?? current?.dependsOnTaskIds ?? [],
           acceptanceCriteria: payload.acceptanceCriteria ?? current?.acceptanceCriteria ?? [],
           resultSummary: payload.resultSummary ?? current?.resultSummary,

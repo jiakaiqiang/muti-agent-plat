@@ -88,12 +88,12 @@ const stages: WorkflowStage[] = [
   },
   {
     key: 'dispatch',
-    title: '分发接单',
+    title: '分发接受',
     agent: 'Assigned Agents',
     points: ['创建任务池', 'Agent 接受任务', '依赖就绪后启动'],
-    eventTypes: ['task_created', 'task_claimed', 'task_started', 'task_waiting', 'agent_message'],
-    eventPhases: ['task_acceptance', 'task_claim_decision', 'task_claim_declined', 'task_handoff'],
-    successEventTypes: ['task_claimed', 'task_started']
+    eventTypes: ['task_created', 'task_assigned', 'task_accepted', 'task_claimed', 'task_blocked', 'task_reassigned', 'task_started', 'task_waiting', 'agent_message'],
+    eventPhases: ['task_acceptance', 'task_acceptance_decision', 'task_acceptance_blocked', 'task_claim_decision', 'task_claim_declined', 'task_handoff'],
+    successEventTypes: ['task_accepted', 'task_claimed', 'task_started']
   },
   {
     key: 'execution',
@@ -202,12 +202,16 @@ const workflowAgentEdges = computed<WorkflowAgentEdge[]>(() => {
     const assigneeAgentId = payload?.assigneeAgentId
     if (!taskId || !assigneeAgentId || !agentIds.has(assigneeAgentId)) continue
     taskOwnerById.set(taskId, assigneeAgentId)
-    if (coordinatorId && coordinatorId !== assigneeAgentId && ['task_created', 'task_claimed', 'task_started', 'task_waiting'].includes(event.type)) {
+    if (
+      coordinatorId &&
+      coordinatorId !== assigneeAgentId &&
+      ['task_created', 'task_assigned', 'task_accepted', 'task_claimed', 'task_blocked', 'task_reassigned', 'task_started', 'task_waiting'].includes(event.type)
+    ) {
       taskEdges.push({
         id: `${event.id}:${coordinatorId}:${assigneeAgentId}`,
         fromAgentId: coordinatorId,
         toAgentId: assigneeAgentId,
-        phase: event.type === 'task_created' ? 'task_acceptance' : 'task_handoff',
+        phase: event.type === 'task_created' || event.type === 'task_assigned' ? 'task_acceptance' : 'task_handoff',
         kind: 'task'
       })
     }
@@ -396,16 +400,16 @@ const workflowKeySignals = computed(() => {
   for (const event of props.events) {
     const phase = eventPhase(event)
     const payload = event.metadata.payload as { fileChanges?: unknown[] } | undefined
-    if (phase === 'task_claim_decision' || phase === 'task_acceptance') counts.claim += 1
-    if (phase === 'task_claim_declined') counts.decline += 1
+    if (phase === 'task_acceptance_decision' || phase === 'task_claim_decision' || phase === 'task_acceptance') counts.claim += 1
+    if (phase === 'task_acceptance_blocked' || phase === 'task_claim_declined') counts.decline += 1
     if (phase === 'user_message_routing') counts.routing += 1
     if (phase === 'agent_runtime_communication') counts.communication += 1
     counts.fileChanges += payload?.fileChanges?.length ?? 0
     if (event.type === 'final_delivery_created') counts.delivery += 1
   }
   return [
-    { key: 'claim', label: '接单', value: counts.claim },
-    { key: 'decline', label: '拒单转派', value: counts.decline },
+    { key: 'claim', label: '接受', value: counts.claim },
+    { key: 'decline', label: '受阻改派', value: counts.decline },
     { key: 'routing', label: '补充路由', value: counts.routing },
     { key: 'communication', label: 'Agent 通信', value: counts.communication },
     { key: 'fileChanges', label: '文件变更', value: counts.fileChanges },

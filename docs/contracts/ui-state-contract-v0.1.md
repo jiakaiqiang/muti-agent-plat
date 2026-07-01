@@ -182,7 +182,21 @@ type TaskViewState = {
   taskId: string
   title: string
   status: AgentTaskStatus
+  assignedByAgentId?: string
   assigneeAgentId?: string
+  routingMode?: 'coordinator_controlled' | 'agent_suggested' | 'agent_delegated'
+  autoResolutionAttempted?: boolean
+  assignmentReason?: string
+  contextRequirements: string[]
+  verificationPlan: string[]
+  riskNotes: string[]
+  requiresUserConfirmation?: boolean
+  handoffSuggestion?: {
+    targetAgentKey?: string
+    targetAgentId?: string
+    reason: string
+    riskLevel?: 'low' | 'medium' | 'high'
+  } | null
   dependsOnTaskIds: string[]
   acceptanceCriteria: string[]
   resultSummary?: string
@@ -192,12 +206,23 @@ type TaskViewState = {
 工作流视图节点规则：
 
 - `pending`：灰色。
-- `claimed/running`：蓝色或绿色。
-- `waiting`：黄色。
+- `assigned`：蓝色，表示 Coordinator 已分配但 Agent 尚未接受。
+- `accepted/claimed`：蓝色，表示 Agent 已接受任务；`claimed` 仅为历史兼容命名。
+- `running`：绿色。
+- `waiting/blocked`：黄色。
 - `reviewing`：紫色。
 - `rejected/reworking`：橙色。
 - `completed`：绿色。
 - `failed`：红色。
+
+Coordinator 中心流转展示规则：
+
+- 任务卡片应优先显示“分配者”和“负责 Agent”。
+- 任务卡片应尽量显示 `assignmentReason`、`contextRequirements`、`verificationPlan` 和 `riskNotes`，帮助用户理解为什么由该 Agent 执行、执行前需要什么、如何验证、还存在哪些风险。
+- `claimed` 不应展示为“已认领”，应展示为“已接受”。
+- 子 Agent 的 `handoffSuggestion` 应展示为“建议交接”，不应展示为“已转派”。
+- 只有 Coordinator 写入的 `task_reassigned` 才能展示为正式改派。
+- `requiresUserConfirmation=true` 时，任务卡片应明确标出“执行前需要用户确认”。
 
 ## 8. Pinia Store 合约
 

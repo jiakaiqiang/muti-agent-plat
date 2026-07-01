@@ -42,9 +42,12 @@ type SessionStatus =
 
 type AgentTaskStatus =
   | 'pending'
+  | 'assigned'
+  | 'accepted'
   | 'claimed'
   | 'running'
   | 'waiting'
+  | 'blocked'
   | 'reviewing'
   | 'rejected'
   | 'reworking'
@@ -80,6 +83,11 @@ type KnowledgeScope =
   | 'role_type'
 
 type CapabilityRiskLevel = 'low' | 'medium' | 'high'
+
+type TaskRoutingMode =
+  | 'coordinator_controlled'
+  | 'agent_suggested'
+  | 'agent_delegated'
 
 type ArtifactType =
   | 'text'
@@ -246,7 +254,10 @@ create table agent_tasks (
   title text not null,
   description text not null,
   status text not null,
+  assigned_by_agent_id uuid null references agents(id),
   assignee_agent_id uuid null references agents(id),
+  routing_mode text not null default 'coordinator_controlled',
+  auto_resolution_attempted boolean not null default false,
   depends_on_task_ids uuid[] not null default '{}',
   acceptance_criteria jsonb not null default '[]',
   result_summary text null,
@@ -255,6 +266,10 @@ create table agent_tasks (
   updated_at timestamptz not null
 );
 ```
+
+说明：
+
+- v1 已落地的 Coordinator 任务规划补充信息，如 `assignmentReason`、`contextRequirements`、`verificationPlan`、`riskNotes`、`requiresUserConfirmation`，当前可放入 `metadata` 做兼容存储，不要求第一阶段立即拆成独立列。
 
 ### 4.8 knowledge_bases
 
@@ -405,6 +420,9 @@ create table artifacts (
 - 一个 session 有多个 collaboration_events。
 - 一个 session 有多个 task_briefs，但只有一个 current_task_brief。
 - 一个 session 有多个 agent_tasks。
+- 第一阶段任务流转必须使用 `routing_mode='coordinator_controlled'`。
+- `claimed` 是历史兼容状态，显示和产品语义均应解释为“已接受”；目标状态优先使用 `assigned`、`accepted` 和 `blocked`。
+- 只有 Coordinator 可以写入 `assigned_by_agent_id` 和改变 `assignee_agent_id`；子 Agent 只能返回接受、阻塞、拒绝或建议交接。
 - session_agents 表示某个 Agent 在某次会话内的状态。
 - knowledge_base 可以绑定到 agent、session、project 或 global。
 - agent_knowledge_bases 定义 Agent 对知识库的访问关系。

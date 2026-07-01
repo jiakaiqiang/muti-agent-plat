@@ -123,3 +123,46 @@ Top-level fields currently covered by this contract:
 - `runtimeSelection` (Engineering Runtime Selection): identifies the currently selected runtime profile for the active agent run. Optional; populated when the project enables runtime selection.
 - `projectMap` (Project Map): structured project topology surfaced to the agent prompt. Optional; populated when cross-module navigation is needed for the active task.
 - `availableTools` (Workspace Tool Descriptors): the tool surface available to the agent at prompt construction time. Optional; populated when the runtime resolves a tool catalog for the workspace.
+
+## 工作区扫描盲区与运行时回填（Context Engineering Remediation v1）
+
+实现参考：`docs/roadmap/context-engineering-remediation-v1.md`（任务追踪 `.tasks.json`）。
+
+### `workspaceManifest.coverage`
+
+`WorkspaceManifestCoverage = { totalEntriesSeen, scannedEntries, readableFiles, skippedByReason }`，由扫描端（`apps/server/src/common/workspace-scanner.ts`、`apps/web/src/stores/local-workspace-scanner.ts`）在 finalize 阶段聚合 `skipped[]` 写入。
+
+- 服务端与浏览器端共用 `WorkspaceSkippedReason` 枚举：`ignored_directory | binary | too_large | sensitive | limit_exceeded | read_error`。
+- `coverage` 直通到 `ContextPack.workspaceManifest.coverage`，可用于 prompt 直接读取盲区比例。
+- 当 `scannedEntries < totalEntriesSeen` 或 `skippedByReason` 非空时，`ContextPack.systemRules` 自动追加一条 CONTEXT_INSUFFICIENT 提示，要求 runtime 用 `requestedPaths` 取回缺失内容而非凭空推测。
+
+### `selectedEvidenceContents[].truncatedHint`
+
+智能截断接口 `truncateContentForEvidence(path, content, budget, options?)`（`apps/server/src/common/evidence-truncation.ts`）返回 `{ content, truncated, truncatedHint }`。`EvidenceTruncatedHint`（合同位于 `packages/shared/src/contracts.ts`）字段：
+
+- `strategy`：`slice | ts-symbol-window | md-section-window`。
+- `originalBytes`、`keptBytes`、`droppedRanges?`。
+- `keptSections?`、`droppedSections?`（仅 `md-section-window` 填充）。
+
+截断策略：
+
+- TS / JS / Vue（含 .tsx/.jsx/.mjs/.cjs）：在 `options.query` 命中时，先保留顶部 imports / `export type|interface|* from|{...}`，再从命中位置回溯最近的 `export (function|class|const|let|var|interface|type|enum)` 符号声明并按剩余 budget 切窗。
+- Markdown（.md/.markdown/.mdx）：按 `^## ` 切段，优先保 `topRegion` 与命中 `options.query` 的章节，hint 写明 `keptSections` / `droppedSections`。
+- 其他扩展或上述策略未命中时回退 `slice`。
+
+`workspaceEvidenceContent` 调用截断接口后把 `truncatedHint` 透传给 `ContextPack.selectedEvidenceContents` 项，debug 接口可读。
+
+### CONTEXT_INSUFFICIENT 重试预算与 dedupe
+
+- env：`AGENT_CLUSTER_CONTEXT_INSUFFICIENT_MAX_RETRIES`（默认 3，负值/非数值回退默认）。
+- `canRetryWithSupplementalContext(code, requestedContext, retryCount, maxRetries)` 校验：必须是 `CONTEXT_INSUFFICIENT` + 携带 `requestedContext` + `retryCount < maxRetries`。
+- 入库前 dedupe：`refSignature(ref) = "${type}::${ref ?? label}"`，paths 与 commands 按字符串精确去重。`trimToNovelContext(candidate, seen)` 只保留新条目，纯重复返回 `undefined` → orchestrator 在 `session.events` 落 `agent_message{phase:'context_supplement', rejectionReason:'duplicate_request'}`，不进入 retry 计数。
+
+### `navigation_only` 阶段（token preflight 终极兜底）
+
+`fitContextToBudget` 阶段链：`initial → focused → compact → minimal → ultra-minimal → emergency → navigation_only`。
+
+- `ContextBudgetDiagnostics` 新增 `stagesTried`、`finalStage`、`droppedSections` 字段。
+- `navigation_only` 触发条件：emergency 后仍超 `budget.maxInputTokens`。
+- 产出形态：`workspaceManifest` 只保 `rootName + entrypoints + detectedStack`；`workspaceSnapshot` 收缩到同形 stub；`workspaceFocus` 只保 `relevantFiles + possibleEntryPoints + validationCommands + detectedStack`；`selectedEvidenceContents` 清空；`projectMap / relevantEvents / relevantMemories / ragSnippets / artifacts` 全清空；`taskContext / currentTask / taskBrief / agentProfile / summaryMemory` 压成 id+title+status 级别。
+- `systemRules` 末尾追加 `contextDegraded=true: ...` 行，runtime 必须按导航包工作并主动用 `CONTEXT_INSUFFICIENT.requestedPaths` 取回需要的文件。

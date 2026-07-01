@@ -11,6 +11,7 @@ import type {
   RuntimeContextRequest,
   RuntimeOutput,
   RuntimeUsage,
+  TaskAcceptanceDecisionOutput,
   TaskClaimDecisionOutput,
   UserMessageHandlingPlanOutput
 } from '@agent-cluster/shared';
@@ -622,8 +623,11 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       input.expectedOutput.kind === 'agent_message'
         ? 'For agent_message, the "content" field must be one plain-text string (never an object or array). Write a detailed Chinese response with 3-6 concise paragraphs or bullets covering understanding, concerns, and recommendations.'
         : '',
+      input.expectedOutput.kind === 'task_acceptance_decision'
+        ? 'For task_acceptance_decision, decide whether this assigned agent can execute the currentTask. Return status accepted, blocked, or rejected; reason; optional missingContext; optional handoffSuggestion { targetAgentKey or targetAgentId, reason, riskLevel }; optional confidence; optional alternativeAgentKeys/alternativeAgentIds; and optional agentMessages. Do not reassign the task yourself.'
+        : '',
       input.expectedOutput.kind === 'task_claim_decision'
-        ? 'For task_claim_decision, decide whether this agent should accept the currentTask. Return accepted, reason, optional confidence, optional alternativeAgentKeys/alternativeAgentIds, and optional agentMessages for handoff or coordination.'
+        ? 'For legacy task_claim_decision, decide whether this agent should accept the currentTask. Return accepted, reason, optional confidence, optional alternativeAgentKeys/alternativeAgentIds, optional handoffSuggestion, and optional agentMessages for coordination. Do not reassign the task yourself.'
         : '',
       input.expectedOutput.kind === 'task_execution_result'
         ? 'For task_execution_result, include changedArtifacts. If this is a validation task or the agent is the Validation Agent, include a test_report artifact with metadata.validationEvidence mapping each taskContext.validationRules item to verdicts and taskContext.evidenceRefs, plus validatorAgentKey, validatorAgentId, and independentFromAgentKeys from taskContext.agentResponsibilities. If workspaceManifest is present, analyze the impact surface from manifest paths, but ground content-specific changes only in selectedEvidenceContents. Do not collapse a multi-file requirement into one file. Use agent-output only for auxiliary summaries. Include optional agentMessages when progress, risks, questions, or handoffs should be sent to other agents; target them with targetAgentKeys such as coordinator, frontend, backend, test, review.'
@@ -741,6 +745,9 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     if (record.kind === expectedKind) {
       return record as RuntimeOutput;
     }
+    if (expectedKind === 'task_acceptance_decision' && record.kind === 'task_claim_decision') {
+      return this.coerceRuntimeOutputWithoutKind(record, expectedKind);
+    }
     if (typeof record.kind === 'string') {
       return undefined;
     }
@@ -847,6 +854,24 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       };
     }
 
+    if (expectedKind === 'task_acceptance_decision') {
+      const reason = this.firstPlainText(record.reason, record.summary, record.content, record.message).trim();
+      if (!reason && record.status === undefined && typeof record.accepted !== 'boolean') {
+        return undefined;
+      }
+      return {
+        kind: 'task_acceptance_decision',
+        status: this.asTaskAcceptanceStatus(record.status, record.accepted),
+        reason: reason || 'Model returned an acceptance decision without a reason.',
+        missingContext: this.optionalStringArray(record.missingContext),
+        handoffSuggestion: this.optionalHandoffSuggestion(record.handoffSuggestion),
+        confidence: typeof record.confidence === 'number' ? record.confidence : undefined,
+        alternativeAgentKeys: this.optionalStringArray(record.alternativeAgentKeys),
+        alternativeAgentIds: this.optionalStringArray(record.alternativeAgentIds),
+        agentMessages: this.agentMessages(record.agentMessages)
+      } satisfies TaskAcceptanceDecisionOutput;
+    }
+
     if (expectedKind === 'task_claim_decision') {
       const reason = this.firstPlainText(record.reason, record.summary, record.content, record.message).trim();
       if (!reason && typeof record.accepted !== 'boolean') {
@@ -857,6 +882,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         accepted: typeof record.accepted === 'boolean' ? record.accepted : true,
         reason: reason || 'Model returned a claim decision without a reason.',
         confidence: typeof record.confidence === 'number' ? record.confidence : undefined,
+        missingContext: this.optionalStringArray(record.missingContext),
+        handoffSuggestion: this.optionalHandoffSuggestion(record.handoffSuggestion),
         alternativeAgentKeys: this.optionalStringArray(record.alternativeAgentKeys),
         alternativeAgentIds: this.optionalStringArray(record.alternativeAgentIds),
         agentMessages: this.agentMessages(record.agentMessages)
@@ -936,6 +963,9 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     if (expectedKind === 'task_execution_result') {
       return record.summary !== undefined || record.status !== undefined || record.completedItems !== undefined;
     }
+    if (expectedKind === 'task_acceptance_decision') {
+      return record.status !== undefined || record.accepted !== undefined || record.reason !== undefined;
+    }
     if (expectedKind === 'task_claim_decision') {
       return record.accepted !== undefined || record.reason !== undefined;
     }
@@ -1011,6 +1041,27 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     return value && typeof value === 'object' && !Array.isArray(value) ? (value as RuntimeContextRequest) : undefined;
   }
 
+  private optionalHandoffSuggestion(value: unknown): TaskAcceptanceDecisionOutput['handoffSuggestion'] {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return undefined;
+    }
+    const record = value as Record<string, unknown>;
+    const reason = this.firstPlainText(record.reason, record.summary, record.content, record.message).trim();
+    if (!reason) {
+      return undefined;
+    }
+    const riskLevel = ['low', 'medium', 'high'].includes(String(record.riskLevel))
+      ? (record.riskLevel as 'low' | 'medium' | 'high')
+      : undefined;
+    return {
+      targetAgentKey: typeof record.targetAgentKey === 'string' ? record.targetAgentKey : undefined,
+      targetAgentId: typeof record.targetAgentId === 'string' ? record.targetAgentId : undefined,
+      reason,
+      missingContext: this.optionalStringArray(record.missingContext),
+      riskLevel
+    };
+  }
+
   private asAgentMessageKind(value: unknown): AgentMessageOutput['messageKind'] {
     return ['discussion', 'answer', 'handoff', 'progress', 'risk', 'decision', 'summary'].includes(String(value))
       ? (value as AgentMessageOutput['messageKind'])
@@ -1021,6 +1072,16 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     return ['completed', 'failed', 'blocked', 'needs_review'].includes(String(value))
       ? (value as 'completed' | 'failed' | 'blocked' | 'needs_review')
       : 'completed';
+  }
+
+  private asTaskAcceptanceStatus(status: unknown, accepted?: unknown): TaskAcceptanceDecisionOutput['status'] {
+    if (['accepted', 'blocked', 'rejected'].includes(String(status))) {
+      return status as TaskAcceptanceDecisionOutput['status'];
+    }
+    if (typeof accepted === 'boolean') {
+      return accepted ? 'accepted' : 'rejected';
+    }
+    return 'accepted';
   }
 
   private asPostReviewRecommendation(value: unknown) {

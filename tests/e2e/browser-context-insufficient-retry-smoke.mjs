@@ -60,12 +60,15 @@ try {
   const { page, web } = handle;
 
   await page.goto(`${web.webBase}/?view=chat`, { waitUntil: 'domcontentloaded' });
-  await assertVisible(page, 'Collaboration Plan', 'Chat task board header');
-  await assertVisible(page, 'Brief Gate', 'Initial brief gate');
+  await assertVisible(page, '协作计划', 'Chat task board header');
+  await page.locator('.task-board-collapse-button').click();
+  await assertVisible(page, '契约关口', 'Initial brief gate');
 
   await page.locator('.confirmation-card__actions .action-button.primary').first().click();
   await waitForStatus(server.apiBase, sessionId, 'COMPLETED', 90_000);
   await page.reload({ waitUntil: 'domcontentloaded' });
+  await assertVisible(page, '协作计划', 'Chat task board header after retry');
+  await page.locator('.task-board-collapse-button').click();
 
   const events = await listEvents(server.apiBase, sessionId);
   const insufficientEvent = events.find(
@@ -89,19 +92,19 @@ try {
     throw new Error(`Expected retry after context supplement, got ${retryStarts.length}`);
   }
 
-  await assertVisible(page, 'Context', 'Task board context summary');
-  await assertVisible(page, 'supplements', 'Task board supplemental context count');
-  await assertVisible(page, 'Requested paths', 'Chat timeline requested paths block');
+  await assertVisible(page, '上下文', 'Task board context summary');
+  await assertVisible(page, '补充', 'Task board supplemental context count');
+  await assertVisible(page, '请求路径', 'Chat timeline requested paths block');
   await assertVisible(page, 'src/index.ts', 'Requested source path in chat timeline');
-  await assertVisible(page, 'Delivery Evidence', 'Delivery evidence after retry');
-  await assertVisible(page, 'Done', 'Completed task status after retry');
+  await assertVisible(page, '交付证据', 'Delivery evidence after retry');
+  await assertVisible(page, '已完成', 'Completed task status after retry');
 
   const boardText = await page.locator('.collaboration-task-board').innerText();
-  const supplementMatch = boardText.match(/(\d+)\s+supplements/);
+  const supplementMatch = boardText.match(/补充\s+(\d+)\s+项/);
   if (!supplementMatch || Number(supplementMatch[1]) < 1) {
     throw new Error('Task board must surface supplemental context count after retry');
   }
-  if (!boardText.includes('Review & Delivery') || !boardText.includes('Delivery Evidence')) {
+  if (!boardText.includes('评审与交付') || !boardText.includes('交付证据')) {
     throw new Error('Task board must still reach final delivery after context retry');
   }
 

@@ -42,8 +42,8 @@ try {
     [
       "import { mkdirSync, writeFileSync } from 'node:fs';",
       "const prompt = process.argv.slice(2).join(' ');",
-      "const requiredKind = process.env.AGENT_CLUSTER_EXPECTED_OUTPUT_KIND ?? prompt.match(/Required output kind:\\s*([a-z_]+)/i)?.[1] ?? prompt.match(/expectedOutput[\\s\\S]{0,240}(task_claim_decision|task_execution_result)/i)?.[1] ?? 'task_execution_result';",
-      "const isClaim = requiredKind === 'task_claim_decision';",
+      "const requiredKind = process.env.AGENT_CLUSTER_EXPECTED_OUTPUT_KIND ?? prompt.match(/Required output kind:\\s*([a-z_]+)/i)?.[1] ?? prompt.match(/expectedOutput[\\s\\S]{0,240}(task_acceptance_decision|task_claim_decision|task_execution_result)/i)?.[1] ?? 'task_execution_result';",
+      "const isClaim = requiredKind === 'task_acceptance_decision' || requiredKind === 'task_claim_decision';",
       "const currentTaskWindow = (prompt.match(/currentTask[\\s\\S]{0,1400}/i)?.[0] ?? prompt);",
       "const agentKey = process.env.AGENT_CLUSTER_AGENT_KEY ?? '';",
       "const isFrontend = agentKey === 'frontend' || /Frontend implementation/i.test(currentTaskWindow) || /key\\s*:?\\s*frontend/i.test(currentTaskWindow);",
@@ -171,11 +171,12 @@ try {
   const acceptedClaims = events.filter(
     (event) =>
       event.type === 'agent_message' &&
-      event.metadata.payload?.phase === 'task_claim_decision' &&
+      event.metadata.payload?.phase === 'task_acceptance_decision' &&
+      event.metadata.payload?.acceptanceDecision?.status === 'accepted' &&
       event.metadata.payload?.claimDecision?.accepted === true
   );
   if (acceptedClaims.length < 2) {
-    throw new Error(`Expected two autonomous claim decisions, got ${acceptedClaims.length}`);
+    throw new Error(`Expected two task acceptance decisions, got ${acceptedClaims.length}`);
   }
 
   const runtimeCommunications = events.filter(

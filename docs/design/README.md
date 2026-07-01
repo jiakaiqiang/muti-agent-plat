@@ -6,6 +6,7 @@
 - `agent-collaboration-target-design-v1.md`：群聊 Agent 任务拆解与协作执行的目标态设计。
 - `workspace-aware-chat-agent-design-v1.md`：工作区感知聊天 Agent 专题设计。
 - `context-router-target-design-v1.md`：支撑群聊协作的 Codex 式上下文路由与最小证据编排设计。
+- `coordinator-controlled-routing-design-v1.md`：Coordinator 中心流转、子 Agent 建议交接和后续自动流转预留设计。
 - `ui-style-guide-v1.md`：前端界面风格规范。
 
 建议阅读顺序：
@@ -14,7 +15,8 @@
 2. `agent-collaboration-target-design-v1.md`
 3. `workspace-aware-chat-agent-design-v1.md`
 4. `context-router-target-design-v1.md`
-5. `ui-style-guide-v1.md`
+5. `coordinator-controlled-routing-design-v1.md`
+6. `ui-style-guide-v1.md`
 
 ## Additional Docs
 

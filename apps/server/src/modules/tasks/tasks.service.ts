@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { AgentTask, SuggestedAgentTask, UUID } from '@agent-cluster/shared';
+import type { AgentTask, SuggestedAgentTask, TaskRoutingMode, UUID } from '@agent-cluster/shared';
 import { nowIso } from '../../common/time.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 
@@ -14,7 +14,12 @@ export class TasksService {
     }
   }
 
-  createFromSuggestions(sessionId: UUID, suggestions: SuggestedAgentTask[], agentIdByKey: Map<string, string>) {
+  createFromSuggestions(
+    sessionId: UUID,
+    suggestions: SuggestedAgentTask[],
+    agentIdByKey: Map<string, string>,
+    options: { assignedByAgentId?: UUID; routingMode?: TaskRoutingMode } = {}
+  ) {
     const titleToId = new Map<string, string>();
     const tasks: AgentTask[] = suggestions.map((suggestion) => {
       const task: AgentTask = {
@@ -22,8 +27,16 @@ export class TasksService {
         sessionId,
         title: suggestion.title,
         description: suggestion.description,
-        status: 'pending',
+        status: 'assigned',
+        assignedByAgentId: options.assignedByAgentId,
         assigneeAgentId: suggestion.suggestedAgentKey ? agentIdByKey.get(suggestion.suggestedAgentKey) : undefined,
+        routingMode: options.routingMode ?? suggestion.routingMode ?? 'coordinator_controlled',
+        autoResolutionAttempted: false,
+        assignmentReason: suggestion.assignmentReason,
+        contextRequirements: suggestion.contextRequirements,
+        verificationPlan: suggestion.verificationPlan,
+        riskNotes: suggestion.riskNotes,
+        requiresUserConfirmation: suggestion.requiresUserConfirmation,
         dependsOnTaskIds: [],
         acceptanceCriteria: suggestion.acceptanceCriteria,
         createdAt: nowIso(),
@@ -63,7 +76,7 @@ export class TasksService {
 
   unfinished(sessionId: string) {
     return this.list(sessionId).filter((task) =>
-      ['pending', 'claimed', 'running', 'waiting', 'reworking'].includes(task.status)
+      ['pending', 'assigned', 'accepted', 'claimed', 'running', 'waiting', 'blocked', 'reworking'].includes(task.status)
     );
   }
 

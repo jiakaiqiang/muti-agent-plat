@@ -96,9 +96,9 @@ export const messages = {
   runtimeError: (runtimeType: string, phase: string, message: string) =>
     `${runtimeType} 在 ${messages.phaseLabel(phase)} 阶段失败：${message}`,
   defaultTaskExecuteTitle: '执行已确认任务契约',
-  defaultTaskExecuteDescription: '由后端 Agent 按任务契约执行结构化 dry-run。',
+  defaultTaskExecuteDescription: '按任务契约执行结构化 dry-run。',
   defaultTaskExecuteAcceptance: '运行时返回结构化 task_execution_result 输出。',
   defaultTaskValidateTitle: '验证执行结果',
-  defaultTaskValidateDescription: '由测试 Agent 验证执行证据与任务契约的一致性。',
+  defaultTaskValidateDescription: '验证执行证据与任务契约的一致性。',
   defaultTaskValidateAcceptance: '验证结果以结构化运行时输出呈现。'
 };

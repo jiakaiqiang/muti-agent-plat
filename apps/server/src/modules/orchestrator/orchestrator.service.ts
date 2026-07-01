@@ -21,6 +21,7 @@ import type {
   RuntimeType,
   SessionDetail,
   SuggestedAgentTask,
+  TaskAcceptanceDecisionOutput,
   TaskBrief,
   TaskBriefOutput,
   TaskClaimDecisionOutput,
@@ -57,6 +58,16 @@ import { RuntimeService } from '../runtimes/runtime.service.js';
 import { TasksService } from '../tasks/tasks.service.js';
 import { ContextRouterService } from './context-router.service.js';
 import { ProjectMapService } from './project-map.service.js';
+import { buildCoverageSystemRule, buildWorkspaceManifest } from './workspace-manifest.js';
+import {
+  canRetryWithSupplementalContext,
+  resolveContextInsufficientMaxRetries
+} from './supplemental-context-retry.js';
+import {
+  collectSeenContextSignatures,
+  trimToNovelContext
+} from './supplemental-context-dedupe.js';
+import { truncateContentForEvidence } from '../../common/evidence-truncation.js';
 
 export type ExecutionOutcome =
   | { kind: 'delivered' }
@@ -307,9 +318,13 @@ export class OrchestratorService {
     brief.confirmedAt = nowIso();
     this.persistBriefs();
 
+    const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
     const agentIdByKey = new Map(this.participatingAgents(session).map((agent) => [agent.key, agent.id]));
     const suggestions = this.suggestedTasksByBriefId.get(brief.id) ?? this.defaultSuggestedTasks(session);
-    const tasks = this.tasks.createFromSuggestions(session.id, suggestions, agentIdByKey);
+    const tasks = this.tasks.createFromSuggestions(session.id, suggestions, agentIdByKey, {
+      assignedByAgentId: coordinator.id,
+      routingMode: 'coordinator_controlled'
+    });
 
     this.events.create({
       sessionId: session.id,
@@ -327,8 +342,42 @@ export class OrchestratorService {
         metadata: createMetadata('task_card', {
           taskId: task.id,
           title: task.title,
+          description: task.description,
           status: task.status,
+          assignedByAgentId: task.assignedByAgentId,
           assigneeAgentId: task.assigneeAgentId,
+          routingMode: task.routingMode,
+          autoResolutionAttempted: task.autoResolutionAttempted,
+          assignmentReason: task.assignmentReason,
+          contextRequirements: task.contextRequirements,
+          verificationPlan: task.verificationPlan,
+          riskNotes: task.riskNotes,
+          requiresUserConfirmation: task.requiresUserConfirmation,
+          acceptanceCriteria: task.acceptanceCriteria
+        })
+      });
+      this.events.create({
+        sessionId: session.id,
+        type: 'task_assigned',
+        taskId: task.id,
+        fromAgentId: coordinator.id,
+        toAgentIds: task.assigneeAgentId ? [task.assigneeAgentId] : [],
+        content: `Coordinator 已分配任务：${task.title}`,
+        metadata: createMetadata('task_card', {
+          taskId: task.id,
+          title: task.title,
+          description: task.description,
+          status: 'assigned',
+          assignedByAgentId: coordinator.id,
+          assigneeAgentId: task.assigneeAgentId,
+          routingMode: task.routingMode,
+          autoResolutionAttempted: task.autoResolutionAttempted,
+          assignmentReason: task.assignmentReason,
+          contextRequirements: task.contextRequirements,
+          verificationPlan: task.verificationPlan,
+          riskNotes: task.riskNotes,
+          requiresUserConfirmation: task.requiresUserConfirmation,
+          dependsOnTaskIds: task.dependsOnTaskIds,
           acceptanceCriteria: task.acceptanceCriteria
         })
       });
@@ -458,7 +507,31 @@ export class OrchestratorService {
     if (claim.agent.id !== taskAgent.id) {
       return this.runOneTask(session, brief, task, signal, attemptedAgentIds, contextRetryCount);
     }
-    this.tasks.update(task, { status: 'claimed' });
+    this.tasks.update(task, { status: 'accepted' });
+    this.events.create({
+      sessionId: session.id,
+      type: 'task_accepted',
+      taskId: task.id,
+      fromAgentId: taskAgent.id,
+      toAgentIds: [coordinator.id],
+      content: `${taskAgent.name} 已接受任务：${task.title}`,
+      metadata: createMetadata('task_card', {
+        taskId: task.id,
+        title: task.title,
+        status: 'accepted',
+        assignedByAgentId: task.assignedByAgentId,
+        assigneeAgentId: taskAgent.id,
+        routingMode: task.routingMode,
+        autoResolutionAttempted: task.autoResolutionAttempted,
+        assignmentReason: task.assignmentReason,
+        contextRequirements: task.contextRequirements,
+        verificationPlan: task.verificationPlan,
+        riskNotes: task.riskNotes,
+        requiresUserConfirmation: task.requiresUserConfirmation,
+        dependsOnTaskIds: task.dependsOnTaskIds,
+        acceptanceCriteria: task.acceptanceCriteria
+      })
+    });
     this.events.create({
       sessionId: session.id,
       type: 'task_claimed',
@@ -470,7 +543,15 @@ export class OrchestratorService {
         taskId: task.id,
         title: task.title,
         status: 'claimed',
+        assignedByAgentId: task.assignedByAgentId,
         assigneeAgentId: taskAgent.id,
+        routingMode: task.routingMode,
+        autoResolutionAttempted: task.autoResolutionAttempted,
+        assignmentReason: task.assignmentReason,
+        contextRequirements: task.contextRequirements,
+        verificationPlan: task.verificationPlan,
+        riskNotes: task.riskNotes,
+        requiresUserConfirmation: task.requiresUserConfirmation,
         dependsOnTaskIds: task.dependsOnTaskIds,
         acceptanceCriteria: task.acceptanceCriteria
       })
@@ -556,9 +637,13 @@ export class OrchestratorService {
         requestedContext
       );
       if (this.canRetryWithSupplementalContext(code, requestedContext, contextRetryCount)) {
-        this.recordSupplementalContextRequest(session, task, taskAgent.id, requestedContext);
-        this.tasks.update(task, { status: 'pending', resultSummary: `Retrying with supplemental context: ${message}` });
-        return this.runOneTask(session, brief, task, signal, new Set<string>(), contextRetryCount + 1);
+        const novelContext = this.resolveRetryRequest(session, code, requestedContext, contextRetryCount);
+        if (novelContext) {
+          this.recordSupplementalContextRequest(session, task, taskAgent.id, novelContext);
+          this.tasks.update(task, { status: 'pending', resultSummary: `Retrying with supplemental context: ${message}` });
+          return this.runOneTask(session, brief, task, signal, new Set<string>(), contextRetryCount + 1);
+        }
+        this.emitSupplementalContextRejected(session, task, taskAgent.id, requestedContext, 'duplicate_request');
       }
       return { ok: false, message };
     }
@@ -591,9 +676,13 @@ export class OrchestratorService {
         output.requestedContext
       );
       if (this.canRetryWithSupplementalContext(code, output.requestedContext, contextRetryCount)) {
-        this.recordSupplementalContextRequest(session, task, taskAgent.id, output.requestedContext);
-        this.tasks.update(task, { status: 'pending', resultSummary: `Retrying with supplemental context: ${output.summary}` });
-        return this.runOneTask(session, brief, task, signal, new Set<string>(), contextRetryCount + 1);
+        const novelContext = this.resolveRetryRequest(session, code, output.requestedContext, contextRetryCount);
+        if (novelContext) {
+          this.recordSupplementalContextRequest(session, task, taskAgent.id, novelContext);
+          this.tasks.update(task, { status: 'pending', resultSummary: `Retrying with supplemental context: ${output.summary}` });
+          return this.runOneTask(session, brief, task, signal, new Set<string>(), contextRetryCount + 1);
+        }
+        this.emitSupplementalContextRejected(session, task, taskAgent.id, output.requestedContext, 'duplicate_request');
       }
       return { ok: false, message: output.summary };
     }
@@ -663,11 +752,11 @@ export class OrchestratorService {
     signal: AbortSignal | undefined,
     attemptedAgentIds: Set<string>
   ): Promise<
-    | { ok: true; agent: Agent; decision: TaskClaimDecisionOutput; runId: string }
+    | { ok: true; agent: Agent; decision: TaskAcceptanceDecisionOutput; runId: string }
     | { ok: false; message: string }
   > {
     if (attemptedAgentIds.has(candidate.id)) {
-      return { ok: true, agent: candidate, decision: this.fallbackClaimDecision(candidate, task), runId: crypto.randomUUID() };
+      return { ok: true, agent: candidate, decision: this.fallbackAcceptanceDecision(candidate, task), runId: crypto.randomUUID() };
     }
     attemptedAgentIds.add(candidate.id);
     const runId = crypto.randomUUID();
@@ -682,7 +771,7 @@ export class OrchestratorService {
         phase: 'task_acceptance',
         agent: this.toRuntimeAgent(candidate, runtimeSelection),
         contextPack,
-        expectedOutput: { kind: 'task_claim_decision', schemaVersion: '0.1' },
+        expectedOutput: { kind: 'task_acceptance_decision', schemaVersion: '0.1' },
         budget: contextPack.budget
       },
       signal
@@ -691,57 +780,83 @@ export class OrchestratorService {
       return { ok: false, message: messages.cancelled };
     }
     const decision =
-      result.status === 'completed' && (result.output as { kind?: string }).kind === 'task_claim_decision'
-        ? (result.output as TaskClaimDecisionOutput)
-        : this.fallbackClaimDecision(candidate, task, result.error?.message ?? result.status);
+      result.status === 'completed'
+        ? this.normalizeTaskAcceptanceDecision(candidate, task, result.output)
+        : this.fallbackAcceptanceDecision(candidate, task, result.error?.message ?? result.status);
 
     this.emitTaskClaimDecisionEvent(session, task, candidate, coordinator, decision, runId, runtimeSelection);
     this.emitRuntimeAgentMessages(session, task, candidate, decision.agentMessages ?? [], runId);
 
-    if (decision.accepted) {
+    if (decision.status === 'accepted') {
       return { ok: true, agent: candidate, decision, runId };
     }
 
-    const alternative = this.findAlternativeClaimAgent(session, decision, attemptedAgentIds);
+    const canAutoResolve = task.autoResolutionAttempted !== true;
+    const alternative = canAutoResolve ? this.findAlternativeClaimAgent(session, task, decision, attemptedAgentIds) : undefined;
+    this.tasks.update(task, {
+      status: 'blocked',
+      autoResolutionAttempted: canAutoResolve ? true : task.autoResolutionAttempted,
+      resultSummary: decision.reason
+    });
+    this.emitTaskBlockedEvent(session, task, candidate, coordinator, decision);
+
     if (!alternative) {
-      this.tasks.update(task, { status: 'waiting', resultSummary: decision.reason });
-      this.events.create({
-        sessionId: session.id,
-        type: 'task_waiting',
-        taskId: task.id,
-        fromAgentId: candidate.id,
-        toAgentIds: [coordinator.id],
-        content: `任务等待重新分配：${task.title}`,
-        metadata: createMetadata('task_card', {
-          taskId: task.id,
-          title: task.title,
-          status: 'waiting',
-          assigneeAgentId: candidate.id,
-          resultSummary: decision.reason
-        })
-      });
       return { ok: false, message: decision.reason };
     }
 
     this.tasks.update(task, {
-      status: 'pending',
+      status: 'assigned',
       assigneeAgentId: alternative.id,
-      resultSummary: `${candidate.name} declined; reassigned to ${alternative.name}. ${decision.reason}`
+      resultSummary: `${candidate.name} cannot accept; Coordinator reassigned to ${alternative.name}. ${decision.reason}`
     });
     this.events.create({
       sessionId: session.id,
-      type: 'task_waiting',
+      type: 'task_reassigned',
       taskId: task.id,
-      fromAgentId: candidate.id,
+      fromAgentId: coordinator.id,
       toAgentIds: [alternative.id, coordinator.id],
-      content: `任务转派：${task.title} -> ${alternative.name}`,
+      content: `Coordinator 自动改派任务：${task.title} -> ${alternative.name}`,
       metadata: createMetadata('task_card', {
         taskId: task.id,
         title: task.title,
-        status: 'pending',
+        status: 'assigned',
+        assignedByAgentId: coordinator.id,
         assigneeAgentId: alternative.id,
+        routingMode: task.routingMode,
+        autoResolutionAttempted: task.autoResolutionAttempted,
+        assignmentReason: task.assignmentReason,
+        contextRequirements: task.contextRequirements,
+        verificationPlan: task.verificationPlan,
+        riskNotes: task.riskNotes,
+        requiresUserConfirmation: task.requiresUserConfirmation,
         previousAssigneeAgentId: candidate.id,
-        resultSummary: decision.reason
+        resultSummary: decision.reason,
+        handoffSuggestion: decision.handoffSuggestion
+      })
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'task_assigned',
+      taskId: task.id,
+      fromAgentId: coordinator.id,
+      toAgentIds: [alternative.id],
+      content: `Coordinator 已分配任务：${task.title}`,
+      metadata: createMetadata('task_card', {
+        taskId: task.id,
+        title: task.title,
+        description: task.description,
+        status: 'assigned',
+        assignedByAgentId: coordinator.id,
+        assigneeAgentId: alternative.id,
+        routingMode: task.routingMode,
+        autoResolutionAttempted: task.autoResolutionAttempted,
+        assignmentReason: task.assignmentReason,
+        contextRequirements: task.contextRequirements,
+        verificationPlan: task.verificationPlan,
+        riskNotes: task.riskNotes,
+        requiresUserConfirmation: task.requiresUserConfirmation,
+        dependsOnTaskIds: task.dependsOnTaskIds,
+        acceptanceCriteria: task.acceptanceCriteria
       })
     });
     return { ok: true, agent: alternative, decision, runId };
@@ -752,11 +867,12 @@ export class OrchestratorService {
     task: AgentTask,
     candidate: Agent,
     coordinator: Agent,
-    decision: TaskClaimDecisionOutput,
+    decision: TaskAcceptanceDecisionOutput,
     runId: string,
     runtimeSelection: EngineeringRuntimeSelection
   ) {
     const alternativeAgentIds = this.claimDecisionAlternativeIds(session, decision);
+    const legacyClaimDecision = this.acceptanceDecisionToLegacyClaimDecision(decision);
     this.events.create({
       sessionId: session.id,
       type: 'agent_message',
@@ -765,11 +881,13 @@ export class OrchestratorService {
       toAgentIds: Array.from(new Set([coordinator.id, ...alternativeAgentIds])),
       content: decision.reason,
       metadata: createMetadata('chat_message', {
-        messageKind: decision.accepted ? 'decision' : 'handoff',
-        phase: decision.accepted ? 'task_claim_decision' : 'task_claim_declined',
+        messageKind: decision.status === 'accepted' ? 'decision' : 'handoff',
+        phase: decision.status === 'accepted' ? 'task_acceptance_decision' : 'task_acceptance_blocked',
         relatedTaskIds: [task.id],
         mentionedAgentIds: alternativeAgentIds.length ? alternativeAgentIds : [coordinator.id],
-        claimDecision: decision,
+        acceptanceDecision: decision,
+        claimDecision: legacyClaimDecision,
+        handoffSuggestion: decision.handoffSuggestion,
         runtimeInvocationId: runId,
         runtimeType: runtimeSelection.effectiveRuntimeType,
         runtimeSelection
@@ -777,37 +895,144 @@ export class OrchestratorService {
     });
   }
 
-  private fallbackClaimDecision(candidate: Agent, task: AgentTask, fallbackReason?: string): TaskClaimDecisionOutput {
+  private emitTaskBlockedEvent(
+    session: SessionDetail,
+    task: AgentTask,
+    candidate: Agent,
+    coordinator: Agent,
+    decision: TaskAcceptanceDecisionOutput
+  ) {
+    this.events.create({
+      sessionId: session.id,
+      type: 'task_blocked',
+      taskId: task.id,
+      fromAgentId: candidate.id,
+      toAgentIds: [coordinator.id],
+      content: `${candidate.name} 无法继续任务：${task.title}`,
+      metadata: createMetadata('task_card', {
+        taskId: task.id,
+        title: task.title,
+        description: task.description,
+        status: 'blocked',
+        assignedByAgentId: task.assignedByAgentId,
+        assigneeAgentId: candidate.id,
+        routingMode: task.routingMode,
+        autoResolutionAttempted: task.autoResolutionAttempted,
+        assignmentReason: task.assignmentReason,
+        contextRequirements: task.contextRequirements,
+        verificationPlan: task.verificationPlan,
+        riskNotes: task.riskNotes,
+        requiresUserConfirmation: task.requiresUserConfirmation,
+        resultSummary: decision.reason,
+        missingContext: decision.missingContext,
+        handoffSuggestion: decision.handoffSuggestion
+      })
+    });
+  }
+
+  private normalizeTaskAcceptanceDecision(
+    candidate: Agent,
+    task: AgentTask,
+    output: unknown
+  ): TaskAcceptanceDecisionOutput {
+    const kind = (output as { kind?: string } | undefined)?.kind;
+    if (kind === 'task_acceptance_decision') {
+      const decision = output as TaskAcceptanceDecisionOutput;
+      return {
+        ...decision,
+        status: ['accepted', 'blocked', 'rejected'].includes(decision.status) ? decision.status : 'accepted'
+      };
+    }
+    if (kind === 'task_claim_decision') {
+      const legacy = output as TaskClaimDecisionOutput;
+      return {
+        kind: 'task_acceptance_decision',
+        status: legacy.accepted ? 'accepted' : 'rejected',
+        reason: legacy.reason,
+        confidence: legacy.confidence,
+        missingContext: legacy.missingContext,
+        handoffSuggestion: legacy.handoffSuggestion,
+        alternativeAgentKeys: legacy.alternativeAgentKeys,
+        alternativeAgentIds: legacy.alternativeAgentIds,
+        agentMessages: legacy.agentMessages
+      };
+    }
+    return this.fallbackAcceptanceDecision(candidate, task, `unexpected output kind: ${kind ?? 'missing'}`);
+  }
+
+  private fallbackAcceptanceDecision(candidate: Agent, task: AgentTask, fallbackReason?: string): TaskAcceptanceDecisionOutput {
     return {
-      kind: 'task_claim_decision',
-      accepted: true,
+      kind: 'task_acceptance_decision',
+      status: 'accepted',
       reason:
         fallbackReason && fallbackReason !== 'completed'
-          ? `${candidate.name} accepts "${task.title}" by fallback because claim decision failed: ${fallbackReason}`
+          ? `${candidate.name} accepts "${task.title}" by fallback because acceptance decision failed: ${fallbackReason}`
           : `${candidate.name} accepts "${task.title}".`,
       confidence: 0.5
     };
   }
 
+  private acceptanceDecisionToLegacyClaimDecision(decision: TaskAcceptanceDecisionOutput): TaskClaimDecisionOutput {
+    return {
+      kind: 'task_claim_decision',
+      accepted: decision.status === 'accepted',
+      reason: decision.reason,
+      confidence: decision.confidence,
+      missingContext: decision.missingContext,
+      handoffSuggestion: decision.handoffSuggestion,
+      alternativeAgentKeys: decision.alternativeAgentKeys,
+      alternativeAgentIds: decision.alternativeAgentIds,
+      agentMessages: decision.agentMessages
+    };
+  }
+
   private findAlternativeClaimAgent(
     session: SessionDetail,
-    decision: TaskClaimDecisionOutput,
+    task: AgentTask,
+    decision: TaskAcceptanceDecisionOutput,
     attemptedAgentIds: Set<string>
   ) {
     const participants = this.participatingAgents(session);
-    const hints = [...(decision.alternativeAgentIds ?? []), ...(decision.alternativeAgentKeys ?? [])];
+    const hints = [
+      decision.handoffSuggestion?.targetAgentId,
+      decision.handoffSuggestion?.targetAgentKey,
+      ...(decision.alternativeAgentIds ?? []),
+      ...(decision.alternativeAgentKeys ?? [])
+    ].filter((hint): hint is string => Boolean(hint));
     for (const hint of hints) {
       const agent = participants.find((candidate) => candidate.id === hint || candidate.key === hint);
+      if (agent && !attemptedAgentIds.has(agent.id) && !['coordinator', 'notification'].includes(agent.key)) {
+        return agent;
+      }
+    }
+
+    const domain = session.taskDomain ?? (session.workspaceSnapshot ? 'mixed' : 'non_coding');
+    const taskText = `${task.title} ${task.description}`;
+    const isPlanningTask = /plan|planning|requirement|analysis|scope|需求|计划|规划|分析|范围/i.test(taskText);
+    const preferredKeys =
+      domain === 'non_coding' || isPlanningTask
+        ? ['requirements', 'product-manager', 'architect', 'review', 'test', 'backend', 'frontend']
+        : ['backend', 'frontend', 'architect', 'requirements', 'test', 'review'];
+    for (const key of preferredKeys) {
+      const agent = participants.find((candidate) => candidate.key === key);
       if (agent && !attemptedAgentIds.has(agent.id)) {
         return agent;
       }
     }
-    return undefined;
+
+    return participants.find(
+      (agent) => !attemptedAgentIds.has(agent.id) && !['coordinator', 'notification'].includes(agent.key)
+    );
   }
 
-  private claimDecisionAlternativeIds(session: SessionDetail, decision: TaskClaimDecisionOutput) {
+  private claimDecisionAlternativeIds(session: SessionDetail, decision: TaskAcceptanceDecisionOutput) {
     const participants = this.participatingAgents(session);
-    return [...(decision.alternativeAgentIds ?? []), ...(decision.alternativeAgentKeys ?? [])]
+    return [
+      decision.handoffSuggestion?.targetAgentId,
+      decision.handoffSuggestion?.targetAgentKey,
+      ...(decision.alternativeAgentIds ?? []),
+      ...(decision.alternativeAgentKeys ?? [])
+    ]
       .map((hint) => participants.find((agent) => agent.id === hint || agent.key === hint)?.id)
       .filter((agentId): agentId is string => Boolean(agentId));
   }
@@ -1201,22 +1426,24 @@ export class OrchestratorService {
   }
 
   private discussionParticipants(session: SessionDetail, coordinator: Agent) {
-    const configuredKeys = (process.env.DISCUSSION_AGENT_KEYS ?? 'requirements,architect,backend,test')
-      .split(',')
-      .map((key) => key.trim())
-      .filter(Boolean);
-    const participants = configuredKeys
-      .map((key) => this.participatingAgents(session).find((agent) => agent.key === key))
-      .filter((agent): agent is Agent => Boolean(agent))
-      .filter((agent) => agent.id !== coordinator.id);
-
-    if (participants.length) {
-      return Array.from(new Map(participants.map((agent) => [agent.id, agent])).values());
+    const sessionParticipants = this.participatingAgents(session).filter(
+      (agent) => agent.id !== coordinator.id
+    );
+    const configured = process.env.DISCUSSION_AGENT_KEYS?.trim();
+    if (!configured) {
+      return sessionParticipants;
     }
-
-    return this.participatingAgents(session)
-      .filter((agent) => agent.id !== coordinator.id)
-      .slice(0, 3);
+    const allowKeys = new Set(
+      configured
+        .split(',')
+        .map((key) => key.trim())
+        .filter(Boolean)
+    );
+    if (!allowKeys.size) {
+      return sessionParticipants;
+    }
+    const filtered = sessionParticipants.filter((agent) => allowKeys.has(agent.key));
+    return filtered.length ? filtered : sessionParticipants;
   }
 
   private discussionMaxRounds() {
@@ -1357,7 +1584,34 @@ export class OrchestratorService {
     requestedContext: RuntimeContextRequest | undefined,
     contextRetryCount: number
   ) {
-    return code === 'CONTEXT_INSUFFICIENT' && Boolean(requestedContext) && contextRetryCount < 1;
+    return canRetryWithSupplementalContext(
+      code,
+      requestedContext,
+      contextRetryCount,
+      resolveContextInsufficientMaxRetries()
+    );
+  }
+
+  /**
+   * Trims duplicates from a runtime's CONTEXT_INSUFFICIENT request against the
+   * session's prior supplemental requests. Returns the trimmed novel-only
+   * context if a retry is allowed, otherwise undefined (no new refs/paths/
+   * commands or retry budget exhausted).
+   */
+  private resolveRetryRequest(
+    session: SessionDetail,
+    code: RuntimeError['code'] | undefined,
+    requestedContext: RuntimeContextRequest | undefined,
+    contextRetryCount: number
+  ): RuntimeContextRequest | undefined {
+    if (!requestedContext) return undefined;
+    const seen = collectSeenContextSignatures(session.supplementalContextRequests);
+    const novelContext = trimToNovelContext(requestedContext, seen);
+    if (!novelContext) return undefined;
+    if (!this.canRetryWithSupplementalContext(code, novelContext, contextRetryCount)) {
+      return undefined;
+    }
+    return novelContext;
   }
 
   private recordSupplementalContextRequest(
@@ -1412,6 +1666,36 @@ export class OrchestratorService {
         relatedTaskIds: [task.id],
         memoryId: memory.id,
         requestedContext
+      })
+    });
+  }
+
+  /**
+   * Emits a session-visible signal when a CONTEXT_INSUFFICIENT request was
+   * rejected without retry (e.g. because every requested ref/path/command was
+   * already supplied in a prior round). This keeps the rejection reason
+   * observable on the session even though no new request is persisted.
+   */
+  private emitSupplementalContextRejected(
+    session: SessionDetail,
+    task: AgentTask,
+    agentId: string,
+    requestedContext: RuntimeContextRequest | undefined,
+    reasonCode: 'duplicate_request'
+  ) {
+    if (!requestedContext) return;
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      taskId: task.id,
+      fromAgentId: agentId,
+      content: `Supplemental context request rejected (${reasonCode}): ${requestedContext.reason}`,
+      metadata: createMetadata('chat_message', {
+        messageKind: 'progress',
+        phase: 'context_supplement',
+        relatedTaskIds: [task.id],
+        requestedContext,
+        rejectionReason: reasonCode
       })
     });
   }
@@ -1913,12 +2197,14 @@ export class OrchestratorService {
     });
     const summaryMemory = this.createSummaryMemory(session, brief, task, phase);
     const runtimeAgent = this.toRuntimeAgent(agent, runtimeSelection);
+    const coverageRule = buildCoverageSystemRule(session.workspaceSnapshot);
     return {
       systemRules: [
         'Return structured JSON matching the expected RuntimeOutput kind.',
         'Do not perform external side effects unless explicitly allowed by capability policy.',
         'Use workspaceManifest for project structure and selectedEvidenceContents for readable evidence content.',
-        'Treat taskContext.evidenceRefs as the selected minimal evidence set; request more context instead of inferring omitted file contents.'
+        'Treat taskContext.evidenceRefs as the selected minimal evidence set; request more context instead of inferring omitted file contents.',
+        ...(coverageRule ? [coverageRule] : [])
       ],
       sessionGoal: session.originalInput,
       taskContext,
@@ -1926,7 +2212,7 @@ export class OrchestratorService {
       continuationState: this.createContinuationState(session, agent, task, phase, taskContext, summaryMemory),
       workingDirectory: session.workingDirectory,
       workspaceSnapshot: this.runtimeWorkspaceSnapshot(session.workspaceSnapshot),
-      workspaceManifest: this.createWorkspaceManifest(session.workspaceSnapshot),
+      workspaceManifest: buildWorkspaceManifest(session.workspaceSnapshot),
       selectedEvidenceContents: this.createSelectedEvidenceContents(session, taskContext),
       runtimeSelection,
       projectMap,
@@ -2010,20 +2296,6 @@ export class OrchestratorService {
     return {
       ...snapshot,
       files: snapshot.files.map((file) => this.workspaceFileWithoutRuntimeContent(file))
-    };
-  }
-
-  private createWorkspaceManifest(snapshot: SessionDetail['workspaceSnapshot']): ContextPack['workspaceManifest'] {
-    if (!snapshot) return undefined;
-    return {
-      rootName: snapshot.rootName,
-      fileCount: snapshot.fileCount,
-      readableFileCount: snapshot.files.length,
-      skippedFileCount: snapshot.skipped.length,
-      tree: snapshot.tree,
-      files: snapshot.files.map((file) => this.workspaceFileWithoutRuntimeContent(file)),
-      detectedStack: snapshot.detectedStack,
-      entrypoints: snapshot.entrypoints
     };
   }
 
@@ -2134,12 +2406,14 @@ export class OrchestratorService {
   private workspaceEvidenceContent(file: NonNullable<SessionDetail['workspaceSnapshot']>['files'][number]) {
     const maxChars = 8_000;
     const content = file.content ?? file.summary ?? '';
+    const truncation = truncateContentForEvidence(file.path, content, maxChars);
     return {
       source: 'workspace_file' as const,
-      content: content.slice(0, maxChars),
+      content: truncation.content,
       summary: file.summary,
       contentLength: content.length,
-      truncated: content.length > maxChars
+      truncated: truncation.truncated,
+      ...(truncation.truncatedHint ? { truncatedHint: truncation.truncatedHint } : {})
     };
   }
 
@@ -2258,7 +2532,7 @@ export class OrchestratorService {
       requiresCodeChanges: domain !== 'non_coding',
       requiresExternalEvidence: Boolean(artifacts.length || recentEvents.length || session.knowledgeBaseIds?.length),
       validationRules,
-      agentResponsibilities: this.createAgentResponsibilities(session, domain),
+      agentResponsibilities: this.createAgentResponsibilities(session, domain, task),
       evidenceSelection,
       evidenceRefs: scopedEvidenceRefs
     };
@@ -2384,9 +2658,9 @@ export class OrchestratorService {
         return [
           {
             action: 'do',
-            label: 'Decide claim, handoff, or rejection',
+            label: 'Decide acceptance, blocked status, or rejection',
             refs: [taskRef],
-            reason: 'Match currentTask to the agent responsibility and avoid accidental self-assignment.'
+            reason: 'Match currentTask to the agent responsibility; Coordinator remains the only routing writer.'
           }
         ];
       case 'task_execution':
@@ -2859,12 +3133,24 @@ export class OrchestratorService {
     return rules;
   }
 
-  private createAgentResponsibilities(session: SessionDetail, domain: TaskContext['domain']): TaskContext['agentResponsibilities'] {
+  private createAgentResponsibilities(
+    session: SessionDetail,
+    domain: TaskContext['domain'],
+    task?: AgentTask
+  ): TaskContext['agentResponsibilities'] {
     const agents = this.participatingAgents(session);
     const choose = (preferredKeys: string[], fallback: string) =>
       agents.find((agent) => preferredKeys.includes(agent.key))?.key ?? fallback;
+    const assignedAgentKey = task?.assigneeAgentId
+      ? agents.find((agent) => agent.id === task.assigneeAgentId)?.key
+      : undefined;
+    const taskText = `${task?.title ?? ''} ${task?.description ?? ''}`;
+    const isPlanningTask = /plan|planning|requirement|analysis|scope|需求|计划|规划|分析|范围/i.test(taskText);
+    const shouldUseAssignedAgent = Boolean(assignedAgentKey) && (domain === 'non_coding' || isPlanningTask);
     const executionKey =
-      domain === 'non_coding'
+      shouldUseAssignedAgent && assignedAgentKey
+        ? assignedAgentKey
+        : domain === 'non_coding'
         ? choose(['requirements', 'product-manager', 'architect'], 'requirements')
         : choose(['backend', 'frontend', 'architect', 'requirements'], 'backend');
     const validationKey = choose(['test', 'review'], 'test');
@@ -2900,7 +3186,7 @@ export class OrchestratorService {
       .map((item) => item.id);
     const handoffRefs = recentEvents
       .filter((event) =>
-        ['task_claimed', 'task_completed', 'task_reworked', 'post_review_completed', 'final_delivery_created'].includes(event.type)
+        ['task_assigned', 'task_accepted', 'task_claimed', 'task_blocked', 'task_reassigned', 'task_completed', 'task_reworked', 'post_review_completed', 'final_delivery_created'].includes(event.type)
       )
       .map((event) => event.id);
 
@@ -3495,10 +3781,9 @@ export class OrchestratorService {
   }
 
   private participatingAgents(session: SessionDetail) {
-    const agents = session.participatingAgentIds
+    return session.participatingAgentIds
       .map((agentId) => this.agents.findByIdOrKey(agentId))
       .filter((agent): agent is Agent => Boolean(agent));
-    return agents.length ? agents : this.agents.list();
   }
 
   private pickSessionAgent(session: SessionDetail, preferredKeys: string[], fallbackIndex = 0) {
@@ -3556,6 +3841,13 @@ export class OrchestratorService {
       suggestedTasks: Array.isArray(output.suggestedTasks)
         ? output.suggestedTasks.map((task) => ({
             ...task,
+            routingMode: this.normalizeRoutingMode(task.routingMode),
+            assignmentReason: typeof task.assignmentReason === 'string' ? task.assignmentReason.trim() : undefined,
+            contextRequirements: this.stringList(task.contextRequirements),
+            verificationPlan: this.stringList(task.verificationPlan),
+            riskNotes: this.stringList(task.riskNotes),
+            requiresUserConfirmation: task.requiresUserConfirmation === true,
+            dependsOnTaskTitles: this.stringList(task.dependsOnTaskTitles),
             acceptanceCriteria: this.stringList(task.acceptanceCriteria)
           }))
         : []
@@ -3578,6 +3870,11 @@ export class OrchestratorService {
   }
 
   private defaultSuggestedTasks(session: SessionDetail): SuggestedAgentTask[] {
+    const planningKeys =
+      session.taskIntent === 'planning'
+        ? ['product-manager', 'requirements', 'architect']
+        : ['requirements', 'product-manager', 'architect'];
+
     if (session.taskDomain === 'non_coding') {
       const analysisTitle = '产出分析或方案建议';
       const validationTitle = '验证事实与交付完整性';
@@ -3585,20 +3882,20 @@ export class OrchestratorService {
         {
           title: analysisTitle,
           description: '围绕当前目标沉淀结构化分析、方案、计划或说明。',
-          suggestedAgentKey: session.taskIntent === 'planning' ? 'product-manager' : 'requirements',
+          suggestedAgentKey: this.resolveParticipatingAgentKey(session, planningKeys),
           acceptanceCriteria: ['输出直接回答用户目标，并形成可复用的结构化结论。']
         },
         {
           title: validationTitle,
           description: '独立验证分析结论的事实一致性、范围一致性、可追溯性和交付完整性。',
-          suggestedAgentKey: 'test',
+          suggestedAgentKey: this.validationSuggestedAgentKey(session),
           acceptanceCriteria: ['验证结果映射到非编程验证规则，并指出证据、缺口和风险。'],
           dependsOnTaskTitles: [analysisTitle]
         },
         {
           title: '复核结论与风险',
           description: '检查分析或方案是否覆盖范围、风险、假设和下一步建议。',
-          suggestedAgentKey: 'review',
+          suggestedAgentKey: this.resolveParticipatingAgentKey(session, ['review', 'test']),
           acceptanceCriteria: ['复核结果明确指出已覆盖项、风险和未决问题。'],
           dependsOnTaskTitles: [validationTitle]
         }
@@ -3610,20 +3907,20 @@ export class OrchestratorService {
         {
           title: '形成需求与实现计划',
           description: '先沉淀需求理解、范围、关键约束和实现路线。',
-          suggestedAgentKey: session.taskIntent === 'planning' ? 'product-manager' : 'requirements',
+          suggestedAgentKey: this.resolveParticipatingAgentKey(session, planningKeys),
           acceptanceCriteria: ['输出包含范围、约束、验收标准和实施建议。']
         },
         {
           title: messages.defaultTaskExecuteTitle,
           description: messages.defaultTaskExecuteDescription,
-          suggestedAgentKey: 'backend',
+          suggestedAgentKey: this.resolveParticipatingAgentKey(session, ['backend', 'frontend', 'architect']),
           acceptanceCriteria: [messages.defaultTaskExecuteAcceptance],
           dependsOnTaskTitles: ['形成需求与实现计划']
         },
         {
           title: messages.defaultTaskValidateTitle,
           description: messages.defaultTaskValidateDescription,
-          suggestedAgentKey: 'test',
+          suggestedAgentKey: this.validationSuggestedAgentKey(session),
           acceptanceCriteria: [messages.defaultTaskValidateAcceptance],
           dependsOnTaskTitles: [messages.defaultTaskExecuteTitle]
         }
@@ -3634,13 +3931,13 @@ export class OrchestratorService {
       {
         title: messages.defaultTaskExecuteTitle,
         description: messages.defaultTaskExecuteDescription,
-        suggestedAgentKey: 'backend',
+        suggestedAgentKey: this.resolveParticipatingAgentKey(session, ['backend', 'frontend', 'architect']),
         acceptanceCriteria: [messages.defaultTaskExecuteAcceptance]
       },
       {
         title: messages.defaultTaskValidateTitle,
         description: messages.defaultTaskValidateDescription,
-        suggestedAgentKey: 'test',
+        suggestedAgentKey: this.validationSuggestedAgentKey(session),
         acceptanceCriteria: [messages.defaultTaskValidateAcceptance]
       }
     ];
@@ -3648,8 +3945,10 @@ export class OrchestratorService {
 
   private selectSuggestedTasks(session: SessionDetail, runtimeSuggestedTasks: SuggestedAgentTask[]) {
     if (!runtimeSuggestedTasks.length) {
-      return this.defaultSuggestedTasks(session);
+      return this.withSuggestedTaskPlanningDetails(session, this.defaultSuggestedTasks(session));
     }
+
+    const participatingKeys = new Set(this.participatingAgents(session).map((agent) => agent.key));
 
     if (session.taskDomain === 'mixed') {
       const hasPlanningTask = runtimeSuggestedTasks.some((task) =>
@@ -3658,30 +3957,41 @@ export class OrchestratorService {
       const hasImplementationTask = runtimeSuggestedTasks.some((task) =>
         /implement|执行|实现|backend|frontend/i.test(`${task.title} ${task.description}`)
       );
-      const hasFrontendImplementation = runtimeSuggestedTasks.some(
-        (task) => task.suggestedAgentKey === 'frontend' && /implement|frontend/i.test(`${task.title} ${task.description}`)
-      );
-      const hasBackendImplementation = runtimeSuggestedTasks.some(
-        (task) => task.suggestedAgentKey === 'backend' && /implement|backend/i.test(`${task.title} ${task.description}`)
-      );
+      const hasFrontendImplementation =
+        participatingKeys.has('frontend') &&
+        runtimeSuggestedTasks.some(
+          (task) => task.suggestedAgentKey === 'frontend' && /implement|frontend/i.test(`${task.title} ${task.description}`)
+        );
+      const hasBackendImplementation =
+        participatingKeys.has('backend') &&
+        runtimeSuggestedTasks.some(
+          (task) => task.suggestedAgentKey === 'backend' && /implement|backend/i.test(`${task.title} ${task.description}`)
+        );
       const hasValidationTask = runtimeSuggestedTasks.some((task) => this.isValidationSuggestedTask(task));
       const isExplicitParallelCodingPlan = hasFrontendImplementation && hasBackendImplementation && hasValidationTask;
       if (!isExplicitParallelCodingPlan && (!hasPlanningTask || !hasImplementationTask)) {
-        return this.defaultSuggestedTasks(session);
+        return this.withSuggestedTaskPlanningDetails(session, this.defaultSuggestedTasks(session));
       }
     }
 
     if (session.taskDomain === 'non_coding') {
-      const allCodingAgents = runtimeSuggestedTasks.every((task) => ['backend', 'frontend', 'test'].includes(task.suggestedAgentKey ?? ''));
+      const participatingCodingKeys = new Set(
+        ['backend', 'frontend', 'test'].filter((key) => participatingKeys.has(key))
+      );
+      const allCodingAgents =
+        participatingCodingKeys.size > 0 &&
+        runtimeSuggestedTasks.every((task) =>
+          task.suggestedAgentKey ? participatingCodingKeys.has(task.suggestedAgentKey) : false
+        );
       const hasValidationTask = runtimeSuggestedTasks.some((task) =>
         /validate|validation|验证|事实|trace|evidence|完整性|test/i.test(`${task.title} ${task.description}`)
       );
       if (allCodingAgents || !hasValidationTask) {
-        return this.defaultSuggestedTasks(session);
+        return this.withSuggestedTaskPlanningDetails(session, this.defaultSuggestedTasks(session));
       }
     }
 
-    return this.ensureValidationSuggestedTask(session, runtimeSuggestedTasks);
+    return this.withSuggestedTaskPlanningDetails(session, this.ensureValidationSuggestedTask(session, runtimeSuggestedTasks));
   }
 
   private ensureValidationSuggestedTask(session: SessionDetail, suggestions: SuggestedAgentTask[]) {
@@ -3700,7 +4010,7 @@ export class OrchestratorService {
 
     const fallbackValidation = this.defaultSuggestedTasks(session).find((task) => this.isValidationSuggestedTask(task));
     const lastTaskTitle = normalized.at(-1)?.title;
-    return [
+    return this.withSuggestedTaskPlanningDetails(session, [
       ...normalized,
       {
         title: fallbackValidation?.title ?? 'Validate task output',
@@ -3713,14 +4023,115 @@ export class OrchestratorService {
         ],
         dependsOnTaskTitles: lastTaskTitle ? [lastTaskTitle] : fallbackValidation?.dependsOnTaskTitles
       }
-    ];
+    ]);
+  }
+
+  private withSuggestedTaskPlanningDetails(session: SessionDetail, suggestions: SuggestedAgentTask[]) {
+    return suggestions.map((task) => {
+      const fallbackVerificationPlan = task.acceptanceCriteria.length
+        ? task.acceptanceCriteria
+        : this.isValidationSuggestedTask(task)
+          ? ['Run the relevant verification command and map evidence back to the brief.']
+          : ['Produce output that can be checked against the Task Brief acceptance criteria.'];
+
+      return {
+        ...task,
+        routingMode: this.normalizeRoutingMode(task.routingMode),
+        assignmentReason: task.assignmentReason?.trim() || this.defaultAssignmentReason(session, task),
+        contextRequirements: task.contextRequirements?.length
+          ? task.contextRequirements
+          : this.defaultContextRequirements(session, task),
+        verificationPlan: task.verificationPlan?.length ? task.verificationPlan : fallbackVerificationPlan,
+        riskNotes: task.riskNotes?.length ? task.riskNotes : this.defaultRiskNotes(task),
+        requiresUserConfirmation:
+          task.requiresUserConfirmation === true || this.suggestedTaskNeedsUserConfirmation(task)
+      } satisfies SuggestedAgentTask;
+    });
+  }
+
+  private defaultAssignmentReason(session: SessionDetail, task: SuggestedAgentTask) {
+    if (this.isValidationSuggestedTask(task)) {
+      return 'Validation work stays with the test/review role so evidence remains independent from implementation.';
+    }
+
+    switch (task.suggestedAgentKey) {
+      case 'requirements':
+      case 'product-manager':
+        return 'This task focuses on clarifying scope, constraints, and delivery shape before execution.';
+      case 'architect':
+        return 'This task needs architecture judgment to translate the brief into a concrete implementation path.';
+      case 'frontend':
+        return 'This task primarily changes user-facing behavior and should stay with the frontend specialist.';
+      case 'backend':
+        return session.taskDomain === 'mixed'
+          ? 'This task owns the executable implementation path while keeping final verification independent.'
+          : 'This task primarily touches server-side logic, contracts, or runtime behavior.';
+      case 'review':
+        return 'This task checks completeness, scope control, and remaining risks after execution.';
+      default:
+        return 'Coordinator assigned this task to the agent whose default role best matches the required work.';
+    }
+  }
+
+  private defaultContextRequirements(session: SessionDetail, task: SuggestedAgentTask) {
+    const taskBriefContext = ['Confirmed Task Brief', 'Relevant project map entries'];
+
+    if (this.isValidationSuggestedTask(task)) {
+      return [...taskBriefContext, 'Upstream task artifacts or summaries', 'Verification commands or acceptance checks'];
+    }
+
+    switch (task.suggestedAgentKey) {
+      case 'requirements':
+      case 'product-manager':
+        return [...taskBriefContext, 'Original user requirement', 'Relevant product or design documents'];
+      case 'architect':
+        return [...taskBriefContext, 'Relevant architecture/design docs', 'Touched modules and contracts'];
+      case 'frontend':
+        return [...taskBriefContext, 'Frontend components/styles', 'UI or interaction contracts'];
+      case 'backend':
+        return [...taskBriefContext, 'Backend modules/services', 'API/runtime/shared contracts'];
+      case 'review':
+        return [...taskBriefContext, 'Execution evidence', 'Validation output and open risks'];
+      default:
+        return taskBriefContext;
+    }
+  }
+
+  private defaultRiskNotes(task: SuggestedAgentTask) {
+    const notes = new Set<string>();
+    if (this.suggestedTaskNeedsUserConfirmation(task)) {
+      notes.add('Potentially high-risk scope detected; Coordinator should confirm before execution.');
+    }
+    if (this.isValidationSuggestedTask(task)) {
+      notes.add('Validation should stay independent from the implementation task owner.');
+    }
+    return Array.from(notes);
+  }
+
+  private suggestedTaskNeedsUserConfirmation(task: SuggestedAgentTask) {
+    return /(deploy|release|publish|delete|drop|migrate|production|上线|发布|删除|清空|迁移生产)/i.test(
+      `${task.title} ${task.description}`
+    );
+  }
+
+  private normalizeRoutingMode(value: unknown): SuggestedAgentTask['routingMode'] {
+    return value === 'agent_suggested' || value === 'agent_delegated' || value === 'coordinator_controlled'
+      ? value
+      : 'coordinator_controlled';
   }
 
   private validationSuggestedAgentKey(session: SessionDetail) {
-    const keys = new Set(this.participatingAgents(session).map((agent) => agent.key));
-    if (keys.has('test')) return 'test';
-    if (keys.has('review')) return 'review';
-    return 'test';
+    return this.resolveParticipatingAgentKey(session, ['test', 'review']);
+  }
+
+  private resolveParticipatingAgentKey(session: SessionDetail, preferredKeys: string[]): string | undefined {
+    const participants = this.participatingAgents(session).filter((agent) => agent.key !== 'coordinator');
+    for (const key of preferredKeys) {
+      if (participants.some((agent) => agent.key === key)) {
+        return key;
+      }
+    }
+    return undefined;
   }
 
   private isValidationSuggestedTask(task: SuggestedAgentTask) {

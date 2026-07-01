@@ -263,7 +263,7 @@ async function createSession(input: string, agentIds: string[], engineeringRunti
 function openCreateSessionDialog() {
   sessionCreateError.value = ''
   newSessionInput.value = ''
-  selectedSessionAgentIds.value = activeAgentIds.value
+  selectedSessionAgentIds.value = []
   sessionScanStatus.value = 'idle'
   sessionScanSummary.value = undefined
   sessionRuntimeType.value = ''

@@ -390,7 +390,15 @@ type AgentTask = {
   title: string
   description: string
   status: AgentTaskStatus
+  assignedByAgentId?: string
   assigneeAgentId?: string
+  routingMode?: 'coordinator_controlled' | 'agent_suggested' | 'agent_delegated'
+  autoResolutionAttempted?: boolean
+  assignmentReason?: string
+  contextRequirements: string[]
+  verificationPlan: string[]
+  riskNotes: string[]
+  requiresUserConfirmation?: boolean
   dependsOnTaskIds: string[]
   acceptanceCriteria: string[]
   resultSummary?: string

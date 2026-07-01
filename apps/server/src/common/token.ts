@@ -39,13 +39,19 @@ const MAX_EVIDENCE_REFS = 20;
 const MAX_SELECTED_EVIDENCE_ITEMS = 3;
 
 export type ContextTrimStage = {
-  name: 'initial' | 'focused' | 'compact' | 'minimal' | 'ultra-minimal' | 'emergency';
+  name: 'initial' | 'focused' | 'compact' | 'minimal' | 'ultra-minimal' | 'emergency' | 'navigation_only';
   estimatedTokens: number;
   breakdown: ContextTokenBreakdown;
 };
 
 export type ContextBudgetDiagnostics = {
   stages: ContextTrimStage[];
+  /** Convenience mirror of stages.map(s => s.name). */
+  stagesTried: ContextTrimStage['name'][];
+  /** Name of the final stage actually returned (last element of stages). */
+  finalStage: ContextTrimStage['name'];
+  /** Breakdown keys whose token estimate fell to (or stayed at) 0 by the final stage. */
+  droppedSections: Array<keyof ContextTokenBreakdown>;
   dominantSections: Array<{ key: keyof ContextTokenBreakdown; tokens: number }>;
   workspaceFileCount: number;
   workspaceTreeCount: number;
@@ -73,6 +79,9 @@ export function fitContextToBudget(contextPack: ContextPack): {
   diagnostics: ContextBudgetDiagnostics;
 } {
   const maxInputTokens = contextPack.budget.maxInputTokens;
+  // Snapshot the original manifest/snapshot identity so navigation_only can
+  // still expose root + entrypoints even after emergency has cleared them.
+  const originalNavigationAnchor = pickNavigationAnchor(contextPack);
   let next = trimContext(contextPack, {
     relevantEventCount: 12,
     ragSnippetCount: 6,
@@ -257,7 +266,206 @@ export function fitContextToBudget(contextPack: ContextPack): {
     breakdown: contextTokenBreakdown(next)
   });
 
+  if (estimatedTokens <= maxInputTokens) {
+    return { contextPack: next, estimatedTokens, trimmed: true, diagnostics: buildDiagnostics(next, stages) };
+  }
+
+  // Stage 7: navigation_only — final fallback when even emergency overflows.
+  // The manifest/snapshot identity (rootName, entrypoints, detectedStack) is
+  // restored from the original contextPack because emergency has wiped them.
+  next = navigationOnly(next, originalNavigationAnchor);
+  estimatedTokens = estimateTokens(next);
+  stages.push({
+    name: 'navigation_only',
+    estimatedTokens,
+    breakdown: contextTokenBreakdown(next)
+  });
+
   return { contextPack: next, estimatedTokens, trimmed: true, diagnostics: buildDiagnostics(next, stages) };
+}
+
+type NavigationAnchor = {
+  manifest?: Pick<NonNullable<ContextPack['workspaceManifest']>, 'rootName' | 'fileCount' | 'entrypoints' | 'detectedStack' | 'coverage'>;
+  snapshot?: Pick<NonNullable<ContextPack['workspaceSnapshot']>, 'rootName' | 'scannedAt' | 'fileCount' | 'totalBytes' | 'entrypoints' | 'detectedStack' | 'coverage'>;
+  focus?: Pick<NonNullable<ContextPack['workspaceFocus']>, 'relevantFiles' | 'possibleEntryPoints' | 'detectedStack' | 'validationCommands'>;
+};
+
+function pickNavigationAnchor(contextPack: ContextPack): NavigationAnchor {
+  return {
+    manifest: contextPack.workspaceManifest
+      ? {
+          rootName: contextPack.workspaceManifest.rootName,
+          fileCount: contextPack.workspaceManifest.fileCount,
+          entrypoints: contextPack.workspaceManifest.entrypoints,
+          detectedStack: contextPack.workspaceManifest.detectedStack,
+          coverage: contextPack.workspaceManifest.coverage
+        }
+      : undefined,
+    snapshot: contextPack.workspaceSnapshot
+      ? {
+          rootName: contextPack.workspaceSnapshot.rootName,
+          scannedAt: contextPack.workspaceSnapshot.scannedAt,
+          fileCount: contextPack.workspaceSnapshot.fileCount,
+          totalBytes: contextPack.workspaceSnapshot.totalBytes,
+          entrypoints: contextPack.workspaceSnapshot.entrypoints,
+          detectedStack: contextPack.workspaceSnapshot.detectedStack,
+          coverage: contextPack.workspaceSnapshot.coverage
+        }
+      : undefined,
+    focus: contextPack.workspaceFocus
+      ? {
+          relevantFiles: contextPack.workspaceFocus.relevantFiles,
+          possibleEntryPoints: contextPack.workspaceFocus.possibleEntryPoints,
+          detectedStack: contextPack.workspaceFocus.detectedStack,
+          validationCommands: contextPack.workspaceFocus.validationCommands
+        }
+      : undefined
+  };
+}
+
+/**
+ * Final fallback context shape: manifest collapsed to root + entrypoints,
+ * workspaceFocus reduced to relevantFiles + validationCommands, every other
+ * large section cleared. systemRules carry an explicit contextDegraded=true
+ * marker so the runtime can reason about the degradation. The anchor argument
+ * lets us restore manifest/snapshot identity that emergency had already
+ * cleared.
+ */
+function navigationOnly(contextPack: ContextPack, anchor: NavigationAnchor): ContextPack {
+  const manifest = anchor.manifest
+    ? {
+        rootName: anchor.manifest.rootName,
+        fileCount: anchor.manifest.fileCount,
+        readableFileCount: 0,
+        skippedFileCount: 0,
+        tree: [],
+        files: [],
+        detectedStack: anchor.manifest.detectedStack?.slice(0, 3),
+        entrypoints: anchor.manifest.entrypoints?.slice(0, 5),
+        coverage: anchor.manifest.coverage
+      }
+    : undefined;
+
+  const snapshot = anchor.snapshot
+    ? {
+        rootName: anchor.snapshot.rootName,
+        scannedAt: anchor.snapshot.scannedAt,
+        fileCount: anchor.snapshot.fileCount,
+        totalBytes: anchor.snapshot.totalBytes,
+        tree: [],
+        files: [],
+        skipped: [],
+        entrypoints: anchor.snapshot.entrypoints?.slice(0, 5),
+        detectedStack: anchor.snapshot.detectedStack?.slice(0, 3),
+        coverage: anchor.snapshot.coverage
+      }
+    : undefined;
+
+  const focus = anchor.focus
+    ? {
+        relevantFiles: anchor.focus.relevantFiles.slice(0, 5),
+        impactedFiles: [],
+        testFiles: [],
+        configFiles: [],
+        possibleEntryPoints: anchor.focus.possibleEntryPoints.slice(0, 3),
+        detectedStack: anchor.focus.detectedStack.slice(0, 3),
+        validationCommands: anchor.focus.validationCommands.slice(0, 4),
+        rationale: 'Navigation-only mode: full context omitted due to token budget. Use validationCommands and entrypoints to navigate the workspace, and return CONTEXT_INSUFFICIENT with specific requestedPaths to fetch what you need.'
+      }
+    : undefined;
+
+  const systemRules = [
+    ...contextPack.systemRules,
+    'contextDegraded=true: the runtime context has been collapsed to navigation_only mode. workspaceManifest carries only root + entrypoints; selectedEvidenceContents has been cleared. Read no file content optimistically — return CONTEXT_INSUFFICIENT with requestedPaths to pull what you need.'
+  ];
+
+  // Strip task-level rich fields too — under navigation_only the runtime can
+  // only navigate via root + entrypoints + validationCommands; detailed task
+  // descriptions, briefs, and agent profile prompts all need to be re-fetched
+  // via CONTEXT_INSUFFICIENT if the runtime actually needs them.
+  const slimTaskContext = contextPack.taskContext
+    ? {
+        ...contextPack.taskContext,
+        taskMap: { ...contextPack.taskContext.taskMap, items: [] },
+        stagePlan: { ...contextPack.taskContext.stagePlan, read: [], do: [], validate: [] },
+        validationRules: [],
+        agentResponsibilities: [],
+        evidenceRefs: [],
+        evidenceSelection: {
+          ...contextPack.taskContext.evidenceSelection,
+          selectedRefs: [],
+          omittedRefs: [],
+          selectedCount: 0,
+          omittedCount: 0,
+          selectedTypes: [],
+          omittedTypes: []
+        }
+      }
+    : contextPack.taskContext;
+
+  const slimCurrentTask = contextPack.currentTask
+    ? {
+        id: contextPack.currentTask.id,
+        sessionId: contextPack.currentTask.sessionId,
+        title: contextPack.currentTask.title,
+        status: contextPack.currentTask.status,
+        dependsOnTaskIds: contextPack.currentTask.dependsOnTaskIds,
+        createdAt: contextPack.currentTask.createdAt,
+        updatedAt: contextPack.currentTask.updatedAt,
+        description: 'Task description omitted under navigation_only. Use CONTEXT_INSUFFICIENT to request it.',
+        acceptanceCriteria: []
+      }
+    : contextPack.currentTask;
+
+  const slimTaskBrief = contextPack.taskBrief
+    ? {
+        id: contextPack.taskBrief.id,
+        sessionId: contextPack.taskBrief.sessionId,
+        version: contextPack.taskBrief.version,
+        goal: contextPack.taskBrief.goal,
+        scope: [],
+        outOfScope: [],
+        constraints: [],
+        acceptanceCriteria: [],
+        risks: [],
+        openQuestions: []
+      }
+    : contextPack.taskBrief;
+
+  const slimAgentProfile = {
+    ...contextPack.agentProfile,
+    systemPrompt: 'System prompt omitted under navigation_only.',
+    profileMarkdown: undefined
+  };
+
+  const slimSummaryMemory = {
+    ...contextPack.summaryMemory,
+    confirmedFacts: [],
+    completed: [],
+    decisions: [],
+    openQuestions: [],
+    risks: [],
+    nextSteps: []
+  };
+
+  return {
+    ...contextPack,
+    systemRules,
+    workspaceManifest: manifest,
+    workspaceSnapshot: snapshot,
+    workspaceFocus: focus,
+    selectedEvidenceContents: [],
+    projectMap: undefined,
+    relevantEvents: [],
+    relevantMemories: [],
+    ragSnippets: [],
+    artifacts: [],
+    taskContext: slimTaskContext,
+    currentTask: slimCurrentTask,
+    taskBrief: slimTaskBrief,
+    agentProfile: slimAgentProfile,
+    summaryMemory: slimSummaryMemory
+  };
 }
 
 type TrimOptions = {
@@ -595,8 +803,23 @@ function contextTokenBreakdown(contextPack: ContextPack): ContextTokenBreakdown 
 
 function buildDiagnostics(contextPack: ContextPack, stages: ContextTrimStage[]): ContextBudgetDiagnostics {
   const latest = stages.at(-1)?.breakdown ?? contextTokenBreakdown(contextPack);
+  const initial = stages[0]?.breakdown;
+  const droppedSections: Array<keyof ContextTokenBreakdown> = [];
+  if (initial) {
+    for (const key of Object.keys(latest) as Array<keyof ContextTokenBreakdown>) {
+      if (key === 'total') continue;
+      if ((initial[key] ?? 0) > 0 && (latest[key] ?? 0) === 0) {
+        droppedSections.push(key);
+      }
+    }
+  }
+  const stagesTried = stages.map((stage) => stage.name);
+  const finalStage = stages.at(-1)?.name ?? 'initial';
   return {
     stages,
+    stagesTried,
+    finalStage,
+    droppedSections,
     dominantSections: Object.entries(latest)
       .filter(([key]) => key !== 'total')
       .map(([key, tokens]) => ({ key: key as keyof ContextTokenBreakdown, tokens }))

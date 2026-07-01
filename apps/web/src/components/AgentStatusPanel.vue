@@ -42,7 +42,10 @@ function statusLabel(status: string) {
       failed: '失败',
       disabled: '停用',
       pending: '待处理',
-      claimed: '已领取',
+      assigned: '已分配',
+      accepted: '已接受',
+      claimed: '已接受',
+      blocked: '阻塞中',
       rejected: '已拒绝',
       cancelled: '已取消'
     }[status] ?? status

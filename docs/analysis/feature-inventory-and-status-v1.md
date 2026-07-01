@@ -1,6 +1,6 @@
 # Agent Cluster 功能清单与当前状态
 
-> 更新时间：2026-06-11
+> 更新时间：2026-06-30
 > 适用版本：`agent-cluster@0.1.0` 当前工作树
 > 本文基于 `apps/server/`、`apps/web/`、`packages/shared/`、`tests/e2e/` 和现有质量文档重新盘点。旧版 2026-06-04 的 P0/P1 问题多数已经修复，不再作为当前事实来源。
 
@@ -8,7 +8,7 @@
 
 Agent Cluster 当前已经从“v1 dry-run 演示闭环”推进到“真实优先、后台执行、可恢复、可观测”的 v1+ 状态。核心链路已经具备：会话创建、工作区快照、Agent 讨论、任务契约确认、后台执行、RAG/Memory 注入、复盘、自动返工、最终交付、飞书通知草稿、文件变更产物、SSE 事件驱动 UI 和多组 e2e 冒烟测试。
 
-当前仍不应把它描述为完整生产级真实研发平台。主要剩余缺口集中在：真实 Codex/Claude/MCP/Human runtime 未落地、RAG 仍是本地关键词检索、外部通知仍为 dry-run、工作区写入缺少 before/after diff 审阅、任务执行尚未实现真正并发认领和细粒度业务表。
+当前仍不应把它描述为完整生产级真实研发平台。主要剩余缺口集中在：真实 Codex/Claude/MCP/Human runtime 未落地、RAG 仍是本地关键词检索、外部通知仍为 dry-run、工作区写入缺少 before/after diff 审阅、任务执行尚未实现受控自动流转和细粒度业务表。
 
 ## 2. 当前架构
 
@@ -48,6 +48,7 @@ packages/shared
 | 执行取消与恢复 | 完成 | in-process 模式下持有 `AbortController`；pause/cancel 可中断运行时；resume 重置 stale running 任务后继续；`RecoveryService` 启动时恢复未完成执行。 |
 | BullMQ 队列 | 完成 | `ENABLE_BULLMQ=true` 时执行入 `agent-task-queue`，worker 消费并使用 job id 保证幂等；`GET /api/ops/queues` 读取队列计数。 |
 | 状态机与复盘 | 完成 | `runPipeline` 返回 `delivered/rework/ask_user/cancelled/failed`；`applyOutcome` 消费复盘建议，自动返工受 `REWORK_MAX_ROUNDS` 限制。 |
+| Coordinator 中心任务流转 | 完成 | 任务确认后由 Coordinator 写入 `task_assigned`，任务携带 `assignedByAgentId/routingMode/autoResolutionAttempted`，并在任务计划/任务卡中保留 `assignmentReason/contextRequirements/verificationPlan/riskNotes/requiresUserConfirmation`；子 Agent 返回 `task_acceptance_decision`，只能接受、阻塞、拒绝或提供 `handoffSuggestion`；第一次失败由 Coordinator 自动改派并写入 `task_reassigned`，第二次失败进入 `WAIT_USER_DECISION` 和确认卡。 |
 | 任务依赖 | 完成 | `SuggestedAgentTask.dependsOnTaskTitles` 会解析为 `dependsOnTaskIds`，执行时只选择依赖已完成的 ready task。 |
 | 统一任务上下文 | 完成 | 会话创建识别 `taskDomain/taskIntent`；`ContextPack.taskContext` 组装 Project Map/Domain Map（模块/边界/入口/关键资料/验证路径）、显式 `stagePlan(read/do/validate)`、`evidenceSelection` 最小证据选择结果、验证规则和 Execution/Validation/Review 分工；编程任务的 `workspaceFocus` 区分相关文件、影响文件、测试文件、配置文件、入口和验证命令，并映射到 Project Map 模块/关键资料/验证路径；Task Map 的 `key_material` 会引用已选证据而非整仓/整库加载；非编程 RAG 命中会按 `sourceType` 映射为文档片段、会议记录、数据表或外部资料证据；Validation Agent 的 `validationEvidence` 会记录验证者身份、独立于哪些 Agent，以及规则到证据的 verdict 映射；`summaryMemory` 支持长链路续跑摘要，并在关键阶段沉淀 `summary_memory_checkpoint` artifact + Memory；`continuationState` 记录 active task/agent、任务队列、handoff refs、checkpoint refs 和 resume hints，供跨阶段/跨 agent 续跑复用。 |
 | Runtime 路由 | 完成 | `RuntimeService` 使用注册表派发 `mock/generic_llm/codex/claude_code`；未实现或未注册 runtime 显式 failed，不再静默回退 mock。 |
@@ -80,7 +81,7 @@ packages/shared
 ### 4.2 确认后执行
 
 1. `POST /api/sessions/:id/briefs/:briefId/confirm` 只返回 `{ accepted: true }`。
-2. `prepareExecution` 标记 brief 已确认，按建议任务创建 `AgentTask`，解析依赖并发 `task_created`。
+2. `prepareExecution` 标记 brief 已确认，按建议任务创建 `AgentTask`，解析依赖并发 `task_created/task_assigned`。
 3. `ExecutionService.start` 根据 `ENABLE_BULLMQ` 选择 in-process 后台 pipeline 或 BullMQ job。
 4. `runPipeline` 循环选择 ready task，调用 runtime，写入 RAG/Memory/Artifact/Runtime/Task 事件。
 5. 复盘输出 `deliver/rework/ask_user` 后决定交付、自动返工或等待用户。
@@ -100,7 +101,7 @@ packages/shared
 | P0 | 真实高风险工具未端到端接入 | 文件写入、命令执行、外部工具执行仍只在策略层预留 | 在 workspace sandbox、用户确认和审计事件齐备后逐项开启。 |
 | P1 | RAG 仍是关键词检索 | 大规模知识库召回质量有限 | 接入 embeddings/pgvector，并新增检索质量与权限测试。 |
 | P1 | Postgres 是 JSONB collection 存储 | 可恢复但难以做复杂查询、索引和审计 | 后续以 migration 拆分 sessions/events/tasks/artifacts/runtime_invocations 表。 |
-| P1 | 任务执行是 ready task 循环，未并发认领 | 多 Agent 并行度有限，`claimed` 状态仍少用 | 在 BullMQ 模式下按任务粒度入队，补并发认领和幂等锁。 |
+| P1 | 任务执行是 ready task 循环，未做子 Agent 自动流转 | 多 Agent 并行度有限，第一阶段仍由 Coordinator 串起异常恢复 | 后续在 `agent_suggested/agent_delegated` 模式下补 delegation depth、幂等锁、审计和用户确认策略。 |
 | P1 | 工作区写回缺少 diff 审阅 | 用户难以在写入前精确审查变更 | 前端增加 before/after diff、冲突检测和逐文件确认。 |
 | P2 | 通知仍为 dry-run | 无真实飞书发送能力 | 增加真实发送 adapter，并保持显式确认和失败回滚。 |
 | P2 | 部分架构分析特化逻辑混在通用编排 | 特定需求措辞会触发特殊产物路径 | 抽成可配置模板或专题 workflow，避免通用 orchestrator 膨胀。 |
@@ -116,6 +117,7 @@ npm run test:harness
 npm run test:e2e:main-chain
 npm run test:e2e:p1-behaviors
 npm run test:e2e:runtime-routing
+npm run test:e2e:coordinator-controlled-routing
 npm run test:e2e:runtime-model-switch
 npm run test:e2e:task-dependency
 npm run test:e2e:multi-agent-discussion

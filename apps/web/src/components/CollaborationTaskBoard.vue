@@ -25,6 +25,7 @@ const emit = defineEmits<{
 }>()
 
 const isCollapsed = ref(true)
+const isActivityDetailOpen = ref(false)
 const completedTaskCount = computed(() => props.tasks.filter((task) => task.status === 'completed').length)
 const waitingTaskCount = computed(() => props.tasks.filter((task) => task.status === 'waiting').length)
 const runningTaskCount = computed(() => props.tasks.filter((task) => task.status === 'running' || task.status === 'claimed').length)
@@ -104,6 +105,36 @@ const interruptionEvents = computed(() =>
 )
 const interruptionCount = computed(() => interruptionEvents.value.length)
 const suggestedTasks = computed(() => (props.tasks.length ? [] : props.brief?.suggestedTasks ?? []))
+const activeAgentStatuses = new Set(['running', 'thinking', 'discussing', 'reviewing', 'reworking', 'waiting'])
+const activeAgentActivities = computed(() =>
+  props.agents
+    .filter((agent) => activeAgentStatuses.has(agent.status))
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+    .map((agent) => ({
+      agentId: agent.agentId,
+      name: agent.name,
+      role: agent.role,
+      status: agent.status,
+      statusText: agentActivityLabel(agent.status),
+      title: `${agent.name}${agentActivityLabel(agent.status)}`,
+      detail: agent.actionSummary ?? agent.thoughtSummary ?? agent.currentTaskTitle ?? agent.recentLogs[0] ?? '正在推进当前任务',
+      currentTaskTitle: agent.currentTaskTitle,
+      thoughtSummary: agent.thoughtSummary,
+      actionSummary: agent.actionSummary,
+      recentLogs: agent.recentLogs,
+      waitingFor: agent.waitingFor.map((id) => agentName(id)),
+      activeCapabilityNames: agent.activeCapabilityNames,
+      updatedAt: agent.updatedAt
+    }))
+)
+const currentActivity = computed(() => {
+  const activity = activeAgentActivities.value[0]
+  if (!activity) return undefined
+  return {
+    ...activity,
+    extraCount: Math.max(0, activeAgentActivities.value.length - 1)
+  }
+})
 const discussionEvents = computed(() =>
   props.events.filter((event) => {
     const payload = event.metadata.payload as { round?: number; messageKind?: string; phase?: string } | undefined
@@ -166,6 +197,16 @@ function agentName(agentId?: string) {
   return props.agents.find((agent) => agent.agentId === agentId)?.name ?? '未分配'
 }
 
+function waitingForLabel(waitingFor: string[]) {
+  if (!waitingFor.length) return ''
+  return waitingFor
+    .map((entry) => {
+      const matched = props.agents.find((agent) => agent.agentId === entry)
+      return matched ? `等待 ${matched.name} 汇总` : entry
+    })
+    .join(' / ')
+}
+
 function suggestedAgentName(task: SuggestedAgentTask) {
   if (!task.suggestedAgentKey) return '未分配'
   return props.agents.find((agent) => agent.name === task.suggestedAgentKey || agent.role === task.suggestedAgentKey)?.name ?? task.suggestedAgentKey
@@ -188,9 +229,12 @@ function taskStatusLabel(status: TaskViewState['status']) {
   return (
     {
       pending: '待处理',
-      claimed: '已接单',
+      assigned: '已分配',
+      accepted: '已接受',
+      claimed: '已接受',
       running: '执行中',
       waiting: '等待中',
+      blocked: '阻塞中',
       reviewing: '评审中',
       rejected: '已驳回',
       cancelled: '已取消',
@@ -204,9 +248,32 @@ function taskStatusLabel(status: TaskViewState['status']) {
 function taskStatusTone(status: TaskViewState['status']) {
   if (status === 'completed') return 'completed'
   if (status === 'failed' || status === 'rejected' || status === 'cancelled') return 'failed'
-  if (status === 'waiting') return 'waiting'
-  if (status === 'running' || status === 'claimed' || status === 'reviewing' || status === 'reworking') return 'running'
+  if (status === 'waiting' || status === 'blocked') return 'waiting'
+  if (status === 'running' || status === 'accepted' || status === 'claimed' || status === 'reviewing' || status === 'reworking') return 'running'
   return 'pending'
+}
+
+function agentActivityLabel(status: string) {
+  return (
+    {
+      running: '正在执行',
+      thinking: '正在思考',
+      discussing: '正在讨论',
+      reviewing: '正在复盘',
+      reworking: '正在返工',
+      waiting: '正在等待'
+    }[status] ?? '正在处理'
+  )
+}
+
+function formatActivityTime(value: string) {
+  const timestamp = Date.parse(value)
+  if (Number.isNaN(timestamp)) return value
+  return new Date(timestamp).toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  })
 }
 </script>
 
@@ -216,6 +283,76 @@ function taskStatusTone(status: TaskViewState['status']) {
       <div>
         <span>协作计划</span>
         <h2>{{ brief?.goal ?? '等待任务契约生成' }}</h2>
+      </div>
+      <div v-if="currentActivity" class="task-board-live-status-wrap">
+        <button
+          class="task-board-live-status"
+          type="button"
+          aria-controls="task-board-live-status-detail"
+          :aria-expanded="isActivityDetailOpen"
+          title="查看当前状态详情"
+          @click="isActivityDetailOpen = !isActivityDetailOpen"
+        >
+          <span class="live-status-dot"></span>
+          <span class="live-status-copy">
+            <strong>{{ currentActivity.title }}</strong>
+            <span>{{ currentActivity.detail }}</span>
+          </span>
+          <small v-if="currentActivity.extraCount">+{{ currentActivity.extraCount }} 个状态</small>
+          <UiIcon name="chevron" :size="15" />
+        </button>
+        <div
+          v-if="isActivityDetailOpen"
+          id="task-board-live-status-detail"
+          class="task-board-live-status-detail"
+          role="dialog"
+          aria-label="当前状态详情"
+        >
+          <header>
+            <div>
+              <strong>当前状态详情</strong>
+              <span>{{ activeAgentActivities.length }} 个 Agent 正在处理</span>
+            </div>
+            <button type="button" title="收起状态详情" @click="isActivityDetailOpen = false">
+              <UiIcon name="x" :size="15" />
+            </button>
+          </header>
+          <article v-for="activity in activeAgentActivities" :key="activity.agentId" class="live-status-detail-item">
+            <div class="live-status-detail-item__heading">
+              <span class="live-status-dot"></span>
+              <div>
+                <strong>{{ activity.name }}{{ activity.statusText }}</strong>
+                <small>{{ activity.role }} · {{ formatActivityTime(activity.updatedAt) }}</small>
+              </div>
+            </div>
+            <p>{{ activity.detail }}</p>
+            <dl>
+              <div v-if="activity.currentTaskTitle">
+                <dt>当前任务</dt>
+                <dd>{{ activity.currentTaskTitle }}</dd>
+              </div>
+              <div v-if="activity.thoughtSummary">
+                <dt>思考内容</dt>
+                <dd>{{ activity.thoughtSummary }}</dd>
+              </div>
+              <div v-if="activity.actionSummary">
+                <dt>执行内容</dt>
+                <dd>{{ activity.actionSummary }}</dd>
+              </div>
+              <div v-if="activity.waitingFor.length">
+                <dt>等待事项</dt>
+                <dd>{{ waitingForLabel(activity.waitingFor) }}</dd>
+              </div>
+              <div v-if="activity.activeCapabilityNames.length">
+                <dt>使用能力</dt>
+                <dd>{{ activity.activeCapabilityNames.join(' / ') }}</dd>
+              </div>
+            </dl>
+            <ul v-if="activity.recentLogs.length">
+              <li v-for="log in activity.recentLogs" :key="`${activity.agentId}-${log}`">{{ log }}</li>
+            </ul>
+          </article>
+        </div>
       </div>
       <div class="task-board-header-actions">
         <div class="task-board-progress">
@@ -353,8 +490,19 @@ function taskStatusTone(status: TaskViewState['status']) {
                 <strong>{{ task.title }}</strong>
                 <span :class="['task-board-status', taskStatusTone(task.status)]">{{ taskStatusLabel(task.status) }}</span>
               </header>
-              <p>{{ agentName(task.assigneeAgentId) }}</p>
+              <p>
+                <span v-if="task.assignedByAgentId">由 {{ agentName(task.assignedByAgentId) }} 分配给 </span>{{ agentName(task.assigneeAgentId) }}
+              </p>
+              <small v-if="task.assignmentReason">分配理由：{{ task.assignmentReason }}</small>
+              <small>路由模式：{{ task.routingMode ?? 'coordinator_controlled' }}</small>
+              <small v-if="task.handoffSuggestion">
+                建议交接：{{ task.handoffSuggestion.targetAgentKey ?? task.handoffSuggestion.targetAgentId ?? 'Coordinator' }} / {{ task.handoffSuggestion.reason }}
+              </small>
               <small v-if="task.acceptanceCriteria.length">{{ task.acceptanceCriteria.slice(0, 2).join(' / ') }}</small>
+              <small v-if="task.contextRequirements.length">上下文：{{ task.contextRequirements.slice(0, 3).join(' / ') }}</small>
+              <small v-if="task.verificationPlan.length">验证：{{ task.verificationPlan.slice(0, 2).join(' / ') }}</small>
+              <small v-if="task.riskNotes.length">风险：{{ task.riskNotes.slice(0, 2).join(' / ') }}</small>
+              <small v-if="task.requiresUserConfirmation">执行前需要用户确认</small>
               <small v-if="task.resultSummary">{{ task.resultSummary }}</small>
               <footer v-if="task.artifacts.length">
                 <span v-for="artifact in task.artifacts.slice(0, 3)" :key="artifact.artifactId">
@@ -369,7 +517,13 @@ function taskStatusTone(status: TaskViewState['status']) {
               </header>
               <p>{{ suggestedAgentName(task) }}</p>
               <small>{{ task.description }}</small>
+              <small v-if="task.assignmentReason">分配理由：{{ task.assignmentReason }}</small>
+              <small>路由模式：{{ task.routingMode ?? 'coordinator_controlled' }}</small>
               <small v-if="task.acceptanceCriteria.length">{{ task.acceptanceCriteria.slice(0, 2).join(' / ') }}</small>
+              <small v-if="task.contextRequirements?.length">上下文：{{ task.contextRequirements.slice(0, 3).join(' / ') }}</small>
+              <small v-if="task.verificationPlan?.length">验证：{{ task.verificationPlan.slice(0, 2).join(' / ') }}</small>
+              <small v-if="task.riskNotes?.length">风险：{{ task.riskNotes.slice(0, 2).join(' / ') }}</small>
+              <small v-if="task.requiresUserConfirmation">执行前需要用户确认</small>
               <footer v-if="task.dependsOnTaskTitles?.length">
                 <span v-for="dependency in task.dependsOnTaskTitles.slice(0, 3)" :key="dependency">依赖 {{ dependency }}</span>
               </footer>

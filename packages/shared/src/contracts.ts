@@ -16,9 +16,12 @@ export type SessionStatus =
 
 export type AgentTaskStatus =
   | 'pending'
+  | 'assigned'
+  | 'accepted'
   | 'claimed'
   | 'running'
   | 'waiting'
+  | 'blocked'
   | 'reviewing'
   | 'rejected'
   | 'reworking'
@@ -121,6 +124,15 @@ export type UserMessageIntent =
   | 'preference_input';
 
 export type TaskDomain = 'coding' | 'non_coding' | 'mixed';
+export type TaskRoutingMode = 'coordinator_controlled' | 'agent_suggested' | 'agent_delegated';
+export type HandoffRiskLevel = 'low' | 'medium' | 'high';
+export type HandoffSuggestion = {
+  targetAgentKey?: string;
+  targetAgentId?: UUID;
+  reason: string;
+  missingContext?: string[];
+  riskLevel?: HandoffRiskLevel;
+};
 export type TaskIntent =
   | 'inquiry'
   | 'analysis'
@@ -185,6 +197,24 @@ export type WorkspaceSkippedFile = {
   detail?: string;
 };
 
+export type WorkspaceManifestCoverage = {
+  totalEntriesSeen: number;
+  scannedEntries: number;
+  readableFiles: number;
+  skippedByReason: Partial<Record<WorkspaceSkippedReason, number>>;
+};
+
+export type EvidenceTruncationStrategy = 'slice' | 'ts-symbol-window' | 'md-section-window';
+
+export type EvidenceTruncatedHint = {
+  strategy: EvidenceTruncationStrategy;
+  originalBytes: number;
+  keptBytes: number;
+  droppedRanges?: Array<[number, number]>;
+  keptSections?: string[];
+  droppedSections?: string[];
+};
+
 export type WorkspaceSnapshot = {
   rootName: string;
   scannedAt: ISODateTime;
@@ -195,6 +225,7 @@ export type WorkspaceSnapshot = {
   skipped: WorkspaceSkippedFile[];
   detectedStack?: string[];
   entrypoints?: string[];
+  coverage?: WorkspaceManifestCoverage;
 };
 
 export type ProjectMapSource = 'static' | 'generated' | 'merged';
@@ -241,7 +272,11 @@ export type CollaborationEventType =
   | 'user_confirmation_requested'
   | 'user_confirmation_resolved'
   | 'task_created'
+  | 'task_assigned'
+  | 'task_accepted'
   | 'task_claimed'
+  | 'task_blocked'
+  | 'task_reassigned'
   | 'task_started'
   | 'task_waiting'
   | 'task_completed'
@@ -375,7 +410,15 @@ export type AgentTask = {
   title: string;
   description: string;
   status: AgentTaskStatus;
+  assignedByAgentId?: UUID;
   assigneeAgentId?: UUID;
+  routingMode?: TaskRoutingMode;
+  autoResolutionAttempted?: boolean;
+  assignmentReason?: string;
+  contextRequirements?: string[];
+  verificationPlan?: string[];
+  riskNotes?: string[];
+  requiresUserConfirmation?: boolean;
   dependsOnTaskIds: UUID[];
   acceptanceCriteria: string[];
   resultSummary?: string;
@@ -724,6 +767,7 @@ export type ContextPack = {
     files: Array<Omit<WorkspaceFileSnapshot, 'content'> & { contentLength?: number }>;
     detectedStack?: string[];
     entrypoints?: string[];
+    coverage?: WorkspaceManifestCoverage;
   };
   selectedEvidenceContents?: Array<{
     type: TaskEvidenceRef['type'];
@@ -734,6 +778,7 @@ export type ContextPack = {
     summary?: string;
     contentLength?: number;
     truncated?: boolean;
+    truncatedHint?: EvidenceTruncatedHint;
     tokenEstimate?: number;
     selectionReason?: string;
   }>;
@@ -826,6 +871,7 @@ export type AgentRunInput = {
 export type ExpectedRuntimeOutput = {
   kind:
     | 'agent_message'
+    | 'task_acceptance_decision'
     | 'task_claim_decision'
     | 'task_brief'
     | 'task_execution_result'
@@ -901,6 +947,7 @@ export type AgentRunResult<TOutput = RuntimeOutput> = {
 
 export type RuntimeOutput =
   | AgentMessageOutput
+  | TaskAcceptanceDecisionOutput
   | TaskClaimDecisionOutput
   | TaskBriefOutput
   | TaskExecutionResultOutput
@@ -923,6 +970,20 @@ export type TaskClaimDecisionOutput = {
   accepted: boolean;
   reason: string;
   confidence?: number;
+  missingContext?: string[];
+  handoffSuggestion?: HandoffSuggestion | null;
+  alternativeAgentKeys?: string[];
+  alternativeAgentIds?: UUID[];
+  agentMessages?: AgentMessageOutput[];
+};
+
+export type TaskAcceptanceDecisionOutput = {
+  kind: 'task_acceptance_decision';
+  status: 'accepted' | 'blocked' | 'rejected';
+  reason: string;
+  missingContext?: string[];
+  handoffSuggestion?: HandoffSuggestion | null;
+  confidence?: number;
   alternativeAgentKeys?: string[];
   alternativeAgentIds?: UUID[];
   agentMessages?: AgentMessageOutput[];
@@ -932,6 +993,12 @@ export type SuggestedAgentTask = {
   title: string;
   description: string;
   suggestedAgentKey?: string;
+  routingMode?: TaskRoutingMode;
+  assignmentReason?: string;
+  contextRequirements?: string[];
+  verificationPlan?: string[];
+  riskNotes?: string[];
+  requiresUserConfirmation?: boolean;
   dependsOnTaskTitles?: string[];
   acceptanceCriteria: string[];
 };

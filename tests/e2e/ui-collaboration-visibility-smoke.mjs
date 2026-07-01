@@ -23,6 +23,8 @@ const graph = read('apps/web/src/components/CollaborationGraphView.vue');
 const workflow = read('apps/web/src/components/WorkflowRuntimeView.vue');
 
 for (const phase of [
+  'task_acceptance_decision',
+  'task_acceptance_blocked',
   'task_claim_decision',
   'task_claim_declined',
   'task_acceptance',
@@ -45,7 +47,7 @@ assertIncludes(graph, "switchView', mode.mode", 'Collaboration graph view switch
 assertNotIncludes(graph, '.slice(0, 8)', 'Collaboration graph real agent sync');
 assertNotIncludes(graph, '.slice(-8)', 'Collaboration graph');
 
-for (const signal of ['接单', '拒单转派', '补充路由', 'Agent 通信', '文件变更', '最终交付']) {
+for (const signal of ['接受', '受阻改派', '补充路由', 'Agent 通信', '文件变更', '最终交付']) {
   assertIncludes(workflow, signal, 'Workflow signal strip');
 }
 
@@ -85,9 +87,9 @@ for (const signal of [
   'requestedContextPaths',
   'requestedContextCommands',
   'context-request-block',
-  'Requested refs',
-  'Requested paths',
-  'Requested commands'
+  '请求引用',
+  '请求路径',
+  '请求命令'
 ]) {
   assertIncludes(timeline, signal, 'Chat timeline context request visibility');
 }
@@ -114,6 +116,12 @@ assertIncludes(taskBoard, 'decisionEvents', 'Task board surfaces decisions, risk
 assertIncludes(taskBoard, 'suggestedTasks', 'Task board surfaces suggested tasks before confirmation');
 assertIncludes(taskBoard, 'Proposed', 'Task board labels pre-confirmation suggested tasks');
 assertIncludes(taskBoard, 'dependsOnTaskTitles', 'Task board surfaces suggested task dependencies');
+assertIncludes(taskBoard, 'assignmentReason', 'Task board surfaces Coordinator assignment rationale');
+assertIncludes(taskBoard, 'contextRequirements', 'Task board surfaces task context requirements');
+assertIncludes(taskBoard, 'verificationPlan', 'Task board surfaces planned verification');
+assertIncludes(taskBoard, 'riskNotes', 'Task board surfaces task-specific risks');
+assertIncludes(taskBoard, '执行前需要用户确认', 'Task board marks tasks that need user confirmation');
+assertIncludes(taskBoard, '路由模式', 'Task board surfaces routing mode');
 assertIncludes(taskBoard, 'Review & Delivery', 'Task board surfaces review and delivery');
 assertIncludes(taskBoard, 'acceptanceCoverage', 'Task board links delivery back to acceptance coverage');
 assertIncludes(taskBoard, 'validationItems', 'Task board surfaces validation evidence');

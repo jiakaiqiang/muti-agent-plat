@@ -338,6 +338,7 @@ Summary memory checkpoint 规则：
 type ExpectedRuntimeOutput = {
   kind:
     | 'agent_message'
+    | 'task_acceptance_decision'
     | 'task_claim_decision'
     | 'task_brief'
     | 'task_execution_result'
@@ -379,6 +380,7 @@ type RuntimeInvocationStatus =
 ```ts
 type RuntimeOutput =
   | AgentMessageOutput
+  | TaskAcceptanceDecisionOutput
   | TaskClaimDecisionOutput
   | TaskBriefOutput
   | TaskExecutionResultOutput
@@ -406,21 +408,58 @@ type AgentMessageOutput = {
 }
 ```
 
-### 8.2 TaskClaimDecisionOutput
+### 8.2 TaskAcceptanceDecisionOutput
+
+`task_acceptance_decision` 是 v1 Coordinator 中心流转的目标合同。子 Agent 只能判断自己是否能执行当前分配任务，并返回阻塞、拒绝原因或建议交接；任务归属变更必须由 Coordinator 写入。
 
 ```ts
-type TaskClaimDecisionOutput = {
-  kind: 'task_claim_decision'
-  accepted: boolean
+type HandoffSuggestion = {
+  targetAgentKey?: string
+  targetAgentId?: string
   reason: string
-  confidence: number
+  missingContext?: string[]
+  riskLevel?: 'low' | 'medium' | 'high'
+}
+
+type TaskAcceptanceDecisionOutput = {
+  kind: 'task_acceptance_decision'
+  status: 'accepted' | 'blocked' | 'rejected'
+  reason: string
+  missingContext?: string[]
+  handoffSuggestion?: HandoffSuggestion | null
+  confidence?: number
   alternativeAgentIds?: string[]
   alternativeAgentKeys?: string[]
   agentMessages?: AgentMessageOutput[]
 }
 ```
 
-### 8.3 TaskBriefOutput
+兼容说明：
+
+- `status='accepted'` 后任务进入 `accepted/running`。
+- `status='blocked'` 表示缺上下文、权限、依赖或外部条件，Coordinator 可自动处理一次。
+- `status='rejected'` 表示当前 Agent 不适合执行，Coordinator 可自动改派一次。
+- `handoffSuggestion` 只作为建议展示和 Coordinator 决策输入，不会让子 Agent 自动转派。
+
+### 8.3 TaskClaimDecisionOutput（兼容）
+
+```ts
+type TaskClaimDecisionOutput = {
+  kind: 'task_claim_decision'
+  accepted: boolean
+  reason: string
+  confidence?: number
+  missingContext?: string[]
+  handoffSuggestion?: HandoffSuggestion | null
+  alternativeAgentIds?: string[]
+  alternativeAgentKeys?: string[]
+  agentMessages?: AgentMessageOutput[]
+}
+```
+
+`task_claim_decision` 保留为旧 runtime/stub 兼容输出。运行时适配层和 Orchestrator 必须将其解释为“接受决策”，不得解释为子 Agent 自由竞争认领。
+
+### 8.4 TaskBriefOutput
 
 ```ts
 type TaskBriefOutput = {
@@ -439,12 +478,18 @@ type SuggestedAgentTask = {
   title: string
   description: string
   suggestedAgentKey?: string
+  routingMode?: 'coordinator_controlled' | 'agent_suggested' | 'agent_delegated'
+  assignmentReason?: string
+  contextRequirements?: string[]
+  verificationPlan?: string[]
+  riskNotes?: string[]
+  requiresUserConfirmation?: boolean
   dependsOnTaskTitles?: string[]
   acceptanceCriteria: string[]
 }
 ```
 
-### 8.4 TaskExecutionResultOutput
+### 8.5 TaskExecutionResultOutput
 
 ```ts
 type TaskExecutionResultOutput = {
@@ -461,7 +506,7 @@ type TaskExecutionResultOutput = {
 
 When `status='blocked'` because the selected Context Pack is not enough to produce a grounded answer, Runtime should set `requestedContext` instead of guessing.
 
-### 8.5 PostReviewReportOutput
+### 8.6 PostReviewReportOutput
 
 ```ts
 type PostReviewReportOutput = {
@@ -476,7 +521,7 @@ type PostReviewReportOutput = {
 }
 ```
 
-### 8.6 FinalDeliveryOutput
+### 8.7 FinalDeliveryOutput
 
 ```ts
 type FinalDeliveryOutput = {
@@ -489,7 +534,7 @@ type FinalDeliveryOutput = {
 }
 ```
 
-### 8.7 UserMessageHandlingPlanOutput
+### 8.8 UserMessageHandlingPlanOutput
 
 ```ts
 type UserMessageHandlingPlanOutput = {

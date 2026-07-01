@@ -17,6 +17,8 @@ import type {
   RuntimeModelOption,
   RuntimeModelProvider,
   RuntimeInvocationStatus,
+  HandoffSuggestion,
+  TaskRoutingMode,
   RuntimeType,
   SessionDetail,
   SessionListItem,
@@ -56,6 +58,8 @@ export type {
   RuntimeModelOption,
   RuntimeModelProvider,
   RuntimeInvocationStatus,
+  HandoffSuggestion,
+  TaskRoutingMode,
   RuntimeType,
   SessionDetail,
   SessionListItem,
@@ -136,7 +140,16 @@ export type TaskEventPayload = {
   title: string
   description?: string
   status: AgentTaskStatus
+  assignedByAgentId?: string
   assigneeAgentId?: string
+  routingMode?: TaskRoutingMode
+  autoResolutionAttempted?: boolean
+  assignmentReason?: string
+  contextRequirements?: string[]
+  verificationPlan?: string[]
+  riskNotes?: string[]
+  requiresUserConfirmation?: boolean
+  handoffSuggestion?: HandoffSuggestion | null
   dependsOnTaskIds?: string[]
   acceptanceCriteria?: string[]
   resultSummary?: string
@@ -303,7 +316,16 @@ export type TaskViewState = {
   taskId: string
   title: string
   status: AgentTaskStatus
+  assignedByAgentId?: string
   assigneeAgentId?: string
+  routingMode?: TaskRoutingMode
+  autoResolutionAttempted?: boolean
+  assignmentReason?: string
+  contextRequirements: string[]
+  verificationPlan: string[]
+  riskNotes: string[]
+  requiresUserConfirmation?: boolean
+  handoffSuggestion?: HandoffSuggestion | null
   dependsOnTaskIds: string[]
   acceptanceCriteria: string[]
   resultSummary?: string

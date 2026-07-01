@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useAgentStore } from '@/stores/agent'
 import type {
   ArtifactEventPayload,
@@ -27,6 +27,32 @@ const emit = defineEmits<{
 
 const agentStore = useAgentStore()
 const timeline = computed(() => props.messages)
+const timelineEl = ref<HTMLElement | null>(null)
+
+function scrollToLatest(behavior: ScrollBehavior = 'auto') {
+  void nextTick(() => {
+    requestAnimationFrame(() => {
+      const element = timelineEl.value
+      if (!element) return
+      element.scrollTo({
+        top: element.scrollHeight,
+        behavior
+      })
+    })
+  })
+}
+
+onMounted(() => {
+  scrollToLatest()
+})
+
+watch(
+  () => [props.messages.length, props.messages.at(-1)?.id ?? ''],
+  () => {
+    scrollToLatest()
+  },
+  { flush: 'post', immediate: true }
+)
 
 function senderLabel(message: ChatMessage) {
   if (message.senderType === 'user') return '你'
@@ -240,17 +266,63 @@ function deliveryPayload(message: ChatMessage) {
 function statusLabel(status?: string) {
   return (
     {
-      allowed: 'Allowed',
-      approved: 'Approved',
-      blocked: 'Blocked',
+      allowed: '已允许',
+      approved: '已批准',
+      accepted: '已接受',
+      assigned: '已分配',
+      blocked: '阻塞',
       claimed: '已接受',
-      completed: 'Completed',
-      failed: 'Failed',
-      pending: 'Pending',
+      completed: '已完成',
+      failed: '失败',
+      pending: '待处理',
       reworking: '返工中',
-      running: 'Running',
-      waiting: 'Waiting'
-    }[status ?? ''] ?? status ?? 'Unknown'
+      running: '进行中',
+      waiting: '等待中'
+    }[status ?? ''] ?? '未知'
+  )
+}
+
+function priorityLabel(priority?: string) {
+  return (
+    {
+      low: '低',
+      normal: '普通',
+      high: '高',
+      critical: '紧急'
+    }[priority ?? ''] ?? '普通'
+  )
+}
+
+function riskLevelLabel(riskLevel?: string) {
+  return (
+    {
+      low: '低',
+      medium: '中',
+      high: '高',
+      critical: '紧急'
+    }[riskLevel ?? ''] ?? '未知'
+  )
+}
+
+function recommendationLabel(recommendation?: string) {
+  return (
+    {
+      deliver: '可以交付',
+      rework: '需要返工',
+      ask_user: '等待用户确认',
+      running: '进行中'
+    }[recommendation ?? ''] ?? '进行中'
+  )
+}
+
+function artifactTypeLabel(type?: string) {
+  return (
+    {
+      markdown: '文档',
+      json: '数据',
+      test_report: '测试报告',
+      project_analysis: '项目分析'
+    }[type ?? ''] ?? '产物'
   )
 }
 
@@ -270,8 +342,10 @@ function phaseLabel(phase?: string) {
       final_delivery: '最终交付',
       workspace_analysis: '工作区分析',
       user_message_routing: '消息路由',
-      task_claim_decision: '接单决策',
-      task_claim_declined: '拒单转派',
+      task_acceptance_decision: '接受决策',
+      task_acceptance_blocked: '接受受阻',
+      task_claim_decision: '接受决策',
+      task_claim_declined: '拒绝接受',
       agent_runtime_communication: 'Agent 通信'
     }[phase ?? ''] ?? phase ?? '未知阶段'
   )
@@ -338,7 +412,7 @@ function yesNo(value?: boolean) {
 </script>
 
 <template>
-  <main class="chat-timeline">
+  <main ref="timelineEl" class="chat-timeline">
     <article
       v-for="message in timeline"
       :key="message.id"
@@ -406,7 +480,7 @@ function yesNo(value?: boolean) {
           <div v-if="routingPlan(message)" class="structured-block routing-block">
             <div class="structured-block__heading">
               <h3>补充需求路由</h3>
-              <span class="status-pill running">{{ routingPlan(message)?.priority ?? 'normal' }}</span>
+              <span class="status-pill running">{{ priorityLabel(routingPlan(message)?.priority) }}</span>
             </div>
             <dl>
               <div>
@@ -441,31 +515,31 @@ function yesNo(value?: boolean) {
 
           <div v-if="requestedContextPayload(message)" class="structured-block context-request-block">
             <div class="structured-block__heading">
-              <h3>Context request</h3>
-              <span class="status-pill waiting">Waiting</span>
+              <h3>上下文请求</h3>
+              <span class="status-pill waiting">等待中</span>
             </div>
             <dl>
               <div v-if="requestedContextPayload(message)?.reason">
-                <dt>Reason</dt>
+                <dt>原因</dt>
                 <dd>{{ requestedContextPayload(message)?.reason }}</dd>
               </div>
               <div v-if="requestedContextPayload(message)?.followUpInstruction">
-                <dt>Next instruction</dt>
+                <dt>下一步指令</dt>
                 <dd>{{ requestedContextPayload(message)?.followUpInstruction }}</dd>
               </div>
             </dl>
             <div v-if="requestedContextRefs(message).length" class="context-request-list">
-              <strong>Requested refs</strong>
+              <strong>请求引用</strong>
               <code v-for="ref in requestedContextRefs(message)" :key="`${ref.type ?? 'ref'}:${ref.ref ?? ref.label}`">
                 {{ [ref.type, ref.label, ref.ref].filter(Boolean).join(' / ') }}
               </code>
             </div>
             <div v-if="requestedContextPaths(message).length" class="context-request-list">
-              <strong>Requested paths</strong>
+              <strong>请求路径</strong>
               <code v-for="path in requestedContextPaths(message)" :key="path">{{ path }}</code>
             </div>
             <div v-if="requestedContextCommands(message).length" class="context-request-list">
-              <strong>Requested commands</strong>
+              <strong>请求命令</strong>
               <code v-for="command in requestedContextCommands(message)" :key="command">{{ command }}</code>
             </div>
           </div>
@@ -516,9 +590,17 @@ function yesNo(value?: boolean) {
             </div>
             <p v-if="taskPayload(message)?.description">{{ taskPayload(message)?.description }}</p>
             <dl>
+              <div v-if="taskPayload(message)?.assignedByAgentId">
+                <dt>分配者</dt>
+                <dd>{{ agentName(taskPayload(message)?.assignedByAgentId) }}</dd>
+              </div>
               <div v-if="taskPayload(message)?.assigneeAgentId">
-                <dt>Agent</dt>
+                <dt>负责 Agent</dt>
                 <dd>{{ agentName(taskPayload(message)?.assigneeAgentId) }}</dd>
+              </div>
+              <div v-if="taskPayload(message)?.handoffSuggestion">
+                <dt>建议交接</dt>
+                <dd>{{ taskPayload(message)?.handoffSuggestion?.targetAgentKey ?? taskPayload(message)?.handoffSuggestion?.targetAgentId ?? 'Coordinator 处理' }}：{{ taskPayload(message)?.handoffSuggestion?.reason }}</dd>
               </div>
               <div v-if="taskPayload(message)?.resultSummary">
                 <dt>结果</dt>
@@ -545,7 +627,7 @@ function yesNo(value?: boolean) {
             <div class="structured-block__heading">
               <h3>复盘结果</h3>
               <span class="status-pill" :class="String(reviewPayload(message)?.recommendation ?? 'running')">
-                {{ reviewPayload(message)?.recommendation ?? '进行中' }}
+                {{ recommendationLabel(String(reviewPayload(message)?.recommendation ?? 'running')) }}
               </span>
             </div>
             <p>{{ message.content }}</p>
@@ -571,15 +653,15 @@ function yesNo(value?: boolean) {
             </div>
             <dl>
               <div>
-                <dt>Risk</dt>
-                <dd>{{ toolPayload(message)?.riskLevel ?? 'unknown' }}</dd>
+                <dt>风险</dt>
+                <dd>{{ riskLevelLabel(toolPayload(message)?.riskLevel) }}</dd>
               </div>
               <div v-if="toolPayload(message)?.requiresUserConfirmation">
-                <dt>Policy</dt>
-                <dd>User confirmation required</dd>
+                <dt>策略</dt>
+                <dd>需要用户确认</dd>
               </div>
               <div v-if="toolPayload(message)?.reason">
-                <dt>Reason</dt>
+                <dt>原因</dt>
                 <dd>{{ toolPayload(message)?.reason }}</dd>
               </div>
               <div v-if="toolPayload(message)?.code">
@@ -592,7 +674,7 @@ function yesNo(value?: boolean) {
           <div v-if="artifactPayload(message)" class="structured-block artifact-block">
             <div class="structured-block__heading">
               <h3>{{ artifactPayload(message)?.title }}</h3>
-              <span class="status-pill" :class="artifactPayload(message)?.type">{{ artifactPayload(message)?.type }}</span>
+              <span class="status-pill" :class="artifactPayload(message)?.type">{{ artifactTypeLabel(artifactPayload(message)?.type) }}</span>
             </div>
             <p v-if="artifactPayload(message)?.contentSummary">{{ artifactPayload(message)?.contentSummary }}</p>
             <p v-if="artifactPayload(message)?.relatedCapabilityId">
@@ -603,7 +685,7 @@ function yesNo(value?: boolean) {
               <article v-for="artifact in runtimeTestArtifacts(message)" :key="`${artifact.title}:${runtimeArtifactCommand(artifact) ?? ''}`">
                 <header>
                   <strong>{{ artifact.title }}</strong>
-                  <span :class="['status-pill', runtimeArtifactStatus(artifact)]">{{ runtimeArtifactStatus(artifact) }}</span>
+                  <span :class="['status-pill', runtimeArtifactStatus(artifact)]">{{ statusLabel(runtimeArtifactStatus(artifact)) }}</span>
                 </header>
                 <p v-if="artifact.summary">{{ artifact.summary }}</p>
                 <code v-if="runtimeArtifactCommand(artifact)">{{ runtimeArtifactCommand(artifact) }}</code>

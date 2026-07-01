@@ -42,6 +42,8 @@ const edgePositions = ref<Record<string, { from?: GraphPoint; to?: GraphPoint }>
 const dragTarget = ref<DragTarget | undefined>()
 
 const pinnedPhases = new Set([
+  'task_acceptance_decision',
+  'task_acceptance_blocked',
   'task_claim_decision',
   'task_claim_declined',
   'task_acceptance',
@@ -80,7 +82,11 @@ const taskDerivedEdges = computed<CommunicationEdge[]>(() => {
     const assigneeAgentId = payload?.assigneeAgentId
     if (taskId && assigneeAgentId) {
       seenTasks.set(taskId, assigneeAgentId)
-      if (coordinatorId && coordinatorId !== assigneeAgentId && ['task_created', 'task_claimed', 'task_started', 'task_waiting'].includes(event.type)) {
+      if (
+        coordinatorId &&
+        coordinatorId !== assigneeAgentId &&
+        ['task_created', 'task_assigned', 'task_accepted', 'task_claimed', 'task_blocked', 'task_reassigned', 'task_started', 'task_waiting'].includes(event.type)
+      ) {
         edges.push({
           id: `${event.id}:${coordinatorId}:${assigneeAgentId}`,
           fromAgentId: coordinatorId,
@@ -88,7 +94,7 @@ const taskDerivedEdges = computed<CommunicationEdge[]>(() => {
           fromName: agentNameById.value.get(coordinatorId) ?? coordinatorId,
           toName: agentNameById.value.get(assigneeAgentId) ?? assigneeAgentId,
           kind: 'handoff',
-          phase: event.type === 'task_created' ? 'task_acceptance' : 'task_handoff',
+          phase: event.type === 'task_created' || event.type === 'task_assigned' ? 'task_acceptance' : 'task_handoff',
           content: payload?.title ?? event.content,
           createdAt: event.createdAt
         })
@@ -354,9 +360,11 @@ function phaseLabel(phase?: string) {
     {
       discussion: '讨论',
       brief_generation: '任务契约',
-      task_acceptance: '接单',
-      task_claim_decision: '接单决策',
-      task_claim_declined: '拒单转派',
+      task_acceptance: '任务分配',
+      task_acceptance_decision: '接受决策',
+      task_acceptance_blocked: '接受受阻',
+      task_claim_decision: '接受决策',
+      task_claim_declined: '拒绝接受',
       task_handoff: '交接',
       task_execution: '执行',
       post_review: '复盘',

@@ -55,7 +55,11 @@ type CollaborationEventType =
   | 'user_confirmation_requested'
   | 'user_confirmation_resolved'
   | 'task_created'
+  | 'task_assigned'
+  | 'task_accepted'
   | 'task_claimed'
+  | 'task_blocked'
+  | 'task_reassigned'
   | 'task_started'
   | 'task_waiting'
   | 'task_completed'
@@ -188,7 +192,7 @@ type ConfirmationOption = {
 }
 ```
 
-### 6.5 task_created / task_started / task_completed
+### 6.5 task_created / task_assigned / task_accepted / task_started / task_completed
 
 ```ts
 type TaskEventPayload = {
@@ -196,12 +200,37 @@ type TaskEventPayload = {
   title: string
   description?: string
   status: AgentTaskStatus
+  assignedByAgentId?: string
   assigneeAgentId?: string
+  routingMode?: 'coordinator_controlled' | 'agent_suggested' | 'agent_delegated'
+  autoResolutionAttempted?: boolean
+  assignmentReason?: string
+  contextRequirements?: string[]
+  verificationPlan?: string[]
+  riskNotes?: string[]
+  requiresUserConfirmation?: boolean
   dependsOnTaskIds?: string[]
   acceptanceCriteria?: string[]
   resultSummary?: string
+  missingContext?: string[]
+  handoffSuggestion?: {
+    targetAgentKey?: string
+    targetAgentId?: string
+    reason: string
+    missingContext?: string[]
+    riskLevel?: 'low' | 'medium' | 'high'
+  } | null
 }
 ```
+
+Coordinator 中心流转兼容规则：
+
+- v1 目标语义中，`task_assigned` 表示 Coordinator 已将任务分配给 `assigneeAgentId`。
+- v1 目标语义中，`task_accepted` 表示子 Agent 已接受被分配任务。
+- 现有 `task_claimed` 保留兼容，但必须解释为“已接受”，不得解释为子 Agent 自由竞争接活。
+- `task_blocked` 表示子 Agent 无法继续，等待 Coordinator 补上下文、改派或请求用户决策。
+- `task_reassigned` 必须由 Coordinator 写入；子 Agent 只能通过 `agent_message.metadata.payload.handoffSuggestion` 提出建议。
+- 当 Coordinator 已在任务规划阶段确定分配理由、上下文需求、验证方式或风险提示时，应通过 `assignmentReason/contextRequirements/verificationPlan/riskNotes/requiresUserConfirmation` 同步到任务事件 payload，供 UI 解释“为什么这样分配、执行前还缺什么、如何验证、是否要先问用户”。
 
 ### 6.6 agent_status_changed
 

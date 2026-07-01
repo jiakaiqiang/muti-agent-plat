@@ -78,12 +78,17 @@ Agent override
 为避免上下文超限，必须同时满足：
 
 - 群聊 Agent 使用 role-specific context slice，不共享同一份大包；
-- `selectedEvidenceContents` 有 item count、per-item chars、total chars 和去重限制；
-- `workspaceSnapshot` 面向 runtime 时保持 manifest-only；
+- `selectedEvidenceContents` 有 item count、per-item chars、total chars 和去重限制；裁剪走 `truncateContentForEvidence` 智能策略（TS/JS 符号窗口、Markdown 章节窗口、回退 slice），并把 `truncatedHint` 透传给 debug 接口；
+- `workspaceSnapshot` 面向 runtime 时保持 manifest-only；扫描端必须输出 `WorkspaceManifestCoverage`，让 ContextPack 显式告诉 runtime 有多少盲区；
 - `relevantEvents`、`relevantMemories`、`artifacts` 只传相关摘要切片；
 - debug payload 与 runtime payload 分离；
-- `CONTEXT_INSUFFICIENT` 重试只补充 requested refs，不能升级成 whole workspace 注入；
-- 正常 trim 失败后必须支持 emergency navigation-only pack。
+- `CONTEXT_INSUFFICIENT` 重试只补充 requested refs，不能升级成 whole workspace 注入；单会话重试预算受 `AGENT_CLUSTER_CONTEXT_INSUFFICIENT_MAX_RETRIES`（默认 3）控制；入库前必须 dedupe，整轮全重复的请求直接拒绝重试并在 session.events 留 `rejectionReason='duplicate_request'`；
+- 正常 trim 失败后必须支持 navigation_only 兜底（emergency 之后的最终阶段），并在 systemRules 追加 `contextDegraded=true` 让 runtime 主动通过 CONTEXT_INSUFFICIENT 拉回缺失内容。
+
+> 上述 coverage / retry / 智能截断 / navigation_only 的实现与契约详见
+> `docs/roadmap/context-engineering-remediation-v1.md`（任务追踪 `.tasks.json`）、
+> `docs/harness-engineering/context-engineering/02-context-protocol.md`、
+> `docs/harness-engineering/context-engineering/prompt-context/runtime-context-contract.md`。
 
 ## 相关设计文档
 

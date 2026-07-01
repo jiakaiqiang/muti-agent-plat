@@ -9,6 +9,7 @@ import type {
   RuntimeUsage,
   RuntimeOutput,
   RuntimeContextRequest,
+  TaskAcceptanceDecisionOutput,
   TaskClaimDecisionOutput,
   TaskBriefOutput,
   TaskExecutionResultOutput,
@@ -26,6 +27,8 @@ import { estimateTokens } from '../../common/token.js';
 @Injectable()
 export class MockRuntimeService implements AgentRuntimeAdapter {
   readonly type = 'mock' as const;
+  /** Session-level CONTEXT_INSUFFICIENT failure counter for MOCK_CONTEXT_INSUFFICIENT_TIMES. */
+  private readonly contextInsufficientCounts = new Map<string, number>();
 
   async run(input: AgentRunInput, signal?: AbortSignal): Promise<AgentRunResult> {
     if (!mockRuntimeEnabled() && input.options?.allowMockFallback !== true) {
@@ -83,11 +86,14 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
       };
     }
 
-    if (
+    const isTaskExecution = input.expectedOutput.kind === 'task_execution_result';
+    const wantsContextInsufficient =
       input.options?.scenario === 'context_insufficient' ||
-      ((process.env.MOCK_CONTEXT_INSUFFICIENT === 'true' || this.shouldRequestContextOnce(input)) &&
-        input.expectedOutput.kind === 'task_execution_result')
-    ) {
+      (isTaskExecution &&
+        (process.env.MOCK_CONTEXT_INSUFFICIENT === 'true' ||
+          this.shouldRequestContextOnce(input) ||
+          this.shouldRequestContextTimes(input)));
+    if (wantsContextInsufficient) {
       return this.contextInsufficientResult(input);
     }
 
@@ -224,16 +230,27 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
   }
 
   private contextInsufficientResult(input: AgentRunInput): AgentRunResult {
+    // Pick a distinct ref for each retry so dedupe (T06) still allows it through.
+    const attemptIndex = this.contextInsufficientAttemptIndex(input);
+    const relevantFiles = input.contextPack.workspaceFocus?.relevantFiles ?? [];
+    const evidenceFiles = input.contextPack.taskContext.evidenceRefs
+      .map((evidence) => evidence.ref)
+      .filter((ref): ref is string => Boolean(ref));
+    const candidateRefs = [...relevantFiles, ...evidenceFiles];
+    const primaryRef = candidateRefs[attemptIndex] ?? candidateRefs[0];
+    const pathSlice = relevantFiles.length
+      ? relevantFiles.slice(attemptIndex, attemptIndex + 3)
+      : [];
     const requestedContext: RuntimeContextRequest = {
-      reason: 'Selected evidence does not include enough concrete workspace material to complete the current phase safely.',
+      reason: `Selected evidence does not include enough concrete workspace material to complete the current phase safely (attempt ${attemptIndex + 1}).`,
       requestedRefs: [
         {
           type: 'workspace_file',
           label: 'Relevant source file content',
-          ref: input.contextPack.workspaceFocus?.relevantFiles[0] ?? input.contextPack.taskContext.evidenceRefs[0]?.ref
+          ref: primaryRef
         }
       ],
-      requestedPaths: input.contextPack.workspaceFocus?.relevantFiles.slice(0, 3) ?? [],
+      requestedPaths: pathSlice,
       requestedCommands: input.contextPack.workspaceFocus?.validationCommands.slice(0, 2) ?? [],
       followUpInstruction: 'Rebuild the Context Pack with the requested files or validation evidence before retrying this runtime phase.'
     };
@@ -280,19 +297,45 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
     };
   }
 
-  private shouldRequestContextOnce(input: AgentRunInput) {
-    if (process.env.MOCK_CONTEXT_INSUFFICIENT_ONCE !== 'true') {
-      return false;
-    }
-    const taskTitle = input.contextPack.currentTask?.title ?? input.contextPack.sessionGoal;
-    const alreadySupplemented =
-      input.contextPack.relevantMemories.some(
-        (memory) => memory.content.includes('Supplemental context request') && memory.content.includes(taskTitle)
-      ) ||
-      input.contextPack.relevantEvents.some(
-        (event) => event.type === 'agent_message' && event.summary.includes('Supplemental context request recorded')
-      );
-    return !alreadySupplemented;
+  /**
+   * Fails with CONTEXT_INSUFFICIENT exactly once per session when
+   * MOCK_CONTEXT_INSUFFICIENT_ONCE=true. Uses the same session-scoped counter
+   * as MOCK_CONTEXT_INSUFFICIENT_TIMES, so the "once" semantics survive
+   * follow-up tasks that would otherwise scroll the supplement event out of
+   * the ContextPack's relevantEvents window.
+   */
+  private shouldRequestContextOnce(input: AgentRunInput): boolean {
+    if (process.env.MOCK_CONTEXT_INSUFFICIENT_ONCE !== 'true') return false;
+    const current = this.contextInsufficientCounts.get(input.sessionId) ?? 0;
+    if (current >= 1) return false;
+    this.contextInsufficientCounts.set(input.sessionId, current + 1);
+    return true;
+  }
+
+  /**
+   * Fails with CONTEXT_INSUFFICIENT for the first N task_execution attempts in
+   * a session when MOCK_CONTEXT_INSUFFICIENT_TIMES=N. Each retry asks for a
+   * different workspace file so the orchestrator's dedupe still allows the
+   * retry through. The counter is session-scoped so a single retry budget
+   * spans all tasks in the session.
+   */
+  private shouldRequestContextTimes(input: AgentRunInput): boolean {
+    const raw = process.env.MOCK_CONTEXT_INSUFFICIENT_TIMES;
+    if (!raw) return false;
+    const max = Number(raw);
+    if (!Number.isFinite(max) || max <= 0) return false;
+    const current = this.contextInsufficientCounts.get(input.sessionId) ?? 0;
+    if (current >= Math.floor(max)) return false;
+    this.contextInsufficientCounts.set(input.sessionId, current + 1);
+    return true;
+  }
+
+  /** Index of the current retry within MOCK_CONTEXT_INSUFFICIENT_TIMES (0-based). */
+  private contextInsufficientAttemptIndex(input: AgentRunInput): number {
+    const current = this.contextInsufficientCounts.get(input.sessionId);
+    if (current === undefined || current === 0) return 0;
+    // The counter has already been incremented by shouldRequestContextTimes.
+    return current - 1;
   }
 
   private outputFor(input: AgentRunInput): RuntimeOutput {
@@ -313,6 +356,8 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
         : ['The output directly addresses the user requirement.', 'The result can be reviewed by the user.'];
 
     switch (input.expectedOutput.kind) {
+      case 'task_acceptance_decision':
+        return this.taskAcceptanceDecision(input, goal, taskTitle);
       case 'task_claim_decision':
         return this.taskClaimDecision(input, goal, taskTitle);
       case 'task_brief':
@@ -534,14 +579,51 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
   }
 
   private taskClaimDecision(input: AgentRunInput, goal: string, taskTitle: string): TaskClaimDecisionOutput {
+    const decision = this.taskAcceptanceDecision(input, goal, taskTitle);
+    return {
+      kind: 'task_claim_decision',
+      accepted: decision.status === 'accepted',
+      reason: decision.reason,
+      confidence: decision.confidence,
+      missingContext: decision.missingContext,
+      handoffSuggestion: decision.handoffSuggestion,
+      alternativeAgentKeys: decision.alternativeAgentKeys,
+      alternativeAgentIds: decision.alternativeAgentIds,
+      agentMessages: decision.agentMessages
+    };
+  }
+
+  private taskAcceptanceDecision(input: AgentRunInput, goal: string, taskTitle: string): TaskAcceptanceDecisionOutput {
     const domain = input.contextPack.taskContext?.domain ?? 'coding';
+    const rejectedAgentKeys = (process.env.MOCK_REJECT_ACCEPTANCE_AGENT_KEYS ?? '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (rejectedAgentKeys.includes('all') || rejectedAgentKeys.includes(input.agent.key)) {
+      return {
+        kind: 'task_acceptance_decision',
+        status: 'rejected',
+        reason: `${input.agent.name} rejects "${taskTitle}" because MOCK_REJECT_ACCEPTANCE_AGENT_KEYS requested it.`,
+        confidence: 0.9,
+        handoffSuggestion: {
+          targetAgentKey: 'coordinator',
+          reason: 'Mock runtime is forcing acceptance rejection for routing smoke coverage.',
+          riskLevel: 'medium'
+        }
+      };
+    }
     if (domain === 'non_coding' && ['backend', 'frontend'].includes(input.agent.key)) {
       return {
-        kind: 'task_claim_decision',
-        accepted: false,
+        kind: 'task_acceptance_decision',
+        status: 'rejected',
         reason: `${input.agent.name} recommends assigning "${taskTitle}" to a planning/analysis role for this non-coding task.`,
         confidence: 0.88,
-        alternativeAgentKeys: ['requirements', 'product-manager', 'test', 'review']
+        alternativeAgentKeys: ['requirements', 'product-manager', 'test', 'review'],
+        handoffSuggestion: {
+          targetAgentKey: 'requirements',
+          reason: 'The task is planning/analysis oriented.',
+          riskLevel: 'low'
+        }
       };
     }
     const shouldDecline =
@@ -550,11 +632,16 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
       /frontend/i.test(taskTitle);
     if (shouldDecline) {
       return {
-        kind: 'task_claim_decision',
-        accepted: false,
+        kind: 'task_acceptance_decision',
+        status: 'rejected',
         reason: `${input.agent.name} cannot take "${taskTitle}" and recommends Backend for this run.`,
         confidence: 0.86,
         alternativeAgentKeys: ['backend'],
+        handoffSuggestion: {
+          targetAgentKey: 'backend',
+          reason: 'The mock scenario asks Backend to take over this frontend-titled task.',
+          riskLevel: 'low'
+        },
         agentMessages: [
           {
             kind: 'agent_message',
@@ -566,8 +653,8 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
       };
     }
     return {
-      kind: 'task_claim_decision',
-      accepted: true,
+      kind: 'task_acceptance_decision',
+      status: 'accepted',
       reason: `${input.agent.name} accepts "${taskTitle}" for requirement: ${goal}`,
       confidence: 0.92,
       agentMessages: [

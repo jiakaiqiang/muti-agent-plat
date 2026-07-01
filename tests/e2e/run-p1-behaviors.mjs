@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const npmCli = process.env.npm_execpath;
 const dataFile = join(root, '.cache', 'agent-cluster', `p1-behaviors-${Date.now()}.json`);
+const p1BehaviorsSpec = join(root, 'tests', 'e2e', 'p1-behaviors.spec.ts');
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -94,7 +95,7 @@ server.stderr.on('data', (chunk) => process.stderr.write(chunk));
 
 try {
   await waitForServer(apiBase);
-  await run(process.execPath, ['tests/e2e/p1-behaviors.spec.ts'], {
+  await run(process.execPath, [npmCli, 'exec', '-w', '@agent-cluster/server', 'tsx', p1BehaviorsSpec], {
     env: {
       E2E_API_BASE: apiBase
     }

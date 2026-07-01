@@ -3,6 +3,7 @@ import { basename, extname, isAbsolute, join, relative } from 'node:path';
 import type {
   SessionWorkingDirectory,
   WorkspaceFileSnapshot,
+  WorkspaceManifestCoverage,
   WorkspaceSkippedReason,
   WorkspaceSnapshot,
   WorkspaceTreeNode
@@ -35,6 +36,7 @@ export async function scanServerWorkspace(rootPath: string): Promise<{
   const tree: WorkspaceTreeNode[] = [];
   let totalBytes = 0;
   let entryCount = 0;
+  let totalEntriesSeen = 0;
   let readableCount = 0;
   let totalContentBytes = 0;
 
@@ -45,6 +47,7 @@ export async function scanServerWorkspace(rootPath: string): Promise<{
     for (const entry of entries) {
       const absolutePath = join(currentPath, entry.name);
       const path = relative(rootPath, absolutePath).replace(/\\/g, '/');
+      totalEntriesSeen += 1;
       if (entryCount >= maxScannedEntries) {
         skipped.push({ path, reason: 'limit_exceeded' });
         continue;
@@ -102,6 +105,16 @@ export async function scanServerWorkspace(rootPath: string): Promise<{
   await scan(rootPath, tree);
   const rootName = basename(rootPath);
   const selectedAt = nowIso();
+  const skippedByReason: Partial<Record<WorkspaceSkippedReason, number>> = {};
+  for (const entry of skipped) {
+    skippedByReason[entry.reason] = (skippedByReason[entry.reason] ?? 0) + 1;
+  }
+  const coverage: WorkspaceManifestCoverage = {
+    totalEntriesSeen,
+    scannedEntries: entryCount,
+    readableFiles: readableCount,
+    skippedByReason
+  };
   return {
     workingDirectory: {
       kind: 'server_local',
@@ -119,7 +132,8 @@ export async function scanServerWorkspace(rootPath: string): Promise<{
       files,
       skipped,
       detectedStack: detectStack(files),
-      entrypoints: detectEntrypoints(files)
+      entrypoints: detectEntrypoints(files),
+      coverage
     }
   };
 }

@@ -249,14 +249,18 @@ export class SessionsService {
       this.recordAgentRequirementContext(session, content, event.id, relevantAgentIds);
 
       // 创建插话任务并立即标记完成（插话内容已通过记忆分发给相关 agent）
-      const assignedAgentId = relevantAgentIds[0] || this.pickSessionAgent(session, ['coordinator']).id;
+      const coordinator = this.pickSessionAgent(session, ['coordinator']);
+      const assignedAgentId = relevantAgentIds[0] || coordinator.id;
       const interruptTask: AgentTask = {
         id: crypto.randomUUID(),
         sessionId: session.id,
         title: '处理用户执行中插话',
         description: content,
         status: 'completed',
+        assignedByAgentId: coordinator.id,
         assigneeAgentId: assignedAgentId,
+        routingMode: 'coordinator_controlled',
+        autoResolutionAttempted: false,
         dependsOnTaskIds: [],
         acceptanceCriteria: [],
         resultSummary: '已将插话内容分发给相关 Agent 作为执行上下文。',
@@ -269,7 +273,7 @@ export class SessionsService {
         sessionId: session.id,
         type: 'task_created',
         taskId: interruptTask.id,
-        fromAgentId: assignedAgentId,
+        fromAgentId: coordinator.id,
         toAgentIds: relevantAgentIds,
         content: `任务已创建：${interruptTask.title}`,
         metadata: createMetadata('task_card', {
@@ -277,7 +281,10 @@ export class SessionsService {
           title: interruptTask.title,
           description: interruptTask.description,
           status: interruptTask.status,
+          assignedByAgentId: coordinator.id,
           assigneeAgentId: assignedAgentId,
+          routingMode: interruptTask.routingMode,
+          autoResolutionAttempted: interruptTask.autoResolutionAttempted,
           acceptanceCriteria: interruptTask.acceptanceCriteria
         })
       });
@@ -441,6 +448,24 @@ export class SessionsService {
         reason
       })
     });
+    if (outcome.kind === 'ask_user') {
+      this.events.create({
+        sessionId,
+        type: 'user_confirmation_requested',
+        priority: 'high',
+        content: 'Coordinator 自动处理未能继续推进，请确认下一步。',
+        metadata: createMetadata('confirmation_card', {
+          confirmationId: crypto.randomUUID(),
+          reason: 'coordinator_routing_needs_user_decision',
+          title: '需要用户确认下一步',
+          description: reason || '任务在自动恢复后仍无法继续，需要用户确认是否继续执行或取消。',
+          options: [
+            { key: 'resume', label: messages.reworkResume, style: 'primary' },
+            { key: 'cancel', label: messages.reworkCancel, style: 'default' }
+          ]
+        })
+      });
+    }
     if (outcome.kind === 'rework') {
       this.startRework(session, reason);
     }

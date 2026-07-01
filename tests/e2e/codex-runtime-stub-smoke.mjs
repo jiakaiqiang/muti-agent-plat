@@ -108,11 +108,12 @@ try {
   const claimDecision = events.find(
     (event) =>
       event.type === 'agent_message' &&
-      event.metadata.payload?.phase === 'task_claim_decision' &&
+      event.metadata.payload?.phase === 'task_acceptance_decision' &&
+      event.metadata.payload?.acceptanceDecision?.status === 'accepted' &&
       event.metadata.payload?.claimDecision?.accepted === true
   );
   if (!claimDecision) {
-    throw new Error('Expected Codex runtime to participate in autonomous task claim decision.');
+    throw new Error('Expected Codex runtime to participate in task acceptance decision.');
   }
 
   const taskArtifact = events.find(
