@@ -188,6 +188,30 @@ export class SessionsService {
       .catch((error) => this.failSessionWithFullError(session, error, 'brief_generation'));
   }
 
+  /**
+   * Re-drives brief generation after a process restart. The discussion phase
+   * runs on an in-memory promise (generateBriefInBackground), so a session
+   * that was AGENT_DISCUSSING when the process died has no driver anymore.
+   */
+  resumeBriefGeneration(sessionId: string) {
+    const session = this.get(sessionId);
+    if (session.status !== 'AGENT_DISCUSSING') {
+      return false;
+    }
+    this.events.create({
+      sessionId: session.id,
+      type: 'session_status_changed',
+      priority: 'high',
+      content: messages.discussionRecoveredAfterRestart,
+      metadata: createMetadata('system_notice', {
+        status: 'AGENT_DISCUSSING',
+        reason: 'brief_generation_recovered_on_boot'
+      })
+    });
+    this.generateBriefInBackground(session);
+    return true;
+  }
+
   async sendMessage(sessionId: string, content: string, mentionedAgentIds: string[] = []) {
     const session = this.get(sessionId);
     const handlingPlan = this.router.route(content, session.status);

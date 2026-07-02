@@ -53,6 +53,14 @@ function payloadOf<T>(event: CollaborationEvent): T {
   return (event.metadata.payload ?? {}) as T
 }
 
+function messageTypeOf(event: CollaborationEvent): ChatMessage['messageType'] {
+  const mapped = eventTypeToMessageType[event.type] ?? 'text'
+  // runtime_* 进度事件可能携带 system_notice（上下文裁剪、心跳等系统通知），
+  // 其 payload 没有任务卡片所需字段，按纯文本渲染。
+  if (mapped === 'task' && event.metadata.renderAs === 'system_notice') return 'text'
+  return mapped
+}
+
 function senderTypeOf(event: CollaborationEvent): ChatMessage['senderType'] {
   if (event.type === 'user_message') return 'user'
   if (event.fromAgentId) return 'agent'
@@ -197,7 +205,7 @@ export const useEventStore = defineStore('event', {
           senderType: senderTypeOf(event),
           senderAgentId: event.fromAgentId,
           toAgentIds: event.toAgentIds,
-          messageType: eventTypeToMessageType[event.type] ?? 'text',
+          messageType: messageTypeOf(event),
           content: event.content,
           createdAt: event.createdAt,
           rawEventId: event.id,

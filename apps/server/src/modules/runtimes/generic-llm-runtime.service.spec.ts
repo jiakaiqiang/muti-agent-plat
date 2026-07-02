@@ -161,3 +161,57 @@ test('does not wrap explicit wrong-kind JSON as agent_message', async () => {
   assert.equal(result.status, 'failed');
   assert.equal(result.error?.code, 'OUTPUT_SCHEMA_INVALID');
 });
+
+test('tool-loop aborts a hung LLM request after LLM_TIMEOUT_MS', async () => {
+  const previousTimeout = process.env.LLM_TIMEOUT_MS;
+  const previousFallback = process.env.LLM_MOCK_FALLBACK;
+  process.env.LLM_TIMEOUT_MS = '80';
+  process.env.LLM_MOCK_FALLBACK = 'false';
+  globalThis.fetch = ((_url: unknown, init?: { signal?: AbortSignal }) =>
+    new Promise((_, reject) => {
+      init?.signal?.addEventListener('abort', () =>
+        reject(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }))
+      );
+    })) as typeof fetch;
+
+  const service = new GenericLlmRuntimeService(
+    {} as never,
+    {
+      connectionForModelId() {
+        return {
+          id: 'remote:test-model',
+          model: 'test-model',
+          baseUrl: 'http://llm.test/v1',
+          apiKey: 'test-key',
+          kind: 'remote'
+        };
+      }
+    } as never,
+    {} as never
+  );
+
+  const input = makeInput('agent_message');
+  const contextPack = input.contextPack as Record<string, unknown>;
+  contextPack.availableTools = [{ name: 'read_file', description: 'read', inputSchema: { type: 'object' } }];
+  contextPack.workingDirectory = { kind: 'server_local', path: 'D:/tmp/workspace' };
+
+  try {
+    const result = await service.run(input);
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error?.code, 'RUNTIME_TIMEOUT');
+    assert.match(result.error?.message ?? '', /timed out/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousTimeout === undefined) {
+      delete process.env.LLM_TIMEOUT_MS;
+    } else {
+      process.env.LLM_TIMEOUT_MS = previousTimeout;
+    }
+    if (previousFallback === undefined) {
+      delete process.env.LLM_MOCK_FALLBACK;
+    } else {
+      process.env.LLM_MOCK_FALLBACK = previousFallback;
+    }
+  }
+});

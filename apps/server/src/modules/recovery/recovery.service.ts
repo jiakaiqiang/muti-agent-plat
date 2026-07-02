@@ -8,12 +8,16 @@ import { TasksService } from '../tasks/tasks.service.js';
 const RESUMABLE_STATUSES: SessionStatus[] = ['EXECUTING', 'POST_REVIEW', 'REWORKING'];
 
 /**
- * On startup, re-drives sessions that were mid-execution when the process
- * stopped. Persisted data is already restored by each service; this restores
- * the *execution* that was attached to a now-dead in-process promise.
+ * On startup, re-drives sessions whose background work was attached to a
+ * now-dead in-process promise: mid-execution sessions (EXECUTING/POST_REVIEW/
+ * REWORKING) and mid-discussion sessions (AGENT_DISCUSSING, whose brief
+ * generation runs in-memory via SessionsService). Persisted data is already
+ * restored by each service.
  *
  * Disabled when ENABLE_BULLMQ=true (the queue's retry/attempts handles
- * cross-restart recovery instead) or AGENT_CLUSTER_RECOVER_ON_BOOT=false.
+ * cross-restart recovery for execution; note brief generation is still
+ * in-process under BullMQ, so that gap remains in queue mode) or
+ * AGENT_CLUSTER_RECOVER_ON_BOOT=false.
  */
 @Injectable()
 export class RecoveryService implements OnApplicationBootstrap {
@@ -35,6 +39,12 @@ export class RecoveryService implements OnApplicationBootstrap {
     }
 
     for (const session of this.sessions.listRaw()) {
+      if (session.status === 'AGENT_DISCUSSING') {
+        this.logger.log(`Recovering session ${session.id} (AGENT_DISCUSSING): re-driving brief generation`);
+        this.sessions.resumeBriefGeneration(session.id);
+        continue;
+      }
+
       if (!RESUMABLE_STATUSES.includes(session.status)) {
         continue;
       }
