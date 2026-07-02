@@ -5,7 +5,8 @@ import type {
   RuntimeModelKind,
   RuntimeModelOption,
   RuntimeModelProvider,
-  RuntimeModelSource
+  RuntimeModelSource,
+  RuntimeModelUpdateInput
 } from '@agent-cluster/shared';
 import {
   genericLlmMockFallbackEnabled,
@@ -191,6 +192,74 @@ export class RuntimeModelConfigService {
     return this.getConfig();
   }
 
+  async updateModel(modelId: string, input: RuntimeModelUpdateInput): Promise<RuntimeModelConfig> {
+    const id = this.normalizeModelId(modelId);
+    const existing = id ? this.config.models?.find((model) => model.id === id) : undefined;
+    if (!id || !existing) {
+      throw new BadRequestException('Only models added via model management can be edited.');
+    }
+
+    const model = input.model !== undefined ? this.normalizeModelId(input.model) : existing.model;
+    if (!model) {
+      throw new BadRequestException('Model name is required.');
+    }
+    const label = input.label !== undefined ? input.label.trim() || model : existing.label;
+
+    let baseUrl = existing.baseUrl;
+    let apiKey = existing.apiKey;
+    if (existing.kind === 'remote') {
+      baseUrl = input.baseUrl !== undefined ? this.normalizeBaseUrl(input.baseUrl) : existing.baseUrl;
+      if (!baseUrl) {
+        throw new BadRequestException('Remote model base URL is required.');
+      }
+      if (input.apiKey !== undefined && input.apiKey.trim()) {
+        apiKey = input.apiKey.trim();
+      }
+      if (!apiKey) {
+        throw new BadRequestException('Remote model API key is required.');
+      }
+    }
+
+    const now = nowIso();
+    // model/baseUrl 参与 id 生成,编辑它们会产生新 id,需要同步迁移 currentModelId
+    const nextId = this.modelId(existing.kind, model, existing.kind === 'remote' ? baseUrl : existing.baseUrl);
+    const next: PersistedRuntimeModelOption = {
+      ...existing,
+      id: nextId,
+      model,
+      label,
+      baseUrl,
+      apiKey,
+      updatedAt: now
+    };
+    this.config = {
+      ...this.config,
+      currentModelId: this.config.currentModelId === id ? nextId : this.config.currentModelId,
+      models: [...(this.config.models ?? []).filter((item) => item.id !== id && item.id !== nextId), next],
+      updatedAt: now
+    };
+    this.persist();
+    return this.getConfig();
+  }
+
+  async deleteModel(modelId: string): Promise<RuntimeModelConfig> {
+    const id = this.normalizeModelId(modelId);
+    const existing = id ? this.config.models?.find((model) => model.id === id) : undefined;
+    if (!id || !existing) {
+      throw new BadRequestException('Only models added via model management can be deleted.');
+    }
+
+    this.config = {
+      ...this.config,
+      // 当前模型被删除时清空指向,buildConfig 会回落到 .env 配置的默认模型
+      currentModelId: this.config.currentModelId === id ? undefined : this.config.currentModelId,
+      models: (this.config.models ?? []).filter((item) => item.id !== id),
+      updatedAt: nowIso()
+    };
+    this.persist();
+    return this.getConfig();
+  }
+
   private availableModels(): RuntimeModelOption[] {
     const byId = new Map<string, RuntimeModelOption>();
     const add = (option: RuntimeModelOption) => {
@@ -293,6 +362,7 @@ export class RuntimeModelConfigService {
       model: model.model,
       baseUrl: model.baseUrl,
       hasApiKey: model.kind === 'remote' ? Boolean(model.apiKey ?? llmApiKey()) : false,
+      persisted: (this.config.models ?? []).some((item) => item.id === model.id),
       agents: [],
       createdAt: model.createdAt,
       updatedAt: model.updatedAt

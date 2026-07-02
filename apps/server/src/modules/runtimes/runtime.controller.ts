@@ -1,5 +1,5 @@
-import { Body, Controller, Get, Post, Query } from '@nestjs/common';
-import type { AgentRunInput, RuntimeModelCreateInput } from '@agent-cluster/shared';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import type { AgentRunInput, RuntimeModelCreateInput, RuntimeModelUpdateInput } from '@agent-cluster/shared';
 import { ok } from '../../common/api-response.js';
 import { RuntimeModelConfigService } from './runtime-model-config.service.js';
 import { RuntimeService } from './runtime.service.js';
@@ -24,6 +24,16 @@ export class RuntimeController {
   @Post('model-config/models')
   async addModel(@Body() body: RuntimeModelCreateInput) {
     return ok(await this.modelConfig.addModel(body));
+  }
+
+  @Patch('model-config/models/:modelId')
+  async updateModel(@Param('modelId') modelId: string, @Body() body?: RuntimeModelUpdateInput) {
+    return ok(await this.modelConfig.updateModel(modelId, body ?? {}));
+  }
+
+  @Delete('model-config/models/:modelId')
+  async deleteModel(@Param('modelId') modelId: string) {
+    return ok(await this.modelConfig.deleteModel(modelId));
   }
 
   @Get('mock/smoke')

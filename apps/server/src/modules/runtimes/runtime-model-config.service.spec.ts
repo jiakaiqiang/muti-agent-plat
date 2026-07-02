@@ -98,3 +98,97 @@ test('persisted user-added model keeps priority over env entry with the same id'
     restoreEnv();
   }
 });
+
+test('updateModel edits label/apiKey in place and migrates id when baseUrl changes', async () => {
+  const restoreEnv = withRemoteEnv();
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ models: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    })) as typeof fetch;
+
+  try {
+    const service = new RuntimeModelConfigService(makePersistence() as never, agentsStub as never);
+    const added = await service.addModel({
+      kind: 'remote',
+      model: 'glm-5.2',
+      baseUrl: 'https://relay.test',
+      apiKey: 'sk-old',
+      label: 'GLM'
+    });
+    const oldId = added.currentModelId;
+
+    const relabeled = await service.updateModel(oldId, { label: 'GLM 中转站', apiKey: 'sk-new' });
+    assert.equal(relabeled.currentModelId, oldId, 'label/apiKey edits keep the id');
+    assert.equal(relabeled.currentModelOption.label, 'GLM 中转站');
+    assert.equal(service.connectionForModelId(oldId).apiKey, 'sk-new');
+
+    const rebased = await service.updateModel(oldId, { baseUrl: 'https://relay.test/v1' });
+    assert.notEqual(rebased.currentModelId, oldId, 'baseUrl edit produces a new id');
+    assert.equal(rebased.currentModelOption.baseUrl, 'https://relay.test/v1');
+    assert.equal(rebased.currentModelOption.persisted, true);
+    assert.equal(service.connectionForModelId(rebased.currentModelId).apiKey, 'sk-new', 'edited key survives id migration');
+    assert.ok(
+      !rebased.availableModels.some((model) => model.id === oldId),
+      'old id entry must be replaced'
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv();
+  }
+});
+
+test('deleteModel removes the entry and falls back to the env default model', async () => {
+  const restoreEnv = withRemoteEnv();
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ models: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    })) as typeof fetch;
+
+  try {
+    const service = new RuntimeModelConfigService(makePersistence() as never, agentsStub as never);
+    const added = await service.addModel({
+      kind: 'remote',
+      model: 'glm-5.2',
+      baseUrl: 'https://relay.test/v1',
+      apiKey: 'sk-old'
+    });
+
+    const config = await service.deleteModel(added.currentModelId);
+    assert.ok(
+      !config.availableModels.some((model) => model.model === 'glm-5.2'),
+      'deleted model must leave the list'
+    );
+    assert.equal(config.currentModel, 'test-remote-model', 'current model falls back to env default');
+    assert.equal(config.currentModelOption.source, 'env');
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv();
+  }
+});
+
+test('update/delete reject non-persisted entries (env and discovered models)', async () => {
+  const restoreEnv = withRemoteEnv();
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ models: [{ name: 'qwen2.5:7b' }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    })) as typeof fetch;
+
+  try {
+    const service = new RuntimeModelConfigService(makePersistence() as never, agentsStub as never);
+    const config = await service.getConfig();
+    const envModel = config.availableModels.find((model) => model.source === 'env');
+    const discovered = config.availableModels.find((model) => model.model === 'qwen2.5:7b');
+    assert.ok(envModel && discovered);
+    assert.equal(envModel.persisted, false);
+    assert.equal(discovered.persisted, false);
+
+    await assert.rejects(() => service.updateModel(envModel.id, { label: 'x' }), /model management/);
+    await assert.rejects(() => service.deleteModel(discovered.id), /model management/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv();
+  }
+});

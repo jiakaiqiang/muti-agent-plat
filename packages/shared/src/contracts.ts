@@ -517,6 +517,8 @@ export type RuntimeModelOption = {
   model: string;
   baseUrl?: string;
   hasApiKey: boolean;
+  /** True when the entry is stored via model management (editable/deletable). */
+  persisted: boolean;
   agents: RuntimeModelAgent[];
   createdAt?: ISODateTime;
   updatedAt?: ISODateTime;
@@ -552,6 +554,14 @@ export type RuntimeModelCreateInput =
       apiKey: string;
       label?: string;
     };
+
+export type RuntimeModelUpdateInput = {
+  label?: string;
+  model?: string;
+  baseUrl?: string;
+  /** Omit to keep the stored key unchanged. */
+  apiKey?: string;
+};
 
 export type RuntimeBudget = {
   maxInputTokens?: number;
