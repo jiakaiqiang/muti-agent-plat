@@ -76,6 +76,15 @@ export type ExecutionOutcome =
   | { kind: 'cancelled'; reason: string }
   | { kind: 'failed'; reason: string };
 
+type TaskRunOutcome =
+  | { ok: true }
+  | {
+      ok: false;
+      message: string;
+      code?: RuntimeError['code'];
+      retryable?: boolean;
+    };
+
 // 慢模型（如本地 Ollama）单次调用可达数分钟，心跳让时间线可见"仍在生成"，
 // 与"卡死"可区分。心跳事件不回流进 relevantEvents（见 createContextPack）。
 const RUNTIME_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -433,6 +442,9 @@ export class OrchestratorService {
       }
       const failedTask = taskResults.find((item) => !item.result.ok);
       if (failedTask && !failedTask.result.ok) {
+        if (this.isInfrastructureTaskFailure(failedTask.result)) {
+          return { kind: 'failed', reason: `${messages.taskFailed(failedTask.task.title)}: ${failedTask.result.message}` };
+        }
         return { kind: 'ask_user', reason: `${messages.taskFailed(failedTask.task.title)}: ${failedTask.result.message}` };
       }
     }
@@ -478,7 +490,7 @@ export class OrchestratorService {
     signal?: AbortSignal,
     attemptedAgentIds = new Set<string>(),
     contextRetryCount = 0
-  ): Promise<{ ok: true } | { ok: false; message: string }> {
+  ): Promise<TaskRunOutcome> {
     const backend = this.pickSessionAgent(session, ['backend'], 0);
     const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
     const taskAgent = task.assigneeAgentId ? this.agents.getByIdOrKey(task.assigneeAgentId) : backend;
@@ -649,7 +661,7 @@ export class OrchestratorService {
         }
         this.emitSupplementalContextRejected(session, task, taskAgent.id, requestedContext, 'duplicate_request');
       }
-      return { ok: false, message };
+      return { ok: false, message, code, retryable: result.error?.retryable };
     }
 
     const output = this.completedOutput<TaskExecutionResultOutput>(result, 'task_execution_result');
@@ -688,7 +700,7 @@ export class OrchestratorService {
         }
         this.emitSupplementalContextRejected(session, task, taskAgent.id, output.requestedContext, 'duplicate_request');
       }
-      return { ok: false, message: output.summary };
+      return { ok: false, message: output.summary, code, retryable: false };
     }
 
     this.tasks.update(task, { status: 'completed', resultSummary: output.summary });
@@ -3904,6 +3916,13 @@ export class OrchestratorService {
     return Object.assign(new Error(messages.runtimeError(result.runtimeType, phase, result.error?.message ?? result.status)), {
       cause: result.error
     });
+  }
+
+  private isInfrastructureTaskFailure(result: TaskRunOutcome) {
+    if (result.ok) {
+      return false;
+    }
+    return result.code === 'RUNTIME_TIMEOUT' || (result.code === 'MODEL_ERROR' && result.retryable === true);
   }
 
   private defaultSuggestedTasks(session: SessionDetail): SuggestedAgentTask[] {

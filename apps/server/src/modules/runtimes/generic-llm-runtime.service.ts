@@ -55,6 +55,13 @@ type GenericLlmUsage = {
 
 type RuntimeOutputKind = RuntimeOutput['kind'];
 
+type HttpRuntimeError = {
+  message: string;
+  code: RuntimeError['code'];
+  retryable: boolean;
+  details: Record<string, unknown>;
+};
+
 @Injectable()
 export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   readonly type = 'generic_llm' as const;
@@ -138,6 +145,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     const timeoutMs = llmTimeoutMs();
     let lastMessage = 'unknown error';
     let lastCode: RuntimeError['code'] = 'MODEL_ERROR';
+    let lastDetails: Record<string, unknown> | undefined;
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       const controller = new AbortController();
@@ -210,11 +218,15 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         });
 
         if (!response.ok) {
-          const retryable = response.status >= 500 || response.status === 429;
-          throw Object.assign(new Error(`LLM request failed: ${response.status}`), { retryable });
+          const httpError = await this.httpRuntimeError(response, 'LLM request');
+          throw Object.assign(new Error(httpError.message), {
+            retryable: httpError.retryable,
+            code: httpError.code,
+            details: httpError.details
+          });
         }
 
-        const rawBody = (await response.json()) as unknown;
+        const rawBody = await this.parseJsonResponse(response, 'LLM request');
         const body = this.asResponseBody(rawBody);
         const extracted = this.extractRuntimeOutput(body, input.expectedOutput.kind);
         if (!extracted.output) {
@@ -269,7 +281,11 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         const wasUpstreamTimeout = isAbort && Boolean(upstreamTimeoutMessage);
         const wasUserCancelled = isAbort && !wasUpstreamTimeout && (cancelledByUser || signal?.aborted);
         lastCode =
-          wasUserCancelled ? 'RUNTIME_CANCELLED' : isAbort && (timedOut || wasUpstreamTimeout) ? 'RUNTIME_TIMEOUT' : 'MODEL_ERROR';
+          wasUserCancelled
+            ? 'RUNTIME_CANCELLED'
+            : isAbort && (timedOut || wasUpstreamTimeout)
+              ? 'RUNTIME_TIMEOUT'
+              : this.errorCode(error);
         lastMessage = wasUserCancelled
           ? 'Runtime request cancelled by user.'
           : wasUpstreamTimeout
@@ -279,6 +295,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
             : error instanceof Error
               ? error.message
               : String(error);
+        lastDetails = this.errorDetails(error);
         const retryable =
           !wasUserCancelled && !wasUpstreamTimeout && (isAbort || (error as { retryable?: boolean }).retryable !== false);
         if (!retryable || attempt === maxRetries) {
@@ -291,7 +308,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       }
     }
 
-    return this.failedResult(input, startedAt, selectedModel, lastMessage, lastCode);
+    return this.failedResult(input, startedAt, selectedModel, lastMessage, lastCode, lastDetails);
   }
 
   /**
@@ -414,16 +431,18 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         });
 
         if (!response.ok) {
+          const httpError = await this.httpRuntimeError(response, 'Tool-loop LLM request');
           return this.failedResult(
             input,
             startedAt,
             selectedModel,
-            `Tool-loop LLM request failed: ${response.status}`,
-            'MODEL_ERROR'
+            httpError.message,
+            httpError.code,
+            httpError.details
           );
         }
 
-        const rawBody = (await response.json()) as unknown;
+        const rawBody = await this.parseJsonResponse(response, 'Tool-loop LLM request');
         const body = this.asResponseBody(rawBody);
         rawResponse = this.extractTextFromBody(body);
       } catch (error) {
@@ -1251,6 +1270,103 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   private chatCompletionsUrl(value?: string) {
     const baseUrl = value?.replace(/\/$/, '');
     return `${baseUrl}/chat/completions`;
+  }
+
+  private async parseJsonResponse(response: Response, context: string): Promise<unknown> {
+    const rawBody = await response.text();
+    if (!rawBody.trim()) {
+      throw Object.assign(new Error(`${context} returned an empty response body.`), { retryable: false });
+    }
+
+    try {
+      return JSON.parse(rawBody) as unknown;
+    } catch {
+      const contentType = response.headers.get('content-type') ?? 'unknown content-type';
+      const preview = this.compactPreview(rawBody);
+      const htmlHint =
+        contentType.toLowerCase().includes('html') || rawBody.trimStart().startsWith('<')
+          ? 'The configured Base URL appears to return an HTML page instead of an OpenAI-compatible JSON API response. Check that the model gateway URL includes the API prefix, usually ending in /v1.'
+          : 'The provider returned non-JSON content.';
+      throw Object.assign(
+        new Error(`${context} returned non-JSON response (${contentType}). ${htmlHint} Preview: ${preview}`),
+        { retryable: false }
+      );
+    }
+  }
+
+  private async responseBodyPreview(response: Response) {
+    const text = await response.text().catch(() => '');
+    return this.compactPreview(text);
+  }
+
+  private compactPreview(value: string) {
+    return value.replace(/\s+/g, ' ').trim().slice(0, 240);
+  }
+
+  private async httpRuntimeError(response: Response, context: string): Promise<HttpRuntimeError> {
+    const preview = await this.responseBodyPreview(response);
+    const contentType = response.headers.get('content-type') ?? 'unknown content-type';
+    const retryable = response.status === 429 || response.status >= 500;
+    const timeoutStatus = response.status === 408 || response.status === 504 || response.status === 524;
+    const code: RuntimeError['code'] = timeoutStatus ? 'RUNTIME_TIMEOUT' : 'MODEL_ERROR';
+    const providerMessage = this.httpStatusMessage(response.status, context);
+    const htmlHint =
+      contentType.toLowerCase().includes('html') || preview.trimStart().startsWith('<')
+        ? ' Provider returned an HTML error page; the raw HTML was suppressed.'
+        : '';
+    const retryHint = retryable ? ' The request may succeed if retried later.' : '';
+
+    return {
+      message: `${providerMessage}.${htmlHint}${retryHint}`.replace(/\s+/g, ' ').trim(),
+      code,
+      retryable,
+      details: {
+        httpStatus: response.status,
+        contentType,
+        responsePreview: preview
+      }
+    };
+  }
+
+  private httpStatusMessage(status: number, context: string) {
+    if (status === 524) {
+      return `${context} timed out at the model gateway (HTTP 524)`;
+    }
+    if (status === 504) {
+      return `${context} timed out at the model gateway (HTTP 504)`;
+    }
+    if (status === 408) {
+      return `${context} timed out before the provider completed the request (HTTP 408)`;
+    }
+    if (status === 429) {
+      return `${context} was rate limited by the model provider (HTTP 429)`;
+    }
+    return `${context} failed with HTTP ${status}`;
+  }
+
+  private errorCode(error: unknown): RuntimeError['code'] {
+    const code = (error as { code?: unknown }).code;
+    return typeof code === 'string' && this.isRuntimeErrorCode(code) ? code : 'MODEL_ERROR';
+  }
+
+  private errorDetails(error: unknown): Record<string, unknown> | undefined {
+    const details = (error as { details?: unknown }).details;
+    return details && typeof details === 'object' && !Array.isArray(details)
+      ? (details as Record<string, unknown>)
+      : undefined;
+  }
+
+  private isRuntimeErrorCode(code: string): code is RuntimeError['code'] {
+    return [
+      'RUNTIME_TIMEOUT',
+      'RUNTIME_CANCELLED',
+      'MODEL_ERROR',
+      'OUTPUT_SCHEMA_INVALID',
+      'CAPABILITY_BLOCKED',
+      'CONTEXT_INSUFFICIENT',
+      'TOKEN_BUDGET_EXCEEDED',
+      'UNKNOWN_ERROR'
+    ].includes(code);
   }
 
   private failedResult(

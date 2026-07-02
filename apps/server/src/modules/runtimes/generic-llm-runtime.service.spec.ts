@@ -12,6 +12,10 @@ function makeService(responseBody: unknown) {
       headers: { 'content-type': 'application/json' }
     });
 
+  return makeServiceWithCurrentFetch();
+}
+
+function makeServiceWithCurrentFetch() {
   return new GenericLlmRuntimeService(
     {} as never,
     {
@@ -64,12 +68,21 @@ function makeInput(kind: ExpectedRuntimeOutput['kind']): AgentRunInput {
 }
 
 async function runWithResponse(kind: ExpectedRuntimeOutput['kind'], responseBody: unknown) {
+  return runWithService(kind, () => makeService(responseBody));
+}
+
+async function runWithFetch(kind: ExpectedRuntimeOutput['kind'], fetchImpl: typeof fetch) {
+  globalThis.fetch = fetchImpl;
+  return runWithService(kind, makeServiceWithCurrentFetch);
+}
+
+async function runWithService(kind: ExpectedRuntimeOutput['kind'], makeRuntime: () => GenericLlmRuntimeService) {
   const previousRetries = process.env.LLM_MAX_RETRIES;
   const previousFallback = process.env.LLM_MOCK_FALLBACK;
   process.env.LLM_MAX_RETRIES = '0';
   process.env.LLM_MOCK_FALLBACK = 'false';
   try {
-    return await makeService(responseBody).run(makeInput(kind));
+    return await makeRuntime().run(makeInput(kind));
   } finally {
     globalThis.fetch = originalFetch;
     if (previousRetries === undefined) {
@@ -162,6 +175,38 @@ test('does not wrap explicit wrong-kind JSON as agent_message', async () => {
   assert.equal(result.error?.code, 'OUTPUT_SCHEMA_INVALID');
 });
 
+test('reports HTML provider responses as model configuration errors', async () => {
+  let requestCount = 0;
+  const result = await runWithFetch('agent_message', (async () => {
+    requestCount += 1;
+    return new Response('<!doctype html><html><body>Not Found</body></html>', {
+      status: 200,
+      headers: { 'content-type': 'text/html; charset=utf-8' }
+    });
+  }) as typeof fetch);
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'MODEL_ERROR');
+  assert.match(result.error?.message ?? '', /non-JSON response/);
+  assert.match(result.error?.message ?? '', /Base URL/);
+  assert.equal(requestCount, 1, 'non-JSON HTML responses should not be retried');
+});
+
+test('classifies HTTP 524 provider responses as runtime timeouts without leaking HTML', async () => {
+  const result = await runWithFetch('task_execution_result', (async () =>
+    new Response('<!DOCTYPE html><html><body>Gateway timeout</body></html>', {
+      status: 524,
+      headers: { 'content-type': 'text/html; charset=utf-8' }
+    })) as typeof fetch);
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'RUNTIME_TIMEOUT');
+  assert.match(result.error?.message ?? '', /HTTP 524/);
+  assert.doesNotMatch(result.error?.message ?? '', /<!DOCTYPE html>/i);
+  assert.equal(result.error?.retryable, true);
+  assert.equal(result.error?.details?.httpStatus, 524);
+});
+
 test('tool-loop aborts a hung LLM request after LLM_TIMEOUT_MS', async () => {
   const previousTimeout = process.env.LLM_TIMEOUT_MS;
   const previousFallback = process.env.LLM_MOCK_FALLBACK;
@@ -208,6 +253,38 @@ test('tool-loop aborts a hung LLM request after LLM_TIMEOUT_MS', async () => {
     } else {
       process.env.LLM_TIMEOUT_MS = previousTimeout;
     }
+    if (previousFallback === undefined) {
+      delete process.env.LLM_MOCK_FALLBACK;
+    } else {
+      process.env.LLM_MOCK_FALLBACK = previousFallback;
+    }
+  }
+});
+
+test('tool-loop classifies HTTP 524 provider responses as runtime timeouts', async () => {
+  const previousFallback = process.env.LLM_MOCK_FALLBACK;
+  process.env.LLM_MOCK_FALLBACK = 'false';
+  globalThis.fetch = (async () =>
+    new Response('<!DOCTYPE html><html><body>Gateway timeout</body></html>', {
+      status: 524,
+      headers: { 'content-type': 'text/html; charset=utf-8' }
+    })) as typeof fetch;
+
+  const service = makeServiceWithCurrentFetch();
+  const input = makeInput('task_execution_result');
+  const contextPack = input.contextPack as Record<string, unknown>;
+  contextPack.availableTools = [{ name: 'read_file', description: 'read', inputSchema: { type: 'object' } }];
+  contextPack.workingDirectory = { kind: 'server_local', path: 'D:/tmp/workspace' };
+
+  try {
+    const result = await service.run(input);
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error?.code, 'RUNTIME_TIMEOUT');
+    assert.match(result.error?.message ?? '', /HTTP 524/);
+    assert.doesNotMatch(result.error?.message ?? '', /<!DOCTYPE html>/i);
+  } finally {
+    globalThis.fetch = originalFetch;
     if (previousFallback === undefined) {
       delete process.env.LLM_MOCK_FALLBACK;
     } else {
