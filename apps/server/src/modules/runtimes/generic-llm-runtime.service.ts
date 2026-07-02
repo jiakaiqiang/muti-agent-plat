@@ -311,6 +311,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     const MAX_TOOL_ROUNDS = 5;
     const MAX_TOOL_CALLS_TOTAL = 12;
     const MAX_TOOL_OUTPUT_CHARS = 80_000;
+    const timeoutMs = llmTimeoutMs();
 
     let totalToolCalls = 0;
     let totalToolOutputChars = 0;
@@ -393,10 +394,18 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       }
 
       let rawResponse: string;
+      const controller = new AbortController();
+      const onAbort = () => controller.abort();
+      signal?.addEventListener('abort', onAbort, { once: true });
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
       try {
         const response = await fetch(this.chatCompletionsUrl(selectedConnection.baseUrl), {
           method: 'POST',
-          signal,
+          signal: controller.signal,
           headers: {
             authorization: `Bearer ${selectedConnection.apiKey}`,
             'content-type': 'application/json'
@@ -418,6 +427,26 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         const body = this.asResponseBody(rawBody);
         rawResponse = this.extractTextFromBody(body);
       } catch (error) {
+        const isAbort = error instanceof Error && (error.name === 'AbortError' || Boolean(signal?.aborted));
+        if (isAbort && timedOut && !signal?.aborted) {
+          return this.failedResult(
+            input,
+            startedAt,
+            selectedModel,
+            `Tool-loop LLM request timed out after ${timeoutMs}ms`,
+            'RUNTIME_TIMEOUT'
+          );
+        }
+        if (isAbort) {
+          const timeoutMessage = this.upstreamTimeoutMessage(signal);
+          return this.failedResult(
+            input,
+            startedAt,
+            selectedModel,
+            timeoutMessage ?? 'Tool loop cancelled by user.',
+            timeoutMessage ? 'RUNTIME_TIMEOUT' : 'RUNTIME_CANCELLED'
+          );
+        }
         return this.failedResult(
           input,
           startedAt,
@@ -425,6 +454,9 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           `Tool-loop fetch error: ${error instanceof Error ? error.message : String(error)}`,
           'MODEL_ERROR'
         );
+      } finally {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
       }
 
       const toolCalls = this.parseToolCalls(rawResponse);

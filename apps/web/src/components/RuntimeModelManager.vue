@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useAgentStore } from '@/stores/agent'
 import { useRuntimeModelStore } from '@/stores/runtimeModel'
-import type { Agent, RuntimeModelKind, RuntimeModelOption } from '@/types/contracts'
+import type { Agent, RuntimeModelKind, RuntimeModelOption, RuntimeModelUpdateInput } from '@/types/contracts'
 import { runtimeTypeLabel } from '@/utils/runtimeLabels'
 import UiIcon from './UiIcon.vue'
 
@@ -181,6 +181,66 @@ async function addRemoteModel() {
   saveMessage.value = '远端模型已添加到模型列表。'
 }
 
+const editDialogOpen = ref(false)
+const editingModelId = ref('')
+const editLabel = ref('')
+const editModelName = ref('')
+const editBaseUrl = ref('')
+const editApiKey = ref('')
+const editLabelInput = ref<HTMLInputElement | null>(null)
+const editingModel = computed(() => modelOptions.value.find((model) => model.id === editingModelId.value))
+const canSaveEdit = computed(
+  () =>
+    Boolean(editModelName.value.trim()) &&
+    (editingModel.value?.kind !== 'remote' || Boolean(editBaseUrl.value.trim())) &&
+    !modelStore.saving
+)
+
+function openEditDialog(model: RuntimeModelOption) {
+  editingModelId.value = model.id
+  editLabel.value = model.label
+  editModelName.value = model.model
+  editBaseUrl.value = model.baseUrl ?? ''
+  editApiKey.value = ''
+  editDialogOpen.value = true
+  saveMessage.value = ''
+  void nextTick(() => editLabelInput.value?.focus())
+}
+
+function closeEditDialog() {
+  editDialogOpen.value = false
+  editingModelId.value = ''
+}
+
+async function saveModelEdit() {
+  const model = editingModel.value
+  if (!model || !canSaveEdit.value) return
+  const input: RuntimeModelUpdateInput = {
+    label: editLabel.value,
+    model: editModelName.value.trim()
+  }
+  if (model.kind === 'remote') {
+    input.baseUrl = editBaseUrl.value.trim()
+    const apiKey = editApiKey.value.trim()
+    if (apiKey) {
+      input.apiKey = apiKey
+    }
+  }
+  await modelStore.updateModel(model.id, input)
+  selectedModelId.value = modelStore.currentModelId
+  closeEditDialog()
+  saveMessage.value = '模型信息已更新。'
+}
+
+async function removeModel(model: RuntimeModelOption) {
+  if (!window.confirm(`确认删除模型「${model.label}」？删除后未绑定模型的 Agent 会回落到当前默认模型。`)) return
+  await modelStore.deleteModel(model.id)
+  if (selectedModelId.value === model.id) {
+    selectedModelId.value = modelStore.currentModelId
+  }
+  saveMessage.value = '模型已删除。'
+}
+
 watch(
   () => modelStore.currentModelId,
   (modelId) => {
@@ -291,10 +351,20 @@ onMounted(async () => {
             <dd>{{ model.agents.length }}</dd>
           </div>
         </dl>
-        <button type="button" :disabled="modelStore.saving || modelStore.currentModelId === model.id" @click.stop="switchModel(model.id)">
-          <UiIcon name="check" :size="16" />
-          {{ modelStore.currentModelId === model.id ? '默认模型' : '设为默认' }}
-        </button>
+        <div class="model-card-actions">
+          <button type="button" :disabled="modelStore.saving || modelStore.currentModelId === model.id" @click.stop="switchModel(model.id)">
+            <UiIcon name="check" :size="16" />
+            {{ modelStore.currentModelId === model.id ? '默认模型' : '设为默认' }}
+          </button>
+          <button v-if="model.persisted" type="button" :disabled="modelStore.saving" @click.stop="openEditDialog(model)">
+            <UiIcon name="settings" :size="16" />
+            编辑
+          </button>
+          <button v-if="model.persisted" type="button" :disabled="modelStore.saving" @click.stop="removeModel(model)">
+            <UiIcon name="trash" :size="16" />
+            删除
+          </button>
+        </div>
       </article>
     </section>
 
@@ -372,6 +442,64 @@ onMounted(async () => {
         />
         <pre v-else class="model-agent-markdown-preview">{{ markdownDraft }}</pre>
         <p v-if="markdownError" class="model-error">{{ markdownError }}</p>
+      </form>
+    </div>
+
+    <div v-if="editDialogOpen && editingModel" class="modal-backdrop" @click.self="closeEditDialog">
+      <form
+        class="modal-panel model-edit-dialog"
+        @submit.prevent="saveModelEdit"
+        @keydown.esc.prevent="closeEditDialog"
+      >
+        <header class="model-edit-head">
+          <div class="model-edit-title">
+            <span class="model-edit-icon"><UiIcon name="settings" :size="18" /></span>
+            <div>
+              <h2>编辑模型</h2>
+              <p>保存后立即对新的模型调用生效</p>
+            </div>
+          </div>
+          <button class="modal-close-button" type="button" @click="closeEditDialog">
+            <UiIcon name="x" :size="16" />
+          </button>
+        </header>
+
+        <div class="model-edit-context">
+          <span class="model-edit-chip accent">{{ kindLabel(editingModel.kind) }}</span>
+          <span class="model-edit-chip">{{ sourceLabel(editingModel.source) }}</span>
+          <code>{{ editingModel.model }}</code>
+        </div>
+
+        <div class="model-edit-fields">
+          <label class="model-select-field">
+            <span>显示名称</span>
+            <input ref="editLabelInput" v-model="editLabel" type="text" placeholder="留空则使用模型名称" />
+          </label>
+          <label class="model-select-field">
+            <span>模型名称</span>
+            <input v-model="editModelName" type="text" />
+          </label>
+          <template v-if="editingModel.kind === 'remote'">
+            <label class="model-select-field span-2">
+              <span>接口地址</span>
+              <input v-model="editBaseUrl" type="text" class="model-edit-url" placeholder="例如 https://api.openai.com/v1" />
+              <small>需包含完整 API 前缀（通常以 /v1 结尾），缺失时请求会落到网页而非接口。</small>
+            </label>
+            <label class="model-select-field span-2">
+              <span>API Key</span>
+              <input v-model="editApiKey" type="password" autocomplete="new-password" placeholder="留空则保持原有 Key 不变" />
+            </label>
+          </template>
+        </div>
+
+        <p v-if="modelStore.error" class="model-error model-edit-error">{{ modelStore.error }}</p>
+
+        <footer class="model-edit-actions">
+          <button type="button" @click="closeEditDialog">取消</button>
+          <button type="submit" class="primary" :disabled="!canSaveEdit">
+            {{ modelStore.saving ? '保存中…' : '保存修改' }}
+          </button>
+        </footer>
       </form>
     </div>
   </div>

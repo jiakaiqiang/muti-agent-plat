@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
-import { apiGet, apiPost } from '@/api/client'
-import type { RuntimeModelConfig, RuntimeModelCreateInput } from '@/types/contracts'
+import { apiDelete, apiGet, apiPatch, apiPost } from '@/api/client'
+import type { RuntimeModelConfig, RuntimeModelCreateInput, RuntimeModelUpdateInput } from '@/types/contracts'
 
 export const useRuntimeModelStore = defineStore('runtimeModel', {
   state: () => ({
@@ -45,6 +45,35 @@ export const useRuntimeModelStore = defineStore('runtimeModel', {
         this.config = await apiPost<RuntimeModelConfig>('/runtimes/model-config/models', input)
       } catch (error) {
         this.error = error instanceof Error ? error.message : '模型添加失败'
+        throw error
+      } finally {
+        this.saving = false
+      }
+    },
+    async updateModel(modelId: string, input: RuntimeModelUpdateInput) {
+      this.saving = true
+      this.error = ''
+      try {
+        this.config = await apiPatch<RuntimeModelConfig>(
+          `/runtimes/model-config/models/${encodeURIComponent(modelId)}`,
+          input
+        )
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '模型更新失败'
+        throw error
+      } finally {
+        this.saving = false
+      }
+    },
+    async deleteModel(modelId: string) {
+      this.saving = true
+      this.error = ''
+      try {
+        this.config = await apiDelete<RuntimeModelConfig>(
+          `/runtimes/model-config/models/${encodeURIComponent(modelId)}`
+        )
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '模型删除失败'
         throw error
       } finally {
         this.saving = false

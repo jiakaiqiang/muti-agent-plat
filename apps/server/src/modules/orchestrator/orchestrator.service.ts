@@ -76,6 +76,10 @@ export type ExecutionOutcome =
   | { kind: 'cancelled'; reason: string }
   | { kind: 'failed'; reason: string };
 
+// 慢模型（如本地 Ollama）单次调用可达数分钟，心跳让时间线可见"仍在生成"，
+// 与"卡死"可区分。心跳事件不回流进 relevantEvents（见 createContextPack）。
+const RUNTIME_HEARTBEAT_INTERVAL_MS = 30_000;
+
 @Injectable()
 export class OrchestratorService {
   private readonly briefsBySession = new Map<string, TaskBrief[]>();
@@ -1871,7 +1875,7 @@ export class OrchestratorService {
     const topDirectories = this.workspaceTopDirectories(snapshot);
     const importantFiles = this.workspaceImportantFiles(snapshot, relevantFiles, entrypoints);
     const impactedFiles = this.workspaceImpactedFiles(snapshot, relevantFiles, entrypoints);
-    const modificationPlan = impactedFiles.map((path) => this.workspaceModificationPlanItem(path, session.originalInput));
+    const modificationPlan = this.workspaceModificationPlan(impactedFiles, session.originalInput);
     const summary = `已分析 ${snapshot.rootName}：扫描 ${snapshot.fileCount} 个条目，识别 ${readableFiles.length} 个可读文本文件。`;
     const payload = {
       rootName: snapshot.rootName,
@@ -1973,20 +1977,30 @@ export class OrchestratorService {
       .slice(0, 12);
   }
 
-  private workspaceModificationPlanItem(path: string, requirement: string) {
+  private workspaceModificationPlan(paths: string[], requirement: string) {
+    const groups = new Map<string, string[]>();
+    for (const path of paths) {
+      const action = this.workspaceModificationAction(path);
+      groups.set(action, [...(groups.get(action) ?? []), path]);
+    }
+    const requirementLabel = this.shortRequirement(requirement);
+    return [...groups.entries()].map(
+      ([action, groupPaths]) => `${action}：${groupPaths.join('、')}，确保与需求“${requirementLabel}”一致。`
+    );
+  }
+
+  private workspaceModificationAction(path: string) {
     const fileName = path.split('/').at(-1) ?? path;
     const lower = fileName.toLowerCase();
-    const action =
-      lower.endsWith('.css') || lower.endsWith('.scss')
-        ? '调整样式或布局相关实现'
-        : lower.endsWith('.vue') || lower.endsWith('.tsx') || lower.endsWith('.jsx')
-          ? '调整页面组件、状态展示或交互逻辑'
-          : lower.endsWith('.ts') || lower.endsWith('.js')
-            ? '调整业务逻辑、类型或运行时处理'
-            : lower.endsWith('.md')
-              ? '同步更新文档和阶段说明'
-              : '按需求补充或更新文件内容';
-    return `${path}：${action}，确保与需求“${this.shortRequirement(requirement)}”一致。`;
+    return lower.endsWith('.css') || lower.endsWith('.scss')
+      ? '调整样式或布局相关实现'
+      : lower.endsWith('.vue') || lower.endsWith('.tsx') || lower.endsWith('.jsx')
+        ? '调整页面组件、状态展示或交互逻辑'
+        : lower.endsWith('.ts') || lower.endsWith('.js')
+          ? '调整业务逻辑、类型或运行时处理'
+          : lower.endsWith('.md')
+            ? '同步更新文档和阶段说明'
+            : '按需求补充或更新文件内容';
   }
 
   private shortRequirement(requirement: string) {
@@ -2233,7 +2247,10 @@ export class OrchestratorService {
         : undefined,
       currentTask: task,
       agentProfile: runtimeAgent,
-      relevantEvents: this.events.list(session.id).slice(-12).map((event) => ({
+      relevantEvents: this.events.list(session.id)
+        .filter((event) => (event.metadata?.payload as { code?: string } | undefined)?.code !== 'RUNTIME_HEARTBEAT')
+        .slice(-12)
+        .map((event) => ({
         eventId: event.id,
         type: event.type,
         summary: event.content,
@@ -3620,16 +3637,36 @@ export class OrchestratorService {
       });
     }
 
-    const result = await this.runtime.run(
-      {
-        ...input,
-        contextPack: fitted.contextPack,
-        budget: fitted.contextPack.budget
-      },
-      signal
-    );
-    this.recordTokenUsage(inputSession, result);
-    return result;
+    const heartbeatStartedAt = Date.now();
+    const heartbeatTimer = setInterval(() => {
+      this.events.create({
+        sessionId: input.sessionId,
+        type: 'runtime_progress',
+        taskId: input.taskId,
+        fromAgentId: input.agent.id,
+        content: messages.runtimeHeartbeat(input.agent.name, Math.round((Date.now() - heartbeatStartedAt) / 1000)),
+        metadata: createMetadata('system_notice', {
+          runtimeInvocationId: input.runId,
+          code: 'RUNTIME_HEARTBEAT',
+          elapsedMs: Date.now() - heartbeatStartedAt
+        })
+      });
+    }, RUNTIME_HEARTBEAT_INTERVAL_MS);
+
+    try {
+      const result = await this.runtime.run(
+        {
+          ...input,
+          contextPack: fitted.contextPack,
+          budget: fitted.contextPack.budget
+        },
+        signal
+      );
+      this.recordTokenUsage(inputSession, result);
+      return result;
+    } finally {
+      clearInterval(heartbeatTimer);
+    }
   }
 
   private runtimeBudgetForInput(input: AgentRunInput): RuntimeBudget {
