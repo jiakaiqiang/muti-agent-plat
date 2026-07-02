@@ -89,6 +89,7 @@ export class RuntimeModelConfigService {
     const currentModelId = this.normalizeModelId(this.config.currentModelId) ?? this.defaultModelId(defaultModel);
     const selectedModelOption =
       availableModelsWithoutAgents.find((model) => model.id === currentModelId) ??
+      availableModelsWithoutAgents.find((model) => model.id === this.defaultModelId(defaultModel)) ??
       availableModelsWithoutAgents[0] ??
       this.toOption(this.createConfiguredModel(defaultModel, 'env', provider));
     const availableModels = availableModelsWithoutAgents.map((model) => this.withAgents(model, selectedModelOption.id));
@@ -205,6 +206,10 @@ export class RuntimeModelConfigService {
     for (const model of this.config.models ?? []) {
       add(this.toOption(model));
     }
+    // .env 配置的默认模型必须始终在列表中:否则 currentModelId 指向它时
+    // 找不到匹配项,会命中 availableModels[0] 回落,被本地发现的模型静默顶掉。
+    // 放在最后添加,同 id 的用户添加条目(自带 label/apiKey)优先。
+    add(this.toOption(this.createConfiguredModel(llmModel(), 'env', llmProvider())));
 
     return [...byId.values()];
   }
