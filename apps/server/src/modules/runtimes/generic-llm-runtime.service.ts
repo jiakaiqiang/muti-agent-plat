@@ -636,7 +636,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     } else if (input.expectedOutput.kind === 'agent_message') {
       parts.push('The "content" field must be plain-text string in Chinese.');
     } else if (input.expectedOutput.kind === 'task_execution_result') {
-      parts.push('Include: summary, status.');
+      parts.push('Include: summary, status. status must be one of: completed, failed, blocked, needs_review.');
     }
 
     return parts.join(' ');
@@ -660,6 +660,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       input.agent.systemPrompt,
       'Return only valid JSON matching the requested RuntimeOutput kind.',
       `Expected kind: ${input.expectedOutput.kind}`,
+      'When the output kind has a status field, status must be exactly one of: completed, failed, blocked, needs_review.',
       'Do not call tools, modify files, or perform external side effects.',
       'Use contextPack.taskContext as the Task Context Pack: follow its stagePlan read/do/validate items, taskMap, evidenceSelection.selectedRefs/evidenceRefs, validationRules, and agentResponsibilities. Keep conclusions traceable to those fields.',
       'Use contextPack.projectMap when present as the structured project index; prefer its modules, sourceRefs, validationCommands, and riskBoundaries over guessing project layout.',
@@ -794,7 +795,9 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
 
     const record = value as Record<string, unknown>;
     if (record.kind === expectedKind) {
-      return record as RuntimeOutput;
+      // 带 kind 的输出同样要走字段归一化：模型可能返回 "success" 等非法 status，
+      // 原样透传会被编排器误判为任务失败。清洗失败时回退原记录，保持旧行为。
+      return this.coerceRuntimeOutputWithoutKind(record, expectedKind) ?? (record as RuntimeOutput);
     }
     if (expectedKind === 'task_acceptance_decision' && record.kind === 'task_claim_decision') {
       return this.coerceRuntimeOutputWithoutKind(record, expectedKind);

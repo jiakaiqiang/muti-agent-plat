@@ -156,6 +156,57 @@ test('coerces missing-kind task_execution_result JSON', async () => {
   assert.equal(result.output.summary, '缺少可验证的需求证据。');
 });
 
+test('normalizes non-canonical status in explicit-kind task_execution_result JSON', async () => {
+  const result = await runWithResponse(
+    'task_execution_result',
+    chatContent(
+      JSON.stringify({
+        kind: 'task_execution_result',
+        status: 'success',
+        summary: '已完成项目架构与技术栈分析。'
+      })
+    )
+  );
+
+  assert.equal(result.status, 'completed');
+  assert.equal(result.output.kind, 'task_execution_result');
+  assert.equal(result.output.status, 'completed');
+  assert.equal(result.output.summary, '已完成项目架构与技术栈分析。');
+});
+
+test('defaults missing status in explicit-kind task_execution_result JSON to completed', async () => {
+  const result = await runWithResponse(
+    'task_execution_result',
+    chatContent(
+      JSON.stringify({
+        kind: 'task_execution_result',
+        summary: '已完成项目架构与技术栈分析。'
+      })
+    )
+  );
+
+  assert.equal(result.status, 'completed');
+  assert.equal(result.output.kind, 'task_execution_result');
+  assert.equal(result.output.status, 'completed');
+});
+
+test('keeps canonical non-completed status in explicit-kind task_execution_result JSON', async () => {
+  const result = await runWithResponse(
+    'task_execution_result',
+    chatContent(
+      JSON.stringify({
+        kind: 'task_execution_result',
+        status: 'blocked',
+        summary: '缺少可验证的需求证据。'
+      })
+    )
+  );
+
+  assert.equal(result.status, 'completed');
+  assert.equal(result.output.kind, 'task_execution_result');
+  assert.equal(result.output.status, 'blocked');
+});
+
 test('does not wrap explicit wrong-kind JSON as agent_message', async () => {
   const wrongKind = {
     kind: 'task_brief',
