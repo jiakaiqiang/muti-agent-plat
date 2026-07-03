@@ -679,7 +679,10 @@ export class OrchestratorService {
       })
     });
 
-    if (output.status !== 'completed') {
+    // needs_review 是合法的"完成但需复盘重点检查"，不能走失败分支：
+    // 失败会丢弃 changedArtifacts 并触发用户决策打断，复盘阶段本就能消化评审诉求。
+    const needsReview = output.status === 'needs_review';
+    if (output.status !== 'completed' && !needsReview) {
       const code = output.requestedContext ? 'CONTEXT_INSUFFICIENT' : 'MODEL_ERROR';
       this.markTaskFailed(
         session.id,
@@ -741,16 +744,37 @@ export class OrchestratorService {
       type: 'task_completed',
       taskId: task.id,
       fromAgentId: taskAgent.id,
-      content: messages.taskCompleted(task.title),
+      content: needsReview ? messages.taskCompletedNeedsReview(task.title) : messages.taskCompleted(task.title),
       metadata: createMetadata('task_card', {
         taskId: task.id,
         title: task.title,
         status: 'completed',
+        needsReview,
         resultSummary: output.summary,
         completedItems: output.completedItems,
         risks: output.risks
       })
     });
+    if (needsReview) {
+      const reviewer = this.pickSessionAgent(session, ['review', 'test'], 1);
+      const reviewNoticeTargets = [...new Set([reviewer.id, coordinator.id])];
+      this.events.create({
+        sessionId: session.id,
+        type: 'agent_message',
+        taskId: task.id,
+        fromAgentId: taskAgent.id,
+        toAgentIds: reviewNoticeTargets,
+        content: messages.taskNeedsReviewNotice(taskAgent.name, task.title, output.summary),
+        metadata: createMetadata('chat_message', {
+          messageKind: 'risk',
+          phase: 'task_execution',
+          relatedTaskIds: [task.id],
+          mentionedAgentIds: reviewNoticeTargets,
+          risks: output.risks,
+          runtimeInvocationId: runId
+        })
+      });
+    }
     this.emitTaskHandoff(session, task, taskAgent, output.summary);
     this.createSummaryMemoryCheckpoint(session, taskAgent, 'task_execution', brief, task);
     await this.applyServerLocalArtifactChanges(session, fileChanges, {

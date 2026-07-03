@@ -10,6 +10,9 @@ export const messages = {
   taskCreated: (title: string) => `已创建任务：${title}`,
   taskStarted: (title: string) => `已开始任务：${title}`,
   taskCompleted: (title: string) => `任务已完成：${title}`,
+  taskCompletedNeedsReview: (title: string) => `任务已完成，待复盘重点检查：${title}`,
+  taskNeedsReviewNotice: (agentName: string, title: string, summary: string) =>
+    `${agentName} 提交任务「${title}」并请求复盘重点检查。摘要：${summary}`,
   taskFailed: (title: string) => `任务执行失败：${title}`,
   runtimeStarted: (agentName: string, runtimeLabel: string) => `${agentName} 已通过 ${runtimeLabel} 开始执行任务。`,
   runtimeCompleted: (agentName: string, runtimeLabel: string) => `${agentName} 已通过 ${runtimeLabel} 完成任务。`,
