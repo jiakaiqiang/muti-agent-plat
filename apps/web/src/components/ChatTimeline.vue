@@ -26,8 +26,46 @@ const emit = defineEmits<{
 }>()
 
 const agentStore = useAgentStore()
-const timeline = computed(() => props.messages)
+const timeline = computed(() => collapseDuplicateFailureMessages(props.messages))
 const timelineEl = ref<HTMLElement | null>(null)
+
+function collapseDuplicateFailureMessages(messages: ChatMessage[]) {
+  const seenFailureKeys = new Set<string>()
+  return messages.filter((message) => {
+    const key = runtimeFailureKey(message)
+    if (!key) return true
+    if (seenFailureKeys.has(key)) return false
+    seenFailureKeys.add(key)
+    return true
+  })
+}
+
+function runtimeFailureKey(message: ChatMessage) {
+  const payload = message.payload ?? {}
+  const status = typeof payload.status === 'string' ? payload.status : undefined
+  const isFailureCard = message.messageType === 'error' || (message.messageType === 'task' && status === 'failed')
+  if (!isFailureCard) return undefined
+
+  const sourceText = [payload.message, payload.resultSummary, payload.reason, payload.fullMessage, message.content]
+    .find((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    ?.trim()
+  if (!sourceText) return undefined
+
+  const normalized = canonicalRuntimeFailureText(sourceText)
+  if (!normalized) return undefined
+  const title =
+    typeof payload.title === 'string'
+      ? payload.title
+      : sourceText.match(/(?:运行时执行任务失败|任务执行失败)[:：]\s*([^:：\n]+)/)?.[1]?.trim() ?? ''
+  return `${title}::${normalized}`
+}
+
+function canonicalRuntimeFailureText(text: string) {
+  const compact = text.replace(/\s+/g, ' ').trim()
+  const runtimeStart = compact.search(/(?:Tool-loop\s+)?LLM request/i)
+  const runtimeText = runtimeStart >= 0 ? compact.slice(runtimeStart) : compact
+  return /HTTP\s+(?:408|504|524)|RUNTIME_TIMEOUT|timed out/i.test(runtimeText) ? runtimeText : undefined
+}
 
 function scrollToLatest(behavior: ScrollBehavior = 'auto') {
   void nextTick(() => {
@@ -161,6 +199,37 @@ function projectAnalysisReportChange(message: ChatMessage) {
   })
 }
 
+function projectAnalysisReportArtifact(message: ChatMessage) {
+  const payload = artifactPayload(message)
+  if (!payload) return undefined
+  return (payload.runtimeArtifacts ?? []).find((artifact) => {
+    const title = artifact.title ?? ''
+    const reportKind = artifact.metadata?.reportKind
+    return (
+      reportKind === 'project_architecture_analysis' ||
+      title.includes('项目架构分析') ||
+      title.includes('工作区架构分析')
+    )
+  })
+}
+
+function projectAnalysisReport(message: ChatMessage) {
+  const change = projectAnalysisReportChange(message)
+  if (change) {
+    return {
+      label: change.path,
+      content: fileChangePreview(change)
+    }
+  }
+
+  const artifact = projectAnalysisReportArtifact(message)
+  if (!artifact?.content?.trim()) return undefined
+  return {
+    label: artifact.title,
+    content: runtimeArtifactContent(artifact.content)
+  }
+}
+
 function workspaceAnalysisPayload(message: ChatMessage) {
   if (message.payload?.phase !== 'workspace_analysis') return undefined
   const workspace = message.payload.workspace as Record<string, unknown> | undefined
@@ -199,12 +268,147 @@ type DiffRow = {
   text: string
 }
 
+type MessageDocumentPart =
+  | {
+      kind: 'paragraph'
+      text: string
+    }
+  | {
+      kind: 'list'
+      items: string[]
+    }
+
+type MessageDocumentBlock = {
+  heading?: string
+  parts: MessageDocumentPart[]
+}
+
+const messageSectionHeadings = [
+  '需求理解',
+  '范围内建议',
+  '范围外建议',
+  '关键信息缺口与风险',
+  '建议的验收标准',
+  '可验证依据应用说明',
+  '下一步建议',
+  '关键结论'
+]
+
+const requiredColonSectionHeadings = [
+  '风险',
+  '结论',
+  '建议',
+  '背景',
+  '范围',
+  '验收标准',
+  '下一步'
+]
+
+const sectionHeadingPattern = new RegExp(
+  `\\s*(?:(${messageSectionHeadings.join('|')})[:：]?|(${requiredColonSectionHeadings.join('|')})[:：])`,
+  'g'
+)
+
 function workspaceFileContent(path: string) {
   return props.workspaceSnapshot?.files.find((file) => file.path === path)?.content
 }
 
 function splitLines(content: string) {
   return content.replace(/\r\n/g, '\n').split('\n')
+}
+
+function cleanMessageText(text: string) {
+  return text
+    .replace(/^[\s,，;；.。:：]+/, '')
+    .replace(/[\s,，;；]+$/, '')
+    .trim()
+}
+
+function splitPlainParagraphs(text: string) {
+  const lineParagraphs = splitLines(text)
+    .map(cleanMessageText)
+    .filter(Boolean)
+
+  if (lineParagraphs.length > 1 || text.length <= 220) return lineParagraphs
+
+  const sentences = text.match(/[^。！？!?；;]+[。！？!?；;]?/g)?.map(cleanMessageText).filter(Boolean) ?? [text]
+  const paragraphs: string[] = []
+  let current = ''
+
+  for (const sentence of sentences) {
+    if (!current) {
+      current = sentence
+      continue
+    }
+
+    if (current.length + sentence.length > 180) {
+      paragraphs.push(current)
+      current = sentence
+    } else {
+      current += sentence
+    }
+  }
+
+  if (current) paragraphs.push(current)
+  return paragraphs
+}
+
+function splitNumberedItems(text: string) {
+  const matches = Array.from(text.matchAll(/(?:^|[\s,，;；.。])(\d+)[)、.）]\s*/g))
+  if (matches.length < 2) return undefined
+
+  const lead = cleanMessageText(text.slice(0, matches[0].index))
+  const items = matches
+    .map((match, index) => {
+      const start = (match.index ?? 0) + match[0].length
+      const end = index + 1 < matches.length ? matches[index + 1].index ?? text.length : text.length
+      return cleanMessageText(text.slice(start, end))
+    })
+    .filter(Boolean)
+
+  return items.length ? { lead, items } : undefined
+}
+
+function messagePartsFromText(text: string): MessageDocumentPart[] {
+  const parts: MessageDocumentPart[] = []
+  const numbered = splitNumberedItems(text)
+
+  if (numbered) {
+    if (numbered.lead) {
+      parts.push({ kind: 'paragraph', text: numbered.lead })
+    }
+    parts.push({ kind: 'list', items: numbered.items })
+    return parts
+  }
+
+  return splitPlainParagraphs(text).map((paragraph) => ({ kind: 'paragraph', text: paragraph }))
+}
+
+function messageDocumentBlocks(content: string): MessageDocumentBlock[] {
+  const normalized = cleanMessageText(content.replace(/\r\n/g, '\n'))
+  if (!normalized) return [{ parts: [{ kind: 'paragraph', text: '' }] }]
+
+  const marked = normalized.replace(sectionHeadingPattern, (_match, optionalHeading?: string, requiredHeading?: string) => {
+    return `\u0000${optionalHeading ?? requiredHeading}：`
+  })
+  const sections = marked
+    .split('\u0000')
+    .map(cleanMessageText)
+    .filter(Boolean)
+
+  const blocks = sections.map((section) => {
+    const headingMatch = section.match(/^([^：:]{1,18})[:：]\s*(.*)$/s)
+    if (!headingMatch) {
+      return { parts: messagePartsFromText(section) }
+    }
+
+    return {
+      heading: headingMatch[1].trim(),
+      parts: messagePartsFromText(headingMatch[2])
+    }
+  })
+
+  return blocks.length ? blocks : [{ parts: messagePartsFromText(normalized) }]
 }
 
 function compactDiffRows(before: string, after: string): DiffRow[] {
@@ -437,7 +641,26 @@ function yesNo(value?: boolean) {
           <div v-if="discussionRound(message)" class="discussion-message-meta">
             第 {{ discussionRound(message) }} 轮 · {{ messageKindLabel(message) ?? 'Agent 讨论' }}
           </div>
-          <p class="message-content">{{ message.content }}</p>
+          <div class="message-content message-document">
+            <section
+              v-for="(block, blockIndex) in messageDocumentBlocks(message.content)"
+              :key="`${message.id}:content-block:${blockIndex}`"
+              class="message-document__section"
+            >
+              <h4 v-if="block.heading">{{ block.heading }}</h4>
+              <template
+                v-for="(part, partIndex) in block.parts"
+                :key="`${message.id}:content-block:${blockIndex}:part:${partIndex}`"
+              >
+                <p v-if="part.kind === 'paragraph'">{{ part.text }}</p>
+                <ol v-else>
+                  <li v-for="(item, itemIndex) in part.items" :key="`${message.id}:content-block:${blockIndex}:part:${partIndex}:item:${itemIndex}`">
+                    {{ item }}
+                  </li>
+                </ol>
+              </template>
+            </section>
+          </div>
 
           <div v-if="workspaceAnalysisPayload(message)" class="structured-block workspace-analysis-block">
             <div class="structured-block__heading">
@@ -692,12 +915,12 @@ function yesNo(value?: boolean) {
                 <pre v-if="artifact.content">{{ runtimeArtifactContent(artifact.content) }}</pre>
               </article>
             </div>
-            <article v-if="projectAnalysisReportChange(message)" class="project-analysis-report">
+            <article v-if="projectAnalysisReport(message)" class="project-analysis-report">
               <header>
                 <span class="file-operation create">报告</span>
-                <code>{{ projectAnalysisReportChange(message)?.path }}</code>
+                <code>{{ projectAnalysisReport(message)?.label }}</code>
               </header>
-              <pre class="file-change-preview project-analysis-preview">{{ fileChangePreview(projectAnalysisReportChange(message)!) }}</pre>
+              <pre class="file-change-preview project-analysis-preview">{{ projectAnalysisReport(message)?.content }}</pre>
             </article>
             <div v-if="artifactFileChanges(message).length" class="file-change-list">
               <h4>文件修改</h4>

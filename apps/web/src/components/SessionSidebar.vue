@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { SessionListItem } from '@/types/contracts'
-import { sessionStatusLabel } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
 import UiIcon from './UiIcon.vue'
 
@@ -11,6 +10,7 @@ const props = defineProps<{
   sessions: SessionListItem[]
   currentSessionId?: string
   favoriteSessionIds: string[]
+  deletingSessionIds: string[]
 }>()
 
 const emit = defineEmits<{
@@ -25,6 +25,7 @@ const search = ref('')
 const contextMenu = ref<{ sessionId: string; x: number; y: number } | undefined>()
 
 const favoriteIds = computed(() => new Set(props.favoriteSessionIds))
+const deletingIds = computed(() => new Set(props.deletingSessionIds))
 
 const filteredSessions = computed(() => {
   const query = search.value.trim().toLowerCase()
@@ -54,12 +55,17 @@ function toggleFavorite(sessionId: string) {
 }
 
 function deleteSession(sessionId: string) {
+  if (isDeletingSession(sessionId)) return
   emit('delete', sessionId)
   closeContextMenu()
 }
 
 function isFavorite(sessionId: string) {
   return favoriteIds.value.has(sessionId)
+}
+
+function isDeletingSession(sessionId: string) {
+  return deletingIds.value.has(sessionId)
 }
 
 function handleGlobalPointerDown(event: PointerEvent) {
@@ -113,18 +119,15 @@ onBeforeUnmount(() => {
     >
       <AgentPortrait :tone="(index % 5) + 1" :label="session.title" size="md" />
       <span class="session-item-main">
-        <span class="session-title">
-          <span>{{ session.title }}</span>
-          <UiIcon v-if="isFavorite(session.id)" name="sparkles" :size="13" />
-        </span>
-        <span v-if="session.latestEventSummary" class="session-summary">{{ session.latestEventSummary }}</span>
-        <span class="session-budget">群聊 / {{ session.agentCount }} Agents</span>
+        <span class="session-title">{{ session.title }}</span>
       </span>
-      <span class="session-meta">
-        <span>{{ sessionStatusLabel[session.status] }}</span>
-        <span>{{ session.tokenUsed }} / {{ session.tokenBudget ?? '--' }}</span>
-      </span>
-      <button class="session-delete-button" type="button" title="删除会话" @click.stop="emit('delete', session.id)">
+      <button
+        class="session-delete-button"
+        type="button"
+        title="删除会话"
+        :disabled="isDeletingSession(session.id)"
+        @click.stop="deleteSession(session.id)"
+      >
         <UiIcon name="trash" :size="16" />
       </button>
     </article>
@@ -141,7 +144,12 @@ onBeforeUnmount(() => {
           <UiIcon name="sparkles" :size="15" />
           {{ isFavorite(contextMenu.sessionId) ? '取消收藏' : '收藏会话' }}
         </button>
-        <button type="button" class="danger" @click="deleteSession(contextMenu.sessionId)">
+        <button
+          type="button"
+          class="danger"
+          :disabled="isDeletingSession(contextMenu.sessionId)"
+          @click="deleteSession(contextMenu.sessionId)"
+        >
           <UiIcon name="trash" :size="15" />
           删除会话
         </button>

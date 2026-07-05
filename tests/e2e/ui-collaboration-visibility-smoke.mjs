@@ -107,6 +107,8 @@ assertIncludes(collaborationTarget, 'Context governance is a supporting capabili
 assertIncludes(contextRouterTarget, 'Context Router 不是 Agent Cluster 的产品主角', 'Context router support positioning');
 
 assertIncludes(workspace, '<CollaborationTaskBoard', 'Chat mainline includes collaboration task board');
+assertNotIncludes(workspace, 'workingDirectoryAddress', 'Workspace header duplicate directory chip');
+assertNotIncludes(styles, '.workspace-directory-path-chip', 'Workspace header duplicate directory chip styles');
 assertIncludes(taskBoard, 'Task Brief', 'Task board surfaces task brief');
 assertIncludes(taskBoard, 'Task Decomposition', 'Task board surfaces task decomposition');
 assertIncludes(taskBoard, 'Discussion Evidence', 'Task board surfaces group-chat discussion evidence');
@@ -134,5 +136,9 @@ assertIncludes(taskBoard, '<ConfirmationCard', 'Task board renders the brief con
 assertIncludes(taskBoard, "emit('resolveConfirmation'", 'Task board emits confirmation decisions');
 assertIncludes(workspace, '@resolve-confirmation="resolveConfirmation"', 'Workspace handles task board confirmation decisions');
 assertIncludes(taskBoard, 'context_supplement', 'Task board surfaces supplemental context events');
+assertIncludes(taskBoard, 'class="task-board-title"', 'Task board constrains long plan titles');
+assertIncludes(styles, '.task-board-title', 'Task board title layout styles');
+assertIncludes(styles, '-webkit-line-clamp: 2', 'Task board title clamps long content');
+assertIncludes(styles, 'overflow-wrap: anywhere', 'Task board title wraps mixed long tokens');
 
 console.log('ui collaboration visibility smoke ok');

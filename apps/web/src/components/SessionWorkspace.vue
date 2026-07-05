@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useAgentStore } from '@/stores/agent'
 import { useEventStore } from '@/stores/event'
 import { useKnowledgeStore } from '@/stores/knowledge'
@@ -37,13 +37,17 @@ const knowledgeStore = useKnowledgeStore()
 const localWorkspaceStore = useLocalWorkspaceStore()
 
 const isSendingMessage = ref(false)
-const inputError = ref('')
+const deletingSessionIds = ref<string[]>([])
 const showAgentPopover = ref(false)
 const showCreateSessionDialog = ref(false)
+const showCreateConfirmDialog = ref(false)
 const isCreatingSession = ref(false)
 const newSessionInput = ref('')
 const selectedSessionAgentIds = ref<string[]>([])
 const sessionCreateError = ref('')
+const pendingCreateInput = ref('')
+const uiMessage = ref<{ id: number; type: 'success' | 'warning' | 'error' | 'info'; text: string } | undefined>()
+let uiMessageTimer: ReturnType<typeof setTimeout> | undefined
 const sessionScanStatus = ref<'idle' | 'scanning' | 'completed' | 'failed'>('idle')
 const sessionScanSummary = ref<WorkspaceSnapshot | undefined>()
 const sessionRuntimeType = ref<RuntimeType | ''>('')
@@ -157,6 +161,26 @@ onMounted(async () => {
   }
 })
 
+onBeforeUnmount(() => {
+  if (uiMessageTimer) {
+    clearTimeout(uiMessageTimer)
+  }
+})
+
+function showMessage(text: string, type: 'success' | 'warning' | 'error' | 'info' = 'info') {
+  if (uiMessageTimer) {
+    clearTimeout(uiMessageTimer)
+  }
+  uiMessage.value = { id: Date.now(), type, text }
+  uiMessageTimer = setTimeout(() => {
+    uiMessage.value = undefined
+  }, type === 'error' ? 4200 : 2600)
+}
+
+function showErrorMessage(error: unknown, fallback: string) {
+  showMessage(error instanceof Error ? error.message : fallback, 'error')
+}
+
 const currentSessionId = computed(() => sessionStore.currentSession?.id ?? '')
 const events = computed(() => eventStore.eventsForSession(currentSessionId.value))
 const messages = computed(() => eventStore.chatMessages(currentSessionId.value))
@@ -175,9 +199,6 @@ const currentWorkingDirectory = computed(
     localWorkspaceStore.directoryForSession(currentSessionId.value) ??
     sessionStore.currentSession?.workingDirectory ??
     localWorkspaceStore.pendingDirectory
-)
-const workingDirectoryAddress = computed(() =>
-  currentWorkingDirectory.value ? `浏览器本地目录 / ${currentWorkingDirectory.value.name}` : ''
 )
 const pendingFileChanges = computed(() => localWorkspaceStore.pendingFileChangesForSession(currentSessionId.value))
 const pendingFileChangeCount = computed(() =>
@@ -219,20 +240,41 @@ const progressPercent = computed(() => {
 })
 
 async function selectSession(sessionId: string) {
-  await sessionStore.loadSession(sessionId)
-  await eventStore.loadEvents(sessionId)
-  eventStore.connectSse(sessionId)
+  try {
+    await sessionStore.loadSession(sessionId)
+    await eventStore.loadEvents(sessionId)
+    eventStore.connectSse(sessionId)
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('Session not found')) {
+      sessionStore.removeSessionFromState(sessionId)
+      showMessage('会话已不存在，已从列表移除', 'warning')
+      return
+    }
+    showErrorMessage(error, '加载会话失败')
+  }
 }
 
 async function deleteSession(sessionId: string) {
+  if (deletingSessionIds.value.includes(sessionId)) return
+  deletingSessionIds.value = [...deletingSessionIds.value, sessionId]
   const deletingCurrent = sessionStore.currentSession?.id === sessionId
-  await sessionStore.deleteSession(sessionId)
   if (deletingCurrent) {
     eventStore.disconnectSse()
-    const nextSessionId = sessionStore.sessions[0]?.id
-    if (nextSessionId) {
-      await selectSession(nextSessionId)
+  }
+  try {
+    const deleted = await sessionStore.deleteSession(sessionId)
+    if (!deleted) return
+    if (deletingCurrent) {
+      const nextSessionId = sessionStore.sessions[0]?.id
+      if (nextSessionId) {
+        await selectSession(nextSessionId)
+      }
     }
+    showMessage('会话已删除', 'success')
+  } catch (error) {
+    showErrorMessage(error, '删除会话失败')
+  } finally {
+    deletingSessionIds.value = deletingSessionIds.value.filter((id) => id !== sessionId)
   }
 }
 
@@ -264,6 +306,8 @@ function openCreateSessionDialog() {
   sessionCreateError.value = ''
   newSessionInput.value = ''
   selectedSessionAgentIds.value = []
+  pendingCreateInput.value = ''
+  showCreateConfirmDialog.value = false
   sessionScanStatus.value = 'idle'
   sessionScanSummary.value = undefined
   sessionRuntimeType.value = ''
@@ -279,6 +323,7 @@ async function chooseWorkingDirectory() {
     sessionScanSummary.value = undefined
   } catch (error) {
     sessionCreateError.value = error instanceof Error ? error.message : '选择工作目录失败'
+    showErrorMessage(error, '选择工作目录失败')
   }
 }
 
@@ -292,18 +337,34 @@ async function createSessionFromDialog() {
   const input = newSessionInput.value.trim()
   if (!agentStore.agents.length) {
     sessionCreateError.value = '请先添加 Agent'
+    showMessage(sessionCreateError.value, 'warning')
     return
   }
   if (!input) {
     sessionCreateError.value = '请填写会话任务'
+    showMessage(sessionCreateError.value, 'warning')
     return
   }
   if (!selectedSessionAgentIds.value.length) {
     sessionCreateError.value = '请选择至少一个 Agent'
+    showMessage(sessionCreateError.value, 'warning')
     return
   }
   if (!localWorkspaceStore.pendingDirectory) {
     sessionCreateError.value = workspaceDirectoryRequiredMessage
+    showMessage(sessionCreateError.value, 'warning')
+    return
+  }
+  sessionCreateError.value = ''
+  pendingCreateInput.value = input
+  showCreateConfirmDialog.value = true
+}
+
+async function confirmCreateSessionFromDialog() {
+  const input = pendingCreateInput.value || newSessionInput.value.trim()
+  if (!input) {
+    showCreateConfirmDialog.value = false
+    showMessage('请填写会话任务', 'warning')
     return
   }
   isCreatingSession.value = true
@@ -311,21 +372,23 @@ async function createSessionFromDialog() {
   try {
     await createSession(input, selectedSessionAgentIds.value, sessionRuntimeType.value || undefined)
     showCreateSessionDialog.value = false
+    showCreateConfirmDialog.value = false
+    showMessage('会话已保存并创建', 'success')
   } catch (error) {
     sessionScanStatus.value = 'failed'
     sessionCreateError.value = error instanceof Error ? error.message : '创建会话失败'
+    showErrorMessage(error, '创建会话失败')
   } finally {
     isCreatingSession.value = false
   }
 }
 
 async function sendUserMessage(content: string) {
-  inputError.value = ''
   isSendingMessage.value = true
   try {
     if (!sessionStore.currentSession) {
       if (!activeAgentIds.value.length) {
-        inputError.value = '请先添加 Agent'
+        showMessage('请先添加 Agent', 'warning')
         return
       }
       await createSession(content, activeAgentIds.value)
@@ -343,7 +406,7 @@ async function sendUserMessage(content: string) {
     eventStore.appendEvent(result.event)
     await eventStore.loadEvents(sessionId, { append: true })
   } catch (error) {
-    inputError.value = error instanceof Error ? error.message : '发送失败'
+    showErrorMessage(error, '发送失败')
   } finally {
     isSendingMessage.value = false
   }
@@ -531,6 +594,15 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
 
 <template>
   <div :class="['workspace-shell', activeSection === 'session' ? `mode-${currentMode}` : 'mode-admin', `section-${activeSection}`]">
+    <teleport to="body">
+      <transition name="el-message-fade">
+        <div v-if="uiMessage" :key="uiMessage.id" :class="['el-style-message', uiMessage.type]">
+          <UiIcon name="message" :size="17" />
+          <span>{{ uiMessage.text }}</span>
+        </div>
+      </transition>
+    </teleport>
+
     <nav class="app-rail" aria-label="主导航">
       <div class="brand-mark" aria-hidden="true">
         <span v-for="index in 6" :key="index"></span>
@@ -560,6 +632,7 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
       :sessions="sessionStore.sessions"
       :current-session-id="sessionStore.currentSession?.id"
       :favorite-session-ids="sessionStore.favoriteSessionIds"
+      :deleting-session-ids="deletingSessionIds"
       @select="selectSession"
       @create="openCreateSessionDialog"
       @delete="deleteSession"
@@ -641,11 +714,7 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
               · {{ discussion.agentCount }} 个 Agent 讨论中，已有 {{ discussion.messageCount }} 条意见
             </span>
           </span>
-          <span v-if="workingDirectoryAddress" class="workspace-directory-path-chip" :title="workingDirectoryAddress">
-            <UiIcon name="folder" :size="15" />
-            {{ workingDirectoryAddress }}
-          </span>
-          <span v-else class="runtime-chip">{{ runtimeDisplay }} · {{ apiBaseUrl }}</span>
+          <span v-if="!currentWorkingDirectory" class="runtime-chip">{{ runtimeDisplay }} · {{ apiBaseUrl }}</span>
           <button
             v-for="mode in viewModes"
             :key="mode"
@@ -675,7 +744,7 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
             :workspace-snapshot="sessionStore.currentSession?.workspaceSnapshot"
             @resolve-confirmation="resolveConfirmation"
           />
-          <UserInputBox :busy="isSendingMessage" :error="inputError" @send="sendUserMessage" />
+          <UserInputBox :busy="isSendingMessage" @send="sendUserMessage" />
         </div>
         <CollaborationGraphView
           v-else-if="currentMode === 'collaboration_graph'"
@@ -1049,10 +1118,44 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
         <footer class="form-actions">
           <button type="button" @click="showCreateSessionDialog = false">取消</button>
           <button type="submit" class="primary" :disabled="isCreatingSession">
-            {{ isCreatingSession ? '创建中' : '创建会话' }}
+            {{ isCreatingSession ? '保存中' : '保存' }}
           </button>
         </footer>
       </form>
+    </section>
+
+    <section v-if="showCreateConfirmDialog" class="modal-backdrop element-confirm-backdrop" aria-label="确认保存会话">
+      <article class="element-confirm-box">
+        <header>
+          <span class="element-confirm-icon">
+            <UiIcon name="message" :size="20" />
+          </span>
+          <div>
+            <h2>确认保存会话</h2>
+            <p>将使用当前任务、Agent 和工作目录创建新会话。</p>
+          </div>
+        </header>
+        <dl>
+          <div>
+            <dt>任务</dt>
+            <dd>{{ pendingCreateInput }}</dd>
+          </div>
+          <div>
+            <dt>Agent 数量</dt>
+            <dd>{{ selectedSessionAgentIds.length }} 个</dd>
+          </div>
+          <div>
+            <dt>工作目录</dt>
+            <dd>{{ localWorkspaceStore.pendingDirectory?.name ?? '未选择' }}</dd>
+          </div>
+        </dl>
+        <footer>
+          <button type="button" @click="showCreateConfirmDialog = false">取消</button>
+          <button type="button" class="primary" :disabled="isCreatingSession" @click="confirmCreateSessionFromDialog">
+            {{ isCreatingSession ? '保存中' : '确认保存' }}
+          </button>
+        </footer>
+      </article>
     </section>
 
     <section v-if="showBriefRevisionDialog" class="modal-backdrop" aria-label="修改任务契约">

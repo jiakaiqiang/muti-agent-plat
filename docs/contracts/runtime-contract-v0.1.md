@@ -685,7 +685,12 @@ GenericLlmRuntime 用于：
 要求：
 
 - 支持结构化 JSON 输出。
-- 输出不合法时最多重试 1 次。
+- OpenAI-compatible 远程模型默认以 `LLM_STRUCTURED_OUTPUT_MODE=auto` 请求结构化输出：优先使用 `json_schema`，网关明确返回不支持时按 `baseUrl + model` 缓存并降级为 `json_object`。
+- `LLM_STRUCTURED_OUTPUT_MODE=json_schema` 或 `json_object` 可强制指定模式。
+- Runtime 必须按 `ExpectedRuntimeOutput.kind` 对归一化后的结果执行运行时 Schema 校验。
+- 输出不合法时通过独立的轻量 Schema repair 请求最多修复 `LLM_SCHEMA_REPAIR_ATTEMPTS` 次，默认 1 次；repair 不重复发送完整 Context Pack，也不计入网络重试次数。
+- Schema repair 仍失败时返回 `OUTPUT_SCHEMA_INVALID`，`details` 应包含 `parseState`、`detectedKind`、`validationErrors`、`contentLength`、`contentHash`、`sanitizedPreview` 和 `repairAttempts`。
+- 不得在事件、日志或持久化状态中保存完整无效模型响应；`sanitizedPreview` 必须脱敏并受 `LLM_DIAGNOSTIC_PREVIEW_CHARS` 限制。
 - 不直接调用高风险工具。
 - 不直接修改文件。
 

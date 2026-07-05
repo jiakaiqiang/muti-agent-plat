@@ -280,9 +280,9 @@ function formatActivityTime(value: string) {
 <template>
   <section :class="['collaboration-task-board', { collapsed: isCollapsed }]" aria-label="协作计划面板">
     <header class="task-board-header">
-      <div>
+      <div class="task-board-title">
         <span>协作计划</span>
-        <h2>{{ brief?.goal ?? '等待任务契约生成' }}</h2>
+        <h2 :title="brief?.goal ?? '等待任务契约生成'">{{ brief?.goal ?? '等待任务契约生成' }}</h2>
       </div>
       <div v-if="currentActivity" class="task-board-live-status-wrap">
         <button

@@ -57,7 +57,8 @@ export const useSessionStore = defineStore('session', {
     currentSession: undefined as SessionDetail | undefined,
     currentViewMode: 'chat' as SessionViewMode,
     loading: false,
-    favoriteSessionIds: loadFavoriteSessionIds() as string[]
+    favoriteSessionIds: loadFavoriteSessionIds() as string[],
+    deletingSessionIds: [] as string[]
   }),
   getters: {
     isFavorite: (state) => (sessionId: string) => state.favoriteSessionIds.includes(sessionId)
@@ -109,14 +110,38 @@ export const useSessionStore = defineStore('session', {
     async sendMessage(sessionId: string, content: string, mentionedAgentIds: string[] = []) {
       return apiPost<{ event: CollaborationEvent }>(`/sessions/${sessionId}/messages`, { content, mentionedAgentIds })
     },
-    async deleteSession(sessionId: string) {
-      await apiDelete<{ deleted: boolean; sessionId: string }>(`/sessions/${sessionId}`)
+    removeSessionFromState(sessionId: string) {
       this.sessions = this.sessions.filter((session) => session.id !== sessionId)
       this.favoriteSessionIds = this.favoriteSessionIds.filter((id) => id !== sessionId)
       persistFavoriteSessionIds(this.favoriteSessionIds)
       if (this.currentSession?.id === sessionId) {
         this.currentSession = undefined
       }
+    },
+    async deleteSession(sessionId: string) {
+      if (this.deletingSessionIds.includes(sessionId)) {
+        return false
+      }
+
+      this.deletingSessionIds = [...this.deletingSessionIds, sessionId]
+      let deleted = false
+      try {
+        await apiDelete<{ deleted: boolean; sessionId: string }>(`/sessions/${sessionId}`)
+        deleted = true
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('Session not found')) {
+          deleted = true
+        } else {
+          throw error
+        }
+      } finally {
+        this.deletingSessionIds = this.deletingSessionIds.filter((id) => id !== sessionId)
+      }
+
+      if (deleted) {
+        this.removeSessionFromState(sessionId)
+      }
+      return deleted
     },
     toggleFavoriteSession(sessionId: string) {
       this.favoriteSessionIds = this.favoriteSessionIds.includes(sessionId)

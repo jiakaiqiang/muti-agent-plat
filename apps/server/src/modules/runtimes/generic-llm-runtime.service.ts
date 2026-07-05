@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import type {
   AgentMessageOutput,
   AgentRunInput,
@@ -17,14 +18,24 @@ import type {
 } from '@agent-cluster/shared';
 import {
   genericLlmMockFallbackEnabled,
+  llmDiagnosticPreviewChars,
   llmLocalMaxOutputTokens,
   llmLocalNumCtx,
   llmMaxRetries,
+  llmRemoteMaxOutputTokens,
+  llmRemoteStreamingEnabled,
+  llmSchemaRepairAttempts,
+  llmStructuredOutputMode,
   llmTimeoutMs
 } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
 import { MockRuntimeService } from './mock-runtime.service.js';
 import { RuntimeModelConfigService, type RuntimeModelConnection } from './runtime-model-config.service.js';
+import {
+  runtimeOutputExample,
+  runtimeOutputSchema,
+  validateRuntimeOutput
+} from './runtime-output-schema.js';
 import { WorkspaceToolsService } from './workspace-tools.service.js';
 
 type GenericLlmResponseBody = {
@@ -53,7 +64,42 @@ type GenericLlmUsage = {
   output_tokens?: number;
 };
 
+type GenericLlmStreamingChunk = {
+  choices?: Array<{
+    delta?: {
+      content?: unknown;
+      reasoning?: unknown;
+      reasoning_content?: unknown;
+    };
+    message?: {
+      content?: unknown;
+    };
+    text?: unknown;
+    finish_reason?: unknown;
+  }>;
+  usage?: GenericLlmUsage;
+  model?: string;
+  output_text?: unknown;
+  response?: unknown;
+};
+
 type RuntimeOutputKind = RuntimeOutput['kind'];
+type ActiveStructuredOutputMode = 'json_schema' | 'json_object';
+
+type CompletionResponse = {
+  rawBody: unknown;
+  body: GenericLlmResponseBody;
+};
+
+type RuntimeOutputDiagnostics = {
+  parseState: 'valid' | 'no_content' | 'invalid_json' | 'wrong_kind' | 'schema_invalid' | 'unrecognized_shape';
+  detectedKind?: string;
+  validationErrors: string[];
+  content: string;
+  contentLength: number;
+  contentHash: string;
+  sanitizedPreview: string;
+};
 
 type HttpRuntimeError = {
   message: string;
@@ -65,6 +111,7 @@ type HttpRuntimeError = {
 @Injectable()
 export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   readonly type = 'generic_llm' as const;
+  private readonly structuredOutputCapabilities = new Map<string, ActiveStructuredOutputMode>();
 
   constructor(
     private readonly mockRuntime: MockRuntimeService,
@@ -171,87 +218,71 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         controller.abort();
       }, timeoutMs);
       try {
-        const requestBody: Record<string, unknown> = {
-          model: selectedModel,
-          stream: false,
-          temperature: 0.2,
-          messages: [
-            {
-              role: 'system',
-              content:
-                selectedConnection.kind === 'local'
-                  ? this.buildLocalSystemPrompt(input)
-                  : this.buildRemoteSystemPrompt(input)
-            },
-            {
-              role: 'user',
-              content: JSON.stringify({
-                phase: input.phase,
-                expectedOutput: input.expectedOutput,
-                contextPack: input.contextPack,
-                budget: input.budget
-              })
-            }
-          ]
-        };
-
-        if (selectedConnection.kind === 'remote') {
-          requestBody.response_format = { type: 'json_object' };
-        } else {
-          requestBody.max_tokens = Math.min(
-            input.budget.maxOutputTokens ?? llmLocalMaxOutputTokens(),
-            llmLocalMaxOutputTokens()
-          );
-          requestBody.options = { num_ctx: llmLocalNumCtx() };
-          requestBody.think = false;
-          requestBody.reasoning_effort = 'none';
-        }
-
-        const response = await fetch(this.chatCompletionsUrl(selectedConnection.baseUrl), {
-          method: 'POST',
-          signal: controller.signal,
-          headers: {
-            authorization: `Bearer ${selectedConnection.apiKey}`,
-            'content-type': 'application/json'
+        const messages = [
+          {
+            role: 'system',
+            content:
+              selectedConnection.kind === 'local'
+                ? this.buildLocalSystemPrompt(input)
+                : this.buildRemoteSystemPrompt(input)
           },
-          body: JSON.stringify(requestBody)
-        });
+          {
+            role: 'user',
+            content: JSON.stringify({
+              phase: input.phase,
+              expectedOutput: input.expectedOutput,
+              contextPack: input.contextPack,
+              budget: input.budget
+            })
+          }
+        ];
+        let completion = await this.requestCompletion(
+          input,
+          selectedConnection,
+          messages,
+          controller.signal,
+          'LLM request'
+        );
+        let usage = this.toUsage(completion.body.usage, selectedModel);
+        let evaluated = this.evaluateRuntimeOutput(completion.body, input.expectedOutput.kind);
+        let repairAttempts = 0;
 
-        if (!response.ok) {
-          const httpError = await this.httpRuntimeError(response, 'LLM request');
-          throw Object.assign(new Error(httpError.message), {
-            retryable: httpError.retryable,
-            code: httpError.code,
-            details: httpError.details
-          });
+        while (!evaluated.output && repairAttempts < llmSchemaRepairAttempts()) {
+          repairAttempts += 1;
+          completion = await this.requestCompletion(
+            input,
+            selectedConnection,
+            this.schemaRepairMessages(input.expectedOutput.kind, evaluated.diagnostics),
+            controller.signal,
+            `LLM schema repair ${repairAttempts}`
+          );
+          usage = this.mergeUsage(usage, this.toUsage(completion.body.usage, selectedModel));
+          evaluated = this.evaluateRuntimeOutput(completion.body, input.expectedOutput.kind);
         }
 
-        const rawBody = await this.parseJsonResponse(response, 'LLM request');
-        const body = this.asResponseBody(rawBody);
-        const extracted = this.extractRuntimeOutput(body, input.expectedOutput.kind);
-        if (!extracted.output) {
+        if (!evaluated.output) {
+          const diagnostics = evaluated.diagnostics;
+          const detected = diagnostics.detectedKind ? `, detected ${diagnostics.detectedKind}` : '';
           return this.failedResult(
             input,
             startedAt,
             selectedModel,
-            'LLM response did not include usable RuntimeOutput JSON',
+            `Expected ${input.expectedOutput.kind}${detected}; model output remained unusable after ${repairAttempts} schema repair attempt(s).`,
             'OUTPUT_SCHEMA_INVALID',
-            { responseShape: this.summarizeResponseShape(rawBody) }
+            {
+              responseShape: this.summarizeResponseShape(completion.rawBody),
+              parseState: diagnostics.parseState,
+              detectedKind: diagnostics.detectedKind,
+              validationErrors: diagnostics.validationErrors,
+              contentLength: diagnostics.contentLength,
+              contentHash: diagnostics.contentHash,
+              sanitizedPreview: diagnostics.sanitizedPreview,
+              repairAttempts
+            },
+            usage
           );
         }
-
-        // Output schema problems are not retryable: a retry would produce the same shape.
-        let output = extracted.output;
-        if (output.kind !== input.expectedOutput.kind) {
-          return this.failedResult(
-            input,
-            startedAt,
-            selectedModel,
-            `Expected ${input.expectedOutput.kind}, got ${String(output.kind)}`,
-            'OUTPUT_SCHEMA_INVALID'
-          );
-        }
-        output = this.normalizeOutput(output);
+        const output = evaluated.output;
 
         return {
           runId: input.runId,
@@ -273,7 +304,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
             }
           ],
           artifacts: [],
-          usage: this.toUsage(body.usage, selectedModel)
+          usage
         };
       } catch (error) {
         const isAbort = error instanceof Error && (error.name === 'AbortError' || Boolean(signal?.aborted));
@@ -309,6 +340,148 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     }
 
     return this.failedResult(input, startedAt, selectedModel, lastMessage, lastCode, lastDetails);
+  }
+
+  private async requestCompletion(
+    input: AgentRunInput,
+    connection: RuntimeModelConnection,
+    messages: Array<{ role: string; content: string }>,
+    signal: AbortSignal,
+    context: string
+  ): Promise<CompletionResponse> {
+    const configuredMode = llmStructuredOutputMode();
+    let activeMode =
+      connection.kind === 'remote'
+        ? configuredMode === 'auto'
+          ? this.structuredOutputCapabilities.get(this.structuredOutputCapabilityKey(connection)) ?? 'json_schema'
+          : configuredMode
+        : undefined;
+
+    for (;;) {
+      const requestBody = this.completionRequestBody(input, connection, messages, activeMode);
+      const response = await fetch(this.chatCompletionsUrl(connection.baseUrl), {
+        method: 'POST',
+        signal,
+        headers: {
+          authorization: `Bearer ${connection.apiKey}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+      });
+
+      if (!response.ok) {
+        if (
+          connection.kind === 'remote' &&
+          configuredMode === 'auto' &&
+          activeMode === 'json_schema' &&
+          (await this.isUnsupportedJsonSchemaResponse(response))
+        ) {
+          activeMode = 'json_object';
+          this.structuredOutputCapabilities.set(this.structuredOutputCapabilityKey(connection), activeMode);
+          continue;
+        }
+        const httpError = await this.httpRuntimeError(response, context);
+        throw Object.assign(new Error(httpError.message), {
+          retryable: httpError.retryable,
+          code: httpError.code,
+          details: httpError.details
+        });
+      }
+
+      if (connection.kind === 'remote' && configuredMode === 'auto' && activeMode) {
+        this.structuredOutputCapabilities.set(this.structuredOutputCapabilityKey(connection), activeMode);
+      }
+      const rawBody =
+        requestBody.stream === true && this.isEventStreamResponse(response)
+          ? await this.parseStreamingResponse(response, context)
+          : await this.parseJsonResponse(response, context);
+      return {
+        rawBody,
+        body: this.asResponseBody(rawBody)
+      };
+    }
+  }
+
+  private completionRequestBody(
+    input: AgentRunInput,
+    connection: RuntimeModelConnection,
+    messages: Array<{ role: string; content: string }>,
+    structuredOutputMode?: ActiveStructuredOutputMode
+  ) {
+    const requestBody: Record<string, unknown> = {
+      model: connection.model,
+      stream: connection.kind === 'remote' ? llmRemoteStreamingEnabled() : false,
+      temperature: 0.2,
+      messages
+    };
+    if (connection.kind === 'remote' && structuredOutputMode) {
+      requestBody.max_tokens = Math.min(
+        input.budget.maxOutputTokens ?? llmRemoteMaxOutputTokens(),
+        llmRemoteMaxOutputTokens()
+      );
+      requestBody.response_format =
+        structuredOutputMode === 'json_schema'
+          ? {
+              type: 'json_schema',
+              json_schema: {
+                name: `runtime_output_${input.expectedOutput.kind}`,
+                strict: true,
+                schema: runtimeOutputSchema(input.expectedOutput.kind)
+              }
+            }
+          : { type: 'json_object' };
+    } else if (connection.kind === 'local') {
+      requestBody.max_tokens = Math.min(
+        input.budget.maxOutputTokens ?? llmLocalMaxOutputTokens(),
+        llmLocalMaxOutputTokens()
+      );
+      requestBody.options = { num_ctx: llmLocalNumCtx() };
+      requestBody.think = false;
+      requestBody.reasoning_effort = 'none';
+    }
+    return requestBody;
+  }
+
+  private isEventStreamResponse(response: Response) {
+    return (response.headers.get('content-type') ?? '').toLowerCase().includes('text/event-stream');
+  }
+
+  private structuredOutputCapabilityKey(connection: RuntimeModelConnection) {
+    return `${connection.baseUrl ?? ''}\n${connection.model}`;
+  }
+
+  private async isUnsupportedJsonSchemaResponse(response: Response) {
+    if (response.status !== 400 && response.status !== 422) {
+      return false;
+    }
+    const body = await response.clone().text().catch(() => '');
+    return /json_schema|response_format|structured.?output/i.test(body) &&
+      /not supported|unsupported|unknown|invalid|not allowed/i.test(body);
+  }
+
+  private schemaRepairMessages(kind: RuntimeOutputKind, diagnostics: RuntimeOutputDiagnostics) {
+    return [
+      {
+        role: 'system',
+        content: [
+          'Schema repair mode. Convert the supplied model output into exactly one valid JSON object.',
+          `Required RuntimeOutput kind: ${kind}`,
+          'Do not add commentary, Markdown fences, tools, or external side effects.',
+          `JSON Schema: ${JSON.stringify(runtimeOutputSchema(kind))}`,
+          `Minimal example: ${JSON.stringify(runtimeOutputExample(kind))}`
+        ].join('\n')
+      },
+      {
+        role: 'user',
+        content: JSON.stringify({
+          expectedKind: kind,
+          parseState: diagnostics.parseState,
+          detectedKind: diagnostics.detectedKind,
+          validationErrors: diagnostics.validationErrors,
+          invalidOutput: diagnostics.content
+        })
+      }
+    ];
   }
 
   /**
@@ -400,82 +573,113 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
 
       const requestBody: Record<string, unknown> = {
         model: selectedModel,
-        stream: false,
+        stream: selectedConnection.kind === 'remote' ? llmRemoteStreamingEnabled() : false,
         temperature: 0.2,
         messages
       };
 
-      if (selectedConnection.kind === 'local') {
+      if (selectedConnection.kind === 'remote') {
+        requestBody.max_tokens = Math.min(
+          input.budget.maxOutputTokens ?? llmRemoteMaxOutputTokens(),
+          llmRemoteMaxOutputTokens()
+        );
+      } else if (selectedConnection.kind === 'local') {
         requestBody.max_tokens = Math.min(input.budget.maxOutputTokens ?? llmLocalMaxOutputTokens(), llmLocalMaxOutputTokens());
         requestBody.options = { num_ctx: llmLocalNumCtx() };
       }
 
-      let rawResponse: string;
-      const controller = new AbortController();
-      const onAbort = () => controller.abort();
-      signal?.addEventListener('abort', onAbort, { once: true });
-      let timedOut = false;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-      }, timeoutMs);
-      try {
-        const response = await fetch(this.chatCompletionsUrl(selectedConnection.baseUrl), {
-          method: 'POST',
-          signal: controller.signal,
-          headers: {
-            authorization: `Bearer ${selectedConnection.apiKey}`,
-            'content-type': 'application/json'
-          },
-          body: JSON.stringify(requestBody)
-        });
+      let rawResponse: string | undefined;
+      const maxRetries = llmMaxRetries();
+      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+        const controller = new AbortController();
+        let cancelledByUser = false;
+        let timedOut = false;
+        const onAbort = () => {
+          cancelledByUser = true;
+          controller.abort();
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+        const timer = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, timeoutMs);
+        try {
+          const response = await fetch(this.chatCompletionsUrl(selectedConnection.baseUrl), {
+            method: 'POST',
+            signal: controller.signal,
+            headers: {
+              authorization: `Bearer ${selectedConnection.apiKey}`,
+              'content-type': 'application/json'
+            },
+            body: JSON.stringify(requestBody)
+          });
 
-        if (!response.ok) {
-          const httpError = await this.httpRuntimeError(response, 'Tool-loop LLM request');
-          return this.failedResult(
-            input,
-            startedAt,
-            selectedModel,
-            httpError.message,
-            httpError.code,
-            httpError.details
-          );
-        }
+          if (!response.ok) {
+            const httpError = await this.httpRuntimeError(response, 'Tool-loop LLM request');
+            if (!httpError.retryable || attempt === maxRetries) {
+              return this.failedResult(
+                input,
+                startedAt,
+                selectedModel,
+                httpError.message,
+                httpError.code,
+                httpError.details
+              );
+            }
+            await this.backoff(attempt, signal);
+            continue;
+          }
 
-        const rawBody = await this.parseJsonResponse(response, 'Tool-loop LLM request');
-        const body = this.asResponseBody(rawBody);
-        rawResponse = this.extractTextFromBody(body);
-      } catch (error) {
-        const isAbort = error instanceof Error && (error.name === 'AbortError' || Boolean(signal?.aborted));
-        if (isAbort && timedOut && !signal?.aborted) {
-          return this.failedResult(
-            input,
-            startedAt,
-            selectedModel,
-            `Tool-loop LLM request timed out after ${timeoutMs}ms`,
-            'RUNTIME_TIMEOUT'
-          );
-        }
-        if (isAbort) {
+          const rawBody =
+            requestBody.stream === true && this.isEventStreamResponse(response)
+              ? await this.parseStreamingResponse(response, 'Tool-loop LLM request')
+              : await this.parseJsonResponse(response, 'Tool-loop LLM request');
+          const body = this.asResponseBody(rawBody);
+          rawResponse = this.extractTextFromBody(body);
+          break;
+        } catch (error) {
+          const isAbort = error instanceof Error && (error.name === 'AbortError' || Boolean(signal?.aborted));
           const timeoutMessage = this.upstreamTimeoutMessage(signal);
-          return this.failedResult(
-            input,
-            startedAt,
-            selectedModel,
-            timeoutMessage ?? 'Tool loop cancelled by user.',
-            timeoutMessage ? 'RUNTIME_TIMEOUT' : 'RUNTIME_CANCELLED'
-          );
+          const wasUpstreamTimeout = isAbort && Boolean(timeoutMessage);
+          const wasUserCancelled = isAbort && !wasUpstreamTimeout && (cancelledByUser || signal?.aborted);
+          const retryable =
+            !wasUserCancelled && !wasUpstreamTimeout && (isAbort || (error as { retryable?: boolean }).retryable !== false);
+          if (!retryable || attempt === maxRetries) {
+            if (wasUserCancelled || wasUpstreamTimeout || isAbort) {
+              return this.failedResult(
+                input,
+                startedAt,
+                selectedModel,
+                wasUserCancelled
+                  ? 'Tool loop cancelled by user.'
+                  : timeoutMessage ?? (timedOut ? `Tool-loop LLM request timed out after ${timeoutMs}ms` : 'Tool loop cancelled by user.'),
+                wasUserCancelled ? 'RUNTIME_CANCELLED' : 'RUNTIME_TIMEOUT'
+              );
+            }
+            return this.failedResult(
+              input,
+              startedAt,
+              selectedModel,
+              `Tool-loop fetch error: ${error instanceof Error ? error.message : String(error)}`,
+              this.errorCode(error),
+              this.errorDetails(error)
+            );
+          }
+          await this.backoff(attempt, signal);
+        } finally {
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
         }
+      }
+
+      if (rawResponse === undefined) {
         return this.failedResult(
           input,
           startedAt,
           selectedModel,
-          `Tool-loop fetch error: ${error instanceof Error ? error.message : String(error)}`,
+          'Tool-loop LLM request ended without a response.',
           'MODEL_ERROR'
         );
-      } finally {
-        clearTimeout(timer);
-        signal?.removeEventListener('abort', onAbort);
       }
 
       const toolCalls = this.parseToolCalls(rawResponse);
@@ -660,6 +864,9 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       input.agent.systemPrompt,
       'Return only valid JSON matching the requested RuntimeOutput kind.',
       `Expected kind: ${input.expectedOutput.kind}`,
+      `Required JSON Schema: ${JSON.stringify(runtimeOutputSchema(input.expectedOutput.kind))}`,
+      `Minimal valid example: ${JSON.stringify(runtimeOutputExample(input.expectedOutput.kind))}`,
+      'Never return a different RuntimeOutput kind, Markdown fences, or explanatory text outside the JSON object.',
       'When the output kind has a status field, status must be exactly one of: completed, failed, blocked, needs_review.',
       'Do not call tools, modify files, or perform external side effects.',
       'Use contextPack.taskContext as the Task Context Pack: follow its stagePlan read/do/validate items, taskMap, evidenceSelection.selectedRefs/evidenceRefs, validationRules, and agentResponsibilities. Keep conclusions traceable to those fields.',
@@ -668,6 +875,9 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       'When selected evidence is insufficient for the expected output, return the expected JSON kind with status "blocked" when supported, summary explaining the gap, and requestedContext containing reason, requestedRefs, requestedPaths, requestedCommands, and followUpInstruction. Do not fabricate file contents, APIs, test results, or logs.',
       'Use contextPack.continuationState to resume or hand off work consistently across phases, agents, pauses, validation, review, and final delivery.',
       'For non-coding tasks, validate fact consistency, scope consistency, traceability, and delivery completeness instead of inventing implementation evidence.',
+      input.expectedOutput.kind === 'task_brief'
+        ? 'When the user asks to analyze, understand, or become familiar with a project/repository architecture, assign the architect as a first-line analysis agent. The architect should directly analyze project positioning, directory responsibilities, module boundaries, entrypoints, data/event/runtime flows, risks, and reading path from workspaceManifest/projectMap/selectedEvidenceContents. Do not turn that architect task into reviewing another agent\'s architecture proposal; review belongs to the review/test task after the architect analysis.'
+        : '',
       input.contextPack.workspaceManifest
         ? 'Before analyzing the user requirement, inspect contextPack.workspaceManifest for project structure and contextPack.selectedEvidenceContents for readable evidence content. workspaceSnapshot is only a manifest-style fallback and may omit file contents.'
         : 'No workspace manifest is available; say when file-level conclusions are assumptions.',
@@ -690,6 +900,134 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     ]
       .filter(Boolean)
       .join('\n');
+  }
+
+  private evaluateRuntimeOutput(
+    body: GenericLlmResponseBody,
+    expectedKind: RuntimeOutputKind
+  ): { output?: RuntimeOutput; diagnostics: RuntimeOutputDiagnostics } {
+    const extracted = this.extractRuntimeOutput(body, expectedKind);
+    if (extracted.output) {
+      const output = this.normalizeOutput(extracted.output);
+      const validation = validateRuntimeOutput(output, expectedKind);
+      if (validation.valid) {
+        return {
+          output,
+          diagnostics: this.runtimeOutputDiagnostics(body, expectedKind, 'valid', validation.errors)
+        };
+      }
+      return {
+        diagnostics: this.runtimeOutputDiagnostics(body, expectedKind, 'schema_invalid', validation.errors)
+      };
+    }
+
+    const content = this.extractMessageContent(body).content?.trim() ?? '';
+    if (!content) {
+      return {
+        diagnostics: this.runtimeOutputDiagnostics(body, expectedKind, 'no_content', ['No model message content was found.'])
+      };
+    }
+    const parsed = this.firstParsedJsonValue(content);
+    if (parsed === undefined) {
+      return {
+        diagnostics: this.runtimeOutputDiagnostics(body, expectedKind, 'invalid_json', ['Model content is not valid JSON.'])
+      };
+    }
+    const detectedKind = this.detectRuntimeOutputKind(parsed);
+    if (detectedKind && detectedKind !== expectedKind) {
+      return {
+        diagnostics: this.runtimeOutputDiagnostics(
+          body,
+          expectedKind,
+          'wrong_kind',
+          [`Expected kind ${expectedKind}, received ${detectedKind}.`],
+          detectedKind
+        )
+      };
+    }
+    const validation = validateRuntimeOutput(parsed, expectedKind);
+    return {
+      diagnostics: this.runtimeOutputDiagnostics(
+        body,
+        expectedKind,
+        validation.errors.length ? 'schema_invalid' : 'unrecognized_shape',
+        validation.errors.length ? validation.errors : ['JSON did not map to a supported RuntimeOutput shape.'],
+        detectedKind
+      )
+    };
+  }
+
+  private runtimeOutputDiagnostics(
+    body: GenericLlmResponseBody,
+    expectedKind: RuntimeOutputKind,
+    parseState: RuntimeOutputDiagnostics['parseState'],
+    validationErrors: string[],
+    detectedKind?: string
+  ): RuntimeOutputDiagnostics {
+    const content = this.extractMessageContent(body).content?.trim() ?? '';
+    return {
+      parseState,
+      detectedKind: detectedKind ?? this.detectRuntimeOutputKind(this.firstParsedJsonValue(content)),
+      validationErrors,
+      content,
+      contentLength: content.length,
+      contentHash: createHash('sha256').update(content).digest('hex'),
+      sanitizedPreview: this.sanitizeDiagnosticPreview(content)
+    };
+  }
+
+  private firstParsedJsonValue(content: string): unknown {
+    if (!content) {
+      return undefined;
+    }
+    for (const candidate of this.jsonTextCandidates(content)) {
+      try {
+        return JSON.parse(candidate) as unknown;
+      } catch {
+        continue;
+      }
+    }
+    return undefined;
+  }
+
+  private detectRuntimeOutputKind(value: unknown, depth = 0): string | undefined {
+    if (!value || depth > 4) {
+      return undefined;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const detected = this.detectRuntimeOutputKind(item, depth + 1);
+        if (detected) {
+          return detected;
+        }
+      }
+      return undefined;
+    }
+    if (typeof value !== 'object') {
+      return undefined;
+    }
+    const record = value as Record<string, unknown>;
+    if (typeof record.kind === 'string') {
+      return record.kind;
+    }
+    for (const key of ['output', 'result', 'final_output', 'data', 'content', 'message', 'value']) {
+      const detected = this.detectRuntimeOutputKind(record[key], depth + 1);
+      if (detected) {
+        return detected;
+      }
+    }
+    return undefined;
+  }
+
+  private sanitizeDiagnosticPreview(content: string) {
+    const redacted = content
+      .replace(
+        /("(?:api[_-]?key|access[_-]?token|authorization|password|secret)"\s*:\s*")[^"]*(")/gi,
+        '$1[REDACTED]$2'
+      )
+      .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+      .replace(/\bsk-[A-Za-z0-9_-]{6,}\b/g, '[REDACTED]');
+    return redacted.replace(/\s+/g, ' ').trim().slice(0, llmDiagnosticPreviewChars());
   }
 
   /** Small local models sometimes return nested objects where the contract expects plain text. */
@@ -1171,7 +1509,58 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       candidates.add(content.slice(firstBrace, lastBrace + 1));
     }
 
+    // 修复变体放在原始候选之后:合法 JSON 先按原样命中,坏的再尝试修复版。
+    for (const candidate of [...candidates]) {
+      const repaired = this.escapeControlCharsInJsonStrings(candidate);
+      if (repaired !== candidate) {
+        candidates.add(repaired);
+      }
+    }
+
     return [...candidates];
+  }
+
+  /**
+   * 模型(尤其 Claude 系)输出长中文时,常在 JSON 字符串字面量里写入裸换行等
+   * 控制字符,严格 JSON.parse 会直接拒绝。只转义字符串内部的 U+0000–U+001F,
+   * 字符串外的控制字符是合法空白,原样保留。
+   */
+  private escapeControlCharsInJsonStrings(text: string) {
+    let result = '';
+    let inString = false;
+    let escaped = false;
+    for (const char of text) {
+      if (!inString) {
+        if (char === '"') {
+          inString = true;
+        }
+        result += char;
+        continue;
+      }
+      if (escaped) {
+        escaped = false;
+        result += char;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        result += char;
+        continue;
+      }
+      if (char === '"') {
+        inString = false;
+        result += char;
+        continue;
+      }
+      const code = char.charCodeAt(0);
+      if (code < 0x20) {
+        result +=
+          code === 0x0a ? '\\n' : code === 0x0d ? '\\r' : code === 0x09 ? '\\t' : `\\u${code.toString(16).padStart(4, '0')}`;
+        continue;
+      }
+      result += char;
+    }
+    return result;
   }
 
   private asResponseBody(value: unknown): GenericLlmResponseBody {
@@ -1273,6 +1662,97 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   private chatCompletionsUrl(value?: string) {
     const baseUrl = value?.replace(/\/$/, '');
     return `${baseUrl}/chat/completions`;
+  }
+
+  private async parseStreamingResponse(response: Response, context: string): Promise<unknown> {
+    if (!response.body) {
+      throw Object.assign(new Error(`${context} returned an empty streaming response body.`), { retryable: true });
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let content = '';
+    let usage: GenericLlmUsage | undefined;
+    let model: string | undefined;
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) {
+          continue;
+        }
+        const data = trimmed.slice('data:'.length).trim();
+        if (!data || data === '[DONE]') {
+          continue;
+        }
+        let chunk: GenericLlmStreamingChunk;
+        try {
+          chunk = JSON.parse(data) as GenericLlmStreamingChunk;
+        } catch {
+          continue;
+        }
+        const delta = chunk.choices?.[0]?.delta;
+        const message = chunk.choices?.[0]?.message;
+        const text = chunk.choices?.[0]?.text;
+        const outputText = chunk.output_text;
+        const responseText = chunk.response;
+        content +=
+          (typeof delta?.content === 'string' ? delta.content : '') ||
+          (typeof message?.content === 'string' ? message.content : '') ||
+          (typeof text === 'string' ? text : '') ||
+          (typeof outputText === 'string' ? outputText : '') ||
+          (typeof responseText === 'string' ? responseText : '');
+        usage = chunk.usage ?? usage;
+        model = chunk.model ?? model;
+      }
+    }
+
+    const trailing = decoder.decode();
+    if (trailing) {
+      buffer += trailing;
+    }
+    for (const line of buffer.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) {
+        continue;
+      }
+      const data = trimmed.slice('data:'.length).trim();
+      if (!data || data === '[DONE]') {
+        continue;
+      }
+      try {
+        const chunk = JSON.parse(data) as GenericLlmStreamingChunk;
+        const delta = chunk.choices?.[0]?.delta;
+        content += typeof delta?.content === 'string' ? delta.content : '';
+        usage = chunk.usage ?? usage;
+        model = chunk.model ?? model;
+      } catch {
+        // Ignore malformed trailing stream lines. The accumulated content is still useful.
+      }
+    }
+
+    if (!content.trim()) {
+      throw Object.assign(new Error(`${context} returned an empty streaming response.`), { retryable: true });
+    }
+
+    return {
+      choices: [
+        {
+          message: { content },
+          finish_reason: 'stop'
+        }
+      ],
+      usage,
+      model
+    } satisfies GenericLlmResponseBody;
   }
 
   private async parseJsonResponse(response: Response, context: string): Promise<unknown> {
@@ -1378,7 +1858,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     model: string,
     message: string,
     code: RuntimeError['code'] = 'MODEL_ERROR',
-    details?: Record<string, unknown>
+    details?: Record<string, unknown>,
+    usage?: RuntimeUsage
   ): AgentRunResult {
     return {
       runId: input.runId,
@@ -1405,13 +1886,22 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         }
       ],
       artifacts: [],
-      usage: this.toUsage(undefined, model),
+      usage: usage ?? this.toUsage(undefined, model),
       error: {
         code,
         message,
         retryable: !['OUTPUT_SCHEMA_INVALID', 'RUNTIME_CANCELLED', 'CAPABILITY_BLOCKED'].includes(code),
         details
       }
+    };
+  }
+
+  private mergeUsage(left: RuntimeUsage, right: RuntimeUsage): RuntimeUsage {
+    return {
+      inputTokens: left.inputTokens + right.inputTokens,
+      outputTokens: left.outputTokens + right.outputTokens,
+      totalTokens: left.totalTokens + right.totalTokens,
+      model: right.model || left.model
     };
   }
 

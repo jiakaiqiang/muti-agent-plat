@@ -1,6 +1,7 @@
 import type { RuntimeType } from '@agent-cluster/shared';
 
 export type LlmProvider = 'openai-compatible' | 'ollama';
+export type LlmStructuredOutputMode = 'auto' | 'json_schema' | 'json_object';
 
 const truthyValues = new Set(['1', 'true', 'yes', 'on']);
 const mockFallbackValues = new Set(['1', 'true', 'yes', 'on', 'mock']);
@@ -107,6 +108,30 @@ export function llmTimeoutMs() {
 export function llmMaxRetries() {
   const parsed = Number(process.env.LLM_MAX_RETRIES ?? 2);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 2;
+}
+
+export function llmRemoteMaxOutputTokens() {
+  const parsed = Number(process.env.LLM_REMOTE_MAX_OUTPUT_TOKENS ?? 4_096);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 4_096;
+}
+
+export function llmRemoteStreamingEnabled() {
+  return envFlag('LLM_REMOTE_STREAMING', true);
+}
+
+export function llmStructuredOutputMode(): LlmStructuredOutputMode {
+  const configured = process.env.LLM_STRUCTURED_OUTPUT_MODE?.trim().toLowerCase();
+  return configured === 'json_schema' || configured === 'json_object' ? configured : 'auto';
+}
+
+export function llmSchemaRepairAttempts() {
+  const parsed = Number(process.env.LLM_SCHEMA_REPAIR_ATTEMPTS ?? 1);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(2, Math.floor(parsed))) : 1;
+}
+
+export function llmDiagnosticPreviewChars() {
+  const parsed = Number(process.env.LLM_DIAGNOSTIC_PREVIEW_CHARS ?? 512);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(2_000, Math.floor(parsed))) : 512;
 }
 
 export function llmLocalMaxInputTokens() {
