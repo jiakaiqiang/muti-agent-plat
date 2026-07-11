@@ -15,7 +15,8 @@ let server;
 
 try {
   server = await startSmokeServer('runtime-routing-smoke', {
-    DISCUSSION_MAX_ROUNDS: '0'
+    DISCUSSION_MAX_ROUNDS: '0',
+    REQUIRE_USER_CONFIRMATION: 'false'
   });
 
   await api(server.apiBase, '/agents/backend', {

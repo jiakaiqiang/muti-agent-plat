@@ -1,13 +1,23 @@
 import type {
+  ActorRef,
+  ActorType,
   Agent,
   AgentStatus,
   AgentTaskStatus,
+  CapabilityDefinition,
+  CapabilityKind,
   CapabilityRiskLevel,
   CollaborationEvent,
+  CompiledAgentProfile,
+  ContextPipelineVersion,
   EngineeringRuntimeSelection,
   EventPriority,
+  ExecutionTarget,
   KnowledgeBase,
   KnowledgeDocument,
+  OpsHealth,
+  PostReviewAction,
+  ProfileDiagnostic,
   RagMatchedChunk,
   RuntimeCapabilityDefinition,
   RuntimeFileChange,
@@ -25,6 +35,8 @@ import type {
   SessionListItem,
   SessionWorkingDirectory,
   SessionStatus,
+  Skill,
+  SkillFile,
   SuggestedAgentTask,
   WorkspaceFileSnapshot,
   WorkspaceSnapshot,
@@ -34,22 +46,32 @@ import type {
 } from '@agent-cluster/shared'
 
 export type {
+  ActorRef,
+  ActorType,
   Agent,
   AgentStatus,
   AgentTaskStatus,
   Artifact,
   ArtifactType,
+  CapabilityDefinition,
+  CapabilityKind,
   CapabilityRiskLevel,
   CollaborationEvent,
   CollaborationEventType,
+  CompiledAgentProfile,
+  ContextPipelineVersion,
   EngineeringRuntimeConfig,
   EngineeringRuntimeSelection,
   EventMetadata,
   EventPriority,
   EventRenderType,
+  ExecutionTarget,
   KnowledgeBase,
   KnowledgeDocument,
   KnowledgeScope,
+  OpsHealth,
+  PostReviewAction,
+  ProfileDiagnostic,
   RagMatchedChunk,
   RuntimeCapabilityDefinition,
   RuntimeFileChange,
@@ -67,6 +89,8 @@ export type {
   SessionListItem,
   SessionWorkingDirectory,
   SessionStatus,
+  Skill,
+  SkillFile,
   SuggestedAgentTask,
   WorkspaceFileSnapshot,
   WorkspaceSnapshot,
@@ -74,6 +98,8 @@ export type {
   WorkspaceTreeNode,
   UserMessageIntent
 } from '@agent-cluster/shared'
+
+export { DEFAULT_CONTEXT_PIPELINE_VERSION, SUPPORTED_CONTEXT_PIPELINE_VERSIONS } from '@agent-cluster/shared'
 
 export type SessionViewMode = 'chat' | 'collaboration_graph' | 'workflow' | 'debug'
 
@@ -126,6 +152,7 @@ export type ConfirmationRequestedPayload = {
   title: string
   description: string
   options: ConfirmationOption[]
+  actions?: PostReviewAction[]
   relatedBriefId?: string
   relatedTaskId?: string
   relatedCapabilityId?: string
@@ -142,6 +169,8 @@ export type TaskEventPayload = {
   title: string
   description?: string
   status: AgentTaskStatus
+  assignedBy?: ActorRef
+  assignee?: ActorRef
   assignedByAgentId?: string
   assigneeAgentId?: string
   routingMode?: TaskRoutingMode
@@ -303,6 +332,7 @@ export type ConfirmationCardState = {
   description: string
   status: 'pending' | 'approved' | 'rejected' | 'expired'
   options: ConfirmationOption[]
+  actions?: PostReviewAction[]
   candidate?: {
     content?: string
     sourceEventId?: string
@@ -318,6 +348,8 @@ export type TaskViewState = {
   taskId: string
   title: string
   status: AgentTaskStatus
+  assignedBy?: ActorRef
+  assignee?: ActorRef
   assignedByAgentId?: string
   assigneeAgentId?: string
   routingMode?: TaskRoutingMode

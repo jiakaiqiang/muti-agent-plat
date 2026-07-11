@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import type {
   Agent,
   AgentMessageOutput,
@@ -13,6 +13,7 @@ import type {
   TaskContext,
   FinalDeliveryOutput,
   PostReviewReportOutput,
+  PostReviewAction,
   RuntimeArtifactOutput,
   RuntimeBudget,
   RuntimeContextRequest,
@@ -38,6 +39,7 @@ import {
   defaultEngineeringRuntimeType,
   discussionTimeoutMs,
   genericLlmMockFallbackEnabled,
+  llmInputSafetyMarginRatio,
   llmLocalMaxInputTokens,
   llmLocalMaxOutputTokens,
   llmRemoteMaxOutputTokens,
@@ -45,7 +47,12 @@ import {
   runtimeModeLabel
 } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
-import { buildBudget, fitContextToBudget } from '../../common/token.js';
+import {
+  buildBudget,
+  estimateRuntimeInputTokens,
+  fitContextToBudget,
+  reserveInputTokenSafetyMargin
+} from '../../common/token.js';
 import { AgentsService } from '../agents/agents.service.js';
 import { ArtifactsService } from '../artifacts/artifacts.service.js';
 import { CapabilitiesService } from '../capabilities/capabilities.service.js';
@@ -55,10 +62,16 @@ import { MemoryService } from '../memory/memory.service.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { KnowledgeService } from '../rag/knowledge.service.js';
 import { RuntimeModelConfigService } from '../runtimes/runtime-model-config.service.js';
+import { runtimeOutputExample, runtimeOutputSchema } from '../runtimes/runtime-output-schema.js';
 import { RuntimeService } from '../runtimes/runtime.service.js';
 import { TasksService } from '../tasks/tasks.service.js';
+import { SkillsService } from '../skills/skills.service.js';
+import { AgentProfileCompilerService } from '../agent-profile/agent-profile-compiler.service.js';
 import { ContextRouterService } from './context-router.service.js';
 import { ProjectMapService } from './project-map.service.js';
+import { consumeRuntimeEvents } from './runtime-stream-consumer.js';
+import { shouldEmitHeartbeat } from './runtime-heartbeat-policy.js';
+import { buildResumeOptions } from './build-resume-options.js';
 import { buildCoverageSystemRule, buildWorkspaceManifest } from './workspace-manifest.js';
 import {
   canRetryWithSupplementalContext,
@@ -73,7 +86,7 @@ import { truncateContentForEvidence } from '../../common/evidence-truncation.js'
 export type ExecutionOutcome =
   | { kind: 'delivered' }
   | { kind: 'rework'; reason: string }
-  | { kind: 'ask_user'; reason: string }
+  | { kind: 'ask_user'; reason: string; actions?: PostReviewAction[] }
   | { kind: 'cancelled'; reason: string }
   | { kind: 'failed'; reason: string };
 
@@ -110,7 +123,9 @@ export class OrchestratorService {
     private readonly persistence: PersistenceService,
     private readonly contextRouter: ContextRouterService,
     private readonly projectMap: ProjectMapService,
-    private readonly runtimeModels: RuntimeModelConfigService
+    private readonly runtimeModels: RuntimeModelConfigService,
+    @Optional() private readonly skills?: SkillsService,
+    @Optional() private readonly profileCompiler?: AgentProfileCompilerService
   ) {
     const persistedBriefs = this.persistence.getCollection<Record<string, TaskBrief[]>>('briefsBySession', {});
     for (const [sessionId, briefs] of Object.entries(persistedBriefs)) {
@@ -457,26 +472,33 @@ export class OrchestratorService {
       return { kind: 'cancelled', reason: messages.cancelled };
     }
 
-    let review: PostReviewReportOutput;
-    try {
-      review = await this.runPostReview(session, brief, signal);
-    } catch (error) {
-      if (signal?.aborted) {
-        return { kind: 'cancelled', reason: messages.cancelled };
+    const limitedDelivery = this.latestLimitedDeliveryAction(session.id);
+    if (!limitedDelivery) {
+      let review: PostReviewReportOutput;
+      try {
+        review = await this.runPostReview(session, brief, signal);
+      } catch (error) {
+        if (signal?.aborted) {
+          return { kind: 'cancelled', reason: messages.cancelled };
+        }
+        throw error;
       }
-      throw error;
-    }
-    if (review.recommendation === 'rework') {
-      return { kind: 'rework', reason: review.mismatchedItems.join('; ') || messages.reviewRework };
-    }
-    if (review.recommendation === 'ask_user') {
-      return { kind: 'ask_user', reason: review.mismatchedItems.join('; ') || messages.reviewAskUser };
+      if (review.recommendation === 'rework') {
+        return { kind: 'rework', reason: review.mismatchedItems.join('; ') || messages.reviewRework };
+      }
+      if (review.recommendation === 'ask_user') {
+        return {
+          kind: 'ask_user',
+          reason: review.mismatchedItems.join('; ') || review.missingItems.join('; ') || messages.reviewAskUser,
+          actions: review.actions
+        };
+      }
     }
 
     const alreadyDelivered = this.events.list(session.id).some((event) => event.type === 'final_delivery_created');
     if (!alreadyDelivered) {
       try {
-        await this.runFinalDelivery(session, brief, signal);
+        await this.runFinalDelivery(session, brief, signal, limitedDelivery?.limitations);
       } catch (error) {
         if (signal?.aborted) {
           return { kind: 'cancelled', reason: messages.cancelled };
@@ -498,6 +520,25 @@ export class OrchestratorService {
   ): Promise<TaskRunOutcome> {
     const backend = this.pickSessionAgent(session, ['backend'], 0);
     const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
+    if (!task.assigneeAgentId && this.isArchitectureAnalysisTask(session, task, brief)) {
+      const message = '当前架构分析任务需要架构师执行，但本会话未选择架构师。请添加或选择架构师后继续。';
+      this.tasks.update(task, { status: 'waiting', resultSummary: message });
+      this.events.create({
+        sessionId: session.id,
+        type: 'task_waiting',
+        taskId: task.id,
+        fromAgentId: coordinator.id,
+        content: message,
+        metadata: createMetadata('task_card', {
+          taskId: task.id,
+          title: task.title,
+          status: 'waiting',
+          resultSummary: message,
+          requiresUserConfirmation: true
+        })
+      });
+      return { ok: false, message };
+    }
     const taskAgent = task.assigneeAgentId ? this.agents.getByIdOrKey(task.assigneeAgentId) : backend;
     const executionRuntimeSelection = this.selectEngineeringRuntime(session, taskAgent);
     const executionRuntimeType = executionRuntimeSelection.effectiveRuntimeType;
@@ -521,7 +562,16 @@ export class OrchestratorService {
       });
       return { ok: false, message: runtimePreflight.message };
     }
-    const claim = await this.resolveTaskClaim(session, brief, task, taskAgent, coordinator, signal, attemptedAgentIds);
+    const claim = await this.resolveTaskClaim(
+      session,
+      brief,
+      task,
+      taskAgent,
+      coordinator,
+      signal,
+      attemptedAgentIds,
+      contextRetryCount
+    );
     if (!claim.ok) {
       return { ok: false, message: claim.message };
     }
@@ -700,10 +750,10 @@ export class OrchestratorService {
     });
 
     // needs_review 是合法的"完成但需复盘重点检查"，不能走失败分支：
-    // 失败会丢弃 changedArtifacts 并触发用户决策打断，复盘阶段本就能消化评审诉求。
+    // blocked 则始终表示尚未完成；requestedContext 只决定能否自动补读重试。
     const needsReview = output.status === 'needs_review';
     if (output.status !== 'completed' && !needsReview) {
-      const code = output.requestedContext ? 'CONTEXT_INSUFFICIENT' : 'MODEL_ERROR';
+      const code = output.status === 'blocked' ? 'CONTEXT_INSUFFICIENT' : 'MODEL_ERROR';
       this.markTaskFailed(
         session.id,
         task,
@@ -818,15 +868,18 @@ export class OrchestratorService {
     candidate: Agent,
     coordinator: Agent,
     signal: AbortSignal | undefined,
-    attemptedAgentIds: Set<string>
+    attemptedAgentIds: Set<string>,
+    contextRetryCount = 0
   ): Promise<
     | { ok: true; agent: Agent; decision: TaskAcceptanceDecisionOutput; runId: string }
     | { ok: false; message: string }
   > {
-    if (attemptedAgentIds.has(candidate.id)) {
+    if (attemptedAgentIds.has(candidate.id) && contextRetryCount === 0) {
       return { ok: true, agent: candidate, decision: this.fallbackAcceptanceDecision(candidate, task), runId: crypto.randomUUID() };
     }
-    attemptedAgentIds.add(candidate.id);
+    if (contextRetryCount === 0) {
+      attemptedAgentIds.add(candidate.id);
+    }
     const runId = crypto.randomUUID();
     const runtimeSelection = this.selectEngineeringRuntime(session, candidate);
     const contextPack = this.createContextPack(session, candidate, brief, task, 'task_acceptance', runtimeSelection);
@@ -857,6 +910,32 @@ export class OrchestratorService {
 
     if (decision.status === 'accepted') {
       return { ok: true, agent: candidate, decision, runId };
+    }
+
+    const isArchitectureTask = this.isArchitectureAnalysisTask(session, task, brief);
+    const requestedContext = this.acceptanceDecisionRequestedContext(session, task, decision, isArchitectureTask);
+    if (isArchitectureTask && requestedContext) {
+      if (this.canRetryWithSupplementalContext('CONTEXT_INSUFFICIENT', requestedContext, contextRetryCount)) {
+        const novelContext = this.resolveRetryRequest(session, 'CONTEXT_INSUFFICIENT', requestedContext, contextRetryCount);
+        if (novelContext) {
+          this.recordSupplementalContextRequest(session, task, candidate.id, novelContext);
+          this.tasks.update(task, {
+            status: 'assigned',
+            resultSummary: `Retrying architect acceptance with supplemental context: ${decision.reason}`
+          });
+          return this.resolveTaskClaim(
+            session,
+            brief,
+            task,
+            candidate,
+            coordinator,
+            signal,
+            attemptedAgentIds,
+            contextRetryCount + 1
+          );
+        }
+        this.emitSupplementalContextRejected(session, task, candidate.id, requestedContext, 'duplicate_request');
+      }
     }
 
     const canAutoResolve = task.autoResolutionAttempted !== true;
@@ -993,9 +1072,84 @@ export class OrchestratorService {
         requiresUserConfirmation: task.requiresUserConfirmation,
         resultSummary: decision.reason,
         missingContext: decision.missingContext,
+        requestedContext: decision.requestedContext,
         handoffSuggestion: decision.handoffSuggestion
       })
     });
+  }
+
+  private acceptanceDecisionRequestedContext(
+    session: SessionDetail,
+    task: AgentTask,
+    decision: TaskAcceptanceDecisionOutput,
+    isArchitectureTask: boolean
+  ): RuntimeContextRequest | undefined {
+    if (decision.requestedContext) {
+      return decision.requestedContext;
+    }
+    if (!isArchitectureTask || !decision.missingContext?.length) {
+      return undefined;
+    }
+    const requestedPaths = this.architectureSupplementalContextPaths(session, decision.missingContext);
+    if (!requestedPaths.length) {
+      return undefined;
+    }
+    return {
+      reason: decision.reason,
+      requestedRefs: [],
+      requestedPaths,
+      followUpInstruction: `Retry architecture task "${task.title}" after reading the requested entrypoint, config, module boundary, and runtime files.`
+    };
+  }
+
+  private architectureSupplementalContextPaths(session: SessionDetail, missingContext: string[]) {
+    const snapshot = session.workspaceSnapshot;
+    if (!snapshot) return [];
+    const availablePaths = new Set(snapshot.files.map((file) => file.path));
+    const mentionedPaths = missingContext
+      .flatMap((item) => item.match(/[A-Za-z0-9_.@/-]+\.(?:ts|tsx|js|jsx|mjs|cjs|vue|json|md|yml|yaml|toml|css|scss)/g) ?? [])
+      .map((path) => path.replace(/\\/g, '/'))
+      .filter((path) => availablePaths.has(path));
+    return this.uniqueFirstStrings([...mentionedPaths, ...this.defaultArchitectureContextPaths(session)], 16);
+  }
+
+  private defaultArchitectureContextPaths(session: SessionDetail) {
+    const snapshot = session.workspaceSnapshot;
+    if (!snapshot) return [];
+    return snapshot.files
+      .map((file) => ({ path: file.path, score: this.architectureContextPathScore(file.path) }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
+      .map((item) => item.path)
+      .slice(0, 16);
+  }
+
+  private architectureContextPathScore(path: string) {
+    const lower = path.toLowerCase();
+    const fileName = lower.split('/').at(-1) ?? lower;
+    let score = 0;
+    if (['package.json', 'readme.md', 'agents.md', 'claude.md', 'tsconfig.json', 'nest-cli.json'].includes(fileName)) {
+      score += 110;
+    }
+    if (/^(vite|webpack|rollup|eslint|vitest|playwright)\.config\.(ts|js|mjs|cjs)$/.test(fileName)) {
+      score += 96;
+    }
+    if (/(^|\/)(main|index|app|server|bootstrap)\.(ts|tsx|js|jsx|mjs|cjs|vue)$/.test(lower)) {
+      score += 120;
+    }
+    if (/\/(modules?|services?|runtimes?|orchestrator|sessions?|tasks?|agents?|events?|intent|router|routes|stores?|api|contracts?|types?|schemas?)\//.test(lower)) {
+      score += 82;
+    }
+    if (/\/(runtime|service|controller|module|provider|store|router|route|contract|schema|types?)\.(ts|tsx|js|jsx|mjs|cjs)$/.test(lower)) {
+      score += 54;
+    }
+    if (/^docs\/(ai-agent-context|design|product|contracts|quality)\//.test(lower)) {
+      score += 58;
+    }
+    if (/(^|\/)(tests?|e2e|__tests__)\//.test(lower) || /\.(test|spec)\./.test(lower)) {
+      score -= 48;
+    }
+    return score;
   }
 
   private normalizeTaskAcceptanceDecision(
@@ -1019,6 +1173,7 @@ export class OrchestratorService {
         reason: legacy.reason,
         confidence: legacy.confidence,
         missingContext: legacy.missingContext,
+        requestedContext: legacy.requestedContext,
         handoffSuggestion: legacy.handoffSuggestion,
         alternativeAgentKeys: legacy.alternativeAgentKeys,
         alternativeAgentIds: legacy.alternativeAgentIds,
@@ -1047,6 +1202,7 @@ export class OrchestratorService {
       reason: decision.reason,
       confidence: decision.confidence,
       missingContext: decision.missingContext,
+      requestedContext: decision.requestedContext,
       handoffSuggestion: decision.handoffSuggestion,
       alternativeAgentKeys: decision.alternativeAgentKeys,
       alternativeAgentIds: decision.alternativeAgentIds,
@@ -1061,6 +1217,10 @@ export class OrchestratorService {
     attemptedAgentIds: Set<string>
   ) {
     const participants = this.participatingAgents(session);
+    if (this.isArchitectureAnalysisTask(session, task)) {
+      const architect = participants.find((candidate) => candidate.key === 'architect');
+      return architect && !attemptedAgentIds.has(architect.id) ? architect : undefined;
+    }
     const hints = [
       decision.handoffSuggestion?.targetAgentId,
       decision.handoffSuggestion?.targetAgentKey,
@@ -1074,13 +1234,27 @@ export class OrchestratorService {
       }
     }
 
-    const domain = session.taskDomain ?? (session.workspaceSnapshot ? 'mixed' : 'non_coding');
     const taskText = `${task.title} ${task.description}`;
+    const isReviewTask = /复核|复盘|review|审查|审核|检查|把关|评审|质量/i.test(taskText);
+    const isValidationTask = this.isValidationSuggestedTask({ title: task.title, description: task.description } as any);
+
+    if (isReviewTask || isValidationTask) {
+      const preferredKeys = isValidationTask ? ['test', 'review'] : ['review', 'test'];
+      for (const key of preferredKeys) {
+        const agent = participants.find((candidate) => candidate.key === key);
+        if (agent && !attemptedAgentIds.has(agent.id)) {
+          return agent;
+        }
+      }
+      return undefined;
+    }
+
+    const domain = session.taskDomain ?? (session.workspaceSnapshot ? 'mixed' : 'non_coding');
     const isPlanningTask = /plan|planning|requirement|analysis|scope|需求|计划|规划|分析|范围/i.test(taskText);
     const preferredKeys =
       domain === 'non_coding' || isPlanningTask
-        ? ['requirements', 'product-manager', 'architect', 'review', 'test', 'backend', 'frontend']
-        : ['backend', 'frontend', 'architect', 'requirements', 'test', 'review'];
+        ? ['requirements', 'product-manager', 'review', 'test', 'backend', 'frontend']
+        : ['backend', 'frontend', 'requirements', 'test', 'review'];
     for (const key of preferredKeys) {
       const agent = participants.find((candidate) => candidate.key === key);
       if (agent && !attemptedAgentIds.has(agent.id)) {
@@ -1250,10 +1424,35 @@ export class OrchestratorService {
     return reviewOutput;
   }
 
-  private async runFinalDelivery(session: SessionDetail, brief: TaskBrief, signal?: AbortSignal): Promise<void> {
+  private latestLimitedDeliveryAction(sessionId: string) {
+    const events = this.events.list(sessionId);
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event.type !== 'user_confirmation_resolved') continue;
+      const payload = event.metadata.payload as { action?: PostReviewAction } | undefined;
+      if (payload?.action?.action === 'deliver_with_limitations') {
+        return payload.action;
+      }
+    }
+    return undefined;
+  }
+
+  private async runFinalDelivery(
+    session: SessionDetail,
+    brief: TaskBrief,
+    signal?: AbortSignal,
+    limitations: string[] = []
+  ): Promise<void> {
     const review = this.pickSessionAgent(session, ['review', 'test'], 1);
     const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
     const finalContextPack = this.createContextPack(session, coordinator, brief, undefined, 'final_delivery');
+    if (limitations.length) {
+      finalContextPack.constraints = [
+        ...finalContextPack.constraints,
+        'The user selected limited delivery. Preserve every listed limitation in the final delivery risks and do not claim it was verified.',
+        ...limitations.map((limitation) => `Limited delivery: ${limitation}`)
+      ];
+    }
     const finalRun = await this.runRuntime(session, {
       runId: crypto.randomUUID(),
       sessionId: session.id,
@@ -1280,6 +1479,7 @@ export class OrchestratorService {
       metadata: {
         ...(finalOutput as unknown as Record<string, unknown>),
         phase: 'final_delivery',
+        limitations,
         fileChanges: deliveryFileChanges
       }
     });
@@ -1300,7 +1500,7 @@ export class OrchestratorService {
           goal: brief.goal,
           summary: finalOutput.summary,
           completedItems: finalOutput.completedItems,
-          risks: finalOutput.risks
+          risks: [...finalOutput.risks, ...limitations]
         },
         sourceArtifactId: deliveryArtifact.id,
         fileChanges: notificationFileChanges
@@ -1314,6 +1514,7 @@ export class OrchestratorService {
       content: messages.finalDeliveryCreated,
       metadata: createMetadata('delivery_card', {
         ...finalOutput,
+        limitations,
         artifactRefs,
         notificationDraftArtifactId: notificationDraft.id
       })
@@ -2254,7 +2455,29 @@ export class OrchestratorService {
   }
 
   private isArchitectureAnalysisSession(session: SessionDetail, brief?: TaskBrief) {
-    return /架构|结构|目录|熟悉|分析项目|项目分析|了解项目/i.test(`${session.originalInput}\n${brief?.goal ?? ''}`);
+    return this.isArchitectureAnalysisText(`${session.originalInput}\n${brief?.goal ?? ''}`);
+  }
+
+  private isArchitectureAnalysisTask(session: SessionDetail, task: AgentTask, brief?: TaskBrief) {
+    return this.isArchitectureAnalysisText(
+      [
+        session.originalInput,
+        brief?.goal,
+        task.title,
+        task.description,
+        task.assignmentReason,
+        ...(task.contextRequirements ?? []),
+        ...(task.acceptanceCriteria ?? [])
+      ]
+        .filter(Boolean)
+        .join('\n')
+    );
+  }
+
+  private isArchitectureAnalysisText(text: string) {
+    return /architecture|architect|project structure|project analysis|main execution|main flow|main path|架构|结构|目录|熟悉|分析项目|项目分析|了解项目|主链路/i.test(
+      text
+    );
   }
 
   private async applyServerLocalArtifactChanges(
@@ -2356,12 +2579,14 @@ export class OrchestratorService {
     const summaryMemory = this.createSummaryMemory(session, brief, task, phase);
     const runtimeAgent = this.toRuntimeAgent(agent, runtimeSelection);
     const coverageRule = buildCoverageSystemRule(session.workspaceSnapshot);
+    const skillRules = this.skills?.systemRules(agent.skillIds ?? []) ?? [];
     return {
       systemRules: [
         'Return structured JSON matching the expected RuntimeOutput kind.',
         'Do not perform external side effects unless explicitly allowed by capability policy.',
         'Use workspaceManifest for project structure and selectedEvidenceContents for readable evidence content.',
         'Treat taskContext.evidenceRefs as the selected minimal evidence set; request more context instead of inferring omitted file contents.',
+        ...skillRules,
         ...(coverageRule ? [coverageRule] : [])
       ],
       sessionGoal: session.originalInput,
@@ -2690,7 +2915,7 @@ export class OrchestratorService {
       stagePlan: this.createStagePlan(session, domain, intent, phase, brief, task, taskMap, validationRules, scopedEvidenceRefs),
       executionMode: session.participatingAgentIds.length > 1 ? 'multi_agent' : 'single_agent',
       validationMode: domain === 'coding' || domain === 'mixed' ? 'mixed' : 'human_review',
-      requiresCodeChanges: domain !== 'non_coding',
+      requiresCodeChanges: session.requiresCodeChanges ?? intent === 'implementation',
       requiresExternalEvidence: Boolean(artifacts.length || recentEvents.length || session.knowledgeBaseIds?.length),
       validationRules,
       agentResponsibilities: this.createAgentResponsibilities(session, domain, task),
@@ -3312,8 +3537,8 @@ export class OrchestratorService {
       shouldUseAssignedAgent && assignedAgentKey
         ? assignedAgentKey
         : domain === 'non_coding'
-        ? choose(['requirements', 'product-manager', 'architect'], 'requirements')
-        : choose(['backend', 'frontend', 'architect', 'requirements'], 'backend');
+        ? choose(['requirements', 'product-manager'], 'requirements')
+        : choose(['backend', 'frontend', 'requirements'], 'backend');
     const validationKey = choose(['test', 'review'], 'test');
     const reviewKey = choose(['review', 'test'], 'review');
     return [
@@ -3728,16 +3953,64 @@ export class OrchestratorService {
     return score;
   }
 
+  /**
+   * Session 固化执行目标（设计 8：executionTarget 优先于 Agent 自身 runtime/model）。
+   * 仅当 runtime 无 per-agent override 时覆盖 runtimeType；modelId 始终以 executionTarget 为准。
+   */
+  private applyExecutionTarget(session: SessionDetail, input: AgentRunInput): AgentRunInput {
+    const target = session.executionTarget;
+    if (!target) {
+      return input;
+    }
+    const hasSessionOverride =
+      input.agent.runtimeSelection?.source === 'agent_override' &&
+      Boolean(session.engineeringRuntime?.agentRuntimeOverrides?.[input.agent.id] ??
+        session.engineeringRuntime?.agentRuntimeOverrides?.[input.agent.key]);
+    return {
+      ...input,
+      executionTarget: hasSessionOverride ? undefined : target,
+      agent: {
+        ...input.agent,
+        runtimeType: hasSessionOverride ? input.agent.runtimeType : target.runtimeType,
+        modelId: target.modelId
+      }
+    };
+  }
+
   private async runRuntime(inputSession: SessionDetail, input: AgentRunInput, signal?: AbortSignal) {
+    // v0.4: 新 Session 使用固化的 executionTarget 覆盖 Agent 自身 runtime/model。
+    // 旧 Session（无 executionTarget）保持既有选择逻辑不变。
+    input = this.applyExecutionTarget(inputSession, input);
     const budget = this.runtimeBudgetForInput(input);
+    const inputSafetyMargin = reserveInputTokenSafetyMargin(
+      budget.maxInputTokens,
+      llmInputSafetyMarginRatio()
+    );
+    const effectiveMaxInputTokens = inputSafetyMargin.effectiveMaxInputTokens;
+    const inputEstimateParts = this.runtimeInputEstimateParts(input);
+    const fixedInputEstimate = estimateRuntimeInputTokens({
+      contextPack: { ...input.contextPack, budget: { ...budget, maxInputTokens: 0 } },
+      ...inputEstimateParts
+    });
+    const originalContextEstimate = fixedInputEstimate.contextTokens;
+    const fixedInputTokens = fixedInputEstimate.totalTokens - originalContextEstimate;
+    const contextInputBudget = effectiveMaxInputTokens
+      ? Math.max(1, effectiveMaxInputTokens - fixedInputTokens)
+      : effectiveMaxInputTokens;
     const contextPack = {
       ...input.contextPack,
-      budget
+      budget: {
+        ...budget,
+        maxInputTokens: contextInputBudget
+      }
     };
     const fitted = fitContextToBudget(contextPack);
-    const maxInputTokens = fitted.contextPack.budget.maxInputTokens;
-    if (maxInputTokens && fitted.estimatedTokens > maxInputTokens) {
-      const result = this.tokenBudgetExceededResult(input, fitted.estimatedTokens, maxInputTokens);
+    const inputEstimate = estimateRuntimeInputTokens({
+      contextPack: fitted.contextPack,
+      ...inputEstimateParts
+    });
+    if (effectiveMaxInputTokens && inputEstimate.totalTokens > effectiveMaxInputTokens) {
+      const result = this.tokenBudgetExceededResult(input, inputEstimate.totalTokens, effectiveMaxInputTokens);
       const fileCount = inputSession.workspaceSnapshot?.fileCount || 0;
       const finalStage = fitted.diagnostics.stages.at(-1);
 
@@ -3745,14 +4018,20 @@ export class OrchestratorService {
         sessionId: input.sessionId,
         type: 'error_reported',
         priority: 'high',
-        content: messages.tokenBudgetExceeded(fitted.estimatedTokens, maxInputTokens) +
-                 '\n\n' + messages.tokenBudgetTooLow(fitted.estimatedTokens, maxInputTokens, fileCount) +
+        content: messages.tokenBudgetExceeded(inputEstimate.totalTokens, effectiveMaxInputTokens) +
+                 '\n\n' + messages.tokenBudgetTooLow(inputEstimate.totalTokens, effectiveMaxInputTokens, fileCount) +
                  '\n\n' + messages.tokenBudgetSuggestion(fileCount) +
                  `\n\n已尝试裁剪至 ${finalStage?.name || 'unknown'} 阶段，仍无法满足预算。`,
         metadata: createMetadata('error_card', {
           code: 'TOKEN_BUDGET_EXCEEDED',
-          estimatedTokens: fitted.estimatedTokens,
-          maxInputTokens,
+          estimatedTokens: inputEstimate.totalTokens,
+          contextEstimatedTokens: inputEstimate.contextTokens,
+          fixedPromptEstimatedTokens: fixedInputTokens,
+          inputEstimate,
+          maxInputTokens: inputSafetyMargin.configuredMaxInputTokens,
+          effectiveMaxInputTokens,
+          inputSafetyMarginTokens: inputSafetyMargin.safetyMarginTokens,
+          inputSafetyMarginRatio: inputSafetyMargin.safetyMarginRatio,
           fileCount,
           trimStage: finalStage?.name,
           suggestedBudget: fileCount < 100 ? 150_000 : fileCount < 300 ? 300_000 : 500_000,
@@ -3760,6 +4039,59 @@ export class OrchestratorService {
         })
       });
       return result;
+    }
+
+    if (
+      fitted.diagnostics.finalStage === 'navigation_only' &&
+      fitted.contextPack.taskContext.intent === 'analysis' &&
+      !(fitted.contextPack.selectedEvidenceContents ?? []).some((item) => Boolean(item.content))
+    ) {
+      const requestedPaths = this.uniqueFirstStrings(
+        [
+          ...(input.contextPack.taskContext.evidenceSelection.selectedRefs
+            .filter((ref) => ref.type === 'workspace_file' || ref.type === 'workspace_symbol')
+            .map((ref) => ref.ref ?? ref.label)),
+          ...(input.contextPack.workspaceManifest?.entrypoints ?? []),
+          ...(input.contextPack.workspaceSnapshot?.entrypoints ?? []),
+          ...(input.contextPack.workspaceFocus?.relevantFiles ?? []),
+          ...(input.contextPack.workspaceFocus?.possibleEntryPoints ?? [])
+        ],
+        8
+      );
+      const requestedContext: RuntimeContextRequest = {
+        reason: 'Analysis requires source evidence, but token fitting reached navigation_only and removed all evidence bodies.',
+        requestedRefs: input.contextPack.taskContext.evidenceSelection.selectedRefs.slice(0, 8),
+        requestedPaths: requestedPaths.length ? requestedPaths : undefined,
+        followUpInstruction: 'Read at least one requested source file, then retry the analysis with grounded evidence.'
+      };
+      return {
+        runId: input.runId,
+        runtimeType: input.agent.runtimeType,
+        status: 'failed',
+        output: {
+          kind: 'agent_message',
+          messageKind: 'risk',
+          content: requestedContext.reason
+        },
+        events: [],
+        artifacts: [],
+        usage: {
+          inputTokens: fitted.estimatedTokens,
+          outputTokens: 0,
+          totalTokens: fitted.estimatedTokens,
+          model: input.agent.modelId ?? input.agent.runtimeType
+        },
+        error: {
+          code: 'CONTEXT_INSUFFICIENT',
+          message: requestedContext.reason,
+          retryable: true,
+          requestedContext,
+          details: {
+            trimStage: fitted.diagnostics.finalStage,
+            diagnostics: fitted.diagnostics
+          }
+        }
+      } satisfies AgentRunResult;
     }
 
     if (fitted.trimmed) {
@@ -3773,44 +4105,114 @@ export class OrchestratorService {
         metadata: createMetadata('system_notice', {
           runtimeInvocationId: input.runId,
           code: 'TOKEN_CONTEXT_TRIMMED',
-          estimatedTokens: fitted.estimatedTokens,
-          maxInputTokens,
+          estimatedTokens: inputEstimate.totalTokens,
+          contextEstimatedTokens: inputEstimate.contextTokens,
+          fixedPromptEstimatedTokens: fixedInputTokens,
+          inputEstimate,
+          maxInputTokens: inputSafetyMargin.configuredMaxInputTokens,
+          effectiveMaxInputTokens,
+          inputSafetyMarginTokens: inputSafetyMargin.safetyMarginTokens,
+          inputSafetyMarginRatio: inputSafetyMargin.safetyMarginRatio,
           trimStage: finalStage?.name,
           diagnostics: fitted.diagnostics
         })
       });
     }
 
+    const adapter = this.runtime.getAdapter(input.agent.runtimeType);
+    const resumeOptions = buildResumeOptions(
+      input.phase,
+      input.taskId
+        ? this.runtime.findPriorInvocation(
+            input.sessionId,
+            input.agent.id,
+            input.taskId,
+            input.agent.runtimeType
+          )
+        : undefined
+    );
+    const streamedInput: AgentRunInput = {
+      ...input,
+      contextPack: fitted.contextPack,
+      budget,
+      estimatedInputTokens: inputEstimate.totalTokens,
+      options: resumeOptions ? { ...(input.options ?? {}), ...resumeOptions } : input.options
+    };
+
     const heartbeatStartedAt = Date.now();
-    const heartbeatTimer = setInterval(() => {
+    const execution = this.runtime.start(streamedInput, signal);
+    const heartbeatTimer = shouldEmitHeartbeat(adapter, execution.hasStreamingEvents)
+      ? setInterval(() => {
+          this.events.create({
+            sessionId: input.sessionId,
+            type: 'runtime_progress',
+            taskId: input.taskId,
+            fromAgentId: input.agent.id,
+            content: messages.runtimeHeartbeat(
+              input.agent.name,
+              Math.round((Date.now() - heartbeatStartedAt) / 1000)
+            ),
+            metadata: createMetadata('system_notice', {
+              runtimeInvocationId: input.runId,
+              code: 'RUNTIME_HEARTBEAT',
+              elapsedMs: Date.now() - heartbeatStartedAt
+            })
+          });
+        }, RUNTIME_HEARTBEAT_INTERVAL_MS)
+      : undefined;
+
+    const streamConsumer = execution.hasStreamingEvents
+      ? consumeRuntimeEvents(execution.events, streamedInput, {
+        events: this.events,
+        createMetadata
+      })
+      : Promise.resolve();
+
+    try {
+      const result = await execution.result;
+      await streamConsumer;
+      if (!execution.hasStreamingEvents) {
+        this.recordRuntimeResultDiagnostics(streamedInput, result);
+      }
+      this.recordTokenUsage(inputSession, result);
+      return result;
+    } finally {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+    }
+  }
+
+  private recordRuntimeResultDiagnostics(input: AgentRunInput, result: AgentRunResult) {
+    for (const event of result.events) {
+      if (event.type !== 'runtime_progress' || event.metadata?.code !== 'TOKEN_ESTIMATION_DRIFT') {
+        continue;
+      }
       this.events.create({
         sessionId: input.sessionId,
         type: 'runtime_progress',
         taskId: input.taskId,
         fromAgentId: input.agent.id,
-        content: messages.runtimeHeartbeat(input.agent.name, Math.round((Date.now() - heartbeatStartedAt) / 1000)),
+        content: event.content,
         metadata: createMetadata('system_notice', {
-          runtimeInvocationId: input.runId,
-          code: 'RUNTIME_HEARTBEAT',
-          elapsedMs: Date.now() - heartbeatStartedAt
+          ...event.metadata,
+          runtimeInvocationId: input.runId
         })
       });
-    }, RUNTIME_HEARTBEAT_INTERVAL_MS);
-
-    try {
-      const result = await this.runtime.run(
-        {
-          ...input,
-          contextPack: fitted.contextPack,
-          budget: fitted.contextPack.budget
-        },
-        signal
-      );
-      this.recordTokenUsage(inputSession, result);
-      return result;
-    } finally {
-      clearInterval(heartbeatTimer);
     }
+  }
+
+  private runtimeInputEstimateParts(input: AgentRunInput) {
+    return {
+      systemPrompt: input.agent.systemPrompt,
+      outputSchema: input.expectedOutput.jsonSchema ?? runtimeOutputSchema(input.expectedOutput.kind),
+      outputExample: runtimeOutputExample(input.expectedOutput.kind),
+      additionalPromptText: [
+        `Runtime phase: ${input.phase}`,
+        `Expected output: ${JSON.stringify(input.expectedOutput)}`,
+        'Return exactly one valid JSON object matching the requested RuntimeOutput kind.',
+        'Follow taskContext.stagePlan and ground conclusions in selectedEvidenceContents.',
+        'When evidence is insufficient, return CONTEXT_INSUFFICIENT with requestedContext instead of guessing.'
+      ]
+    };
   }
 
   private runtimeBudgetForInput(input: AgentRunInput): RuntimeBudget {
@@ -3860,7 +4262,7 @@ export class OrchestratorService {
   }
 
   private isArchitectureAnalysisInput(input: AgentRunInput) {
-    return /架构|结构|目录|熟悉|分析项目|项目分析|了解项目/i.test(
+    return this.isArchitectureAnalysisText(
       [
         input.contextPack.sessionGoal,
         input.contextPack.taskBrief?.goal,
@@ -3926,9 +4328,10 @@ export class OrchestratorService {
     const agentOverride = session.engineeringRuntime?.agentRuntimeOverrides?.[agent.id] ??
       session.engineeringRuntime?.agentRuntimeOverrides?.[agent.key];
     const agentRuntimeType = agentOverride ?? agent.runtimeType;
-    const hasAgentOverride = Boolean(agentOverride) || agent.runtimeType !== defaultAgentRuntime;
+    const hasAgentOverride =
+      Boolean(agentOverride) || (agent.runtimeType !== undefined && agent.runtimeType !== defaultAgentRuntime);
 
-    if (hasAgentOverride) {
+    if (hasAgentOverride && agentRuntimeType) {
       return {
         effectiveRuntimeType: agentRuntimeType,
         source: 'agent_override',
@@ -3975,18 +4378,29 @@ export class OrchestratorService {
   }
 
   private toRuntimeAgent(agent: Agent, runtimeSelection?: EngineeringRuntimeSelection) {
+    const fallbackRuntime = defaultAgentRuntimeType();
+    const configuredRuntimeType = agent.runtimeType ?? fallbackRuntime;
+    // 编译 Markdown Profile：展开 ${skill:key}/${tool:key}，作为所有 Runtime 的统一 systemPrompt。
+    // 编译器缺席（部分测试环境）时回退到原始 Markdown。
+    const compiled = this.profileCompiler?.compile({
+      profileMarkdown: agent.profileMarkdown ?? '',
+      agentCapabilityIds: agent.capabilityIds
+    });
+    const systemPrompt =
+      compiled?.systemPrompt?.trim() || agent.profileMarkdown?.trim() || `${agent.name}: ${agent.role}`;
     return {
       id: agent.id,
       key: agent.key,
       name: agent.name,
       role: agent.role,
       profileMarkdown: agent.profileMarkdown,
-      systemPrompt: agent.profileMarkdown?.trim() || `${agent.name}: ${agent.role}`,
-      runtimeType: runtimeSelection?.effectiveRuntimeType ?? agent.runtimeType,
-      configuredRuntimeType: agent.runtimeType,
+      systemPrompt,
+      runtimeType: runtimeSelection?.effectiveRuntimeType ?? configuredRuntimeType,
+      configuredRuntimeType,
       runtimeSelection,
       modelId: agent.modelId,
-      capabilityIds: agent.capabilityIds
+      capabilityIds: agent.capabilityIds,
+      skillIds: compiled?.skillIds ?? agent.skillIds ?? []
     };
   }
 
@@ -4111,42 +4525,50 @@ export class OrchestratorService {
   private defaultSuggestedTasks(session: SessionDetail): SuggestedAgentTask[] {
     const planningKeys =
       session.taskIntent === 'planning'
-        ? ['product-manager', 'requirements', 'architect']
-        : ['requirements', 'product-manager', 'architect'];
+        ? ['product-manager', 'requirements']
+        : ['requirements', 'product-manager'];
 
     if (this.isArchitectureAnalysisSession(session)) {
       return this.architectureAnalysisSuggestedTasks(session);
     }
 
+    const appendValidation = this.shouldAppendValidationTask(session);
+
     if (session.taskDomain === 'non_coding') {
       const analysisTitle = '产出分析或方案建议';
       const validationTitle = '验证事实与交付完整性';
-      return [
+      const tasks: SuggestedAgentTask[] = [
         {
           title: analysisTitle,
           description: '围绕当前目标沉淀结构化分析、方案、计划或说明。',
           suggestedAgentKey: this.resolveParticipatingAgentKey(session, planningKeys),
           acceptanceCriteria: ['输出直接回答用户目标，并形成可复用的结构化结论。']
-        },
-        {
+        }
+      ];
+      if (appendValidation) {
+        tasks.push({
           title: validationTitle,
           description: '独立验证分析结论的事实一致性、范围一致性、可追溯性和交付完整性。',
           suggestedAgentKey: this.validationSuggestedAgentKey(session),
           acceptanceCriteria: ['验证结果映射到非编程验证规则，并指出证据、缺口和风险。'],
           dependsOnTaskTitles: [analysisTitle]
-        },
-        {
-          title: '复核结论与风险',
-          description: '检查分析或方案是否覆盖范围、风险、假设和下一步建议。',
-          suggestedAgentKey: this.resolveParticipatingAgentKey(session, ['review', 'test']),
-          acceptanceCriteria: ['复核结果明确指出已覆盖项、风险和未决问题。'],
-          dependsOnTaskTitles: [validationTitle]
+        });
+        const reviewKey = this.resolveParticipatingAgentKey(session, ['review', 'test']);
+        if (reviewKey) {
+          tasks.push({
+            title: '复核结论与风险',
+            description: '检查分析或方案是否覆盖范围、风险、假设和下一步建议。',
+            suggestedAgentKey: reviewKey,
+            acceptanceCriteria: ['复核结果明确指出已覆盖项、风险和未决问题。'],
+            dependsOnTaskTitles: [validationTitle]
+          });
         }
-      ];
+      }
+      return tasks;
     }
 
     if (session.taskDomain === 'mixed') {
-      return [
+      const tasks: SuggestedAgentTask[] = [
         {
           title: '形成需求与实现计划',
           description: '先沉淀需求理解、范围、关键约束和实现路线。',
@@ -4156,34 +4578,59 @@ export class OrchestratorService {
         {
           title: messages.defaultTaskExecuteTitle,
           description: messages.defaultTaskExecuteDescription,
-          suggestedAgentKey: this.resolveParticipatingAgentKey(session, ['backend', 'frontend', 'architect']),
+          suggestedAgentKey: this.resolveParticipatingAgentKey(session, ['backend', 'frontend']),
           acceptanceCriteria: [messages.defaultTaskExecuteAcceptance],
           dependsOnTaskTitles: ['形成需求与实现计划']
-        },
-        {
+        }
+      ];
+      if (appendValidation) {
+        tasks.push({
           title: messages.defaultTaskValidateTitle,
           description: messages.defaultTaskValidateDescription,
           suggestedAgentKey: this.validationSuggestedAgentKey(session),
           acceptanceCriteria: [messages.defaultTaskValidateAcceptance],
           dependsOnTaskTitles: [messages.defaultTaskExecuteTitle]
-        }
-      ];
+        });
+      }
+      return tasks;
     }
 
-    return [
+    const tasks: SuggestedAgentTask[] = [
       {
         title: messages.defaultTaskExecuteTitle,
         description: messages.defaultTaskExecuteDescription,
-        suggestedAgentKey: this.resolveParticipatingAgentKey(session, ['backend', 'frontend', 'architect']),
+        suggestedAgentKey: this.resolveParticipatingAgentKey(session, ['backend', 'frontend']),
         acceptanceCriteria: [messages.defaultTaskExecuteAcceptance]
-      },
-      {
+      }
+    ];
+    if (appendValidation) {
+      tasks.push({
         title: messages.defaultTaskValidateTitle,
         description: messages.defaultTaskValidateDescription,
         suggestedAgentKey: this.validationSuggestedAgentKey(session),
         acceptanceCriteria: [messages.defaultTaskValidateAcceptance]
-      }
-    ];
+      });
+    }
+    return tasks;
+  }
+
+  private shouldAppendValidationTask(session: SessionDetail): boolean {
+    if (!this.validationSuggestedAgentKey(session)) {
+      return false;
+    }
+    if (this.userExplicitlyRequestedValidation(session.originalInput)) {
+      return true;
+    }
+    if (session.taskDomain === 'mixed') {
+      return true;
+    }
+    return false;
+  }
+
+  private userExplicitlyRequestedValidation(input: string): boolean {
+    return /(?:验证|校验|复核|复盘|复查|审查|审核|检查|把关|review|validate|validation|verify|verification|check|audit|独立验证|独立复核)/i.test(
+      input
+    );
   }
 
   private selectSuggestedTasks(session: SessionDetail, runtimeSuggestedTasks: SuggestedAgentTask[]) {
@@ -4233,7 +4680,8 @@ export class OrchestratorService {
       const hasValidationTask = runtimeSuggestedTasks.some((task) =>
         /validate|validation|验证|事实|trace|evidence|完整性|test/i.test(`${task.title} ${task.description}`)
       );
-      if (allCodingAgents || !hasValidationTask) {
+      const shouldAppendValidation = this.shouldAppendValidationTask(session);
+      if (allCodingAgents || (!hasValidationTask && shouldAppendValidation)) {
         return this.withReadOnlySuggestedTaskPolicy(session, this.defaultSuggestedTasks(session));
       }
     }
@@ -4242,7 +4690,15 @@ export class OrchestratorService {
   }
 
   private withReadOnlySuggestedTaskPolicy(session: SessionDetail, suggestions: SuggestedAgentTask[]) {
-    const planned = this.withSuggestedTaskPlanningDetails(session, suggestions);
+    const participatingKeys = new Set(this.participatingAgents(session).map((agent) => agent.key));
+    const validAgentSuggestions = suggestions.filter((task) => {
+      if (!task.suggestedAgentKey) {
+        return true;
+      }
+      return participatingKeys.has(task.suggestedAgentKey);
+    });
+
+    const planned = this.withSuggestedTaskPlanningDetails(session, validAgentSuggestions);
     if (!this.isReadOnlyResponseSession(session)) {
       return planned;
     }
@@ -4267,7 +4723,7 @@ export class OrchestratorService {
     return {
       title: '查看并说明整体需求内容',
       description: '在会话中整理和说明用户需要查看的整体内容，不生成文件、不写入工作区。',
-      suggestedAgentKey: this.resolveParticipatingAgentKey(session, ['architect', 'requirements', 'product-manager', 'review']),
+      suggestedAgentKey: this.resolveParticipatingAgentKey(session, ['requirements', 'product-manager', 'review']),
       acceptanceCriteria: [
         '输出可直接在会话中阅读的分析结果。',
         '不返回 fileChanges，不写入 agent-output、docs 或其他工作区文件。'
@@ -4281,17 +4737,17 @@ export class OrchestratorService {
       {
         title: analysisTitle,
         description:
-          '作为一线架构分析任务，基于用户目标、workspaceManifest、projectMap 和 selectedEvidenceContents 直接分析当前项目，先产出架构视角的项目理解。',
-        suggestedAgentKey: this.resolveParticipatingAgentKey(session, ['architect', 'requirements', 'product-manager']),
+          '作为唯一的架构师场景，基于用户目标、workspaceManifest、projectMap 和 selectedEvidenceContents 直接分析当前项目结构与主链路，并给出架构方面的想法和建议。',
+        suggestedAgentKey: this.resolveArchitectureAgentKey(session),
         assignmentReason:
-          '用户目标是理解或分析项目架构，系统架构师应直接从模块边界、目录职责、入口链路、数据/事件流、运行时协作和技术风险角度分析项目。',
+          '用户目标是理解或分析项目架构，系统架构师只负责从目录职责、模块边界、入口链路、数据/事件/Runtime 流和架构风险角度分析当前项目。',
         contextRequirements: [
           'Original user requirement',
           'workspaceManifest and projectMap',
           'Selected readable evidence contents for entrypoints, config files, docs, contracts, and core modules'
         ],
         verificationPlan: [
-          '输出包含总体定位、目录分层、主运行链路、模块边界、数据/事件/Runtime 流、关键阅读路径和未确认风险。',
+          '输出包含总体定位、目录分层、主运行链路、模块边界、数据/事件/Runtime 流、架构想法、建议阅读路径和未确认风险。',
           '明确区分基于证据的结论、目录级推断和需要补充源码正文才能确认的点。'
         ],
         riskNotes: [
@@ -4300,22 +4756,20 @@ export class OrchestratorService {
         ],
         acceptanceCriteria: [
           '架构师直接输出面向用户理解项目的架构分析。',
-          '分析覆盖项目定位、目录职责、核心入口、模块边界、主链路、技术栈、风险缺口和建议阅读顺序。',
+          '分析覆盖项目定位、目录职责、核心入口、模块边界、主链路、技术栈、架构想法、建议和风险缺口。',
           '结论引用 workspaceManifest、projectMap 或 selectedEvidenceContents 中的证据。'
         ]
-      },
-      {
-        title: '复核项目架构分析完整性',
-        description: '检查架构师的一线项目分析是否覆盖用户目标、证据、边界、风险和后续阅读路径。',
-        suggestedAgentKey: this.resolveParticipatingAgentKey(session, ['review', 'test']),
-        dependsOnTaskTitles: [analysisTitle],
-        acceptanceCriteria: ['复核结论指出架构分析是否足够帮助用户熟悉项目，以及仍缺哪些证据。']
       }
     ];
   }
 
   private ensureValidationSuggestedTask(session: SessionDetail, suggestions: SuggestedAgentTask[]) {
     const validationAgentKey = this.validationSuggestedAgentKey(session);
+
+    if (!validationAgentKey) {
+      return suggestions.filter((task) => !this.isValidationSuggestedTask(task));
+    }
+
     const normalized = suggestions.map((task) =>
       this.isValidationSuggestedTask(task)
         ? {
@@ -4325,6 +4779,10 @@ export class OrchestratorService {
         : task
     );
     if (normalized.some((task) => this.isValidationSuggestedTask(task))) {
+      return normalized;
+    }
+
+    if (!this.shouldAppendValidationTask(session)) {
       return normalized;
     }
 
@@ -4386,7 +4844,7 @@ export class OrchestratorService {
       case 'product-manager':
         return 'This task focuses on clarifying scope, constraints, and delivery shape before execution.';
       case 'architect':
-        return 'This task needs architecture judgment to translate the brief into a concrete implementation path.';
+        return 'This task is the dedicated project architecture analysis scenario.';
       case 'frontend':
         return 'This task primarily changes user-facing behavior and should stay with the frontend specialist.';
       case 'backend':
@@ -4412,7 +4870,7 @@ export class OrchestratorService {
       case 'product-manager':
         return [...taskBriefContext, 'Original user requirement', 'Relevant product or design documents'];
       case 'architect':
-        return [...taskBriefContext, 'Relevant architecture/design docs', 'Touched modules and contracts'];
+        return [...taskBriefContext, 'Workspace structure', 'Entrypoints, project map, and selected readable evidence'];
       case 'frontend':
         return [...taskBriefContext, 'Frontend components/styles', 'UI or interaction contracts'];
       case 'backend':
@@ -4478,6 +4936,10 @@ export class OrchestratorService {
 
   private validationSuggestedAgentKey(session: SessionDetail) {
     return this.resolveParticipatingAgentKey(session, ['test', 'review']);
+  }
+
+  private resolveArchitectureAgentKey(session: SessionDetail): string | undefined {
+    return this.resolveParticipatingAgentKey(session, ['architect']);
   }
 
   private resolveParticipatingAgentKey(session: SessionDetail, preferredKeys: string[]): string | undefined {

@@ -120,6 +120,7 @@ function confirmationFromMessage(message: ChatMessage): ConfirmationCardState | 
     description: payload.description,
     status: (payload.status as ConfirmationCardState['status'] | undefined) ?? 'pending',
     options: payload.options,
+    actions: payload.actions,
     relatedBriefId: payload.relatedBriefId as string | undefined,
     relatedTaskId: payload.relatedTaskId as string | undefined,
     relatedCapabilityId: payload.relatedCapabilityId as string | undefined,

@@ -1,0 +1,13 @@
+{
+  "seatId": "claude-1",
+  "runnerType": "claude",
+  "state": "done",
+  "currentTask": "3",
+  "currentAction": "completed",
+  "workspacePath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\worktrees\\sess_20260708_194833_712\\claude-1-1783511417519",
+  "controlMode": "accept",
+  "nativeModeId": "claude:acceptEdits",
+  "startedAt": "2026-07-08T11:50:17.984Z",
+  "updatedAt": "2026-07-08T11:50:34.269Z",
+  "finishedAt": "2026-07-08T11:50:34.269Z"
+}

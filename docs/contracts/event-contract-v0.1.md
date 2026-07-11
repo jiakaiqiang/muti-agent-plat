@@ -361,3 +361,105 @@ data: {"time":"2026-05-27T00:00:00.000Z"}
 - 任务事件必须有 `taskId` 或 `metadata.payload.taskId`。
 - 高风险工具事件必须包含 `requiresUserConfirmation`。
 - `createdAt` 使用 ISO 8601。
+
+## 10. v0.2 迁移说明（双写期）
+
+v0.2 引入统一的 `ActorRef` 表达"事件/任务是谁发起、谁负责、谁分配"，同时保留 v0.1 的旧字段作为双写降级。发布时间点：M3 阶段随 event 序列化改造合入，v0.3 起旧字段将被移除。
+
+### 10.1 新增类型
+
+```ts
+type ActorType = 'user' | 'agent' | 'system'
+
+type ActorRef = {
+  type: ActorType
+  id: string
+  displayName?: string
+}
+```
+
+### 10.2 事件结构新增字段
+
+```ts
+type CollaborationEvent = {
+  // ...v0.1 已有字段
+  actor?: ActorRef            // v0.2 新增；未来主字段
+  fromAgentId?: string        // v0.2 保留；v0.3 移除（deprecated）
+}
+```
+
+### 10.3 任务结构新增字段
+
+```ts
+type AgentTask = {
+  // ...v0.1 已有字段
+  assignee?: ActorRef         // v0.2 新增
+  assignedBy?: ActorRef       // v0.2 新增
+  assigneeAgentId?: string    // v0.2 保留；v0.3 移除（deprecated）
+  assignedByAgentId?: string  // v0.2 保留；v0.3 移除（deprecated）
+}
+```
+
+### 10.4 双写与推导规则
+
+M3-04 `events.create` 内部依据下列规则推导 `actor`，写入事件时 `actor` 与旧字段同时落盘（双写）：
+
+| 事件场景 | actor.type | actor.id 来源 |
+| --- | --- | --- |
+| 用户消息 | `user` | 会话用户 id |
+| Agent 输出 | `agent` | `fromAgentId` |
+| Coordinator 分派/改派/取消 | `agent` | 会话 Coordinator agent id |
+| 系统/编排器自身事件（heartbeat、status 切换） | `system` | 固定 `system` |
+| Runtime 侧事件（有 `fromAgentId`） | `agent` | 关联 agent id |
+| Runtime 侧事件（无 `fromAgentId`） | `system` | 固定 `system` |
+
+任务的 `assignee` / `assignedBy` 由 orchestrator 在分派/接受路径上填入，`AgentTask` 落库同时保留 `assigneeAgentId` / `assignedByAgentId` 直至 v0.3。
+
+### 10.5 前端契约
+
+- 前端时间线组件必须**优先读 `actor`**（M3-06 落地）；`actor` 缺失回退到旧字段：
+  - 事件：`actor.id` → `fromAgentId`
+  - 任务：`assignee.id` → `assigneeAgentId`；`assignedBy.id` → `assignedByAgentId`
+- 展示名优先取 `actor.displayName`，否则由前端根据 `actor.type` + id 查会话 agent 名字兜底。
+
+### 10.6 弃用字段清单
+
+以下字段在 v0.2 保留双写，v0.3 移除：
+
+- `CollaborationEvent.fromAgentId`
+- `TaskEventPayload.assigneeAgentId`（v0.2 仍写入以兼容 v0.1 UI）
+- `TaskEventPayload.assignedByAgentId`（同上）
+- `AgentTask.assigneeAgentId`
+- `AgentTask.assignedByAgentId`
+
+### 10.7 迁移清单
+
+- M3-02：`ActorType` / `ActorRef` 加入 `packages/shared/src/contracts.ts`，事件类型追加 `actor?`。
+- M3-03：`AgentTask` 追加 `assignee?` / `assignedBy?`；数据层同步。
+- M3-04：`events.create` 推导 `actor` 并双写。
+- M3-05：历史事件/任务回填脚本，为已有数据补 `actor` / `assignee` / `assignedBy`。
+- M3-06：前端时间线读 `actor` 优先，回退旧字段。
+- M3-07：v0.2 合同测试回归。
+
+### 10.8 变更日志
+
+- v0.2（2026-07-09，M3-01 起草）：引入 `actor` / `assignee` / `assignedBy` 统一 actor 契约，旧字段进入双写弃用期；v0.3 计划移除。
+- v0.2（2026-07-09，M3-07 回归）：`events.service.create` 单点推导 actor（M3-04）、backfill 脚本落地（M3-05）、前端 timeline 走 `useActor` 双数据源渲染（M3-06）。
+- v0.2（2026-07-10，R3 完成）：任务创建/更新/改派路径完成 `assignee/assignedBy` 与旧字段双写；file/PostgreSQL collection 回填支持 dry-run、备份和 apply；Actor/Task/backfill 单测及 Web build 通过。
+
+### 10.9 Runtime 恢复审计事件
+
+CLI Resume 失败或 session id 不一致并触发单次 fresh-session fallback 时，必须写入：
+
+```ts
+{
+  type: 'runtime_progress',
+  metadata: {
+    code: 'RESUME_FALLBACK',
+    runtimeType: 'codex' | 'claude_code',
+    priorCliSessionId?: string
+  }
+}
+```
+
+该事件只表达恢复路径切换，不等于运行失败；最终状态仍由后续 `runtime_completed/runtime_failed` 决定。

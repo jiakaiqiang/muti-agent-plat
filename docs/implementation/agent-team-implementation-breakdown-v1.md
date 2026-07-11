@@ -321,7 +321,7 @@ TaskNodeInspector.vue
 - Database Schema Agent
 - Session Service Agent
 - Event Service Agent
-- User Message Router Agent
+- Intent Recognition System
 - Orchestrator Agent
 - Task Service Agent
 - Realtime Service Agent
@@ -406,11 +406,11 @@ TaskNodeInspector.vue
 - SSE 可实时推送。
 - 前端刷新后可以恢复完整事件流。
 
-#### 5.3.4 User Message Router
+#### 5.3.4 Intent Recognition System
 
 负责 Agent：
 
-- User Message Router Agent
+- Intent Recognition System
 
 范围：
 
@@ -459,7 +459,7 @@ TaskNodeInspector.vue
 - 默认 Agent seed。
 - 状态机。
 - 事件流。
-- User Message Router。
+- Intent Recognition System。
 - Orchestrator。
 
 ### 5.5 Backend Team 依赖
@@ -640,7 +640,7 @@ v2 实现：
 
 - Session 状态机。
 - Event 写入和查询。
-- User Message Router。
+- Intent Recognition System。
 - Task Brief。
 - Orchestrator。
 - RAG 检索。
@@ -689,7 +689,7 @@ v2 实现：
 
 ```text
 执行中用户发送“不要修改数据库”
-  -> User Message Router 识别 constraint
+  -> Intent Recognition System 识别 constraint
   -> 暂停受影响任务
   -> Agent 评估影响
   -> 更新任务契约或等待用户确认
@@ -1037,7 +1037,7 @@ milestone_completed
 
 关键交付：
 
-- User Message Router。
+- Intent Recognition System。
 - 执行中插话。
 - 影响范围判断。
 - 任务暂停和恢复。
@@ -1202,7 +1202,7 @@ P0：
 - 实现 SSE 推送。
 - 实现 Task Brief 基础 API。
 - 实现 Agent Task 基础模型。
-- 实现 User Message Router 雏形。
+- 实现 Intent Recognition System 雏形。
 - 实现 Orchestrator v0。
 
 P1：

@@ -1,0 +1,13 @@
+{
+  "seatId": "codex-2",
+  "runnerType": "codex",
+  "state": "running",
+  "currentTask": "你具体可以做的事情有那些并且你的数据来源以及数据的时间是什么时候",
+  "currentAction": "Mode LastWriteTime Length Name",
+  "workspacePath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\worktrees\\sess_20260706_113814_965\\codex-2-1783309283410",
+  "controlMode": "accept",
+  "startedAt": "2026-07-06T03:41:23.963Z",
+  "updatedAt": "2026-07-06T03:42:02.918Z",
+  "processId": 47704,
+  "needsUser": false
+}

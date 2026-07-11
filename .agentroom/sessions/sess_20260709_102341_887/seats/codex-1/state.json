@@ -1,0 +1,10 @@
+{
+  "seatId": "codex-1",
+  "runnerType": "codex",
+  "state": "idle",
+  "currentAction": "idle",
+  "workspacePath": "D:\\demo\\muti-agent\\muti-agent-plat",
+  "controlMode": "accept",
+  "nativeModeId": "codex:auto",
+  "updatedAt": "2026-07-09T02:23:43.066Z"
+}

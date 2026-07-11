@@ -205,7 +205,8 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
         {
           type: 'test_report',
           title: 'Test Report',
-          summary: `${report.passed}/${report.total} tests passed`
+          summary: `${report.passed}/${report.total} tests passed`,
+          content: this.reportContent(report)
         }
       ],
       nextSuggestedActions: report.failed > 0 ? ['Inspect failing tests before continuing.'] : [],

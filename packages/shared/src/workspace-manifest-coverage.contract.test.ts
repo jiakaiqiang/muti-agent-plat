@@ -11,11 +11,12 @@ type IsExact<T, Expected> = [T] extends [Expected]
     : false
   : false;
 
-// Test 1: WorkspaceManifestCoverage has the four required fields.
+// Test 1: WorkspaceManifestCoverage includes generated-directory audit coverage.
 const coverage: WorkspaceManifestCoverage = {
   totalEntriesSeen: 12,
   scannedEntries: 10,
   readableFiles: 8,
+  generatedSkipped: 1,
   skippedByReason: {
     ignored_directory: 1,
     binary: 0,

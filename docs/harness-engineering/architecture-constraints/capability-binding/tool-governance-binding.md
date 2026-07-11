@@ -25,7 +25,7 @@
 
 low、medium、high 三档必须按工程策略而非业务语义解释。
 
-## 硬性规则
+## 硬性规则（Hard Rules）
 
 - 高风险能力不允许 Agent 自我审批。
 - blocked 状态的能力不允许绕过。

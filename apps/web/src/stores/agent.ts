@@ -1,13 +1,14 @@
 import { defineStore } from 'pinia'
 import { defaultAgents } from '@agent-cluster/shared'
 import { apiGet, apiPatch, apiPost } from '@/api/client'
-import type { Agent, RuntimeCapabilityDefinition, RuntimeType } from '@/types/contracts'
+import type { Agent, CapabilityDefinition, CompiledAgentProfile, RuntimeType } from '@/types/contracts'
 
 type CreateAgentInput = {
   name: string
   role: string
   tags?: string[]
   capabilityIds?: string[]
+  profileMarkdown?: string
   modelId?: string
   runtimeType?: RuntimeType
 }
@@ -15,6 +16,11 @@ type CreateAgentInput = {
 type UpdateAgentInput = Partial<
   Pick<Agent, 'name' | 'role' | 'tags' | 'capabilityIds' | 'status' | 'modelId' | 'runtimeType' | 'profileMarkdown'>
 >
+
+type ValidateProfileInput = {
+  profileMarkdown: string
+  capabilityIds?: string[]
+}
 
 const capabilityNameById: Record<string, string> = {
   'cap-brief': '任务契约生成',
@@ -42,7 +48,7 @@ function mergeWithDefaultAgents(agents: Agent[]) {
 export const useAgentStore = defineStore('agent', {
   state: () => ({
     agents: [] as Agent[],
-    capabilities: [] as RuntimeCapabilityDefinition[]
+    capabilities: [] as CapabilityDefinition[]
   }),
   getters: {
     agentById: (state) => (agentId: string) => state.agents.find((agent) => agent.id === agentId),
@@ -69,11 +75,31 @@ export const useAgentStore = defineStore('agent', {
     },
     async updateAgent(agentId: string, input: UpdateAgentInput) {
       const agent = await apiPatch<Agent>(`/agents/${agentId}`, input)
-      this.agents = this.agents.map((item) => (item.id === agent.id ? agent : item))
+      this.applyServerAgent(agent)
       return agent
     },
+    applyServerAgent(agent: Agent) {
+      const hasAgent = this.agents.some((item) => item.id === agent.id)
+      this.agents = hasAgent
+        ? this.agents.map((item) => (item.id === agent.id ? agent : item))
+        : [agent, ...this.agents]
+    },
+    removeSkillReference(skillId: string, agentIds?: string[]) {
+      const affectedAgentIds = agentIds ? new Set(agentIds) : undefined
+      this.agents = this.agents.map((agent) => {
+        if (affectedAgentIds && !affectedAgentIds.has(agent.id)) return agent
+        if (!(agent.skillIds ?? []).includes(skillId)) return agent
+        return {
+          ...agent,
+          skillIds: (agent.skillIds ?? []).filter((id) => id !== skillId)
+        }
+      })
+    },
     async loadCapabilities() {
-      this.capabilities = await apiGet<RuntimeCapabilityDefinition[]>('/capabilities')
+      this.capabilities = await apiGet<CapabilityDefinition[]>('/capabilities')
+    },
+    async validateProfile(input: ValidateProfileInput) {
+      return await apiPost<CompiledAgentProfile>('/agents/profile/validate', input)
     }
   }
 })

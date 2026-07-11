@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AgentsModule } from '../agents/agents.module.js';
+import { AgentProfileModule } from '../agent-profile/agent-profile.module.js';
 import { ArtifactsModule } from '../artifacts/artifacts.module.js';
 import { CapabilitiesModule } from '../capabilities/capabilities.module.js';
 import { EventsModule } from '../events/events.module.js';
@@ -7,6 +8,7 @@ import { MemoryModule } from '../memory/memory.module.js';
 import { KnowledgeModule } from '../rag/knowledge.module.js';
 import { RuntimeModule } from '../runtimes/runtime.module.js';
 import { TasksModule } from '../tasks/tasks.module.js';
+import { SkillsModule } from '../skills/skills.module.js';
 import { ContextRouterService } from './context-router.service.js';
 import { OrchestratorService } from './orchestrator.service.js';
 import { ProjectMapService } from './project-map.service.js';
@@ -14,13 +16,15 @@ import { ProjectMapService } from './project-map.service.js';
 @Module({
   imports: [
     AgentsModule,
+    AgentProfileModule,
     EventsModule,
     RuntimeModule,
     TasksModule,
     KnowledgeModule,
     MemoryModule,
     ArtifactsModule,
-    CapabilitiesModule
+    CapabilitiesModule,
+    SkillsModule
   ],
   providers: [ContextRouterService, ProjectMapService, OrchestratorService],
   exports: [ContextRouterService, ProjectMapService, OrchestratorService]

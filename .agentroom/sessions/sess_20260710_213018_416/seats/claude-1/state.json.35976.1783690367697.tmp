@@ -1,0 +1,13 @@
+{
+  "seatId": "claude-1",
+  "runnerType": "claude",
+  "state": "running",
+  "currentTask": "分析这个项目D:\\work\\机器人统一平台\\mr_pro_web\\apps\\mp_robot_vue的项目架构 然后交给@codex-1 进行审查",
+  "currentAction": "Claude is thinking...",
+  "workspacePath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\worktrees\\sess_20260710_213018_416\\claude-1-1783690264431",
+  "controlMode": "accept",
+  "nativeModeId": "claude:acceptEdits",
+  "startedAt": "2026-07-10T13:31:05.214Z",
+  "updatedAt": "2026-07-10T13:32:47.696Z",
+  "processId": 65368
+}

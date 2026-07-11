@@ -1,4 +1,4 @@
-import type { RuntimeType } from '@agent-cluster/shared';
+import { DEFAULT_CONTEXT_PIPELINE_VERSION, type ContextPipelineVersion, type RuntimeType } from '@agent-cluster/shared';
 
 export type LlmProvider = 'openai-compatible' | 'ollama';
 export type LlmStructuredOutputMode = 'auto' | 'json_schema' | 'json_object';
@@ -25,6 +25,14 @@ const ollamaDefaultModel = 'llama3.2';
 export function envFlag(name: string, fallback = false) {
   const value = process.env[name];
   return value === undefined ? fallback : truthyValues.has(value.trim().toLowerCase());
+}
+
+export function contextPipelineV2Enabled() {
+  return envFlag('CONTEXT_PIPELINE_V2_ENABLED', false);
+}
+
+export function contextPipelineVersionForNewSession(): ContextPipelineVersion {
+  return contextPipelineV2Enabled() ? 'v2' : DEFAULT_CONTEXT_PIPELINE_VERSION;
 }
 
 export function defaultAgentRuntimeType(): RuntimeType {
@@ -115,6 +123,11 @@ export function llmRemoteMaxOutputTokens() {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 4_096;
 }
 
+export function llmInputSafetyMarginRatio() {
+  const parsed = Number(process.env.LLM_INPUT_SAFETY_MARGIN_RATIO ?? 0.1);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 0.5 ? parsed : 0.1;
+}
+
 export function llmRemoteStreamingEnabled() {
   return envFlag('LLM_REMOTE_STREAMING', true);
 }
@@ -164,6 +177,38 @@ export function reworkMaxRounds() {
 
 export function mockRuntimeEnabled() {
   return envFlag('MOCK_RUNTIME_ENABLED', false);
+}
+
+export type EngineeringRuntimeStreamingMode = 'off' | 'codex' | 'all';
+
+const engineeringStreamingValues = new Set<EngineeringRuntimeStreamingMode>(['off', 'codex', 'all']);
+const MAX_RUNTIME_TIMEOUT_MS = 2_147_483_647;
+
+export function engineeringRuntimeStreaming(): EngineeringRuntimeStreamingMode {
+  const raw = process.env.ENGINEERING_RUNTIME_STREAMING?.trim().toLowerCase();
+  if (raw && engineeringStreamingValues.has(raw as EngineeringRuntimeStreamingMode)) {
+    return raw as EngineeringRuntimeStreamingMode;
+  }
+  return 'off';
+}
+
+export function positiveRuntimeTimeoutMs(name: string, fallback: number) {
+  const parsed = Number(process.env[name]);
+  const normalized = Math.floor(parsed);
+  return Number.isFinite(parsed) && normalized > 0 && normalized <= MAX_RUNTIME_TIMEOUT_MS ? normalized : fallback;
+}
+
+export function optionalRuntimeTimeoutMs(name: string) {
+  const value = process.env[name]?.trim();
+  if (!value) return undefined;
+  const parsed = Number(value);
+  const normalized = Math.floor(parsed);
+  return Number.isFinite(parsed) && normalized > 0 && normalized <= MAX_RUNTIME_TIMEOUT_MS ? normalized : undefined;
+}
+
+export function engineeringRuntimeStreamingEnabledFor(runtimeType: RuntimeType): boolean {
+  const mode = engineeringRuntimeStreaming();
+  return runtimeType === 'codex' ? mode === 'codex' || mode === 'all' : runtimeType === 'claude_code' && mode === 'all';
 }
 
 export function runtimeModeLabel(runtimeType: RuntimeType) {

@@ -3,6 +3,7 @@ import { apiDelete, apiGet, apiPage, apiPost } from '@/api/client'
 import type {
   SessionDetail,
   EngineeringRuntimeConfig,
+  ExecutionTarget,
   RuntimeType,
   SessionListItem,
   SessionStatus,
@@ -11,6 +12,7 @@ import type {
   WorkspaceSnapshot,
   CollaborationEvent
 } from '@/types/contracts'
+import type { PostReviewAction } from '@/types/contracts'
 
 type CreateSessionInput = {
   input: string
@@ -22,6 +24,7 @@ type CreateSessionInput = {
   workspaceSnapshot?: WorkspaceSnapshot
   engineeringRuntimeType?: RuntimeType
   engineeringRuntime?: EngineeringRuntimeConfig
+  executionTarget?: ExecutionTarget
 }
 
 const favoriteStorageKey = 'agent-cluster.favorite-session-ids'
@@ -181,6 +184,17 @@ export const useSessionStore = defineStore('session', {
     async cancelSession(sessionId: string, confirmationId?: string) {
       await apiPost(`/sessions/${sessionId}/cancel`, confirmationId ? { confirmationId } : undefined)
       this.setCurrentStatus(sessionId, 'CANCELLED')
+    },
+    async resolvePostReviewAction(
+      sessionId: string,
+      input: { confirmationId: string; action: PostReviewAction['action'] }
+    ) {
+      const result = await apiPost<{ session: SessionDetail; action: PostReviewAction }>(
+        `/sessions/${sessionId}/post-review/actions`,
+        input
+      )
+      await this.loadSession(sessionId)
+      return result
     },
     async confirmMemory(
       sessionId: string,

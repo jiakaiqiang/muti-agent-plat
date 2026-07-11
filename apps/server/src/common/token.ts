@@ -5,6 +5,109 @@ export function estimateTokens(value: unknown) {
   return Math.ceil(text.length / 4);
 }
 
+export type RuntimeInputTokenEstimate = {
+  contextTokens: number;
+  systemPromptTokens: number;
+  schemaTokens: number;
+  exampleTokens: number;
+  additionalPromptTokens: number;
+  totalTokens: number;
+};
+
+export type InputTokenEstimationError = {
+  estimated: number;
+  actual: number;
+  ratio: number;
+};
+
+export const DEFAULT_INPUT_TOKEN_ESTIMATION_ERROR_THRESHOLD = 0.2;
+
+export function calculateInputTokenEstimationError(
+  estimated: number | undefined,
+  actual: number | undefined
+): InputTokenEstimationError | undefined {
+  if (!Number.isFinite(estimated) || (estimated ?? 0) <= 0 || !Number.isFinite(actual) || (actual ?? -1) < 0) {
+    return undefined;
+  }
+  return {
+    estimated: estimated as number,
+    actual: actual as number,
+    ratio: (actual as number) / (estimated as number)
+  };
+}
+
+export function inputTokenEstimationDrift(
+  estimated: number | undefined,
+  actual: number | undefined,
+  threshold = DEFAULT_INPUT_TOKEN_ESTIMATION_ERROR_THRESHOLD
+): InputTokenEstimationError | undefined {
+  const estimation = calculateInputTokenEstimationError(estimated, actual);
+  if (!estimation || estimation.actual <= 0) {
+    return undefined;
+  }
+  const normalizedThreshold = Number.isFinite(threshold) && threshold >= 0 ? threshold : DEFAULT_INPUT_TOKEN_ESTIMATION_ERROR_THRESHOLD;
+  return Math.abs(estimation.ratio - 1) > normalizedThreshold ? estimation : undefined;
+}
+
+export type InputTokenSafetyMargin = {
+  configuredMaxInputTokens?: number;
+  effectiveMaxInputTokens?: number;
+  safetyMarginTokens: number;
+  safetyMarginRatio: number;
+};
+
+export function reserveInputTokenSafetyMargin(
+  configuredMaxInputTokens: number | undefined,
+  safetyMarginRatio: number
+): InputTokenSafetyMargin {
+  const normalizedRatio = Number.isFinite(safetyMarginRatio)
+    ? Math.max(0, Math.min(0.5, safetyMarginRatio))
+    : 0.1;
+  const normalizedMax =
+    Number.isFinite(configuredMaxInputTokens) && (configuredMaxInputTokens ?? 0) > 0
+      ? Math.floor(configuredMaxInputTokens as number)
+      : undefined;
+  if (normalizedMax === undefined) {
+    return {
+      configuredMaxInputTokens: undefined,
+      effectiveMaxInputTokens: undefined,
+      safetyMarginTokens: 0,
+      safetyMarginRatio: normalizedRatio
+    };
+  }
+  const safetyMarginTokens = Math.min(normalizedMax - 1, Math.ceil(normalizedMax * normalizedRatio));
+  return {
+    configuredMaxInputTokens: normalizedMax,
+    effectiveMaxInputTokens: normalizedMax - safetyMarginTokens,
+    safetyMarginTokens,
+    safetyMarginRatio: normalizedRatio
+  };
+}
+
+export function estimateRuntimeInputTokens(input: {
+  contextPack: ContextPack;
+  systemPrompt?: string;
+  outputSchema?: unknown;
+  outputExample?: unknown;
+  additionalPromptText?: string[];
+}): RuntimeInputTokenEstimate {
+  const estimate = {
+    contextTokens: estimateTokens(input.contextPack),
+    systemPromptTokens: input.systemPrompt ? estimateTokens(input.systemPrompt) : 0,
+    schemaTokens: input.outputSchema === undefined ? 0 : estimateTokens(input.outputSchema),
+    exampleTokens: input.outputExample === undefined ? 0 : estimateTokens(input.outputExample),
+    additionalPromptTokens: input.additionalPromptText?.length ? estimateTokens(input.additionalPromptText) : 0,
+    totalTokens: 0
+  };
+  estimate.totalTokens =
+    estimate.contextTokens +
+    estimate.systemPromptTokens +
+    estimate.schemaTokens +
+    estimate.exampleTokens +
+    estimate.additionalPromptTokens;
+  return estimate;
+}
+
 export type ContextTokenBreakdown = {
   systemRules: number;
   sessionGoal: number;
@@ -37,6 +140,7 @@ const MAX_TASK_MAP_ITEMS = 12;
 const MAX_STAGE_PLAN_ITEMS = 8;
 const MAX_EVIDENCE_REFS = 20;
 const MAX_SELECTED_EVIDENCE_ITEMS = 3;
+const GROUNDED_EVIDENCE_FLOOR_CHARS = 96;
 
 export type ContextTrimStage = {
   name: 'initial' | 'focused' | 'compact' | 'minimal' | 'ultra-minimal' | 'emergency' | 'navigation_only';
@@ -486,13 +590,21 @@ type TrimOptions = {
 
 function trimContext(contextPack: ContextPack, options: TrimOptions): ContextPack {
   const workspaceFocus = compactWorkspaceFocus(contextPack.workspaceFocus, options.workspaceFocusItemLimit);
+  const evidenceOptions = requiresGroundedSourceEvidence(contextPack)
+    ? {
+        ...options,
+        workspaceContentCharsPerFile: Math.max(options.workspaceContentCharsPerFile, GROUNDED_EVIDENCE_FLOOR_CHARS),
+        selectedEvidenceItemLimit: Math.max(options.selectedEvidenceItemLimit, 1),
+        selectedEvidenceTotalChars: Math.max(options.selectedEvidenceTotalChars, GROUNDED_EVIDENCE_FLOOR_CHARS)
+      }
+    : options;
   return {
     ...contextPack,
     taskContext: compactTaskContext(contextPack.taskContext, options.evidenceRefLimit),
     continuationState: compactContinuationState(contextPack.continuationState),
     workspaceSnapshot: compactWorkspaceSnapshot(contextPack.workspaceSnapshot, workspaceFocus?.relevantFiles ?? [], options),
     workspaceManifest: compactWorkspaceManifest(contextPack.workspaceManifest, workspaceFocus?.relevantFiles ?? [], options),
-    selectedEvidenceContents: compactSelectedEvidenceContents(contextPack.selectedEvidenceContents, options),
+    selectedEvidenceContents: compactSelectedEvidenceContents(contextPack.selectedEvidenceContents, evidenceOptions),
     projectMap: compactProjectMap(contextPack.projectMap, options.projectMapModuleLimit),
     workspaceFocus,
     relevantEvents: options.relevantEventCount ? contextPack.relevantEvents.slice(-options.relevantEventCount) : [],
@@ -500,6 +612,18 @@ function trimContext(contextPack: ContextPack, options: TrimOptions): ContextPac
     ragSnippets: contextPack.ragSnippets.slice(0, options.ragSnippetCount),
     artifacts: contextPack.artifacts.slice(-options.artifactCount)
   };
+}
+
+function requiresGroundedSourceEvidence(contextPack: ContextPack) {
+  const hasSourceEvidence = contextPack.selectedEvidenceContents?.some(
+    (item) => Boolean(item.content) && (item.source === 'workspace_file' || item.type === 'diff')
+  );
+  if (!hasSourceEvidence) return false;
+  return (
+    contextPack.taskContext.requiresCodeChanges ||
+    contextPack.taskContext.evidenceSelection.strategy === 'architecture_analysis' ||
+    contextPack.taskContext.evidenceRefs.some((ref) => ref.type === 'workspace_file' || ref.type === 'workspace_symbol')
+  );
 }
 
 function compactWorkspaceSnapshot(
@@ -512,7 +636,9 @@ function compactWorkspaceSnapshot(
   const relevant = new Set(relevantFiles);
   let remainingContentChars = options.workspaceTotalContentChars;
   let contentFileCount = 0;
-  const rankedFiles = [...snapshot.files].sort((left, right) => fileRank(right, relevant) - fileRank(left, relevant));
+  const rankedFiles = [...snapshot.files]
+    .sort((left, right) => fileRank(right, relevant) - fileRank(left, relevant))
+    .slice(0, options.workspaceContentFileCount);
   const files = rankedFiles.map((file) => {
     const keepContent =
       Boolean(file.content) &&

@@ -310,7 +310,7 @@ Agent 执行前，Context Manager 会根据当前任务、Agent 身份和权限�
 ```text
 用户消息
   -> 写入协作事件流
-  -> User Message Router 识别意图
+  -> Intent Recognition System 识别意图
   -> Coordinator 判断影响范围
   -> 必要时暂停相关 Agent 或任务
   -> 通知受影响 Agent
@@ -778,7 +778,7 @@ NestJS Backend
   - Session Module
   - Agent Module
   - Collaboration Event Module
-  - User Message Router Module
+  - Intent Recognition System Module
   - Context Module
   - Memory Module
   - RAG Knowledge Module
@@ -1027,7 +1027,7 @@ PostgreSQL
 - 用户确认任务契约。
 - 用户继续补充后重新生成任务契约。
 - 用户消息处理协议。
-- User Message Router 雏形。
+- Intent Recognition System 雏形。
 - 执行中用户插话后的影响范围判断。
 - 确认后进入执行。
 - 执行事件写入事件流。

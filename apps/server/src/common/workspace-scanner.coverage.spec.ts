@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { GENERATED_WORKSPACE_DIRECTORIES } from '@agent-cluster/shared';
 import { scanServerWorkspace } from './workspace-scanner.js';
 
 async function withTempDir<T>(fn: (root: string) => Promise<T>): Promise<T> {
@@ -35,6 +36,7 @@ test('scanServerWorkspace exposes coverage stats', async () => {
     assert.equal(typeof coverage.readableFiles, 'number');
     assert.ok(coverage.totalEntriesSeen >= coverage.scannedEntries);
     assert.ok(coverage.readableFiles >= 2, `expected >=2 readable, got ${coverage.readableFiles}`);
+    assert.equal(coverage.generatedSkipped, 1, 'node_modules should increment generatedSkipped');
     assert.equal(coverage.skippedByReason.sensitive ?? 0, 1, '.env should be sensitive');
     assert.equal(coverage.skippedByReason.too_large ?? 0, 1, 'big.ts should be too_large');
     assert.equal(coverage.skippedByReason.ignored_directory ?? 0, 1, 'node_modules should be ignored_directory');
@@ -57,5 +59,47 @@ test('scanServerWorkspace coverage counts limit_exceeded entries', async () => {
     const coverage = workspaceSnapshot.coverage;
     assert.ok(coverage);
     assert.ok((coverage.skippedByReason.limit_exceeded ?? 0) > 0, 'expected limit_exceeded > 0');
+  });
+});
+
+test('scanServerWorkspace skips generated directories with the shared ignore rules', async () => {
+  await withTempDir(async (root) => {
+    await writeFile(join(root, 'README.md'), '# title\n');
+    for (const name of GENERATED_WORKSPACE_DIRECTORIES) {
+      if (name === '.git' || name === 'node_modules') continue;
+      await mkdir(join(root, name), { recursive: true });
+      await writeFile(join(root, name, 'generated.ts'), `export const generated = ${JSON.stringify(name)};\n`);
+    }
+
+    const { workspaceSnapshot } = await scanServerWorkspace(root);
+    assert.equal(workspaceSnapshot.coverage?.generatedSkipped, GENERATED_WORKSPACE_DIRECTORIES.length - 2);
+    for (const name of ['.nuxt', '.output', '.vite', '.turbo']) {
+      assert.equal(
+        workspaceSnapshot.files.some((item) => item.path.startsWith(`${name}/`)),
+        false,
+        `${name} contents should not be read`
+      );
+      assert.equal(
+        workspaceSnapshot.skipped.some((item) => item.path === name && item.reason === 'ignored_directory'),
+        true,
+        `${name} should be recorded as ignored_directory`
+      );
+    }
+  });
+});
+
+test('scanServerWorkspace keeps navigation complete after the 80-file content budget is exhausted', async () => {
+  await withTempDir(async (root) => {
+    for (let index = 0; index < 81; index += 1) {
+      await writeFile(join(root, `file-${String(index).padStart(2, '0')}.ts`), `// ${index}\n`);
+    }
+
+    const { workspaceSnapshot } = await scanServerWorkspace(root);
+
+    assert.equal(workspaceSnapshot.tree.length, 81);
+    assert.equal(workspaceSnapshot.coverage?.totalEntriesSeen, 81);
+    assert.equal(workspaceSnapshot.coverage?.scannedEntries, 81);
+    assert.equal(workspaceSnapshot.files.length, 80);
+    assert.equal(workspaceSnapshot.skipped.filter((item) => item.reason === 'limit_exceeded').length, 1);
   });
 });

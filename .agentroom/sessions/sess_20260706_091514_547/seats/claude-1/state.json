@@ -1,0 +1,11 @@
+{
+  "seatId": "claude-1",
+  "runnerType": "claude",
+  "state": "failed",
+  "currentTask": "你的模型是",
+  "currentAction": "The primary workspace has uncommitted changes. Pass --allow-dirty for local experiments.",
+  "workspacePath": "D:\\demo\\muti-agent\\muti-agent-plat",
+  "controlMode": "accept",
+  "error": "The primary workspace has uncommitted changes. Pass --allow-dirty for local experiments.",
+  "updatedAt": "2026-07-06T01:15:25.470Z"
+}

@@ -3,6 +3,7 @@ import { apiPage, eventStreamUrl, parseSseEvent } from '@/api/client'
 import { useAgentStore } from '@/stores/agent'
 import { useKnowledgeStore } from '@/stores/knowledge'
 import { useLocalWorkspaceStore } from '@/stores/localWorkspace'
+import { actorAgentId, eventAgentId } from '@/composables/useActor'
 import type {
   AgentCardState,
   ArtifactEventPayload,
@@ -62,9 +63,14 @@ function messageTypeOf(event: CollaborationEvent): ChatMessage['messageType'] {
 }
 
 function senderTypeOf(event: CollaborationEvent): ChatMessage['senderType'] {
+  if (event.actor) return event.actor.type
   if (event.type === 'user_message') return 'user'
   if (event.fromAgentId) return 'agent'
   return 'system'
+}
+
+function senderAgentIdOf(event: CollaborationEvent): string | undefined {
+  return eventAgentId(event)
 }
 
 function shouldRenderInTimeline(event: CollaborationEvent) {
@@ -83,7 +89,8 @@ function discussionProgress(events: CollaborationEvent[]) {
     if (event.type === 'agent_message') {
       const payload = payloadOf<{ round?: number }>(event)
       if (payload.round) {
-        if (event.fromAgentId) discussingAgents.add(event.fromAgentId)
+        const agentId = eventAgentId(event)
+        if (agentId) discussingAgents.add(agentId)
         messageCount++
         if (payload.round > maxRound) maxRound = payload.round
       }
@@ -145,8 +152,8 @@ const agentStatusStrength: Partial<Record<AgentCardState['status'], number>> = {
 }
 
 function derivedAgentId(event: CollaborationEvent) {
-  const payload = payloadOf<{ assigneeAgentId?: string; agentId?: string }>(event)
-  return payload.assigneeAgentId ?? payload.agentId ?? event.fromAgentId
+  const payload = payloadOf<TaskEventPayload & { agentId?: string }>(event)
+  return actorAgentId(payload.assignee, payload.assigneeAgentId) ?? payload.agentId ?? eventAgentId(event)
 }
 
 function statusFromEvent(event: CollaborationEvent): AgentCardState['status'] | undefined {
@@ -203,7 +210,7 @@ export const useEventStore = defineStore('event', {
           id: `msg-${event.id}`,
           sessionId: event.sessionId,
           senderType: senderTypeOf(event),
-          senderAgentId: event.fromAgentId,
+          senderAgentId: senderAgentIdOf(event),
           toAgentIds: event.toAgentIds,
           messageType: messageTypeOf(event),
           content: event.content,
@@ -294,7 +301,7 @@ export const useEventStore = defineStore('event', {
 
         if (event.type === 'artifact_created') {
           const payload = artifactPayload(event)
-          const agentId = event.fromAgentId
+          const agentId = eventAgentId(event)
           if (payload && agentId) {
             const current = cards.get(agentId)
             if (!current) continue
@@ -307,10 +314,11 @@ export const useEventStore = defineStore('event', {
           }
         }
 
-        if (event.fromAgentId && event.type !== 'agent_status_changed') {
-          const current = cards.get(event.fromAgentId)
+        const sourceAgentId = eventAgentId(event)
+        if (sourceAgentId && event.type !== 'agent_status_changed') {
+          const current = cards.get(sourceAgentId)
           if (current) {
-            cards.set(event.fromAgentId, {
+            cards.set(sourceAgentId, {
               ...current,
               recentLogs: [event.content, ...current.recentLogs].slice(0, 4),
               updatedAt: event.createdAt
@@ -352,8 +360,11 @@ export const useEventStore = defineStore('event', {
           taskId,
           title: payload.title ?? current?.title ?? taskId,
           status: payload.status,
-          assignedByAgentId: payload.assignedByAgentId ?? current?.assignedByAgentId,
-          assigneeAgentId: payload.assigneeAgentId ?? current?.assigneeAgentId,
+          assignedBy: payload.assignedBy ?? current?.assignedBy,
+          assignee: payload.assignee ?? current?.assignee,
+          assignedByAgentId:
+            actorAgentId(payload.assignedBy, payload.assignedByAgentId) ?? current?.assignedByAgentId,
+          assigneeAgentId: actorAgentId(payload.assignee, payload.assigneeAgentId) ?? current?.assigneeAgentId,
           routingMode: payload.routingMode ?? current?.routingMode,
           autoResolutionAttempted: payload.autoResolutionAttempted ?? current?.autoResolutionAttempted,
           assignmentReason: payload.assignmentReason ?? current?.assignmentReason,
@@ -385,6 +396,7 @@ export const useEventStore = defineStore('event', {
             description: payload.description,
             status: 'pending',
             options: payload.options,
+            actions: payload.actions,
             candidate: payload.candidate,
             relatedBriefId: payload.relatedBriefId as string | undefined,
             relatedTaskId: payload.relatedTaskId as string | undefined,

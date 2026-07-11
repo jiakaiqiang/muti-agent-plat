@@ -1,0 +1,10 @@
+{
+  "seatId": "claude-1",
+  "runnerType": "claude",
+  "state": "idle",
+  "currentAction": "idle",
+  "workspacePath": "D:\\demo\\muti-agent\\muti-agent-plat",
+  "controlMode": "accept",
+  "nativeModeId": "claude:acceptEdits",
+  "updatedAt": "2026-07-08T12:01:08.837Z"
+}

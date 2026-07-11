@@ -1,0 +1,18 @@
+{
+  "seats": [
+    {
+      "seatId": "codex-1",
+      "runnerType": "codex",
+      "controlMode": "accept",
+      "nativeModeId": "codex:auto"
+    },
+    {
+      "seatId": "claude-1",
+      "runnerType": "claude",
+      "controlMode": "accept",
+      "nativeModeId": "claude:acceptEdits"
+    }
+  ],
+  "allowDirty": true,
+  "updatedAt": "2026-07-10T14:31:21.817Z"
+}

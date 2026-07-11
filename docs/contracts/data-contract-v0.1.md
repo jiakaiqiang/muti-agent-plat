@@ -436,3 +436,65 @@ create table artifacts (
 - seed 必须创建默认研发 Agent。
 - 所有枚举先用 text，后续稳定后再考虑数据库 enum。
 - pgvector 扩展需要在初始化 migration 中开启。
+
+## 7. v0.2 迁移说明（双写期）
+
+与 event-contract v0.2、runtime-contract 演进保持一致，`agent_tasks` 增加 `assignee` / `assigned_by` 两列（JSONB, `ActorRef` 结构），旧 `assignee_agent_id` / `assigned_by_agent_id` 保留为双写字段，v0.3 起废弃。
+
+- 结构：`assignee` / `assigned_by` 各存 `{ type: 'user' | 'agent' | 'system', id: uuid, displayName?: string }`。
+- 双写：Coordinator 写入任务或改派时，同时写入新旧字段；读侧优先读 `assignee` / `assigned_by`，缺失时回退到旧 id 字段。
+- 兼容：M3-05 回填脚本负责为历史数据补齐 `assignee` / `assigned_by`。
+- 变更日志：v0.2（2026-07-09，M3-03 起草）新增 `assignee` / `assigned_by`，旧 id 字段进入弃用期。
+
+## 8. v0.2 当前 JSONB collection 实现
+
+当前 file/PostgreSQL persistence backend 新增或扩展以下 collection；这仍是过渡存储，不代表第 4 节关系表已经落地：
+
+| Collection | 结构 | 用途 |
+| --- | --- | --- |
+| `agents` | `Agent[]` | `Agent.skillIds` 持久化；Skill 删除时清理悬空引用 |
+| `skills` | `Skill[]` | Skill CRUD 与受限文件内容 |
+| `autopilots` | `Autopilot[]` | Autopilot 配置、schedule 和 enabled 状态 |
+| `autopilotRuns` | `AutopilotRun[]` | trigger、issueguard、sessionId 和运行终态 |
+| `runtimeInvocations` | invocation log | CLI `cliSessionId/workDir`、status、usage 和 runtimeType |
+| `eventsBySession` | session-keyed events | `actor` 与旧 `fromAgentId` 双写 |
+| `tasksBySession` | session-keyed tasks | `assignee/assignedBy` 与旧 agentId 双写 |
+
+新增 shared 数据结构：
+
+```ts
+type Skill = {
+  id: string
+  name: string
+  description?: string
+  content: string
+  files: Array<{ path: string; content: string }>
+  createdAt: string
+  updatedAt: string
+}
+
+type Autopilot = {
+  id: string
+  name: string
+  prompt: string
+  schedule?: string
+  enabled: boolean
+  runtimeType: 'mock'
+  riskLevel: 'low'
+  agentIds: string[]
+  tokenBudget?: number
+}
+
+type AutopilotRun = {
+  id: string
+  autopilotId: string
+  trigger: 'manual' | 'scheduled'
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'skipped'
+  issueguardKey: string
+  sessionId?: string
+}
+```
+
+Session 增加 `origin?: 'user' | 'autopilot'` 和 `autopilotRunId?: string`。Autopilot 创建的会话必须写入二者，保证事件、任务、artifact 可沿 session 回溯到 run。
+
+Actor PostgreSQL 回填针对 collection 表执行，默认表名遵循 persistence 配置；`--apply` 前创建时间戳备份表并在事务内更新 `eventsBySession/tasksBySession`。默认仅 dry-run。

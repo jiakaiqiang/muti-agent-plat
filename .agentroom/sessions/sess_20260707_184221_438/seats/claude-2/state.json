@@ -1,0 +1,12 @@
+{
+  "seatId": "claude-2",
+  "runnerType": "claude",
+  "state": "done",
+  "currentTask": "你的模型是",
+  "currentAction": "completed",
+  "workspacePath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\worktrees\\sess_20260707_184221_438\\claude-2-1783421020984",
+  "controlMode": "accept",
+  "startedAt": "2026-07-07T10:43:41.617Z",
+  "updatedAt": "2026-07-07T10:44:23.040Z",
+  "finishedAt": "2026-07-07T10:44:23.040Z"
+}

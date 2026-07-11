@@ -16,6 +16,11 @@ export class AgentsController {
     return ok(this.agents.getByIdOrKey(agentId));
   }
 
+  @Post('profile/validate')
+  validateProfile(@Body() body: { profileMarkdown: string; capabilityIds?: string[] }) {
+    return ok(this.agents.validateProfile(body ?? { profileMarkdown: '' }));
+  }
+
   @Post()
   create(@Body() body: Parameters<AgentsService['create']>[0]) {
     return ok(this.agents.create(body));

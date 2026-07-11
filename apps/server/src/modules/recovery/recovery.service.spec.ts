@@ -62,6 +62,23 @@ test('recovers AGENT_DISCUSSING sessions by re-driving brief generation', () => 
   assert.deepEqual(calls.outcomes, []);
 });
 
+test('recovers in-process brief generation even when BullMQ execution is enabled', () => {
+  const previous = process.env.ENABLE_BULLMQ;
+  process.env.ENABLE_BULLMQ = 'true';
+  try {
+    const discussing = makeSession('AGENT_DISCUSSING');
+    const executing = makeSession('EXECUTING');
+    const { service, calls } = makeDeps([discussing, executing]);
+
+    service.onApplicationBootstrap();
+
+    assert.deepEqual(calls.resumedBriefSessionIds, [discussing.id]);
+    assert.deepEqual(calls.executionStartedSessionIds, []);
+  } finally {
+    process.env.ENABLE_BULLMQ = previous;
+  }
+});
+
 test('still recovers EXECUTING sessions through the execution pipeline', () => {
   const session = makeSession('EXECUTING');
   const { service, calls } = makeDeps([session]);

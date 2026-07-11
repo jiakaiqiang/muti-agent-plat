@@ -40,6 +40,7 @@ export const defaultAgents: Agent[] = defaultAgentPresets.map((preset) => ({
   runtimeType: 'generic_llm',
   status: 'active',
   capabilityIds: preset.capabilityIds,
+  skillIds: [],
   defaultKnowledgeBaseIds: [],
   createdAt: defaultAgentTimestamp,
   updatedAt: defaultAgentTimestamp

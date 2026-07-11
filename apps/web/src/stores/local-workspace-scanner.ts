@@ -5,18 +5,10 @@ import type {
   WorkspaceSnapshot,
   WorkspaceTreeNode
 } from '@agent-cluster/shared'
+import { isGeneratedWorkspaceDirectory } from '@agent-cluster/shared'
 
 export type DirectoryHandle = FileSystemDirectoryHandle
 
-const ignoredDirectories = new Set([
-  '.git',
-  'node_modules',
-  'dist',
-  'build',
-  '.next',
-  '.cache',
-  'coverage'
-])
 const textExtensions = new Set([
   '.css',
   '.html',
@@ -43,6 +35,8 @@ const configFileNames = new Set([
   'vite.config.js',
   'nest-cli.json'
 ])
+const ruleFileNames = new Set(['agents.md', 'claude.md'])
+const sourceExtensions = new Set(['.css', '.html', '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.vue'])
 const maxScannedEntries = 350
 const maxReadableFiles = 80
 const maxSingleFileBytes = 80_000
@@ -52,6 +46,19 @@ function extensionOf(path: string) {
   const name = path.split('/').at(-1) ?? path
   const index = name.lastIndexOf('.')
   return index >= 0 ? name.slice(index).toLowerCase() : ''
+}
+
+export function workspaceFileScanPriority(path: string) {
+  const normalizedPath = path.replace(/\\/g, '/').toLowerCase()
+  const name = normalizedPath.split('/').at(-1) ?? normalizedPath
+  const extension = extensionOf(normalizedPath)
+
+  if (ruleFileNames.has(name)) return 0
+  if (/^(?:.*\/)?(?:src\/)?(?:main|index)\.(?:ts|tsx|js|jsx|mjs|cjs|vue)$/.test(normalizedPath) || name === 'app.vue') return 10
+  if (configFileNames.has(name) || name.includes('.config.')) return 20
+  if (sourceExtensions.has(extension)) return 30
+  if (extension === '.md' || extension === '.txt') return 40
+  return 50
 }
 
 function isSensitivePath(path: string) {
@@ -125,6 +132,7 @@ function detectEntrypoints(files: WorkspaceFileSnapshot[]) {
 
 export async function scanDirectory(root: DirectoryHandle): Promise<WorkspaceSnapshot> {
   const files: WorkspaceFileSnapshot[] = []
+  const readableCandidates: Array<{ path: string; file: File }> = []
   const skipped: WorkspaceSnapshot['skipped'] = []
   const tree: WorkspaceTreeNode[] = []
   let totalBytes = 0
@@ -132,6 +140,7 @@ export async function scanDirectory(root: DirectoryHandle): Promise<WorkspaceSna
   let totalEntriesSeen = 0
   let readableCount = 0
   let totalContentBytes = 0
+  let generatedSkipped = 0
 
   async function scan(handle: DirectoryHandle, pathPrefix: string, target: WorkspaceTreeNode[]) {
     const entries: Array<[string, FileSystemDirectoryHandle | FileSystemFileHandle]> = []
@@ -152,7 +161,8 @@ export async function scanDirectory(root: DirectoryHandle): Promise<WorkspaceSna
       if (child.kind === 'directory') {
         const node: WorkspaceTreeNode = { path, kind: 'directory', children: [] }
         target.push(node)
-        if (ignoredDirectories.has(name)) {
+        if (isGeneratedWorkspaceDirectory(name)) {
+          generatedSkipped += 1
           skipped.push({ path, reason: 'ignored_directory' })
           continue
         }
@@ -178,19 +188,7 @@ export async function scanDirectory(root: DirectoryHandle): Promise<WorkspaceSna
           skipped.push({ path, reason: 'too_large', detail: `${file.size} bytes` })
           continue
         }
-        if (readableCount >= maxReadableFiles || totalContentBytes + file.size > maxTotalContentBytes) {
-          skipped.push({ path, reason: 'limit_exceeded' })
-          continue
-        }
-        const content = await file.text()
-        readableCount += 1
-        totalContentBytes += content.length
-        files.push({
-          path,
-          size: file.size,
-          language: languageForPath(path),
-          content
-        })
+        readableCandidates.push({ path, file })
       } catch (error) {
         skipped.push({ path, reason: 'read_error', detail: error instanceof Error ? error.message : String(error) })
       }
@@ -198,6 +196,28 @@ export async function scanDirectory(root: DirectoryHandle): Promise<WorkspaceSna
   }
 
   await scan(root, '', tree)
+  readableCandidates.sort(
+    (left, right) => workspaceFileScanPriority(left.path) - workspaceFileScanPriority(right.path) || left.path.localeCompare(right.path)
+  )
+  for (const { path, file } of readableCandidates) {
+    if (readableCount >= maxReadableFiles || totalContentBytes + file.size > maxTotalContentBytes) {
+      skipped.push({ path, reason: 'limit_exceeded' })
+      continue
+    }
+    try {
+      const content = await file.text()
+      readableCount += 1
+      totalContentBytes += content.length
+      files.push({
+        path,
+        size: file.size,
+        language: languageForPath(path),
+        content
+      })
+    } catch (error) {
+      skipped.push({ path, reason: 'read_error', detail: error instanceof Error ? error.message : String(error) })
+    }
+  }
   const skippedByReason: Partial<Record<WorkspaceSkippedReason, number>> = {}
   for (const entry of skipped) {
     skippedByReason[entry.reason] = (skippedByReason[entry.reason] ?? 0) + 1
@@ -206,6 +226,7 @@ export async function scanDirectory(root: DirectoryHandle): Promise<WorkspaceSna
     totalEntriesSeen,
     scannedEntries: entryCount,
     readableFiles: readableCount,
+    generatedSkipped,
     skippedByReason
   }
   return {

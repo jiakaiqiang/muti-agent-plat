@@ -1,6 +1,13 @@
 import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
 import { ok } from '../../common/api-response.js';
-import type { EngineeringRuntimeConfig, RuntimeType, SessionWorkingDirectory, WorkspaceSnapshot } from '@agent-cluster/shared';
+import type {
+  EngineeringRuntimeConfig,
+  ExecutionTarget,
+  PostReviewAction,
+  RuntimeType,
+  SessionWorkingDirectory,
+  WorkspaceSnapshot
+} from '@agent-cluster/shared';
 import { SessionsService } from './sessions.service.js';
 
 @Controller()
@@ -28,6 +35,7 @@ export class SessionsController {
       workspaceSnapshot?: WorkspaceSnapshot;
       engineeringRuntimeType?: RuntimeType;
       engineeringRuntime?: EngineeringRuntimeConfig;
+      executionTarget?: ExecutionTarget;
     }
   ) {
     return this.sessions.create(body).then(ok);
@@ -72,6 +80,14 @@ export class SessionsController {
   @Post('sessions/:sessionId/cancel')
   cancel(@Param('sessionId') sessionId: string, @Body() body: { reason?: string; confirmationId?: string }) {
     return ok(this.sessions.control(sessionId, 'CANCELLED', body?.reason ?? '用户已取消会话', body?.confirmationId));
+  }
+
+  @Post('sessions/:sessionId/post-review/actions')
+  resolvePostReviewAction(
+    @Param('sessionId') sessionId: string,
+    @Body() body: { confirmationId: string; action: PostReviewAction['action'] }
+  ) {
+    return ok(this.sessions.resolvePostReviewAction(sessionId, body));
   }
 
   @Get('sessions/:sessionId/briefs')

@@ -1,14 +1,14 @@
 # Agent Cluster 功能清单与当前状态
 
-> 更新时间：2026-06-30
+> 更新时间：2026-07-10
 > 适用版本：`agent-cluster@0.1.0` 当前工作树
 > 本文基于 `apps/server/`、`apps/web/`、`packages/shared/`、`tests/e2e/` 和现有质量文档重新盘点。旧版 2026-06-04 的 P0/P1 问题多数已经修复，不再作为当前事实来源。
 
 ## 1. 总体结论
 
-Agent Cluster 当前已经从“v1 dry-run 演示闭环”推进到“真实优先、后台执行、可恢复、可观测”的 v1+ 状态。核心链路已经具备：会话创建、工作区快照、Agent 讨论、任务契约确认、后台执行、RAG/Memory 注入、复盘、自动返工、最终交付、飞书通知草稿、文件变更产物、SSE 事件驱动 UI 和多组 e2e 冒烟测试。
+Agent Cluster 当前已经从“v1 dry-run 演示闭环”推进到“真实优先、后台执行、可恢复、可观测”的 v1+ 状态。核心链路已经具备：会话创建、工作区快照、Agent 讨论、任务契约确认、后台执行、RAG/Memory 注入、复盘、自动返工、最终交付、飞书通知草稿、文件变更产物、SSE 事件驱动 UI、Codex/Claude 受控本地 CLI Runtime、Session Resume、Workdir Brief、Skill 和功能门控 Autopilot。
 
-当前仍不应把它描述为完整生产级真实研发平台。主要剩余缺口集中在：真实 Codex/Claude/MCP/Human runtime 未落地、RAG 仍是本地关键词检索、外部通知仍为 dry-run、工作区写入缺少 before/after diff 审阅、任务执行尚未实现受控自动流转和细粒度业务表。
+当前仍不应把它描述为完整生产级真实研发平台。主要剩余缺口集中在：MCP/Human runtime 未落地、Codex 真实调用受外部上游阻塞、Watchdog 尚缺每个目标 Runtime 20 次真实样本形成生产参数、RAG 仍是本地关键词检索、外部通知仍为 dry-run、工作区写入缺少 before/after diff 审阅、Autopilot 仅允许 mock/low-risk，以及持久化尚未拆成细粒度业务表。
 
 ## 2. 当前架构
 
@@ -25,8 +25,10 @@ apps/server (NestJS)
      │            │             ├─ in-process background pipeline
      │            │             └─ BullMQ agent-task-queue worker
      │            ├─ tasks / events / artifacts
-     │            ├─ rag / memory / capabilities
-     │            └─ workspace snapshot + fileChanges
+     │            ├─ rag / memory / capabilities / skills
+     │            ├─ Codex app-server / Claude stream-json
+     │            └─ workspace snapshot + recoverable Workdir Brief + fileChanges
+  autopilot -> issueguard -> existing session pipeline
   persistence(file JSON / PostgreSQL JSONB collection)
   recovery(on boot, non-BullMQ mode)
   ops/debug endpoints
@@ -54,7 +56,13 @@ packages/shared
 | Runtime 路由 | 完成 | `RuntimeService` 使用注册表派发 `mock/generic_llm/codex/claude_code`；未实现或未注册 runtime 显式 failed，不再静默回退 mock。 |
 | Generic LLM | 完成 | OpenAI-compatible/Ollama endpoint；缺配置时失败可见；支持超时、退避重试、取消信号和结构化 JSON 输出校验。 |
 | Mock Runtime | 完成 | 支持确定性 dry-run、延迟、失败率、工作区 fileChanges 和多种输出 kind，供本地/e2e 使用。 |
-| Codex/Claude/MCP/Human Runtime | 预留 | `codex`、`claude_code` adapter 已注册但返回未实现；`mcp_tool`、`human` 仍未接入真实执行。 |
+| Codex/Claude Runtime | 完成（受控本地，生产验收部分完成） | Codex app-server JSONL、Claude stream-json、统一 RunHandle、cancel/watchdog、stream metrics、usage/artifact、legacy 灰度和 stub e2e 已完成；Claude 真实验收通过，Codex 受 `upstream_400` 阻塞；Watchdog 20 次真实样本待采集。 |
+| MCP/Human Runtime | 预留 | `mcp_tool`、`human` 尚未接入真实执行。 |
+| Runtime Session Resume | 完成 | CLI session/workdir 显式写入 invocation log；同 runtime/workdir 恢复；失败或 session mismatch 单次 fresh fallback 并写 `RESUME_FALLBACK`。 |
+| Actor v0.2 | 完成 | Event/Task ActorRef 新旧字段双写；前端优先读 ActorRef；file/PostgreSQL collection 回填支持 dry-run、备份与 apply。 |
+| Workdir Brief | 完成 | Codex/Claude 执行前注入 AGENTS.md/CLAUDE.md 受控块和 task sidecar，结束逐字节恢复；支持 lease、崩溃恢复和 TTL。 |
+| Skill | 完成（含管理前端） | `skills` collection CRUD、Agent `skillIds` 绑定、路径/大小校验、稳定排序注入 ContextPack 与 Workdir Brief、删除引用清理；Web 支持列表/编辑/文件/绑定/删除影响和脱敏注入预览。 |
+| Autopilot | 完成（功能门控） | CRUD、手工触发、BullMQ scheduler、active issueguard、run/session 追踪已实现；默认禁用并强制 mock/low-risk。 |
 | RAG | 部分 | 知识库 CRUD、文档录入、关键词检索、`rag_retrieved` 事件和 context pack 注入已可用；pgvector/embedding 仍未落地。 |
 | Memory | 完成 | session memory 创建/检索/注入；偏好类消息先发确认卡，`POST /memories/confirm` 后才写长期记忆候选。 |
 | Capability governance | 部分 | 能力注册、风险分级、check/approve 可用；真实高风险工具执行仍默认关闭且未做端到端真实工具链。 |
@@ -62,7 +70,7 @@ packages/shared
 | 工作区感知 | 完成 | 前端可扫描本地目录并上传 `workspaceSnapshot`；后端可解析 server-local 路径；运行时基于真实文件结构生成影响面和 fileChanges。 |
 | 文件变更写回 | 部分 | 浏览器端可应用 artifact `fileChanges`；server-local 会话可写 `agent-output/`；缺少 before/after diff 审阅和细粒度冲突处理。 |
 | 飞书通知 | 部分 | 最终交付会创建 `feishu_draft` artifact 和确认卡；确认后记录 dry-run tool 完成事件；不会调用真实飞书接口。 |
-| 前端工作台 | 完成 | 三栏工作台、群聊、工作流、协作图、debug、Agent/Knowledge/Model/Tool/Notification 管理入口和中文可见文案。 |
+| 前端工作台 | 完成 | 三栏工作台、群聊、工作流、协作图、debug、Agent/Skill/Knowledge/Model/Tool/Notification 管理入口和中文可见文案。 |
 | 持久化 | 部分 | file backend 原子 rename；PostgreSQL backend 使用常驻 `pg.Pool` 和 JSONB collection 单 key upsert；尚未拆成细粒度关系表。 |
 | 可观测性 | 完成 | 启动日志输出 runtime/persistence/data/BullMQ/recovery；debug API 暴露 context packs、runtime invocations、Task Context Pack 摘要、RAG 和 token usage。 |
 | Token 预算 | 完成 | `buildBudget`、`fitContextToBudget` 做估算、裁剪和超预算失败事件；runtime usage 回写 `session.tokenUsed`。 |
@@ -95,9 +103,13 @@ packages/shared
 
 ## 5. 当前剩余风险
 
+Multica R1～R7 的生产就绪验收与直接后续增强，统一记录在 [Multica 对标改造剩余事项需求文档](../product/multica-refactor-production-readiness-requirements-v1.md)。
+
 | 优先级 | 风险 | 影响 | 建议 |
 | --- | --- | --- | --- |
-| P0 | 真实 Codex/Claude/MCP/Human runtime 未实现 | 平台不能真正调用代码代理或人工 runtime 完成真实开发任务 | v2 优先实现 Codex/Claude adapter，保留注册表失败语义和审计日志。 |
+| P0 | Codex 真实上游仍不可用 | Claude、Redis/BullMQ、PostgreSQL backfill 和 Workdir Brief 已完成环境验收；Codex 三次首轮调用均返回 `upstream_400` | 上游恢复或切换有效配置后补跑 Codex probe 与完整真实验收，不进行无界重试。 |
+| P1 | Watchdog 生产参数尚无真实样本基线 | 指标、诊断、采样和分析器已完成，但仅靠 stub/单测无法证明真实慢任务分布 | 明确成本批准后，为每个目标 Runtime 采集至少 20 次 completed 样本，批准参数并演练回滚。 |
+| P0 | MCP/Human runtime 未实现 | 平台仍不能统一调用 MCP 工具执行器或人工 runtime | 后续按现有 Runtime Adapter/Capability 合同接入，保持失败可见和审计。 |
 | P0 | 真实高风险工具未端到端接入 | 文件写入、命令执行、外部工具执行仍只在策略层预留 | 在 workspace sandbox、用户确认和审计事件齐备后逐项开启。 |
 | P1 | RAG 仍是关键词检索 | 大规模知识库召回质量有限 | 接入 embeddings/pgvector，并新增检索质量与权限测试。 |
 | P1 | Postgres 是 JSONB collection 存储 | 可恢复但难以做复杂查询、索引和审计 | 后续以 migration 拆分 sessions/events/tasks/artifacts/runtime_invocations 表。 |
@@ -112,11 +124,18 @@ packages/shared
 
 ```bash
 npm run typecheck
+npm run test
 npm run build
 npm run test:harness
 npm run test:e2e:main-chain
 npm run test:e2e:p1-behaviors
 npm run test:e2e:runtime-routing
+npm run test:e2e:codex-streaming
+npm run test:e2e:claude-streaming
+npm run test:e2e:session-resumption
+npm run test:e2e:workdir-brief
+npm run test:e2e:skill-injection
+npm run test:e2e:autopilot
 npm run test:e2e:coordinator-controlled-routing
 npm run test:e2e:runtime-model-switch
 npm run test:e2e:task-dependency

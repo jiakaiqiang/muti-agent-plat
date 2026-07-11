@@ -54,11 +54,66 @@ Agent override
 ```ts
 interface AgentRuntimeAdapter {
   type: RuntimeType
-  run(input: AgentRunInput): Promise<AgentRunResult>
+  run(input: AgentRunInput, signal?: AbortSignal): Promise<AgentRunResult>
+  start?(input: AgentRunInput, signal?: AbortSignal): AgentRuntimeRunHandle
+  /** @deprecated v0.2 双轨兼容，优先使用 start().events。 */
   stream?(runId: string): AsyncIterable<AgentRuntimeEvent>
+  /** @deprecated v0.2 双轨兼容，优先使用 start().cancel()。 */
   cancel?(runId: string): Promise<void>
 }
+
+interface AgentRuntimeRunHandle {
+  events: AsyncIterable<AgentRuntimeEvent>
+  result: Promise<AgentRunResult>
+  cancel(): Promise<void>
+}
 ```
+
+### 3.a 流式语义
+
+v0.2 的首选流式入口是 `start()`。它必须同步返回当前运行独占的 `AgentRuntimeRunHandle`，编排器立即消费 `events`，并发等待 `result`，从而消除按 `runId` 事后查询 handle 的注册竞态。
+
+`stream?(runId)` 仅作为 v0.2 双轨兼容通道保留，其历史语义如下：
+
+- **消费方约定**：orchestrator 对同一 `runId` 只调用 `stream(runId)` 一次；调用后必须持续消费直到 iterator 自然终止（`{done: true}`）。
+- **生产方约定**：adapter 保证同 `runId` 的帧按生成顺序推送；不同 `runId` 的帧互相隔离。
+- **终止时机**：`run()` 返回后（无论 completed / failed / cancelled），iterator 必须在有限时间内终止；`stream()` 上的最后一帧不得晚于 `run()` 的 result 落地。
+- **未消费保护**：如未启动消费者即 `run()` 结束，adapter 可丢弃缓冲帧；orchestrator 不应依赖"事后补看"。
+- **帧数上限**：adapter 应在通道内实施有界策略（如队列上限），避免长任务下积压帧撑爆内存；被丢弃的中间帧不影响最终 `AgentRunResult.events`。
+
+### 3.b 帧类型与事件映射
+
+adapter 内部可维护自己的原生 CLI 帧类型（如 stream-json 事件、JSON-RPC notification），但通过 `stream?` 暴露出来的只能是合同 `AgentRuntimeEvent`。映射约定：
+
+| 原生帧类别 | `AgentRuntimeEvent.type` | 备注 |
+| --- | --- | --- |
+| 助手增量文本 | `runtime_progress` | `metadata.deltaText` 承载增量内容；orchestrator 可自行聚合 |
+| 工具调用发起 | `tool_called` | `metadata.toolCallId`、`metadata.tool`、`metadata.input` |
+| 工具调用结果 | `tool_completed` | 同上 + `metadata.output`（可截断） |
+| 产物创建 | `artifact_created` | `metadata.artifactType` |
+| 终止事件 | `runtime_completed` / `runtime_failed` | 与 `AgentRunResult.status` 一致；可省略（`run()` 已表达） |
+| 未识别帧 | `runtime_progress` | `metadata.subtype` 保留原始类型；不得抛错 |
+
+内部帧类型（例如 `RuntimeStreamFrame`）**不进合同**。合同只约束消费侧看到的 `AgentRuntimeEvent`。
+
+### 3.c cancel 语义
+
+`AgentRuntimeRunHandle.cancel()` 是首选取消入口；deprecated `cancel?(runId)` 在兼容期保持相同调用契约：
+
+- **幂等**：对同一 `runId` 连续调用不得抛错；重复 cancel 无副作用。
+- **终止承诺**：调用后 `run()` 必须在有限时间内以 `status='cancelled'` 结束（不允许仍返回 completed）。
+- **不撤回**：已发出的帧不撤回；`cancel` 只影响后续帧的生成。
+- **未知 runId**：对未在跑的 `runId` 调用 `cancel` 应静默返回（`Promise<void>`），不抛错。
+- **与 AbortSignal**：优先响应 `run(input, signal)` 传入的 `AbortSignal`；`cancel(runId)` 是"从外部取回控制权"的补充路径。
+
+### 3.d 兼容与降级
+
+`start?` / `stream?` / `cancel?` 均为**可选**方法：
+
+- adapter 未实现 `start?` 时，RuntimeService 使用 `run()`；orchestrator 对没有真实 streaming events 的运行发送合成 heartbeat。
+- adapter 实现 `start?` 时，RuntimeService 必须返回本次 handle 的 `events/result/cancel`，不得先按 `runId` 查询全局 map。
+- handle 未提供独立取消能力时，编排器依赖传入的 `AbortSignal`；metadata 应准确声明 `supportsCancel`。
+- `MockRuntime` 和 `GenericLlmRuntime` 继续只实现 `run()`；Codex/Claude 在 streaming 灰度开启时实现 `start()`，在 `off` 模式保留 legacy `run()`。
 
 ## 4. AgentRunInput
 
@@ -72,6 +127,7 @@ type AgentRunInput = {
   contextPack: ContextPack
   expectedOutput: ExpectedRuntimeOutput
   budget: RuntimeBudget
+  estimatedInputTokens?: number
   options?: RuntimeOptions
 }
 ```
@@ -361,9 +417,38 @@ type AgentRunResult = {
   events: AgentRuntimeEvent[]
   artifacts: RuntimeArtifactOutput[]
   usage: RuntimeUsage
+  runtimeSession?: RuntimeSessionRef
+  streamMetrics?: RuntimeStreamMetrics
   error?: RuntimeError
 }
+
+type RuntimeSessionRef = {
+  cliSessionId?: string
+  workDir?: string
+}
+
+type RuntimeStreamMetrics = {
+  startedAt: ISODateTime
+  completedAt: ISODateTime
+  durationMs: number
+  frameCount: number
+  firstFrameAt?: ISODateTime
+  firstFrameLatencyMs?: number
+  lastActivityAt: ISODateTime
+  maxInterFrameGapMs: number
+}
 ```
+
+`runtimeSession` 是 CLI 会话恢复的显式结果字段。RuntimeService 必须优先使用该字段写入 invocation log，不得从普通进度事件 metadata 猜测 session id。
+
+`streamMetrics` 是流式 Runtime 的完成态观测字段。Codex/Claude runner 无论 completed、failed、cancelled 或 timeout 都应返回该字段；RuntimeService 必须把它写入对应 invocation log，供 Watchdog 分位数分析使用。`frameCount=0` 时 `firstFrameAt/firstFrameLatencyMs` 可以省略，`lastActivityAt` 取进程启动时间。
+
+Resume 规则：
+
+- prior invocation 必须与当前 `sessionId/agentId/taskId/runtimeType` 匹配且为最近一次 completed 调用。
+- `workDir` 必须存在、属于允许的 server-local session root，且与当前 execution workdir 一致。
+- Resume 失败或返回不同 `cliSessionId` 时，清除 resume 参数并新建会话重试一次。
+- fallback 必须产生 `runtime_progress`，`metadata.code='RESUME_FALLBACK'`；第二次失败直接返回，不递归。
 
 ```ts
 type RuntimeInvocationStatus =
@@ -518,8 +603,19 @@ type PostReviewReportOutput = {
   outOfScopeChanges: string[]
   testResults: string[]
   recommendation: 'deliver' | 'rework' | 'ask_user'
+  actions?: PostReviewAction[]
 }
+
+type PostReviewAction =
+  | { action: 'request_workspace_context'; reason: string; missingPaths: string[] }
+  | { action: 'deliver_with_limitations'; limitations: string[] }
+  | { action: 'save_progress'; artifactIds?: string[] }
+  | { action: 'cancel'; reason?: string }
 ```
+
+When Post Review cannot verify completion because workspace evidence is missing, it should return
+`recommendation='ask_user'` with a `request_workspace_context` action whose non-empty `missingPaths`
+records the exact files needed for the next review attempt.
 
 ### 8.7 FinalDeliveryOutput
 
@@ -592,7 +688,7 @@ type RuntimeArtifactOutput = {
     | 'url'
     | 'file'
   title: string
-  content?: string
+  content: string
   uri?: string
   summary?: string
   metadata?: Record<string, unknown> & {
@@ -646,13 +742,23 @@ type RuntimeBudget = {
   maxTotalTokens?: number
   maxCost?: number
 }
+
+type InputTokenEstimationError = {
+  estimated: number
+  actual: number
+  ratio: number
+}
 ```
+
+`type`、`title` 和顶层 `content` 是必填字段；`type` 只能取上述标准枚举，`title` 与 `content` 必须是非空字符串。Runtime 输出 Schema 不接受缺字段、空正文或枚举外类型。`metadata` 不得包含 `content` 键，报告正文只能存在于顶层 `content`。
 
 规则：
 
 - Runtime 必须返回 usage。
 - MockRuntime usage 可以返回 0。
 - 超预算时 Runtime 应返回 `blocked`，由 Token Budget Module 决定是否继续。
+- Orchestrator 应在 `AgentRunInput.estimatedInputTokens` 传入完整输入估算；RuntimeService 在实际 usage 可用时，将 `{ estimated, actual: usage.inputTokens, ratio: actual / estimated }` 写入 Invocation 的 `inputTokenEstimation`，供 debug runtime-invocations 查询。
+- GenericLlmRuntime 在 `actual > 0` 且 `abs(actual / estimated - 1) > 0.2` 时必须追加 `runtime_progress` 事件，`metadata.code='TOKEN_ESTIMATION_DRIFT'`，并包含 `model`、`estimated`、`actual`、`ratio`、`relativeError` 和 `threshold`；Orchestrator 应将非流式结果中的该诊断事件写入会话时间线。
 
 ## 12. MockRuntime 规则
 
@@ -694,7 +800,7 @@ GenericLlmRuntime 用于：
 - 不直接调用高风险工具。
 - 不直接修改文件。
 
-## 14. 后续 Coding Runtime 兼容要求
+## 14. Coding Runtime 兼容要求
 
 CodexRuntime 和 ClaudeCodeRuntime 接入时必须遵守：
 
@@ -704,7 +810,7 @@ CodexRuntime 和 ClaudeCodeRuntime 接入时必须遵守：
 - 必须支持 timeout。
 - 最好支持 cancel；如果不支持，需要在 Adapter 中标记。
 - 必须返回 artifact，包括 diff、测试结果或执行摘要。
-- 当前已有 `CodexRuntimeAdapter` 和 `ClaudeCodeRuntimeAdapter` 的受控本地 CLI 接入骨架，默认关闭；真实执行必须显式启用并经过 capability preflight。
+- 当前 `CodexRuntimeAdapter` 已实现 Codex app-server JSONL 生命周期，`ClaudeCodeRuntimeAdapter` 已实现 stream-json 生命周期；streaming 默认关闭，真实执行必须显式启用并经过 capability preflight。
 
 Additional real coding runtime rules:
 
@@ -736,6 +842,31 @@ type RuntimeError = {
 }
 ```
 
+`RUNTIME_TIMEOUT` 的 `details` 必须使用以下字段，且同一份脱敏字段应写入对应 `runtime_failed` 事件 metadata：
+
+```ts
+type RuntimeTimeoutDetails = {
+  watchdog: 'first_frame' | 'idle' | 'absolute'
+  runtimeType: RuntimeType
+  runId: string
+  phase: AgentRunPhase
+  thresholdMs: number
+  startedAt: ISODateTime
+  lastActivityAt: ISODateTime
+  timedOutAt: ISODateTime
+  elapsedMs: number
+  idleForMs: number
+  firstFrameSeen: boolean
+  stderrTailSummary?: string
+}
+```
+
+- `stderrTailSummary` 必须去除 ANSI 和控制字符，并限制在 1,000 字符内；不得持久化完整 stderr、凭据或完整模型输出。
+- first-frame 默认 30 秒，idle 默认 10 分钟；两者必须在 Node 定时器支持的 1～2,147,483,647 ms 范围内，非法值回退到默认值。
+- absolute 默认关闭；未设置、空值、`0` 或负数均表示关闭。
+- 对应环境变量为 `CODEX_RUNTIME_FIRST_FRAME_TIMEOUT_MS`、`CODEX_RUNTIME_IDLE_TIMEOUT_MS`、`CODEX_RUNTIME_ABSOLUTE_TIMEOUT_MS`、`CLAUDE_CODE_FIRST_FRAME_TIMEOUT_MS`、`CLAUDE_CODE_IDLE_TIMEOUT_MS`、`CLAUDE_CODE_ABSOLUTE_TIMEOUT_MS`。
+- 连续产生真实帧会刷新 idle watchdog；任务总时长超过 120 秒本身不构成 timeout。
+
 ```ts
 type RuntimeContextRequest = {
   reason: string
@@ -764,3 +895,10 @@ Supplemental context retry rules:
 - `ExpectedRuntimeOutput.kind` 与 `RuntimeOutput.kind` 必须一致。
 - Runtime 过程事件必须带 `runId`。
 - Runtime 不能绕过 Capability Module 直接执行高风险操作。
+
+## 17. 变更日志
+
+- **2026-07-10（PR-05）**：新增 `AgentRunResult.streamMetrics` 和 invocation 持久化语义；补齐 Watchdog timeout 的 runtime/run/phase/阈值/活动时间/脱敏 stderr 诊断合同；Codex/Claude 支持独立 first-frame、idle 和默认关闭的 absolute 配置。
+- **2026-07-10（R1/R2/R4/R5/R6）**：`AgentRuntimeRunHandle/start()` 成为流式主合同；`AgentRunResult.runtimeSession` 显式承载 CLI session/workdir；Codex app-server 与 Claude stream-json 接入完成；Resume 增加 workdir/runtime 校验和单次 `RESUME_FALLBACK`；CLI adapter 接入可恢复 Workdir Brief，Skill 通过 `systemRules` 和 brief 注入。
+- **2026-07-09（M2-06）**：Engineering Runtime 灰度开关 `ENGINEERING_RUNTIME_STREAMING` 语义补齐为 `off | codex | all`。`codex` 仅 CodexAdapter 走 `startCodexStreaming`；`all` CodexAdapter 与 ClaudeCodeAdapter 同时启用流式 (`--output-format stream-json`) 生命周期；默认 `off` 走旧 execFile 路径。相关 adapter 通过 `pickCodexRunMode` / `pickClaudeRunMode` 判定，`stream?/cancel?` 只在流式模式下有非空实现。
+- **2026-07-08（M1-14 ~ M2-05）**：引入 §3.a/3.b/3.c/3.d 流式语义、内部帧类型不进合同、cancel 幂等 + 有限时间承诺、可选 `stream?/cancel?` 与合成心跳降级。

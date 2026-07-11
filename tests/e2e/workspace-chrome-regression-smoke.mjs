@@ -8,11 +8,13 @@ const agentPanelSource = readFileSync(join(root, 'apps/web/src/components/AgentS
 const agentManagerSource = readFileSync(join(root, 'apps/web/src/components/AgentManager.vue'), 'utf8');
 
 const requiredWorkspacePatterns = [
-  { pattern: /type WorkspaceSection = 'session' \| 'knowledge' \| 'settings' \| 'models' \| 'tools' \| 'notifications' \| 'agents'/, reason: '工作台需要保留原有功能区状态' },
+  { pattern: /type WorkspaceSection = 'session' \| 'knowledge' \| 'settings' \| 'models' \| 'tools' \| 'notifications' \| 'agents' \| 'skills'/, reason: '工作台需要保留原有功能区状态' },
   { pattern: /const railSections:/, reason: '左侧主导航需要由功能区配置驱动' },
   { pattern: /@click="activateRailSection\(section\.id\)"/, reason: '左侧入口需要可切换，不应只是空按钮' },
   { pattern: /v-else-if="activeSection === 'agents'"/, reason: 'Agent 管理入口需要有真实内容面板' },
   { pattern: /<AgentManager :agents="agentStore\.agents"/, reason: 'Agent 添加功能需要保留在管理页' },
+  { pattern: /v-else-if="activeSection === 'skills'"/, reason: 'Skill 管理入口需要有真实内容面板' },
+  { pattern: /<SkillManager :agents="agentStore\.agents"/, reason: 'Skill 管理面板需要使用真实 Agent 状态' },
   { pattern: /v-(?:else-)?if="activeSection === 'knowledge'"/, reason: '知识库入口需要有真实内容面板' },
   { pattern: /knowledgeStore\.knowledgeBases/, reason: '知识库面板需要使用真实知识库状态' },
   { pattern: /v-else-if="activeSection === 'settings'"/, reason: '设置入口需要恢复内容面板' },
@@ -24,6 +26,7 @@ const requiredWorkspacePatterns = [
 
 const requiredChineseLabels = [
   '知识库',
+  'Skill 管理',
   '设置',
   '模型管理',
   '工具集成',

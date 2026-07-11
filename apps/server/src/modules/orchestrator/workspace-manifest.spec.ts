@@ -31,6 +31,7 @@ test('buildWorkspaceManifest strips file content but threads coverage when prese
         totalEntriesSeen: 12,
         scannedEntries: 10,
         readableFiles: 1,
+        generatedSkipped: 1,
         skippedByReason: { sensitive: 1, ignored_directory: 1 }
       }
     })
@@ -43,6 +44,7 @@ test('buildWorkspaceManifest strips file content but threads coverage when prese
   assert.equal(manifest.files[0].contentLength, 'export const a = 1\n'.length);
   assert.ok(manifest.coverage, 'coverage must be threaded to manifest');
   assert.equal(manifest.coverage.totalEntriesSeen, 12);
+  assert.equal(manifest.coverage.generatedSkipped, 1);
   assert.equal(manifest.coverage.skippedByReason.sensitive, 1);
 });
 
@@ -57,6 +59,7 @@ test('buildCoverageSystemRule returns undefined when coverage is full and nothin
         totalEntriesSeen: 5,
         scannedEntries: 5,
         readableFiles: 5,
+        generatedSkipped: 0,
         skippedByReason: {}
       }
     })
@@ -71,6 +74,7 @@ test('buildCoverageSystemRule surfaces partial scan with CONTEXT_INSUFFICIENT hi
         totalEntriesSeen: 400,
         scannedEntries: 350,
         readableFiles: 80,
+        generatedSkipped: 0,
         skippedByReason: { limit_exceeded: 50, sensitive: 1 }
       }
     })
@@ -90,6 +94,7 @@ test('buildCoverageSystemRule surfaces fully-scanned-but-skipped workspace', () 
         totalEntriesSeen: 10,
         scannedEntries: 10,
         readableFiles: 7,
+        generatedSkipped: 0,
         skippedByReason: { sensitive: 2, binary: 1 }
       }
     })

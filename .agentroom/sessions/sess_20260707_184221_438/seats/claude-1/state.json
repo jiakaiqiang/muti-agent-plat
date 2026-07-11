@@ -1,0 +1,12 @@
+{
+  "seatId": "claude-1",
+  "runnerType": "claude",
+  "state": "running",
+  "currentTask": "你当前的数据是",
+  "currentAction": "Claude is thinking...",
+  "workspacePath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\worktrees\\sess_20260707_184221_438\\claude-1-1783475931048",
+  "controlMode": "accept",
+  "startedAt": "2026-07-08T01:58:51.822Z",
+  "updatedAt": "2026-07-08T01:58:57.890Z",
+  "processId": 42572
+}

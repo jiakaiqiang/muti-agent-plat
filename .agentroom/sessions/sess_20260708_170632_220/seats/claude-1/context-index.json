@@ -1,0 +1,29 @@
+{
+  "seatId": "claude-1",
+  "entries": [
+    {
+      "id": "240d84cff2118615",
+      "seatId": "claude-1",
+      "kind": "patch",
+      "createdAt": "2026-07-08T09:09:40.238Z",
+      "sizeBytes": 0,
+      "refPath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\sessions\\sess_20260708_170632_220\\seats\\claude-1\\patch.diff",
+      "meta": {
+        "changedFiles": [],
+        "diffStat": ""
+      }
+    },
+    {
+      "id": "c71e4b42f77ef844",
+      "seatId": "claude-1",
+      "kind": "summary",
+      "createdAt": "2026-07-08T09:09:40.235Z",
+      "sizeBytes": 2279,
+      "refPath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\sessions\\sess_20260708_170632_220\\seats\\claude-1\\summary.md",
+      "meta": {
+        "changedFiles": []
+      }
+    }
+  ],
+  "updatedAt": "2026-07-08T09:09:40.238Z"
+}

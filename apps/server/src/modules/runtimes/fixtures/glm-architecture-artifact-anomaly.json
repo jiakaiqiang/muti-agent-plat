@@ -1,0 +1,20 @@
+{
+  "id": "glm-captured-architecture-artifact-anomaly",
+  "object": "chat.completion",
+  "model": "glm-4.5-air",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "{\"kind\":\"task_execution_result\",\"status\":\"completed\",\"summary\":\"已完成项目架构分析。\",\"completedItems\":[\"分析项目结构与主链路\"],\"changedArtifacts\":[{\"type\":\"architecture_analysis\",\"title\":\"项目架构分析报告\",\"metadata\":{\"content\":\"# 项目架构分析报告\\n\\n## 总体定位\\n\\n该项目采用多 Agent 协作架构。\\n\\n## 主链路\\n\\nSession → Orchestrator → Runtime → Artifact。\",\"reportKind\":\"project_architecture_analysis\",\"evidenceRefs\":[\"package.json\",\"apps/server/src/main.ts\"]}}],\"nextSuggestedActions\":[],\"risks\":[]}"
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 2048,
+    "completion_tokens": 256,
+    "total_tokens": 2304
+  }
+}

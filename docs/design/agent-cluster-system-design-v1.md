@@ -19,7 +19,7 @@
 
 Agent Cluster 中的 `ContextPack`、`Capability`、`RuntimeInvocation`、`Memory`、`SessionStatus` 等概念，是业务系统对 Harness Engineering 的 reference 映射；它们不构成其他项目使用 Harness 时必须实现的 API、模块、数据库表或 UI。
 
-当前实现状态以 [功能清单与当前状态](../analysis/feature-inventory-and-status-v1.md) 为准。本文中 PostgreSQL 细表、pgvector、真实 Codex/Claude/MCP/Human Runtime、真实飞书发送和独立 Token/Notification/Context 模块等内容，除非在当前状态文档中标记为已完成，否则应理解为目标态或后续版本范围。
+当前实现状态以 [功能清单与当前状态](../analysis/feature-inventory-and-status-v1.md) 为准。本文中 PostgreSQL 细表、pgvector、MCP/Human Runtime、真实飞书发送和独立 Token/Notification/Context 模块等内容，除非在当前状态文档中标记为已完成，否则应理解为目标态或后续版本范围。Codex/Claude 已完成受控本地 CLI 接入，生产环境可用性仍以部署侧真实凭据验收为准。
 
 ## 2. 技术栈
 
@@ -68,7 +68,7 @@ NestJS API
   ├─ Session Module
   ├─ Agent Module
   ├─ Collaboration Event Module
-  ├─ User Message Router Module
+  ├─ Intent Recognition System Module
   ├─ Orchestrator Module
   ├─ Task Module
   ├─ Context Module
@@ -271,7 +271,7 @@ final_delivery_created
 - `task_reassigned` 必须由 Coordinator 写入，子 Agent 之间不自动转派。
 - 任务规划阶段已经确定的 `assignmentReason`、`contextRequirements`、`verificationPlan`、`riskNotes`、`requiresUserConfirmation` 应随任务事件和 UI 状态一起传递，保证用户不仅能看到状态，还能理解“为什么这样分配、执行前缺什么、如何验证、是否需要先确认”。
 
-### 5.4 User Message Router Module
+### 5.4 Intent Recognition System Module
 
 职责：
 
@@ -529,7 +529,7 @@ runtime_invocation
   -> POST /sessions
   -> 创建 session
   -> 写入 user_message 事件
-  -> User Message Router 识别为新任务
+  -> Intent Recognition System 识别为新任务
   -> Orchestrator 召集默认 Agent
   -> Context Module 为各 Agent 生成 Context Pack
   -> Runtime Module 调用 Agent 讨论
@@ -545,7 +545,7 @@ runtime_invocation
 ```text
 用户发送补充消息
   -> 写入 user_message 事件
-  -> User Message Router 判断 intent
+  -> Intent Recognition System 判断 intent
   -> 如果影响任务契约，Session 状态变为 REVISING_BRIEF
   -> Orchestrator 召集受影响 Agent 重新讨论
   -> 生成新版本 Task Brief
@@ -591,7 +591,7 @@ Worker 获取任务
 ```text
 用户发送消息
   -> 写入 user_message 事件
-  -> User Message Router 生成 handling plan
+  -> Intent Recognition System 生成 handling plan
   -> 如果 shouldPause=true，暂停受影响任务
   -> Coordinator 在群聊中说明处理策略
   -> 受影响 Agent 评估影响
@@ -1229,7 +1229,7 @@ Agent 请求调用能力
 
 ### Milestone 5：用户消息处理协议
 
-- User Message Router。
+- Intent Recognition System。
 - 执行中用户插话。
 - 影响范围判断。
 - 任务暂停和恢复。
@@ -1260,7 +1260,7 @@ apps/server/src
   │  ├─ sessions
   │  ├─ agents
   │  ├─ events
-  │  ├─ user-message-router
+  │  ├─ intent-recognition
   │  ├─ orchestrator
   │  ├─ tasks
   │  ├─ context
@@ -1359,7 +1359,7 @@ v1 实现重点：
 2. 完成 Vue3 三栏群聊主界面。
 3. 完成 Agent 讨论和任务契约生成。
 4. 完成用户确认和补充需求后重新讨论。
-5. 完成 User Message Router 雏形。
+5. 完成 Intent Recognition System 雏形。
 6. 完成 dry-run 执行和 Agent 状态卡片。
 7. 完成执行后复盘一致性检查。
 8. 完成基础 RAG 和 Context Pack。
@@ -1494,6 +1494,19 @@ v3 多用户能力：
 - 知识库权限。
 - 审批权限。
 - 操作审计。
+
+### 17.5 v1+ Multica 对标补全落地
+
+2026-07-10 已在不改变主会话/编排流水线的前提下补齐：
+
+- RuntimeService 统一 `AgentRuntimeRunHandle` 生命周期，Codex app-server 与 Claude stream-json 可灰度开启，legacy execFile 保留。
+- Runtime invocation log 保存 CLI session/workdir，支持同任务同 runtime 恢复和一次性 `RESUME_FALLBACK`。
+- ActorRef 进入 Event/Task 双写、前端读取和历史 collection 回填链路。
+- CLI Runtime 使用可恢复 Workdir Brief，注入期间加 execution workdir 独占 lease，结束或启动恢复时逐字节还原。
+- Skill 使用 JSONB collection 管理，绑定到 Agent 后注入 ContextPack `systemRules` 和 Workdir Brief。
+- Autopilot 复用现有 Session/Execution/BullMQ，不创建第二套执行引擎；v0.1 默认禁用并强制 mock/low-risk。
+
+详细设计与运行边界见 [Multica 对标改造补全系统设计](./multica-refactor-completion-system-design-v1.md)。
 
 ### 17.4 版本边界总结
 

@@ -18,6 +18,7 @@ import { FileWriterTool } from '../tools/builtin/file-writer.tool.js';
 import { TestRunnerTool } from '../tools/builtin/test-runner.tool.js';
 import { ToolRegistryService } from '../tools/tool-registry.service.js';
 import { WorkspaceToolsService } from './workspace-tools.service.js';
+import { WorkdirBriefService } from './streaming/workdir-brief.service.js';
 
 @Module({
   imports: [AgentsModule, CapabilitiesModule],
@@ -38,7 +39,8 @@ import { WorkspaceToolsService } from './workspace-tools.service.js';
     CodeReaderRuntimeAdapterService,
     CodexRuntimeAdapterService,
     ClaudeCodeRuntimeAdapterService,
-    WorkspaceToolsService
+    WorkspaceToolsService,
+    WorkdirBriefService
   ],
   exports: [
     RuntimeService,
@@ -52,7 +54,8 @@ import { WorkspaceToolsService } from './workspace-tools.service.js';
     TestRunnerTool,
     CodeReaderRuntimeAdapterService,
     RuntimeModelConfigService,
-    WorkspaceToolsService
+    WorkspaceToolsService,
+    WorkdirBriefService
   ]
 })
 export class RuntimeModule {}

@@ -1,9 +1,10 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException, Optional, forwardRef } from '@nestjs/common';
 import { defaultAgents } from '@agent-cluster/shared';
-import type { Agent } from '@agent-cluster/shared';
+import type { Agent, CompiledAgentProfile } from '@agent-cluster/shared';
 import { defaultAgentRuntimeType } from '../../common/runtime-config.js';
 import { defaultCapabilityIdsByAgentKey } from '../capabilities/default-capabilities.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
+import { AgentProfileCompilerService } from '../agent-profile/agent-profile-compiler.service.js';
 
 const truthyValues = new Set(['1', 'true', 'yes', 'on']);
 const defaultAgentsByKey = new Map(defaultAgents.map((agent) => [agent.key, agent]));
@@ -16,7 +17,12 @@ export class AgentsService {
   private readonly persistedDefaultAgentIds = new Set<string>();
   private readonly seedDefaultAgents: boolean;
 
-  constructor(private readonly persistence: PersistenceService) {
+  constructor(
+    private readonly persistence: PersistenceService,
+    @Optional()
+    @Inject(forwardRef(() => AgentProfileCompilerService))
+    private readonly profileCompiler?: AgentProfileCompilerService
+  ) {
     const persistedAgents = this.persistence.getCollection<Agent[]>('agents', []);
     const defaultRuntimeType = defaultAgentRuntimeType();
     this.seedDefaultAgents = this.defaultAgentSeedEnabled();
@@ -41,7 +47,8 @@ export class AgentsService {
         modelId: agent.modelId,
         profileMarkdown: agent.profileMarkdown?.trim() || this.defaultProfileMarkdown(agent),
         runtimeType,
-        capabilityIds: Array.from(new Set([...defaultCapabilityIds, ...agent.capabilityIds]))
+        capabilityIds: Array.from(new Set([...defaultCapabilityIds, ...agent.capabilityIds])),
+        skillIds: this.normalizeStringList(agent.skillIds)
       });
     }
     this.persist();
@@ -74,18 +81,24 @@ export class AgentsService {
 
   create(input: Partial<Agent> & Pick<Agent, 'name' | 'role'>) {
     const now = new Date().toISOString();
+    const profileMarkdown = input.profileMarkdown?.trim() || this.defaultProfileMarkdown(input);
+    const capabilityIds = this.normalizeStringList(input.capabilityIds);
+    const compiled = this.compileOrThrow(profileMarkdown, capabilityIds);
+    const derivedSkillIds = compiled
+      ? Array.from(new Set([...compiled.skillIds, ...this.normalizeStringList(input.skillIds)]))
+      : this.normalizeStringList(input.skillIds);
     const agent: Agent = {
       id: input.id ?? crypto.randomUUID(),
       key: this.uniqueAgentKey(input.key ?? input.name),
       name: input.name.trim(),
       role: input.role.trim(),
       description: input.description?.trim() || undefined,
-      profileMarkdown: input.profileMarkdown?.trim() || this.defaultProfileMarkdown(input),
+      profileMarkdown,
       tags: this.normalizeStringList(input.tags),
-      modelId: input.modelId?.trim() || undefined,
-      runtimeType: input.runtimeType ?? defaultAgentRuntimeType(),
+      // v0.4: 新数据不再写入 modelId/runtimeType,交由 Session.executionTarget 决定。
       status: input.status ?? 'active',
-      capabilityIds: this.normalizeStringList(input.capabilityIds),
+      capabilityIds,
+      skillIds: derivedSkillIds,
       defaultKnowledgeBaseIds: this.normalizeStringList(input.defaultKnowledgeBaseIds),
       createdAt: input.createdAt ?? now,
       updatedAt: input.updatedAt ?? now
@@ -97,11 +110,26 @@ export class AgentsService {
 
   update(agentId: string, patch: Partial<Agent>) {
     const current = this.getByIdOrKey(agentId);
+    const profileMarkdown = patch.profileMarkdown?.trim() || current.profileMarkdown;
+    const capabilityIds = patch.capabilityIds
+      ? this.normalizeStringList(patch.capabilityIds)
+      : current.capabilityIds;
+    // Markdown 引用是 skillIds 的事实来源；仅当传入 markdown 或能力变化时重新编译。
+    const compiled =
+      patch.profileMarkdown !== undefined || patch.capabilityIds !== undefined
+        ? this.compileOrThrow(profileMarkdown ?? '', capabilityIds)
+        : undefined;
     const updated: Agent = {
       ...current,
       ...patch,
       id: current.id,
-      profileMarkdown: patch.profileMarkdown?.trim() || current.profileMarkdown,
+      profileMarkdown,
+      capabilityIds,
+      skillIds: compiled
+        ? compiled.skillIds
+        : patch.skillIds
+          ? this.normalizeStringList(patch.skillIds)
+          : current.skillIds ?? [],
       updatedAt: new Date().toISOString()
     };
     if (this.isDefaultAgent(updated)) {
@@ -110,6 +138,39 @@ export class AgentsService {
     this.agents.set(updated.id, updated);
     this.persist();
     return updated;
+  }
+
+  /**
+   * 校验并编译 Agent Profile（POST /api/agents/profile/validate）。
+   * 不修改数据，仅返回编译结果与诊断。
+   */
+  validateProfile(input: { profileMarkdown: string; capabilityIds?: string[] }): CompiledAgentProfile {
+    if (!this.profileCompiler) {
+      throw new BadRequestException('Agent profile compiler is unavailable.');
+    }
+    return this.profileCompiler.compile({
+      profileMarkdown: input.profileMarkdown ?? '',
+      agentCapabilityIds: this.normalizeStringList(input.capabilityIds)
+    });
+  }
+
+  /** 保存路径的编译入口：诊断错误时抛出，阻止保存。编译器缺席（部分单测环境）时返回 undefined。 */
+  private compileOrThrow(profileMarkdown: string, capabilityIds: string[]): CompiledAgentProfile | undefined {
+    if (!this.profileCompiler) {
+      return undefined;
+    }
+    const compiled = this.profileCompiler.compile({
+      profileMarkdown,
+      agentCapabilityIds: capabilityIds
+    });
+    const errors = compiled.diagnostics.filter((diagnostic) => diagnostic.severity === 'error');
+    if (errors.length > 0) {
+      throw new BadRequestException({
+        message: 'Agent profile has invalid references.',
+        diagnostics: errors
+      });
+    }
+    return compiled;
   }
 
   bindKnowledge(agentId: string, knowledgeBaseId: string) {
@@ -123,6 +184,35 @@ export class AgentsService {
     return this.update(agent.id, {
       defaultKnowledgeBaseIds: agent.defaultKnowledgeBaseIds.filter((id) => id !== knowledgeBaseId)
     });
+  }
+
+  bindSkill(agentId: string, skillId: string) {
+    const agent = this.getByIdOrKey(agentId);
+    return this.update(agent.id, {
+      skillIds: Array.from(new Set([...(agent.skillIds ?? []), skillId]))
+    });
+  }
+
+  unbindSkill(agentId: string, skillId: string) {
+    const agent = this.getByIdOrKey(agentId);
+    return this.update(agent.id, {
+      skillIds: (agent.skillIds ?? []).filter((id) => id !== skillId)
+    });
+  }
+
+  removeSkillReferences(skillId: string) {
+    const updated: Agent[] = [];
+    for (const agent of this.list()) {
+      if (!(agent.skillIds ?? []).includes(skillId)) continue;
+      updated.push({
+        ...agent,
+        skillIds: (agent.skillIds ?? []).filter((id) => id !== skillId),
+        updatedAt: new Date().toISOString()
+      });
+    }
+    for (const agent of updated) this.agents.set(agent.id, agent);
+    if (updated.length > 0) this.persist();
+    return updated;
   }
 
   private persist() {
@@ -154,6 +244,7 @@ export class AgentsService {
       runtimeType: seed.runtimeType,
       status: persisted.status ?? seed.status,
       defaultKnowledgeBaseIds: this.normalizeStringList(persisted.defaultKnowledgeBaseIds),
+      skillIds: this.normalizeStringList(persisted.skillIds),
       createdAt: persisted.createdAt ?? seed.createdAt,
       updatedAt: seed.updatedAt
     };

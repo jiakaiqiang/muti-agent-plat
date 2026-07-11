@@ -10,6 +10,7 @@
 - `.github/workflows/ci.yml`：执行安装、typecheck、build、主链 E2E、P1 行为 E2E、mock-free 前端检查、真实 LLM 兼容烟测、PostgreSQL 持久化 smoke、BullMQ ops smoke 和真实模式 Agent 不自动 seed 检查。
 - `docs/devops/local-development.md`：本地启动与常见操作说明。
 - `docs/devops/ci-release-checklist.md`：CI、发布和回滚 checklist。
+- `docs/devops/watchdog-baseline.md`：Codex/Claude 流式 Watchdog 指标、20 次真实采样、参数分析和回滚手册。
 - `GET /api/health`：服务健康检查。
 - `GET /api/ops/queues`：BullMQ 队列观测入口；启用 `ENABLE_BULLMQ=true` 时从 Redis/BullMQ 读取真实 job counts，未启用时返回 disabled 状态。
 - `GET /api/sessions/:sessionId/debug/*`：开发态调试入口，覆盖 Context Pack、Runtime invocation、RAG retrieval 和 token usage。
@@ -39,4 +40,11 @@
     "test:e2e:persistence": "node tests/e2e/persistence-smoke.mjs"
   }
 }
+```
+
+Watchdog 定向验证与报告入口：
+
+```bash
+npm run test:watchdog-baseline
+npm run report:watchdog-baseline
 ```

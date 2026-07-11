@@ -20,6 +20,16 @@ export function queueConcurrency() {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 4;
 }
 
+export function queueLockDuration() {
+  const parsed = Number(process.env.QUEUE_LOCK_DURATION_MS ?? 30_000);
+  return Number.isFinite(parsed) && parsed >= 1_000 ? Math.floor(parsed) : 30_000;
+}
+
+export function queueStalledInterval() {
+  const parsed = Number(process.env.QUEUE_STALLED_INTERVAL_MS ?? 30_000);
+  return Number.isFinite(parsed) && parsed >= 1_000 ? Math.floor(parsed) : 30_000;
+}
+
 export function redisConnectionOptions(): ConnectionOptions {
   const redisUrl = process.env.REDIS_URL;
   const connectTimeout = Number(process.env.REDIS_CONNECT_TIMEOUT_MS ?? 5_000);

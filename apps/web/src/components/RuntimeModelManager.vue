@@ -1,25 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { useAgentStore } from '@/stores/agent'
 import { useRuntimeModelStore } from '@/stores/runtimeModel'
-import type { Agent, RuntimeModelKind, RuntimeModelOption, RuntimeModelUpdateInput } from '@/types/contracts'
-import { runtimeTypeLabel } from '@/utils/runtimeLabels'
+import type { RuntimeModelKind, RuntimeModelOption, RuntimeModelUpdateInput } from '@/types/contracts'
 import UiIcon from './UiIcon.vue'
 
-const props = defineProps<{
-  agents: Agent[]
-  capabilityName: (capabilityId: string) => string
-}>()
-
-const agentStore = useAgentStore()
 const modelStore = useRuntimeModelStore()
 const selectedModelId = ref('')
-const selectedAgentId = ref('')
-const markdownDraft = ref('')
-const markdownMode = ref<'edit' | 'preview'>('edit')
-const markdownDialogOpen = ref(false)
-const markdownSaving = ref(false)
-const markdownError = ref('')
 const addMode = ref<RuntimeModelKind>('local')
 const localModelName = ref('')
 const remoteLabel = ref('')
@@ -30,14 +16,6 @@ const saveMessage = ref('')
 
 const modelOptions = computed(() => modelStore.availableModels)
 const selectedModel = computed(() => modelOptions.value.find((model) => model.id === selectedModelId.value))
-const agentsForSelectedModel = computed(() => {
-  const agentIds = new Set(selectedModel.value?.agents.map((agent) => agent.id) ?? [])
-  if (!agentIds.size) return []
-  return props.agents.filter((agent) => agentIds.has(agent.id))
-})
-const selectedAgent = computed(
-  () => agentsForSelectedModel.value.find((agent) => agent.id === selectedAgentId.value) ?? agentsForSelectedModel.value[0]
-)
 const canAddLocal = computed(() => Boolean(localModelName.value.trim()) && !modelStore.saving)
 const canAddRemote = computed(
   () =>
@@ -67,89 +45,15 @@ function keyLabel(model: RuntimeModelOption) {
   return model.hasApiKey ? 'Key 已配置' : 'Key 未配置'
 }
 
-function fallbackAgentMarkdown(agent?: Agent) {
-  if (!agent) return ''
-  const tools = agent.capabilityIds.map((capabilityId) => `- ${props.capabilityName(capabilityId)}`).join('\n') || '- none'
-  const tags = agent.tags?.map((tag) => `- ${tag}`).join('\n') || '- none'
-  return [
-    `# ${agent.name}`,
-    '',
-    '## Role',
-    agent.role,
-    '',
-    '## Working Rules',
-    '- Follow the user request and current task contract.',
-    '- Keep changes scoped and explain risks clearly.',
-    '- Ask for confirmation before high-risk or destructive actions.',
-    '',
-    '## Tags',
-    tags,
-    '',
-    '## Capabilities',
-    tools
-  ].join('\n')
-}
-
-function agentMarkdown(agent?: Agent) {
-  return agent?.profileMarkdown?.trim() || fallbackAgentMarkdown(agent)
-}
-
 function selectModel(modelId: string) {
   selectedModelId.value = modelId
-  selectedAgentId.value = ''
   saveMessage.value = ''
-  markdownError.value = ''
-}
-
-function selectAgent(agent: Agent) {
-  selectedAgentId.value = agent.id
-  markdownDraft.value = agentMarkdown(agent)
-  markdownMode.value = 'edit'
-  markdownDialogOpen.value = true
-  markdownError.value = ''
-  saveMessage.value = ''
-}
-
-function closeMarkdownDialog() {
-  markdownDialogOpen.value = false
-  markdownError.value = ''
 }
 
 async function switchModel(modelId: string) {
   await modelStore.switchModel(modelId)
   selectedModelId.value = modelStore.currentModelId
-  saveMessage.value = '当前默认模型已切换。未单独绑定模型的 Agent 会使用它。'
-}
-
-async function bindAgentToModel(agent: Agent) {
-  const modelId = selectedModel.value?.id
-  if (!modelId) return
-  await agentStore.updateAgent(agent.id, { modelId })
-  await modelStore.loadConfig()
-  saveMessage.value = `${agent.name} 已绑定到 ${selectedModel.value?.label ?? '当前模型'}。`
-}
-
-async function saveAgentMarkdown() {
-  const agent = selectedAgent.value
-  if (!agent) return
-  const profileMarkdown = markdownDraft.value.trim()
-  if (!profileMarkdown) {
-    markdownError.value = '请填写 Agent Markdown 规则文档'
-    return
-  }
-
-  markdownSaving.value = true
-  markdownError.value = ''
-  try {
-    await agentStore.updateAgent(agent.id, { profileMarkdown })
-    markdownDraft.value = profileMarkdown
-    saveMessage.value = `${agent.name} 的 Markdown 规则已更新。`
-    closeMarkdownDialog()
-  } catch (error) {
-    markdownError.value = error instanceof Error ? error.message : '保存 Agent Markdown 规则失败'
-  } finally {
-    markdownSaving.value = false
-  }
+  saveMessage.value = '当前默认模型已切换。仅影响之后新建的 Session。'
 }
 
 async function addLocalModel() {
@@ -233,7 +137,7 @@ async function saveModelEdit() {
 }
 
 async function removeModel(model: RuntimeModelOption) {
-  if (!window.confirm(`确认删除模型「${model.label}」？删除后未绑定模型的 Agent 会回落到当前默认模型。`)) return
+  if (!window.confirm(`确认删除模型「${model.label}」？删除后新建 Session 会回落到当前默认模型。`)) return
   await modelStore.deleteModel(model.id)
   if (selectedModelId.value === model.id) {
     selectedModelId.value = modelStore.currentModelId
@@ -251,25 +155,6 @@ watch(
   { immediate: true }
 )
 
-watch(
-  selectedAgent,
-  (agent) => {
-    markdownDraft.value = agentMarkdown(agent)
-    markdownError.value = ''
-  },
-  { immediate: true }
-)
-
-watch(
-  agentsForSelectedModel,
-  (agents) => {
-    if (!agents.some((agent) => agent.id === selectedAgentId.value)) {
-      selectedAgentId.value = agents[0]?.id ?? ''
-    }
-  },
-  { immediate: true }
-)
-
 onMounted(async () => {
   if (!modelStore.config) {
     await modelStore.loadConfig()
@@ -279,6 +164,15 @@ onMounted(async () => {
 
 <template>
   <div class="model-management model-management-cards">
+    <article class="admin-card model-manager-intro">
+      <div>
+        <strong>模型管理</strong>
+        <p>只负责模型 CRUD、默认切换和连接状态。Agent 能力编辑与模型绑定已迁移到 Agent 管理页。</p>
+      </div>
+      <p v-if="saveMessage" class="model-success">{{ saveMessage }}</p>
+      <p v-if="modelStore.error" class="model-error">{{ modelStore.error }}</p>
+    </article>
+
     <section class="model-card-list">
       <article class="admin-card model-add-card">
         <header>
@@ -347,8 +241,8 @@ onMounted(async () => {
             <dd>{{ keyLabel(model) }}</dd>
           </div>
           <div>
-            <dt>Agent</dt>
-            <dd>{{ model.agents.length }}</dd>
+            <dt>状态</dt>
+            <dd>{{ modelStore.currentModelId === model.id ? '默认模型' : '可用' }}</dd>
           </div>
         </dl>
         <div class="model-card-actions">
@@ -367,83 +261,6 @@ onMounted(async () => {
         </div>
       </article>
     </section>
-
-    <section class="model-agent-detail">
-      <article class="admin-card model-selected-summary">
-        <header>
-          <div>
-            <strong>{{ selectedModel?.label ?? '未选择模型' }}</strong>
-            <p>{{ selectedModel ? `${kindLabel(selectedModel.kind)} / ${sourceLabel(selectedModel.source)}` : '请选择左侧模型卡片' }}</p>
-          </div>
-          <span>{{ agentsForSelectedModel.length }} 个 Agent</span>
-        </header>
-        <p v-if="saveMessage" class="model-success">{{ saveMessage }}</p>
-        <p v-if="modelStore.error" class="model-error">{{ modelStore.error }}</p>
-      </article>
-
-      <div class="model-agent-grid">
-        <article
-          v-for="agent in agentsForSelectedModel"
-          :key="agent.id"
-          :class="['admin-card', 'model-agent-card', { active: selectedAgent?.id === agent.id }]"
-          @click="selectAgent(agent)"
-        >
-          <header>
-            <div>
-              <strong>{{ agent.name }}</strong>
-              <p>{{ agent.role }}</p>
-            </div>
-            <span :class="['agent-maintenance-status', agent.status]">{{ agent.status === 'active' ? '可用' : '停用' }}</span>
-          </header>
-          <div class="tag-row">
-            <span v-for="capabilityId in agent.capabilityIds" :key="capabilityId" class="tag">
-              {{ props.capabilityName(capabilityId) }}
-            </span>
-            <span v-if="!agent.capabilityIds.length" class="tag muted">未配置能力</span>
-          </div>
-        </article>
-        <p v-if="!agentsForSelectedModel.length" class="admin-empty">
-          当前模型下暂无 Agent。到 Agent 管理里编辑 Agent，或选择其它模型。
-        </p>
-      </div>
-
-    </section>
-
-    <div v-if="markdownDialogOpen && selectedAgent" class="modal-backdrop" @click.self="closeMarkdownDialog">
-      <form class="modal-panel model-agent-markdown-dialog" @submit.prevent="saveAgentMarkdown">
-        <header>
-          <div>
-            <h2>{{ selectedAgent.name }}</h2>
-            <p>{{ runtimeTypeLabel(selectedAgent.runtimeType) }} / {{ selectedModel?.label ?? '未配置模型' }}</p>
-          </div>
-          <button class="modal-close-button" type="button" @click="closeMarkdownDialog">
-            <UiIcon name="x" :size="16" />
-          </button>
-        </header>
-
-        <div class="model-doc-actions">
-          <button type="button" @click="markdownMode = markdownMode === 'edit' ? 'preview' : 'edit'">
-            {{ markdownMode === 'edit' ? '预览' : '编辑' }}
-          </button>
-          <button type="button" @click="bindAgentToModel(selectedAgent)">
-              <UiIcon name="check" :size="16" />
-              绑定到当前模型
-            </button>
-          <button type="submit" class="primary" :disabled="markdownSaving">
-            {{ markdownSaving ? '保存中' : '保存 Markdown' }}
-          </button>
-        </div>
-
-        <textarea
-          v-if="markdownMode === 'edit'"
-          v-model="markdownDraft"
-          class="model-agent-markdown-editor"
-          spellcheck="false"
-        />
-        <pre v-else class="model-agent-markdown-preview">{{ markdownDraft }}</pre>
-        <p v-if="markdownError" class="model-error">{{ markdownError }}</p>
-      </form>
-    </div>
 
     <div v-if="editDialogOpen && editingModel" class="modal-backdrop" @click.self="closeEditDialog">
       <form

@@ -1,0 +1,75 @@
+{
+  "seatId": "claude-2",
+  "entries": [
+    {
+      "id": "491a88826172cf25",
+      "seatId": "claude-2",
+      "kind": "patch",
+      "createdAt": "2026-07-08T03:30:41.790Z",
+      "sizeBytes": 0,
+      "refPath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\sessions\\sess_20260708_111330_226\\seats\\claude-2\\patch.diff",
+      "meta": {
+        "changedFiles": [],
+        "diffStat": ""
+      }
+    },
+    {
+      "id": "c318dfb13ab62777",
+      "seatId": "claude-2",
+      "kind": "summary",
+      "createdAt": "2026-07-08T03:30:41.784Z",
+      "sizeBytes": 236,
+      "refPath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\sessions\\sess_20260708_111330_226\\seats\\claude-2\\summary.md",
+      "meta": {
+        "changedFiles": []
+      }
+    },
+    {
+      "id": "460f5032ae46c7e5",
+      "seatId": "claude-2",
+      "kind": "patch",
+      "createdAt": "2026-07-08T03:29:56.396Z",
+      "sizeBytes": 0,
+      "refPath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\sessions\\sess_20260708_111330_226\\seats\\claude-2\\patch.diff",
+      "meta": {
+        "changedFiles": [],
+        "diffStat": ""
+      }
+    },
+    {
+      "id": "93db976535632c1e",
+      "seatId": "claude-2",
+      "kind": "summary",
+      "createdAt": "2026-07-08T03:29:56.393Z",
+      "sizeBytes": 215,
+      "refPath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\sessions\\sess_20260708_111330_226\\seats\\claude-2\\summary.md",
+      "meta": {
+        "changedFiles": []
+      }
+    },
+    {
+      "id": "60f6ee52595e00fc",
+      "seatId": "claude-2",
+      "kind": "patch",
+      "createdAt": "2026-07-08T03:14:03.129Z",
+      "sizeBytes": 0,
+      "refPath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\sessions\\sess_20260708_111330_226\\seats\\claude-2\\patch.diff",
+      "meta": {
+        "changedFiles": [],
+        "diffStat": ""
+      }
+    },
+    {
+      "id": "aa12c35b3e5edb41",
+      "seatId": "claude-2",
+      "kind": "summary",
+      "createdAt": "2026-07-08T03:14:03.125Z",
+      "sizeBytes": 182,
+      "refPath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\sessions\\sess_20260708_111330_226\\seats\\claude-2\\summary.md",
+      "meta": {
+        "changedFiles": []
+      }
+    }
+  ],
+  "updatedAt": "2026-07-08T03:30:41.791Z"
+}

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const npmCli = process.env.npm_execpath;
+const tsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs');
 const dataFile = join(root, '.cache', 'agent-cluster', `main-chain-${Date.now()}.json`);
 
 function findFreePort() {
@@ -100,7 +101,7 @@ server.stderr.on('data', (chunk) => process.stderr.write(chunk));
 
 try {
   await waitForServer();
-  await run(process.execPath, ['tests/e2e/collaboration-main-chain.spec.ts'], {
+  await run(process.execPath, [tsxCli, 'tests/e2e/collaboration-main-chain.spec.ts'], {
     env: {
       E2E_API_BASE: apiBase
     }

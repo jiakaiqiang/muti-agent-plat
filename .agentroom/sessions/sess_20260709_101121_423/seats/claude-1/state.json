@@ -1,0 +1,14 @@
+{
+  "seatId": "claude-1",
+  "runnerType": "claude",
+  "state": "running",
+  "currentTask": "分析一下D:\\demo\\agent-cli 这个项目的架构然后通知@codex-1进行审核",
+  "currentAction": "Claude is thinking...",
+  "workspacePath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\worktrees\\sess_20260709_101121_423\\claude-1-1783563126327",
+  "controlMode": "accept",
+  "nativeModeId": "claude:acceptEdits",
+  "startedAt": "2026-07-09T02:12:06.706Z",
+  "updatedAt": "2026-07-09T02:23:39.667Z",
+  "processId": 24152,
+  "needsUser": false
+}

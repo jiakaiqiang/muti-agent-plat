@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import type { AgentRunInput, ExpectedRuntimeOutput, RuntimeOutput } from '@agent-cluster/shared';
 import { GenericLlmRuntimeService } from './generic-llm-runtime.service.js';
 
@@ -76,7 +77,11 @@ async function runWithFetch(kind: ExpectedRuntimeOutput['kind'], fetchImpl: type
   return runWithService(kind, makeServiceWithCurrentFetch);
 }
 
-async function runWithService(kind: ExpectedRuntimeOutput['kind'], makeRuntime: () => GenericLlmRuntimeService) {
+async function runWithService(
+  kind: ExpectedRuntimeOutput['kind'],
+  makeRuntime: () => GenericLlmRuntimeService,
+  configureInput?: (input: AgentRunInput) => void
+) {
   const previousRetries = process.env.LLM_MAX_RETRIES;
   const previousFallback = process.env.LLM_MOCK_FALLBACK;
   const previousStructuredOutputMode = process.env.LLM_STRUCTURED_OUTPUT_MODE;
@@ -90,7 +95,9 @@ async function runWithService(kind: ExpectedRuntimeOutput['kind'], makeRuntime: 
   process.env.LLM_REMOTE_MAX_OUTPUT_TOKENS = process.env.LLM_REMOTE_MAX_OUTPUT_TOKENS ?? '4096';
   process.env.LLM_REMOTE_STREAMING = 'true';
   try {
-    return await makeRuntime().run(makeInput(kind));
+    const input = makeInput(kind);
+    configureInput?.(input);
+    return await makeRuntime().run(input);
   } finally {
     globalThis.fetch = originalFetch;
     if (previousRetries === undefined) {
@@ -152,6 +159,10 @@ function completedTaskExecutionContent(summary = 'Completed the requested analys
   );
 }
 
+function loadJsonFixture(name: string): unknown {
+  return JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8')) as unknown;
+}
+
 test('requests strict json_schema output for remote models in auto mode', async () => {
   let requestBody: Record<string, unknown> | undefined;
   const result = await runWithFetch('task_execution_result', (async (_url, init) => {
@@ -171,6 +182,137 @@ test('requests strict json_schema output for remote models in auto mode', async 
   assert.equal(schema?.properties?.kind?.const, 'task_execution_result');
   assert.equal(requestBody?.stream, true);
   assert.equal(requestBody?.max_tokens, 500);
+});
+
+test('normalizes legacy GLM Artifacts before schema validation and orchestration', async () => {
+  let requestCount = 0;
+  const result = await runWithFetch('task_execution_result', (async () => {
+    requestCount += 1;
+    return new Response(
+      JSON.stringify(
+        chatContent(
+          JSON.stringify({
+            kind: 'task_execution_result',
+            status: 'completed',
+            summary: 'Architecture analysis completed.',
+            completedItems: ['Analyzed architecture.'],
+            changedArtifacts: [
+              {
+                type: 'architecture_analysis',
+                title: '项目架构分析报告',
+                metadata: {
+                  content: '# 项目架构\n\n旧格式正文',
+                  reportKind: 'project_architecture_analysis'
+                }
+              }
+            ],
+            nextSuggestedActions: [],
+            risks: []
+          })
+        )
+      ),
+      { status: 200, headers: { 'content-type': 'application/json' } }
+    );
+  }) as typeof fetch);
+
+  assert.equal(result.status, 'completed');
+  assert.equal(requestCount, 1);
+  assert.equal(result.output.kind, 'task_execution_result');
+  if (result.output.kind !== 'task_execution_result') return;
+  assert.deepEqual(result.output.changedArtifacts, [
+    {
+      type: 'markdown',
+      title: '项目架构分析报告',
+      content: '# 项目架构\n\n旧格式正文',
+      metadata: { reportKind: 'project_architecture_analysis' }
+    }
+  ]);
+});
+
+test('preserves traceable workspace-context actions from Post Review output', async () => {
+  const actions = [
+    {
+      action: 'request_workspace_context' as const,
+      reason: 'Review needs the implementation source before it can verify completion.',
+      missingPaths: ['src/feature.ts']
+    }
+  ];
+  const result = await runWithResponse(
+    'post_review_report',
+    chatContent(
+      JSON.stringify({
+        kind: 'post_review_report',
+        isConsistentWithBrief: false,
+        matchedItems: [],
+        mismatchedItems: [],
+        missingItems: ['Missing source evidence for src/feature.ts.'],
+        outOfScopeChanges: [],
+        testResults: [],
+        recommendation: 'ask_user',
+        actions
+      })
+    )
+  );
+
+  assert.equal(result.status, 'completed');
+  assert.equal(result.output.kind, 'post_review_report');
+  if (result.output.kind !== 'post_review_report') return;
+  assert.deepEqual(result.output.actions, actions);
+});
+
+test('regresses the captured GLM architecture Artifact anomaly fixture', async () => {
+  const result = await runWithResponse(
+    'task_execution_result',
+    loadJsonFixture('glm-architecture-artifact-anomaly.json')
+  );
+
+  assert.equal(result.status, 'completed');
+  assert.equal(result.output.kind, 'task_execution_result');
+  if (result.output.kind !== 'task_execution_result') return;
+  const report = result.output.changedArtifacts[0];
+  assert.equal(report?.type, 'markdown');
+  assert.equal(report?.title, '项目架构分析报告');
+  assert.match(report?.content ?? '', /# 项目架构分析报告/);
+  assert.equal(report?.metadata?.reportKind, 'project_architecture_analysis');
+  assert.equal('content' in (report?.metadata ?? {}), false);
+});
+
+test('emits token estimation diagnostics when actual GLM input usage exceeds the error threshold', async () => {
+  const response = completedTaskExecutionContent();
+  response.usage = { prompt_tokens: 150, completion_tokens: 10, total_tokens: 160 };
+  const result = await runWithService(
+    'task_execution_result',
+    () => makeService(response),
+    (input) => {
+      input.estimatedInputTokens = 100;
+    }
+  );
+
+  const diagnostic = result.events.find((event) => event.metadata?.code === 'TOKEN_ESTIMATION_DRIFT');
+  assert.ok(diagnostic);
+  assert.deepEqual(
+    {
+      model: diagnostic.metadata?.model,
+      estimated: diagnostic.metadata?.estimated,
+      actual: diagnostic.metadata?.actual,
+      ratio: diagnostic.metadata?.ratio
+    },
+    { model: 'test-model', estimated: 100, actual: 150, ratio: 1.5 }
+  );
+});
+
+test('does not emit token estimation diagnostics within the error threshold', async () => {
+  const response = completedTaskExecutionContent();
+  response.usage = { prompt_tokens: 110, completion_tokens: 10, total_tokens: 120 };
+  const result = await runWithService(
+    'task_execution_result',
+    () => makeService(response),
+    (input) => {
+      input.estimatedInputTokens = 100;
+    }
+  );
+
+  assert.equal(result.events.some((event) => event.metadata?.code === 'TOKEN_ESTIMATION_DRIFT'), false);
 });
 
 test('caps remote max_tokens by LLM_REMOTE_MAX_OUTPUT_TOKENS', async () => {
@@ -312,6 +454,40 @@ test('reports sanitized schema diagnostics after the repair attempt fails', asyn
   assert.doesNotMatch(String(result.error?.details?.sanitizedPreview), /sk-super-secret|sk-another-secret/);
   assert.match(String(result.error?.details?.sanitizedPreview), /\[REDACTED\]/);
   assert.match(result.error?.message ?? '', /Expected task_execution_result, detected task_brief/);
+});
+
+test('returns OUTPUT_SCHEMA_INVALID when Artifact schema repair still fails', async () => {
+  let requestCount = 0;
+  const invalidArtifactOutput = chatContent(
+    JSON.stringify({
+      kind: 'task_execution_result',
+      status: 'completed',
+      summary: 'Claims success with an invalid Artifact.',
+      completedItems: ['Generated a report.'],
+      changedArtifacts: [
+        { type: 'mystery_report', title: 'Unknown report', content: 'Unsupported Artifact type.' }
+      ],
+      nextSuggestedActions: [],
+      risks: []
+    })
+  );
+  const result = await runWithFetch('task_execution_result', (async () => {
+    requestCount += 1;
+    return new Response(JSON.stringify(invalidArtifactOutput), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  }) as typeof fetch);
+
+  assert.equal(requestCount, 2);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'OUTPUT_SCHEMA_INVALID');
+  assert.equal(result.error?.details?.parseState, 'schema_invalid');
+  assert.equal(result.error?.details?.repairAttempts, 1);
+  assert.match(
+    JSON.stringify(result.error?.details?.validationErrors ?? []),
+    /changedArtifacts|enum|type/
+  );
 });
 
 test('wraps plain text discussion output as agent_message', async () => {

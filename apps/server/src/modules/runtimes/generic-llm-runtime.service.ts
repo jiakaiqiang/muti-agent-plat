@@ -29,7 +29,16 @@ import {
   llmTimeoutMs
 } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
+import {
+  DEFAULT_INPUT_TOKEN_ESTIMATION_ERROR_THRESHOLD,
+  inputTokenEstimationDrift
+} from '../../common/token.js';
 import { MockRuntimeService } from './mock-runtime.service.js';
+import { normalizeRuntimeArtifact } from './runtime-artifact-normalizer.js';
+import {
+  normalizePostReviewActions,
+  POST_REVIEW_CONTEXT_ACTION_INSTRUCTION
+} from './post-review-action-normalizer.js';
 import { RuntimeModelConfigService, type RuntimeModelConnection } from './runtime-model-config.service.js';
 import {
   runtimeOutputExample,
@@ -139,21 +148,50 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
 
     const missingConfig = this.missingConfig(selectedConnection);
     if (missingConfig.length) {
-      return this.failedResult(
+      return this.withTokenEstimationDiagnostic(input, this.failedResult(
         input,
         startedAt,
         selectedConnection.model,
         `通用大模型未配置（缺少 ${missingConfig.join('、')}），本次执行已中止而不会回退到模拟运行时。请在 .env 设置 LLM_PROVIDER/LLM_MODEL/LLM_API_KEY/LLM_BASE_URL，或在运行时模型管理中添加并选择可用模型；如需本地演示模式，请显式设置 LLM_MOCK_FALLBACK=true。`,
         'CAPABILITY_BLOCKED'
-      );
+      ));
     }
 
     const hasTools = input.contextPack.availableTools && input.contextPack.availableTools.length > 0;
     if (hasTools && input.contextPack.workingDirectory?.kind === 'server_local' && input.contextPack.workingDirectory?.path) {
-      return this.runWithToolLoop(input, selectedConnection, signal);
+      return this.withTokenEstimationDiagnostic(input, await this.runWithToolLoop(input, selectedConnection, signal));
     }
 
-    return this.runOpenAiCompatible(input, selectedConnection, signal);
+    return this.withTokenEstimationDiagnostic(input, await this.runOpenAiCompatible(input, selectedConnection, signal));
+  }
+
+  private withTokenEstimationDiagnostic(input: AgentRunInput, result: AgentRunResult): AgentRunResult {
+    const drift = inputTokenEstimationDrift(input.estimatedInputTokens, result.usage.inputTokens);
+    if (!drift) {
+      return result;
+    }
+    const model = result.usage.model ?? input.agent.modelId ?? result.runtimeType;
+    return {
+      ...result,
+      events: [
+        ...result.events,
+        {
+          runId: input.runId,
+          type: 'runtime_progress',
+          content: `GLM input token estimation drift detected for ${model}: estimated ${drift.estimated}, actual ${drift.actual}.`,
+          metadata: {
+            code: 'TOKEN_ESTIMATION_DRIFT',
+            model,
+            estimated: drift.estimated,
+            actual: drift.actual,
+            ratio: drift.ratio,
+            relativeError: Math.abs(drift.ratio - 1),
+            threshold: DEFAULT_INPUT_TOKEN_ESTIMATION_ERROR_THRESHOLD
+          },
+          createdAt: nowIso()
+        }
+      ]
+    };
   }
 
   private async runFallback(input: AgentRunInput, selectedModel: string, signal?: AbortSignal): Promise<AgentRunResult> {
@@ -532,7 +570,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         : '',
       input.expectedOutput.kind === 'task_execution_result'
         ? 'For task_execution_result, include changedArtifacts with file changes if applicable.'
-        : ''
+        : '',
+      input.expectedOutput.kind === 'post_review_report' ? POST_REVIEW_CONTEXT_ACTION_INSTRUCTION : ''
     ]
       .filter(Boolean)
       .join('\n');
@@ -710,6 +749,21 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           );
         }
         output = this.normalizeOutput(output);
+        const validation = validateRuntimeOutput(output, input.expectedOutput.kind);
+        if (!validation.valid) {
+          return this.failedResult(
+            input,
+            startedAt,
+            selectedModel,
+            `Tool-loop output failed RuntimeOutput validation: ${validation.errors.join('; ')}`,
+            'OUTPUT_SCHEMA_INVALID',
+            {
+              parseState: 'schema_invalid',
+              validationErrors: validation.errors,
+              repairAttempts: 0
+            }
+          );
+        }
 
         return {
           runId: input.runId,
@@ -841,6 +895,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       parts.push('The "content" field must be plain-text string in Chinese.');
     } else if (input.expectedOutput.kind === 'task_execution_result') {
       parts.push('Include: summary, status. status must be one of: completed, failed, blocked, needs_review.');
+    } else if (input.expectedOutput.kind === 'post_review_report') {
+      parts.push(POST_REVIEW_CONTEXT_ACTION_INSTRUCTION);
     }
 
     return parts.join(' ');
@@ -867,7 +923,9 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       `Required JSON Schema: ${JSON.stringify(runtimeOutputSchema(input.expectedOutput.kind))}`,
       `Minimal valid example: ${JSON.stringify(runtimeOutputExample(input.expectedOutput.kind))}`,
       'Never return a different RuntimeOutput kind, Markdown fences, or explanatory text outside the JSON object.',
-      'When the output kind has a status field, status must be exactly one of: completed, failed, blocked, needs_review.',
+      input.expectedOutput.kind === 'task_acceptance_decision'
+        ? 'For task_acceptance_decision, status must be exactly one of: accepted, blocked, rejected.'
+        : 'When task_execution_result has a status field, status must be exactly one of: completed, failed, blocked, needs_review.',
       'Do not call tools, modify files, or perform external side effects.',
       'Use contextPack.taskContext as the Task Context Pack: follow its stagePlan read/do/validate items, taskMap, evidenceSelection.selectedRefs/evidenceRefs, validationRules, and agentResponsibilities. Keep conclusions traceable to those fields.',
       'Use contextPack.projectMap when present as the structured project index; prefer its modules, sourceRefs, validationCommands, and riskBoundaries over guessing project layout.',
@@ -876,7 +934,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       'Use contextPack.continuationState to resume or hand off work consistently across phases, agents, pauses, validation, review, and final delivery.',
       'For non-coding tasks, validate fact consistency, scope consistency, traceability, and delivery completeness instead of inventing implementation evidence.',
       input.expectedOutput.kind === 'task_brief'
-        ? 'When the user asks to analyze, understand, or become familiar with a project/repository architecture, assign the architect as a first-line analysis agent. The architect should directly analyze project positioning, directory responsibilities, module boundaries, entrypoints, data/event/runtime flows, risks, and reading path from workspaceManifest/projectMap/selectedEvidenceContents. Do not turn that architect task into reviewing another agent\'s architecture proposal; review belongs to the review/test task after the architect analysis.'
+        ? 'When the user asks to analyze, understand, or become familiar with a project/repository architecture, assign exactly one architect task. The architect scenario is only: analyze the current project structure and main execution/collaboration path from an architecture viewpoint, then provide architecture ideas, risks, and suggestions grounded in workspaceManifest/projectMap/selectedEvidenceContents. Do not add a separate review/test task unless the user explicitly asks for validation.'
         : '',
       input.contextPack.workspaceManifest
         ? 'Before analyzing the user requirement, inspect contextPack.workspaceManifest for project structure and contextPack.selectedEvidenceContents for readable evidence content. workspaceSnapshot is only a manifest-style fallback and may omit file contents.'
@@ -886,7 +944,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         ? 'For agent_message, the "content" field must be one plain-text string (never an object or array). Write a detailed Chinese response with 3-6 concise paragraphs or bullets covering understanding, concerns, and recommendations.'
         : '',
       input.expectedOutput.kind === 'task_acceptance_decision'
-        ? 'For task_acceptance_decision, decide whether this assigned agent can execute the currentTask. Return status accepted, blocked, or rejected; reason; optional missingContext; optional handoffSuggestion { targetAgentKey or targetAgentId, reason, riskLevel }; optional confidence; optional alternativeAgentKeys/alternativeAgentIds; and optional agentMessages. Do not reassign the task yourself.'
+        ? 'For task_acceptance_decision, decide whether this assigned agent can execute the currentTask. Return status accepted, blocked, or rejected; reason; optional missingContext; optional requestedContext { reason, requestedRefs, requestedPaths, requestedCommands, followUpInstruction } when evidence is insufficient; optional handoffSuggestion { targetAgentKey or targetAgentId, reason, riskLevel }; optional confidence; optional alternativeAgentKeys/alternativeAgentIds; and optional agentMessages. Do not reassign the task yourself.'
         : '',
       input.expectedOutput.kind === 'task_claim_decision'
         ? 'For legacy task_claim_decision, decide whether this agent should accept the currentTask. Return accepted, reason, optional confidence, optional alternativeAgentKeys/alternativeAgentIds, optional handoffSuggestion, and optional agentMessages for coordination. Do not reassign the task yourself.'
@@ -894,6 +952,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       input.expectedOutput.kind === 'task_execution_result'
         ? 'For task_execution_result, include changedArtifacts. If this is a validation task or the agent is the Validation Agent, include a test_report artifact with metadata.validationEvidence mapping each taskContext.validationRules item to verdicts and taskContext.evidenceRefs, plus validatorAgentKey, validatorAgentId, and independentFromAgentKeys from taskContext.agentResponsibilities. If workspaceManifest is present, analyze the impact surface from manifest paths, but ground content-specific changes only in selectedEvidenceContents. Do not collapse a multi-file requirement into one file. Use agent-output only for auxiliary summaries. Include optional agentMessages when progress, risks, questions, or handoffs should be sent to other agents; target them with targetAgentKeys such as coordinator, frontend, backend, test, review.'
         : '',
+      input.expectedOutput.kind === 'post_review_report' ? POST_REVIEW_CONTEXT_ACTION_INSTRUCTION : '',
       input.contextPack.workingDirectory
         ? 'A local working directory is selected. Return file changes only as RuntimeArtifactOutput.metadata.fileChanges with safe relative paths. The browser applies those changes inside the selected directory.'
         : 'No local working directory is selected. Do not return fileChanges.'
@@ -1233,12 +1292,16 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       if (!summary) {
         return undefined;
       }
+      const changedArtifacts = this.artifacts(record.changedArtifacts);
+      if (!changedArtifacts) {
+        return undefined;
+      }
       return {
         kind: 'task_execution_result',
         status: this.asTaskExecutionStatus(record.status),
         summary,
         completedItems: this.stringArray(record.completedItems),
-        changedArtifacts: this.artifacts(record.changedArtifacts),
+        changedArtifacts,
         requestedContext: this.optionalContextRequest(record.requestedContext),
         agentMessages: this.agentMessages(record.agentMessages),
         nextSuggestedActions: this.stringArray(record.nextSuggestedActions),
@@ -1256,6 +1319,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         status: this.asTaskAcceptanceStatus(record.status, record.accepted),
         reason: reason || 'Model returned an acceptance decision without a reason.',
         missingContext: this.optionalStringArray(record.missingContext),
+        requestedContext: this.optionalContextRequest(record.requestedContext),
         handoffSuggestion: this.optionalHandoffSuggestion(record.handoffSuggestion),
         confidence: typeof record.confidence === 'number' ? record.confidence : undefined,
         alternativeAgentKeys: this.optionalStringArray(record.alternativeAgentKeys),
@@ -1275,6 +1339,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         reason: reason || 'Model returned a claim decision without a reason.',
         confidence: typeof record.confidence === 'number' ? record.confidence : undefined,
         missingContext: this.optionalStringArray(record.missingContext),
+        requestedContext: this.optionalContextRequest(record.requestedContext),
         handoffSuggestion: this.optionalHandoffSuggestion(record.handoffSuggestion),
         alternativeAgentKeys: this.optionalStringArray(record.alternativeAgentKeys),
         alternativeAgentIds: this.optionalStringArray(record.alternativeAgentIds),
@@ -1287,6 +1352,10 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       if (!recommendation && record.isConsistentWithBrief === undefined) {
         return undefined;
       }
+      const actions = normalizePostReviewActions(record.actions);
+      if (record.actions !== undefined && record.actions !== null && !actions) {
+        return undefined;
+      }
       return {
         kind: 'post_review_report',
         isConsistentWithBrief: record.isConsistentWithBrief !== false,
@@ -1295,7 +1364,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         missingItems: this.stringArray(record.missingItems),
         outOfScopeChanges: this.stringArray(record.outOfScopeChanges),
         testResults: this.stringArray(record.testResults),
-        recommendation: recommendation ?? 'ask_user'
+        recommendation: recommendation ?? 'ask_user',
+        actions
       } satisfies PostReviewReportOutput;
     }
 
@@ -1425,8 +1495,17 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     return messages.length ? messages : undefined;
   }
 
-  private artifacts(value: unknown): RuntimeArtifactOutput[] {
-    return Array.isArray(value) ? (value as RuntimeArtifactOutput[]) : [];
+  private artifacts(value: unknown): RuntimeArtifactOutput[] | undefined {
+    if (value === undefined || value === null) {
+      return [];
+    }
+    if (!Array.isArray(value)) {
+      return undefined;
+    }
+    const normalized = value.map(normalizeRuntimeArtifact);
+    return normalized.every((artifact): artifact is RuntimeArtifactOutput => Boolean(artifact))
+      ? normalized
+      : undefined;
   }
 
   private optionalContextRequest(value: unknown): RuntimeContextRequest | undefined {

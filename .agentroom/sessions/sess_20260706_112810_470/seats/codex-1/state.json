@@ -1,0 +1,14 @@
+{
+  "seatId": "codex-1",
+  "runnerType": "codex",
+  "state": "done",
+  "currentTask": "你的模型是",
+  "currentAction": "completed",
+  "workspacePath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\worktrees\\sess_20260706_112810_470\\codex-1-1783308502675",
+  "controlMode": "accept",
+  "startedAt": "2026-07-06T03:28:23.314Z",
+  "updatedAt": "2026-07-06T03:31:33.159Z",
+  "processId": 42868,
+  "finishedAt": "2026-07-06T03:31:33.159Z",
+  "needsUser": false
+}

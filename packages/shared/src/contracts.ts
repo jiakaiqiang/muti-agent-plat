@@ -51,6 +51,25 @@ export type RuntimeType =
   | 'mcp_tool'
   | 'human';
 
+export type ContextPipelineVersion = 'v1' | 'v2';
+
+export const SUPPORTED_CONTEXT_PIPELINE_VERSIONS = ['v1', 'v2'] as const satisfies readonly ContextPipelineVersion[];
+export const DEFAULT_CONTEXT_PIPELINE_VERSION: ContextPipelineVersion = 'v1';
+
+export type OpsHealth = {
+  status: 'ok';
+  service: string;
+  version: string;
+  buildTime: string;
+  commit: string;
+  pipelineVersion: ContextPipelineVersion;
+  defaultContextPipelineVersion: ContextPipelineVersion;
+  contextPipelineVersion: ContextPipelineVersion;
+  contextPipelineV2Enabled: boolean;
+  supportedContextPipelineVersions: readonly ContextPipelineVersion[];
+  timestamp: ISODateTime;
+};
+
 /** Classifies whether a Runtime is provided by this system or an external provider. */
 export type RuntimeAdapterCategory = 'external' | 'internal';
 
@@ -102,15 +121,18 @@ export type EngineeringRuntimeConfig = {
 export type KnowledgeScope = 'global' | 'project' | 'session' | 'agent' | 'role_type';
 export type CapabilityRiskLevel = 'low' | 'medium' | 'high';
 
-export type ArtifactType =
-  | 'text'
-  | 'markdown'
-  | 'json'
-  | 'code_diff'
-  | 'test_report'
-  | 'feishu_draft'
-  | 'url'
-  | 'file';
+export const ARTIFACT_TYPES = [
+  'text',
+  'markdown',
+  'json',
+  'code_diff',
+  'test_report',
+  'feishu_draft',
+  'url',
+  'file'
+] as const;
+
+export type ArtifactType = (typeof ARTIFACT_TYPES)[number];
 
 export type EventPriority = 'low' | 'normal' | 'high' | 'critical';
 
@@ -161,6 +183,373 @@ export type EvidenceSourceType =
   | 'data_table'
   | 'historical_decision';
 
+export const WORKSPACE_PROVIDER_KINDS = [
+  'server_local',
+  'browser_broker',
+  'local_bridge'
+] as const;
+
+export type WorkspaceProviderKind = (typeof WORKSPACE_PROVIDER_KINDS)[number];
+
+export const WORKSPACE_CAPABILITY_KEYS = ['read', 'write', 'command', 'test'] as const;
+
+export type WorkspaceCapabilityKey = (typeof WORKSPACE_CAPABILITY_KEYS)[number];
+
+export type WorkspaceCapabilities = Readonly<Record<WorkspaceCapabilityKey, boolean>>;
+
+export type WorkspaceRevision = {
+  id: string;
+  observedAt: ISODateTime;
+};
+
+export type FileHash = {
+  algorithm: 'sha256';
+  value: string;
+};
+
+type FileMetadataBase = {
+  path: string;
+  revision: WorkspaceRevision;
+  modifiedAt?: ISODateTime;
+  language?: string;
+};
+
+export type FileMetadata =
+  | (FileMetadataBase & {
+      kind: 'file';
+      size: number;
+      hash: FileHash;
+    })
+  | (FileMetadataBase & {
+      kind: 'directory';
+      size?: number;
+      hash?: never;
+    });
+
+export type ListDirectoryInput = {
+  path?: string;
+  recursive?: boolean;
+  maxDepth?: number;
+  cursor?: string;
+  limit?: number;
+};
+
+export type ListDirectoryResult = {
+  path: string;
+  entries: FileMetadata[];
+  revision: WorkspaceRevision;
+  nextCursor?: string;
+};
+
+export type StatFileInput = {
+  path: string;
+};
+
+export type ReadFileInput = {
+  path: string;
+  startLine?: number;
+  endLine?: number;
+  maxBytes?: number;
+};
+
+export type ReadFileResult = {
+  path: string;
+  content: string;
+  encoding: 'utf-8';
+  byteLength: number;
+  truncated: boolean;
+  revision: WorkspaceRevision;
+  hash: FileHash;
+  startLine?: number;
+  endLine?: number;
+};
+
+export type SearchTextInput = {
+  query: string;
+  path?: string;
+  include?: string[];
+  exclude?: string[];
+  caseSensitive?: boolean;
+  maxResults?: number;
+};
+
+export type SearchTextMatch = {
+  path: string;
+  line: number;
+  column?: number;
+  preview: string;
+};
+
+export type SearchTextResult = {
+  matches: SearchTextMatch[];
+  truncated: boolean;
+  revision: WorkspaceRevision;
+};
+
+export const WORKSPACE_CHANGE_OPERATIONS = ['create', 'update', 'delete', 'move'] as const;
+
+export type WorkspaceChangeOperation = (typeof WORKSPACE_CHANGE_OPERATIONS)[number];
+
+export type WorkspaceChange =
+  | {
+      operation: 'create';
+      path: string;
+      content: string;
+      encoding: 'utf-8';
+    }
+  | {
+      operation: 'update';
+      path: string;
+      content: string;
+      encoding: 'utf-8';
+      expectedHash: FileHash;
+    }
+  | {
+      operation: 'delete';
+      path: string;
+      expectedHash: FileHash;
+    }
+  | {
+      operation: 'move';
+      fromPath: string;
+      toPath: string;
+      expectedHash: FileHash;
+    };
+
+export type WorkspaceChangeSet = {
+  id: UUID;
+  baseRevision: WorkspaceRevision;
+  changes: WorkspaceChange[];
+  createdAt: ISODateTime;
+};
+
+export const WORKSPACE_BASE_HASH_MISMATCH = 'WORKSPACE_BASE_HASH_MISMATCH' as const;
+
+export type WorkspaceConflictErrorCode = typeof WORKSPACE_BASE_HASH_MISMATCH;
+
+export type WorkspaceConflictError = {
+  code: WorkspaceConflictErrorCode;
+  message: string;
+  changeSetId: UUID;
+  operation: Exclude<WorkspaceChangeOperation, 'create'>;
+  path: string;
+  baseHash: FileHash;
+  actualHash?: FileHash;
+  actualRevision: WorkspaceRevision;
+};
+
+export type ExecutionTargetSource =
+  | 'task_override'
+  | 'session_preference'
+  | 'project_policy'
+  | 'smart_router'
+  | 'global_default';
+
+export type ResolvedExecutionTarget = {
+  runtimeType: RuntimeType;
+  modelId?: string;
+  source: ExecutionTargetSource;
+  requiredCapabilities: readonly WorkspaceCapabilityKey[];
+  writeMode: RuntimeRoutingWriteMode;
+};
+
+export type WorkspaceOperationKind =
+  | 'capabilities'
+  | 'getRevision'
+  | 'listDirectory'
+  | 'statFile'
+  | 'readFile'
+  | 'searchText'
+  | 'applyChangeSet';
+
+export type WorkspaceOperationStatus = 'pending' | 'ok' | 'error';
+
+export type WorkspaceOperationRequest =
+  | { requestId: UUID; workspaceId: string; operation: 'capabilities' }
+  | { requestId: UUID; workspaceId: string; operation: 'getRevision' }
+  | { requestId: UUID; workspaceId: string; operation: 'listDirectory'; input: ListDirectoryInput }
+  | { requestId: UUID; workspaceId: string; operation: 'statFile'; input: StatFileInput }
+  | { requestId: UUID; workspaceId: string; operation: 'readFile'; input: ReadFileInput }
+  | { requestId: UUID; workspaceId: string; operation: 'searchText'; input: SearchTextInput }
+  | { requestId: UUID; workspaceId: string; operation: 'applyChangeSet'; input: WorkspaceChangeSet };
+
+export type WorkspaceOperationErrorPayload = {
+  code: string;
+  message: string;
+  conflicts?: WorkspaceConflictError[];
+};
+
+export type WorkspaceOperationResult<T = unknown> = {
+  requestId: UUID;
+  workspaceId: string;
+  operation: WorkspaceOperationKind;
+  status: WorkspaceOperationStatus;
+  data?: T;
+  error?: WorkspaceOperationErrorPayload;
+};
+
+export type RuntimeRoutingPhase = 'discussion' | 'execution' | 'post_review' | 'delivery';
+
+export type RuntimeRoutingWriteMode = 'none' | 'propose_changes' | 'direct_audited';
+
+export type RuntimeRoutingWorkspaceContext = {
+  workspaceId: string;
+  providerKind: WorkspaceProviderKind;
+  capabilities: WorkspaceCapabilities;
+};
+
+export type RuntimeRoutingOverride = {
+  runtimeType: RuntimeType;
+  modelId?: string;
+  source: 'task_override' | 'session_preference' | 'user';
+};
+
+export type RuntimeRoutingInput = {
+  phase: RuntimeRoutingPhase;
+  sessionId: UUID;
+  taskKind: string;
+  agentId: string;
+  agentPreferredRuntime?: RuntimeType;
+  requiredCapabilities: readonly WorkspaceCapabilityKey[];
+  writeMode: RuntimeRoutingWriteMode;
+  workspace: RuntimeRoutingWorkspaceContext;
+  userOverride?: RuntimeRoutingOverride;
+};
+
+export type ContextEnvelopeV2Layer = 'L0' | 'L1' | 'L2' | 'L3' | 'L4' | 'L5' | 'L6';
+
+export type ContextL0WorkspaceIdentity = {
+  workspaceId: string;
+  rootName: string;
+  providerKind: WorkspaceProviderKind;
+  revision: WorkspaceRevision;
+};
+
+export type ContextL1NavigationEntry = {
+  path: string;
+  kind: 'file' | 'directory';
+  generated: boolean;
+  sensitive: boolean;
+  size?: number;
+  language?: string;
+};
+
+export type ContextL1NavigationManifest = {
+  entries: ContextL1NavigationEntry[];
+  truncated: boolean;
+  nextCursor?: string;
+};
+
+export type ContextL2ProjectMapModule = {
+  name: string;
+  path: string;
+  responsibility: string;
+  entrypoints?: string[];
+  tests?: string[];
+};
+
+export type ContextL2ProjectMap = {
+  source: 'static' | 'generated' | 'merged';
+  modules: ContextL2ProjectMapModule[];
+  detectedStack?: string[];
+};
+
+export type ContextL3EvidenceFile = {
+  path: string;
+  content: string;
+  byteLength: number;
+  startLine?: number;
+  endLine?: number;
+  hash?: FileHash;
+};
+
+export type ContextL3SelectedEvidence = {
+  files: ContextL3EvidenceFile[];
+  totalByteLength: number;
+  truncated: boolean;
+};
+
+export type ContextL4ToolCall = {
+  tool: string;
+  arguments: Record<string, unknown>;
+  resultSummary: string;
+  durationMs?: number;
+  succeeded?: boolean;
+};
+
+export type ContextL4ToolResults = {
+  calls: ContextL4ToolCall[];
+};
+
+export type ContextL5SummaryMemory = {
+  bullets: string[];
+  turnCount: number;
+};
+
+export type ContextL6DeliveryArtifacts = {
+  changeSetIds: UUID[];
+  reportIds: UUID[];
+};
+
+export type ContextEnvelopeV2Budget = {
+  inputTokens: number;
+  navigationTokens: number;
+  projectMapTokens: number;
+  evidenceTokens: number;
+};
+
+export type ContextEnvelopeV2 = {
+  version: 'v2';
+  createdAt: ISODateTime;
+  workspaceId: string;
+  sessionId: UUID;
+  L0: ContextL0WorkspaceIdentity;
+  L1: ContextL1NavigationManifest;
+  L2: ContextL2ProjectMap;
+  L3: ContextL3SelectedEvidence;
+  L4: ContextL4ToolResults;
+  L5: ContextL5SummaryMemory;
+  L6: ContextL6DeliveryArtifacts;
+  budget: ContextEnvelopeV2Budget;
+};
+
+export type WorkspaceIndexEntryKind = 'file' | 'directory';
+
+export type WorkspaceIndexEntry =
+  | {
+      path: string;
+      kind: 'file';
+      size: number;
+      hash: FileHash;
+      revision: WorkspaceRevision;
+      generated: boolean;
+      sensitive: boolean;
+      language?: string;
+      modifiedAt?: ISODateTime;
+    }
+  | {
+      path: string;
+      kind: 'directory';
+      revision: WorkspaceRevision;
+      generated: boolean;
+      sensitive: boolean;
+      modifiedAt?: ISODateTime;
+    };
+
+export type ApplyChangeSetResult =
+  | {
+      ok: true;
+      changeSetId: UUID;
+      revision: WorkspaceRevision;
+      appliedCount: number;
+    }
+  | {
+      ok: false;
+      changeSetId: UUID;
+      revision: WorkspaceRevision;
+      conflicts: WorkspaceConflictError[];
+    };
+
 export type SessionWorkingDirectory = {
   kind: 'browser_local' | 'server_local';
   id: UUID;
@@ -201,6 +590,7 @@ export type WorkspaceManifestCoverage = {
   totalEntriesSeen: number;
   scannedEntries: number;
   readableFiles: number;
+  generatedSkipped: number;
   skippedByReason: Partial<Record<WorkspaceSkippedReason, number>>;
 };
 
@@ -319,12 +709,22 @@ export type EventMetadata<TPayload extends Record<string, unknown> = Record<stri
   payload?: TPayload;
 };
 
+export type ActorType = 'user' | 'agent' | 'system';
+
+export interface ActorRef {
+  type: ActorType;
+  id: UUID;
+  displayName?: string;
+}
+
 export type CollaborationEvent<TPayload extends Record<string, unknown> = Record<string, unknown>> = {
   id: UUID;
   sessionId: UUID;
   type: CollaborationEventType;
   userMessageIntent?: UserMessageIntent;
   priority?: EventPriority;
+  actor?: ActorRef;
+  /** @deprecated v0.3 移除,改读 actor.id (type='agent')。v0.2 双写期保留。 */
   fromAgentId?: UUID;
   toAgentIds: UUID[];
   taskId?: UUID;
@@ -341,11 +741,23 @@ export type SessionDetail = {
   ownerId: string;
   workspaceId: string;
   projectId?: UUID;
+  origin?: 'user' | 'autopilot';
+  autopilotRunId?: UUID;
   currentTaskBriefId?: UUID;
   knowledgeBaseIds?: UUID[];
+  /**
+   * Session 创建时固化的 Context Pipeline 版本。
+   * 兼容期：旧 Session 允许缺失，读取路径按 DEFAULT_CONTEXT_PIPELINE_VERSION 兜底。
+   */
+  contextPipelineVersion?: ContextPipelineVersion;
   workingDirectory?: SessionWorkingDirectory;
   workspaceSnapshot?: WorkspaceSnapshot;
   engineeringRuntime?: EngineeringRuntimeConfig;
+  /**
+   * v0.4 新增。Session 创建时固化的运行时/模型选择，供所有参与 Agent 共用。
+   * 兼容期：旧 Session 允许缺失，恢复路径继续使用 engineeringRuntime + Agent.runtimeType 兜底。
+   */
+  executionTarget?: ExecutionTarget;
   supplementalContextRequests?: Array<{
     id: UUID;
     taskId: UUID;
@@ -357,6 +769,7 @@ export type SessionDetail = {
   tokenUsed: number;
   taskDomain?: TaskDomain;
   taskIntent?: TaskIntent;
+  requiresCodeChanges?: boolean;
   participatingAgentIds: UUID[];
   createdAt: ISODateTime;
   updatedAt: ISODateTime;
@@ -379,13 +792,143 @@ export type Agent = {
   description?: string;
   profileMarkdown?: string;
   tags?: string[];
+  /** @deprecated v0.4 起废弃，改由 Session.executionTarget 决定实际模型。兼容期保留。 */
   modelId?: string;
-  runtimeType: RuntimeType;
+  /** @deprecated v0.4 起废弃，改由 Session.executionTarget 决定实际运行时。兼容期保留可选字段。 */
+  runtimeType?: RuntimeType;
   status: 'active' | 'disabled';
   capabilityIds: UUID[];
+  skillIds?: UUID[];
   defaultKnowledgeBaseIds: UUID[];
   createdAt: ISODateTime;
   updatedAt: ISODateTime;
+};
+
+export type Autopilot = {
+  id: UUID;
+  name: string;
+  prompt: string;
+  schedule?: string;
+  enabled: boolean;
+  runtimeType: 'mock';
+  riskLevel: 'low';
+  agentIds: UUID[];
+  tokenBudget?: number;
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+};
+
+export type AutopilotRun = {
+  id: UUID;
+  autopilotId: UUID;
+  trigger: 'manual' | 'scheduled';
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'skipped';
+  issueguardKey: string;
+  sessionId?: UUID;
+  error?: string;
+  createdAt: ISODateTime;
+  startedAt?: ISODateTime;
+  completedAt?: ISODateTime;
+};
+
+export type SkillFile = {
+  path: string;
+  content: string;
+};
+
+export type Skill = {
+  id: UUID;
+  /**
+   * 稳定引用键。创建后不可修改，用作 `${skill:key}` 占位符解析。
+   * 兼容期：v0.4 前旧数据允许缺失，读取路径会补齐。
+   */
+  key?: string;
+  name: string;
+  description?: string;
+  content: string;
+  files: SkillFile[];
+  /** @default 'active' — 兼容期允许缺失，读取路径视为 active。 */
+  status?: 'active' | 'disabled';
+  /** 每次内容修改递增；兼容期允许缺失，读取路径视为 1。 */
+  revision?: number;
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+};
+
+export type CapabilityKind = 'internal' | 'tool' | 'mcp' | 'connector';
+
+/**
+ * 完整能力定义（tool/capability 管理页面使用）。
+ * 与 RuntimeCapabilityDefinition 的区别：后者是运行时快照（只保留 id/key/name/risk/description），
+ * 前者是管理层完整记录，多出 kind、状态、schema、系统所有权等字段。
+ */
+export type CapabilityDefinition = {
+  id: UUID;
+  key: string;
+  kind: CapabilityKind;
+  name: string;
+  descriptionMarkdown?: string;
+  usageMarkdown?: string;
+  inputSchema?: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  riskLevel: CapabilityRiskLevel;
+  status: 'active' | 'disabled' | 'unconfigured';
+  systemOwned: boolean;
+  createdAt?: ISODateTime;
+  updatedAt?: ISODateTime;
+};
+
+export type ProfileReferenceKind = 'skill' | 'tool';
+
+export type ProfileDiagnosticCode =
+  | 'unknown_skill'
+  | 'unknown_tool'
+  | 'disabled_skill'
+  | 'disabled_tool'
+  | 'unconfigured_tool'
+  | 'internal_tool_not_insertable'
+  | 'tool_capability_missing'
+  | 'duplicate_reference'
+  | 'profile_over_budget';
+
+export type ProfileDiagnostic = {
+  severity: 'error' | 'warning';
+  code: ProfileDiagnosticCode;
+  message: string;
+  kind?: ProfileReferenceKind;
+  refKey?: string;
+  line?: number;
+  column?: number;
+};
+
+export type CompiledAgentProfile = {
+  sourceMarkdown: string;
+  systemPrompt: string;
+  skillIds: UUID[];
+  toolIds: UUID[];
+  /** 稳定 key 记录，便于跨模型持久化。 */
+  skillKeys: string[];
+  toolKeys: string[];
+  skillRevisions: Record<string, number>;
+  diagnostics: ProfileDiagnostic[];
+  contentHash: string;
+  characterCount: number;
+  estimatedTokens: number;
+};
+
+export type ExecutionTarget = {
+  runtimeType: RuntimeType;
+  modelId?: string;
+};
+
+export type RuntimeInvocationProfileSnapshot = {
+  runtimeType: RuntimeType;
+  modelId?: string;
+  agentId: UUID;
+  profileHash: string;
+  resolvedSkillIds: UUID[];
+  resolvedSkillRevisions: Record<string, number>;
+  resolvedToolIds: UUID[];
 };
 
 export type TaskBrief = {
@@ -410,7 +953,13 @@ export type AgentTask = {
   title: string;
   description: string;
   status: AgentTaskStatus;
+  /** v0.2 新增。指派方 ActorRef。旧字段 assignedByAgentId 双写保留至 v0.3。 */
+  assignedBy?: ActorRef;
+  /** v0.2 新增。被指派方 ActorRef。旧字段 assigneeAgentId 双写保留至 v0.3。 */
+  assignee?: ActorRef;
+  /** @deprecated v0.3 移除,改读 assignedBy.id (type='agent'|'system')。v0.2 双写期保留。 */
   assignedByAgentId?: UUID;
+  /** @deprecated v0.3 移除,改读 assignee.id (type='agent'|'user')。v0.2 双写期保留。 */
   assigneeAgentId?: UUID;
   routingMode?: TaskRoutingMode;
   autoResolutionAttempted?: boolean;
@@ -582,6 +1131,7 @@ export type RuntimeAgentProfile = {
   runtimeSelection?: EngineeringRuntimeSelection;
   modelId?: string;
   capabilityIds: UUID[];
+  skillIds?: UUID[];
 };
 
 export type RuntimeTaskBrief = Omit<TaskBrief, 'confirmedByUser' | 'confirmedAt' | 'createdAt'>;
@@ -641,7 +1191,7 @@ export type TaskEvidenceRef = {
   omissionReason?: string;
 };
 
-export type EvidenceSelectionStrategy = 'coding_minimal' | 'non_coding_minimal' | 'mixed_minimal';
+export type EvidenceSelectionStrategy = 'coding_minimal' | 'non_coding_minimal' | 'mixed_minimal' | 'architecture_analysis';
 
 export type TaskEvidenceSelection = {
   phase: AgentRunPhase;
@@ -875,7 +1425,9 @@ export type AgentRunInput = {
   contextPack: ContextPack;
   expectedOutput: ExpectedRuntimeOutput;
   budget: RuntimeBudget;
+  estimatedInputTokens?: number;
   options?: Record<string, unknown>;
+  executionTarget?: ExecutionTarget;
 };
 
 export type ExpectedRuntimeOutput = {
@@ -895,14 +1447,17 @@ export type ExpectedRuntimeOutput = {
 export type RuntimeArtifactOutput = {
   type: ArtifactType;
   title: string;
-  content?: string;
+  content: string;
   uri?: string;
   summary?: string;
-  metadata?: Record<string, unknown> & {
-    fileChanges?: RuntimeFileChange[];
-    validationEvidence?: ValidationEvidenceReport;
-    summaryMemoryCheckpoint?: SummaryMemoryCheckpoint;
-  };
+  metadata?: RuntimeArtifactMetadata;
+};
+
+export type RuntimeArtifactMetadata = Record<string, unknown> & {
+  content?: never;
+  fileChanges?: RuntimeFileChange[];
+  validationEvidence?: ValidationEvidenceReport;
+  summaryMemoryCheckpoint?: SummaryMemoryCheckpoint;
 };
 
 export type RuntimeContextRequest = {
@@ -944,6 +1499,22 @@ export type AgentRuntimeEvent = {
   createdAt: ISODateTime;
 };
 
+export type RuntimeSessionRef = {
+  cliSessionId?: string;
+  workDir?: string;
+};
+
+export type RuntimeStreamMetrics = {
+  startedAt: ISODateTime;
+  completedAt: ISODateTime;
+  durationMs: number;
+  frameCount: number;
+  firstFrameAt?: ISODateTime;
+  firstFrameLatencyMs?: number;
+  lastActivityAt: ISODateTime;
+  maxInterFrameGapMs: number;
+};
+
 export type AgentRunResult<TOutput = RuntimeOutput> = {
   runId: UUID;
   runtimeType: RuntimeType;
@@ -952,7 +1523,15 @@ export type AgentRunResult<TOutput = RuntimeOutput> = {
   events: AgentRuntimeEvent[];
   artifacts: RuntimeArtifactOutput[];
   usage: RuntimeUsage;
+  runtimeSession?: RuntimeSessionRef;
+  streamMetrics?: RuntimeStreamMetrics;
   error?: RuntimeError;
+};
+
+export type AgentRuntimeRunHandle = {
+  events: AsyncIterable<AgentRuntimeEvent>;
+  result: Promise<AgentRunResult>;
+  cancel(): Promise<void>;
 };
 
 export type RuntimeOutput =
@@ -981,6 +1560,7 @@ export type TaskClaimDecisionOutput = {
   reason: string;
   confidence?: number;
   missingContext?: string[];
+  requestedContext?: RuntimeContextRequest;
   handoffSuggestion?: HandoffSuggestion | null;
   alternativeAgentKeys?: string[];
   alternativeAgentIds?: UUID[];
@@ -992,6 +1572,7 @@ export type TaskAcceptanceDecisionOutput = {
   status: 'accepted' | 'blocked' | 'rejected';
   reason: string;
   missingContext?: string[];
+  requestedContext?: RuntimeContextRequest;
   handoffSuggestion?: HandoffSuggestion | null;
   confidence?: number;
   alternativeAgentKeys?: string[];
@@ -1037,6 +1618,34 @@ export type TaskExecutionResultOutput = {
   risks: string[];
 };
 
+export const POST_REVIEW_ACTION_KEYS = [
+  'request_workspace_context',
+  'deliver_with_limitations',
+  'save_progress',
+  'cancel'
+] as const;
+
+export type PostReviewActionKey = (typeof POST_REVIEW_ACTION_KEYS)[number];
+
+export type PostReviewAction =
+  | {
+      action: 'request_workspace_context';
+      reason: string;
+      missingPaths: string[];
+    }
+  | {
+      action: 'deliver_with_limitations';
+      limitations: string[];
+    }
+  | {
+      action: 'save_progress';
+      artifactIds?: UUID[];
+    }
+  | {
+      action: 'cancel';
+      reason?: string;
+    };
+
 export type PostReviewReportOutput = {
   kind: 'post_review_report';
   isConsistentWithBrief: boolean;
@@ -1046,6 +1655,7 @@ export type PostReviewReportOutput = {
   outOfScopeChanges: string[];
   testResults: string[];
   recommendation: 'deliver' | 'rework' | 'ask_user';
+  actions?: PostReviewAction[];
 };
 
 export type FinalDeliveryOutput = {
@@ -1065,7 +1675,10 @@ export type AgentRuntimeAdapter = {
   type: RuntimeType;
   metadata?: RuntimeAdapterMetadata;
   run(input: AgentRunInput, signal?: AbortSignal): Promise<AgentRunResult>;
+  start?: (input: AgentRunInput, signal?: AbortSignal) => AgentRuntimeRunHandle;
+  /** @deprecated v0.2 双轨兼容。优先使用 start().events。 */
   stream?: (runId: UUID) => AsyncIterable<AgentRuntimeEvent>;
+  /** @deprecated v0.2 双轨兼容。优先使用 start().cancel()。 */
   cancel?: (runId: UUID) => Promise<void>;
   checkAvailability?: () => Promise<RuntimeAvailability>;
   healthCheck?: () => Promise<RuntimeHealthStatus>;

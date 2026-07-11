@@ -1,5 +1,5 @@
 import Ajv, { type ErrorObject, type ValidateFunction } from 'ajv';
-import type { RuntimeOutput } from '@agent-cluster/shared';
+import { ARTIFACT_TYPES, type RuntimeOutput } from '@agent-cluster/shared';
 
 export type RuntimeOutputKind = RuntimeOutput['kind'];
 
@@ -9,6 +9,64 @@ const nullableNumber = { type: ['number', 'null'] } as const;
 const nullableObject = { type: ['object', 'null'], additionalProperties: true } as const;
 const nullableObjectArray = {
   anyOf: [{ type: 'array', items: { type: 'object', additionalProperties: true } }, { type: 'null' }]
+} as const;
+const runtimeArtifactSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    type: { enum: [...ARTIFACT_TYPES] },
+    title: { type: 'string', minLength: 1 },
+    content: { type: 'string', minLength: 1 },
+    uri: { type: 'string' },
+    summary: { type: 'string' },
+    metadata: {
+      type: 'object',
+      additionalProperties: true,
+      not: { required: ['content'] }
+    }
+  },
+  required: ['type', 'title', 'content']
+} as const;
+const postReviewActionSchema = {
+  oneOf: [
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { const: 'request_workspace_context' },
+        reason: { type: 'string', minLength: 1 },
+        missingPaths: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', minLength: 1 } }
+      },
+      required: ['action', 'reason', 'missingPaths']
+    },
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { const: 'deliver_with_limitations' },
+        limitations: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', minLength: 1 } }
+      },
+      required: ['action', 'limitations']
+    },
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { const: 'save_progress' },
+        artifactIds: { type: 'array', uniqueItems: true, items: { type: 'string', minLength: 1 } }
+      },
+      required: ['action']
+    },
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { const: 'cancel' },
+        reason: { type: 'string', minLength: 1 }
+      },
+      required: ['action']
+    }
+  ]
 } as const;
 
 function objectSchema(
@@ -46,6 +104,7 @@ const schemas: Record<RuntimeOutputKind, Record<string, unknown>> = {
       status: { enum: ['accepted', 'blocked', 'rejected'] },
       reason: { type: 'string', minLength: 1 },
       missingContext: nullableStringArray,
+      requestedContext: nullableObject,
       handoffSuggestion: nullableObject,
       confidence: nullableNumber,
       alternativeAgentKeys: nullableStringArray,
@@ -61,6 +120,7 @@ const schemas: Record<RuntimeOutputKind, Record<string, unknown>> = {
       reason: { type: 'string', minLength: 1 },
       confidence: nullableNumber,
       missingContext: nullableStringArray,
+      requestedContext: nullableObject,
       handoffSuggestion: nullableObject,
       alternativeAgentKeys: nullableStringArray,
       alternativeAgentIds: nullableStringArray,
@@ -88,7 +148,7 @@ const schemas: Record<RuntimeOutputKind, Record<string, unknown>> = {
       status: { enum: ['completed', 'failed', 'blocked', 'needs_review'] },
       summary: { type: 'string', minLength: 1 },
       completedItems: stringArray,
-      changedArtifacts: { type: 'array', items: { type: 'object', additionalProperties: true } },
+      changedArtifacts: { type: 'array', items: runtimeArtifactSchema },
       requestedContext: nullableObject,
       agentMessages: nullableObjectArray,
       nextSuggestedActions: stringArray,
@@ -105,7 +165,8 @@ const schemas: Record<RuntimeOutputKind, Record<string, unknown>> = {
       missingItems: stringArray,
       outOfScopeChanges: stringArray,
       testResults: stringArray,
-      recommendation: { enum: ['deliver', 'rework', 'ask_user'] }
+      recommendation: { enum: ['deliver', 'rework', 'ask_user'] },
+      actions: { type: 'array', items: postReviewActionSchema }
     },
     [
       'isConsistentWithBrief',
@@ -199,7 +260,8 @@ const examples: Record<RuntimeOutputKind, Record<string, unknown>> = {
     missingItems: [],
     outOfScopeChanges: [],
     testResults: [],
-    recommendation: 'deliver'
+    recommendation: 'deliver',
+    actions: []
   },
   final_delivery: {
     kind: 'final_delivery',

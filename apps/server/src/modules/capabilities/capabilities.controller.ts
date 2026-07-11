@@ -1,7 +1,7 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/common';
 import { ok } from '../../common/api-response.js';
 import { CapabilityAuditService } from './capability-audit.service.js';
-import { CapabilitiesService } from './capabilities.service.js';
+import { CapabilitiesService, type CapabilityUpsertInput } from './capabilities.service.js';
 
 @Controller('capabilities')
 export class CapabilitiesController {
@@ -12,12 +12,32 @@ export class CapabilitiesController {
 
   @Get()
   list() {
-    return ok(this.capabilities.list());
+    return ok(this.capabilities.listDefinitions());
+  }
+
+  @Post()
+  create(@Body() body: CapabilityUpsertInput) {
+    return ok(this.capabilities.createDefinition(body));
   }
 
   @Get(':capabilityId')
   detail(@Param('capabilityId') capabilityId: string) {
-    return ok(this.capabilities.get(capabilityId));
+    return ok(this.capabilities.getDefinition(capabilityId));
+  }
+
+  @Get(':capabilityId/references')
+  references(@Param('capabilityId') capabilityId: string) {
+    return ok({ agents: this.capabilities.referencingAgents(capabilityId) });
+  }
+
+  @Patch(':capabilityId')
+  update(@Param('capabilityId') capabilityId: string, @Body() body: Partial<CapabilityUpsertInput>) {
+    return ok(this.capabilities.updateDefinition(capabilityId, body ?? {}));
+  }
+
+  @Delete(':capabilityId')
+  remove(@Param('capabilityId') capabilityId: string) {
+    return ok(this.capabilities.removeDefinition(capabilityId));
   }
 
   @Post(':capabilityId/check')

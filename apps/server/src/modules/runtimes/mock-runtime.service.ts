@@ -434,6 +434,36 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
           risks: []
         } satisfies TaskExecutionResultOutput;
       case 'post_review_report':
+        if (input.options?.scenario === 'post_review_context_insufficient') {
+          const missingPaths = Array.from(
+            new Set([
+              ...(input.contextPack.workspaceFocus?.relevantFiles ?? []),
+              ...input.contextPack.taskContext.evidenceRefs
+                .filter((evidence) => evidence.type === 'workspace_file')
+                .map((evidence) => evidence.ref)
+                .filter((ref): ref is string => Boolean(ref))
+            ])
+          );
+          if (missingPaths.length) {
+            return {
+              kind: 'post_review_report',
+              isConsistentWithBrief: false,
+              matchedItems: [],
+              mismatchedItems: [],
+              missingItems: missingPaths.map((path) => `Missing workspace evidence: ${path}`),
+              outOfScopeChanges: [],
+              testResults: [],
+              recommendation: 'ask_user',
+              actions: [
+                {
+                  action: 'request_workspace_context',
+                  reason: 'Post Review needs additional workspace evidence before it can verify completion.',
+                  missingPaths
+                }
+              ]
+            } satisfies PostReviewReportOutput;
+          }
+        }
         if (isArchitectureAnalysis) {
           return {
             kind: 'post_review_report',
@@ -481,7 +511,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
           return {
             kind: 'final_delivery',
             summary: `已完成项目架构分析：${goal}`,
-            completedItems: ['生成工作区架构分析', '生成项目架构分析报告', '完成分析结果复核'],
+            completedItems: ['生成工作区架构分析', '生成项目架构分析报告', '输出架构想法与建议'],
             incompleteItems: [],
             risks: [],
             artifactRefs: []
@@ -548,13 +578,13 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
       goal: `分析并熟悉项目架构：${workspace?.rootName ?? goal}`,
       scope: [
         '读取用户指定目录的工作区快照。',
-        '分析项目技术栈、目录职责、入口文件、关键配置和核心模块。',
-        '输出中文项目架构分析报告，帮助用户快速熟悉项目。'
+        '从架构视角分析项目结构、目录职责、入口文件、主链路、关键配置和核心模块。',
+        '输出中文项目架构分析报告，帮助用户快速熟悉项目，并给出架构方面的想法和建议。'
       ],
       outOfScope: ['不修改项目源码。', '不发布、部署或调用外部系统。'],
-      constraints: ['所有阶段产物必须围绕项目架构分析。', '所有用户可见产物必须使用中文。'],
+      constraints: ['架构师只承担当前项目结构与主链路分析这一场景。', '所有用户可见产物必须使用中文。'],
       acceptanceCriteria: [
-        '产物包含项目结构、技术栈、入口文件、核心目录、重点文件和建议阅读路径。',
+        '产物包含项目结构、技术栈、入口文件、核心目录、主链路、重点文件、架构想法和建议阅读路径。',
         '产物引用用户指定的目录或工作区名称。',
         '产物以 fileChanges 形式生成到 agent-output/，方便写入用户选择的目录。'
       ],
@@ -565,14 +595,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
           title: '生成项目架构分析报告',
           description: `基于工作区快照分析项目架构：${goal}`,
           suggestedAgentKey: 'architect',
-          acceptanceCriteria: ['报告包含技术栈、目录职责、入口文件、重点文件和熟悉路径。']
-        },
-        {
-          title: '复核项目架构分析完整性',
-          description: '检查架构分析报告是否覆盖用户指定目录和核心项目结构。',
-          suggestedAgentKey: 'review',
-          dependsOnTaskTitles: ['生成项目架构分析报告'],
-          acceptanceCriteria: ['复核结论指出报告是否足够帮助用户熟悉项目。']
+          acceptanceCriteria: ['报告包含技术栈、目录职责、入口文件、主链路、重点文件、架构想法和熟悉路径。']
         }
       ]
     };
@@ -586,6 +609,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
       reason: decision.reason,
       confidence: decision.confidence,
       missingContext: decision.missingContext,
+      requestedContext: decision.requestedContext,
       handoffSuggestion: decision.handoffSuggestion,
       alternativeAgentKeys: decision.alternativeAgentKeys,
       alternativeAgentIds: decision.alternativeAgentIds,
@@ -1007,7 +1031,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
       kind: 'task_execution_result',
       status: 'completed',
       summary: `已生成项目架构分析报告：${input.contextPack.workspaceSnapshot?.rootName ?? goal}`,
-      completedItems: ['分析工作区目录结构', '识别项目技术栈和入口文件', '生成中文项目架构分析报告'],
+      completedItems: ['分析工作区目录结构', '识别项目技术栈和入口文件', '梳理项目主链路', '输出架构想法与建议'],
       changedArtifacts: [artifact],
       nextSuggestedActions: ['阅读 agent-output/project-architecture-analysis.md', '按报告中的建议阅读路径逐步熟悉项目'],
       risks: input.contextPack.workspaceSnapshot ? [] : ['缺少工作区快照，报告仅能基于用户文字描述。']
@@ -1087,6 +1111,16 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
       '',
       '## 重点文件',
       ...(importantFiles.length ? importantFiles.map((item) => `- ${item}`) : ['- 暂无重点文件']),
+      '',
+      '## 主链路理解',
+      ...(snapshot?.entrypoints?.length
+        ? snapshot.entrypoints.map((item) => `- 从 ${item} 进入，结合核心目录继续追踪启动、路由、状态、服务和运行时协作链路。`)
+        : ['- 当前证据不足以确认主链路，需要继续读取入口文件和核心模块正文。']),
+      '',
+      '## 架构想法与建议',
+      '- 先用入口文件、核心目录和配置文件建立系统边界，再补读具体模块实现，避免直接陷入局部细节。',
+      '- 对主链路中的数据流、事件流、Runtime 调用和持久化边界分别做标注，后续改动先检查这些边界是否受影响。',
+      '- 对被跳过或未读取的关键文件保持不确定性标记，避免把目录级推断当作源码事实。',
       '',
       '## 配置与说明文件',
       ...(configFiles.length ? configFiles.map((item) => `- ${item}`) : ['- 暂未识别到 README、AGENTS、CLAUDE 或构建配置文件。']),

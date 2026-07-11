@@ -1,0 +1,13 @@
+{
+  "seatId": "codex-2",
+  "runnerType": "codex",
+  "state": "running",
+  "currentTask": "你不能进行联网吗",
+  "currentAction": "hen the user writes any substantial Chinese",
+  "workspacePath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\worktrees\\sess_20260706_113814_965\\codex-2-1783310079691",
+  "controlMode": "accept",
+  "startedAt": "2026-07-06T03:54:40.372Z",
+  "updatedAt": "2026-07-06T03:54:56.117Z",
+  "processId": 20752,
+  "needsUser": false
+}

@@ -127,6 +127,8 @@ type SessionDetail = {
   ownerId: string
   workspaceId: string
   projectId?: string
+  origin?: 'user' | 'autopilot'
+  autopilotRunId?: string
   currentTaskBriefId?: string
   engineeringRuntime?: {
     sessionDefaultRuntimeType?: RuntimeType
@@ -190,6 +192,32 @@ type SessionControlResponse = {
   event: CollaborationEvent
 }
 ```
+
+### 3.6 处理 Post Review 动作
+
+```text
+POST /api/sessions/:sessionId/post-review/actions
+```
+
+请求中的 `action` 必须来自指定确认卡片的服务端事件载荷，服务端不会接受客户端伪造的动作详情。
+
+```ts
+type ResolvePostReviewActionRequest = {
+  confirmationId: string
+  action:
+    | 'request_workspace_context'
+    | 'deliver_with_limitations'
+    | 'save_progress'
+    | 'cancel'
+}
+```
+
+动作语义：
+
+- `request_workspace_context`：记录缺失路径并重新进入执行流程。
+- `deliver_with_limitations`：携带已确认限制跳过重复 Post Review，进入最终交付。
+- `save_progress`：保留当前检查点并继续等待用户决定。
+- `cancel`：取消会话和未完成任务。
 
 ## 4. Task Brief API
 
@@ -618,7 +646,68 @@ type Capability = {
 }
 ```
 
-## 13. 错误码
+## 13. Skills API
+
+```text
+GET    /api/skills
+GET    /api/skills/:skillId
+POST   /api/skills
+PATCH  /api/skills/:skillId
+DELETE /api/skills/:skillId
+POST   /api/agents/:agentId/skills/:skillId
+DELETE /api/agents/:agentId/skills/:skillId
+```
+
+```ts
+type SkillInput = {
+  name: string
+  description?: string
+  content: string
+  files?: Array<{ path: string; content: string }>
+}
+```
+
+约束：
+
+- name 最长 100，description 最长 500，content 最长 100000 字符。
+- files 最多 20 个，单文件最长 100000，总内容最长 500000 字符。
+- file path 必须是规范化相对路径，不允许绝对路径、空段、`.`、`..` 或重复路径。
+- Skill 名称大小写不敏感唯一；删除 Skill 时清理所有 Agent 的 `skillIds` 引用。
+
+## 14. Autopilot API
+
+```text
+GET    /api/autopilots
+GET    /api/autopilots/runs
+GET    /api/autopilots/:autopilotId
+GET    /api/autopilots/:autopilotId/runs
+POST   /api/autopilots
+PATCH  /api/autopilots/:autopilotId
+DELETE /api/autopilots/:autopilotId
+POST   /api/autopilots/:autopilotId/trigger
+```
+
+```ts
+type AutopilotInput = {
+  name: string
+  prompt: string
+  schedule?: string
+  enabled?: boolean
+  agentIds?: string[]
+  tokenBudget?: number
+}
+
+type TriggerAutopilotRequest = {
+  force?: boolean
+}
+```
+
+- v0.1 服务端强制 `runtimeType='mock'`、`riskLevel='low'`，请求不能提升风险级别。
+- disabled Autopilot 的手工触发默认返回校验错误；仅显式 `force=true` 可用于受控手工触发。
+- 同一 Autopilot 已有 queued/running run 时，trigger 返回现有 run 和 `duplicate=true`，不重复创建 session。
+- `AUTOPILOT_ENABLED=true` 且 `ENABLE_BULLMQ=true` 时启用 BullMQ Job Scheduler；否则不启动定时调度。
+
+## 15. 错误码
 
 ```text
 SESSION_NOT_FOUND

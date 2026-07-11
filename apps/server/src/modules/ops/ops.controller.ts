@@ -1,7 +1,10 @@
 import { Controller, Get } from '@nestjs/common';
+import { DEFAULT_CONTEXT_PIPELINE_VERSION, SUPPORTED_CONTEXT_PIPELINE_VERSIONS } from '@agent-cluster/shared';
+import type { OpsHealth } from '@agent-cluster/shared';
 import { Queue, type ConnectionOptions } from 'bullmq';
 import { ok } from '../../common/api-response.js';
 import { bullMqEnabled, bullMqPrefix, redisConnectionOptions } from '../../common/redis.js';
+import { contextPipelineV2Enabled, contextPipelineVersionForNewSession } from '../../common/runtime-config.js';
 
 const queueNames = [
   'agent-discussion-queue',
@@ -16,12 +19,21 @@ const queueNames = [
 export class OpsController {
   @Get('health')
   health() {
-    return ok({
+    const pipelineVersion = contextPipelineVersionForNewSession();
+    const health: OpsHealth = {
       status: 'ok',
       service: 'agent-cluster-server',
       version: '0.1.0',
+      buildTime: this.buildTime(),
+      commit: this.commit(),
+      pipelineVersion,
+      defaultContextPipelineVersion: DEFAULT_CONTEXT_PIPELINE_VERSION,
+      contextPipelineVersion: pipelineVersion,
+      contextPipelineV2Enabled: contextPipelineV2Enabled(),
+      supportedContextPipelineVersions: SUPPORTED_CONTEXT_PIPELINE_VERSIONS,
       timestamp: new Date().toISOString()
-    });
+    };
+    return ok(health);
   }
 
   @Get('ops/queues')
@@ -86,6 +98,19 @@ export class OpsController {
     } finally {
       await Promise.all(queues.map((queue) => queue.close().catch(() => undefined)));
     }
+  }
+
+  private buildTime() {
+    return process.env.AGENT_CLUSTER_BUILD_TIME?.trim() || process.env.BUILD_TIME?.trim() || 'unknown';
+  }
+
+  private commit() {
+    return (
+      process.env.AGENT_CLUSTER_COMMIT?.trim() ||
+      process.env.GIT_COMMIT?.trim() ||
+      process.env.COMMIT_SHA?.trim() ||
+      'unknown'
+    );
   }
 
 }

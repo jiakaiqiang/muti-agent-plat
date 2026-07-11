@@ -3,10 +3,11 @@ import { ExecutionModule } from '../execution/execution.module.js';
 import { OrchestratorModule } from '../orchestrator/orchestrator.module.js';
 import { SessionsModule } from '../sessions/sessions.module.js';
 import { TasksModule } from '../tasks/tasks.module.js';
+import { RuntimeModule } from '../runtimes/runtime.module.js';
 import { RecoveryService } from './recovery.service.js';
 
 @Module({
-  imports: [SessionsModule, TasksModule, OrchestratorModule, ExecutionModule],
+  imports: [SessionsModule, TasksModule, OrchestratorModule, ExecutionModule, RuntimeModule],
   providers: [RecoveryService]
 })
 export class RecoveryModule {}

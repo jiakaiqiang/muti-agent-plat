@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { ContextPack } from '@agent-cluster/shared';
-import { fitContextToBudget } from './token.js';
+import { estimateRuntimeInputTokens, fitContextToBudget, reserveInputTokenSafetyMargin } from './token.js';
 
 function makeContextPack(overrides: Partial<ContextPack> = {}): ContextPack {
   const base = {
@@ -83,6 +83,122 @@ test('fitContextToBudget exposes diagnostics with stagesTried and finalStage', (
     result.diagnostics.stages.map((stage) => stage.name)
   );
   assert.equal(result.diagnostics.finalStage, result.diagnostics.stages.at(-1)?.name);
+});
+
+test('runtime input estimate includes system prompt, schema, example, and extra prompt text', () => {
+  const contextPack = makeContextPack();
+  const contextOnly = estimateRuntimeInputTokens({ contextPack });
+  const complete = estimateRuntimeInputTokens({
+    contextPack,
+    systemPrompt: 'System instruction '.repeat(40),
+    outputSchema: { type: 'object', properties: { summary: { type: 'string' } } },
+    outputExample: { kind: 'agent_message', messageKind: 'summary', content: 'Example output' },
+    additionalPromptText: ['Return JSON only.', 'Ground conclusions in selected evidence.']
+  });
+
+  assert.ok(complete.systemPromptTokens > 0);
+  assert.ok(complete.schemaTokens > 0);
+  assert.ok(complete.exampleTokens > 0);
+  assert.ok(complete.additionalPromptTokens > 0);
+  assert.ok(complete.totalTokens > contextOnly.totalTokens);
+  assert.equal(
+    complete.totalTokens,
+    complete.contextTokens +
+      complete.systemPromptTokens +
+      complete.schemaTokens +
+      complete.exampleTokens +
+      complete.additionalPromptTokens
+  );
+});
+
+test('input token safety margin reserves a configured ratio from the model limit', () => {
+  assert.deepEqual(reserveInputTokenSafetyMargin(4_000, 0.1), {
+    configuredMaxInputTokens: 4_000,
+    effectiveMaxInputTokens: 3_600,
+    safetyMarginTokens: 400,
+    safetyMarginRatio: 0.1
+  });
+  assert.deepEqual(reserveInputTokenSafetyMargin(undefined, 0.1), {
+    configuredMaxInputTokens: undefined,
+    effectiveMaxInputTokens: undefined,
+    safetyMarginTokens: 0,
+    safetyMarginRatio: 0.1
+  });
+});
+
+test('initial snapshot compaction limits file metadata for an 80-file Runtime Snapshot', () => {
+  const files = Array.from({ length: 80 }, (_, index) => ({
+    path: `src/file-${String(index).padStart(2, '0')}.ts`,
+    size: 128,
+    language: 'typescript',
+    content: `export const value${index} = ${index};`
+  }));
+  const result = fitContextToBudget(makeContextPack({
+    budget: { maxInputTokens: 1_000_000, maxOutputTokens: 100_000, maxTotalTokens: 1_100_000 },
+    workspaceSnapshot: {
+      rootName: 'large-snapshot',
+      scannedAt: '2026-07-11T00:00:00.000Z',
+      fileCount: files.length,
+      totalBytes: files.reduce((sum, file) => sum + file.size, 0),
+      tree: files.map((file) => ({ path: file.path, kind: 'file' as const })),
+      files,
+      skipped: []
+    }
+  }));
+
+  assert.equal(result.diagnostics.finalStage, 'initial');
+  const compactedFileCount = result.contextPack.workspaceSnapshot?.files.length ?? 0;
+  assert.ok(compactedFileCount <= 8, `expected at most 8 file metadata objects, got ${compactedFileCount}`);
+});
+
+test('grounded source analysis keeps at least one selected evidence body under pressure', () => {
+  const groundedPack = makeContextPack({
+    budget: { maxInputTokens: 420, maxOutputTokens: 100, maxTotalTokens: 600 },
+    taskContext: {
+      ...makeContextPack().taskContext,
+      domain: 'mixed',
+      intent: 'analysis',
+      requiresCodeChanges: false,
+      evidenceSelection: {
+        ...makeContextPack().taskContext.evidenceSelection,
+        strategy: 'architecture_analysis',
+        selectedRefs: [{ type: 'workspace_file', label: 'src/main.ts', ref: 'src/main.ts' }],
+        selectedCount: 1,
+        selectedTypes: ['workspace_file']
+      },
+      evidenceRefs: [{ type: 'workspace_file', label: 'src/main.ts', ref: 'src/main.ts' }]
+    },
+    selectedEvidenceContents: [
+      {
+        type: 'workspace_file',
+        label: 'src/main.ts',
+        ref: 'src/main.ts',
+        source: 'workspace_file',
+        content: `export function bootstrap() { return 'grounded'; }\n${'// source evidence\n'.repeat(80)}`,
+        contentLength: 1_600,
+        tokenEstimate: 400
+      }
+    ]
+  });
+
+  const result = fitContextToBudget(groundedPack);
+
+  assert.notEqual(result.diagnostics.finalStage, 'navigation_only');
+  assert.ok(
+    (result.contextPack.selectedEvidenceContents?.length ?? 0) >= 1,
+    `expected an evidence floor, final stage was ${result.diagnostics.finalStage}; stages=${JSON.stringify(
+      result.diagnostics.stages.map((stage) => ({
+        name: stage.name,
+        total: stage.estimatedTokens,
+        evidence: stage.breakdown.selectedEvidenceContents,
+        taskContext: stage.breakdown.taskContext,
+        summaryMemory: stage.breakdown.summaryMemory,
+        continuationState: stage.breakdown.continuationState,
+        agentProfile: stage.breakdown.agentProfile
+      }))
+    )}`
+  );
+  assert.ok(result.contextPack.selectedEvidenceContents?.[0]?.content);
 });
 
 test('navigation_only is a valid FitStage name and only fires after emergency', () => {

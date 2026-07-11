@@ -148,7 +148,7 @@ async function runConfirmedSession(requirement) {
     method: 'POST',
     body: JSON.stringify({
       input: requirement,
-      agentIds: ['coordinator', 'architect', 'review']
+      agentIds: ['coordinator', 'architect', 'requirements', 'review']
     })
   });
   const sessionId = created.data.session.id;
@@ -178,6 +178,9 @@ async function assertArchitectLeadsProjectAnalysis(sessionId, events) {
   if (/审查架构说明|审核架构说明/.test(allTaskText)) {
     throw new Error(`Project architecture analysis should not be converted into proposal review tasks: ${allTaskText}`);
   }
+  if (tasks.data.some((task) => task.title === '复核项目架构分析完整性')) {
+    throw new Error(`Project architecture analysis should create only one architect scenario task: ${allTaskText}`);
+  }
 
   const analysisTask = tasks.data.find((task) => task.title === '从架构视角分析当前项目结构与主链路');
   if (!analysisTask) {
@@ -196,6 +199,27 @@ async function assertArchitectLeadsProjectAnalysis(sessionId, events) {
   );
   if (!architectDecision) {
     throw new Error(`Expected architect to accept the first-line project analysis task: ${JSON.stringify(events)}`);
+  }
+
+  const reassignedToRequirements = events.find(
+    (event) =>
+      event.type === 'task_reassigned' &&
+      event.taskId === analysisTask.id &&
+      event.metadata.payload?.previousAssigneeAgentId === '00000000-0000-0000-0000-000000000003' &&
+      event.metadata.payload?.assigneeAgentId === '00000000-0000-0000-0000-000000000002'
+  );
+  if (reassignedToRequirements) {
+    throw new Error(`Architecture analysis must not be auto-reassigned to requirements: ${JSON.stringify(reassignedToRequirements)}`);
+  }
+
+  const requirementsBlockedAnalysis = events.find(
+    (event) =>
+      event.type === 'task_blocked' &&
+      event.taskId === analysisTask.id &&
+      event.fromAgentId === '00000000-0000-0000-0000-000000000002'
+  );
+  if (requirementsBlockedAnalysis) {
+    throw new Error(`Requirements analyst must not block the architect-owned analysis task: ${JSON.stringify(requirementsBlockedAnalysis)}`);
   }
 }
 

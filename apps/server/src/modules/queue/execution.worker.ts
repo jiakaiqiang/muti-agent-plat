@@ -5,6 +5,8 @@ import {
   bullMqPrefix,
   executionQueueName,
   queueConcurrency,
+  queueLockDuration,
+  queueStalledInterval,
   redisConnectionOptions
 } from '../../common/redis.js';
 import { OrchestratorService } from '../orchestrator/orchestrator.service.js';
@@ -60,7 +62,9 @@ export class ExecutionWorker implements OnModuleInit, OnModuleDestroy {
       {
         connection: redisConnectionOptions(),
         prefix: bullMqPrefix(),
-        concurrency: queueConcurrency()
+        concurrency: queueConcurrency(),
+        lockDuration: queueLockDuration(),
+        stalledInterval: queueStalledInterval()
       }
     );
 
@@ -69,6 +73,9 @@ export class ExecutionWorker implements OnModuleInit, OnModuleDestroy {
     });
     this.worker.on('completed', (job) => {
       this.logger.log(`Execution job ${job.id} completed`);
+    });
+    this.worker.on('stalled', (jobId) => {
+      this.logger.warn(`Execution job ${jobId} stalled and will be retried`);
     });
   }
 

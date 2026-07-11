@@ -1,8 +1,9 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Subject } from 'rxjs';
-import type { CollaborationEvent, CollaborationEventType, EventMetadata, UUID } from '@agent-cluster/shared';
+import type { ActorRef, CollaborationEvent, CollaborationEventType, EventMetadata, UUID } from '@agent-cluster/shared';
 import { nowIso } from '../../common/time.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
+import { deriveActor } from './derive-actor.js';
 
 type CreateEventInput<TPayload extends Record<string, unknown> = Record<string, unknown>> = {
   sessionId: UUID;
@@ -14,6 +15,8 @@ type CreateEventInput<TPayload extends Record<string, unknown> = Record<string, 
   taskId?: UUID;
   userMessageIntent?: CollaborationEvent['userMessageIntent'];
   priority?: CollaborationEvent['priority'];
+  actor?: ActorRef;
+  sessionUserId?: UUID;
 };
 
 @Injectable()
@@ -36,6 +39,13 @@ export class EventsService implements OnModuleDestroy {
   create<TPayload extends Record<string, unknown> = Record<string, unknown>>(
     input: CreateEventInput<TPayload>
   ): CollaborationEvent<TPayload> {
+    const actor: ActorRef =
+      input.actor ??
+      deriveActor({
+        type: input.type,
+        fromAgentId: input.fromAgentId,
+        sessionUserId: input.sessionUserId
+      });
     const event: CollaborationEvent<TPayload> = {
       id: crypto.randomUUID(),
       sessionId: input.sessionId,
@@ -47,6 +57,7 @@ export class EventsService implements OnModuleDestroy {
       taskId: input.taskId,
       content: input.content,
       metadata: input.metadata ?? { schemaVersion: '0.1', payload: {} as TPayload },
+      actor,
       createdAt: nowIso()
     };
 

@@ -10,7 +10,7 @@ export class TasksService {
   constructor(private readonly persistence: PersistenceService) {
     const persisted = this.persistence.getCollection<Record<string, AgentTask[]>>('tasksBySession', {});
     for (const [sessionId, tasks] of Object.entries(persisted)) {
-      this.tasksBySession.set(sessionId, tasks);
+      this.tasksBySession.set(sessionId, tasks.map((task) => this.normalizeActorFields(task)));
     }
   }
 
@@ -22,14 +22,20 @@ export class TasksService {
   ) {
     const titleToId = new Map<string, string>();
     const tasks: AgentTask[] = suggestions.map((suggestion) => {
+      const assignedByAgentId = options.assignedByAgentId;
+      const assigneeAgentId = suggestion.suggestedAgentKey
+        ? agentIdByKey.get(suggestion.suggestedAgentKey)
+        : undefined;
       const task: AgentTask = {
         id: crypto.randomUUID(),
         sessionId,
         title: suggestion.title,
         description: suggestion.description,
         status: 'assigned',
-        assignedByAgentId: options.assignedByAgentId,
-        assigneeAgentId: suggestion.suggestedAgentKey ? agentIdByKey.get(suggestion.suggestedAgentKey) : undefined,
+        assignedBy: assignedByAgentId ? { type: 'agent', id: assignedByAgentId } : undefined,
+        assignee: assigneeAgentId ? { type: 'agent', id: assigneeAgentId } : undefined,
+        assignedByAgentId,
+        assigneeAgentId,
         routingMode: options.routingMode ?? suggestion.routingMode ?? 'coordinator_controlled',
         autoResolutionAttempted: false,
         assignmentReason: suggestion.assignmentReason,
@@ -63,6 +69,7 @@ export class TasksService {
   }
 
   add(task: AgentTask) {
+    this.normalizeActorFields(task);
     this.tasksBySession.set(task.sessionId, [...this.list(task.sessionId), task]);
     this.persist();
     return task;
@@ -70,6 +77,7 @@ export class TasksService {
 
   update(task: AgentTask, patch: Partial<AgentTask>) {
     Object.assign(task, patch, { updatedAt: nowIso() });
+    this.normalizeActorFields(task);
     this.persist();
     return task;
   }
@@ -113,5 +121,21 @@ export class TasksService {
 
   private normalizeTitle(title: string) {
     return title.trim().toLocaleLowerCase();
+  }
+
+  private normalizeActorFields(task: AgentTask) {
+    if (!task.assignee && task.assigneeAgentId) {
+      task.assignee = { type: 'agent', id: task.assigneeAgentId };
+    }
+    if (!task.assigneeAgentId && task.assignee?.type === 'agent') {
+      task.assigneeAgentId = task.assignee.id;
+    }
+    if (!task.assignedBy && task.assignedByAgentId) {
+      task.assignedBy = { type: 'agent', id: task.assignedByAgentId };
+    }
+    if (!task.assignedByAgentId && task.assignedBy?.type === 'agent') {
+      task.assignedByAgentId = task.assignedBy.id;
+    }
+    return task;
   }
 }

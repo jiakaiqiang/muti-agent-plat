@@ -8,12 +8,14 @@ import type {
   WorkspaceSnapshot,
   WorkspaceTreeNode
 } from '@agent-cluster/shared';
+import { isGeneratedWorkspaceDirectory } from '@agent-cluster/shared';
 import { nowIso } from './time.js';
 import { isSensitivePath } from './path-safety.js';
 
-const ignoredDirectories = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.cache', 'coverage']);
 const textExtensions = new Set(['.css', '.html', '.js', '.json', '.jsx', '.md', '.mjs', '.cjs', '.ts', '.tsx', '.vue', '.yml', '.yaml', '.txt']);
 const configFileNames = new Set(['AGENTS.md', 'CLAUDE.md', 'README.md', 'package.json', 'tsconfig.json', 'vite.config.ts', 'vite.config.js', 'nest-cli.json']);
+const ruleFileNames = new Set(['agents.md', 'claude.md']);
+const sourceExtensions = new Set(['.css', '.html', '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.vue']);
 const maxScannedEntries = 350;
 const maxReadableFiles = 80;
 const maxSingleFileBytes = 80_000;
@@ -32,6 +34,7 @@ export async function scanServerWorkspace(rootPath: string): Promise<{
   }
 
   const files: WorkspaceFileSnapshot[] = [];
+  const readableCandidates: Array<{ path: string; absolutePath: string; size: number }> = [];
   const skipped: WorkspaceSnapshot['skipped'] = [];
   const tree: WorkspaceTreeNode[] = [];
   let totalBytes = 0;
@@ -39,6 +42,7 @@ export async function scanServerWorkspace(rootPath: string): Promise<{
   let totalEntriesSeen = 0;
   let readableCount = 0;
   let totalContentBytes = 0;
+  let generatedSkipped = 0;
 
   async function scan(currentPath: string, target: WorkspaceTreeNode[]) {
     const entries = await readdir(currentPath, { withFileTypes: true });
@@ -57,7 +61,8 @@ export async function scanServerWorkspace(rootPath: string): Promise<{
       if (entry.isDirectory()) {
         const node: WorkspaceTreeNode = { path, kind: 'directory', children: [] };
         target.push(node);
-        if (ignoredDirectories.has(entry.name)) {
+        if (isGeneratedWorkspaceDirectory(entry.name)) {
+          generatedSkipped += 1;
           skipped.push({ path, reason: 'ignored_directory' });
           continue;
         }
@@ -83,19 +88,7 @@ export async function scanServerWorkspace(rootPath: string): Promise<{
           skipped.push({ path, reason: 'too_large', detail: `${fileStat.size} bytes` });
           continue;
         }
-        if (readableCount >= maxReadableFiles || totalContentBytes + fileStat.size > maxTotalContentBytes) {
-          skipped.push({ path, reason: 'limit_exceeded' });
-          continue;
-        }
-        const content = await readFile(absolutePath, 'utf8');
-        readableCount += 1;
-        totalContentBytes += content.length;
-        files.push({
-          path,
-          size: fileStat.size,
-          language: languageForPath(path),
-          content
-        });
+        readableCandidates.push({ path, absolutePath, size: fileStat.size });
       } catch (error) {
         skipped.push({ path, reason: 'read_error', detail: error instanceof Error ? error.message : String(error) });
       }
@@ -103,6 +96,32 @@ export async function scanServerWorkspace(rootPath: string): Promise<{
   }
 
   await scan(rootPath, tree);
+  readableCandidates.sort(
+    (left, right) => workspaceFileScanPriority(left.path) - workspaceFileScanPriority(right.path) || left.path.localeCompare(right.path)
+  );
+  for (const candidate of readableCandidates) {
+    if (readableCount >= maxReadableFiles || totalContentBytes + candidate.size > maxTotalContentBytes) {
+      skipped.push({ path: candidate.path, reason: 'limit_exceeded' });
+      continue;
+    }
+    try {
+      const content = await readFile(candidate.absolutePath, 'utf8');
+      readableCount += 1;
+      totalContentBytes += content.length;
+      files.push({
+        path: candidate.path,
+        size: candidate.size,
+        language: languageForPath(candidate.path),
+        content
+      });
+    } catch (error) {
+      skipped.push({
+        path: candidate.path,
+        reason: 'read_error',
+        detail: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
   const rootName = basename(rootPath);
   const selectedAt = nowIso();
   const skippedByReason: Partial<Record<WorkspaceSkippedReason, number>> = {};
@@ -113,6 +132,7 @@ export async function scanServerWorkspace(rootPath: string): Promise<{
     totalEntriesSeen,
     scannedEntries: entryCount,
     readableFiles: readableCount,
+    generatedSkipped,
     skippedByReason
   };
   return {
@@ -146,6 +166,19 @@ export function extractServerWorkspacePath(input: string) {
 
 function extensionOf(path: string) {
   return extname(path).toLowerCase();
+}
+
+export function workspaceFileScanPriority(path: string) {
+  const normalizedPath = path.replace(/\\/g, '/').toLowerCase();
+  const name = normalizedPath.split('/').at(-1) ?? normalizedPath;
+  const extension = extensionOf(normalizedPath);
+
+  if (ruleFileNames.has(name)) return 0;
+  if (/^(?:.*\/)?(?:src\/)?(?:main|index)\.(?:ts|tsx|js|jsx|mjs|cjs|vue)$/.test(normalizedPath) || name === 'app.vue') return 10;
+  if (configFileNames.has(name) || name.includes('.config.')) return 20;
+  if (sourceExtensions.has(extension)) return 30;
+  if (extension === '.md' || extension === '.txt') return 40;
+  return 50;
 }
 
 function shouldReadTextFile(path: string) {

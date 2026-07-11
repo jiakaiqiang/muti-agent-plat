@@ -43,7 +43,7 @@ Agent Cluster 是一个多 Agent 协作与运行时编排平台，采用 npm wor
 - 后端：NestJS、TypeScript、ESM、模块化服务。
 - 前端：Vue 3、Vite、Pinia、File System Access API。
 - 共享层：`@agent-cluster/shared` 提供会话、任务、事件、Agent、Runtime、Artifact、Workspace Snapshot 等合同。
-- Runtime：`mock`、`generic_llm` 可运行；`codex`、`claude_code` 已注册但返回未实现；`mcp_tool`、`human` 仍为合同预留。
+- Runtime：`mock`、`generic_llm` 可运行；`codex` 已接入 app-server JSONL，`claude_code` 已接入 stream-json，默认仍走 legacy 灰度；`mcp_tool`、`human` 仍为合同预留。
 - 持久化：默认 file JSON 快照；可选 PostgreSQL JSONB collection，通过常驻 `pg.Pool` 单 key upsert。
 - 队列：可选 BullMQ/Redis，当前执行队列名为 `agent-task-queue`。
 - 测试：e2e smoke 覆盖主链、P1 行为、队列、恢复、任务依赖、运行时路由、工作区、token、记忆、Postgres、BullMQ、中文文案、安全和运维。

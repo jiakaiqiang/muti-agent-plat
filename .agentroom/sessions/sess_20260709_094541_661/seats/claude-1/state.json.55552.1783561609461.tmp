@@ -1,0 +1,77 @@
+{
+  "seatId": "claude-1",
+  "runnerType": "claude",
+  "state": "waiting_user",
+  "currentTask": "查看D:\\demo\\agent-cli 这个项目的项目架构将结果传给@codex-1 让其进行审查",
+  "currentAction": "waiting for upstream confirmation",
+  "workspacePath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\worktrees\\sess_20260709_094541_661\\claude-1-1783561598146",
+  "controlMode": "accept",
+  "nativeModeId": "claude:acceptEdits",
+  "startedAt": "2026-07-09T01:46:38.672Z",
+  "updatedAt": "2026-07-09T01:46:49.450Z",
+  "processId": 11392,
+  "needsUser": true,
+  "pendingInteraction": {
+    "id": "terminal:sess_20260709_094541_661:claude-1:claude-approval",
+    "provider": "claude",
+    "seatId": "claude-1",
+    "kind": "approval",
+    "title": "Claude is waiting for confirmation",
+    "message": "accept edits on (shift+tab to cycle)",
+    "subject": {
+      "type": "terminal"
+    },
+    "details": [
+      {
+        "label": "Channel",
+        "value": "Claude CLI"
+      },
+      {
+        "label": "Prompt",
+        "value": "accept edits on (shift+tab to cycle)"
+      }
+    ],
+    "choices": [
+      {
+        "id": "accept",
+        "label": "Approve / Enter",
+        "shortcut": "y",
+        "intent": "approve"
+      },
+      {
+        "id": "acceptForSession",
+        "label": "Approve for session",
+        "shortcut": "s",
+        "intent": "approveForSession"
+      },
+      {
+        "id": "decline",
+        "label": "Reject",
+        "shortcut": "n",
+        "intent": "deny"
+      },
+      {
+        "id": "cancel",
+        "label": "Cancel",
+        "shortcut": "c",
+        "intent": "cancel",
+        "destructive": true
+      }
+    ],
+    "selectedChoiceId": "accept",
+    "raw": {
+      "screen": [
+        "Claude Code v2.1.205eader mode: on]",
+        "Fable 5 · API Usage Billing",
+        "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\worktrees\\sess_20260709_094541_661\\claude-1-1783561598146",
+        "accept edits on (shift+tab to cycle)",
+        "you: AgentRoom control mode: accept. Work normally; routine file edits are allowed by the runner. Do not perform",
+        "destructive operations unless the user explicitly asked for them.",
+        "Propagating…",
+        "accept edits on (shift+tab to cycle) · esc to interrupt",
+        "effort: max · /effort",
+        "$"
+      ]
+    }
+  }
+}

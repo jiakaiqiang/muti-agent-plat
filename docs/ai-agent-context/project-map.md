@@ -41,9 +41,11 @@
 | 需求关键词 | 主要路径 | 相关文档/测试 |
 | --- | --- | --- |
 | 会话、用户输入、确认、恢复 | `apps/server/src/modules/sessions/` | `docs/contracts/api-contract-v0.1.md`, `tests/e2e/memory-confirm-smoke.mjs` |
+| 意图识别、任务领域/意图、用户消息处理计划 | `apps/server/src/modules/intent-recognition/` | `docs/design/context-router-target-design-v1.md`, `apps/server/src/modules/intent-recognition/intent-recognition.service.spec.ts` |
 | 编排、brief、任务执行、review、delivery | `apps/server/src/modules/orchestrator/` | `docs/harness-engineering/alignment/`, `tests/e2e/run-main-chain.mjs` |
-| Runtime、模型切换、LLM、Codex、Claude Code | `apps/server/src/modules/runtimes/` | `docs/contracts/runtime-contract-v0.1.md`, `tests/e2e/runtime-routing-smoke.mjs` |
+| Runtime、模型切换、LLM、Codex、Claude Code、Watchdog | `apps/server/src/modules/runtimes/` | `docs/contracts/runtime-contract-v0.1.md`, `docs/devops/watchdog-baseline.md`, `tests/e2e/runtime-routing-smoke.mjs` |
 | Agent 管理、默认 Agent | `apps/server/src/modules/agents/`, `packages/shared/src/default-agents.ts` | `docs/harness-engineering/10-agent-working-protocol.md` |
+| Skill 管理、Agent 绑定、ContextPack 注入 | `apps/server/src/modules/skills/`, `apps/server/src/modules/agents/` | `docs/contracts/api-contract-v0.1.md`, `tests/e2e/skill-injection-smoke.mjs` |
 | 任务、依赖、状态 | `apps/server/src/modules/tasks/` | `tests/e2e/task-dependency-smoke.mjs` |
 | 事件流 | `apps/server/src/modules/events/` | `docs/contracts/event-contract-v0.1.md`, `apps/web/src/stores/event.ts` |
 | 产物 | `apps/server/src/modules/artifacts/` 或编排内产物创建逻辑 | `docs/harness-engineering/alignment/artifacts-alignment.md` |
@@ -70,6 +72,7 @@
 | 聊天时间线、事件展示 | `apps/web/src/components/ChatTimeline.vue` | `docs/contracts/event-contract-v0.1.md` |
 | 用户输入框 | `apps/web/src/components/UserInputBox.vue` | `tests/e2e/chinese-visible-copy-smoke.mjs` |
 | Agent 状态、画像、图谱 | `apps/web/src/components/AgentStatusPanel.vue`, `AgentPortrait.vue`, `CollaborationGraphView.vue` | `docs/design/agent-cluster-system-design-v1.md` |
+| Skill 管理、文件、Agent 绑定、注入预览 | `apps/web/src/components/SkillManager.vue` | `apps/web/src/stores/skill.ts`, `tests/e2e/skill-management-browser-smoke.mjs` |
 | 运行时模型管理 | `apps/web/src/components/RuntimeModelManager.vue` | `apps/web/src/stores/runtimeModel.ts`, `tests/e2e/runtime-model-switch-smoke.mjs` |
 | 运行时过程展示 | `apps/web/src/components/WorkflowRuntimeView.vue`, `DebugRuntimeView.vue` | `docs/contracts/runtime-contract-v0.1.md` |
 | 确认卡片 | `apps/web/src/components/ConfirmationCard.vue` | `tests/e2e/memory-confirm-smoke.mjs` |
@@ -100,6 +103,9 @@
 | `docs/implementation/agent-team-implementation-breakdown-v1.md` | Agent 团队实现拆解 |
 | `docs/analysis/feature-inventory-and-status-v1.md` | 功能清单与当前状态 |
 | `docs/analysis/project-analysis.md` | 项目分析 |
+| `docs/analysis/multica-runtime-comparison-v1.md` | Multica 运行时架构对比与优化建议 |
+| `docs/product/multica-refactor-production-readiness-requirements-v1.md` | Multica P0/P1 统一闭环需求与 P2 冻结边界 |
+| `docs/devops/watchdog-baseline.md` | Codex/Claude Watchdog 真实采样、参数分析与回滚手册 |
 | `docs/roadmap/remediation-plan-v1.md` | 修复计划 |
 | `docs/roadmap/remediation-execution-plan-batch2-3.md` | 修复执行计划 |
 | `docs/contracts/` | API、事件、数据、运行时、UI 状态合同 |
@@ -136,6 +142,8 @@
 | Server-local 项目分析 | `npm run test:e2e:server-local-project-analysis` |
 | Postgres 持久化 | `npm run test:e2e:postgres-persistence` |
 | BullMQ 队列 | `npm run test:e2e:bullmq-ops` |
+| Skill 管理前端 | `npm run test:e2e:skill-management` |
+| Watchdog 基线分析器 | `npm run test:watchdog-baseline` |
 ## 需求到上下文的路由
 
 | 如果用户说 | 优先读取 |

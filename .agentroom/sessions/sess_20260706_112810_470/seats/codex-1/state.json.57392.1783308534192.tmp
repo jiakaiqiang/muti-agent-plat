@@ -1,0 +1,13 @@
+{
+  "seatId": "codex-1",
+  "runnerType": "codex",
+  "state": "running",
+  "currentTask": "你的模型是",
+  "currentAction": "- 不确定任务落点时，先读 `project-map.m",
+  "workspacePath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\worktrees\\sess_20260706_112810_470\\codex-1-1783308502675",
+  "controlMode": "accept",
+  "startedAt": "2026-07-06T03:28:23.314Z",
+  "updatedAt": "2026-07-06T03:28:54.181Z",
+  "processId": 42868,
+  "needsUser": false
+}

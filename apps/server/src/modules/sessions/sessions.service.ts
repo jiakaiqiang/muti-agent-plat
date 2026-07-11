@@ -1,30 +1,37 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import type {
   Agent,
   AgentTask,
   CollaborationEvent,
   EngineeringRuntimeConfig,
+  ExecutionTarget,
+  PostReviewAction,
   SessionDetail,
   SessionStatus,
-  TaskDomain,
-  TaskIntent,
   RuntimeType,
   SessionWorkingDirectory,
   WorkspaceSnapshot
 } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
 import { messages } from '../../common/messages.js';
-import { isRuntimeType, reworkMaxRounds } from '../../common/runtime-config.js';
+import {
+  contextPipelineVersionForNewSession,
+  defaultEngineeringRuntimeType,
+  isRuntimeType,
+  projectDefaultEngineeringRuntimeType,
+  reworkMaxRounds
+} from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
 import { extractServerWorkspacePath, scanServerWorkspace } from '../../common/workspace-scanner.js';
 import { AgentsService } from '../agents/agents.service.js';
 import { EventsService } from '../events/events.service.js';
+import { IntentRecognitionService } from '../intent-recognition/intent-recognition.service.js';
 import { MemoryService } from '../memory/memory.service.js';
 import { ExecutionOutcome, OrchestratorService } from '../orchestrator/orchestrator.service.js';
 import { ExecutionService } from '../execution/execution.service.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { TasksService } from '../tasks/tasks.service.js';
-import { UserMessageRouterService } from '../user-message-router/user-message-router.service.js';
+import { RuntimeModelConfigService } from '../runtimes/runtime-model-config.service.js';
 
 type CreateSessionInput = {
   input: string;
@@ -36,6 +43,9 @@ type CreateSessionInput = {
   workspaceSnapshot?: WorkspaceSnapshot;
   engineeringRuntimeType?: RuntimeType;
   engineeringRuntime?: EngineeringRuntimeConfig;
+  executionTarget?: ExecutionTarget;
+  origin?: 'user' | 'autopilot';
+  autopilotRunId?: string;
 };
 
 @Injectable()
@@ -47,11 +57,12 @@ export class SessionsService {
     private readonly agents: AgentsService,
     private readonly events: EventsService,
     private readonly memories: MemoryService,
-    private readonly router: UserMessageRouterService,
+    private readonly intentRecognition: IntentRecognitionService,
     private readonly orchestrator: OrchestratorService,
     private readonly execution: ExecutionService,
     private readonly tasks: TasksService,
-    private readonly persistence: PersistenceService
+    private readonly persistence: PersistenceService,
+    @Optional() private readonly runtimeModels?: RuntimeModelConfigService
   ) {
     const persisted = this.persistence.getCollection<SessionDetail[]>('sessions', []);
     for (const session of persisted) {
@@ -105,6 +116,8 @@ export class SessionsService {
     const now = nowIso();
     const participatingAgentIds = this.agents.resolveIds(input.agentIds);
     const workspaceBinding = await this.resolveWorkspaceBinding(input);
+    const recognizedIntent = this.intentRecognition.recognizeTask(input.input, workspaceBinding.workspaceSnapshot);
+    const executionTarget = this.resolveExecutionTarget(input);
     const session: SessionDetail = {
       id: crypto.randomUUID(),
       title: this.titleFromInput(input.input),
@@ -113,14 +126,19 @@ export class SessionsService {
       ownerId: 'local-user',
       workspaceId: 'default-workspace',
       projectId: input.projectId,
+      origin: input.origin ?? 'user',
+      autopilotRunId: input.autopilotRunId,
       knowledgeBaseIds: input.knowledgeBaseIds ?? [],
+      contextPipelineVersion: contextPipelineVersionForNewSession(),
       workingDirectory: workspaceBinding.workingDirectory,
       workspaceSnapshot: workspaceBinding.workspaceSnapshot,
-      engineeringRuntime: this.normalizeEngineeringRuntime(input),
+      engineeringRuntime: this.normalizeEngineeringRuntime({ ...input, executionTarget }),
+      executionTarget,
       tokenBudget: input.tokenBudget,
       tokenUsed: 0,
-      taskDomain: this.detectTaskDomain(input.input, workspaceBinding.workspaceSnapshot),
-      taskIntent: this.detectTaskIntent(input.input),
+      taskDomain: recognizedIntent.domain,
+      taskIntent: recognizedIntent.intent,
+      requiresCodeChanges: recognizedIntent.requiresCodeChanges,
       participatingAgentIds,
       createdAt: now,
       updatedAt: now
@@ -137,7 +155,9 @@ export class SessionsService {
       toAgentIds: participatingAgentIds,
       metadata: createMetadata('chat_message', {
         text: input.input,
-        mentionedAgentIds: participatingAgentIds
+        mentionedAgentIds: participatingAgentIds,
+        origin: session.origin,
+        autopilotRunId: session.autopilotRunId
       })
     });
 
@@ -184,6 +204,11 @@ export class SessionsService {
         }
         session.currentTaskBriefId = brief.id;
         this.setStatus(session, 'WAIT_USER_CONFIRM');
+        if (session.origin === 'autopilot') {
+          void this.confirmBrief(session.id, brief.id).catch((error) =>
+            this.failSessionWithFullError(session, error, 'autopilot_auto_confirm')
+          );
+        }
       })
       .catch((error) => this.failSessionWithFullError(session, error, 'brief_generation'));
   }
@@ -214,7 +239,7 @@ export class SessionsService {
 
   async sendMessage(sessionId: string, content: string, mentionedAgentIds: string[] = []) {
     const session = this.get(sessionId);
-    const handlingPlan = this.router.route(content, session.status);
+    const handlingPlan = this.intentRecognition.recognizeUserMessage(content, session.status);
     const event = this.events.create({
       sessionId,
       type: 'user_message',
@@ -469,7 +494,8 @@ export class SessionsService {
       metadata: createMetadata(outcome.kind === 'failed' ? 'error_card' : 'system_notice', {
         status: nextStatus,
         outcome: outcome.kind,
-        reason
+        reason,
+        actions: outcome.kind === 'ask_user' ? outcome.actions : undefined
       })
     });
     if (outcome.kind === 'ask_user') {
@@ -483,6 +509,7 @@ export class SessionsService {
           reason: 'coordinator_routing_needs_user_decision',
           title: '需要用户确认下一步',
           description: reason || '任务在自动恢复后仍无法继续，需要用户确认是否继续执行或取消。',
+          actions: outcome.actions,
           options: [
             { key: 'resume', label: messages.reworkResume, style: 'primary' },
             { key: 'cancel', label: messages.reworkCancel, style: 'default' }
@@ -493,6 +520,106 @@ export class SessionsService {
     if (outcome.kind === 'rework') {
       this.startRework(session, reason);
     }
+  }
+
+  resolvePostReviewAction(
+    sessionId: string,
+    input: { confirmationId: string; action: PostReviewAction['action'] }
+  ) {
+    const session = this.get(sessionId);
+    if (session.status !== 'WAIT_USER_DECISION') {
+      throw new BadRequestException(`Post Review action requires WAIT_USER_DECISION: ${session.status}`);
+    }
+    const action = this.confirmedPostReviewAction(sessionId, input.confirmationId, input.action);
+    const alreadyResolved = this.events.list(sessionId).some(
+      (event) =>
+        event.type === 'user_confirmation_resolved' &&
+        (event.metadata.payload as { confirmationId?: string } | undefined)?.confirmationId === input.confirmationId
+    );
+    if (alreadyResolved) {
+      throw new BadRequestException(`Confirmation already resolved: ${input.confirmationId}`);
+    }
+
+    const resolvedEvent = this.events.create({
+      sessionId,
+      type: 'user_confirmation_resolved',
+      content: `用户选择 Post Review 动作：${action.action}`,
+      metadata: createMetadata('system_notice', {
+        confirmationId: input.confirmationId,
+        status: action.action === 'cancel' ? 'rejected' : 'approved',
+        selectedOptionKey: action.action,
+        action
+      })
+    });
+
+    if (action.action === 'request_workspace_context') {
+      const reviewer = this.pickSessionAgent(session, ['review', 'test', 'coordinator']);
+      const requestedContext = {
+        reason: action.reason,
+        requestedRefs: action.missingPaths.map((path) => ({
+          type: 'workspace_file' as const,
+          label: path,
+          ref: path
+        })),
+        requestedPaths: action.missingPaths,
+        followUpInstruction: 'Load the requested workspace files and retry Post Review with grounded evidence.'
+      };
+      session.supplementalContextRequests = [
+        ...(session.supplementalContextRequests ?? []),
+        {
+          id: crypto.randomUUID(),
+          taskId: session.currentTaskBriefId ?? session.id,
+          agentId: reviewer.id,
+          requestedContext,
+          createdAt: nowIso()
+        }
+      ].slice(-12);
+      this.events.create({
+        sessionId,
+        type: 'agent_message',
+        fromAgentId: reviewer.id,
+        content: `Post Review requested workspace context: ${action.missingPaths.join(', ')}`,
+        metadata: createMetadata('chat_message', {
+          messageKind: 'progress',
+          phase: 'context_supplement',
+          requestedContext,
+          action
+        })
+      });
+      this.setStatus(session, 'EXECUTING');
+      this.resumeExecution(session);
+    } else if (action.action === 'deliver_with_limitations') {
+      this.setStatus(session, 'EXECUTING');
+      this.resumeExecution(session);
+    } else if (action.action === 'save_progress') {
+      this.touchSession(session);
+    } else {
+      this.execution.cancel(sessionId);
+      this.tasks.cancelUnfinished(sessionId, action.reason ?? '用户取消 Post Review 后续流程。');
+      this.setStatus(session, 'CANCELLED');
+    }
+
+    return { session, action, resolvedEvent };
+  }
+
+  private confirmedPostReviewAction(
+    sessionId: string,
+    confirmationId: string,
+    actionKey: PostReviewAction['action']
+  ): PostReviewAction {
+    const confirmation = this.events
+      .list(sessionId)
+      .find(
+        (event) =>
+          event.type === 'user_confirmation_requested' &&
+          (event.metadata.payload as { confirmationId?: string } | undefined)?.confirmationId === confirmationId
+      );
+    const actions = (confirmation?.metadata.payload as { actions?: PostReviewAction[] } | undefined)?.actions;
+    const action = actions?.find((candidate) => candidate.action === actionKey);
+    if (!action) {
+      throw new BadRequestException(`Post Review action is not available: ${actionKey}`);
+    }
+    return action;
   }
 
   /**
@@ -885,7 +1012,9 @@ export class SessionsService {
 
   private normalizeEngineeringRuntime(input: CreateSessionInput): EngineeringRuntimeConfig | undefined {
     const sessionDefaultRuntimeType =
-      input.engineeringRuntimeType ?? input.engineeringRuntime?.sessionDefaultRuntimeType;
+      input.executionTarget?.runtimeType ??
+      input.engineeringRuntimeType ??
+      input.engineeringRuntime?.sessionDefaultRuntimeType;
     const projectDefaultRuntimeType = input.engineeringRuntime?.projectDefaultRuntimeType;
     const agentRuntimeOverrides = Object.fromEntries(
       Object.entries(input.engineeringRuntime?.agentRuntimeOverrides ?? {}).filter(([, runtimeType]) =>
@@ -898,6 +1027,43 @@ export class SessionsService {
       ...(Object.keys(agentRuntimeOverrides).length ? { agentRuntimeOverrides } : {})
     };
     return Object.keys(config).length ? config : undefined;
+  }
+
+  /**
+   * 固化 Session 执行目标（设计 5.2 / 8.1 / 8.2）。
+   * 优先级：Session 显式选择 > Project 默认 > Global 默认。
+   * generic_llm 未指定模型时，解析并固化当前默认模型 ID，避免全局切换影响已建 Session。
+   */
+  private resolveExecutionTarget(input: CreateSessionInput): ExecutionTarget {
+    const explicitRuntime =
+      input.executionTarget?.runtimeType ??
+      input.engineeringRuntimeType ??
+      input.engineeringRuntime?.sessionDefaultRuntimeType;
+    const runtimeType: RuntimeType = isRuntimeType(explicitRuntime)
+      ? explicitRuntime
+      : input.engineeringRuntime?.projectDefaultRuntimeType && isRuntimeType(input.engineeringRuntime.projectDefaultRuntimeType)
+        ? input.engineeringRuntime.projectDefaultRuntimeType
+        : projectDefaultEngineeringRuntimeType() ?? defaultEngineeringRuntimeType();
+
+    if (runtimeType !== 'generic_llm') {
+      // codex/claude_code 本期使用 Runtime 自身配置，不从统一模型管理选择具体模型。
+      return { runtimeType };
+    }
+
+    const explicitModelId = input.executionTarget?.modelId?.trim();
+    const resolvedModelId = explicitModelId || this.resolveDefaultModelId();
+    return resolvedModelId ? { runtimeType, modelId: resolvedModelId } : { runtimeType };
+  }
+
+  private resolveDefaultModelId(): string | undefined {
+    if (!this.runtimeModels) {
+      return undefined;
+    }
+    try {
+      return this.runtimeModels.getConfigSnapshot().currentModelId;
+    } catch {
+      return undefined;
+    }
   }
 
   private restartExecutionWithUpdatedContext(
@@ -942,34 +1108,6 @@ export class SessionsService {
 
   private titleFromInput(input: string) {
     return input.trim().slice(0, 28) || '新协作会话';
-  }
-
-  private detectTaskDomain(input: string, workspaceSnapshot?: WorkspaceSnapshot): TaskDomain {
-    const hasWorkspaceCode = Boolean(
-      workspaceSnapshot?.files.some((file) => /\.(ts|tsx|js|jsx|vue|py|java|go|rs|css|scss|sql)$/i.test(file.path))
-    );
-    const hasCodeSignals =
-      hasWorkspaceCode ||
-      /(代码|编码|实现|修复|测试|build|bug|接口|前端|后端|组件|workflow|graph|session|agent|runtime|adapter|model|llm|mcp|codex|claude|repo|项目|工程|开发)/i.test(
-        input
-      );
-    const hasNonCodingSignals =
-      /(需求|方案|分析|调研|汇报|计划|prd|文档|总结|review|验证|竞品|研究|流程|制度|规范)/i.test(input);
-    if (hasCodeSignals && hasNonCodingSignals) return 'mixed';
-    if (hasCodeSignals) return 'coding';
-    return 'non_coding';
-  }
-
-  private detectTaskIntent(input: string): TaskIntent {
-    if (/(交付|发布说明|最终说明|delivery|deliver)/i.test(input)) return 'delivery';
-    if (/(验证|验收|测试|check|smoke|build|typecheck)/i.test(input)) return 'validation';
-    if (/(review|复盘|审查|评审)/i.test(input)) return 'review';
-    if (/(排查|诊断|定位|故障|报错|失败|troubleshoot|debug)/i.test(input)) return 'troubleshooting';
-    if (/(计划|规划|拆解|roadmap|milestone)/i.test(input)) return 'planning';
-    if (/(分析|调研|理解|熟悉|研究|总结)/i.test(input)) return 'analysis';
-    if (/(只问|询问|问题|为什么|如何|怎么|\?|？|咨询|说明|问答)/i.test(input)) return 'inquiry';
-    if (/(qa)/i.test(input)) return 'qa';
-    return 'implementation';
   }
 
   private participatingAgents(session: SessionDetail) {

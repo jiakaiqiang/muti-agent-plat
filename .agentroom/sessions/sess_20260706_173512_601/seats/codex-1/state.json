@@ -1,0 +1,15 @@
+{
+  "seatId": "codex-1",
+  "runnerType": "codex",
+  "state": "failed",
+  "currentTask": "分析D:\\demo\\agentlearn-other 这个项目的项目架构 然后让@claude #1 检查",
+  "currentAction": "执行超时：600000ms",
+  "workspacePath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\worktrees\\sess_20260706_173512_601\\codex-1-1783330589036",
+  "controlMode": "accept",
+  "startedAt": "2026-07-06T09:36:29.685Z",
+  "updatedAt": "2026-07-06T09:46:29.776Z",
+  "processId": 36028,
+  "finishedAt": "2026-07-06T09:46:29.776Z",
+  "error": "执行超时：600000ms",
+  "needsUser": false
+}

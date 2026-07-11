@@ -32,6 +32,7 @@ export class ContextRouterService {
     const { session, brief, task, phase, projectMap, workspaceFocus, relevantMemories, ragSnippets, artifacts, events } = input;
     const domain = session.taskDomain ?? (session.workspaceSnapshot ? 'mixed' : 'non_coding');
     const intent = session.taskIntent ?? (brief ? 'implementation' : 'analysis');
+    const isArchitectureAnalysis = this.isArchitectureAnalysis(session, task);
     const recentEvents = events.slice(-6);
     const decisionEvents = events
       .filter((event) => ['brief_created', 'brief_confirmed', 'post_review_completed'].includes(event.type))
@@ -45,6 +46,9 @@ export class ContextRouterService {
       16
     );
     const supplementalEvidenceRefs = this.supplementalEvidenceRefs(session, task?.id);
+    const architectureEvidenceRefs = isArchitectureAnalysis
+      ? this.architectureEvidenceRefs(session, workspaceFocus, projectMap)
+      : [];
     const validationRules = this.createValidationRules(domain, intent);
     const candidateEvidenceRefs: TaskContext['evidenceRefs'] = [
       { type: 'user_input', label: 'session.originalInput' },
@@ -61,6 +65,7 @@ export class ContextRouterService {
       ...(session.workspaceSnapshot
         ? [{ type: 'workspace_snapshot' as const, label: session.workspaceSnapshot.rootName, ref: session.workingDirectory?.name }]
         : []),
+      ...architectureEvidenceRefs,
       ...workspaceEvidenceFiles.map((path) => ({
         type: 'workspace_file' as const,
         label: path,
@@ -87,9 +92,7 @@ export class ContextRouterService {
             ? ('test' as const)
             : artifact.type === 'code_diff'
               ? ('diff' as const)
-              : domain === 'non_coding'
-                ? ('document_fragment' as const)
-                : ('artifact' as const),
+              : ('artifact' as const),
         label: artifact.title,
         ref: artifact.id
       })),
@@ -142,10 +145,10 @@ export class ContextRouterService {
       ),
       executionMode: session.participatingAgentIds.length > 1 ? 'multi_agent' : 'single_agent',
       validationMode: domain === 'coding' || domain === 'mixed' ? 'mixed' : 'human_review',
-      requiresCodeChanges: domain !== 'non_coding',
+      requiresCodeChanges: session.requiresCodeChanges ?? intent === 'implementation',
       requiresExternalEvidence: Boolean(artifacts.length || recentEvents.length || session.knowledgeBaseIds?.length),
       validationRules,
-      agentResponsibilities: this.createAgentResponsibilities(input.participatingAgentKeys, domain),
+      agentResponsibilities: this.createAgentResponsibilities(input.participatingAgentKeys, domain, isArchitectureAnalysis),
       evidenceSelection,
       evidenceRefs
     };
@@ -329,9 +332,111 @@ export class ContextRouterService {
     }
   }
 
+  private isArchitectureAnalysis(session: SessionDetail, task?: AgentTask) {
+    return /architecture|architect|project structure|project analysis|main execution|main flow|main path|架构|结构|目录|熟悉|分析项目|项目分析|了解项目|主链路/i.test(
+      [session.originalInput, task?.title, task?.description, task?.assignmentReason]
+        .filter(Boolean)
+        .join('\n')
+    );
+  }
+
+  private architectureEvidenceRefs(
+    session: SessionDetail,
+    workspaceFocus: ContextPack['workspaceFocus'],
+    projectMap: ProjectMap | undefined
+  ): TaskContext['evidenceRefs'] {
+    const snapshot = session.workspaceSnapshot;
+    if (!snapshot) return [];
+    const projectMapPaths = [
+      ...(projectMap?.sourceRefs ?? []),
+      ...(projectMap?.modules.flatMap((module) => [
+        module.path,
+        ...module.entrypoints,
+        ...module.contracts
+      ]) ?? [])
+    ];
+    const focusPaths = [
+      ...(workspaceFocus?.possibleEntryPoints ?? []),
+      ...(workspaceFocus?.configFiles ?? []),
+      ...(workspaceFocus?.relevantFiles ?? []),
+      ...(workspaceFocus?.impactedFiles ?? [])
+    ];
+    const hintedPaths = new Set([...projectMapPaths, ...focusPaths, ...(snapshot.entrypoints ?? [])]);
+    return snapshot.files
+      .map((file) => ({
+        path: file.path,
+        score: this.architectureEvidencePathScore(file.path) + (hintedPaths.has(file.path) ? 42 : 0)
+      }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
+      .slice(0, 28)
+      .map((item) => ({
+        type: 'workspace_file' as const,
+        label: item.path,
+        ref: item.path,
+        selectionReason: `Architecture analysis priority: ${this.architectureEvidenceReason(item.path)}`
+      }));
+  }
+
+  private architectureEvidencePathScore(path: string) {
+    const lower = path.toLowerCase();
+    const fileName = lower.split('/').at(-1) ?? lower;
+    let score = 0;
+    if (['package.json', 'readme.md', 'agents.md', 'claude.md', 'tsconfig.json', 'nest-cli.json'].includes(fileName)) {
+      score += 118;
+    }
+    if (/^(vite|webpack|rollup|eslint|vitest|playwright)\.config\.(ts|js|mjs|cjs)$/.test(fileName)) {
+      score += 100;
+    }
+    if (/(^|\/)(main|index|app|server|bootstrap)\.(ts|tsx|js|jsx|mjs|cjs|vue)$/.test(lower)) {
+      score += 126;
+    }
+    if (/\/(modules?|services?|runtimes?|orchestrator|sessions?|tasks?|agents?|events?|intent|router|routes|stores?|api|contracts?|types?|schemas?)\//.test(lower)) {
+      score += 86;
+    }
+    if (/\/(runtime|service|controller|module|provider|store|router|route|contract|schema|types?)\.(ts|tsx|js|jsx|mjs|cjs)$/.test(lower)) {
+      score += 58;
+    }
+    if (/^docs\/(ai-agent-context|design|product|contracts|quality)\//.test(lower)) {
+      score += 62;
+    }
+    if (/(^|\/)(tests?|e2e|__tests__)\//.test(lower) || /\.(test|spec)\./.test(lower)) {
+      score -= 52;
+    }
+    return score;
+  }
+
+  private architectureEvidenceReason(path: string) {
+    const lower = path.toLowerCase();
+    if (/(^|\/)(main|index|app|server|bootstrap)\./.test(lower)) return 'entrypoint evidence for the main execution path.';
+    if (/(^|\/)(package\.json|readme\.md|agents\.md|claude\.md|tsconfig\.json|nest-cli\.json)$/.test(lower)) {
+      return 'project setup, instructions, or stack configuration evidence.';
+    }
+    if (/\/(modules?|services?|runtimes?|orchestrator|sessions?|tasks?|agents?|events?|intent|router|routes|stores?|api|contracts?|types?|schemas?)\//.test(lower)) {
+      return 'module boundary, service/runtime flow, route, store, or contract evidence.';
+    }
+    if (/^docs\/(ai-agent-context|design|product|contracts|quality)\//.test(lower)) {
+      return 'project map, product/design, contract, or quality evidence.';
+    }
+    return 'repository structure evidence for architecture analysis.';
+  }
+
   private stageEvidenceRefs(domain: TaskContext['domain'], evidenceRefs: TaskContext['evidenceRefs']) {
+    const isArchitectureAnalysis = evidenceRefs.some((ref) =>
+      ref.selectionReason?.startsWith('Architecture analysis priority')
+    );
     const preferredTypes =
-      domain === 'non_coding'
+      isArchitectureAnalysis
+        ? new Set<TaskContext['evidenceRefs'][number]['type']>([
+            'project_map',
+            'workspace_snapshot',
+            'workspace_file',
+            'workspace_symbol',
+            'artifact',
+            'memory',
+            'user_input'
+          ])
+        : domain === 'non_coding'
         ? new Set<TaskContext['evidenceRefs'][number]['type']>([
             'document_fragment',
             'meeting_note',
@@ -355,7 +460,7 @@ export class ContextRouterService {
           ]);
     const preferred = evidenceRefs.filter((ref) => preferredTypes.has(ref.type));
     return (preferred.length ? preferred : evidenceRefs)
-      .slice(0, 8)
+      .slice(0, isArchitectureAnalysis ? 12 : 8)
       .map((ref) => ref.ref ?? ref.label)
       .filter((ref): ref is string => Boolean(ref));
   }
@@ -402,7 +507,16 @@ export class ContextRouterService {
     candidateRefs: TaskContext['evidenceRefs']
   ): TaskContext['evidenceSelection'] {
     const uniqueCandidates = this.uniqueEvidenceRefs(candidateRefs);
-    const maxEvidenceRefs = phase === 'brief_generation' || phase === 'discussion' ? 18 : domain === 'non_coding' ? 24 : 28;
+    const isArchitectureAnalysis =
+      this.isArchitectureAnalysis(session, task) ||
+      uniqueCandidates.some((ref) => ref.selectionReason?.startsWith('Architecture analysis priority'));
+    const maxEvidenceRefs = isArchitectureAnalysis
+      ? 32
+      : phase === 'brief_generation' || phase === 'discussion'
+        ? 18
+        : domain === 'non_coding'
+          ? 24
+          : 28;
     const ranked = uniqueCandidates
       .map((ref, index) => ({
         ref,
@@ -429,7 +543,9 @@ export class ContextRouterService {
     return {
       phase,
       strategy:
-        domain === 'non_coding'
+        isArchitectureAnalysis
+          ? 'architecture_analysis'
+          : domain === 'non_coding'
           ? 'non_coding_minimal'
           : domain === 'mixed'
             ? 'mixed_minimal'
@@ -442,20 +558,29 @@ export class ContextRouterService {
       omittedTypes: Array.from(new Set(omitted.map((ref) => ref.type))),
       selectedRefs: selected,
       omittedRefs: omitted.slice(0, 8),
-      rules: this.evidenceSelectionRules(domain, intent, phase)
+      rules: this.evidenceSelectionRules(domain, intent, phase, isArchitectureAnalysis)
     };
   }
 
   private evidenceSelectionRules(
     domain: TaskContext['domain'],
     intent: TaskContext['intent'],
-    phase: AgentRunPhase
+    phase: AgentRunPhase,
+    isArchitectureAnalysis = false
   ) {
     const shared = [
       `Select only refs needed for ${phase}.`,
       'Always keep user goal, current task, prior artifacts, memory, RAG, or event refs when they ground the current output.',
       'Keep omitted refs traceable by count/type, but do not send full unrelated history.'
     ];
+    if (isArchitectureAnalysis) {
+      return [
+        ...shared,
+        'Prefer workspace manifest, project map, entrypoints, configs, module boundaries, runtime/services, routes/stores, contracts, and selected readable file contents.',
+        'Use directory routing as navigation evidence, but ground architecture conclusions in selectedEvidenceContents whenever file content is available.',
+        'If key entrypoint or module boundary content is omitted, request supplemental context instead of reassigning the task.'
+      ];
+    }
     if (domain === 'non_coding') {
       return [
         ...shared,
@@ -508,7 +633,8 @@ export class ContextRouterService {
     task: AgentTask | undefined,
     ref: TaskContext['evidenceRefs'][number]
   ) {
-    if (ref.selectionReason?.startsWith('Requested by runtime')) return 260;
+    if (ref.selectionReason?.startsWith('Requested by runtime')) return 360;
+    if (ref.selectionReason?.startsWith('Architecture analysis priority')) return 320;
     let score = ref.type === 'user_input' ? 120 : ref.ref && task?.id === ref.ref ? 115 : 20;
     const codingPriority = new Map<TaskContext['evidenceRefs'][number]['type'], number>([
       ['workspace_snapshot', 90],
@@ -688,6 +814,25 @@ export class ContextRouterService {
     evidenceSelection: TaskContext['evidenceSelection'],
     domain: TaskContext['domain']
   ): TaskContext['taskMap']['items'] {
+    if (evidenceSelection.strategy === 'architecture_analysis') {
+      const materialTypes = new Set<TaskContext['evidenceRefs'][number]['type']>([
+        'project_map',
+        'workspace_snapshot',
+        'workspace_file',
+        'workspace_symbol',
+        'artifact',
+        'memory'
+      ]);
+      return evidenceSelection.selectedRefs
+        .filter((ref) => materialTypes.has(ref.type))
+        .slice(0, 12)
+        .map((ref) => ({
+          type: 'key_material' as const,
+          label: `${ref.type}: ${ref.label}`,
+          ref: ref.ref,
+          reason: 'Selected by architecture_analysis evidence routing for project structure and main-path analysis.'
+        }));
+    }
     const materialTypes =
       domain === 'non_coding'
         ? new Set<TaskContext['evidenceRefs'][number]['type']>([
@@ -742,14 +887,18 @@ export class ContextRouterService {
 
   private createAgentResponsibilities(
     participatingAgentKeys: string[],
-    domain: TaskContext['domain']
+    domain: TaskContext['domain'],
+    isArchitectureAnalysis = false
   ): TaskContext['agentResponsibilities'] {
     const choose = (preferredKeys: string[], fallback: string) =>
       preferredKeys.find((key) => participatingAgentKeys.includes(key)) ?? fallback;
+    if (isArchitectureAnalysis) {
+      return [{ role: 'execution', agentKey: choose(['architect'], 'architect') }];
+    }
     const executionKey =
       domain === 'non_coding'
-        ? choose(['requirements', 'product-manager', 'architect'], 'requirements')
-        : choose(['backend', 'frontend', 'architect', 'requirements'], 'backend');
+        ? choose(['requirements', 'product-manager'], 'requirements')
+        : choose(['backend', 'frontend', 'requirements'], 'backend');
     const validationKey = choose(['test', 'review'], 'test');
     const reviewKey = choose(['review', 'test'], 'review');
     return [

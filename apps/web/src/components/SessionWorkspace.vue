@@ -6,10 +6,13 @@ import { useKnowledgeStore } from '@/stores/knowledge'
 import { useLocalWorkspaceStore } from '@/stores/localWorkspace'
 import type { ReviewableFileChange } from '@/stores/localWorkspace'
 import { useSessionStore } from '@/stores/session'
+import { useRuntimeModelStore } from '@/stores/runtimeModel'
 import { apiBaseUrl, runtimeModeLabel } from '@/config/runtime'
 import {
+  DEFAULT_CONTEXT_PIPELINE_VERSION,
   sessionStatusLabel,
   type BriefEventPayload,
+  type PostReviewAction,
   type RuntimeType,
   type SessionStatus,
   type SessionViewMode,
@@ -24,17 +27,21 @@ import CollaborationGraphView from './CollaborationGraphView.vue'
 import CollaborationLogPanel from './CollaborationLogPanel.vue'
 import DebugRuntimeView from './DebugRuntimeView.vue'
 import RuntimeModelManager from './RuntimeModelManager.vue'
+import RuntimeVersionSummary from './RuntimeVersionSummary.vue'
 import SessionSidebar from './SessionSidebar.vue'
+import SkillManager from './SkillManager.vue'
 import TokenUsageIndicator from './TokenUsageIndicator.vue'
 import UiIcon from './UiIcon.vue'
 import UserInputBox from './UserInputBox.vue'
 import WorkflowRuntimeView from './WorkflowRuntimeView.vue'
+import { resolveSessionWorkspacePostReviewAction } from './session-workspace-post-review-action'
 
 const sessionStore = useSessionStore()
 const eventStore = useEventStore()
 const agentStore = useAgentStore()
 const knowledgeStore = useKnowledgeStore()
 const localWorkspaceStore = useLocalWorkspaceStore()
+const runtimeModelStore = useRuntimeModelStore()
 
 const isSendingMessage = ref(false)
 const deletingSessionIds = ref<string[]>([])
@@ -51,6 +58,7 @@ let uiMessageTimer: ReturnType<typeof setTimeout> | undefined
 const sessionScanStatus = ref<'idle' | 'scanning' | 'completed' | 'failed'>('idle')
 const sessionScanSummary = ref<WorkspaceSnapshot | undefined>()
 const sessionRuntimeType = ref<RuntimeType | ''>('')
+const sessionModelId = ref('')
 const workspaceDirectoryRequiredMessage = '请先选择本地工作目录'
 
 const sessionRuntimeOptions: { value: RuntimeType | ''; label: string }[] = [
@@ -97,7 +105,7 @@ function diffLines(before: string, after: string): FileReviewDiffRow[] {
   ]
 }
 
-type WorkspaceSection = 'session' | 'knowledge' | 'settings' | 'models' | 'tools' | 'notifications' | 'agents'
+type WorkspaceSection = 'session' | 'knowledge' | 'settings' | 'models' | 'tools' | 'notifications' | 'agents' | 'skills'
 
 const viewModes: SessionViewMode[] = ['chat', 'workflow', 'collaboration_graph', 'debug']
 const activeSection = ref<WorkspaceSection>('session')
@@ -105,6 +113,7 @@ const activeSection = ref<WorkspaceSection>('session')
 const railSections: Array<{ id: WorkspaceSection; label: string; icon: string }> = [
   { id: 'session', label: '工作台', icon: 'message' },
   { id: 'agents', label: 'Agent 管理', icon: 'users' },
+  { id: 'skills', label: 'Skill 管理', icon: 'sparkles' },
   { id: 'knowledge', label: '知识库', icon: 'database' },
   { id: 'settings', label: '设置', icon: 'settings' },
   { id: 'models', label: '模型管理', icon: 'bot' },
@@ -232,6 +241,9 @@ const derivedStatus = computed(() => {
 })
 
 const discussion = computed(() => eventStore.discussionProgress(currentSessionId.value))
+const currentContextPipelineVersion = computed(
+  () => sessionStore.currentSession?.contextPipelineVersion ?? DEFAULT_CONTEXT_PIPELINE_VERSION
+)
 
 const completedTaskCount = computed(() => tasks.value.filter((task) => task.status === 'completed').length)
 const progressPercent = computed(() => {
@@ -278,7 +290,12 @@ async function deleteSession(sessionId: string) {
   }
 }
 
-async function createSession(input: string, agentIds: string[], engineeringRuntimeType?: RuntimeType) {
+async function createSession(
+  input: string,
+  agentIds: string[],
+  engineeringRuntimeType?: RuntimeType,
+  modelId?: string
+) {
   const workingDirectory = localWorkspaceStore.pendingDirectory
   let workspaceSnapshot: WorkspaceSnapshot | undefined
   if (workingDirectory) {
@@ -288,13 +305,20 @@ async function createSession(input: string, agentIds: string[], engineeringRunti
     sessionScanSummary.value = workspaceSnapshot
     sessionScanStatus.value = 'completed'
   }
+  // 统一执行目标：所有参与 Agent 共用同一 Runtime/模型（设计 5.2 / 10.5）。
+  const executionTarget = engineeringRuntimeType
+    ? {
+        runtimeType: engineeringRuntimeType,
+        ...(engineeringRuntimeType === 'generic_llm' && modelId ? { modelId } : {})
+      }
+    : undefined
   const session = await sessionStore.createSession({
     input,
     agentIds,
     workingDirectory,
     workspaceSnapshot,
-    tokenBudget: 30000,
-    ...(engineeringRuntimeType ? { engineeringRuntimeType } : {})
+    ...(engineeringRuntimeType ? { engineeringRuntimeType } : {}),
+    ...(executionTarget ? { executionTarget } : {})
   })
   localWorkspaceStore.bindPendingDirectoryToSession(session.id)
   await eventStore.loadEvents(session.id)
@@ -311,8 +335,12 @@ function openCreateSessionDialog() {
   sessionScanStatus.value = 'idle'
   sessionScanSummary.value = undefined
   sessionRuntimeType.value = ''
+  sessionModelId.value = ''
   localWorkspaceStore.clearPendingDirectory()
   showCreateSessionDialog.value = true
+  if (!runtimeModelStore.config) {
+    void runtimeModelStore.loadConfig().catch(() => undefined)
+  }
 }
 
 async function chooseWorkingDirectory() {
@@ -370,7 +398,7 @@ async function confirmCreateSessionFromDialog() {
   isCreatingSession.value = true
   sessionCreateError.value = ''
   try {
-    await createSession(input, selectedSessionAgentIds.value, sessionRuntimeType.value || undefined)
+    await createSession(input, selectedSessionAgentIds.value, sessionRuntimeType.value || undefined, sessionModelId.value || undefined)
     showCreateSessionDialog.value = false
     showCreateConfirmDialog.value = false
     showMessage('会话已保存并创建', 'success')
@@ -415,6 +443,28 @@ async function sendUserMessage(content: string) {
 async function resolveConfirmation(optionKey: string) {
   if (!sessionStore.currentSession || !activeConfirmation.value) return
   const sessionId = sessionStore.currentSession.id
+  if (activeConfirmation.value.actions?.length) {
+    const resolveAction = async (action: PostReviewAction) => {
+      await sessionStore.resolvePostReviewAction(sessionId, {
+        confirmationId: activeConfirmation.value!.confirmationId,
+        action: action.action
+      })
+    }
+    const handled = await resolveSessionWorkspacePostReviewAction(
+      optionKey,
+      activeConfirmation.value.actions,
+      {
+        requestWorkspaceContext: resolveAction,
+        deliverWithLimitations: resolveAction,
+        saveProgress: resolveAction,
+        cancel: resolveAction
+      }
+    )
+    if (handled) {
+      await eventStore.loadEvents(sessionId)
+      return
+    }
+  }
   if (optionKey === 'approve' && activeConfirmation.value.relatedBriefId) {
     await sessionStore.confirmBrief(sessionId, activeConfirmation.value.relatedBriefId)
     await eventStore.loadEvents(sessionId)
@@ -800,6 +850,16 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
       <AgentManager :agents="agentStore.agents" :capabilities="agentStore.capabilities" />
     </section>
 
+    <section v-else-if="activeSection === 'skills'" class="workspace-admin">
+      <header class="admin-header">
+        <div>
+          <h1>Skill 管理</h1>
+          <p>管理可复用工作规则、Agent 绑定和 ContextPack 注入顺序。</p>
+        </div>
+      </header>
+      <SkillManager :agents="agentStore.agents" />
+    </section>
+
     <section v-else-if="activeSection === 'knowledge'" class="workspace-admin">
       <header class="admin-header">
         <div>
@@ -867,9 +927,14 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
               <dd>{{ runtimeDisplay }}</dd>
             </div>
             <div>
+              <dt>Context Pipeline</dt>
+              <dd>{{ currentContextPipelineVersion }}</dd>
+            </div>
+            <div>
               <dt>后端地址</dt>
               <dd>{{ apiBaseUrl }}</dd>
             </div>
+            <RuntimeVersionSummary />
           </dl>
         </article>
       </div>
@@ -883,10 +948,7 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
         </div>
         <span class="admin-count">{{ agentStore.agents.length }} 个 Agent</span>
       </header>
-      <RuntimeModelManager
-        :agents="agentStore.agents"
-        :capability-name="agentStore.capabilityName"
-      />
+      <RuntimeModelManager />
     </section>
 
     <section v-else-if="activeSection === 'tools'" class="workspace-admin">
@@ -903,7 +965,7 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
             <strong>{{ capability.name }}</strong>
             <span>{{ capability.riskLevel }}</span>
           </header>
-          <p>{{ capability.description }}</p>
+          <p>{{ capability.descriptionMarkdown }}</p>
           <dl>
             <div>
               <dt>能力标识</dt>
@@ -1052,6 +1114,16 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
             该运行时可读取并真实修改所选目录里的文件，需后端启用对应开关，高风险操作仍需确认。
           </small>
         </label>
+        <label v-if="sessionRuntimeType === 'generic_llm' || sessionRuntimeType === ''" class="dialog-field">
+          <span>统一模型</span>
+          <select v-model="sessionModelId">
+            <option value="">跟随当前默认模型（创建时固化）</option>
+            <option v-for="model in runtimeModelStore.availableModels" :key="model.id" :value="model.id">
+              {{ model.label }}
+            </option>
+          </select>
+          <small>本次会话所有参与 Agent 共用同一 Runtime/模型；创建后全局默认切换不影响该会话。</small>
+        </label>
         <section
           v-if="localWorkspaceStore.pendingDirectory || sessionScanStatus !== 'idle'"
           class="workspace-scan-summary"
@@ -1114,6 +1186,24 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
             <small>{{ agent.role }}</small>
           </button>
         </div>
+        <label class="dialog-field">
+          <span>运行时类型</span>
+          <select v-model="sessionRuntimeType">
+            <option v-for="opt in sessionRuntimeOptions" :key="opt.value" :value="opt.value">
+              {{ opt.label }}
+            </option>
+          </select>
+          <small>Agent 与模型已解绑，由 Session 指定统一的 Runtime 和模型。</small>
+        </label>
+        <label v-if="sessionRuntimeType === 'generic_llm'" class="dialog-field">
+          <span>模型</span>
+          <select v-model="sessionModelId">
+            <option value="">跟随系统默认</option>
+            <option v-for="model in runtimeModelStore.config?.availableModels ?? []" :key="model.id" :value="model.id">
+              {{ model.label }} ({{ model.provider }})
+            </option>
+          </select>
+        </label>
         <p v-if="sessionCreateError" class="form-error">{{ sessionCreateError }}</p>
         <footer class="form-actions">
           <button type="button" @click="showCreateSessionDialog = false">取消</button>
@@ -1147,6 +1237,14 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
           <div>
             <dt>工作目录</dt>
             <dd>{{ localWorkspaceStore.pendingDirectory?.name ?? '未选择' }}</dd>
+          </div>
+          <div v-if="sessionRuntimeType">
+            <dt>运行时</dt>
+            <dd>{{ sessionRuntimeOptions.find(opt => opt.value === sessionRuntimeType)?.label ?? sessionRuntimeType }}</dd>
+          </div>
+          <div v-if="sessionModelId">
+            <dt>模型</dt>
+            <dd>{{ runtimeModelStore.config?.availableModels?.find(m => m.id === sessionModelId)?.label ?? sessionModelId }}</dd>
           </div>
         </dl>
         <footer>

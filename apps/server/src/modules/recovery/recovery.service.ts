@@ -4,6 +4,7 @@ import { ExecutionService } from '../execution/execution.service.js';
 import { OrchestratorService } from '../orchestrator/orchestrator.service.js';
 import { SessionsService } from '../sessions/sessions.service.js';
 import { TasksService } from '../tasks/tasks.service.js';
+import { WorkdirBriefService } from '../runtimes/streaming/workdir-brief.service.js';
 
 const RESUMABLE_STATUSES: SessionStatus[] = ['EXECUTING', 'POST_REVIEW', 'REWORKING'];
 
@@ -14,10 +15,9 @@ const RESUMABLE_STATUSES: SessionStatus[] = ['EXECUTING', 'POST_REVIEW', 'REWORK
  * generation runs in-memory via SessionsService). Persisted data is already
  * restored by each service.
  *
- * Disabled when ENABLE_BULLMQ=true (the queue's retry/attempts handles
- * cross-restart recovery for execution; note brief generation is still
- * in-process under BullMQ, so that gap remains in queue mode) or
- * AGENT_CLUSTER_RECOVER_ON_BOOT=false.
+ * Execution-state recovery is delegated to BullMQ when ENABLE_BULLMQ=true.
+ * Brief generation is always recovered because AGENT_DISCUSSING is an
+ * in-process promise and has not reached the execution queue yet.
  */
 @Injectable()
 export class RecoveryService implements OnApplicationBootstrap {
@@ -27,21 +27,30 @@ export class RecoveryService implements OnApplicationBootstrap {
     private readonly sessions: SessionsService,
     private readonly tasks: TasksService,
     private readonly orchestrator: OrchestratorService,
-    private readonly execution: ExecutionService
+    private readonly execution: ExecutionService,
+    private readonly workdirBrief?: WorkdirBriefService
   ) {}
 
   onApplicationBootstrap() {
     if ((process.env.AGENT_CLUSTER_RECOVER_ON_BOOT ?? 'true').trim().toLowerCase() === 'false') {
       return;
     }
-    if (process.env.ENABLE_BULLMQ === 'true') {
-      return;
+    const briefRecovery = this.workdirBrief?.recoverAll();
+    if (briefRecovery?.restored || briefRecovery?.failed) {
+      this.logger.log(
+        `Workdir brief recovery: restored=${briefRecovery.restored}, failed=${briefRecovery.failed}, expiredRemoved=${briefRecovery.expiredRemoved}`
+      );
     }
+    const queueEnabled = process.env.ENABLE_BULLMQ === 'true';
 
     for (const session of this.sessions.listRaw()) {
       if (session.status === 'AGENT_DISCUSSING') {
         this.logger.log(`Recovering session ${session.id} (AGENT_DISCUSSING): re-driving brief generation`);
         this.sessions.resumeBriefGeneration(session.id);
+        continue;
+      }
+
+      if (queueEnabled) {
         continue;
       }
 

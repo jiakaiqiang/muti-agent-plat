@@ -1,0 +1,7 @@
+{"type":"seat.state_changed","seatId":"codex-1","state":"idle","ts":"2026-07-06T02:22:41.173Z"}
+{"type":"seat.state_changed","seatId":"codex-2","state":"idle","ts":"2026-07-06T02:22:45.585Z"}
+{"type":"activity.appended","seatId":"codex-2","text":"User: 你的模型是","ts":"2026-07-06T02:22:49.468Z"}
+{"type":"seat.state_changed","seatId":"codex-2","state":"queued","ts":"2026-07-06T02:22:49.477Z"}
+{"type":"assignment.failed","assignmentId":"assign_1783304569477","seatId":"codex-2","error":"The primary workspace has uncommitted changes. Pass --allow-dirty for local experiments.","ts":"2026-07-06T02:22:49.646Z"}
+{"type":"seat.state_changed","seatId":"codex-2","state":"failed","ts":"2026-07-06T02:22:49.646Z"}
+{"type":"seat.state_changed","seatId":"codex-3","state":"idle","ts":"2026-07-06T02:23:13.084Z"}

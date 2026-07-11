@@ -74,8 +74,42 @@ test('scanDirectory exposes coverage stats with skippedByReason aggregation', as
   assert.equal(coverage.readableFiles, 2, 'should read README.md + main.ts')
 
   const { skippedByReason } = coverage
+  assert.equal(coverage.generatedSkipped, 1, 'node_modules → generatedSkipped')
   assert.equal(skippedByReason.ignored_directory, 1, 'node_modules → ignored_directory')
   assert.equal(skippedByReason.sensitive, 1, '.env → sensitive')
   assert.equal(skippedByReason.too_large, 1, 'big.ts → too_large')
   assert.equal(skippedByReason.binary, 1, 'image.png → binary')
+})
+
+test('scanDirectory skips generated .nuxt directory content', async () => {
+  const root = makeDirectoryHandle({
+    kind: 'directory',
+    name: 'fake-root',
+    children: [
+      file('README.md', '# hi'),
+      dir('.nuxt', [file('server.mjs', 'export const generated = true')])
+    ]
+  }) as DirectoryHandle
+
+  const snapshot = await scanDirectory(root)
+
+  assert.equal(snapshot.files.some((item) => item.path.startsWith('.nuxt/')), false)
+  assert.equal(snapshot.coverage?.generatedSkipped, 1)
+  assert.equal(snapshot.skipped.some((item) => item.path === '.nuxt' && item.reason === 'ignored_directory'), true)
+})
+
+test('scanDirectory keeps navigation complete after the 80-file content budget is exhausted', async () => {
+  const root = makeDirectoryHandle({
+    kind: 'directory',
+    name: 'fake-root',
+    children: Array.from({ length: 81 }, (_, index) => file(`file-${String(index).padStart(2, '0')}.ts`, `// ${index}`))
+  }) as DirectoryHandle
+
+  const snapshot = await scanDirectory(root)
+
+  assert.equal(snapshot.tree.length, 81)
+  assert.equal(snapshot.coverage?.totalEntriesSeen, 81)
+  assert.equal(snapshot.coverage?.scannedEntries, 81)
+  assert.equal(snapshot.files.length, 80)
+  assert.equal(snapshot.skipped.filter((item) => item.reason === 'limit_exceeded').length, 1)
 })

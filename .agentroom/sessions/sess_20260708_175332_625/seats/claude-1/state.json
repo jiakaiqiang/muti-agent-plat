@@ -1,0 +1,12 @@
+{
+  "seatId": "claude-1",
+  "runnerType": "claude",
+  "state": "done",
+  "currentTask": "分析一下D:\\demo\\agent-cli这个项目的项目架构 然后用@codex-1 审核",
+  "currentAction": "completed",
+  "workspacePath": "D:\\demo\\muti-agent\\muti-agent-plat\\.agentroom\\worktrees\\sess_20260708_175332_625\\claude-1-1783504453524",
+  "controlMode": "accept",
+  "startedAt": "2026-07-08T09:54:14.040Z",
+  "updatedAt": "2026-07-08T09:55:08.170Z",
+  "finishedAt": "2026-07-08T09:55:08.170Z"
+}
