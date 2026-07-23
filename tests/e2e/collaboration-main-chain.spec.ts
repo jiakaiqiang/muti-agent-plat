@@ -126,6 +126,13 @@ async function waitForStatus(sessionId: string, status: string, timeoutMs = 15_0
     if (last === status) {
       return;
     }
+    if (last === "FAILED" && status !== "FAILED") {
+      const events = await listEvents(sessionId);
+      const diagnostics = events
+        .filter((event) => ["runtime_failed", "workflow_run_failed", "error_reported"].includes(String(event.type)))
+        .slice(-8);
+      throw new Error(`Session failed while waiting for ${status}: ${JSON.stringify(diagnostics)}`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error(`Timed out waiting for status ${status}, last=${last}`);
@@ -208,6 +215,29 @@ async function runMainChain() {
   if (!notificationCapabilityIds.includes("cap-feishu-draft")) {
     throw new Error("Notification agent must include default Feishu draft capability");
   }
+  const productManagerAgent = agents.data.find((agent) => agent.key === "product-manager") as Json | undefined;
+  if (!productManagerAgent) {
+    throw new Error("Main-chain workflow requires the product-manager Agent");
+  }
+
+  const workflowDraft = await api<{ data: Json }>("/workflows", {
+    method: "POST",
+    body: JSON.stringify({
+      name: "Main-chain contract workflow",
+      nodes: [
+        {
+          id: "main-chain-product-analysis",
+          type: "agent",
+          agentId: String(productManagerAgent.id),
+          order: 0
+        }
+      ]
+    })
+  });
+  const workflow = await api<{ data: Json }>(`/workflows/${String(workflowDraft.data.id)}/publish`, {
+    method: "POST",
+    body: JSON.stringify({ expectedDraftRevision: workflowDraft.data.draftRevision })
+  });
 
   const capabilities = await api<{ data: Json[] }>("/capabilities");
   if (!capabilities.data.some((capability) => capability.id === "cap-file-write")) {
@@ -282,10 +312,14 @@ async function runMainChain() {
     {
       method: "POST",
       body: JSON.stringify({
-        input: "Build the v1 collaboration workflow",
-        agentIds: ["coordinator", "requirements", "backend", "test", "review"],
+        input: "分析并记录协作流程，仅输出说明。",
+        agentIds: ["coordinator", "requirements", "backend", "test", "review", "product-manager"],
         tokenBudget: 20000,
-        knowledgeBaseIds: [knowledgeBaseId]
+        knowledgeBaseIds: [knowledgeBaseId],
+        runtimePreference: {
+          preferredRuntimeType: "mock",
+          allowedRuntimeTypes: ["mock"]
+        }
       })
     }
   );
@@ -344,7 +378,7 @@ async function runMainChain() {
     throw new Error("Confirmation request must reference the created brief");
   }
 
-  const confirmed = await api<{ data: { accepted: boolean; status: string; createdTasks: Json[] } }>(
+  const confirmed = await api<{ data: { accepted: boolean; status: string; confirmationId: string } }>(
     `/sessions/${sessionId}/briefs/${briefId}/confirm`,
     {
       method: "POST",
@@ -355,11 +389,31 @@ async function runMainChain() {
   if (confirmed.data.accepted !== true) {
     throw new Error("Brief confirmation must be accepted");
   }
-  if (confirmed.data.createdTasks.length === 0) {
-    throw new Error("Brief confirmation must create tasks");
+  if (confirmed.data.status !== "WAIT_WORKFLOW_SELECT") {
+    throw new Error(`Brief confirmation must enter WAIT_WORKFLOW_SELECT, got ${confirmed.data.status}`);
   }
   const briefConfirmedEvent = await waitForEvent(sessionId, "brief_confirmed");
   expectContractEvent(briefConfirmedEvent, "brief_confirmed");
+  const workflowSelection = await waitForMatchingEvent(
+    sessionId,
+    "user_confirmation_requested",
+    (event) => (((event.metadata as Json).payload as Json).reason === "select_workflow")
+  );
+  const workflowSelectionPayload = (workflowSelection.metadata as Json).payload as Json;
+  const selectedWorkflow = await api<{ data: { createdTasks: Json[]; workflowRun: Json } }>(
+    `/sessions/${sessionId}/workflow/select`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        workflowId: workflow.data.id,
+        workflowVersion: workflow.data.currentPublishedVersion,
+        confirmationId: workflowSelectionPayload.confirmationId
+      })
+    }
+  );
+  if (selectedWorkflow.data.createdTasks.length === 0) {
+    throw new Error("Workflow selection must create executable tasks");
+  }
   const taskClaimedEvent = await waitForEvent(sessionId, "task_claimed");
   expectContractEvent(taskClaimedEvent, "task_claimed");
   const taskClaimedPayload = (taskClaimedEvent.metadata as Json).payload as Json;
@@ -372,43 +426,7 @@ async function runMainChain() {
     throw new Error("Confirmed brief must set confirmedByUser=true");
   }
 
-  const interrupt = await api<{ data: { event: Json; handlingPlan?: Json } }>(
-    `/sessions/${sessionId}/messages`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        content: "While executing, keep the dry-run non-destructive.",
-        mentionedAgentIds: ["coordinator"]
-      })
-    }
-  );
-
-  expectContractEvent(interrupt.data.event, "user_message");
-  if (!interrupt.data.handlingPlan) {
-    throw new Error("Executing user interrupt must return handlingPlan");
-  }
-  if (interrupt.data.handlingPlan.priority !== "high") {
-    throw new Error("Executing user interrupt that changes constraints must be high priority");
-  }
-
-  const interruptConfirmation = await waitForMatchingEvent(
-    sessionId,
-    "session_status_changed",
-    (event) => (((event.metadata as Json).payload as Json).reason === "executing_user_interrupt_task_created")
-  );
-  if (!interruptConfirmation) {
-    throw new Error("Executing interrupt must create a task to handle it");
-  }
-  const interruptHandoff = await waitForMatchingEvent(
-    sessionId,
-    "agent_message",
-    (event) => (((event.metadata as Json).payload as Json).phase === "user_message_routing")
-  );
-  if (!Array.isArray(interruptHandoff.toAgentIds) || interruptHandoff.toAgentIds.length === 0) {
-    throw new Error("Executing user interrupt must be visibly routed to affected Agents");
-  }
-
-  // 验证插话后执行继续到完成，不作废任务
+  // 执行中插话、暂停和重调度由专用 E2E 覆盖；主链只验证确定性的端到端交付。
   await waitForStatus(sessionId, "COMPLETED", 60_000);
 
   const taskHandoff = await waitForMatchingEvent(

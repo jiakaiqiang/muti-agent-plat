@@ -1,13 +1,15 @@
 import { defineStore } from 'pinia'
-import type { RuntimeFileChange, SessionWorkingDirectory } from '@/types/contracts'
+import type { RuntimeFileChange, SessionWorkingDirectory, WorkspaceSnapshot } from '@/types/contracts'
 import { scanDirectory, type DirectoryHandle } from './local-workspace-scanner'
+import { workspaceBrokerSocket } from './workspaceBrokerSocket'
+import { runBrowserWorkspaceWrite } from './workspaceWriteCoordinator'
 
-type WorkspaceBinding = {
+export type WorkspaceBinding = {
   directory: SessionWorkingDirectory
   handle: DirectoryHandle
 }
 
-type FileChangeApplyResult = {
+export type FileChangeApplyResult = {
   applied: number
   skipped: number
   errors: string[]
@@ -53,6 +55,24 @@ function createWorkingDirectory(handle: DirectoryHandle): SessionWorkingDirector
     name: handle.name,
     selectedAt: new Date().toISOString()
   }
+}
+
+export async function findCanonicalWorkspaceBinding(
+  bindings: readonly WorkspaceBinding[],
+  handle: DirectoryHandle
+): Promise<WorkspaceBinding | undefined> {
+  const unique = new Map(bindings.map((binding) => [binding.directory.id, binding]))
+  for (const binding of unique.values()) {
+    if (binding.handle === handle) return binding
+    if (typeof handle.isSameEntry === 'function' && await handle.isSameEntry(binding.handle)) return binding
+  }
+  return undefined
+}
+
+async function snapshotBinding(binding: WorkspaceBinding): Promise<WorkspaceSnapshot> {
+  const snapshot = await scanDirectory(binding.handle)
+  const revision = workspaceBrokerSocket.revision(binding.directory.id)
+  return revision ? { ...snapshot, revision } : snapshot
 }
 
 function safePathParts(path: string) {
@@ -133,14 +153,14 @@ function normalizeContent(value?: string | null) {
  * - create: a file already exists with different content.
  * - update: disk differs from the change's previousContent (someone else edited it).
  * - delete: disk differs from previousContent.
- * When previousContent is absent we cannot prove a conflict, so we report none.
+ * When previousContent is absent we cannot prove safety, so updates and deletes fail closed.
  */
-function detectConflict(change: RuntimeFileChange, currentContent?: string): boolean {
+export function detectFileChangeConflict(change: RuntimeFileChange, currentContent?: string): boolean {
   if (change.operation === 'create') {
     return currentContent !== undefined && normalizeContent(currentContent) !== normalizeContent(change.content)
   }
   if (change.previousContent === undefined || change.previousContent === null) {
-    return false
+    return true
   }
   if (currentContent === undefined) {
     // The file the change expected to modify/delete is gone.
@@ -179,20 +199,48 @@ export const useLocalWorkspaceStore = defineStore('localWorkspace', {
       if (!allowed) {
         throw new Error('Read/write permission was not granted for the selected directory.')
       }
-      this.pendingBinding = {
-        directory: createWorkingDirectory(handle),
+      const existing = await findCanonicalWorkspaceBinding(
+        [
+          ...(this.pendingBinding ? [this.pendingBinding] : []),
+          ...Object.values(this.bindingsBySessionId).filter((binding): binding is WorkspaceBinding => Boolean(binding))
+        ],
         handle
-      }
+      )
+      const pendingBinding = existing
+        ? { directory: existing.directory, handle }
+        : { directory: createWorkingDirectory(handle), handle }
+      await workspaceBrokerSocket.register(
+        pendingBinding.directory.id,
+        pendingBinding.directory.name,
+        pendingBinding.handle
+      )
+      this.pendingBinding = pendingBinding
       return this.pendingBinding.directory
     },
     clearPendingDirectory() {
+      if (this.pendingBinding) {
+        const workspaceId = this.pendingBinding.directory.id
+        const sharedBySession = Object.values(this.bindingsBySessionId)
+          .some((binding) => binding?.directory.id === workspaceId)
+        if (!sharedBySession) workspaceBrokerSocket.unregister(workspaceId)
+      }
       this.pendingBinding = undefined
     },
     bindPendingDirectoryToSession(sessionId: string) {
       if (!this.pendingBinding) return undefined
       this.bindingsBySessionId[sessionId] = this.pendingBinding
+      const binding = this.pendingBinding
       this.pendingBinding = undefined
       return this.bindingsBySessionId[sessionId]?.directory
+    },
+    releaseSessionWorkspace(sessionId: string) {
+      const binding = this.bindingsBySessionId[sessionId]
+      if (!binding) return
+      delete this.bindingsBySessionId[sessionId]
+      const workspaceId = binding.directory.id
+      const stillReferenced = this.pendingBinding?.directory.id === workspaceId || Object.values(this.bindingsBySessionId)
+        .some((candidate) => candidate?.directory.id === workspaceId)
+      if (!stillReferenced) workspaceBrokerSocket.unregister(workspaceId)
     },
     reusePendingDirectoryFromSession(sessionId?: string) {
       if (this.pendingBinding) return this.pendingBinding.directory
@@ -207,7 +255,16 @@ export const useLocalWorkspaceStore = defineStore('localWorkspace', {
       if (!allowed) {
         throw new Error('Read/write permission was not granted for the selected directory.')
       }
-      return scanDirectory(this.pendingBinding.handle)
+      return snapshotBinding(this.pendingBinding)
+    },
+    async scanSessionWorkspace(sessionId: string) {
+      const binding = this.bindingsBySessionId[sessionId]
+      if (!binding) return undefined
+      const allowed = await ensurePermission(binding.handle)
+      if (!allowed) {
+        throw new Error('Read/write permission was not granted for the selected directory.')
+      }
+      return snapshotBinding(binding)
     },
     enqueueArtifactFileChanges(
       sessionId: string,
@@ -242,45 +299,53 @@ export const useLocalWorkspaceStore = defineStore('localWorkspace', {
       }
       const binding = this.bindingsBySessionId[sessionId]
       if (!binding) {
-        this.lastApplyResultBySessionId[sessionId] = {
+        const result = {
           applied: 0,
           skipped: fileChanges.length,
           errors: [
             'No local directory permission is available for this session. Select the working directory again before applying file changes.'
           ]
         }
-        return
+        this.lastApplyResultBySessionId[sessionId] = result
+        return result
       }
 
       const allowed = await ensurePermission(binding.handle)
       if (!allowed) {
-        this.lastApplyResultBySessionId[sessionId] = {
+        const result = {
           applied: 0,
           skipped: fileChanges.length,
           errors: ['The browser did not grant write permission for this directory.']
         }
-        return
+        this.lastApplyResultBySessionId[sessionId] = result
+        return result
       }
 
-      const errors: string[] = []
-      let applied = 0
-      for (const change of fileChanges) {
-        try {
-          await applyFileChange(binding.handle, change)
-          applied += 1
-        } catch (error) {
-          errors.push(error instanceof Error ? error.message : String(error))
+      const result = await runBrowserWorkspaceWrite(binding.directory.id, async () => {
+        const errors: string[] = []
+        let applied = 0
+        for (const change of fileChanges) {
+          try {
+            const currentContent = await readCurrentContent(binding.handle, change.path)
+            if (detectFileChangeConflict(change, currentContent)) {
+              errors.push(`${change.path}: workspace changed since this proposal was created`)
+              continue
+            }
+            await applyFileChange(binding.handle, change)
+            applied += 1
+          } catch (error) {
+            errors.push(error instanceof Error ? error.message : String(error))
+          }
         }
-      }
+        if (applied > 0) workspaceBrokerSocket.advanceRevision(binding.directory.id)
+        return { applied, skipped: fileChanges.length - applied, errors }
+      })
 
-      if (!errors.length) {
+      if (!result.errors.length && result.applied === fileChanges.length) {
         this.appliedArtifactIds[artifactId] = true
       }
-      this.lastApplyResultBySessionId[sessionId] = {
-        applied,
-        skipped: fileChanges.length - applied,
-        errors
-      }
+      this.lastApplyResultBySessionId[sessionId] = result
+      return result
     },
     /**
      * Reads on-disk content for every queued change and flags conflicts so the
@@ -300,7 +365,7 @@ export const useLocalWorkspaceStore = defineStore('localWorkspace', {
             artifactTitle: item.title,
             change,
             currentContent,
-            conflict: detectConflict(change, currentContent)
+            conflict: detectFileChangeConflict(change, currentContent)
           })
         }
       }
@@ -314,51 +379,66 @@ export const useLocalWorkspaceStore = defineStore('localWorkspace', {
       const selected = new Set(selectedPaths)
       const binding = this.bindingsBySessionId[sessionId]
       if (!binding) {
-        this.lastApplyResultBySessionId[sessionId] = {
+        const result = {
           applied: 0,
           skipped: selected.size,
           errors: ['No local directory permission is available for this session. Select the working directory again.']
         }
-        return
+        this.lastApplyResultBySessionId[sessionId] = result
+        return result
       }
       const allowed = await ensurePermission(binding.handle)
       if (!allowed) {
-        this.lastApplyResultBySessionId[sessionId] = {
+        const result = {
           applied: 0,
           skipped: selected.size,
           errors: ['The browser did not grant write permission for this directory.']
         }
-        return
+        this.lastApplyResultBySessionId[sessionId] = result
+        return result
       }
 
       const queue = this.pendingFileChangesBySessionId[sessionId] ?? []
-      const errors: string[] = []
-      let applied = 0
-      let skipped = 0
-      for (const item of queue) {
-        if (this.appliedArtifactIds[item.artifactId]) continue
-        let appliedInArtifact = 0
-        for (const change of item.fileChanges) {
-          if (!selected.has(change.path)) {
-            skipped += 1
-            continue
+      const result = await runBrowserWorkspaceWrite(binding.directory.id, async () => {
+        const errors: string[] = []
+        let applied = 0
+        let skipped = 0
+        for (const item of queue) {
+          if (this.appliedArtifactIds[item.artifactId]) continue
+          let appliedInArtifact = 0
+          let failedInArtifact = false
+          for (const change of item.fileChanges) {
+            if (!selected.has(change.path)) {
+              skipped += 1
+              continue
+            }
+            try {
+              const currentContent = await readCurrentContent(binding.handle, change.path)
+              if (detectFileChangeConflict(change, currentContent)) {
+                failedInArtifact = true
+                skipped += 1
+                errors.push(`${change.path}: workspace changed since this proposal was created`)
+                continue
+              }
+              await applyFileChange(binding.handle, change)
+              applied += 1
+              appliedInArtifact += 1
+            } catch (error) {
+              failedInArtifact = true
+              errors.push(`${change.path}: ${error instanceof Error ? error.message : String(error)}`)
+            }
           }
-          try {
-            await applyFileChange(binding.handle, change)
-            applied += 1
-            appliedInArtifact += 1
-          } catch (error) {
-            errors.push(`${change.path}: ${error instanceof Error ? error.message : String(error)}`)
+          if (appliedInArtifact === item.fileChanges.length && !failedInArtifact) {
+            this.appliedArtifactIds[item.artifactId] = true
           }
         }
-        // Mark the artifact fully applied only when every change in it was written.
-        if (appliedInArtifact === item.fileChanges.length && !errors.length) {
-          this.appliedArtifactIds[item.artifactId] = true
-        }
-      }
+        if (applied > 0) workspaceBrokerSocket.advanceRevision(binding.directory.id)
+        return { applied, skipped, errors }
+      })
 
       this.pendingFileChangesBySessionId[sessionId] = queue.filter((item) => !this.appliedArtifactIds[item.artifactId])
-      this.lastApplyResultBySessionId[sessionId] = { applied, skipped, errors }
+      this.lastApplyResultBySessionId[sessionId] = result
+      return result
     }
   }
 })

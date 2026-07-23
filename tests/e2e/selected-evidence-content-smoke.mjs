@@ -67,34 +67,29 @@ try {
     }
   );
 
-  const contextPacks = await api(server.apiBase, `/sessions/${sessionId}/debug/context-packs`);
-  const pack = [...contextPacks.data.items]
+  const envelopes = await api(server.apiBase, `/sessions/${sessionId}/debug/context-envelopes`);
+  const envelopeItem = [...envelopes.data.items]
     .reverse()
-    .find((item) => item.contextPack?.workspaceManifest && item.contextPack?.taskContext?.evidenceSelection);
-  if (!pack) {
-    throw new Error(`Expected a context pack with workspaceManifest: ${JSON.stringify(contextPacks)}`);
+    .find((item) => item.contextEnvelope?.L1.navigation && item.contextEnvelope?.L3.files);
+  if (!envelopeItem) {
+    throw new Error(`Expected a ContextEnvelope with navigation and selected evidence: ${JSON.stringify(envelopes)}`);
   }
 
-  const runtimeSnapshotFiles = pack.contextPack.workspaceSnapshot?.files ?? [];
-  const leakedSnapshotContent = runtimeSnapshotFiles.find((file) => Object.hasOwn(file, 'content'));
-  if (leakedSnapshotContent) {
-    throw new Error(`workspaceSnapshot must not carry file content into runtime context: ${JSON.stringify(leakedSnapshotContent)}`);
+  const envelope = envelopeItem.contextEnvelope;
+  const navigationTarget = envelope.L1.navigation.entries.find((file) => file.path === 'src/target.ts');
+  if (!navigationTarget || navigationTarget.size !== targetContent.length || Object.hasOwn(navigationTarget, 'content')) {
+    throw new Error(`L1 navigation should expose file metadata without content: ${JSON.stringify(navigationTarget)}`);
   }
 
-  const manifestTarget = pack.contextPack.workspaceManifest.files.find((file) => file.path === 'src/target.ts');
-  if (!manifestTarget || manifestTarget.contentLength !== targetContent.length || Object.hasOwn(manifestTarget, 'content')) {
-    throw new Error(`workspaceManifest should expose file metadata without content: ${JSON.stringify(manifestTarget)}`);
-  }
-
-  const selectedContents = pack.contextPack.selectedEvidenceContents ?? [];
-  const targetEvidence = selectedContents.find((item) => item.source === 'workspace_file' && item.ref === 'src/target.ts');
+  const selectedContents = envelope.L3.files;
+  const targetEvidence = selectedContents.find((item) => item.path === 'src/target.ts');
   if (!targetEvidence?.content?.includes(targetContent)) {
     throw new Error(`Expected selected evidence content for src/target.ts: ${JSON.stringify(selectedContents)}`);
   }
 
-  const leakedSecret = JSON.stringify(pack.contextPack).includes(secretContent);
+  const leakedSecret = JSON.stringify(envelope).includes(secretContent);
   if (leakedSecret) {
-    throw new Error('Unselected secret file content leaked into runtime ContextPack.');
+    throw new Error('Unselected secret file content leaked into ContextEnvelope.');
   }
 
   console.log('selected evidence content smoke ok');

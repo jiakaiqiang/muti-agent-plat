@@ -30,6 +30,47 @@ test('workspaceFileScanPriority uses deterministic category ordering', () => {
   assert.ok(workspaceFileScanPriority('src/app.ts') < workspaceFileScanPriority('docs/guide.md'));
 });
 
+test('data-flow source outranks nested demo routers', () => {
+  for (const path of [
+    'src/shared/model.ts',
+    'src/chains/articleChain.ts',
+    'src/rag/pipeline.ts',
+    'src/memory/chatMemory.ts',
+    'src/tools/weatherTool.ts'
+  ]) {
+    assert.ok(
+      workspaceFileScanPriority(path) < workspaceFileScanPriority('src/demos/08-rag/index.ts'),
+      `${path} should be read before nested demo indexes`
+    );
+  }
+});
+
+test('bounded scanning keeps architecture data-flow bodies when demo indexes exceed the read limit', async () => {
+  await withTempDir(async (root) => {
+    const coreFiles = [
+      'src/shared/model.ts',
+      'src/chains/articleChain.ts',
+      'src/rag/pipeline.ts',
+      'src/memory/chatMemory.ts',
+      'src/tools/weatherTool.ts'
+    ];
+    for (const path of coreFiles) {
+      const directory = path.slice(0, path.lastIndexOf('/'));
+      await mkdir(join(root, ...directory.split('/')), { recursive: true });
+      await writeFile(join(root, ...path.split('/')), `export const value = '${path}';`);
+    }
+    for (let index = 0; index < 90; index += 1) {
+      const directory = join(root, 'src', 'demos', String(index).padStart(2, '0'));
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, 'index.ts'), `export const demo = ${index};`);
+    }
+
+    const { workspaceSnapshot } = await scanServerWorkspace(root);
+    const readable = new Set(workspaceSnapshot.files.map((file) => file.path));
+    for (const path of coreFiles) assert.ok(readable.has(path), `expected readable core evidence ${path}`);
+  });
+});
+
 test('scanServerWorkspace uses the same priority ordering as browser scanning', async () => {
   await withTempDir(async (root) => {
     for (let index = 0; index < 80; index += 1) {

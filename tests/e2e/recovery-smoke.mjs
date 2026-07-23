@@ -7,6 +7,7 @@ import {
   startSmokeServer,
   stopSmokeServer,
   waitForEvent,
+  waitForMatchingEvent,
   waitForStatus
 } from './smoke-server.mjs';
 
@@ -20,14 +21,43 @@ let fourthServer;
 try {
   firstServer = await startSmokeServer('recovery-smoke', {
     DISCUSSION_MAX_ROUNDS: '0',
-    MOCK_RUNTIME_DELAY_MS: '1500'
+    MOCK_RUNTIME_DELAY_MS: '1500',
+    GLOBAL_DEFAULT_RUNTIME_TYPE: 'mock'
   });
+
+  const agents = (await api(firstServer.apiBase, '/agents')).data;
+  const taskAgent = agents.find((agent) => agent.key === 'requirements') ?? agents[0];
+  if (!taskAgent) throw new Error('Recovery smoke requires at least one Agent.');
+  const workflow = (await api(firstServer.apiBase, '/workflows', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Recovery smoke workflow',
+      nodes: [{ id: 'recovery-smoke-node', type: 'agent', agentId: taskAgent.id, order: 0 }]
+    })
+  })).data;
 
   const { sessionId, briefId } = await createSessionAndWaitForBrief(
     firstServer.apiBase,
-    '验证服务崩溃重启后自动恢复执行'
+    '分析服务崩溃重启后的恢复语义并输出结论',
+    { runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] } }
   );
   await api(firstServer.apiBase, `/sessions/${sessionId}/briefs/${briefId}/confirm`, { method: 'POST' });
+  await waitForStatus(firstServer.apiBase, sessionId, 'WAIT_WORKFLOW_SELECT');
+  const workflowSelection = await waitForMatchingEvent(
+    firstServer.apiBase,
+    sessionId,
+    'user_confirmation_requested',
+    (event) => event.metadata.payload.reason === 'select_workflow'
+  );
+  const selected = (await api(firstServer.apiBase, `/sessions/${sessionId}/workflow/select`, {
+    method: 'POST',
+    body: JSON.stringify({
+      workflowId: workflow.id,
+      confirmationId: workflowSelection.metadata.payload.confirmationId
+    })
+  })).data;
+  const workflowTask = selected.createdTasks[0];
+  if (!workflowTask) throw new Error('Recovery smoke workflow did not create a task.');
   await waitForEvent(firstServer.apiBase, sessionId, 'task_started');
   // 给文件持久化一个写盘窗口，然后模拟进程崩溃（绕过优雅关闭）
   await new Promise((resolve) => setTimeout(resolve, 400));
@@ -37,15 +67,41 @@ try {
   // 复用同一数据文件重启：RecoveryService 应续跑 EXECUTING 会话
   secondServer = await startSmokeServer('recovery-smoke-restart', {
     DISCUSSION_MAX_ROUNDS: '0',
+    GLOBAL_DEFAULT_RUNTIME_TYPE: 'mock',
     AGENT_CLUSTER_DATA_FILE: firstServer.dataFile
   });
 
+  await waitForStatus(secondServer.apiBase, sessionId, 'WAIT_WORKFLOW_STEP_CONFIRM', 60_000);
+  const stepConfirmation = await waitForMatchingEvent(
+    secondServer.apiBase,
+    sessionId,
+    'user_confirmation_requested',
+    (event) =>
+      event.metadata.payload.reason === 'confirm_workflow_step' &&
+      event.metadata.payload.relatedTaskId === workflowTask.id
+  );
+  await api(secondServer.apiBase, `/sessions/${sessionId}/workflow/steps/${workflowTask.id}/decision`, {
+    method: 'POST',
+    body: JSON.stringify({
+      confirmationId: stepConfirmation.metadata.payload.confirmationId,
+      decision: 'approve'
+    })
+  });
   const recovered = await waitForStatus(secondServer.apiBase, sessionId, 'COMPLETED', 60_000);
   if (recovered.status !== 'COMPLETED') {
     throw new Error(`Recovered session did not complete: ${recovered.status}`);
   }
 
   const events = await listEvents(secondServer.apiBase, sessionId);
+  const interrupted = events.find(
+    (event) =>
+      event.type === 'runtime_failed' &&
+      event.metadata?.payload?.termination?.kind === 'service_shutdown' &&
+      event.metadata.payload.termination.graceful === false
+  );
+  if (!interrupted) {
+    throw new Error('Expected crash recovery to record service_shutdown with graceful=false');
+  }
   const deliveries = events.filter((event) => event.type === 'final_delivery_created');
   if (deliveries.length !== 1) {
     throw new Error(`Expected exactly 1 final_delivery_created after recovery, got ${deliveries.length}`);
@@ -65,14 +121,16 @@ try {
   // 重启后 RecoveryService 必须重新驱动，否则会话永久停在最后一条事件。
   thirdServer = await startSmokeServer('recovery-smoke-discussing', {
     DISCUSSION_MAX_ROUNDS: '1',
-    MOCK_RUNTIME_DELAY_MS: '1500'
+    MOCK_RUNTIME_DELAY_MS: '1500',
+    GLOBAL_DEFAULT_RUNTIME_TYPE: 'mock'
   });
 
   const createdDiscussing = await api(thirdServer.apiBase, '/sessions', {
     method: 'POST',
     body: JSON.stringify({
       input: '验证讨论阶段崩溃重启后自动恢复契约生成',
-      agentIds: ['coordinator', 'requirements', 'architect', 'backend', 'test', 'review', 'notification']
+      agentIds: ['coordinator', 'requirements', 'architect', 'backend', 'test', 'review', 'notification'],
+      runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] }
     })
   });
   const discussingSessionId = createdDiscussing.data.session.id;
@@ -88,6 +146,7 @@ try {
 
   fourthServer = await startSmokeServer('recovery-smoke-discussing-restart', {
     DISCUSSION_MAX_ROUNDS: '0',
+    GLOBAL_DEFAULT_RUNTIME_TYPE: 'mock',
     AGENT_CLUSTER_DATA_FILE: thirdServer.dataFile
   });
 

@@ -1,142 +1,40 @@
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const root = fileURLToPath(new URL('../..', import.meta.url))
+const root = fileURLToPath(new URL('../..', import.meta.url));
+const debugView = readFileSync(join(root, 'apps/web/src/components/DebugRuntimeView.vue'), 'utf8');
+const debugController = readFileSync(join(root, 'apps/server/src/modules/debug/debug.controller.ts'), 'utf8');
 
-function read(path) {
-  return readFileSync(`${root}/${path}`, 'utf8')
+function requirePattern(source, pattern, label) {
+  if (!pattern.test(source)) throw new Error(`Missing ${label}: ${pattern}`);
 }
 
-function assertIncludes(source, needle, label) {
-  if (!source.includes(needle)) {
-    throw new Error(`${label} must include ${needle}`)
-  }
+function forbidPattern(source, pattern, label) {
+  if (pattern.test(source)) throw new Error(`Found obsolete ${label}: ${pattern}`);
 }
 
-const debugView = read('apps/web/src/components/DebugRuntimeView.vue')
-const debugController = read('apps/server/src/modules/debug/debug.controller.ts')
-const orchestratorModule = read('apps/server/src/modules/orchestrator/orchestrator.module.ts')
-const orchestratorService = read('apps/server/src/modules/orchestrator/orchestrator.service.ts')
-const contextRouterService = read('apps/server/src/modules/orchestrator/context-router.service.ts')
-const projectMapService = read('apps/server/src/modules/orchestrator/project-map.service.ts')
-const sharedContracts = read('packages/shared/src/contracts.ts')
-const genericLlmRuntime = read('apps/server/src/modules/runtimes/generic-llm-runtime.service.ts')
-const mockRuntime = read('apps/server/src/modules/runtimes/mock-runtime.service.ts')
-const codexRuntime = read('apps/server/src/modules/runtimes/codex-runtime-adapter.service.ts')
-const claudeCodeRuntime = read('apps/server/src/modules/runtimes/claude-code-runtime-adapter.service.ts')
+requirePattern(debugController, /@Get\('context-envelopes'\)/, 'ContextEnvelope debug endpoint');
+requirePattern(debugController, /contextEnvelopes\(/, 'ContextEnvelope controller method');
+requirePattern(debugController, /contextEnvelope: invocation\.contextEnvelope/, 'authoritative envelope payload');
+requirePattern(debugController, /identity: invocation\.profileSnapshot/, 'compiled identity snapshot');
+requirePattern(debugController, /executionTarget: invocation\.executionTarget/, 'resolved execution target');
+requirePattern(debugController, /toolCatalog: invocation\.toolCatalog/, 'Tool Authority catalog');
+requirePattern(debugController, /memoryBulletCount: invocation\.contextEnvelope\.L5\.bullets\.length/, 'L5 memory summary');
+requirePattern(debugController, /artifactRefCount:/, 'L6 artifact summary');
 
-assertIncludes(debugView, 'taskContext?', 'DebugRuntimeView task context type')
-assertIncludes(debugView, 'summaryMemory?', 'DebugRuntimeView summary memory type')
-assertIncludes(debugView, 'continuationState?', 'DebugRuntimeView continuation state type')
-assertIncludes(debugView, 'taskDomainLabel(selectedContextPack.contextPack.taskContext?.domain)', 'DebugRuntimeView task domain rendering')
-assertIncludes(debugView, 'taskIntentLabel(selectedContextPack.contextPack.taskContext?.intent)', 'DebugRuntimeView task intent rendering')
-assertIncludes(debugView, 'selectedContextPack.contextPack.taskContext?.taskMap?.items ?? []', 'DebugRuntimeView task map rendering')
-assertIncludes(debugView, 'projectMap?', 'DebugRuntimeView project map type')
-assertIncludes(debugView, 'workspaceManifest?', 'DebugRuntimeView workspace manifest type')
-assertIncludes(debugView, 'selectedEvidenceContents?', 'DebugRuntimeView selected evidence contents type')
-assertIncludes(debugView, 'selectedContextPack.contextPack.projectMap?.source', 'DebugRuntimeView project map source rendering')
-assertIncludes(debugView, 'selectedContextPack.contextPack.projectMap?.modules ?? []', 'DebugRuntimeView project map modules rendering')
-assertIncludes(debugView, 'selectedContextPack.contextPack.projectMap?.validationCommands ?? []', 'DebugRuntimeView project map validation command rendering')
-assertIncludes(debugView, 'selectedContextPack.contextPack.projectMap?.riskBoundaries ?? []', 'DebugRuntimeView project map risk boundary rendering')
-assertIncludes(debugView, 'selectedContextPack.contextPack.taskContext?.stagePlan?.read ?? []', 'DebugRuntimeView stage plan read rendering')
-assertIncludes(debugView, 'selectedContextPack.contextPack.taskContext?.stagePlan?.do ?? []', 'DebugRuntimeView stage plan do rendering')
-assertIncludes(debugView, 'selectedContextPack.contextPack.taskContext?.stagePlan?.validate ?? []', 'DebugRuntimeView stage plan validate rendering')
-assertIncludes(debugView, 'evidenceSelection?', 'DebugRuntimeView evidence selection type')
-assertIncludes(debugView, 'selectedContextPack.contextPack.taskContext?.evidenceSelection?.strategy', 'DebugRuntimeView evidence selection strategy rendering')
-assertIncludes(debugView, 'selectedContextPack.contextPack.taskContext?.evidenceSelection?.selectedRefs ?? []', 'DebugRuntimeView evidence selection selected refs rendering')
-assertIncludes(debugView, 'selectedContextPack.contextPack.taskContext?.evidenceSelection?.omittedRefs ?? []', 'DebugRuntimeView evidence selection omitted refs rendering')
-assertIncludes(debugView, 'selectedContextPack.contextPack.workspaceManifest?.fileCount', 'DebugRuntimeView workspace manifest rendering')
-assertIncludes(debugView, 'selectedContextPack.contextPack.selectedEvidenceContents?.length', 'DebugRuntimeView selected evidence contents rendering')
-assertIncludes(debugView, 'item.estimatedTokens', 'DebugRuntimeView evidence token estimate rendering')
-assertIncludes(debugView, 'item.selectionReason', 'DebugRuntimeView evidence selection reason rendering')
-assertIncludes(debugView, 'item.omissionReason', 'DebugRuntimeView evidence omission reason rendering')
-assertIncludes(debugView, 'selectedContextPack.contextPack.continuationState?.resumeHints ?? []', 'DebugRuntimeView continuation resume hints rendering')
-assertIncludes(debugView, 'selectedContextPack.contextPack.continuationState?.nextAgentKeys?.length', 'DebugRuntimeView continuation next agents rendering')
-assertIncludes(debugView, 'selectedContextPack.contextPack.taskContext?.validationRules ?? []', 'DebugRuntimeView validation rules rendering')
-assertIncludes(debugView, 'selectedContextPack.contextPack.taskContext?.agentResponsibilities ?? []', 'DebugRuntimeView agent responsibilities rendering')
-assertIncludes(debugView, "selectedContextPack.contextPack.taskContext?.evidenceRefs ?? []", 'DebugRuntimeView evidence refs rendering')
-assertIncludes(debugView, "selectedContextPack.contextPack.summaryMemory?.confirmedFacts ?? []", 'DebugRuntimeView summary confirmed facts rendering')
-assertIncludes(debugView, "selectedContextPack.contextPack.summaryMemory?.nextSteps ?? []", 'DebugRuntimeView summary next steps rendering')
-assertIncludes(debugView, 'selectedInvocation?.error?.requestedContext', 'DebugRuntimeView requested context rendering')
-assertIncludes(debugView, 'selectedInvocation.error.requestedContext.requestedRefs ?? []', 'DebugRuntimeView requested refs rendering')
-assertIncludes(debugView, 'selectedInvocation.error.requestedContext.requestedPaths ?? []', 'DebugRuntimeView requested paths rendering')
-assertIncludes(debugView, 'selectedInvocation.error.requestedContext.requestedCommands ?? []', 'DebugRuntimeView requested commands rendering')
+requirePattern(debugView, /ContextEnvelopeV2/, 'ContextEnvelope view contract');
+for (const layer of ['L0', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6']) {
+  requirePattern(debugView, new RegExp(`contextEnvelope\\.${layer}`), `${layer} rendering`);
+}
+requirePattern(debugView, /selectedInvocation\.identity/, 'identity rendering');
+requirePattern(debugView, /selectedInvocation\.executionTarget/, 'execution target rendering');
+requirePattern(debugView, /selectedInvocation\.toolCatalog/, 'tool authority rendering');
 
-assertIncludes(debugController, 'taskDomain: contextPack.taskContext.domain', 'Debug controller task domain summary')
-assertIncludes(debugController, 'taskIntent: contextPack.taskContext.intent', 'Debug controller task intent summary')
-assertIncludes(debugController, 'taskMapKind: contextPack.taskContext.taskMap.kind', 'Debug controller task map summary')
-assertIncludes(debugController, 'stagePlanReadCount: contextPack.taskContext.stagePlan.read.length', 'Debug controller stage plan read summary')
-assertIncludes(debugController, 'projectMapSource: contextPack.projectMap?.source', 'Debug controller project map source summary')
-assertIncludes(debugController, 'projectMapModuleCount: contextPack.projectMap?.modules.length ?? 0', 'Debug controller project map module summary')
-assertIncludes(debugController, 'projectMapSourceRefCount: contextPack.projectMap?.sourceRefs.length ?? 0', 'Debug controller project map source ref summary')
-assertIncludes(debugController, 'projectMapValidationCommandCount: contextPack.projectMap?.validationCommands.length ?? 0', 'Debug controller project map validation command summary')
-assertIncludes(debugController, 'errorCode: invocation.error?.code', 'Debug controller runtime error code summary')
-assertIncludes(debugController, 'requestedContextRefCount: invocation.error?.requestedContext?.requestedRefs.length ?? 0', 'Debug controller requested context refs summary')
-assertIncludes(debugController, 'requestedContextPathCount: invocation.error?.requestedContext?.requestedPaths?.length ?? 0', 'Debug controller requested context paths summary')
-assertIncludes(debugController, 'requestedContextCommandCount: invocation.error?.requestedContext?.requestedCommands?.length ?? 0', 'Debug controller requested context commands summary')
-assertIncludes(debugController, 'stagePlanDoCount: contextPack.taskContext.stagePlan.do.length', 'Debug controller stage plan do summary')
-assertIncludes(debugController, 'stagePlanValidateCount: contextPack.taskContext.stagePlan.validate.length', 'Debug controller stage plan validate summary')
-assertIncludes(debugController, 'validationRuleCount: contextPack.taskContext.validationRules.length', 'Debug controller validation rule summary')
-assertIncludes(debugController, 'agentResponsibilityCount: contextPack.taskContext.agentResponsibilities.length', 'Debug controller responsibility summary')
-assertIncludes(debugController, 'evidenceSelectionStrategy: contextPack.taskContext.evidenceSelection.strategy', 'Debug controller evidence selection strategy summary')
-assertIncludes(debugController, 'evidenceSelectionSelectedCount: contextPack.taskContext.evidenceSelection.selectedCount', 'Debug controller evidence selection selected count summary')
-assertIncludes(debugController, 'evidenceSelectionOmittedCount: contextPack.taskContext.evidenceSelection.omittedCount', 'Debug controller evidence selection omitted count summary')
-assertIncludes(debugController, 'evidenceSelectionSelectedTokenEstimate', 'Debug controller selected evidence token estimate summary')
-assertIncludes(debugController, 'evidenceSelectionOmittedTokenEstimate', 'Debug controller omitted evidence token estimate summary')
-assertIncludes(debugController, 'evidenceCount: contextPack.taskContext.evidenceRefs.length', 'Debug controller evidence count summary')
-assertIncludes(debugController, 'summaryConfirmedFactCount: contextPack.summaryMemory.confirmedFacts.length', 'Debug controller summary confirmed fact count')
-assertIncludes(debugController, 'summaryCompletedCount: contextPack.summaryMemory.completed.length', 'Debug controller summary completed count')
-assertIncludes(debugController, 'continuationPhase: contextPack.continuationState.phase', 'Debug controller continuation phase summary')
-assertIncludes(debugController, 'continuationActiveTaskId: contextPack.continuationState.activeTaskId', 'Debug controller continuation active task summary')
-assertIncludes(debugController, 'continuationResumeHintCount: contextPack.continuationState.resumeHints.length', 'Debug controller continuation resume hint summary')
-assertIncludes(debugController, "@Get('summary-memory')", 'Debug controller summary memory endpoint')
-assertIncludes(debugController, 'summaryMemoryCheckpoint', 'Debug controller summary memory checkpoint payload')
+const obsoleteAssemblyName = new RegExp(['context', 'Assembl'].join(''), 'i');
+forbidPattern(debugController, /context-packs|contextPacks/, 'old context API');
+forbidPattern(debugController, obsoleteAssemblyName, 'old context controller model');
+forbidPattern(debugView, /ContextPack|contextPack/, 'old context view model');
+forbidPattern(debugView, obsoleteAssemblyName, 'old context view model');
 
-assertIncludes(contextRouterService, 'export class ContextRouterService', 'Context router service')
-assertIncludes(contextRouterService, 'route(input: ContextRouteInput): TaskContext', 'Context router route API')
-assertIncludes(contextRouterService, 'projectMap?: ProjectMap', 'Context router project map input')
-assertIncludes(contextRouterService, "type: 'project_map' as const", 'Context router project map evidence')
-assertIncludes(contextRouterService, 'evidenceSelection', 'Context router evidence selection')
-assertIncludes(contextRouterService, 'selectedRefs', 'Context router selected evidence refs')
-assertIncludes(contextRouterService, 'omittedRefs', 'Context router omitted evidence refs')
-assertIncludes(contextRouterService, 'supplementalEvidenceRefs(session, task?.id)', 'Context router includes supplemental evidence refs')
-assertIncludes(contextRouterService, 'Requested by runtime after CONTEXT_INSUFFICIENT', 'Context router prioritizes supplemental context requests')
-assertIncludes(contextRouterService, 'estimatedTokens: this.estimateEvidenceTokens', 'Context router evidence token estimates')
-assertIncludes(contextRouterService, 'selectionReason: this.evidenceSelectionReason', 'Context router evidence selection reasons')
-assertIncludes(contextRouterService, 'omissionReason:', 'Context router evidence omission reasons')
-assertIncludes(contextRouterService, 'createStagePlan', 'Context router stage plan builder')
-assertIncludes(contextRouterService, 'createTaskMap', 'Context router task map builder')
-assertIncludes(projectMapService, 'export class ProjectMapService', 'Project map service')
-assertIncludes(projectMapService, 'buildProjectMap(session: SessionDetail', 'Project map builder API')
-assertIncludes(projectMapService, 'sourceRefs', 'Project map source refs')
-assertIncludes(projectMapService, "workspaceFocus(session: SessionDetail): ContextPack['workspaceFocus']", 'Project map workspace focus API')
-assertIncludes(projectMapService, 'workspaceValidationCommands', 'Project map validation command discovery')
-assertIncludes(projectMapService, 'workspaceConfigFiles', 'Project map config file discovery')
-assertIncludes(projectMapService, 'workspaceTestFiles', 'Project map test file discovery')
-assertIncludes(orchestratorModule, 'ContextRouterService', 'Orchestrator module context router provider')
-assertIncludes(orchestratorModule, 'ProjectMapService', 'Orchestrator module project map provider')
-assertIncludes(orchestratorService, 'this.contextRouter.route', 'Orchestrator uses ContextRouterService')
-assertIncludes(orchestratorService, 'this.projectMap.workspaceFocus(session)', 'Orchestrator uses ProjectMapService')
-assertIncludes(orchestratorService, "code === 'CONTEXT_INSUFFICIENT'", 'Orchestrator handles context insufficiency')
-assertIncludes(orchestratorService, 'requestedContext?: RuntimeContextRequest', 'Orchestrator receives requested context')
-assertIncludes(orchestratorService, 'session.supplementalContextRequests', 'Orchestrator persists supplemental context requests')
-assertIncludes(sharedContracts, 'export type RuntimeContextRequest', 'Shared contract runtime context request')
-assertIncludes(sharedContracts, 'supplementalContextRequests?', 'Shared contract supplemental context request state')
-assertIncludes(sharedContracts, "'CONTEXT_INSUFFICIENT'", 'Shared contract context insufficiency error code')
-assertIncludes(sharedContracts, 'requestedContext?: RuntimeContextRequest', 'Shared contract requested context fields')
-assertIncludes(sharedContracts, 'estimatedTokens?: number', 'Shared contract evidence token estimate')
-assertIncludes(sharedContracts, 'selectionReason?: string', 'Shared contract evidence selection reason')
-assertIncludes(sharedContracts, 'omissionReason?: string', 'Shared contract evidence omission reason')
-assertIncludes(sharedContracts, 'workspaceManifest?:', 'Shared contract workspace manifest')
-assertIncludes(sharedContracts, 'selectedEvidenceContents?:', 'Shared contract selected evidence contents')
-assertIncludes(genericLlmRuntime, 'When selected evidence is insufficient', 'Generic LLM prompt asks for more context instead of guessing')
-assertIncludes(codexRuntime, 'workspaceManifest: input.contextPack.workspaceManifest', 'Codex runtime receives workspace manifest')
-assertIncludes(codexRuntime, 'selectedEvidenceContents: input.contextPack.selectedEvidenceContents', 'Codex runtime receives selected evidence contents')
-assertIncludes(codexRuntime, 'Use workspaceManifest only for workspace structure', 'Codex runtime prompt separates manifest from content')
-assertIncludes(claudeCodeRuntime, 'workspaceManifest: input.contextPack.workspaceManifest', 'Claude Code runtime receives workspace manifest')
-assertIncludes(claudeCodeRuntime, 'selectedEvidenceContents: input.contextPack.selectedEvidenceContents', 'Claude Code runtime receives selected evidence contents')
-assertIncludes(claudeCodeRuntime, 'Use workspaceManifest only for workspace structure', 'Claude Code runtime prompt separates manifest from content')
-assertIncludes(mockRuntime, 'contextInsufficientResult', 'Mock runtime context insufficiency scenario')
-assertIncludes(mockRuntime, "process.env.MOCK_CONTEXT_INSUFFICIENT === 'true'", 'Mock runtime context insufficiency env hook')
-
-console.log('debug task context view smoke ok')
+console.log('debug ContextEnvelope view smoke ok');

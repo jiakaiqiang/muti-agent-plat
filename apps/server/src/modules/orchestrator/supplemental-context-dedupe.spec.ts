@@ -15,8 +15,15 @@ function ref(type: TaskEvidenceRef['type'], label: string, refValue?: string): T
 function record(
   refs: TaskEvidenceRef[],
   paths: string[] = [],
-  commands: string[] = []
+  commands: string[] = [],
+  hydratedPaths?: string[]
 ): NonNullable<SessionDetail['supplementalContextRequests']>[number] {
+  const workspaceRefPaths = refs
+    .filter((item) => ['workspace_file', 'workspace_symbol', 'test'].includes(item.type))
+    .map((item) => item.ref)
+    .filter((item): item is string => Boolean(item));
+  const requestedPaths = [...new Set([...paths, ...workspaceRefPaths])];
+  const resolvedPaths = hydratedPaths ?? requestedPaths;
   return {
     id: 'rec-' + Math.random().toString(36).slice(2, 10),
     taskId: 'task-1',
@@ -25,8 +32,17 @@ function record(
     requestedContext: {
       reason: 'unit-test',
       requestedRefs: refs,
-      requestedPaths: paths.length ? paths : undefined,
+      requestedPaths: requestedPaths.length ? requestedPaths : undefined,
       requestedCommands: commands.length ? commands : undefined
+    },
+    resolution: {
+      requestedPaths,
+      hydratedPaths: resolvedPaths,
+      failedPaths: requestedPaths
+        .filter((path) => !resolvedPaths.includes(path))
+        .map((path) => ({ path, code: 'READ_ERROR' as const, retryable: true })),
+      deferredPaths: [],
+      contentBytes: 1
     }
   };
 }
@@ -42,14 +58,22 @@ test('refSignature keeps ref+kind stable across labels', () => {
   );
 });
 
-test('collectSeenContextSignatures aggregates refs+paths+commands across prior requests', () => {
+test('collectSeenContextSignatures only dedupes successfully hydrated paths', () => {
+  const seen = collectSeenContextSignatures([
+    record([], ['src/a.ts', 'src/b.ts'], [], ['src/a.ts'])
+  ]);
+  assert.ok(seen.paths.has('src/a.ts'));
+  assert.equal(seen.paths.has('src/b.ts'), false);
+});
+
+test('collectSeenContextSignatures aggregates hydrated refs and paths but not unexecuted commands', () => {
   const seen = collectSeenContextSignatures([
     record([ref('workspace_file', 'a.ts', 'src/a.ts')], ['docs/a.md'], ['npm test']),
     record([ref('workspace_symbol', 'foo', 'src/a.ts#foo')], ['docs/b.md'])
   ]);
   assert.equal(seen.refs.size, 2);
-  assert.equal(seen.paths.size, 2);
-  assert.equal(seen.commands.size, 1);
+  assert.equal(seen.paths.size, 4);
+  assert.equal(seen.commands.size, 0);
   assert.ok(seen.paths.has('docs/a.md'));
 });
 
@@ -95,7 +119,7 @@ test('diffRequestedContext keeps only the novel subset', () => {
     ['src/b.ts']
   );
   assert.deepEqual(diff.novelPaths, ['docs/b.md']);
-  assert.deepEqual(diff.novelCommands, ['npm run typecheck']);
+  assert.deepEqual(diff.novelCommands, ['npm test', 'npm run typecheck']);
 });
 
 test('trimToNovelContext returns undefined when nothing new', () => {
@@ -129,5 +153,5 @@ test('trimToNovelContext returns a candidate trimmed to net-new entries', () => 
   assert.equal(trimmed.followUpInstruction, 'pretty please');
   assert.deepEqual(trimmed.requestedRefs.map((r) => r.ref), ['src/b.ts']);
   assert.deepEqual(trimmed.requestedPaths, ['docs/b.md']);
-  assert.equal(trimmed.requestedCommands, undefined, 'all-duplicate commands collapsed to undefined');
+  assert.deepEqual(trimmed.requestedCommands, ['npm test'], 'unexecuted commands remain novel');
 });

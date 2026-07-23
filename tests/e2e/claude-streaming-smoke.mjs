@@ -1,93 +1,71 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
+import assert from 'node:assert/strict';
 import { dirname, join } from 'node:path';
-import {
-  api,
-  buildServer,
-  createSessionAndWaitForBrief,
-  listEvents,
-  startSmokeServer,
-  stopSmokeServer,
-  waitForStatus
-} from './smoke-server.mjs';
+import { fileURLToPath } from 'node:url';
+import { buildServer } from './smoke-server.mjs';
 
 /**
- * M2-06 · claude 流式端到端 smoke。
- * - env=all → ClaudeAdapter 走 startClaudeStreaming
- * - stub 来自 tests/e2e/fixtures/claude-stream-json-stub.mjs
- * - 验证:tool_called/tool_completed 至少一类事件出现,runtime_completed 存在,status=COMPLETED,
- *   且不出现 RUNTIME_HEARTBEAT。
+ * Claude stream-json process-level smoke.
+ *
+ * The current router intentionally chooses Codex for code-changing tasks and
+ * Generic LLM for non-execution phases. This smoke therefore exercises the
+ * Claude provider boundary directly instead of mutating product routing rules
+ * merely to force a full Session through Claude.
  */
 
 await buildServer();
 
+const { startClaudeStreaming } = await import(
+  '../../apps/server/dist/apps/server/src/modules/runtimes/streaming/claude-streaming-runner.js'
+);
+const { makeInvocationPlan } = await import(
+  '../../apps/server/dist/apps/server/src/modules/runtimes/invocation-plan.fixture.js'
+);
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const stubPath = join(__dirname, 'fixtures', 'claude-stream-json-stub.mjs');
+const input = makeInvocationPlan({
+  invocationId: 'claude-streaming-smoke-invocation',
+  sessionId: 'claude-streaming-smoke-session',
+  phase: 'task_execution',
+  executionTarget: { runtimeType: 'claude_code' },
+  contextEnvelope: { L1: { sessionGoal: 'Validate Claude strict output', phase: 'task_execution' } },
+  expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' }
+});
 
-let server;
-let workspaceRoot;
+const handle = startClaudeStreaming(input, {
+  command: process.execPath,
+  args: [stubPath],
+  env: {
+    ...process.env,
+    STUB_KIND: 'task_execution_result',
+    STUB_SKIP_CONTROL: '1'
+  },
+  closeStdinAfterPrompt: true,
+  firstFrameTimeoutMs: 5_000,
+  idleTimeoutMs: 5_000,
+  absoluteTimeoutMs: 15_000
+});
 
-try {
-  workspaceRoot = await mkdtemp(join(tmpdir(), 'agent-cluster-claude-streaming-'));
-  await mkdir(join(workspaceRoot, 'src'), { recursive: true });
-  await writeFile(
-    join(workspaceRoot, 'package.json'),
-    JSON.stringify({ name: 'stub', scripts: { test: "node -e \"console.log('ok')\"" } }, null, 2)
-  );
+const frames = [];
+const consume = (async () => {
+  for await (const frame of handle.channel) frames.push(frame);
+})();
+const result = await handle.result;
+await consume;
 
-  server = await startSmokeServer('claude-streaming-smoke', {
-    DISCUSSION_MAX_ROUNDS: '0',
-    REQUIRE_USER_CONFIRMATION: 'false',
-    CLAUDE_CODE_ENABLED: 'true',
-    CLAUDE_CODE_COMMAND: process.execPath,
-    CLAUDE_CODE_ARGS_JSON: JSON.stringify([stubPath]),
-    CLAUDE_CODE_SHELL: 'false',
-    CLAUDE_CODE_STREAM_KEEP_STDIN_OPEN: 'true',
-    ENGINEERING_RUNTIME_STREAMING: 'all',
-    STUB_KIND: 'task_execution_result'
-  });
+assert.equal(result.status, 'completed');
+assert.equal(result.runtimeType, 'claude_code');
+assert.equal(result.output.schemaVersion, '1.0');
+assert.equal(result.output.kind, 'task_execution_result');
+assert.equal(result.runtimeSession?.cliSessionId, 'stub-claude-session-1');
+assert.ok(frames.some((frame) => frame.kind === 'assistant_text'));
+assert.ok(frames.some((frame) => frame.kind === 'tool_use'));
+assert.ok(frames.some((frame) => frame.kind === 'tool_result'));
+assert.ok(frames.some((frame) => frame.kind === 'result'));
+assert.ok(
+  result.runtimeDiagnostics?.providerNotifications.some(
+    (notification) => notification.method === 'init' && notification.disposition === 'debug_only'
+  )
+);
 
-  await api(server.apiBase, '/agents/backend', {
-    method: 'PATCH',
-    body: JSON.stringify({ runtimeType: 'claude_code' })
-  });
-  await api(server.apiBase, '/agents/test', {
-    method: 'PATCH',
-    body: JSON.stringify({ runtimeType: 'mock' })
-  });
-  await api(server.apiBase, '/agents/review', {
-    method: 'PATCH',
-    body: JSON.stringify({ runtimeType: 'mock' })
-  });
-
-  const { sessionId, briefId } = await createSessionAndWaitForBrief(
-    server.apiBase,
-    `Use Claude streaming in ${workspaceRoot}`
-  );
-  await api(server.apiBase, `/sessions/${sessionId}/briefs/${briefId}/confirm`, { method: 'POST' });
-  await waitForStatus(server.apiBase, sessionId, 'COMPLETED', 60_000);
-
-  const events = await listEvents(server.apiBase, sessionId);
-  const runtimeCompleted = events.find(
-    (e) => e.type === 'runtime_completed' && e.metadata?.payload?.runtimeType === 'claude_code'
-  );
-  if (!runtimeCompleted) {
-    throw new Error('Expected a runtime_completed event from streaming Claude adapter.');
-  }
-  const toolEvents = events.filter((e) => e.type === 'tool_called' || e.type === 'tool_completed');
-  if (toolEvents.length === 0) {
-    throw new Error('Expected at least one tool_called/tool_completed event from stream.');
-  }
-  const heartbeat = events.find(
-    (e) => e.metadata?.payload?.code === 'RUNTIME_HEARTBEAT'
-  );
-  if (heartbeat) {
-    throw new Error('Streaming path must not emit RUNTIME_HEARTBEAT events.');
-  }
-
-  console.log('claude streaming smoke ok');
-} finally {
-  if (server) await stopSmokeServer(server);
-  if (workspaceRoot) await rm(workspaceRoot, { recursive: true, force: true });
-}
+console.log('claude streaming smoke ok');

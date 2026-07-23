@@ -1,6 +1,7 @@
 import {
-  api,
   buildServer,
+  confirmBriefAndSelectWorkflow,
+  createPublishedAgentWorkflow,
   createSessionAndWaitForBrief,
   listEvents,
   startSmokeServer,
@@ -17,6 +18,26 @@ import { tmpdir } from 'node:os';
 
 await buildServer();
 
+const configuredOllamaUrl = process.env.OLLAMA_BASE_URL ?? 'http://127.0.0.1:11434';
+const ollamaRoot = configuredOllamaUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
+let ollamaModel;
+try {
+  const tagsResponse = await fetch(`${ollamaRoot}/api/tags`, { signal: AbortSignal.timeout(3_000) });
+  if (!tagsResponse.ok) {
+    throw new Error(`GET /api/tags returned HTTP ${tagsResponse.status}`);
+  }
+  const tags = await tagsResponse.json();
+  const availableModels = (tags.models ?? []).map((item) => item.model ?? item.name).filter(Boolean);
+  const requestedModel = process.env.OLLAMA_MODEL;
+  ollamaModel = requestedModel && availableModels.includes(requestedModel) ? requestedModel : availableModels[0];
+  if (!ollamaModel) {
+    throw new Error('Ollama has no installed models');
+  }
+} catch (error) {
+  console.log(`[SKIP] Local Ollama is unavailable at ${ollamaRoot}: ${error instanceof Error ? error.message : error}`);
+  process.exit(0);
+}
+
 let server;
 let workspace;
 
@@ -29,8 +50,15 @@ try {
 
   server = await startSmokeServer('tool-loop-smoke', {
     DISCUSSION_MAX_ROUNDS: '2', // Allow brief discussion so coordinator can generate brief
+    LLM_PROVIDER: 'ollama',
+    LLM_MODEL: ollamaModel,
+    LLM_API_KEY: 'ollama-local',
+    LLM_BASE_URL: `${ollamaRoot}/v1`,
+    LLM_DRY_RUN: 'false',
     LLM_MOCK_FALLBACK: 'false' // Force real LLM
   });
+
+  const workflow = await createPublishedAgentWorkflow(server.apiBase, 'Ollama tool loop workflow', ['backend']);
 
   const requirementText = 'Read the main.ts file and tell me what function it exports.';
   const { sessionId, briefId } = await createSessionAndWaitForBrief(
@@ -62,9 +90,9 @@ try {
     }
   );
 
-  await api(server.apiBase, `/sessions/${sessionId}/briefs/${briefId}/confirm`, { method: 'POST' });
+  await confirmBriefAndSelectWorkflow(server.apiBase, sessionId, briefId, workflow);
 
-  const finalStatus = await waitForStatus(server.apiBase, sessionId, ['COMPLETED', 'FAILED'], 180_000);
+  await waitForStatus(server.apiBase, sessionId, 'COMPLETED', 180_000);
 
   const events = await listEvents(server.apiBase, sessionId);
 
@@ -80,11 +108,6 @@ try {
   }
 
   // The session should complete successfully if the agent was able to read files.
-  if (finalStatus !== 'COMPLETED') {
-    console.error(`Expected session to complete, got status: ${finalStatus}`);
-    process.exit(1);
-  }
-
   console.log('tool loop with ollama smoke ok');
 } catch (error) {
   console.error(error?.stack ?? error);

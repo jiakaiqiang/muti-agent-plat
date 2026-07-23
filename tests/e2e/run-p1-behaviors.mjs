@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createSmokeV2State } from './smoke-server.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const npmCli = process.env.npm_execpath;
@@ -75,6 +76,8 @@ await runNpm(['run', 'build', '-w', '@agent-cluster/server']);
 
 const port = await findFreePort();
 const apiBase = `http://127.0.0.1:${port}/api`;
+mkdirSync(dirname(dataFile), { recursive: true });
+writeFileSync(dataFile, JSON.stringify(createSmokeV2State()), 'utf8');
 const server = spawn(process.execPath, ['apps/server/dist/apps/server/src/main.js'], {
   cwd: root,
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -86,7 +89,7 @@ const server = spawn(process.execPath, ['apps/server/dist/apps/server/src/main.j
     LLM_DRY_RUN: 'true',
     LLM_MOCK_FALLBACK: 'true',
     MOCK_RUNTIME_ENABLED: 'true',
-    MOCK_RUNTIME_DELAY_MS: '80'
+    MOCK_RUNTIME_DELAY_MS: '1800'
   }
 });
 

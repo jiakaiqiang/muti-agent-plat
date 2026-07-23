@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isAssistantTextFrame,
+  isRuntimeActivityFrame,
   isResultFrame,
   isStderrTailFrame,
   isSystemFrame,
@@ -22,7 +23,7 @@ test('RuntimeStreamFrame guards discriminate all six kinds', () => {
       isError: false
     },
     { kind: 'result', payload: { ok: true }, usage: { inputTokens: 1, outputTokens: 2 }, cliSessionId: 's1' },
-    { kind: 'system', subtype: 'init', raw: {} },
+    { kind: 'system', subtype: 'init', raw: {}, disposition: 'debug_only' },
     { kind: 'stderr_tail', text: 'warn' }
   ];
 
@@ -82,10 +83,26 @@ test('system frame preserves unknown subtype for forward compatibility', () => {
   const frame: RuntimeStreamFrame = {
     kind: 'system',
     subtype: 'future_event_kind',
-    raw: { anything: 1 }
+    raw: { anything: 1 },
+    disposition: 'debug_only'
   };
   if (!isSystemFrame(frame)) {
     assert.fail('guard should recognize system frame');
   }
   assert.equal(frame.subtype, 'future_event_kind');
+});
+
+test('diagnostic frames do not count as invocation activity', () => {
+  assert.equal(
+    isRuntimeActivityFrame({
+      kind: 'system',
+      subtype: 'account/rateLimits/updated',
+      raw: {},
+      disposition: 'debug_only'
+    }),
+    false
+  );
+  assert.equal(isRuntimeActivityFrame({ kind: 'stderr_tail', text: 'retrying' }), false);
+  assert.equal(isRuntimeActivityFrame({ kind: 'assistant_text', text: 'working' }), true);
+  assert.equal(isRuntimeActivityFrame({ kind: 'usage', usage: { inputTokens: 1 } }), true);
 });

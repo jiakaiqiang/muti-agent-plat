@@ -1,5 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
-import type { AgentRuntimeAdapter, RuntimeAdapterCategory, RuntimeType } from '@agent-cluster/shared';
+import type {
+  AgentRuntimeAdapter,
+  RuntimeAdapterCategory,
+  RuntimeAvailability,
+  RuntimeType
+} from '@agent-cluster/shared';
 
 @Injectable()
 export class RuntimeRegistryService {
@@ -8,20 +13,28 @@ export class RuntimeRegistryService {
 
   /** Register a Runtime Adapter when it is available for use. */
   async registerAdapter(adapter: AgentRuntimeAdapter): Promise<void> {
+    await this.refreshAdapter(adapter);
+  }
+
+  /** Re-check one Adapter and keep the registry aligned with current availability. */
+  async refreshAdapter(adapter: AgentRuntimeAdapter): Promise<RuntimeAvailability> {
     const { available, reason } = adapter.checkAvailability
       ? await adapter.checkAvailability()
       : { available: true };
 
     if (!available) {
+      this.adapters.delete(adapter.type);
       this.logger.warn(`Runtime ${adapter.type} unavailable: ${reason ?? 'unknown reason'}`);
-      return;
+      return { available, ...(reason ? { reason } : {}) };
     }
 
-    if (this.adapters.has(adapter.type)) {
+    const existing = this.adapters.get(adapter.type);
+    if (existing && existing !== adapter) {
       this.logger.warn(`Runtime registration overwritten: ${adapter.type}`);
     }
     this.adapters.set(adapter.type, adapter);
-    this.logger.log(`Runtime registered: ${adapter.type}`);
+    if (!existing) this.logger.log(`Runtime registered: ${adapter.type}`);
+    return { available: true, ...(reason ? { reason } : {}) };
   }
 
   /** Return a Runtime Adapter by its configured runtime type. */

@@ -62,20 +62,20 @@ export class LivenessWatchdog {
     }
   }
 
-  notifyFrame(): void {
+  notifyFrame(activity = true): void {
     if (!this.started || this.stopped || this.fired) return;
-    this.lastActivityAtMs = this.now();
+    const observedAtMs = this.now();
     if (!this.firstFrameSeen) {
       this.firstFrameSeen = true;
       if (this.firstFrameTimer) {
         clearTimeout(this.firstFrameTimer);
         this.firstFrameTimer = undefined;
       }
+      this.startIdleTimer();
     }
-    if (this.opts.idleTimeoutMs && this.opts.idleTimeoutMs > 0) {
-      if (this.idleTimer) clearTimeout(this.idleTimer);
-      this.idleTimer = setTimeout(() => this.fire('idle'), this.opts.idleTimeoutMs);
-    }
+    if (!activity) return;
+    this.lastActivityAtMs = observedAtMs;
+    this.startIdleTimer();
   }
 
   stop(): void {
@@ -110,6 +110,12 @@ export class LivenessWatchdog {
 
   private now(): number {
     return this.opts.now?.() ?? Date.now();
+  }
+
+  private startIdleTimer(): void {
+    if (!this.opts.idleTimeoutMs || this.opts.idleTimeoutMs <= 0) return;
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => this.fire('idle'), this.opts.idleTimeoutMs);
   }
 
   private clearAll(): void {

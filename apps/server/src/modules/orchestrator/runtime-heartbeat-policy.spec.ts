@@ -1,22 +1,21 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
+import test from 'node:test';
 import { shouldEmitHeartbeat } from './runtime-heartbeat-policy.js';
 
-test('shouldEmitHeartbeat: adapter 有 stream 方法 → false', () => {
-  const adapter = { type: 'codex', run: async () => ({}) as never, stream: () => ({}) as never };
-  assert.equal(shouldEmitHeartbeat(adapter as never), false);
+const adapter = { type: 'codex', run: async () => ({}) as never } as never;
+
+test('streaming handles keep a silent-period heartbeat fallback', () => {
+  assert.equal(shouldEmitHeartbeat(adapter, true), true);
 });
 
-test('shouldEmitHeartbeat: adapter 无 stream 方法 → true', () => {
-  const adapter = { type: 'mock', run: async () => ({}) as never };
-  assert.equal(shouldEmitHeartbeat(adapter as never), true);
+test('buffered handles receive synthetic heartbeats', () => {
+  assert.equal(shouldEmitHeartbeat(adapter, false), true);
 });
 
-test('shouldEmitHeartbeat: adapter 为 undefined → true (回退到旧心跳兜底)', () => {
-  assert.equal(shouldEmitHeartbeat(undefined), true);
+test('missing adapters receive synthetic heartbeats for failure visibility', () => {
+  assert.equal(shouldEmitHeartbeat(undefined, false), true);
 });
 
-test('shouldEmitHeartbeat: adapter.stream 存在但非函数 → true', () => {
-  const adapter = { type: 'mock', run: async () => ({}) as never, stream: 'nope' } as unknown;
-  assert.equal(shouldEmitHeartbeat(adapter as never), true);
+test('stream capability is supplied by the execution handle, not Adapter shape inspection', () => {
+  assert.equal(shouldEmitHeartbeat(adapter), true);
 });

@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   api,
   buildServer,
@@ -5,17 +8,40 @@ import {
   listEvents,
   startSmokeServer,
   stopSmokeServer,
+  waitForMatchingEvent,
   waitForStatus
 } from './smoke-server.mjs';
 
 await buildServer();
 
 let server;
+let workspaceRoot;
 
 try {
+  workspaceRoot = await mkdtemp(join(tmpdir(), 'agent-cluster-artifact-domains-'));
+  await mkdir(join(workspaceRoot, 'apps', 'web', 'src'), { recursive: true });
+  await writeFile(join(workspaceRoot, 'AGENTS.md'), '# Workspace Rules\nUse Harness Engineering.\n');
+  await writeFile(join(workspaceRoot, 'apps', 'web', 'src', 'styles.css'), '.workspace-main { display: grid; }\n');
   server = await startSmokeServer('artifact-file-changes-smoke', {
-    DISCUSSION_MAX_ROUNDS: '0'
+    DISCUSSION_MAX_ROUNDS: '0',
+    GLOBAL_DEFAULT_RUNTIME_TYPE: 'mock',
+    MOCK_RUNTIME_ENABLED: 'true'
   });
+
+  const agents = (await api(server.apiBase, '/agents')).data;
+  const requirementsAgent = agents.find((agent) => agent.key === 'requirements');
+  if (!requirementsAgent) throw new Error('Artifact file changes smoke requires the requirements Agent.');
+  const draft = (await api(server.apiBase, '/workflows', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Artifact file changes smoke workflow',
+      nodes: [{ id: 'artifact-file-changes-node', type: 'agent', agentId: requirementsAgent.id, order: 0 }]
+    })
+  })).data;
+  const workflow = (await api(server.apiBase, `/workflows/${draft.id}/publish`, {
+    method: 'POST',
+    body: JSON.stringify({ expectedDraftRevision: draft.draftRevision })
+  })).data;
 
   const requirementText = 'Generate concrete files for the confirmed implementation task.';
   const { sessionId, briefId } = await createSessionAndWaitForBrief(
@@ -23,9 +49,10 @@ try {
     requirementText,
     {
       workingDirectory: {
-        kind: 'browser_local',
+        kind: 'server_local',
         id: 'local-dir-smoke',
         name: 'smoke-workspace',
+        path: workspaceRoot,
         selectedAt: new Date().toISOString()
       },
       workspaceSnapshot: {
@@ -55,23 +82,47 @@ try {
         skipped: [{ path: '.env', reason: 'sensitive' }],
         detectedStack: ['vue', 'typescript'],
         entrypoints: ['AGENTS.md', 'apps/web/src/styles.css']
-      }
+      },
+      runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] }
     }
   );
 
   await api(server.apiBase, `/sessions/${sessionId}/briefs/${briefId}/confirm`, { method: 'POST' });
+  await waitForStatus(server.apiBase, sessionId, 'WAIT_WORKFLOW_SELECT');
+  const workflowSelection = await waitForMatchingEvent(
+    server.apiBase,
+    sessionId,
+    'user_confirmation_requested',
+    (event) => event.metadata.payload.reason === 'select_workflow'
+  );
+  await api(server.apiBase, `/sessions/${sessionId}/workflow/select`, {
+    method: 'POST',
+    body: JSON.stringify({
+      workflowId: workflow.id,
+      workflowVersion: workflow.currentPublishedVersion,
+      confirmationId: workflowSelection.metadata.payload.confirmationId
+    })
+  });
   await waitForStatus(server.apiBase, sessionId, 'COMPLETED');
 
   const events = await listEvents(server.apiBase, sessionId);
   const artifactEvents = events.filter((event) => event.type === 'artifact_created');
-  const fileChanges = artifactEvents.flatMap((event) => event.metadata.payload?.fileChanges ?? []);
+  const platformProjections = artifactEvents.flatMap(
+    (event) => event.metadata.payload?.platformProjections ?? []
+  );
+  const runtimeProposals = artifactEvents.flatMap(
+    (event) => event.metadata.payload?.runtimeProposals ?? []
+  );
+  const observedChanges = artifactEvents.flatMap(
+    (event) => event.metadata.payload?.systemEvidence?.workspaceChangeSet?.changes ?? []
+  );
   const workspaceAnalysisEvent = events.find(
     (event) => event.type === 'agent_message' && event.metadata.payload?.phase === 'workspace_analysis'
   );
   const workspaceAnalysisArtifact = artifactEvents.find(
     (event) => event.metadata.payload?.title === '工作区架构分析'
   );
-  const workspaceAnalysisChange = fileChanges.find(
+  const workspaceAnalysisChange = platformProjections.find(
     (change) =>
       change.path === 'agent-output/workspace-analysis.md' &&
       change.operation === 'create' &&
@@ -86,38 +137,51 @@ try {
   if (!workspaceAnalysisArtifact || !workspaceAnalysisChange) {
     throw new Error('Expected workspace analysis to create a Chinese stage artifact file');
   }
-
-  if (!fileChanges.length) {
-    throw new Error('Expected artifact_created events to include fileChanges for browser local file writing');
+  if ((workspaceAnalysisArtifact.metadata.payload?.runtimeProposals ?? []).length) {
+    throw new Error('Platform stage projection must not be duplicated into runtimeProposals');
   }
 
-  const invalidChange = fileChanges.find((change) => !change.path || !['create', 'update', 'delete'].includes(change.operation));
+  if (artifactEvents.some((event) => Object.prototype.hasOwnProperty.call(event.metadata.payload ?? {}, 'fileChanges'))) {
+    throw new Error('Artifact events must not expose the removed ambiguous fileChanges field');
+  }
+
+  const invalidChange = [...platformProjections, ...observedChanges].find(
+    (change) => !change.path || !['create', 'update', 'delete'].includes(change.operation)
+  );
   if (invalidChange) {
     throw new Error(`Invalid file change payload: ${JSON.stringify(invalidChange)}`);
   }
 
-  const stageArtifactChanges = fileChanges.filter((change) => change.path?.startsWith('agent-output/'));
+  const stageArtifactChanges = platformProjections.filter((change) => change.path?.startsWith('agent-output/'));
   if (!stageArtifactChanges.length) {
     throw new Error('Expected stage artifact file changes under agent-output/');
   }
 
-  const unrelatedChange = fileChanges.find(
-    (change) => typeof change.content === 'string' && change.content.length && !change.content.includes(requirementText)
-  );
-  if (unrelatedChange) {
-    throw new Error(`Expected generated file content to reference the user requirement: ${unrelatedChange.path}`);
+  const proposedChanges = runtimeProposals.flatMap((proposal) => proposal.metadata?.fileChanges ?? []);
+  if (!proposedChanges.length) {
+    throw new Error('Expected the mock Runtime execution Artifact to retain model file proposals');
   }
-
-  const workspacePaths = new Set(['AGENTS.md', 'apps/web/src/styles.css']);
-  const workspaceFileUpdates = fileChanges.filter(
-    (change) =>
-      workspacePaths.has(change.path) &&
-      change.operation === 'update' &&
-      change.content?.includes(requirementText) &&
-      change.content?.includes('Mock runtime note')
+  const executionArtifact = artifactEvents.find(
+    (event) => (event.metadata.payload?.runtimeProposals ?? []).length > 0
   );
-  if (workspaceFileUpdates.length < workspacePaths.size) {
-    throw new Error('Expected execution fileChanges to update every relevant real workspace file from the workspace snapshot');
+  const executionPayload = executionArtifact?.metadata.payload;
+  if (!executionPayload || !Object.prototype.hasOwnProperty.call(executionPayload, 'systemEvidence')) {
+    throw new Error('Execution Artifact must explicitly expose the systemEvidence trust domain');
+  }
+  if (!executionPayload.systemEvidence?.invocationId) {
+    throw new Error('Execution Artifact systemEvidence must retain its Runtime invocation identity');
+  }
+  if ((executionPayload.platformProjections ?? []).length) {
+    throw new Error('Runtime execution proposals must not be duplicated into platformProjections');
+  }
+  const executionObserved = executionPayload.systemEvidence.workspaceChangeSet?.changes ?? [];
+  if (JSON.stringify(observedChanges) !== JSON.stringify(executionObserved)) {
+    throw new Error('Observed changes must come exactly from execution systemEvidence.workspaceChangeSet');
+  }
+  const proposedPaths = new Set(proposedChanges.map((change) => change.path));
+  const promotedProposal = [...platformProjections, ...observedChanges].find((change) => proposedPaths.has(change.path));
+  if (promotedProposal) {
+    throw new Error(`Runtime proposal was promoted into a platform/observed domain: ${promotedProposal.path}`);
   }
 
   const feishuConfirmation = events.find(
@@ -161,5 +225,8 @@ try {
 } finally {
   if (server) {
     await stopSmokeServer(server);
+  }
+  if (workspaceRoot) {
+    await rm(workspaceRoot, { recursive: true, force: true });
   }
 }

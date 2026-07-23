@@ -3,27 +3,25 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentRunInput } from '@agent-cluster/shared';
 import { WorkdirBriefService } from './workdir-brief.service.js';
+import { makeInvocationPlan } from '../invocation-plan.fixture.js';
 
-function input(workDir: string, runId = 'run-1'): AgentRunInput {
-  return {
-    runId,
+function input(_workDir: string, invocationId = 'run-1') {
+  return makeInvocationPlan({
+    invocationId: invocationId,
     sessionId: 'session-1',
     taskId: 'task-1',
     phase: 'task_execution',
     agent: {
-      id: 'agent-1', key: 'coder', name: 'Coder', role: 'coder', systemPrompt: '', runtimeType: 'codex', capabilityIds: []
+      agentId: 'agent-1', key: 'coder', name: 'Coder', role: 'coder', systemPrompt: ''
     },
-    contextPack: {
-      systemRules: [], sessionGoal: 'Implement feature', taskContext: {} as never, summaryMemory: {} as never,
-      continuationState: {} as never,
-      workingDirectory: { id: 'wd-1', name: 'workspace', kind: 'server_local', path: workDir, selectedAt: new Date().toISOString() },
-      agentProfile: {} as never, relevantEvents: [], relevantMemories: [], ragSnippets: [], artifacts: [], capabilities: [], constraints: [], budget: {}
+    executionTarget: { runtimeType: 'codex' },
+    contextEnvelope: {
+      L1: { sessionGoal: 'Implement feature' },
+      L5: { bullets: ['Memory: SUPPLEMENTAL_WORKDIR_MARKER'], turnCount: 2 }
     },
-    expectedOutput: { kind: 'task_execution_result', schemaVersion: '0.1' },
-    budget: {}
-  };
+    expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' },
+  });
 }
 
 function withTemp(testFn: (workDir: string, stagingDir: string, service: WorkdirBriefService) => void) {
@@ -33,7 +31,11 @@ function withTemp(testFn: (workDir: string, stagingDir: string, service: Workdir
   process.env.AGENT_CLUSTER_BRIEF_STAGING_DIR = stagingDir;
   mkdirSync(workDir, { recursive: true });
   try {
-    testFn(workDir, stagingDir, new WorkdirBriefService());
+    testFn(
+      workDir,
+      stagingDir,
+      new WorkdirBriefService({ resolveServerRoot: () => workDir } as never)
+    );
   } finally {
     delete process.env.AGENT_CLUSTER_BRIEF_STAGING_DIR;
     rmSync(root, { recursive: true, force: true });
@@ -45,6 +47,13 @@ test('injects and removes a new AGENTS.md exactly', () => {
     const lease = service.prepare(input(workDir), 'codex');
     assert.ok(lease);
     assert.match(readFileSync(join(workDir, 'AGENTS.md'), 'utf8'), /Task sidecar:/);
+    const sidecar = JSON.parse(readFileSync(lease.taskSidecarPath, 'utf8')) as Record<string, any>;
+    assert.equal(sidecar.contextEnvelope.version, 'v2');
+    assert.deepEqual(sidecar.contextEnvelope.L5.bullets, ['Memory: SUPPLEMENTAL_WORKDIR_MARKER']);
+    assert.equal('goal' in sidecar, false);
+    assert.equal('currentTask' in sidecar, false);
+    assert.equal('systemRules' in sidecar, false);
+    assert.equal('toolCatalogHash' in sidecar, false);
     lease.restore();
     assert.throws(() => readFileSync(join(workDir, 'AGENTS.md')));
   });
@@ -71,9 +80,22 @@ test('rejects concurrent workdir leases and recovers an active manifest after re
     writeFileSync(join(workDir, 'CLAUDE.md'), original);
     const lease = service.prepare(input(workDir), 'claude_code');
     assert.throws(() => service.prepare(input(workDir, 'run-2'), 'claude_code'), /WORKDIR_LEASE_CONFLICT/);
-    const recovery = new WorkdirBriefService().recoverAll();
+    const recovery = new WorkdirBriefService({ resolveServerRoot: () => workDir } as never).recoverAll();
     assert.equal(recovery.restored, 1);
     assert.deepEqual(readFileSync(join(workDir, 'CLAUDE.md')), original);
     lease?.restore();
+  });
+});
+
+test('deleting a Session restores active instructions and removes its brief directory', () => {
+  withTemp((workDir, stagingDir, service) => {
+    const original = Buffer.from('# Existing\n', 'utf8');
+    writeFileSync(join(workDir, 'AGENTS.md'), original);
+    service.prepare(input(workDir), 'codex');
+
+    service.deleteSessionDirectory('session-1');
+
+    assert.deepEqual(readFileSync(join(workDir, 'AGENTS.md')), original);
+    assert.throws(() => readFileSync(join(stagingDir, 'runs', 'session-1', 'run-1', 'backup-manifest.json')));
   });
 });

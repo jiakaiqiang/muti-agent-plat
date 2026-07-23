@@ -134,7 +134,7 @@ async function startServer() {
       AGENT_CLUSTER_POSTGRES_COLLECTION_TABLE: tableName,
       AGENT_CLUSTER_SEED_DEFAULT_AGENTS: 'false',
       DATABASE_URL: databaseUrl,
-      DEFAULT_AGENT_RUNTIME_TYPE: 'mock',
+      GLOBAL_DEFAULT_RUNTIME_TYPE: 'mock',
       LLM_DRY_RUN: 'true',
       LLM_MOCK_FALLBACK: 'true',
       MOCK_RUNTIME_ENABLED: 'true'

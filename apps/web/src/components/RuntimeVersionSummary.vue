@@ -1,18 +1,17 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import { apiGet } from '@/api/client'
+import { computed, onMounted } from 'vue'
+import { storeToRefs } from 'pinia'
 import { frontendVersion } from '@/config/runtime'
-import type { OpsHealth } from '@/types/contracts'
+import { useSessionStore } from '@/stores/session'
 
-const health = ref<OpsHealth | undefined>()
-const loadError = ref(false)
+const sessionStore = useSessionStore()
+const { runtimeHealth: health } = storeToRefs(sessionStore)
+const loadError = computed(() => Boolean(sessionStore.runtimeHealthError && !health.value))
 
 onMounted(async () => {
   try {
-    health.value = await apiGet<OpsHealth>('/health')
-  } catch {
-    loadError.value = true
-  }
+    await sessionStore.loadRuntimeHealth(true)
+  } catch {}
 })
 </script>
 
@@ -36,5 +35,17 @@ onMounted(async () => {
   <div>
     <dt>Pipeline</dt>
     <dd>{{ health?.pipelineVersion ?? '-' }}</dd>
+  </div>
+  <div>
+    <dt>Schema / Epoch</dt>
+    <dd>{{ health ? `${health.dataSchemaVersion} / ${health.dataEpoch}` : '-' }}</dd>
+  </div>
+  <div>
+    <dt>进程 / 启动时间</dt>
+    <dd>{{ health ? `${health.processId} / ${health.startedAt}` : '-' }}</dd>
+  </div>
+  <div>
+    <dt>持久化位置</dt>
+    <dd>{{ health ? `${health.persistenceBackend}: ${health.persistenceLocation}` : '-' }}</dd>
   </div>
 </template>

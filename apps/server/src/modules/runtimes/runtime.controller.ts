@@ -1,5 +1,10 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
-import type { AgentRunInput, RuntimeModelCreateInput, RuntimeModelUpdateInput } from '@agent-cluster/shared';
+import type {
+  InvocationPlan,
+  RuntimeModelCreateInput,
+  RuntimeModelUpdateInput,
+  RuntimeType
+} from '@agent-cluster/shared';
 import { ok } from '../../common/api-response.js';
 import { RuntimeModelConfigService } from './runtime-model-config.service.js';
 import { RuntimeService } from './runtime.service.js';
@@ -14,6 +19,11 @@ export class RuntimeController {
   @Get('model-config')
   async modelConfiguration() {
     return ok(await this.modelConfig.getConfig());
+  }
+
+  @Get('availability')
+  async availability() {
+    return ok({ items: await this.runtime.listRuntimeAvailability() });
   }
 
   @Post('model-config/switch')
@@ -38,133 +48,93 @@ export class RuntimeController {
 
   @Get('mock/smoke')
   async mockSmoke(@Query('scenario') scenario?: 'happy_path' | 'task_failed') {
-    return ok(await this.runtime.run(this.createSmokeInput('mock', scenario)));
+    return ok(await this.runtime.run(this.createSmokePlan('mock', scenario)));
   }
 
   @Get('generic-llm/smoke')
   async genericLlmSmoke(@Query('scenario') scenario?: 'happy_path' | 'task_failed') {
-    return ok(await this.runtime.run(this.createSmokeInput('generic_llm', scenario)));
+    return ok(await this.runtime.run(this.createSmokePlan('generic_llm', scenario)));
   }
 
-  private createSmokeInput(runtimeType: 'mock' | 'generic_llm', scenario?: 'happy_path' | 'task_failed'): AgentRunInput {
-    const agent = {
-      id: 'runtime-smoke-agent',
-      key: 'backend',
-      name: 'Backend Agent',
-      role: 'Runtime smoke test agent',
-      systemPrompt: 'Return deterministic mock output.',
-      runtimeType,
-      capabilityIds: []
-    };
+  private createSmokePlan(
+    runtimeType: Extract<RuntimeType, 'mock' | 'generic_llm'>,
+    scenario: 'happy_path' | 'task_failed' = 'happy_path'
+  ): InvocationPlan {
+    const invocationId = crypto.randomUUID();
+    const sessionId = 'runtime-smoke-session';
+    const agentId = 'runtime-smoke-agent';
+    const profileHash = 'runtime-smoke-profile-v2';
+    const toolCatalogHash = 'runtime-smoke-tools-v2';
+    const createdAt = new Date().toISOString();
     return {
-      runId: crypto.randomUUID(),
-      sessionId: 'runtime-smoke-session',
+      invocationId,
+      sessionId,
       phase: 'task_execution',
-      agent,
-      contextPack: {
-        systemRules: ['v0.1 runtime smoke test'],
-        sessionGoal: 'Verify runtime result contract.',
-        taskContext: {
-          domain: 'coding',
-          intent: 'validation',
-          currentStage: 'task_execution',
-          taskMap: {
-            kind: 'project_map',
-            summary: 'Runtime smoke uses a synthetic project map.',
-            items: [
-              { type: 'boundary', label: 'runtime-smoke-session' },
-              { type: 'validation_path', label: 'Runtime contract smoke', reason: 'Expected output kind must match.' }
-            ]
-          },
-          stagePlan: {
-            phase: 'task_execution',
-            read: [
-              {
-                action: 'read',
-                label: 'Runtime smoke input',
-                refs: ['runtime smoke input'],
-                reason: 'Synthetic evidence for the runtime contract smoke.'
-              }
-            ],
-            do: [
-              {
-                action: 'do',
-                label: 'Return deterministic runtime output',
-                refs: ['runtime-smoke-session'],
-                reason: 'Exercise the adapter output normalization path.'
-              }
-            ],
-            validate: [
-              {
-                action: 'validate',
-                label: 'Runtime output contract',
-                refs: ['runtime smoke input'],
-                reason: 'AgentRunResult output kind matches expectedOutput.'
-              }
-            ]
-          },
-          executionMode: 'single_agent',
-          validationMode: 'runtime_checks',
-          requiresCodeChanges: false,
-          requiresExternalEvidence: false,
-          validationRules: [{ label: 'Runtime output contract', evidenceRequired: 'AgentRunResult output kind matches expectedOutput.' }],
-          agentResponsibilities: [
-            { role: 'execution', agentKey: agent.key },
-            { role: 'validation', agentKey: agent.key, independentFrom: [agent.key] },
-            { role: 'review', agentKey: agent.key, independentFrom: [agent.key] }
-          ],
-          evidenceSelection: {
-            phase: 'task_execution',
-            strategy: 'coding_minimal',
-            query: 'Verify runtime result contract.',
-            maxEvidenceRefs: 8,
-            selectedCount: 1,
-            omittedCount: 0,
-            selectedTypes: ['user_input'],
-            omittedTypes: [],
-            selectedRefs: [{ type: 'user_input', label: 'runtime smoke input' }],
-            omittedRefs: [],
-            rules: ['Select only refs needed for task_execution.']
-          },
-          evidenceRefs: [{ type: 'user_input', label: 'runtime smoke input' }]
-        },
-        summaryMemory: {
-          goal: 'Verify runtime result contract.',
-          currentState: 'runtime smoke',
-          confirmedFacts: ['Synthetic runtime smoke invocation.'],
-          completed: [],
-          decisions: [],
-          openQuestions: [],
-          risks: [],
-          nextSteps: ['Return a deterministic smoke-test output.']
-        },
-        continuationState: {
-          phase: 'task_execution',
-          sessionStatus: 'EXECUTING',
-          activeTaskId: 'runtime-smoke-task',
-          activeAgentKey: agent.key,
-          pendingTaskIds: [],
-          runningTaskIds: ['runtime-smoke-task'],
-          completedTaskIds: [],
-          blockedTaskIds: [],
-          nextAgentKeys: [agent.key],
-          handoffRefs: [],
-          sourceEventIds: [],
-          sourceArtifactIds: [],
-          resumeHints: ['Synthetic runtime smoke can resume from the task_execution phase.']
-        },
-        agentProfile: agent,
-        relevantEvents: [],
-        relevantMemories: [],
-        ragSnippets: [],
-        artifacts: [],
-        capabilities: [],
-        constraints: ['dry-run only'],
-        budget: {}
+      agent: {
+        agentId,
+        key: 'backend',
+        name: 'Backend Agent',
+        role: 'Runtime smoke test agent',
+        systemPrompt: 'Return deterministic structured output for the smoke invocation.',
+        profileHash,
+        profileRevision: 1,
+        skillBindings: [],
+        requestedToolIds: [],
+        requestedToolKeys: [],
+        capabilityIds: [],
+        knowledgeBaseIds: []
       },
-      expectedOutput: { kind: 'task_execution_result', schemaVersion: '0.1' },
-      budget: {},
-      options: { scenario: scenario ?? 'happy_path' }
+      executionTarget: {
+        runtimeType,
+        source: 'task_override',
+        reason: 'Operator requested a Runtime smoke invocation.',
+        requiredCapabilities: [],
+        requiredToolIds: [],
+        writeMode: 'none',
+        workspaceProviderKind: 'server_local'
+      },
+      toolCatalog: {
+        tools: [],
+        decisions: [],
+        catalogHash: toolCatalogHash
+      },
+      contextEnvelope: {
+        version: 'v2',
+        createdAt,
+        workspaceId: 'runtime-smoke-workspace',
+        sessionId,
+        L0: {
+          systemRules: ['Return the requested structured output without external side effects.'],
+          agentId,
+          profileHash,
+          profileRevision: 1,
+          toolCatalogHash,
+          workspace: {
+            workspaceId: 'runtime-smoke-workspace',
+            rootName: 'runtime-smoke',
+            providerKind: 'server_local',
+            revision: { id: 'runtime-smoke-revision', observedAt: createdAt }
+          }
+        },
+        L1: {
+          sessionGoal: `Verify the Runtime result contract (${scenario}).`,
+          phase: 'task_execution',
+          navigation: { entries: [], truncated: false }
+        },
+        L2: { source: 'generated', modules: [] },
+        L3: { files: [], totalByteLength: 0, truncated: false },
+        L4: { calls: [] },
+        L5: { bullets: [`Smoke scenario: ${scenario}`], turnCount: 0 },
+        L6: { changeSetIds: [], reportIds: [] },
+        budget: {
+          inputTokens: 2_000,
+          navigationTokens: 200,
+          projectMapTokens: 100,
+          evidenceTokens: 600
+        }
+      },
+      expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' },
+      budget: { maxInputTokens: 2_000, maxOutputTokens: 1_000, maxTotalTokens: 3_000 }
     };
   }
 }

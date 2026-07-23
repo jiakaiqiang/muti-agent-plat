@@ -32,7 +32,8 @@ export class SkillsService {
     private readonly agents: AgentsService
   ) {
     for (const skill of this.persistence.getCollection<Skill[]>('skills', [])) {
-      const normalized = this.normalize(this.backfill(skill));
+      this.assertCurrentSchema(skill);
+      const normalized = this.normalize(skill);
       this.skills.set(normalized.id, normalized);
     }
   }
@@ -85,7 +86,7 @@ export class SkillsService {
       id: current.id,
       key: current.key,
       status: patch.status ?? current.status,
-      revision: contentChanged ? (current.revision ?? 1) + 1 : current.revision ?? 1,
+      revision: contentChanged ? current.revision + 1 : current.revision,
       createdAt: current.createdAt,
       updatedAt: new Date().toISOString()
     });
@@ -105,12 +106,11 @@ export class SkillsService {
       );
     }
     this.skills.delete(skill.id);
-    const updatedAgents = this.agents.removeSkillReferences(skill.id);
     this.persist();
-    return { skill, removed: true, cleanedAgentIds: updatedAgents.map((agent) => agent.id) };
+    return { skill, removed: true };
   }
 
-  /** 删除前影响分析：引用该 Skill 的 Agent 列表（skillIds 绑定或 Markdown 占位符）。 */
+  /** 删除前影响分析：引用该 Skill 的 Agent Profile 列表。 */
   referencingAgents(skillId: string) {
     const skill = this.get(skillId);
     const placeholder = `\${skill:${skill.key}}`;
@@ -118,43 +118,9 @@ export class SkillsService {
       .list()
       .filter(
         (agent) =>
-          (agent.skillIds ?? []).includes(skill.id) ||
-          (skill.key ? (agent.profileMarkdown ?? '').includes(placeholder) : false)
+          agent.profileMarkdown.includes(placeholder)
       )
       .map((agent) => ({ id: agent.id, key: agent.key, name: agent.name }));
-  }
-
-  bind(agentId: string, skillId: string) {
-    const skill = this.get(skillId);
-    return { agent: this.agents.bindSkill(agentId, skill.id), skill };
-  }
-
-  unbind(agentId: string, skillId: string) {
-    const skill = this.get(skillId);
-    return { agent: this.agents.unbindSkill(agentId, skill.id), skill, removed: true };
-  }
-
-  resolve(skillIds: string[] = []) {
-    return Array.from(new Set(skillIds))
-      .map((skillId) => this.skills.get(skillId))
-      .filter((skill): skill is Skill => Boolean(skill))
-      .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
-  }
-
-  systemRules(skillIds: string[] = []) {
-    return this.resolve(skillIds).map((skill) => {
-      const files = skill.files.length
-        ? ['Files:', ...skill.files.map((file) => `--- ${file.path} ---\n${file.content}`)].join('\n')
-        : '';
-      return [
-        `[Skill:${skill.name}]`,
-        skill.description ? `Description: ${skill.description}` : '',
-        skill.content,
-        files
-      ]
-        .filter(Boolean)
-        .join('\n');
-    });
   }
 
   private normalize(input: Skill): Skill {
@@ -175,20 +141,17 @@ export class SkillsService {
       description,
       content,
       files,
-      key: input.key ?? slugifyKey(name),
-      status: input.status ?? 'active',
-      revision: input.revision ?? 1
+      key: input.key,
+      status: input.status,
+      revision: input.revision
     };
   }
 
   /** 为旧数据补齐 key/status/revision（迁移 11.2）。 */
-  private backfill(skill: Skill): Skill {
-    return {
-      ...skill,
-      key: skill.key ?? slugifyKey(skill.name),
-      status: skill.status ?? 'active',
-      revision: skill.revision ?? 1
-    };
+  private assertCurrentSchema(skill: Skill) {
+    if (!skill.key?.trim() || !skill.status || !Number.isInteger(skill.revision) || skill.revision < 1) {
+      throw new Error(`CUTOVER_REQUIRED: persisted Skill is not v2-only: ${skill.id ?? 'unknown'}`);
+    }
   }
 
   private uniqueKey(source: string) {

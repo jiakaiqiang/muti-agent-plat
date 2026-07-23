@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { mkdirSync, writeFileSync } from 'node:fs';
 /**
  * claude-stream-json-stub: 模拟 `claude --output-format stream-json`。
  *
@@ -16,6 +17,7 @@
  *   STUB_CRASH=1     首帧后立即 exit(1)
  *   STUB_EXIT_WITHOUT_RESULT=1  首帧后 exit(0)，但不发送 result
  *   STUB_RESULT_ERROR=1  返回 CLI result error 帧
+ *   STUB_PROVIDER_524=1  stderr 返回 Cloudflare 524 后 exit(1)
  *   STUB_FIRST_DELAY_MS=<n>  首帧前等待毫秒 (测首帧超时看门狗)
  *   STUB_SKIP_CONTROL=1  跳过 control_request 步骤
  */
@@ -37,19 +39,38 @@ function nextControlResponse(requestId) {
 }
 
 function makePayload(kind) {
+  if (kind === 'task_acceptance_decision') {
+    return {
+      schemaVersion: '1.0',
+      kind,
+      status: 'accepted',
+      reason: 'stub accepted',
+      missingContext: [],
+      requestedContext: null,
+      handoffSuggestion: null,
+      confidence: 1,
+      alternativeAgentKeys: [],
+      alternativeAgentIds: [],
+      agentMessages: []
+    };
+  }
   if (kind === 'task_execution_result') {
     return {
+      schemaVersion: '1.0',
       kind,
       status: 'completed',
       summary: '任务完成: 读取了 sample.ts',
       completedItems: ['stub'],
       changedArtifacts: [],
+      requestedContext: null,
+      agentMessages: [],
       nextSuggestedActions: [],
       risks: []
     };
   }
   if (kind === 'task_brief') {
     return {
+      schemaVersion: '1.0',
       kind,
       goal: 'stub goal',
       scope: [],
@@ -61,7 +82,55 @@ function makePayload(kind) {
       suggestedTasks: []
     };
   }
-  return { kind: 'agent_message', messageKind: 'summary', content: '任务完成: 读取了 sample.ts' };
+  if (kind === 'post_review_report') {
+    return {
+      schemaVersion: '1.0',
+      kind,
+      isConsistentWithBrief: true,
+      matchedItems: [],
+      mismatchedItems: [],
+      missingItems: [],
+      outOfScopeChanges: [],
+      testResults: [],
+      recommendation: 'deliver',
+      actions: []
+    };
+  }
+  if (kind === 'final_delivery') {
+    return {
+      schemaVersion: '1.0',
+      kind,
+      summary: 'stub delivery',
+      completedItems: [],
+      incompleteItems: [],
+      risks: [],
+      artifactRefs: []
+    };
+  }
+  if (kind === 'user_message_handling_plan') {
+    return {
+      schemaVersion: '1.0',
+      kind,
+      intent: 'question',
+      priority: 'normal',
+      shouldPause: false,
+      affectedTaskIds: [],
+      affectedAgentIds: [],
+      requiresBriefRevision: false,
+      requiresUserConfirmation: false,
+      coordinatorInstruction: 'Handle the user message.'
+    };
+  }
+  return {
+    schemaVersion: '1.0',
+    kind: 'agent_message',
+    messageKind: 'summary',
+    content: '任务完成: 读取了 sample.ts',
+    targetAgentIds: [],
+    targetAgentKeys: [],
+    mentionedAgentIds: [],
+    relatedTaskIds: []
+  };
 }
 
 stdin.setEncoding('utf8');
@@ -101,6 +170,11 @@ async function runScenario() {
   if (firstDelay > 0) await new Promise((r) => setTimeout(r, firstDelay));
 
   writeLine({ type: 'system', subtype: 'init', session_id: 'stub-claude-session-1', model: 'claude-stub' });
+  if (process.env.STUB_PROVIDER_524 === '1') {
+    process.stderr.write('API Error: 524 {"status":524,"error_name":"origin_response_timeout","zone":"api.picpi.top","ray_id":"stub-ray","retryable":true,"retry_after":120}');
+    process.exit(1);
+    return;
+  }
   if (process.env.STUB_CRASH === '1') {
     process.exit(1);
     return;
@@ -172,11 +246,18 @@ async function runScenario() {
     }
   });
 
+  const outputKind = process.env.AGENT_CLUSTER_EXPECTED_OUTPUT_KIND ?? process.env.STUB_KIND ?? 'agent_message';
+  if (outputKind === 'task_execution_result' && process.env.STUB_EDIT_FILES === 'claude') {
+    mkdirSync('src', { recursive: true });
+    writeFileSync('src/feature.txt', 'after from claude stub\n');
+    writeFileSync('src/generated.txt', 'created by claude stub\n');
+  }
+
   // result
   writeLine({
     type: 'result',
     subtype: 'success',
-    result: JSON.stringify(makePayload(process.env.STUB_KIND ?? 'agent_message')),
+    result: JSON.stringify(makePayload(outputKind)),
     usage: { input_tokens: 128, output_tokens: 64 },
     session_id: 'stub-claude-session-1'
   });

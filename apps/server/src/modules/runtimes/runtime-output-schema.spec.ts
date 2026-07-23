@@ -1,15 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ARTIFACT_TYPES } from '@agent-cluster/shared';
+import { ARTIFACT_TYPES, createRuntimeArtifactOutput } from '@agent-cluster/shared';
 import { validateRuntimeOutput } from './runtime-output-schema.js';
 
 function executionResult(changedArtifacts: unknown[]) {
   return {
+    schemaVersion: '1.0',
     kind: 'task_execution_result',
     status: 'completed',
     summary: 'Completed the requested work.',
     completedItems: [],
     changedArtifacts,
+    requestedContext: null,
+    agentMessages: [],
     nextSuggestedActions: [],
     risks: []
   };
@@ -18,7 +21,7 @@ function executionResult(changedArtifacts: unknown[]) {
 test('Runtime Artifact schema accepts every canonical type with required fields', () => {
   for (const type of ARTIFACT_TYPES) {
     const result = validateRuntimeOutput(
-      executionResult([{ type, title: `${type} artifact`, content: `${type} content` }]),
+      executionResult([createRuntimeArtifactOutput({ type, title: `${type} artifact`, content: `${type} content` })]),
       'task_execution_result'
     );
     assert.equal(result.valid, true, `${type}: ${result.errors.join('; ')}`);
@@ -64,6 +67,7 @@ test('Runtime Artifact schema rejects metadata.content as a second body source',
 test('Post Review schema accepts a traceable workspace-context request', () => {
   const result = validateRuntimeOutput(
     {
+      schemaVersion: '1.0',
       kind: 'post_review_report',
       isConsistentWithBrief: false,
       matchedItems: [],
@@ -89,6 +93,7 @@ test('Post Review schema accepts a traceable workspace-context request', () => {
 test('Post Review schema rejects workspace-context requests without missing paths', () => {
   const result = validateRuntimeOutput(
     {
+      schemaVersion: '1.0',
       kind: 'post_review_report',
       isConsistentWithBrief: false,
       matchedItems: [],

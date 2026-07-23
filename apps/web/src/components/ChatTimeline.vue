@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useAgentStore } from '@/stores/agent'
+import { actorAgentId } from '@/composables/useActor'
 import type {
   ArtifactEventPayload,
   ChatMessage,
@@ -8,13 +9,16 @@ import type {
   ConfirmationRequestedPayload,
   FinalDeliveryPayload,
   RuntimeContextRequest,
+  RuntimeError,
   RuntimeFileChange,
+  SupplementalContextResolution,
   TaskEventPayload,
   ToolEventPayload,
   WorkspaceSnapshot
 } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
 import ConfirmationCard from './ConfirmationCard.vue'
+import { observedArtifactFileChanges, platformArtifactProjections } from './artifactFileChangeModel'
 
 const props = defineProps<{
   messages: ChatMessage[]
@@ -45,6 +49,20 @@ function runtimeFailureKey(message: ChatMessage) {
   const status = typeof payload.status === 'string' ? payload.status : undefined
   const isFailureCard = message.messageType === 'error' || (message.messageType === 'task' && status === 'failed')
   if (!isFailureCard) return undefined
+
+  const runtimeError = payload.runtimeError && typeof payload.runtimeError === 'object'
+    ? payload.runtimeError as Record<string, unknown>
+    : undefined
+  const details = runtimeError?.details && typeof runtimeError.details === 'object'
+    ? runtimeError.details as Record<string, unknown>
+    : undefined
+  const code = typeof runtimeError?.code === 'string' ? runtimeError.code : undefined
+  const diagnosticRef = typeof details?.diagnosticRef === 'string' ? details.diagnosticRef : undefined
+  const phase = typeof payload.phase === 'string' ? payload.phase : ''
+  if (code) {
+    const stableMessage = typeof runtimeError?.message === 'string' ? runtimeError.message.trim() : ''
+    return `${diagnosticRef ?? (stableMessage || message.id)}:${code}:${phase}`
+  }
 
   const sourceText = [payload.message, payload.resultSummary, payload.reason, payload.fullMessage, message.content]
     .find((value): value is string => typeof value === 'string' && value.trim().length > 0)
@@ -124,7 +142,13 @@ function confirmationFromMessage(message: ChatMessage): ConfirmationCardState | 
     relatedBriefId: payload.relatedBriefId as string | undefined,
     relatedTaskId: payload.relatedTaskId as string | undefined,
     relatedCapabilityId: payload.relatedCapabilityId as string | undefined,
-    relatedArtifactId: payload.relatedArtifactId as string | undefined
+    relatedArtifactId: payload.relatedArtifactId as string | undefined,
+    workflowId: payload.workflowId as string | undefined,
+    workflowName: payload.workflowName as string | undefined,
+    workflowRunId: payload.workflowRunId as string | undefined,
+    workflowNodeId: payload.workflowNodeId as string | undefined,
+    workflowNodeRunId: payload.workflowNodeRunId as string | undefined,
+    expectedRunRevision: payload.expectedRunRevision as number | undefined
   }
 }
 
@@ -144,8 +168,30 @@ function taskPayload(message: ChatMessage) {
 }
 
 function requestedContextPayload(message: ChatMessage): RuntimeContextRequest | undefined {
-  const payload = message.payload as { requestedContext?: RuntimeContextRequest; error?: { requestedContext?: RuntimeContextRequest } } | undefined
-  return payload?.requestedContext ?? payload?.error?.requestedContext
+  const payload = message.payload as {
+    requestedContext?: RuntimeContextRequest
+    error?: { requestedContext?: RuntimeContextRequest }
+    runtimeError?: { requestedContext?: RuntimeContextRequest }
+  } | undefined
+  return payload?.requestedContext ?? payload?.runtimeError?.requestedContext ?? payload?.error?.requestedContext
+}
+
+function requestedContextResolution(message: ChatMessage): SupplementalContextResolution | undefined {
+  return (message.payload as { resolution?: SupplementalContextResolution } | undefined)?.resolution
+}
+
+function requestedContextStatus(message: ChatMessage) {
+  const payload = message.payload as { rejectionReason?: string } | undefined
+  if (payload?.rejectionReason) return { label: '已拒绝', tone: 'failed' }
+  const resolution = requestedContextResolution(message)
+  if (!resolution) return { label: '等待中', tone: 'waiting' }
+  if (resolution.hydratedPaths.length && (resolution.failedPaths.length || resolution.deferredPaths.length)) {
+    return { label: '部分完成', tone: 'running' }
+  }
+  if (resolution.hydratedPaths.length) return { label: '已补充', tone: 'completed' }
+  if (resolution.failedPaths.length) return { label: '读取失败', tone: 'failed' }
+  if (resolution.deferredPaths.length) return { label: '已延期', tone: 'running' }
+  return { label: '无可用内容', tone: 'failed' }
 }
 
 function requestedContextRefs(message: ChatMessage) {
@@ -165,11 +211,19 @@ function artifactPayload(message: ChatMessage) {
 }
 
 function artifactFileChanges(message: ChatMessage): RuntimeFileChange[] {
-  return artifactPayload(message)?.fileChanges ?? []
+  return observedArtifactFileChanges(artifactPayload(message))
+}
+
+function artifactPlatformProjections(message: ChatMessage): RuntimeFileChange[] {
+  return platformArtifactProjections(artifactPayload(message))
 }
 
 function runtimeTestArtifacts(message: ChatMessage) {
-  return (artifactPayload(message)?.runtimeArtifacts ?? []).filter((artifact) => artifact.type === 'test_report')
+  return (artifactPayload(message)?.runtimeProposals ?? []).filter((artifact) => artifact.type === 'test_report')
+}
+
+function verifiedTestResults(message: ChatMessage) {
+  return artifactPayload(message)?.systemEvidence?.verifiedTestResults ?? []
 }
 
 function runtimeArtifactStatus(artifact: { metadata?: Record<string, unknown> }) {
@@ -183,14 +237,13 @@ function runtimeArtifactCommand(artifact: { metadata?: Record<string, unknown> }
 }
 
 function runtimeArtifactContent(content?: string) {
-  if (!content) return ''
-  return content.length > 1200 ? `${content.slice(0, 1200)}...` : content
+  return content ?? ''
 }
 
 function projectAnalysisReportChange(message: ChatMessage) {
   const payload = artifactPayload(message)
   if (!payload) return undefined
-  return artifactFileChanges(message).find((change) => {
+  return [...artifactPlatformProjections(message), ...artifactFileChanges(message)].find((change) => {
     const title = payload.title ?? ''
     return (
       change.path === 'agent-output/project-architecture-analysis.md' ||
@@ -202,16 +255,7 @@ function projectAnalysisReportChange(message: ChatMessage) {
 
 function projectAnalysisReportArtifact(message: ChatMessage) {
   const payload = artifactPayload(message)
-  if (!payload) return undefined
-  return (payload.runtimeArtifacts ?? []).find((artifact) => {
-    const title = artifact.title ?? ''
-    const reportKind = artifact.metadata?.reportKind
-    return (
-      reportKind === 'project_architecture_analysis' ||
-      title.includes('项目架构分析') ||
-      title.includes('工作区架构分析')
-    )
-  })
+  return payload?.report?.kind === 'project_architecture_analysis' ? payload.report : undefined
 }
 
 function projectAnalysisReport(message: ChatMessage) {
@@ -261,7 +305,7 @@ function fileChangePreview(change: RuntimeFileChange) {
   if (change.operation === 'delete') return '该文件将在选择的目录中删除。'
   const content = change.content?.trim()
   if (!content) return '该文件变更没有提供内容预览。'
-  return content.length > 1200 ? `${content.slice(0, 1200)}...` : content
+  return content
 }
 
 type DiffRow = {
@@ -385,9 +429,10 @@ function messagePartsFromText(text: string): MessageDocumentPart[] {
   return splitPlainParagraphs(text).map((paragraph) => ({ kind: 'paragraph', text: paragraph }))
 }
 
-function messageDocumentBlocks(content: string): MessageDocumentBlock[] {
-  const normalized = cleanMessageText(content.replace(/\r\n/g, '\n'))
-  if (!normalized) return [{ parts: [{ kind: 'paragraph', text: '' }] }]
+function messageDocumentBlocks(content: unknown): MessageDocumentBlock[] {
+  const safeContent = typeof content === 'string' ? content : ''
+  const normalized = cleanMessageText(safeContent.replace(/\r\n/g, '\n'))
+  if (!normalized) return [{ parts: [{ kind: 'paragraph', text: '该事件缺少可展示内容' }] }]
 
   const marked = normalized.replace(sectionHeadingPattern, (_match, optionalHeading?: string, requiredHeading?: string) => {
     return `\u0000${optionalHeading ?? requiredHeading}：`
@@ -466,6 +511,25 @@ function diffPrefix(kind: DiffRow['kind']) {
 
 function deliveryPayload(message: ChatMessage) {
   return message.messageType === 'delivery' ? (message.payload as FinalDeliveryPayload | undefined) : undefined
+}
+
+function deliveryReport(message: ChatMessage) {
+  const report = deliveryPayload(message)?.report
+  if (report?.format === 'markdown' && report.content.trim()) return report
+
+  for (const candidate of [...props.messages].reverse()) {
+    const historical = projectAnalysisReport(candidate)
+    if (!historical?.content.trim()) continue
+    return {
+      artifactId: artifactPayload(candidate)?.artifactId ?? 'historical-project-architecture-report',
+      title: '完整系统架构说明',
+      format: 'markdown' as const,
+      content: historical.content,
+      suggestedPath: 'agent-output/project-architecture-analysis.md',
+      requiresUserConfirmation: true
+    }
+  }
+  return undefined
 }
 
 function statusLabel(status?: string) {
@@ -549,7 +613,6 @@ function phaseLabel(phase?: string) {
       user_message_routing: '消息路由',
       task_acceptance_decision: '接受决策',
       task_acceptance_blocked: '接受受阻',
-      task_claim_decision: '接受决策',
       task_claim_declined: '拒绝接受',
       agent_runtime_communication: 'Agent 通信'
     }[phase ?? ''] ?? phase ?? '未知阶段'
@@ -584,6 +647,29 @@ function errorPayload(message: ChatMessage) {
 function errorText(message: ChatMessage, key: string) {
   const value = errorPayload(message)?.[key]
   return typeof value === 'string' ? value : ''
+}
+
+function runtimeErrorPayload(message: ChatMessage): RuntimeError | undefined {
+  const payload = errorPayload(message)
+  const candidate = payload?.runtimeError ?? payload?.error
+  if (!candidate || typeof candidate !== 'object') return undefined
+  const runtimeError = candidate as Partial<RuntimeError>
+  return typeof runtimeError.code === 'string' &&
+    typeof runtimeError.message === 'string' &&
+    typeof runtimeError.retryable === 'boolean'
+    ? runtimeError as RuntimeError
+    : undefined
+}
+
+function runtimeErrorDetails(message: ChatMessage) {
+  const details = runtimeErrorPayload(message)?.details
+  if (!details) return ''
+  const safeDetails = Object.fromEntries(
+    ['stage', 'diagnosticRef']
+      .filter((key) => details[key] !== undefined)
+      .map((key) => [key, details[key]])
+  )
+  return Object.keys(safeDetails).length > 0 ? JSON.stringify(safeDetails, null, 2) : ''
 }
 
 function reviewPayload(message: ChatMessage) {
@@ -740,7 +826,9 @@ function yesNo(value?: boolean) {
           <div v-if="requestedContextPayload(message)" class="structured-block context-request-block">
             <div class="structured-block__heading">
               <h3>上下文请求</h3>
-              <span class="status-pill waiting">等待中</span>
+              <span class="status-pill" :class="requestedContextStatus(message).tone">
+                {{ requestedContextStatus(message).label }}
+              </span>
             </div>
             <dl>
               <div v-if="requestedContextPayload(message)?.reason">
@@ -766,6 +854,20 @@ function yesNo(value?: boolean) {
               <strong>请求命令</strong>
               <code v-for="command in requestedContextCommands(message)" :key="command">{{ command }}</code>
             </div>
+            <div v-if="requestedContextResolution(message)?.hydratedPaths.length" class="context-request-list">
+              <strong>已读取路径</strong>
+              <code v-for="path in requestedContextResolution(message)?.hydratedPaths" :key="`hydrated:${path}`">{{ path }}</code>
+            </div>
+            <div v-if="requestedContextResolution(message)?.failedPaths.length" class="context-request-list">
+              <strong>读取失败</strong>
+              <code v-for="item in requestedContextResolution(message)?.failedPaths" :key="`failed:${item.path}`">
+                {{ item.path }} / {{ item.code }}
+              </code>
+            </div>
+            <div v-if="requestedContextResolution(message)?.deferredPaths.length" class="context-request-list">
+              <strong>延期路径</strong>
+              <code v-for="path in requestedContextResolution(message)?.deferredPaths" :key="`deferred:${path}`">{{ path }}</code>
+            </div>
           </div>
 
           <div v-if="errorPayload(message)" class="structured-block error-block">
@@ -780,11 +882,21 @@ function yesNo(value?: boolean) {
               </div>
               <div>
                 <dt>错误</dt>
-                <dd>{{ errorText(message, 'message') || message.content }}</dd>
+                <dd>{{ errorText(message, 'message') || runtimeErrorPayload(message)?.message || message.content }}</dd>
               </div>
             </dl>
-            <pre v-if="errorText(message, 'stack')" class="error-stack">{{ errorText(message, 'stack') }}</pre>
-            <pre v-else class="error-stack">{{ errorText(message, 'fullMessage') || message.content }}</pre>
+            <dl v-if="runtimeErrorPayload(message)" class="runtime-error-contract">
+              <div>
+                <dt>错误代码</dt>
+                <dd><code>{{ runtimeErrorPayload(message)?.code }}</code></dd>
+              </div>
+              <div>
+                <dt>可重试</dt>
+                <dd>{{ runtimeErrorPayload(message)?.retryable ? '可重试' : '不可重试' }}</dd>
+              </div>
+            </dl>
+            <pre v-if="runtimeErrorDetails(message)" class="error-stack">{{ runtimeErrorDetails(message) }}</pre>
+            <pre class="error-stack">{{ errorText(message, 'fullMessage') || message.content }}</pre>
           </div>
 
           <div v-if="message.messageType === 'brief'" class="structured-block">
@@ -814,13 +926,13 @@ function yesNo(value?: boolean) {
             </div>
             <p v-if="taskPayload(message)?.description">{{ taskPayload(message)?.description }}</p>
             <dl>
-              <div v-if="taskPayload(message)?.assignedByAgentId">
+              <div v-if="actorAgentId(taskPayload(message)?.assignedBy)">
                 <dt>分配者</dt>
-                <dd>{{ agentName(taskPayload(message)?.assignedByAgentId) }}</dd>
+                <dd>{{ agentName(actorAgentId(taskPayload(message)?.assignedBy)) }}</dd>
               </div>
-              <div v-if="taskPayload(message)?.assigneeAgentId">
+              <div v-if="actorAgentId(taskPayload(message)?.assignee)">
                 <dt>负责 Agent</dt>
-                <dd>{{ agentName(taskPayload(message)?.assigneeAgentId) }}</dd>
+                <dd>{{ agentName(actorAgentId(taskPayload(message)?.assignee)) }}</dd>
               </div>
               <div v-if="taskPayload(message)?.handoffSuggestion">
                 <dt>建议交接</dt>
@@ -836,15 +948,44 @@ function yesNo(value?: boolean) {
             </ul>
           </div>
 
-          <div v-if="message.messageType === 'delivery'" class="structured-block">
-            <h3>{{ message.payload?.summary }}</h3>
-            <div v-if="deliveryPayload(message)?.notificationDraftArtifactId" class="inline-metadata">
+          <div v-if="message.messageType === 'delivery'" class="structured-block delivery-block">
+            <div class="structured-block__heading">
+              <h3>最终交付</h3>
+              <span class="status-pill completed">已生成</span>
+            </div>
+            <p>{{ message.payload?.summary }}</p>
+            <div
+              v-if="deliveryPayload(message)?.notificationDraftArtifactId && !deliveryReport(message)"
+              class="inline-metadata"
+            >
               <span>Feishu draft</span>
               <strong>{{ deliveryPayload(message)?.notificationDraftArtifactId }}</strong>
             </div>
-            <ul>
-              <li v-for="item in listFromPayload(message, 'completedItems')" :key="String(item)">{{ item }}</li>
-            </ul>
+            <details v-if="deliveryReport(message)" class="delivery-report" open>
+              <summary>
+                <span>完整系统架构说明</span>
+                <code>{{ deliveryReport(message)?.suggestedPath }}</code>
+              </summary>
+              <pre aria-label="完整系统架构说明正文">{{ deliveryReport(message)?.content }}</pre>
+            </details>
+            <section v-if="listFromPayload(message, 'completedItems').length" class="delivery-list">
+              <h4>已完成</h4>
+              <ul>
+                <li v-for="item in listFromPayload(message, 'completedItems')" :key="`completed-${String(item)}`">{{ item }}</li>
+              </ul>
+            </section>
+            <section v-if="listFromPayload(message, 'incompleteItems').length" class="delivery-list warning">
+              <h4>未完成</h4>
+              <ul>
+                <li v-for="item in listFromPayload(message, 'incompleteItems')" :key="`incomplete-${String(item)}`">{{ item }}</li>
+              </ul>
+            </section>
+            <section v-if="listFromPayload(message, 'risks').length" class="delivery-list warning">
+              <h4>风险与限制</h4>
+              <ul>
+                <li v-for="item in listFromPayload(message, 'risks')" :key="`risk-${String(item)}`">{{ item }}</li>
+              </ul>
+            </section>
           </div>
 
           <div v-if="reviewPayload(message)" class="structured-block review-block">
@@ -916,6 +1057,17 @@ function yesNo(value?: boolean) {
                 <pre v-if="artifact.content">{{ runtimeArtifactContent(artifact.content) }}</pre>
               </article>
             </div>
+            <div v-if="verifiedTestResults(message).length" class="runtime-test-report-list">
+              <h4>平台验证结果</h4>
+              <article v-for="result in verifiedTestResults(message)" :key="`${result.command}:${result.completedAt}`">
+                <header>
+                  <strong>{{ result.command }}</strong>
+                  <span :class="['status-pill', result.status]">{{ statusLabel(result.status) }}</span>
+                </header>
+                <code>exit {{ result.exitCode ?? '-' }}</code>
+                <pre v-if="result.stdout || result.stderr">{{ [result.stdout, result.stderr].filter(Boolean).join('\n') }}</pre>
+              </article>
+            </div>
             <article v-if="projectAnalysisReport(message)" class="project-analysis-report">
               <header>
                 <span class="file-operation create">报告</span>
@@ -923,8 +1075,26 @@ function yesNo(value?: boolean) {
               </header>
               <pre class="file-change-preview project-analysis-preview">{{ projectAnalysisReport(message)?.content }}</pre>
             </article>
+            <div v-if="artifactPlatformProjections(message).length" class="file-change-list">
+              <h4>平台生成的待写入文件</h4>
+              <article
+                v-for="change in artifactPlatformProjections(message)"
+                :key="`platform:${change.operation}:${change.path}`"
+                class="file-change-item"
+              >
+                <header>
+                  <span class="file-operation" :class="change.operation">{{ fileOperationLabel(change.operation) }}</span>
+                  <code>{{ change.path }}</code>
+                </header>
+                <pre class="file-change-diff" aria-label="平台文件投影 diff"><span
+                  v-for="(row, index) in fileChangeDiffRows(change)"
+                  :key="`platform:${change.path}:${index}`"
+                  :class="['diff-line', row.kind]"
+                ><b>{{ diffPrefix(row.kind) }}</b>{{ row.text }}</span></pre>
+              </article>
+            </div>
             <div v-if="artifactFileChanges(message).length" class="file-change-list">
-              <h4>文件修改</h4>
+              <h4>平台观测的文件变更</h4>
               <article
                 v-for="change in artifactFileChanges(message)"
                 :key="`${change.operation}:${change.path}`"

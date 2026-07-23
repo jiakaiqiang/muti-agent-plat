@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { apiDelete, apiGet, apiPatch, apiPost } from '@/api/client'
-import type { Agent, Skill, SkillFile } from '@/types/contracts'
+import type { Skill, SkillFile } from '@/types/contracts'
 
 export type SkillInput = {
   name: string
@@ -12,13 +12,19 @@ export type SkillInput = {
 export type SkillRemovalResult = {
   skill: Skill
   removed: boolean
-  cleanedAgentIds: string[]
 }
 
-export type SkillBindingResult = {
-  agent: Agent
-  skill: Skill
-  removed?: boolean
+export type SkillFormField = 'name' | 'description' | 'content' | 'files'
+
+export type SkillFormState = {
+  name: string
+  description: string
+  content: string
+  files: SkillFile[]
+}
+
+function emptySkillForm(): SkillFormState {
+  return { name: '', description: '', content: '', files: [] }
 }
 
 export function sortSkills(skills: Skill[]) {
@@ -30,7 +36,13 @@ export const useSkillStore = defineStore('skill', {
     skills: [] as Skill[],
     loading: false,
     saving: false,
-    error: ''
+    error: '',
+    selectedSkillId: '',
+    formMode: undefined as 'create' | 'edit' | undefined,
+    form: emptySkillForm(),
+    fieldErrors: {} as Partial<Record<SkillFormField, string>>,
+    operationError: '',
+    pendingDeleteSkillId: ''
   }),
   actions: {
     async loadSkills() {
@@ -83,30 +95,6 @@ export const useSkillStore = defineStore('skill', {
         return result
       } catch (error) {
         this.error = error instanceof Error ? error.message : '删除 Skill 失败'
-        throw error
-      } finally {
-        this.saving = false
-      }
-    },
-    async bindSkill(agentId: string, skillId: string) {
-      this.saving = true
-      this.error = ''
-      try {
-        return await apiPost<SkillBindingResult>(`/agents/${agentId}/skills/${skillId}`)
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : '绑定 Skill 失败'
-        throw error
-      } finally {
-        this.saving = false
-      }
-    },
-    async unbindSkill(agentId: string, skillId: string) {
-      this.saving = true
-      this.error = ''
-      try {
-        return await apiDelete<SkillBindingResult>(`/agents/${agentId}/skills/${skillId}`)
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : '解绑 Skill 失败'
         throw error
       } finally {
         this.saving = false

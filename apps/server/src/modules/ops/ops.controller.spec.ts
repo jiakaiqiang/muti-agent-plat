@@ -22,15 +22,28 @@ test('health exposes build time, commit and effective pipeline version', () => {
   withEnv(
     {
       AGENT_CLUSTER_BUILD_TIME: '2026-07-11T02:00:00.000Z',
-      AGENT_CLUSTER_COMMIT: 'abc1234',
-      CONTEXT_PIPELINE_V2_ENABLED: 'true'
+      AGENT_CLUSTER_COMMIT: 'abc1234'
     },
     () => {
-      const response = new OpsController().health();
+      const response = new OpsController(
+        {
+          currentDataEpoch: () => 'epoch-test',
+          backendName: () => 'file',
+          locationSummary: () => 'C:\\data\\state.v3.json',
+          isInMaintenanceMode: () => false
+        } as never,
+        { current: () => undefined } as never
+      ).health();
 
       assert.equal(response.data.buildTime, '2026-07-11T02:00:00.000Z');
       assert.equal(response.data.commit, 'abc1234');
       assert.equal(response.data.pipelineVersion, 'v2');
+      assert.equal(response.data.dataSchemaVersion, 3);
+      assert.equal(response.data.dataEpoch, 'epoch-test');
+      assert.equal(response.data.processId, process.pid);
+      assert.match(response.data.startedAt, /^\d{4}-\d{2}-\d{2}T/);
+      assert.equal(response.data.persistenceBackend, 'file');
+      assert.equal(response.data.persistenceLocation, 'C:\\data\\state.v3.json');
     }
   );
 });

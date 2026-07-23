@@ -1,272 +1,410 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
-import type {
-  AgentRunInput,
-  AgentRunResult,
-  AgentRuntimeAdapter,
-  AgentRuntimeEvent,
-  AgentRuntimeRunHandle
-} from '@agent-cluster/shared';
+import test from 'node:test';
+import type { AgentRunResult, AgentRuntimeAdapter, AgentRuntimeEvent, InvocationPlan, RuntimeType } from '@agent-cluster/shared';
+import { createAgentMessageOutput, createRuntimeArtifactSystemEvidence } from '@agent-cluster/shared';
+import { makeInvocationPlan } from './invocation-plan.fixture.js';
 import { RuntimeService } from './runtime.service.js';
 
-function makeInput(): AgentRunInput {
+function completed(plan: InvocationPlan, runtimeType: RuntimeType = plan.executionTarget.runtimeType): AgentRunResult {
   return {
-    runId: 'run-1',
-    sessionId: 'session-1',
-    taskId: 'task-1',
-    phase: 'task_execution',
-    agent: {
-      id: 'agent-1',
-      key: 'coder',
-      name: 'Coder',
-      role: 'coder',
-      systemPrompt: '',
-      runtimeType: 'codex',
-      capabilityIds: []
-    },
-    contextPack: {
-      systemRules: [],
-      sessionGoal: 'test resume',
-      taskContext: {} as never,
-      summaryMemory: {} as never,
-      continuationState: {} as never,
-      workingDirectory: {
-        id: 'workdir-1',
-        name: 'test workdir',
-        kind: 'server_local',
-        path: process.cwd(),
-        selectedAt: new Date().toISOString()
-      },
-      agentProfile: {} as never,
-      relevantEvents: [],
-      relevantMemories: [],
-      ragSnippets: [],
-      artifacts: [],
-      capabilities: [],
-      constraints: [],
-      budget: {}
-    },
-    expectedOutput: { kind: 'agent_message', schemaVersion: '0.1' },
-    budget: {},
-    options: { resume: { cliSessionId: 'old-session', workDir: process.cwd() } }
-  };
-}
-
-function result(status: AgentRunResult['status'], cliSessionId?: string): AgentRunResult {
-  return {
-    runId: 'run-1',
-    runtimeType: 'codex',
-    status,
-    output: { kind: 'agent_message', messageKind: status === 'completed' ? 'summary' : 'risk', content: status },
+    invocationId: plan.invocationId,
+    runtimeType,
+    status: 'completed',
+    output: createAgentMessageOutput({ messageKind: 'summary', content: 'completed' }),
     events: [],
     artifacts: [],
-    usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-    runtimeSession: cliSessionId ? { cliSessionId, workDir: process.cwd() } : undefined,
-    error:
-      status === 'failed'
-        ? { code: 'MODEL_ERROR', message: 'thread/resume failed', retryable: true }
-        : undefined
+    systemEvidence: createRuntimeArtifactSystemEvidence(plan.invocationId),
+    usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, model: runtimeType }
   };
 }
 
-function handle(runResult: AgentRunResult, events: AgentRuntimeEvent[] = []): AgentRuntimeRunHandle {
+function adapter(type: RuntimeType, run?: (plan: InvocationPlan) => Promise<AgentRunResult>): AgentRuntimeAdapter {
   return {
-    events: {
-      async *[Symbol.asyncIterator]() {
-        yield* events;
-      }
-    },
-    result: Promise.resolve(runResult),
-    cancel: async () => {}
-  };
-}
-
-function createService(adapter: AgentRuntimeAdapter) {
-  const persisted = {} as Record<string, unknown>;
-  const persistence = {
-    getCollection: (_name: string, fallback: unknown) => fallback,
-    setCollection: (name: string, value: unknown) => {
-      persisted[name] = value;
+    type,
+    start(plan) {
+      return {
+        events: (async function* () {})(),
+        result: (run ?? (async (value) => completed(value, type)))(plan),
+        async cancel() {}
+      };
     }
   };
+}
+
+function createService(
+  adapters: AgentRuntimeAdapter[],
+  configuredAdapters: AgentRuntimeAdapter[] = adapters,
+  executions: { worktree?: unknown; browserMirror?: unknown } = {},
+  initialInvocations?: Record<string, unknown[]>
+) {
+  const persisted = new Map<string, unknown>();
+  if (initialInvocations) persisted.set('runtimeInvocationsBySession', initialInvocations);
   const registry = {
     registerAdapter: async () => {},
-    getAdapter: () => adapter
+    getAdapter: (type: RuntimeType) => adapters.find((item) => item.type === type),
+    listAll: () => adapters
   };
+  const persistence = {
+    currentDataEpoch() {
+      return 'epoch-test';
+    },
+    getCollection<T>(name: string, fallback: T): T {
+      return (persisted.get(name) as T | undefined) ?? fallback;
+    },
+    setCollection(name: string, value: unknown) {
+      persisted.set(name, value);
+    }
+  };
+  const placeholders = [
+    ...configuredAdapters,
+    ...Array.from({ length: 6 }, () => adapter('human'))
+  ].slice(0, 6);
   const service = new RuntimeService(
     persistence as never,
     registry as never,
-    {} as never,
-    {} as never,
-    {} as never,
-    {} as never,
-    {} as never,
-    {} as never
+    placeholders[0] as never,
+    placeholders[1] as never,
+    placeholders[2] as never,
+    placeholders[3] as never,
+    placeholders[4] as never,
+    placeholders[5] as never,
+    executions.worktree as never,
+    executions.browserMirror as never
   );
   return { service, persisted };
 }
 
-test('RuntimeService retries a failed resume once and emits RESUME_FALLBACK', async () => {
-  const previous = process.env.ENGINEERING_RUNTIME_STREAMING;
-  process.env.ENGINEERING_RUNTIME_STREAMING = 'codex';
-  try {
-    const inputs: AgentRunInput[] = [];
-    const adapter: AgentRuntimeAdapter = {
-      type: 'codex',
-      run: async () => result('failed'),
-      start: (input) => {
-        inputs.push(input);
-        return inputs.length === 1 ? handle(result('failed')) : handle(result('completed', 'new-session'));
-      }
-    };
-    const { service } = createService(adapter);
-    const execution = service.start(makeInput());
-    const events: AgentRuntimeEvent[] = [];
-    const consume = (async () => {
-      for await (const event of execution.events) events.push(event);
-    })();
-    const resolved = await execution.result;
-    await consume;
-
-    assert.equal(resolved.status, 'completed');
-    assert.equal(inputs.length, 2);
-    assert.equal(inputs[1].options?.resume, undefined);
-    assert.ok(events.some((event) => event.metadata?.code === 'RESUME_FALLBACK'));
-  } finally {
-    process.env.ENGINEERING_RUNTIME_STREAMING = previous;
-  }
+test('dispatches by InvocationPlan.executionTarget', async () => {
+  const codex = adapter('codex');
+  const { service } = createService([codex]);
+  const result = await service.run(makeInvocationPlan({ executionTarget: { runtimeType: 'codex' } }));
+  assert.equal(result.runtimeType, 'codex');
 });
 
-test('RuntimeService keeps a successful matching resumed session', async () => {
-  let starts = 0;
-  const adapter: AgentRuntimeAdapter = {
-    type: 'codex',
-    run: async () => result('completed', 'old-session'),
-    start: () => {
-      starts += 1;
-      return handle(result('completed', 'old-session'));
-    }
-  };
-  const { service } = createService(adapter);
-  const resolved = await service.start(makeInput()).result;
-  assert.equal(resolved.runtimeSession?.cliSessionId, 'old-session');
-  assert.equal(starts, 1);
-});
-
-test('RuntimeService falls back when resume returns a different session id', async () => {
-  let starts = 0;
-  const adapter: AgentRuntimeAdapter = {
-    type: 'codex',
-    run: async () => result('completed', 'unexpected'),
-    start: () => {
-      starts += 1;
-      return handle(result('completed', starts === 1 ? 'unexpected' : 'fresh'));
-    }
-  };
-  const { service } = createService(adapter);
-  const resolved = await service.start(makeInput()).result;
-  assert.equal(resolved.runtimeSession?.cliSessionId, 'fresh');
-  assert.equal(starts, 2);
-});
-
-test('RuntimeService persists stream metrics for watchdog baseline analysis', async () => {
-  const completed = result('completed', 'old-session');
-  completed.streamMetrics = {
-    startedAt: '2026-07-10T00:00:00.000Z',
-    completedAt: '2026-07-10T00:02:30.000Z',
-    durationMs: 150_000,
-    frameCount: 4,
-    firstFrameAt: '2026-07-10T00:00:02.000Z',
-    firstFrameLatencyMs: 2_000,
-    lastActivityAt: '2026-07-10T00:02:20.000Z',
-    maxInterFrameGapMs: 60_000
-  };
-  const adapter: AgentRuntimeAdapter = {
-    type: 'codex',
-    run: async () => completed,
-    start: () => handle(completed)
-  };
-  const { service } = createService(adapter);
-  await service.start(makeInput()).result;
-  const [invocation] = service.listInvocations('session-1');
-  assert.equal(invocation.streamMetrics?.durationMs, 150_000);
-  assert.equal(invocation.streamMetrics?.maxInterFrameGapMs, 60_000);
-});
-
-test('RuntimeService persists queryable input token estimation error', async () => {
-  const completed = result('completed', 'old-session');
-  completed.usage.inputTokens = 125;
-  const adapter: AgentRuntimeAdapter = {
-    type: 'codex',
-    run: async () => completed,
-    start: () => handle(completed)
-  };
-  const { service, persisted } = createService(adapter);
-  const input = makeInput();
-  input.estimatedInputTokens = 100;
-
-  await service.start(input).result;
-
-  const [invocation] = service.listInvocations('session-1') as Array<{
-    inputTokenEstimation?: { estimated: number; actual: number; ratio: number };
-  }>;
-  assert.deepEqual(invocation.inputTokenEstimation, {
-    estimated: 100,
-    actual: 125,
-    ratio: 1.25
+test('module initialization waits for asynchronous Runtime registration', async () => {
+  let releaseRegistration: (() => void) | undefined;
+  const registrationGate = new Promise<void>((resolve) => {
+    releaseRegistration = resolve;
   });
-  const stored = persisted.runtimeInvocationsBySession as Record<
-    string,
-    Array<{ inputTokenEstimation?: { estimated: number; actual: number; ratio: number } }>
-  >;
-  assert.deepEqual(stored['session-1'][0].inputTokenEstimation, invocation.inputTokenEstimation);
-});
-
-test('RuntimeService uses executionTarget from input when provided', async () => {
-  const mockResult: AgentRunResult = {
-    runId: 'run-1',
-    runtimeType: 'mock',
-    status: 'completed',
-    output: { kind: 'agent_message', messageKind: 'summary', content: 'completed' },
-    events: [],
-    artifacts: [],
-    usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-    runtimeSession: { cliSessionId: 'mock-session', workDir: process.cwd() }
-  };
-
-  const mockAdapter: AgentRuntimeAdapter = {
-    type: 'mock',
-    run: async () => mockResult,
-    start: () => handle(mockResult)
-  };
-
-  const registry = {
-    registerAdapter: async () => {},
-    getAdapter: (type: string) => (type === 'mock' ? mockAdapter : null)
-  };
-
+  let registered = 0;
+  const runtime = adapter('claude_code');
   const persistence = {
+    currentDataEpoch: () => 'epoch-test',
     getCollection: (_name: string, fallback: unknown) => fallback,
-    setCollection: () => {}
+    setCollection() {}
   };
-
+  const registry = {
+    async registerAdapter() {
+      await registrationGate;
+      registered += 1;
+    },
+    getAdapter: () => runtime,
+    listAll: () => registered ? [runtime] : []
+  };
+  const placeholders = Array.from({ length: 6 }, () => runtime);
   const service = new RuntimeService(
     persistence as never,
     registry as never,
-    {} as never,
-    {} as never,
-    {} as never,
-    {} as never,
-    {} as never,
-    {} as never
+    placeholders[0] as never,
+    placeholders[1] as never,
+    placeholders[2] as never,
+    placeholders[3] as never,
+    placeholders[4] as never,
+    placeholders[5] as never
   );
 
-  const input = makeInput();
-  input.executionTarget = {
-    runtimeType: 'mock'
-  };
+  let initialized = false;
+  const initialization = service.onModuleInit().then(() => {
+    initialized = true;
+  });
+  await Promise.resolve();
+  assert.equal(initialized, false);
+  releaseRegistration?.();
+  await initialization;
+  assert.equal(registered, 6);
+});
 
-  const resolved = await service.start(input).result;
-  assert.equal(resolved.status, 'completed');
-  assert.equal(resolved.runtimeType, 'mock');
+test('passes the exact InvocationPlan object to the adapter', async () => {
+  let received: InvocationPlan | undefined;
+  const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'mock' } });
+  const mock = adapter('mock', async (input) => {
+    received = input;
+    return completed(input);
+  });
+  const { service } = createService([mock]);
+  await service.run(plan);
+  assert.equal(received, plan);
+});
+
+test('prepares and captures a browser mirror before dispatching Codex', async () => {
+  const calls: string[] = [];
+  let received: InvocationPlan | undefined;
+  const codex = adapter('codex', async (input) => {
+    received = input;
+    return completed(input, 'codex');
+  });
+  const browserMirror = {
+    shouldManage: () => true,
+    async prepare() {
+      calls.push('prepare');
+      return {
+        manifest: {
+          workspaceId: 'browser-workspace',
+          baseRevision: { id: 'revision-1', observedAt: '2026-07-14T00:00:00.000Z' },
+          skippedFiles: []
+        },
+        release() {
+          calls.push('release');
+        }
+      };
+    },
+    async capture(_lease: unknown, result: AgentRunResult) {
+      calls.push('capture');
+      return result;
+    }
+  };
+  const { service } = createService([codex], [codex], { browserMirror });
+  const handle = service.start(makeInvocationPlan({
+    executionTarget: { runtimeType: 'codex', workspaceProviderKind: 'browser_broker' },
+    resume: { cliSessionId: 'older-browser-mirror', workDir: 'C:/stale-mirror' }
+  }));
+  const events: AgentRuntimeEvent[] = [];
+  const consume = (async () => {
+    for await (const event of handle.events) events.push(event);
+  })();
+  const result = await handle.result;
+  await consume;
+  assert.equal(result.status, 'completed');
+  assert.equal(received?.resume, undefined);
+  assert.deepEqual(calls, ['prepare', 'capture', 'release']);
+  assert.equal(events.find((event) => event.metadata?.code === 'BROWSER_MIRROR_PREPARED')?.visibility, 'debug');
+});
+
+test('fails closed when the selected Runtime is not registered', async () => {
+  const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'codex' } });
+  const { service } = createService([]);
+  const result = await service.run(plan);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'CAPABILITY_BLOCKED');
+  assert.match(result.error?.message ?? '', /Unsupported runtime/);
+});
+
+test('normalizes adapter promise rejection into a failed result', async () => {
+  const codex = adapter('codex', async () => { throw new Error('adapter exploded'); });
+  const { service } = createService([codex]);
+  const result = await service.run(makeInvocationPlan({ executionTarget: { runtimeType: 'codex' } }));
+  assert.equal(result.status, 'failed');
+  assert.match(result.error?.message ?? '', /adapter exploded/);
+});
+
+test('persists the compiled Agent identity snapshot', async () => {
+  const plan = makeInvocationPlan({
+    agent: {
+      profileHash: 'profile-audit',
+      profileRevision: 7,
+      skillBindings: [{ id: 'skill-1', key: 'review', revision: 3, contentHash: 'skill-hash' }]
+    },
+    executionTarget: { runtimeType: 'mock' }
+  });
+  const { service } = createService([adapter('mock')]);
+  await service.run(plan);
+  const [log] = service.listInvocations(plan.sessionId);
+  assert.deepEqual(log.profileSnapshot, {
+    agentId: plan.agent.agentId,
+    profileHash: 'profile-audit',
+    profileRevision: 7,
+    resolvedSkillIds: ['skill-1'],
+    resolvedSkillRevisions: { 'skill-1': 3 },
+    resolvedToolIds: []
+  });
+});
+
+test('persists execution target, tool catalog, and ContextEnvelope together', async () => {
+  const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'mock', modelId: 'model-1' } });
+  const { service } = createService([adapter('mock')]);
+  await service.run(plan);
+  const [log] = service.listInvocations(plan.sessionId);
+  assert.equal(log.executionTarget, plan.executionTarget);
+  assert.equal(log.toolCatalog, plan.toolCatalog);
+  assert.equal(log.contextEnvelope, plan.contextEnvelope);
+});
+
+test('persists Runtime usage and result status', async () => {
+  const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'mock' } });
+  const { service } = createService([adapter('mock')]);
+  await service.run(plan);
+  const [log] = service.listInvocations(plan.sessionId);
+  assert.equal(log.status, 'completed');
+  assert.equal(log.dataEpoch, 'epoch-test');
+  assert.equal(log.usage?.totalTokens, 15);
+  assert.equal(log.systemEvidence.invocationId, plan.invocationId);
+});
+
+test('persists the exact output contract identity used by the invocation', async () => {
+  const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'mock' } });
+  const { service } = createService([adapter('mock')]);
+  await service.run(plan);
+  const [log] = service.listInvocations(plan.sessionId);
+  assert.equal(log.outputContract.contractId, `runtime.output.${plan.expectedOutput.kind}`);
+  assert.equal(log.outputContract.contractVersion, '1.0');
+  assert.match(log.outputContract.schemaHash, /^fnv1a32:[0-9a-f]{8}$/);
+});
+
+test('listAvailableRuntimeTypes reflects the active registry', () => {
+  const { service } = createService([adapter('codex'), adapter('generic_llm')]);
+  assert.deepEqual(service.listAvailableRuntimeTypes(), ['codex', 'generic_llm']);
+});
+
+test('startup gate rejects persisted RuntimeInvocation without dataEpoch', () => {
+  assert.throws(
+    () => createService([], [], {}, { 'session-1': [{ id: 'legacy' }] }),
+    /CUTOVER_REQUIRED: persisted RuntimeInvocation has no dataEpoch/
+  );
+});
+
+test('startup gate rejects persisted RuntimeInvocation from a stale dataEpoch', () => {
+  assert.throws(
+    () => createService([], [], {}, { 'session-1': [{ id: 'stale', dataEpoch: 'epoch-old' }] }),
+    /STALE_DATA_EPOCH/
+  );
+});
+
+test('startup gate rejects persisted RuntimeInvocation with stale contract identity', async () => {
+  const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'mock' } });
+  const { service } = createService([adapter('mock')]);
+  await service.run(plan);
+  const [validLog] = service.listInvocations(plan.sessionId);
+
+  for (const outputContract of [
+    { ...validLog.outputContract, contractId: 'runtime.output.stale' },
+    { ...validLog.outputContract, schemaHash: 'fnv1a32:deadbeef' }
+  ]) {
+    assert.throws(
+      () => createService([], [], {}, {
+        [plan.sessionId]: [{ ...validLog, outputContract }]
+      }),
+      /CUTOVER_REQUIRED: persisted RuntimeInvocation does not satisfy the v3 contract/
+    );
+  }
+});
+
+test('Runtime availability reports registration, preflight reason, and workspace kinds', async () => {
+  const codex = adapter('codex');
+  codex.checkAvailability = async () => ({ available: false, reason: 'disabled for test' });
+  codex.metadata = {
+    name: 'codex',
+    version: '2.0.0',
+    category: 'external',
+    provider: 'openai',
+    capabilityIds: [],
+    supportedWorkspaceCapabilities: ['read'],
+    supportedWorkspaceProviderKinds: ['server_local'],
+    supportedToolNames: ['read_file']
+  };
+  const { service } = createService([], [codex]);
+  const status = (await service.listRuntimeAvailability()).find((item) => item.runtimeType === 'codex');
+  assert.deepEqual(status, {
+    runtimeType: 'codex',
+    available: false,
+    registered: false,
+    reason: 'disabled for test',
+    supportedWorkspaceProviderKinds: ['server_local']
+  });
+});
+
+test('keeps a successful resumed CLI session without retrying', async () => {
+  const calls: InvocationPlan[] = [];
+  const codex = adapter('codex', async (plan) => {
+    calls.push(plan);
+    return { ...completed(plan, 'codex'), runtimeSession: { cliSessionId: 'session-1', workDir: '/workspace' } };
+  });
+  const { service } = createService([codex]);
+  const plan = makeInvocationPlan({
+    executionTarget: { runtimeType: 'codex' },
+    resume: { cliSessionId: 'session-1', workDir: '/workspace' }
+  });
+  const result = await service.run(plan);
+  assert.equal(result.status, 'completed');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0], plan);
+});
+
+test('falls back once without resume when the resumed session id mismatches', async () => {
+  const calls: InvocationPlan[] = [];
+  const codex = adapter('codex', async (plan) => {
+    calls.push(plan);
+    const cliSessionId = plan.resume ? 'unexpected-session' : 'new-session';
+    return { ...completed(plan, 'codex'), runtimeSession: { cliSessionId, workDir: '/workspace' } };
+  });
+  const { service } = createService([codex]);
+  const plan = makeInvocationPlan({
+    executionTarget: { runtimeType: 'codex' },
+    resume: { cliSessionId: 'expired-session', workDir: '/workspace' }
+  });
+  const handle = service.start(plan);
+  const events: AgentRuntimeEvent[] = [];
+  const consume = (async () => {
+    for await (const event of handle.events) events.push(event);
+  })();
+  const result = await handle.result;
+  await consume;
+  assert.equal(result.runtimeSession?.cliSessionId, 'new-session');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].resume?.cliSessionId, 'expired-session');
+  assert.equal(calls[1].resume, undefined);
+  assert.equal(events.filter((event) => event.metadata?.code === 'RESUME_FALLBACK').length, 1);
+});
+
+test('does not fall back when a resumed Runtime invocation is rejected before execution', async () => {
+  const calls: InvocationPlan[] = [];
+  const claude = adapter('claude_code', async (plan) => {
+    calls.push(plan);
+    return {
+      ...completed(plan, 'claude_code'),
+      status: 'failed',
+      error: {
+        code: 'RUNTIME_INVOCATION_ERROR',
+        message: 'Claude Code rejected the Runtime invocation arguments.',
+        retryable: false,
+        details: { diagnosticRef: plan.invocationId }
+      }
+    };
+  });
+  const { service } = createService([claude]);
+  const plan = makeInvocationPlan({
+    executionTarget: { runtimeType: 'claude_code' },
+    resume: { cliSessionId: 'existing-session', workDir: '/workspace' }
+  });
+  const handle = service.start(plan);
+  const events: AgentRuntimeEvent[] = [];
+  const consume = (async () => {
+    for await (const event of handle.events) events.push(event);
+  })();
+  const result = await handle.result;
+  await consume;
+
+  assert.equal(result.error?.code, 'RUNTIME_INVOCATION_ERROR');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0], plan);
+  assert.equal(events.some((event) => event.metadata?.code === 'RESUME_FALLBACK'), false);
+});
+
+test('findPriorInvocation is scoped to session, agent, task, and Runtime', async () => {
+  const plan = makeInvocationPlan({
+    sessionId: 'session-a',
+    taskId: 'task-a',
+    agent: { agentId: 'agent-a' },
+    executionTarget: { runtimeType: 'claude_code' }
+  });
+  const claude = adapter('claude_code', async (input) => ({
+    ...completed(input, 'claude_code'),
+    runtimeSession: { cliSessionId: 'claude-session', workDir: '/workspace' }
+  }));
+  const { service } = createService([claude]);
+  await service.run(plan);
+  assert.deepEqual(service.findPriorInvocation('session-a', 'agent-a', 'task-a', 'claude_code'), {
+    cliSessionId: 'claude-session',
+    workDir: '/workspace'
+  });
+  assert.equal(service.findPriorInvocation('session-a', 'agent-a', 'task-a', 'codex'), undefined);
 });

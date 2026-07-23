@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { mkdirSync, writeFileSync } from 'node:fs';
 /**
  * Codex app-server v2 JSONL fixture.
  *
@@ -13,6 +14,7 @@ let buffer = '';
 let interrupted = false;
 let activeThreadId;
 let activeTurnId;
+let activeOutputKind = process.env.STUB_KIND ?? 'agent_message';
 
 function send(message) {
   stdout.write(`${JSON.stringify(message)}\n`);
@@ -20,18 +22,36 @@ function send(message) {
 
 function makePayload(kind) {
   switch (kind) {
+    case 'task_acceptance_decision':
+      return {
+        schemaVersion: '1.0',
+        kind,
+        status: 'accepted',
+        reason: 'stub accepted',
+        missingContext: [],
+        requestedContext: null,
+        handoffSuggestion: null,
+        confidence: 1,
+        alternativeAgentKeys: [],
+        alternativeAgentIds: [],
+        agentMessages: []
+      };
     case 'task_execution_result':
       return {
+        schemaVersion: '1.0',
         kind,
         summary: '你好世界',
         status: 'completed',
         completedItems: ['stub'],
         changedArtifacts: [],
+        requestedContext: null,
+        agentMessages: [],
         nextSuggestedActions: [],
         risks: []
       };
     case 'task_brief':
       return {
+        schemaVersion: '1.0',
         kind,
         goal: 'stub goal',
         scope: [],
@@ -42,9 +62,54 @@ function makePayload(kind) {
         openQuestions: [],
         suggestedTasks: []
       };
+    case 'post_review_report':
+      return {
+        schemaVersion: '1.0',
+        kind,
+        isConsistentWithBrief: true,
+        matchedItems: [],
+        mismatchedItems: [],
+        missingItems: [],
+        outOfScopeChanges: [],
+        testResults: [],
+        recommendation: 'deliver',
+        actions: []
+      };
+    case 'final_delivery':
+      return {
+        schemaVersion: '1.0',
+        kind,
+        summary: 'stub delivery',
+        completedItems: [],
+        incompleteItems: [],
+        risks: [],
+        artifactRefs: []
+      };
+    case 'user_message_handling_plan':
+      return {
+        schemaVersion: '1.0',
+        kind,
+        intent: 'question',
+        priority: 'normal',
+        shouldPause: false,
+        affectedTaskIds: [],
+        affectedAgentIds: [],
+        requiresBriefRevision: false,
+        requiresUserConfirmation: false,
+        coordinatorInstruction: 'Handle the user message.'
+      };
     case 'agent_message':
     default:
-      return { kind: 'agent_message', content: '你好世界', messageKind: 'summary' };
+      return {
+        schemaVersion: '1.0',
+        kind: 'agent_message',
+        content: '你好世界',
+        messageKind: 'summary',
+        targetAgentIds: [],
+        targetAgentKeys: [],
+        mentionedAgentIds: [],
+        relatedTaskIds: []
+      };
   }
 }
 
@@ -57,6 +122,12 @@ async function runScenario(threadId, turnId) {
   if (firstDelay > 0) await new Promise((resolve) => setTimeout(resolve, firstDelay));
   if (interrupted) return;
 
+  send({ method: 'thread/started', params: { thread: thread(threadId) } });
+  send({ method: 'remoteControl/status/changed', params: { status: 'disabled' } });
+  send({
+    method: 'mcpServer/startupStatus/updated',
+    params: { server: 'fixture', status: process.env.STUB_MCP_FAIL === '1' ? 'failed' : 'ready' }
+  });
   send({ method: 'item/agentMessage/delta', params: { threadId, turnId, itemId: 'msg-1', delta: '你' } });
   if (process.env.STUB_CRASH === '1') {
     process.exit(1);
@@ -95,7 +166,27 @@ async function runScenario(threadId, turnId) {
     }
   });
 
-  const payload = makePayload(process.env.STUB_KIND ?? 'agent_message');
+  if (activeOutputKind === 'task_execution_result' && process.env.STUB_EDIT_FILES === 'codex') {
+    mkdirSync('src', { recursive: true });
+    writeFileSync('src/feature.txt', 'after from codex stub\n');
+    writeFileSync('src/generated-by-codex.txt', 'created by codex stub\n');
+  }
+  const payload = makePayload(activeOutputKind);
+  send({
+    method: 'item/completed',
+    params: {
+      threadId,
+      turnId,
+      item: {
+        type: 'agentMessage',
+        id: 'msg-1',
+        text: JSON.stringify(payload),
+        phase: 'final_answer',
+        memoryCitation: null
+      },
+      completedAtMs: Date.now()
+    }
+  });
   send({
     method: 'turn/completed',
     params: {
@@ -103,7 +194,7 @@ async function runScenario(threadId, turnId) {
       turn: {
         id: turnId,
         status: 'completed',
-        items: [{ type: 'agentMessage', id: 'msg-1', text: JSON.stringify(payload), phase: 'final_answer', memoryCitation: null }],
+        items: [],
         error: null
       }
     }
@@ -138,6 +229,8 @@ function handle(message) {
   if (message.method === 'turn/start' && message.id !== undefined) {
     activeThreadId = message.params?.threadId || activeThreadId || 'stub-session-1';
     activeTurnId = 'stub-turn-1';
+    const schemaKind = message.params?.outputSchema?.properties?.kind?.const;
+    activeOutputKind = typeof schemaKind === 'string' ? schemaKind : activeOutputKind;
     send({ id: message.id, result: { turn: { id: activeTurnId, status: 'inProgress', items: [], error: null } } });
     void runScenario(activeThreadId, activeTurnId);
     return;

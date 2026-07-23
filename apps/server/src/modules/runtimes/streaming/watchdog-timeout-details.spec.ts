@@ -1,19 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildWatchdogTimeoutDetails, summarizeStderrTail } from './watchdog-timeout-details.js';
+import { makeInvocationPlan } from '../invocation-plan.fixture.js';
 
 test('buildWatchdogTimeoutDetails returns production observability fields', () => {
   const details = buildWatchdogTimeoutDetails({
     runtimeType: 'codex',
-    input: {
-      runId: 'run-1',
+    input: makeInvocationPlan({
+      invocationId: 'run-1',
       sessionId: 'session-1',
       phase: 'task_execution',
-      agent: { id: 'a1', key: 'backend', name: 'Backend', role: 'backend', systemPrompt: '', runtimeType: 'codex', capabilityIds: [] },
-      contextPack: {} as never,
-      expectedOutput: { kind: 'agent_message', schemaVersion: '0.1' },
-      budget: {}
-    },
+      agent: { agentId: 'a1', key: 'backend', name: 'Backend', role: 'backend', systemPrompt: '' },
+      executionTarget: { runtimeType: 'codex' }
+    }),
     observation: {
       reason: 'idle',
       thresholdMs: 600_000,
@@ -28,7 +27,7 @@ test('buildWatchdogTimeoutDetails returns production observability fields', () =
   });
 
   assert.equal(details.runtimeType, 'codex');
-  assert.equal(details.runId, 'run-1');
+  assert.equal(details.invocationId, 'run-1');
   assert.equal(details.phase, 'task_execution');
   assert.equal(details.thresholdMs, 600_000);
   assert.equal(details.lastActivityAt, new Date(2_000).toISOString());

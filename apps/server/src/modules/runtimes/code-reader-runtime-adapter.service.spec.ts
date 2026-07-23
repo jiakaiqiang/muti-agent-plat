@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { AgentRunInput } from '@agent-cluster/shared';
+import type { InvocationPlan } from '@agent-cluster/shared';
 import type { Tool, ToolExecutionContext, ToolResult } from '../tools/tool.interface.js';
 import { isRuntimeType, runtimeModeLabel } from '../../common/runtime-config.js';
 import { CodeReaderRuntimeAdapterService } from './code-reader-runtime-adapter.service.js';
+import { makeInvocationPlan } from './invocation-plan.fixture.js';
+
+const workspaceBindings = { resolveServerRoot: () => 'D:/workspace' };
 
 function makeReadTool(results: ToolResult[]) {
   const calls: Array<{ params: unknown; context: ToolExecutionContext }> = [];
@@ -29,28 +32,25 @@ function makeRegistry(tool?: Tool) {
   };
 }
 
-function makeInput(overrides: Partial<AgentRunInput> = {}): AgentRunInput {
-  return {
-    runId: 'run-1',
+function makeInput(overrides: Parameters<typeof makeInvocationPlan>[0] = {}): InvocationPlan {
+  return makeInvocationPlan({
+    invocationId: 'run-1',
     sessionId: 'session-1',
-    phase: 'execute_task',
+    phase: 'task_execution',
     agent: {
-      id: 'agent-1',
+      agentId: 'agent-1',
       key: 'code-reader',
       name: 'Code Reader',
       role: 'reader',
-      systemPrompt: '',
-      runtimeType: 'code_reader',
       capabilityIds: ['cap-file-read']
     },
-    contextPack: {
-      workingDirectory: { path: 'D:/workspace' },
-      taskContext: { targetFiles: ['src/index.ts'] }
+    executionTarget: { runtimeType: 'code_reader' },
+    contextEnvelope: {
+      L3: { files: [{ path: 'src/index.ts', content: '', byteLength: 0 }] }
     },
-    expectedOutput: { kind: 'task_execution_result', schemaVersion: '0.1' },
-    budget: { maxTokens: 1000 },
+    expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' },
     ...overrides
-  } as unknown as AgentRunInput;
+  });
 }
 
 function readSuccess(path: string, output: string): ToolResult {
@@ -72,7 +72,7 @@ test('code_reader is a recognized RuntimeType with a label', () => {
 });
 
 test('exposes internal self-hosted metadata', () => {
-  const runtime = new CodeReaderRuntimeAdapterService(makeRegistry() as never);
+  const runtime = new CodeReaderRuntimeAdapterService(makeRegistry() as never, workspaceBindings as never);
 
   assert.equal(runtime.type, 'code_reader');
   assert.equal(runtime.metadata.category, 'internal');
@@ -81,17 +81,17 @@ test('exposes internal self-hosted metadata', () => {
 });
 
 test('checkAvailability returns available', async () => {
-  const runtime = new CodeReaderRuntimeAdapterService(makeRegistry() as never);
+  const runtime = new CodeReaderRuntimeAdapterService(makeRegistry() as never, workspaceBindings as never);
 
   assert.deepEqual(await runtime.checkAvailability(), { available: true });
 });
 
 test('reads target files from taskContext using ToolRegistry read_file', async () => {
   const { tool, calls } = makeReadTool([readSuccess('src/index.ts', 'console.log("ok");')]);
-  const runtime = new CodeReaderRuntimeAdapterService(makeRegistry(tool) as never);
+  const runtime = new CodeReaderRuntimeAdapterService(makeRegistry(tool) as never, workspaceBindings as never);
   const signal = new AbortController().signal;
 
-  const result = await runtime.run(makeInput(), signal);
+  const result = await runtime.start(makeInput(), signal).result;
 
   assert.equal(result.status, 'completed');
   assert.deepEqual(calls[0], {
@@ -100,28 +100,31 @@ test('reads target files from taskContext using ToolRegistry read_file', async (
   });
 });
 
-test('falls back to workspaceFocus relevantFiles when targetFiles are absent', async () => {
+test('uses non-sensitive navigation files when selected evidence is absent', async () => {
   const { tool, calls } = makeReadTool([readSuccess('src/fallback.ts', 'export const value = 1;')]);
-  const runtime = new CodeReaderRuntimeAdapterService(makeRegistry(tool) as never);
+  const runtime = new CodeReaderRuntimeAdapterService(makeRegistry(tool) as never, workspaceBindings as never);
 
-  await runtime.run(
+  await runtime.start(
     makeInput({
-      contextPack: {
-        workingDirectory: { path: 'D:/workspace' },
-        taskContext: {},
-        workspaceFocus: { relevantFiles: ['src/fallback.ts'] }
+      contextEnvelope: {
+        L3: { files: [], totalByteLength: 0 },
+        L1: {
+          navigation: {
+            entries: [{ path: 'src/fallback.ts', kind: 'file', generated: false, sensitive: false }]
+          }
+        }
       }
-    } as unknown as AgentRunInput)
-  );
+    })
+  ).result;
 
   assert.deepEqual(calls.map((call) => call.params), [{ path: 'src/fallback.ts' }]);
 });
 
 test('summarizes successful file reads as task execution output', async () => {
   const { tool } = makeReadTool([readSuccess('src/index.ts', 'line 1\nline 2')]);
-  const runtime = new CodeReaderRuntimeAdapterService(makeRegistry(tool) as never);
+  const runtime = new CodeReaderRuntimeAdapterService(makeRegistry(tool) as never, workspaceBindings as never);
 
-  const result = await runtime.run(makeInput());
+  const result = await runtime.start(makeInput()).result;
 
   assert.equal(result.status, 'completed');
   assert.equal(result.output.kind, 'task_execution_result');
@@ -130,9 +133,9 @@ test('summarizes successful file reads as task execution output', async () => {
 });
 
 test('returns failed when read_file tool is missing', async () => {
-  const runtime = new CodeReaderRuntimeAdapterService(makeRegistry() as never);
+  const runtime = new CodeReaderRuntimeAdapterService(makeRegistry() as never, workspaceBindings as never);
 
-  const result = await runtime.run(makeInput());
+  const result = await runtime.start(makeInput()).result;
 
   assert.equal(result.status, 'failed');
   assert.equal(result.error?.message.includes('read_file tool not found'), true);
@@ -141,9 +144,9 @@ test('returns failed when read_file tool is missing', async () => {
 
 test('returns failed when read_file tool returns failure', async () => {
   const { tool } = makeReadTool([{ success: false, output: { ok: false }, error: 'SENSITIVE_PATH' }]);
-  const runtime = new CodeReaderRuntimeAdapterService(makeRegistry(tool) as never);
+  const runtime = new CodeReaderRuntimeAdapterService(makeRegistry(tool) as never, workspaceBindings as never);
 
-  const result = await runtime.run(makeInput());
+  const result = await runtime.start(makeInput()).result;
 
   assert.equal(result.status, 'failed');
   assert.equal(result.error?.message.includes('SENSITIVE_PATH'), true);
@@ -151,16 +154,16 @@ test('returns failed when read_file tool returns failure', async () => {
 
 test('returns completed with zero files when no targets are present', async () => {
   const { tool, calls } = makeReadTool([readSuccess('unused.ts', 'unused')]);
-  const runtime = new CodeReaderRuntimeAdapterService(makeRegistry(tool) as never);
+  const runtime = new CodeReaderRuntimeAdapterService(makeRegistry(tool) as never, workspaceBindings as never);
 
-  const result = await runtime.run(
+  const result = await runtime.start(
     makeInput({
-      contextPack: {
-        workingDirectory: { path: 'D:/workspace' },
-        taskContext: {}
+      contextEnvelope: {
+        L3: { files: [], totalByteLength: 0 },
+        L1: { navigation: { entries: [] } }
       }
-    } as unknown as AgentRunInput)
-  );
+    })
+  ).result;
 
   assert.equal(result.status, 'completed');
   assert.equal(result.output.kind, 'task_execution_result');

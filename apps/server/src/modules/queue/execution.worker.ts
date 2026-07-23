@@ -14,6 +14,8 @@ import { SessionsService } from '../sessions/sessions.service.js';
 import { TasksService } from '../tasks/tasks.service.js';
 import { ExecutionQueue } from './execution.queue.js';
 import type { ExecutionJobData } from './execution.queue.js';
+import { assertCurrentDataEpoch } from '../persistence/data-epoch-guard.js';
+import { PersistenceService } from '../persistence/persistence.service.js';
 
 @Injectable()
 export class ExecutionWorker implements OnModuleInit, OnModuleDestroy {
@@ -25,7 +27,8 @@ export class ExecutionWorker implements OnModuleInit, OnModuleDestroy {
     @Inject(forwardRef(() => SessionsService))
     private readonly sessions: SessionsService,
     private readonly tasks: TasksService,
-    private readonly executionQueue: ExecutionQueue
+    private readonly executionQueue: ExecutionQueue,
+    private readonly persistence: PersistenceService
   ) {}
 
   onModuleInit() {
@@ -36,7 +39,8 @@ export class ExecutionWorker implements OnModuleInit, OnModuleDestroy {
     this.worker = new Worker<ExecutionJobData>(
       executionQueueName,
       async (job) => {
-        const { sessionId, briefId } = job.data;
+        const { sessionId, briefId, dataEpoch } = job.data;
+        assertCurrentDataEpoch(this.persistence.currentDataEpoch(), dataEpoch, `execution job ${job.id}`);
         const session = this.sessions.get(sessionId);
         if (['CANCELLED', 'COMPLETED'].includes(session.status)) {
           this.logger.log(`Skipping execution job ${job.id}; session ${sessionId} is ${session.status}`);
@@ -54,7 +58,7 @@ export class ExecutionWorker implements OnModuleInit, OnModuleDestroy {
         const controller = this.executionQueue.registerAbortController(sessionId);
         try {
           const outcome = await this.orchestrator.runPipeline(session, brief, unfinishedTasks, controller.signal);
-          this.sessions.applyOutcome(sessionId, outcome);
+          await this.sessions.applyQueuedExecutionOutcome(sessionId, outcome);
         } finally {
           this.executionQueue.releaseAbortController(sessionId, controller);
         }

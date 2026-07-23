@@ -1,11 +1,11 @@
 import type {
-  ContextPack,
+  ContextAssembly,
   WorkspaceFileSnapshot,
   WorkspaceManifestCoverage,
   WorkspaceSnapshot
 } from '@agent-cluster/shared';
 
-type WorkspaceManifest = NonNullable<ContextPack['workspaceManifest']>;
+type WorkspaceManifest = NonNullable<ContextAssembly['workspaceManifest']>;
 type WorkspaceManifestFile = WorkspaceManifest['files'][number];
 
 function fileWithoutRuntimeContent(file: WorkspaceFileSnapshot): WorkspaceManifestFile {

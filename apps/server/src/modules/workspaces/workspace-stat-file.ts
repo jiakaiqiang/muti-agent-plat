@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import type { FileHash, FileMetadata, StatFileInput, WorkspaceRevision } from '@agent-cluster/shared';
 import { resolveWorkspacePath } from './workspace-path.js';
+import { assertWorkspacePathWithinRoot } from './workspace-symlink-guard.js';
 
 export interface StatServerLocalFileArgs {
   rootPath: string;
@@ -12,6 +13,7 @@ export interface StatServerLocalFileArgs {
 export async function statServerLocalFile(args: StatServerLocalFileArgs): Promise<FileMetadata> {
   const { rootPath, revision, input } = args;
   const { absolute, relative } = resolveWorkspacePath(rootPath, input.path);
+  await assertWorkspacePathWithinRoot(rootPath, relative);
   const stats = await stat(absolute);
 
   if (stats.isDirectory()) {

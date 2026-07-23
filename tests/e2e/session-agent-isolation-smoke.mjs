@@ -1,6 +1,8 @@
 import {
   api,
   buildServer,
+  confirmBriefAndSelectWorkflow,
+  createPublishedAgentWorkflow,
   createSessionAndWaitForBrief,
   listEvents,
   startSmokeServer,
@@ -15,30 +17,37 @@ let server;
 try {
   server = await startSmokeServer('session-agent-isolation-smoke', {
     DISCUSSION_AGENT_KEYS: 'requirements,architect,backend,test',
-    DISCUSSION_MAX_ROUNDS: '1'
+    DISCUSSION_MAX_ROUNDS: '1',
+    GLOBAL_DEFAULT_RUNTIME_TYPE: 'mock'
   });
+  const workflow = await createPublishedAgentWorkflow(server.apiBase, 'Session agent isolation smoke', ['requirements']);
 
   const { sessionId, briefId } = await createSessionAndWaitForBrief(
     server.apiBase,
-    'Only selected agents should participate in this isolated session.',
+    '分析隔离会话中的 Agent 参与范围并输出说明。',
     {
-      agentIds: ['coordinator', 'requirements']
+      agentIds: ['coordinator', 'requirements'],
+      runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] }
     }
   );
 
-  await api(server.apiBase, `/sessions/${sessionId}/briefs/${briefId}/confirm`, { method: 'POST' });
+  await confirmBriefAndSelectWorkflow(server.apiBase, sessionId, briefId, workflow);
   await waitForStatus(server.apiBase, sessionId, 'COMPLETED');
 
   const session = await api(server.apiBase, `/sessions/${sessionId}`);
   const allowed = new Set(session.data.participatingAgentIds);
   const events = await listEvents(server.apiBase, sessionId);
-  const leakedEvents = events.filter((event) => event.fromAgentId && !allowed.has(event.fromAgentId));
+  const leakedEvents = events.filter(
+    (event) => event.actor?.type === 'agent' && !allowed.has(event.actor.id)
+  );
   if (leakedEvents.length) {
     throw new Error(`Session emitted events from non-participating agents: ${JSON.stringify(leakedEvents)}`);
   }
 
   const tasks = await api(server.apiBase, `/sessions/${sessionId}/tasks`);
-  const leakedTasks = tasks.data.filter((task) => task.assigneeAgentId && !allowed.has(task.assigneeAgentId));
+  const leakedTasks = tasks.data.filter(
+    (task) => task.assignee?.type === 'agent' && !allowed.has(task.assignee.id)
+  );
   if (leakedTasks.length) {
     throw new Error(`Session assigned tasks to non-participating agents: ${JSON.stringify(leakedTasks)}`);
   }

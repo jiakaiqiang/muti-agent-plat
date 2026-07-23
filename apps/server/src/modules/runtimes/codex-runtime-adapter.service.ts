@@ -2,27 +2,33 @@ import { Injectable } from '@nestjs/common';
 import { execFile } from 'node:child_process';
 import { readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { extname, join, relative } from 'node:path';
+import { extname, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type {
-  AgentRunInput,
+  InvocationPlan,
   AgentRunResult,
   AgentRuntimeAdapter,
   AgentRuntimeEvent,
   AgentRuntimeRunHandle,
-  RuntimeArtifactOutput,
+  RuntimeError,
   RuntimeFileChange,
   RuntimeOutput,
-  TaskExecutionResultOutput,
+  VerifiedTestResult,
   UUID
 } from '@agent-cluster/shared';
+import { createAgentMessageOutput } from '@agent-cluster/shared';
 import {
-  engineeringRuntimeStreaming,
+  runtimeStreamingMode,
   optionalRuntimeTimeoutMs,
   positiveRuntimeTimeoutMs
 } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
-import { runtimeOutputSchema } from './runtime-output-schema.js';
+import {
+  runtimeOutputExample,
+  runtimeOutputSchema,
+  validateRuntimeOutput,
+  type RuntimeOutputKind
+} from './runtime-output-schema.js';
 import { POST_REVIEW_CONTEXT_ACTION_INSTRUCTION } from './post-review-action-normalizer.js';
 import {
   startCodexStreaming,
@@ -31,36 +37,38 @@ import {
 } from './streaming/codex-streaming-runner.js';
 import { frameToRuntimeEvent } from './streaming/frame-to-runtime-event.js';
 import { WorkdirBriefService, type WorkdirBriefLease } from './streaming/workdir-brief.service.js';
+import { InvocationWorkspaceBindingsService } from './invocation-workspace-bindings.service.js';
+import { withStructuredTermination } from './structured-termination-run-handle.js';
+import { isChildProcessTimeoutError } from '../../common/execution-termination.js';
+import { extractRuntimeError } from '../../common/runtime-error.js';
+import { resolveCliToolAuthority } from './cli-tool-authority.js';
+import { emptyRuntimeSystemEvidence, runtimeSystemEvidence } from './runtime-system-evidence.js';
+import { ToolInvocationAuditService } from '../tools/tool-invocation-audit.service.js';
+import type { RuntimeStreamFrame } from './streaming/runtime-stream-frame.js';
 
-/**
- * M4-04 · 组装 CodexAdapter 传给 startCodexStreaming 的 options。
- *
- * 从 runStreaming 抽出为纯函数,便于单测:
- *   - input.options.resume.workDir → spawn 的 cwd
- *   - input.options.resume.cliSessionId → env.AGENT_CLUSTER_CODEX_RESUME_ID
- *     (M4-06 会真正在 app-server 层消费这个 env, 首期只做落库透传)
- * 非字符串类型静默忽略,保持默认行为。
- */
 export function buildCodexStreamingOptions(params: {
-  input: AgentRunInput;
   command: string;
   args: string[];
   baseEnv: Record<string, string | undefined>;
   firstFrameTimeoutMs: number;
   idleTimeoutMs: number;
   absoluteTimeoutMs?: number;
+  workDir?: string;
+  resumeCliSessionId?: string;
+  shell?: boolean;
 }): StreamingRunnerOptions {
-  const { input, command, args, baseEnv, firstFrameTimeoutMs, idleTimeoutMs, absoluteTimeoutMs } = params;
-  const resume = extractResume(input.options);
-  const workDir =
-    resume.workDir ??
-    (input.contextPack.workingDirectory?.kind === 'server_local'
-      ? input.contextPack.workingDirectory.path
-      : undefined);
+  const {
+    command,
+    args,
+    baseEnv,
+    firstFrameTimeoutMs,
+    idleTimeoutMs,
+    absoluteTimeoutMs,
+    workDir,
+    resumeCliSessionId,
+    shell
+  } = params;
   const env: Record<string, string | undefined> = { ...baseEnv };
-  if (resume.cliSessionId) {
-    env.AGENT_CLUSTER_CODEX_RESUME_ID = resume.cliSessionId;
-  }
   return {
     command,
     args,
@@ -69,28 +77,100 @@ export function buildCodexStreamingOptions(params: {
     firstFrameTimeoutMs,
     idleTimeoutMs,
     absoluteTimeoutMs,
-    resumeCliSessionId: resume.cliSessionId
+    resumeCliSessionId,
+    shell
   };
 }
 
-function extractResume(options: AgentRunInput['options']): { cliSessionId?: string; workDir?: string } {
-  if (!options || typeof options !== 'object') return {};
-  const resumeRaw = (options as Record<string, unknown>).resume;
-  if (!resumeRaw || typeof resumeRaw !== 'object') return {};
-  const resume = resumeRaw as Record<string, unknown>;
-  return {
-    cliSessionId: typeof resume.cliSessionId === 'string' ? resume.cliSessionId : undefined,
-    workDir: typeof resume.workDir === 'string' ? resume.workDir : undefined
-  };
-}
+export type CodexRunMode = 'buffered' | 'streaming';
 
 const execFileAsync = promisify(execFile);
 
-export type CodexRunMode = 'legacy' | 'streaming';
-
 export function pickCodexRunMode(): CodexRunMode {
-  const mode = engineeringRuntimeStreaming();
-  return mode === 'off' ? 'legacy' : 'streaming';
+  const mode = runtimeStreamingMode();
+  return mode === 'off' ? 'buffered' : 'streaming';
+}
+
+export function buildCodexExecArgs(input: InvocationPlan, configuredArgs?: string) {
+  const authority = resolveCliToolAuthority(input);
+  if (configuredArgs?.trim()) {
+    const parsed = JSON.parse(configuredArgs);
+    if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === 'string')) {
+      throw new Error('CODEX_RUNTIME_ARGS_JSON must be a JSON string array.');
+    }
+    return [...parsed, '--sandbox', authority.codexSandbox, '-'];
+  }
+  return ['exec', '--json', '--sandbox', authority.codexSandbox, '-'];
+}
+
+export function parseCodexExecOutput(stdout: string, expectedKind: RuntimeOutputKind): RuntimeOutput {
+  const trimmed = stdout.trim();
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    const frames = trimmed
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const frame = JSON.parse(line) as unknown;
+        if (!frame || typeof frame !== 'object' || Array.isArray(frame)) {
+          throw new Error('Codex JSONL output contained a non-object frame.');
+        }
+        return frame as Record<string, unknown>;
+      });
+    const messageText = frames
+      .filter((frame) => frame.type === 'item.completed')
+      .map((frame) => frame.item)
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+      .filter((item) => item.type === 'agent_message' && typeof item.text === 'string')
+      .map((item) => item.text as string)
+      .at(-1);
+    if (!messageText) {
+      throw new Error('Codex JSONL output did not contain a completed agent message.');
+    }
+    parsed = JSON.parse(messageText) as Record<string, unknown>;
+  }
+  const completedItem = parsed.item;
+  if (
+    parsed.type === 'item.completed' &&
+    completedItem &&
+    typeof completedItem === 'object' &&
+    (completedItem as Record<string, unknown>).type === 'agent_message' &&
+    typeof (completedItem as Record<string, unknown>).text === 'string'
+  ) {
+    parsed = JSON.parse((completedItem as Record<string, unknown>).text as string) as Record<string, unknown>;
+  }
+  const candidate = parsed;
+  if (!candidate || typeof candidate !== 'object' || typeof candidate.kind !== 'string') {
+    throw new Error('Codex output did not contain a RuntimeOutput kind.');
+  }
+  const validation = validateRuntimeOutput(candidate, expectedKind);
+  if (!validation.valid) {
+    throw new Error(
+      `RUNTIME_OUTPUT_CONTRACT_VIOLATION: Codex buffered output for ${expectedKind}: ${validation.errors.join('; ')}`
+    );
+  }
+  return validation.value as RuntimeOutput;
+}
+
+function parseCodexBufferedOutput(stdout: string, expectedKind: RuntimeOutputKind): RuntimeOutput {
+  try {
+    return parseCodexExecOutput(stdout, expectedKind);
+  } catch (error) {
+    const originalMessage = error instanceof Error ? error.message : String(error);
+    const message = originalMessage.startsWith('RUNTIME_OUTPUT_CONTRACT_VIOLATION:')
+      ? originalMessage
+      : `RUNTIME_OUTPUT_CONTRACT_VIOLATION: Codex buffered output for ${expectedKind}: ${originalMessage}`;
+    const runtimeError: RuntimeError = {
+      code: 'RUNTIME_OUTPUT_CONTRACT_VIOLATION',
+      message,
+      retryable: false,
+      details: { provider: 'codex', expectedKind }
+    };
+    throw Object.assign(new Error(message), { cause: runtimeError, runtimeError });
+  }
 }
 const ignoredDirectories = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.cache', 'coverage']);
 const textExtensions = new Set(['.css', '.html', '.js', '.json', '.jsx', '.md', '.mjs', '.cjs', '.ts', '.tsx', '.vue', '.yml', '.yaml', '.txt']);
@@ -101,47 +181,69 @@ const maxSnapshotFileBytes = 200_000;
 @Injectable()
 export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
   readonly type = 'codex' as const;
+  readonly metadata = {
+    name: 'codex',
+    version: '2.0.0',
+    category: 'external' as const,
+    provider: 'openai',
+    capabilityIds: ['cap-file-read', 'cap-code-search', 'cap-file-write', 'cap-command-run', 'cap-test-report'] as const,
+    supportedWorkspaceCapabilities: ['read', 'write', 'command', 'test'] as const,
+    supportedWorkspaceProviderKinds: ['server_local', 'browser_broker'] as const,
+    supportedToolNames: ['read_file', 'search_code', 'write_file', 'run_test'] as const
+  };
 
   private readonly streamingHandles = new Map<UUID, StreamingRunHandle>();
 
-  constructor(private readonly workdirBrief?: WorkdirBriefService) {}
+  constructor(
+    private readonly workspaceBindings: InvocationWorkspaceBindingsService,
+    private readonly workdirBrief?: WorkdirBriefService,
+    private readonly toolAudit?: ToolInvocationAuditService
+  ) {}
 
-  start(input: AgentRunInput, signal?: AbortSignal): AgentRuntimeRunHandle {
+  async checkAvailability() {
+    return process.env.CODEX_RUNTIME_ENABLED === 'true'
+      ? { available: true }
+      : { available: false, reason: 'Set CODEX_RUNTIME_ENABLED=true to register Codex.' };
+  }
+
+  start(input: InvocationPlan, signal?: AbortSignal): AgentRuntimeRunHandle {
     if (process.env.CODEX_RUNTIME_ENABLED !== 'true') {
-      return settledHandle(this.blockedResult(input, 'Codex runtime is disabled. Set CODEX_RUNTIME_ENABLED=true to run controlled local coding agents.'));
+      return withStructuredTermination(settledHandle(this.blockedResult(input, 'Codex runtime is disabled. Set CODEX_RUNTIME_ENABLED=true to run controlled local coding agents.')), input, signal);
     }
-    const rootPath = input.contextPack.workingDirectory?.kind === 'server_local'
-      ? input.contextPack.workingDirectory.path
-      : undefined;
+    const rootPath = this.workspaceBindings.resolveServerRoot(input);
     if (!rootPath) {
-      return settledHandle(this.blockedResult(input, 'Codex runtime requires a server_local working directory.'));
+      return withStructuredTermination(settledHandle(this.blockedResult(input, 'Codex runtime requires a server_local or materialized browser working directory.')), input, signal);
+    }
+    if (input.resume?.workDir && resolve(input.resume.workDir) !== resolve(rootPath)) {
+      return withStructuredTermination(settledHandle(this.failedResult(input, new Error('Resume workDir does not match the current workspace binding.'))), input, signal);
     }
     if (pickCodexRunMode() !== 'streaming') {
-      return promiseHandle(this.run(input, signal));
+      return withStructuredTermination(promiseHandle(this.execute(input, signal)), input, signal);
     }
     let runner: StreamingRunHandle;
     try {
       runner = this.createStreamingRunnerWithBrief(input, signal);
     } catch (error) {
-      return settledHandle(this.failedResult(input, error));
+      return withStructuredTermination(settledHandle(this.failedResult(input, error)), input, signal);
     }
-    return {
-      events: runtimeEvents(input.runId, runner),
+    return withStructuredTermination({
+      events: runtimeEvents(input.invocationId, runner),
       result: runner.result,
       cancel: runner.cancel
-    };
+    }, input, signal);
   }
 
-  async run(input: AgentRunInput, signal?: AbortSignal): Promise<AgentRunResult> {
+  private async execute(input: InvocationPlan, signal?: AbortSignal): Promise<AgentRunResult> {
     if (process.env.CODEX_RUNTIME_ENABLED !== 'true') {
       return this.blockedResult(input, 'Codex runtime is disabled. Set CODEX_RUNTIME_ENABLED=true to run controlled local coding agents.');
     }
 
-    const rootPath = input.contextPack.workingDirectory?.kind === 'server_local'
-      ? input.contextPack.workingDirectory.path
-      : undefined;
+    const rootPath = this.workspaceBindings.resolveServerRoot(input);
     if (!rootPath) {
-      return this.blockedResult(input, 'Codex runtime requires a server_local working directory.');
+      return this.blockedResult(input, 'Codex runtime requires a server_local or materialized browser working directory.');
+    }
+    if (input.resume?.workDir && resolve(input.resume.workDir) !== resolve(rootPath)) {
+      return this.failedResult(input, new Error('Resume workDir does not match the current workspace binding.'));
     }
 
     if (pickCodexRunMode() === 'streaming') {
@@ -157,35 +259,39 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
       briefLease = this.workdirBrief?.prepare(input, 'codex');
       const prompt = this.prompt(input, briefLease?.taskSidecarPath);
       promptFilePath = await this.writePromptFileIfConfigured(input, prompt);
-      const commandArgs = this.commandArgs(promptFilePath ?? prompt);
+      const commandArgs = this.commandArgs(input);
+      const authority = resolveCliToolAuthority(input);
       const beforeFiles = await this.snapshotTextFiles(rootPath);
-      const { stdout, stderr } = await execFileAsync(command, commandArgs, {
-        cwd: rootPath,
+      const { stdout, stderr } = await this.runBufferedCommand(
+        command,
+        commandArgs,
+        promptFilePath ?? prompt,
+        rootPath,
         timeout,
-        shell: this.useShell(),
-        signal,
-        env: this.runtimeEnv(input, promptFilePath),
-        maxBuffer: Number(process.env.CODEX_RUNTIME_MAX_BUFFER ?? 8 * 1024 * 1024)
-      });
-      const parsedOutput = this.parseOutput(stdout);
+        input,
+        promptFilePath,
+        signal
+      );
+      const parsedOutput = parseCodexBufferedOutput(stdout, input.expectedOutput.kind);
       const actualFileChanges = await this.actualFileChanges(rootPath, beforeFiles);
-      const testArtifact = await this.runConfiguredTests(rootPath, signal);
-      const output = this.withRuntimeEvidence(parsedOutput, actualFileChanges, testArtifact);
+      const testResult = authority.canRunTests ? await this.runConfiguredTests(rootPath, signal) : undefined;
       return {
-        runId: input.runId,
+        invocationId: input.invocationId,
         runtimeType: this.type,
         status: 'completed',
-        output,
+        output: parsedOutput,
         events: [
           {
-            runId: input.runId,
+            invocationId: input.invocationId,
             type: 'runtime_completed',
+            visibility: 'user',
             content: `${input.agent.name} completed ${input.phase} with Codex.`,
             metadata: { stderr: stderr.trim() || undefined },
             createdAt: nowIso()
           }
         ],
-        artifacts: this.outputArtifacts(output),
+        artifacts: this.outputArtifacts(parsedOutput),
+        systemEvidence: runtimeSystemEvidence(input, actualFileChanges, testResult ? [testResult] : []),
         usage: {
           inputTokens: 0,
           outputTokens: 0,
@@ -195,36 +301,40 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const timedOut = !signal?.aborted && isChildProcessTimeoutError(error);
+      const preservedRuntimeError = extractRuntimeError(error);
+      const runtimeError: RuntimeError = signal?.aborted
+        ? { code: 'RUNTIME_CANCELLED', message, retryable: false }
+        : timedOut
+          ? { code: 'RUNTIME_TIMEOUT', message, retryable: true, details: { timeoutMs: timeout } }
+          : preservedRuntimeError ?? { code: 'MODEL_ERROR', message, retryable: true };
       return {
-        runId: input.runId,
+        invocationId: input.invocationId,
         runtimeType: this.type,
         status: signal?.aborted ? 'cancelled' : 'failed',
-        output: {
-          kind: 'agent_message',
+        output: createAgentMessageOutput({
           messageKind: 'risk',
           content: `${input.agent.name} Codex runtime failed: ${message}`
-        },
+        }),
         events: [
           {
-            runId: input.runId,
+            invocationId: input.invocationId,
             type: 'runtime_failed',
+            visibility: 'user',
             content: `${input.agent.name} Codex runtime failed.`,
-            metadata: { message },
+            metadata: { message, code: runtimeError.code },
             createdAt: nowIso()
           }
         ],
         artifacts: [],
+        systemEvidence: emptyRuntimeSystemEvidence(input.invocationId),
         usage: {
           inputTokens: 0,
           outputTokens: 0,
           totalTokens: 0,
           model: 'codex'
         },
-        error: {
-          code: signal?.aborted ? 'RUNTIME_CANCELLED' : 'MODEL_ERROR',
-          message,
-          retryable: !signal?.aborted
-        }
+        error: runtimeError
       };
     } finally {
       if (promptFilePath) {
@@ -234,11 +344,11 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
     }
   }
 
-  private async writePromptFileIfConfigured(input: AgentRunInput, prompt: string) {
+  private async writePromptFileIfConfigured(input: InvocationPlan, prompt: string) {
     if (process.env.CODEX_RUNTIME_PROMPT_MODE !== 'file') {
       return undefined;
     }
-    const promptFilePath = join(tmpdir(), `agent-cluster-codex-${input.runId}.prompt.txt`);
+    const promptFilePath = join(tmpdir(), `agent-cluster-codex-${input.invocationId}.prompt.txt`);
     await writeFile(promptFilePath, prompt, 'utf8');
     return promptFilePath;
   }
@@ -251,33 +361,55 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
     return process.platform === 'win32';
   }
 
-  private commandArgs(prompt: string) {
-    const configured = process.env.CODEX_RUNTIME_ARGS_JSON?.trim();
-    if (configured) {
-      const parsed = JSON.parse(configured);
-      if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === 'string')) {
-        throw new Error('CODEX_RUNTIME_ARGS_JSON must be a JSON string array.');
-      }
-      return [...parsed, prompt];
-    }
-    return ['exec', '--json', prompt];
+  private commandArgs(input: InvocationPlan) {
+    return buildCodexExecArgs(input, process.env.CODEX_RUNTIME_ARGS_JSON);
   }
 
-  private runtimeEnv(input: AgentRunInput, promptFilePath?: string) {
+  private runBufferedCommand(
+    command: string,
+    args: string[],
+    prompt: string,
+    cwd: string,
+    timeout: number,
+    input: InvocationPlan,
+    promptFilePath?: string,
+    signal?: AbortSignal
+  ): Promise<{ stdout: string; stderr: string }> {
+    return new Promise((resolveCommand, rejectCommand) => {
+      const child = execFile(command, args, {
+        cwd,
+        timeout,
+        shell: this.useShell(),
+        signal,
+        env: this.runtimeEnv(input, promptFilePath),
+        maxBuffer: Number(process.env.CODEX_RUNTIME_MAX_BUFFER ?? 8 * 1024 * 1024),
+        encoding: 'utf8'
+      }, (error, stdout, stderr) => {
+        if (error) {
+          rejectCommand(Object.assign(error, { stdout, stderr }));
+          return;
+        }
+        resolveCommand({ stdout, stderr });
+      });
+      child.stdin?.end(prompt, 'utf8');
+    });
+  }
+
+  private runtimeEnv(input: InvocationPlan, promptFilePath?: string) {
     return {
       ...process.env,
       AGENT_CLUSTER_RUNTIME_TYPE: this.type,
       AGENT_CLUSTER_RUNTIME_PHASE: input.phase,
       AGENT_CLUSTER_SESSION_ID: input.sessionId,
       AGENT_CLUSTER_TASK_ID: input.taskId ?? '',
-      AGENT_CLUSTER_AGENT_ID: input.agent.id,
+      AGENT_CLUSTER_AGENT_ID: input.agent.agentId,
       AGENT_CLUSTER_AGENT_KEY: input.agent.key,
       AGENT_CLUSTER_EXPECTED_OUTPUT_KIND: input.expectedOutput.kind,
       AGENT_CLUSTER_PROMPT_FILE: promptFilePath
     };
   }
 
-  private prompt(input: AgentRunInput, taskSidecarPath?: string) {
+  private prompt(input: InvocationPlan, taskSidecarPath?: string) {
     if (taskSidecarPath) {
       return [
         'You are running as an Agent Cluster Codex coding runtime.',
@@ -292,13 +424,10 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
       'Work inside the allowed server_local directory only.',
       'Return one JSON object and no markdown fences.',
       `Required output kind: ${input.expectedOutput.kind}.`,
-      'Follow taskContext.stagePlan: read only the listed evidence/map refs first, do the listed stage actions, and report validation against the listed validate items.',
-      'Use taskContext.evidenceSelection.selectedRefs and taskContext.evidenceRefs as the selected minimal evidence set; omittedRefs are intentionally excluded unless you ask for more evidence.',
-      'Use workspaceManifest only for workspace structure and file metadata. Use selectedEvidenceContents for readable file/log/artifact content. workspaceSnapshot is a manifest-style fallback and may omit all file contents.',
+      'Use ContextEnvelopeV2 L1/L2 for navigation and L3 for readable evidence.',
       'If selected evidence is insufficient, return a blocked task_execution_result or runtime error with code CONTEXT_INSUFFICIENT and requestedContext; do not fabricate unread file contents, APIs, logs, or test results.',
-      'Use continuationState to resume or hand off work consistently across phases, agents, pauses, validation, review, and final delivery.',
       'For task_acceptance_decision, decide whether this assigned agent can execute the currentTask. Return status accepted, blocked, or rejected; reason; optional missingContext; optional handoffSuggestion { targetAgentKey or targetAgentId, reason, riskLevel }; optional confidence; optional alternativeAgentKeys/alternativeAgentIds; and optional agentMessages. Do not reassign the task yourself.',
-      'For legacy task_claim_decision, return accepted, reason, optional confidence, optional alternativeAgentKeys/alternativeAgentIds, optional handoffSuggestion, and optional agentMessages. Do not reassign the task yourself.',
+      'For task_acceptance_decision, return status, reason, optional confidence, optional alternativeAgentKeys/alternativeAgentIds, optional handoffSuggestion, and optional agentMessages. Do not reassign the task yourself.',
       'For task_execution_result, include changedArtifacts with metadata.fileChanges for every file you changed or propose to change.',
       'For validation task_execution_result, include a test_report changedArtifact with metadata.validationEvidence mapping each taskContext.validationRules item to verdict status, evidenceRefs, notes, and missingEvidence, plus validatorAgentKey, validatorAgentId, and independentFromAgentKeys from taskContext.agentResponsibilities.',
       'For task_execution_result, include optional agentMessages when you need to communicate progress, risks, questions, or handoffs to other agents. Use targetAgentKeys such as coordinator, frontend, backend, test, review.',
@@ -310,21 +439,12 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
         {
           phase: input.phase,
           agent: input.agent,
-          sessionGoal: input.contextPack.sessionGoal,
-          taskBrief: input.contextPack.taskBrief,
-          currentTask: input.contextPack.currentTask,
-          taskContext: input.contextPack.taskContext,
-          projectMap: input.contextPack.projectMap,
-          continuationState: input.contextPack.continuationState,
-          workspaceFocus: input.contextPack.workspaceFocus,
-          workspaceManifest: input.contextPack.workspaceManifest,
-          selectedEvidenceContents: input.contextPack.selectedEvidenceContents,
-          relevantEvents: input.contextPack.relevantEvents,
-          relevantMemories: input.contextPack.relevantMemories,
-          ragSnippets: input.contextPack.ragSnippets,
-          artifacts: input.contextPack.artifacts,
-          constraints: input.contextPack.constraints,
-          expectedOutput: input.expectedOutput
+          contextEnvelope: input.contextEnvelope,
+          executionTarget: input.executionTarget,
+          toolCatalog: input.toolCatalog,
+          expectedOutput: input.expectedOutput,
+          outputSchema: runtimeOutputSchema(input.expectedOutput.kind),
+          outputExample: runtimeOutputExample(input.expectedOutput.kind)
         },
         null,
         2
@@ -332,62 +452,8 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
     ].filter(Boolean).join('\n');
   }
 
-  private parseOutput(stdout: string): RuntimeOutput {
-    const parsed = JSON.parse(stdout.trim());
-    const candidate =
-      typeof parsed.result === 'string'
-        ? JSON.parse(parsed.result)
-        : typeof parsed.output === 'string'
-          ? JSON.parse(parsed.output)
-          : typeof parsed.final_output === 'string'
-            ? JSON.parse(parsed.final_output)
-            : parsed;
-    if (!candidate || typeof candidate.kind !== 'string') {
-      throw new Error('Codex output did not contain a RuntimeOutput kind.');
-    }
-    return candidate as RuntimeOutput;
-  }
-
   private outputArtifacts(output: RuntimeOutput) {
     return output.kind === 'task_execution_result' ? output.changedArtifacts : [];
-  }
-
-  private evidenceArtifacts(actualFileChanges: RuntimeFileChange[], testArtifact?: RuntimeArtifactOutput) {
-    const actualChangeArtifact: RuntimeArtifactOutput | undefined = actualFileChanges.length
-      ? {
-          type: 'code_diff',
-          title: 'Codex 实际文件变更',
-          content: actualFileChanges.map((change) => `${change.operation}: ${change.path}`).join('\n'),
-          summary: `捕获 ${actualFileChanges.length} 个真实落盘文件变更。`,
-          metadata: {
-            source: 'codex_filesystem_snapshot',
-            fileChanges: actualFileChanges
-          }
-        }
-      : undefined;
-    return [
-      ...(actualChangeArtifact ? [actualChangeArtifact] : []),
-      ...(testArtifact ? [testArtifact] : [])
-    ];
-  }
-
-  private withRuntimeEvidence(
-    output: RuntimeOutput,
-    actualFileChanges: RuntimeFileChange[],
-    testArtifact?: RuntimeArtifactOutput
-  ): RuntimeOutput {
-    if (output.kind !== 'task_execution_result') {
-      return output;
-    }
-    return {
-      ...output,
-      completedItems: [
-        ...output.completedItems,
-        ...(actualFileChanges.length ? [`捕获 ${actualFileChanges.length} 个真实文件变更。`] : []),
-        ...(testArtifact?.summary ? [`测试结果：${testArtifact.summary}`] : [])
-      ],
-      changedArtifacts: [...output.changedArtifacts, ...this.evidenceArtifacts(actualFileChanges, testArtifact)]
-    } satisfies TaskExecutionResultOutput;
   }
 
   private async snapshotTextFiles(rootPath: string) {
@@ -470,11 +536,12 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
     return changes;
   }
 
-  private async runConfiguredTests(rootPath: string, signal?: AbortSignal): Promise<RuntimeArtifactOutput | undefined> {
+  private async runConfiguredTests(rootPath: string, signal?: AbortSignal): Promise<VerifiedTestResult | undefined> {
     const testCommand = process.env.CODEX_RUNTIME_TEST_COMMAND?.trim();
     if (!testCommand) {
       return undefined;
     }
+    const startedAt = nowIso();
     try {
       const { stdout, stderr } = await execFileAsync(testCommand, {
         cwd: rootPath,
@@ -483,29 +550,25 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
         timeout: Number(process.env.CODEX_RUNTIME_TEST_TIMEOUT_MS ?? 120_000),
         maxBuffer: Number(process.env.CODEX_RUNTIME_MAX_BUFFER ?? 8 * 1024 * 1024)
       });
-      const content = [stdout.trim(), stderr.trim()].filter(Boolean).join('\n') || 'Test command completed without output.';
       return {
-        type: 'test_report',
-        title: 'Codex 测试结果',
-        content,
-        summary: '测试命令执行成功。',
-        metadata: {
-          command: testCommand,
-          status: 'completed'
-        }
+        command: testCommand,
+        status: 'passed',
+        exitCode: 0,
+        stdout,
+        stderr,
+        startedAt,
+        completedAt: nowIso()
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const failure = error as { code?: unknown; stdout?: unknown; stderr?: unknown };
       return {
-        type: 'test_report',
-        title: 'Codex 测试结果',
-        content: message,
-        summary: `测试命令失败：${message}`,
-        metadata: {
-          command: testCommand,
-          status: 'failed',
-          message
-        }
+        command: testCommand,
+        status: 'failed',
+        exitCode: typeof failure.code === 'number' ? failure.code : null,
+        stdout: typeof failure.stdout === 'string' ? failure.stdout : '',
+        stderr: typeof failure.stderr === 'string' ? failure.stderr : error instanceof Error ? error.message : String(error),
+        startedAt,
+        completedAt: nowIso()
       };
     }
   }
@@ -515,17 +578,17 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
     return configFileNames.has(name) || textExtensions.has(extname(path).toLowerCase());
   }
 
-  private async runStreaming(input: AgentRunInput, signal?: AbortSignal): Promise<AgentRunResult> {
+  private async runStreaming(input: InvocationPlan, signal?: AbortSignal): Promise<AgentRunResult> {
     const handle = this.createStreamingRunnerWithBrief(input, signal);
-    this.streamingHandles.set(input.runId, handle);
+    this.streamingHandles.set(input.invocationId, handle);
     try {
       return await handle.result;
     } finally {
-      this.streamingHandles.delete(input.runId);
+      this.streamingHandles.delete(input.invocationId);
     }
   }
 
-  private createStreamingRunnerWithBrief(input: AgentRunInput, signal?: AbortSignal): StreamingRunHandle {
+  private createStreamingRunnerWithBrief(input: InvocationPlan, signal?: AbortSignal): StreamingRunHandle {
     const briefLease = this.workdirBrief?.prepare(input, 'codex');
     try {
       const runner = this.createStreamingRunner(input, signal, briefLease?.taskSidecarPath);
@@ -540,7 +603,7 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
   }
 
   private createStreamingRunner(
-    input: AgentRunInput,
+    input: InvocationPlan,
     signal?: AbortSignal,
     taskSidecarPath?: string
   ): StreamingRunHandle {
@@ -549,25 +612,119 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
     const args = argsJson
       ? (JSON.parse(argsJson) as string[])
       : ['app-server', '--listen', 'stdio://'];
+    const pendingTools = new Map<string, { toolName: string; argumentsValue: unknown; startedAt: string }>();
+    const auditWrites = new Set<Promise<boolean>>();
+    const scheduleAudit = (write: Promise<boolean> | undefined) => {
+      if (!write) return;
+      let tracked: Promise<boolean>;
+      tracked = write.catch(() => false).finally(() => auditWrites.delete(tracked));
+      auditWrites.add(tracked);
+    };
     const streamingOptions: StreamingRunnerOptions = {
       ...buildCodexStreamingOptions({
-      input,
-      command,
-      args,
-      baseEnv: this.runtimeEnv(input),
-      firstFrameTimeoutMs: positiveRuntimeTimeoutMs('CODEX_RUNTIME_FIRST_FRAME_TIMEOUT_MS', 30_000),
-      idleTimeoutMs: positiveRuntimeTimeoutMs('CODEX_RUNTIME_IDLE_TIMEOUT_MS', 600_000),
-      absoluteTimeoutMs: optionalRuntimeTimeoutMs('CODEX_RUNTIME_ABSOLUTE_TIMEOUT_MS')
+        command,
+        args,
+        baseEnv: this.runtimeEnv(input),
+        firstFrameTimeoutMs: positiveRuntimeTimeoutMs('CODEX_RUNTIME_FIRST_FRAME_TIMEOUT_MS', 30_000),
+        idleTimeoutMs: positiveRuntimeTimeoutMs('CODEX_RUNTIME_IDLE_TIMEOUT_MS', 600_000),
+        absoluteTimeoutMs: optionalRuntimeTimeoutMs('CODEX_RUNTIME_ABSOLUTE_TIMEOUT_MS'),
+        workDir: this.workspaceBindings.resolveServerRoot(input),
+        shell: this.useShell()
       }),
       prompt: this.prompt(input, taskSidecarPath),
       outputSchema: runtimeOutputSchema(input.expectedOutput.kind),
-      model: input.agent.modelId
+      model: input.executionTarget.modelId,
+      resumeCliSessionId: input.resume?.cliSessionId,
+      sandbox: resolveCliToolAuthority(input).codexSandbox
     };
-    return startCodexStreaming(input, streamingOptions, signal);
+    streamingOptions.onFrame = (frame: RuntimeStreamFrame) => {
+      if (frame.kind === 'tool_use') {
+        pendingTools.set(frame.toolCallId, { toolName: frame.tool, argumentsValue: frame.input, startedAt: nowIso() });
+        return;
+      }
+      if (frame.kind !== 'tool_result') return;
+      const pending = pendingTools.get(frame.toolCallId);
+      if (!pending) return;
+      pendingTools.delete(frame.toolCallId);
+      const mcp = parseMcpToolName(pending.toolName);
+      if (mcp) {
+        scheduleAudit(this.toolAudit?.recordMcp({
+          serverExternalId: `mcp:${mcp.server}`,
+          serverName: mcp.server,
+          toolName: mcp.tool,
+          providerCallId: frame.toolCallId,
+          runtimeInvocationExternalId: input.invocationId,
+          sessionExternalId: input.sessionId,
+          agentExternalId: input.agent.agentId,
+          arguments: pending.argumentsValue,
+          result: frame.output,
+          success: !frame.isError,
+          startedAt: pending.startedAt,
+          completedAt: nowIso(),
+          errorMessage: frame.isError ? frame.output : undefined
+        }));
+      } else {
+        scheduleAudit(this.toolAudit?.record({
+          externalId: `tool:${input.invocationId}:${frame.toolCallId}`,
+          runtimeInvocationExternalId: input.invocationId,
+          sessionExternalId: input.sessionId,
+          toolName: pending.toolName || frame.tool || 'unknown',
+          providerCallId: frame.toolCallId,
+          provider: this.type,
+          arguments: pending.argumentsValue,
+          result: frame.output,
+          success: !frame.isError,
+          errorMessage: frame.isError ? frame.output : undefined,
+          agentExternalId: input.agent.agentId,
+          startedAt: pending.startedAt,
+          completedAt: nowIso()
+        }));
+      }
+    };
+    const runner = startCodexStreaming(input, streamingOptions, signal);
+    const settleAudits = async () => {
+      for (const [toolCallId, pending] of pendingTools) {
+        const mcp = parseMcpToolName(pending.toolName);
+        if (mcp) {
+          scheduleAudit(this.toolAudit?.recordMcp({
+            serverExternalId: `mcp:${mcp.server}`,
+            serverName: mcp.server,
+            toolName: mcp.tool,
+            providerCallId: toolCallId,
+            runtimeInvocationExternalId: input.invocationId,
+            sessionExternalId: input.sessionId,
+            agentExternalId: input.agent.agentId,
+            arguments: pending.argumentsValue,
+            success: false,
+            errorMessage: 'Runtime ended before the MCP Tool returned a result.',
+            startedAt: pending.startedAt,
+            completedAt: nowIso()
+          }));
+        } else {
+          scheduleAudit(this.toolAudit?.record({
+            externalId: `tool:${input.invocationId}:${toolCallId}`,
+            runtimeInvocationExternalId: input.invocationId,
+            sessionExternalId: input.sessionId,
+            toolName: pending.toolName || 'unknown',
+            providerCallId: toolCallId,
+            provider: this.type,
+            arguments: pending.argumentsValue,
+            success: false,
+            errorMessage: 'Runtime ended before the Tool returned a result.',
+            agentExternalId: input.agent.agentId,
+            startedAt: pending.startedAt,
+            completedAt: nowIso()
+          }));
+        }
+      }
+      pendingTools.clear();
+      await Promise.allSettled([...auditWrites]);
+    };
+    return { ...runner, result: runner.result.finally(settleAudits) };
   }
 
-  stream(runId: UUID): AsyncIterable<AgentRuntimeEvent> {
-    const handle = this.streamingHandles.get(runId);
+  stream(invocationId: UUID): AsyncIterable<AgentRuntimeEvent> {
+    const handle = this.streamingHandles.get(invocationId);
     const runtimeType = this.type;
     if (!handle) {
       return {
@@ -579,38 +736,36 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
     return {
       async *[Symbol.asyncIterator]() {
         for await (const frame of handle.channel) {
-          const event = frameToRuntimeEvent(runId, frame);
+          const event = frameToRuntimeEvent(invocationId, frame);
           if (event) yield event;
         }
       }
     };
   }
 
-  async cancel(runId: UUID): Promise<void> {
-    const handle = this.streamingHandles.get(runId);
+  async cancel(invocationId: UUID): Promise<void> {
+    const handle = this.streamingHandles.get(invocationId);
     await handle?.cancel();
   }
 
-  private blockedResult(input: AgentRunInput, message: string): AgentRunResult {
+  private blockedResult(input: InvocationPlan, message: string): AgentRunResult {
     return {
-      runId: input.runId,
+      invocationId: input.invocationId,
       runtimeType: this.type,
       status: 'blocked',
-      output: {
-        kind: 'agent_message',
-        messageKind: 'risk',
-        content: message
-      },
+      output: createAgentMessageOutput({ messageKind: 'risk', content: message }),
       events: [
         {
-          runId: input.runId,
+          invocationId: input.invocationId,
           type: 'runtime_failed',
+          visibility: 'user',
           content: message,
           metadata: { code: 'CAPABILITY_BLOCKED', message },
           createdAt: nowIso()
         }
       ],
       artifacts: [],
+      systemEvidence: emptyRuntimeSystemEvidence(input.invocationId),
       usage: {
         inputTokens: 0,
         outputTokens: 0,
@@ -625,34 +780,36 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
     };
   }
 
-  private failedResult(input: AgentRunInput, error: unknown): AgentRunResult {
+  private failedResult(input: InvocationPlan, error: unknown): AgentRunResult {
     const message = error instanceof Error ? error.message : String(error);
     return {
-      runId: input.runId,
+      invocationId: input.invocationId,
       runtimeType: this.type,
       status: 'failed',
-      output: { kind: 'agent_message', messageKind: 'risk', content: message },
+      output: createAgentMessageOutput({ messageKind: 'risk', content: message }),
       events: [
         {
-          runId: input.runId,
+          invocationId: input.invocationId,
           type: 'runtime_failed',
+          visibility: 'user',
           content: message,
           metadata: { code: 'MODEL_ERROR', message },
           createdAt: nowIso()
         }
       ],
       artifacts: [],
+      systemEvidence: emptyRuntimeSystemEvidence(input.invocationId),
       usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: 'codex' },
       error: { code: 'MODEL_ERROR', message, retryable: true }
     };
   }
 }
 
-function runtimeEvents(runId: UUID, handle: StreamingRunHandle): AsyncIterable<AgentRuntimeEvent> {
+function runtimeEvents(invocationId: UUID, handle: StreamingRunHandle): AsyncIterable<AgentRuntimeEvent> {
   return {
     async *[Symbol.asyncIterator]() {
       for await (const frame of handle.channel) {
-        const event = frameToRuntimeEvent(runId, frame);
+        const event = frameToRuntimeEvent(invocationId, frame);
         if (event) yield event;
       }
     }
@@ -681,4 +838,18 @@ function promiseHandle(result: Promise<AgentRunResult>): AgentRuntimeRunHandle {
     result,
     cancel: async () => {}
   };
+}
+
+function parseMcpToolName(toolName: string): { server: string; tool: string } | undefined {
+  if (toolName.startsWith('mcp__')) {
+    const [server, ...toolParts] = toolName.slice(5).split('__');
+    const tool = toolParts.join('__');
+    if (server && tool) return { server, tool };
+  }
+  if (toolName.includes('/')) {
+    const [server, ...toolParts] = toolName.split('/');
+    const tool = toolParts.join('/');
+    if (server && tool) return { server, tool };
+  }
+  return undefined;
 }

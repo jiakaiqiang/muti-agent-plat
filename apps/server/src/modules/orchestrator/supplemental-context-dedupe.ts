@@ -18,13 +18,23 @@ export function collectSeenContextSignatures(
   const paths = new Set<string>();
   const commands = new Set<string>();
   for (const entry of prior ?? []) {
+    const hydratedPaths = entry.resolution ? new Set(entry.resolution.hydratedPaths) : undefined;
     for (const ref of entry.requestedContext.requestedRefs ?? []) {
+      if (
+        hydratedPaths &&
+        (ref.type === 'workspace_file' || ref.type === 'workspace_symbol' || ref.type === 'test') &&
+        (!ref.ref || !hydratedPaths.has(ref.ref))
+      ) {
+        continue;
+      }
       refs.add(refSignature(ref));
     }
-    for (const path of entry.requestedContext.requestedPaths ?? []) {
+    const providedPaths = entry.resolution?.hydratedPaths ?? entry.requestedContext.requestedPaths ?? [];
+    for (const path of providedPaths) {
       if (path) paths.add(path);
     }
-    for (const command of entry.requestedContext.requestedCommands ?? []) {
+    const providedCommands = entry.resolution ? [] : entry.requestedContext.requestedCommands ?? [];
+    for (const command of providedCommands) {
       if (command) commands.add(command);
     }
   }

@@ -1,18 +1,27 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useRuntimeModelStore } from '@/stores/runtimeModel'
 import type { RuntimeModelKind, RuntimeModelOption, RuntimeModelUpdateInput } from '@/types/contracts'
 import UiIcon from './UiIcon.vue'
 
 const modelStore = useRuntimeModelStore()
-const selectedModelId = ref('')
-const addMode = ref<RuntimeModelKind>('local')
-const localModelName = ref('')
-const remoteLabel = ref('')
-const remoteModelName = ref('')
-const remoteBaseUrl = ref('')
-const remoteApiKey = ref('')
-const saveMessage = ref('')
+const {
+  selectedModelId,
+  addMode,
+  localModelName,
+  remoteLabel,
+  remoteModelName,
+  remoteBaseUrl,
+  remoteApiKey,
+  saveMessage,
+  editDialogOpen,
+  editingModelId,
+  editLabel,
+  editModelName,
+  editBaseUrl,
+  editApiKey
+} = storeToRefs(modelStore)
 
 const modelOptions = computed(() => modelStore.availableModels)
 const selectedModel = computed(() => modelOptions.value.find((model) => model.id === selectedModelId.value))
@@ -85,12 +94,6 @@ async function addRemoteModel() {
   saveMessage.value = '远端模型已添加到模型列表。'
 }
 
-const editDialogOpen = ref(false)
-const editingModelId = ref('')
-const editLabel = ref('')
-const editModelName = ref('')
-const editBaseUrl = ref('')
-const editApiKey = ref('')
 const editLabelInput = ref<HTMLInputElement | null>(null)
 const editingModel = computed(() => modelOptions.value.find((model) => model.id === editingModelId.value))
 const canSaveEdit = computed(

@@ -3,6 +3,7 @@ export const GENERATED_WORKSPACE_DIRECTORIES = [
   'node_modules',
   'dist',
   'build',
+  'generated',
   '.next',
   '.nuxt',
   '.output',

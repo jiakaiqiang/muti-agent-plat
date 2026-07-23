@@ -40,6 +40,7 @@ const actions = [
 ] satisfies PostReviewAction[];
 
 const report: PostReviewReportOutput = {
+  schemaVersion: '1.0',
   kind: 'post_review_report',
   isConsistentWithBrief: false,
   matchedItems: [],

@@ -3,16 +3,14 @@ import assert from 'node:assert/strict';
 import { parseCodexNotification } from './codex-frame-parser.js';
 import type { JsonRpcMessage } from './codex-appserver-codec.js';
 
-test('agent.text_delta → assistant_text frame', () => {
-  const msg: JsonRpcMessage = {
-    jsonrpc: '2.0',
-    method: 'agent.text_delta',
-    params: { text: '你好' }
-  };
-  const frame = parseCodexNotification(msg);
-  assert.equal(frame.kind, 'assistant_text');
-  if (frame.kind !== 'assistant_text') return;
-  assert.equal(frame.text, '你好');
+test('legacy Codex notification methods are debug-only unknown frames', () => {
+  for (const method of ['agent.text_delta', 'tool.called', 'tool.completed', 'run.completed']) {
+    const frame = parseCodexNotification({ jsonrpc: '2.0', method, params: { text: 'legacy' } });
+    assert.equal(frame.kind, 'system');
+    if (frame.kind !== 'system') continue;
+    assert.equal(frame.subtype, method);
+    assert.equal(frame.disposition, 'debug_only');
+  }
 });
 
 test('official item/agentMessage/delta → assistant_text frame', () => {
@@ -37,6 +35,40 @@ test('official item lifecycle maps command execution to tool frames', () => {
   assert.equal(started.kind, 'tool_use');
   assert.equal(completed.kind, 'tool_result');
   if (completed.kind === 'tool_result') assert.equal(completed.output, 'ok');
+});
+
+test('official completed agentMessage is the authoritative provider output', () => {
+  const payload = {
+    kind: 'agent_message',
+    schemaVersion: '1.0',
+    messageKind: 'summary',
+    content: 'done',
+    targetAgentIds: []
+  };
+  const frame = parseCodexNotification({
+    method: 'item/completed',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      completedAtMs: Date.now(),
+      item: { type: 'agentMessage', id: 'msg-1', text: JSON.stringify(payload) }
+    }
+  });
+  assert.deepEqual(frame, { kind: 'provider_output', payload, source: 'item/completed' });
+});
+
+test('completed agentMessage does not repair non-JSON text into an output object', () => {
+  const frame = parseCodexNotification({
+    method: 'item/completed',
+    params: {
+      item: { type: 'agentMessage', id: 'msg-1', text: 'plain text is invalid here' }
+    }
+  });
+  assert.deepEqual(frame, {
+    kind: 'provider_output',
+    payload: 'plain text is invalid here',
+    source: 'item/completed'
+  });
 });
 
 test('official token usage and turn completion map to usage/result frames', () => {
@@ -67,52 +99,6 @@ test('official token usage and turn completion map to usage/result frames', () =
   assert.equal((result.payload as { content: string }).content, 'done');
 });
 
-test('tool.called → tool_use frame', () => {
-  const msg: JsonRpcMessage = {
-    jsonrpc: '2.0',
-    method: 'tool.called',
-    params: { id: 't1', name: 'read_file', input: { path: 'x.ts' } }
-  };
-  const frame = parseCodexNotification(msg);
-  assert.equal(frame.kind, 'tool_use');
-  if (frame.kind !== 'tool_use') return;
-  assert.equal(frame.toolCallId, 't1');
-  assert.equal(frame.tool, 'read_file');
-  assert.deepEqual(frame.input, { path: 'x.ts' });
-});
-
-test('tool.completed → tool_result frame', () => {
-  const msg: JsonRpcMessage = {
-    jsonrpc: '2.0',
-    method: 'tool.completed',
-    params: { id: 't1', name: 'read_file', output: 'file body', isError: false }
-  };
-  const frame = parseCodexNotification(msg);
-  assert.equal(frame.kind, 'tool_result');
-  if (frame.kind !== 'tool_result') return;
-  assert.equal(frame.toolCallId, 't1');
-  assert.equal(frame.output, 'file body');
-  assert.equal(frame.isError, false);
-});
-
-test('run.completed → result frame with usage and cliSessionId', () => {
-  const msg: JsonRpcMessage = {
-    jsonrpc: '2.0',
-    method: 'run.completed',
-    params: {
-      payload: { summary: 'done' },
-      usage: { inputTokens: 100, outputTokens: 50 },
-      sessionId: 's-42'
-    }
-  };
-  const frame = parseCodexNotification(msg);
-  assert.equal(frame.kind, 'result');
-  if (frame.kind !== 'result') return;
-  assert.deepEqual(frame.payload, { summary: 'done' });
-  assert.equal(frame.cliSessionId, 's-42');
-  assert.equal(frame.usage?.inputTokens, 100);
-});
-
 test('unknown method → system frame (forward compatible)', () => {
   const msg: JsonRpcMessage = {
     jsonrpc: '2.0',
@@ -123,10 +109,32 @@ test('unknown method → system frame (forward compatible)', () => {
   assert.equal(frame.kind, 'system');
   if (frame.kind !== 'system') return;
   assert.equal(frame.subtype, 'future.event');
+  assert.equal(frame.disposition, 'debug_only');
+});
+
+test('internal lifecycle notifications are debug-only', () => {
+  for (const method of [
+    'thread/started',
+    'mcpServer/startupStatus/updated',
+    'remoteControl/status/changed'
+  ]) {
+    const frame = parseCodexNotification({ method, params: { status: 'ready' } });
+    assert.equal(frame.kind, 'system');
+    if (frame.kind === 'system') assert.equal(frame.disposition, 'debug_only');
+  }
+});
+
+test('MCP startup failure remains diagnostic because turn completion is authoritative', () => {
+  const frame = parseCodexNotification({
+    method: 'mcpServer/startupStatus/updated',
+    params: { server: 'example', status: 'failed', error: 'spawn EPERM' }
+  });
+  assert.equal(frame.kind, 'system');
+  if (frame.kind === 'system') assert.equal(frame.disposition, 'debug_only');
 });
 
 test('malformed params still yield a system frame instead of throwing', () => {
-  const msg: JsonRpcMessage = { jsonrpc: '2.0', method: 'tool.called', params: null };
+  const msg: JsonRpcMessage = { jsonrpc: '2.0', method: 'item/started', params: null };
   const frame = parseCodexNotification(msg);
   // params 不合规 → 落 system,不抛
   assert.equal(frame.kind, 'system');

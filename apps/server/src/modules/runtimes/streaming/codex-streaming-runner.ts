@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type {
-  AgentRunInput,
+  InvocationPlan,
   AgentRunResult,
   AgentRuntimeEvent,
   ExpectedRuntimeOutput,
@@ -8,6 +8,7 @@ import type {
   RuntimeOutput,
   RuntimeUsage
 } from '@agent-cluster/shared';
+import { createAgentMessageOutput, createRuntimeArtifactSystemEvidence } from '@agent-cluster/shared';
 import { nowIso } from '../../../common/time.js';
 import { JsonRpcDecoder, encodeJsonRpc, type JsonRpcMessage } from './codex-appserver-codec.js';
 import { parseCodexNotification } from './codex-frame-parser.js';
@@ -15,9 +16,10 @@ import { framesToOutput, MapperError } from './frame-to-output.mapper.js';
 import { LivenessWatchdog, type WatchdogTimeoutObservation } from './liveness-watchdog.js';
 import { RunChannel } from './run-channel.js';
 import { RuntimeStreamMetricsCollector } from './runtime-stream-metrics.js';
-import type { RuntimeStreamFrame } from './runtime-stream-frame.js';
+import { isRuntimeActivityFrame, type RuntimeStreamFrame } from './runtime-stream-frame.js';
 import { buildWatchdogTimeoutDetails } from './watchdog-timeout-details.js';
 import { validateRuntimeOutput } from '../runtime-output-schema.js';
+import { buildRuntimeDiagnostics } from './runtime-diagnostics.js';
 
 /**
  * `CodexStreamingRunner` 封装一次流式运行的完整生命周期:
@@ -32,6 +34,7 @@ export interface StreamingRunnerOptions {
   args: string[];
   cwd?: string;
   env?: Record<string, string | undefined>;
+  shell?: boolean;
   channelCapacity?: number;
   firstFrameTimeoutMs?: number;
   idleTimeoutMs?: number;
@@ -39,9 +42,11 @@ export interface StreamingRunnerOptions {
   prompt?: string;
   outputSchema?: Record<string, unknown>;
   resumeCliSessionId?: string;
+  sandbox?: 'read-only' | 'workspace-write';
   model?: string;
   /** 为单测注入 spawn 依赖。生产不传即用 node:child_process.spawn。 */
   spawnFn?: typeof spawn;
+  onFrame?: (frame: RuntimeStreamFrame) => void;
 }
 
 export interface StreamingRunHandle {
@@ -56,7 +61,7 @@ const DEFAULT_CHANNEL_CAPACITY = 512;
 const STDERR_TAIL_BYTES = 8 * 1024;
 
 export function startCodexStreaming(
-  input: AgentRunInput,
+  input: InvocationPlan,
   opts: StreamingRunnerOptions,
   signal?: AbortSignal
 ): StreamingRunHandle {
@@ -68,6 +73,7 @@ export function startCodexStreaming(
   const child: ChildProcess = spawnFn(opts.command, opts.args, {
     cwd: opts.cwd,
     env: opts.env,
+    shell: opts.shell,
     stdio: ['pipe', 'pipe', 'pipe']
   });
 
@@ -105,8 +111,9 @@ export function startCodexStreaming(
 
   function pushFrame(frame: RuntimeStreamFrame) {
     streamMetrics.notifyFrame();
-    watchdog.notifyFrame();
+    watchdog.notifyFrame(isRuntimeActivityFrame(frame));
     collected.push(frame);
+    opts.onFrame?.(frame);
     channel.push(frame);
   }
 
@@ -165,14 +172,14 @@ export function startCodexStreaming(
             threadId: opts.resumeCliSessionId,
             cwd: opts.cwd,
             approvalPolicy: 'never',
-            sandbox: 'workspace-write',
+            sandbox: opts.sandbox ?? 'read-only',
             excludeTurns: true
           });
         } else {
           sendRequest(threadRequestId, 'thread/start', {
             cwd: opts.cwd,
             approvalPolicy: 'never',
-            sandbox: 'workspace-write',
+            sandbox: opts.sandbox ?? 'read-only',
             model: opts.model
           });
         }
@@ -201,7 +208,7 @@ export function startCodexStreaming(
               text_elements: []
             }
           ],
-          outputSchema: opts.outputSchema ?? input.expectedOutput.jsonSchema
+          outputSchema: opts.outputSchema
         });
         return;
       }
@@ -336,13 +343,17 @@ export function startCodexStreaming(
             input,
             startedAt,
             message,
-            err instanceof MapperError ? 'OUTPUT_SCHEMA_INVALID' : 'MODEL_ERROR',
+            err instanceof MapperError ? 'RUNTIME_OUTPUT_CONTRACT_VIOLATION' : 'MODEL_ERROR',
             stderrTailToString(stderrTail)
           )
         );
       }
     });
-  }).then((outcome) => ({ ...outcome, streamMetrics: streamMetrics.complete() }));
+  }).then((outcome) => ({
+    ...outcome,
+    streamMetrics: streamMetrics.complete(),
+    runtimeDiagnostics: buildRuntimeDiagnostics('codex', collected, stderrTailToString(stderrTail))
+  }));
 
   return { channel, result, cancel };
 }
@@ -374,7 +385,7 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-function defaultPrompt(input: AgentRunInput): string {
+function defaultPrompt(input: InvocationPlan): string {
   return [
     'You are running as an Agent Cluster Codex runtime.',
     `Required output kind: ${input.expectedOutput.kind}.`,
@@ -382,7 +393,9 @@ function defaultPrompt(input: AgentRunInput): string {
     JSON.stringify({
       phase: input.phase,
       agent: input.agent,
-      contextPack: input.contextPack,
+      contextEnvelope: input.contextEnvelope,
+      executionTarget: input.executionTarget,
+      toolCatalog: input.toolCatalog,
       expectedOutput: input.expectedOutput
     })
   ].join('\n');
@@ -401,19 +414,15 @@ function lastFrameOfKind<K extends RuntimeStreamFrame['kind']>(
   return undefined;
 }
 
-function sessionFromFrames(input: AgentRunInput, frames: RuntimeStreamFrame[], cwd?: string) {
+function sessionFromFrames(input: InvocationPlan, frames: RuntimeStreamFrame[], cwd?: string) {
   const resultFrame = frames.find((frame) => frame.kind === 'result');
   const cliSessionId = resultFrame?.kind === 'result' ? resultFrame.cliSessionId : undefined;
-  const workDir =
-    cwd ??
-    (input.contextPack.workingDirectory?.kind === 'server_local'
-      ? input.contextPack.workingDirectory.path
-      : undefined);
+  const workDir = cwd;
   return cliSessionId || workDir ? { cliSessionId, workDir } : undefined;
 }
 
 function makeCompletedResult(
-  input: AgentRunInput,
+  input: InvocationPlan,
   startedAt: string,
   output: RuntimeOutput,
   usage: RuntimeUsage,
@@ -422,68 +431,73 @@ function makeCompletedResult(
 ): AgentRunResult {
   const events: AgentRuntimeEvent[] = [
     {
-      runId: input.runId,
+      invocationId: input.invocationId,
       type: 'runtime_started',
+      visibility: 'user',
       content: `${input.agent.name} Codex streaming started ${input.phase}.`,
       createdAt: startedAt
     },
     {
-      runId: input.runId,
+      invocationId: input.invocationId,
       type: 'runtime_completed',
+      visibility: 'user',
       content: `${input.agent.name} Codex streaming completed ${input.phase}.`,
       metadata: { exit: exitDetail ?? undefined },
       createdAt: nowIso()
     }
   ];
   return {
-    runId: input.runId,
+    invocationId: input.invocationId,
     runtimeType: 'codex',
     status: 'completed',
     output,
     events,
     artifacts: output.kind === 'task_execution_result' ? output.changedArtifacts : [],
+    systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
     usage,
     runtimeSession
   };
 }
 
-function makeCancelledResult(input: AgentRunInput, startedAt: string): AgentRunResult {
+function makeCancelledResult(input: InvocationPlan, startedAt: string): AgentRunResult {
   const error: RuntimeError = {
     code: 'RUNTIME_CANCELLED',
     message: 'Codex streaming cancelled by user.',
     retryable: false
   };
   return {
-    runId: input.runId,
+    invocationId: input.invocationId,
     runtimeType: 'codex',
     status: 'cancelled',
-    output: {
-      kind: 'agent_message',
+    output: createAgentMessageOutput({
       messageKind: 'progress',
       content: `${input.agent.name} Codex streaming cancelled.`
-    },
+    }),
     events: [
       {
-        runId: input.runId,
+        invocationId: input.invocationId,
         type: 'runtime_started',
+        visibility: 'user',
         content: `${input.agent.name} Codex streaming started ${input.phase}.`,
         createdAt: startedAt
       },
       {
-        runId: input.runId,
+        invocationId: input.invocationId,
         type: 'runtime_failed',
+        visibility: 'user',
         content: `${input.agent.name} Codex streaming cancelled.`,
         createdAt: nowIso()
       }
     ],
     artifacts: [],
+    systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
     usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: 'codex' },
     error
   };
 }
 
 function makeTimeoutResult(
-  input: AgentRunInput,
+  input: InvocationPlan,
   startedAt: string,
   observation: WatchdogTimeoutObservation,
   stderrTail: string | undefined
@@ -501,73 +515,82 @@ function makeTimeoutResult(
     details
   };
   return {
-    runId: input.runId,
+    invocationId: input.invocationId,
     runtimeType: 'codex',
     status: 'failed',
-    output: {
-      kind: 'agent_message',
+    output: createAgentMessageOutput({
       messageKind: 'risk',
       content: `${input.agent.name} Codex streaming timed out (${observation.reason}).`
-    },
+    }),
     events: [
       {
-        runId: input.runId,
+        invocationId: input.invocationId,
         type: 'runtime_started',
+        visibility: 'user',
         content: `${input.agent.name} Codex streaming started ${input.phase}.`,
         createdAt: startedAt
       },
       {
-        runId: input.runId,
+        invocationId: input.invocationId,
         type: 'runtime_failed',
+        visibility: 'user',
         content: `${input.agent.name} Codex streaming timed out (${observation.reason}).`,
         metadata: details,
         createdAt: nowIso()
       }
     ],
     artifacts: [],
+    systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
     usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: 'codex' },
     error
   };
 }
 
 function makeFailedResult(
-  input: AgentRunInput,
+  input: InvocationPlan,
   startedAt: string,
   message: string,
   code: RuntimeError['code'],
-  stderrTail: string | undefined
+  stderrTail: string | undefined,
+  details?: Record<string, unknown>
 ): AgentRunResult {
+  const errorDetails = {
+    ...(stderrTail ? { stderrTail } : {}),
+    ...details
+  };
   const error: RuntimeError = {
     code,
     message,
-    retryable: code !== 'OUTPUT_SCHEMA_INVALID',
-    details: stderrTail ? { stderrTail } : undefined
+    retryable: code !== 'RUNTIME_OUTPUT_CONTRACT_VIOLATION',
+    details: Object.keys(errorDetails).length ? errorDetails : undefined
   };
   return {
-    runId: input.runId,
+    invocationId: input.invocationId,
     runtimeType: 'codex',
     status: 'failed',
-    output: {
-      kind: 'agent_message',
+    output: createAgentMessageOutput({
       messageKind: 'risk',
       content: `${input.agent.name} Codex streaming failed: ${message}`
-    },
+    }),
     events: [
       {
-        runId: input.runId,
+        invocationId: input.invocationId,
         type: 'runtime_started',
+        visibility: 'user',
         content: `${input.agent.name} Codex streaming started ${input.phase}.`,
         createdAt: startedAt
       },
       {
-        runId: input.runId,
+        invocationId: input.invocationId,
         type: 'runtime_failed',
+        visibility: 'user',
         content: `${input.agent.name} Codex streaming failed.`,
-        metadata: { message },
+        metadata: { message, code, runtimeError: error },
         createdAt: nowIso()
       }
     ],
     artifacts: [],
+    systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
     usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: 'codex' },
     error
   };

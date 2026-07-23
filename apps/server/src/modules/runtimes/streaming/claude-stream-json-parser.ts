@@ -40,7 +40,8 @@ export class ClaudeStreamJsonParser {
           {
             kind: 'system',
             subtype: typeof msg.subtype === 'string' ? msg.subtype : 'unknown',
-            raw: msg
+            raw: msg,
+            disposition: 'debug_only'
           }
         ];
       default:

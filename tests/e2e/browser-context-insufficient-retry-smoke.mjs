@@ -11,11 +11,18 @@ import {
   startBrowserSmokeServer,
   stopBrowserCollaborationSmoke
 } from './browser-smoke-utils.mjs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 await buildServer();
 let handle;
+const workspaceRoot = mkdtempSync(join(tmpdir(), 'browser-context-insufficient-retry-'));
 
 try {
+  mkdirSync(join(workspaceRoot, 'src'), { recursive: true });
+  writeFileSync(join(workspaceRoot, 'src', 'index.ts'), 'export const browserContextRetryMarker = "BROWSER_CONTEXT_RETRY_9137";');
+  writeFileSync(join(workspaceRoot, 'package.json'), '{"scripts":{"typecheck":"tsc --noEmit","test":"vitest run","build":"vite build"}}');
   handle = await startBrowserSmokeServer('browser-context-insufficient-retry', {
     DISCUSSION_MAX_ROUNDS: '0',
     MOCK_CONTEXT_INSUFFICIENT_ONCE: 'true'
@@ -26,6 +33,13 @@ try {
     'Implement a small workspace change and surface the context retry in the group-chat task board.',
     {
       tokenBudget: 50_000,
+      workingDirectory: {
+        kind: 'server_local',
+        id: 'browser-context-retry-workspace',
+        name: 'browser-context-retry-project',
+        path: workspaceRoot,
+        selectedAt: new Date().toISOString()
+      },
       workspaceSnapshot: {
         rootName: 'browser-context-retry-project',
         scannedAt: new Date().toISOString(),
@@ -124,4 +138,5 @@ try {
   if (handle) {
     await stopBrowserCollaborationSmoke(handle);
   }
+  rmSync(workspaceRoot, { recursive: true, force: true });
 }

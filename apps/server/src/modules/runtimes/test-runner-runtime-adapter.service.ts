@@ -1,16 +1,26 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import type {
   AgentMessageOutput,
-  AgentRunInput,
+  InvocationPlan,
   AgentRunResult,
   AgentRuntimeAdapter,
+  AgentRuntimeRunHandle,
   RuntimeError,
   RuntimeType,
   TaskExecutionResultOutput
 } from '@agent-cluster/shared';
+import {
+  createAgentMessageOutput,
+  createRuntimeArtifactOutput,
+  createRuntimeArtifactSystemEvidence
+} from '@agent-cluster/shared';
 import { nowIso } from '../../common/time.js';
 import type { TestRunnerOutput } from '../tools/builtin/test-runner.tool.js';
 import { ToolRegistryService } from '../tools/tool-registry.service.js';
+import { ToolInvocationAuditService } from '../tools/tool-invocation-audit.service.js';
+import { InvocationWorkspaceBindingsService } from './invocation-workspace-bindings.service.js';
+import { promiseHandle } from './promise-run-handle.js';
+import { withStructuredTermination } from './structured-termination-run-handle.js';
 
 type TestReport = {
   script: string;
@@ -35,16 +45,26 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
     version: '0.1.0',
     category: 'internal' as const,
     provider: 'self-hosted',
-    capabilityIds: ['cap-test-report', 'cap-command-run'] as const
+    capabilityIds: ['cap-test-report', 'cap-command-run'] as const,
+    supportedWorkspaceCapabilities: ['read', 'command', 'test'] as const,
+    supportedToolNames: ['run_test'] as const
   };
 
-  constructor(private readonly toolRegistry: ToolRegistryService) {}
+  constructor(
+    private readonly toolRegistry: ToolRegistryService,
+    private readonly workspaceBindings: InvocationWorkspaceBindingsService,
+    @Optional() private readonly toolAudit?: ToolInvocationAuditService
+  ) {}
 
   async checkAvailability() {
     return { available: true };
   }
 
-  async run(input: AgentRunInput, signal?: AbortSignal): Promise<AgentRunResult> {
+  start(input: InvocationPlan, signal?: AbortSignal): AgentRuntimeRunHandle {
+    return withStructuredTermination(promiseHandle(this.execute(input, signal)), input, signal);
+  }
+
+  private async execute(input: InvocationPlan, signal?: AbortSignal): Promise<AgentRunResult> {
     const startedAt = nowIso();
     try {
       const runTestTool = this.toolRegistry.getTool('run_test');
@@ -53,15 +73,24 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
       }
 
       const script = this.testScript(input);
-      const result = await runTestTool.execute(
-        { script },
-        {
-          workingDirectory: input.contextPack.workingDirectory?.path ?? '',
-          sessionId: input.sessionId,
-          agentId: input.agent.id,
-          signal
-        }
-      );
+      const argumentsValue = { script };
+      const toolStartedAt = nowIso();
+      let result;
+      try {
+        result = await runTestTool.execute(
+          argumentsValue,
+          {
+            workingDirectory: this.workspaceBindings.resolveServerRoot(input) ?? '',
+            sessionId: input.sessionId,
+            agentId: input.agent.agentId,
+            signal
+          }
+        );
+      } catch (error) {
+        await this.recordToolInvocation(input, argumentsValue, undefined, false, toolStartedAt, error);
+        throw error;
+      }
+      await this.recordToolInvocation(input, argumentsValue, result, result.success, toolStartedAt, result.error);
 
       if (!result.success) {
         throw new Error(result.error ?? 'Test execution failed');
@@ -75,11 +104,34 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
     }
   }
 
-  private testScript(input: AgentRunInput) {
-    const taskContext = input.contextPack.taskContext as { testScript?: unknown } | undefined;
-    return typeof taskContext?.testScript === 'string' && taskContext.testScript.length > 0
-      ? taskContext.testScript
-      : 'test';
+  private async recordToolInvocation(
+    input: InvocationPlan,
+    argumentsValue: unknown,
+    result: unknown,
+    success: boolean,
+    startedAt: string,
+    error?: unknown
+  ): Promise<void> {
+    const persisted = await this.toolAudit?.record({
+      externalId: `tool:${input.invocationId}:run_test:1`,
+      runtimeInvocationExternalId: input.invocationId,
+      sessionExternalId: input.sessionId,
+      toolName: 'run_test',
+      providerCallId: `${input.invocationId}:run_test:1`,
+      provider: this.type,
+      arguments: argumentsValue,
+      result,
+      success,
+      errorMessage: error ? (error instanceof Error ? error.message : String(error)) : undefined,
+      agentExternalId: input.agent.agentId,
+      startedAt,
+      completedAt: nowIso()
+    });
+    if (persisted === false) this.logger.warn(`Tool audit was not persisted for ${input.invocationId}:run_test`);
+  }
+
+  private testScript(_input: InvocationPlan) {
+    return 'test';
   }
 
   private generateReport(output: unknown): TestReport {
@@ -99,51 +151,54 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
     };
   }
 
-  private completedResult(input: AgentRunInput, report: TestReport, startedAt: string): AgentRunResult {
+  private completedResult(input: InvocationPlan, report: TestReport, startedAt: string): AgentRunResult {
     return {
-      runId: input.runId,
+      invocationId: input.invocationId,
       runtimeType: this.type,
       status: 'completed',
       output: this.output(report),
       events: [
         {
-          runId: input.runId,
+          invocationId: input.invocationId,
           type: 'runtime_started',
+          visibility: 'user',
           content: `${input.agent.name} started test running`,
           createdAt: startedAt
         },
         {
-          runId: input.runId,
+          invocationId: input.invocationId,
           type: 'artifact_created',
+          visibility: 'user',
           content: 'Test report artifact created',
           createdAt: nowIso()
         },
         {
-          runId: input.runId,
+          invocationId: input.invocationId,
           type: 'runtime_completed',
+          visibility: 'user',
           content: `${input.agent.name} completed test running`,
           createdAt: nowIso()
         }
       ],
       artifacts: [
-        {
+        createRuntimeArtifactOutput({
           type: 'test_report',
           title: 'Test Report',
           summary: `${report.passed}/${report.total} tests passed`,
-          content: this.reportContent(report),
-          metadata: {
-            script: report.script,
-            duration: report.duration,
-            summary: {
-              total: report.total,
-              passed: report.passed,
-              failed: report.failed,
-              skipped: report.skipped
-            },
-            failures: report.failures
-          }
-        }
+          content: this.reportContent(report)
+        })
       ],
+      systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId, {
+        verifiedTestResults: [{
+          command: report.script,
+          status: report.success ? 'passed' : 'failed',
+          exitCode: report.success ? 0 : 1,
+          stdout: report.stdout,
+          stderr: report.stderr,
+          startedAt,
+          completedAt: nowIso()
+        }]
+      }),
       usage: {
         inputTokens: 0,
         outputTokens: 0,
@@ -153,7 +208,7 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
     };
   }
 
-  private failedResult(input: AgentRunInput, error: unknown, startedAt: string): AgentRunResult {
+  private failedResult(input: InvocationPlan, error: unknown, startedAt: string): AgentRunResult {
     const message = error instanceof Error ? error.message : String(error);
     const runtimeError: RuntimeError = {
       code: 'UNKNOWN_ERROR',
@@ -161,30 +216,29 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
       retryable: false
     };
     return {
-      runId: input.runId,
+      invocationId: input.invocationId,
       runtimeType: this.type,
       status: 'failed',
-      output: {
-        kind: 'agent_message',
-        messageKind: 'risk',
-        content: message
-      } satisfies AgentMessageOutput,
+      output: createAgentMessageOutput({ messageKind: 'risk', content: message }) satisfies AgentMessageOutput,
       events: [
         {
-          runId: input.runId,
+          invocationId: input.invocationId,
           type: 'runtime_started',
+          visibility: 'user',
           content: `${input.agent.name} started test running`,
           createdAt: startedAt
         },
         {
-          runId: input.runId,
+          invocationId: input.invocationId,
           type: 'runtime_failed',
+          visibility: 'user',
           content: message,
           metadata: { code: runtimeError.code },
           createdAt: nowIso()
         }
       ],
       artifacts: [],
+      systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
       usage: {
         inputTokens: 0,
         outputTokens: 0,
@@ -197,18 +251,21 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
 
   private output(report: TestReport): TaskExecutionResultOutput {
     return {
+      schemaVersion: '1.0',
       kind: 'task_execution_result',
       status: report.success ? 'completed' : 'failed',
       summary: `${report.passed}/${report.total} tests passed in ${report.duration}ms.`,
       completedItems: [`Script: ${report.script}`, `Passed: ${report.passed}`, `Skipped: ${report.skipped}`],
       changedArtifacts: [
-        {
+        createRuntimeArtifactOutput({
           type: 'test_report',
           title: 'Test Report',
           summary: `${report.passed}/${report.total} tests passed`,
           content: this.reportContent(report)
-        }
+        })
       ],
+      requestedContext: null,
+      agentMessages: [],
       nextSuggestedActions: report.failed > 0 ? ['Inspect failing tests before continuing.'] : [],
       risks: report.failed > 0 ? report.failures : []
     };

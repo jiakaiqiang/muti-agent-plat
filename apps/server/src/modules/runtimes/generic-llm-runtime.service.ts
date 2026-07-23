@@ -1,10 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import type {
   AgentMessageOutput,
-  AgentRunInput,
+  InvocationPlan,
   AgentRunResult,
   AgentRuntimeAdapter,
+  AgentRuntimeRunHandle,
   FinalDeliveryOutput,
   PostReviewReportOutput,
   RuntimeError,
@@ -13,9 +14,9 @@ import type {
   RuntimeOutput,
   RuntimeUsage,
   TaskAcceptanceDecisionOutput,
-  TaskClaimDecisionOutput,
   UserMessageHandlingPlanOutput
 } from '@agent-cluster/shared';
+import { createAgentMessageOutput, createRuntimeArtifactSystemEvidence } from '@agent-cluster/shared';
 import {
   genericLlmMockFallbackEnabled,
   llmDiagnosticPreviewChars,
@@ -29,16 +30,10 @@ import {
   llmTimeoutMs
 } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
-import {
-  DEFAULT_INPUT_TOKEN_ESTIMATION_ERROR_THRESHOLD,
-  inputTokenEstimationDrift
-} from '../../common/token.js';
+import { promiseHandle } from './promise-run-handle.js';
+import { withStructuredTermination } from './structured-termination-run-handle.js';
 import { MockRuntimeService } from './mock-runtime.service.js';
-import { normalizeRuntimeArtifact } from './runtime-artifact-normalizer.js';
-import {
-  normalizePostReviewActions,
-  POST_REVIEW_CONTEXT_ACTION_INSTRUCTION
-} from './post-review-action-normalizer.js';
+import { POST_REVIEW_CONTEXT_ACTION_INSTRUCTION } from './post-review-action-normalizer.js';
 import { RuntimeModelConfigService, type RuntimeModelConnection } from './runtime-model-config.service.js';
 import {
   runtimeOutputExample,
@@ -46,6 +41,14 @@ import {
   validateRuntimeOutput
 } from './runtime-output-schema.js';
 import { WorkspaceToolsService } from './workspace-tools.service.js';
+import { ToolInvocationAuditService } from '../tools/tool-invocation-audit.service.js';
+import { InvocationWorkspaceBindingsService } from './invocation-workspace-bindings.service.js';
+import {
+  abortWithTermination,
+  createExecutionTermination,
+  isExecutionTermination,
+  safeTerminationMessage
+} from '../../common/execution-termination.js';
 
 type GenericLlmResponseBody = {
   choices?: Array<{
@@ -120,17 +123,68 @@ type HttpRuntimeError = {
 @Injectable()
 export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   readonly type = 'generic_llm' as const;
+  readonly metadata = {
+    name: 'generic-llm',
+    version: '2.0.0',
+    category: 'external' as const,
+    provider: 'openai-compatible',
+    capabilityIds: ['cap-file-read', 'cap-code-search'] as const,
+    supportedWorkspaceCapabilities: ['read'] as const,
+    supportedWorkspaceProviderKinds: ['server_local', 'browser_broker', 'local_bridge'] as const,
+    supportedToolNames: ['read_file', 'search_code'] as const
+  };
   private readonly structuredOutputCapabilities = new Map<string, ActiveStructuredOutputMode>();
 
   constructor(
     private readonly mockRuntime: MockRuntimeService,
     private readonly modelConfig: RuntimeModelConfigService,
-    private readonly workspaceTools: WorkspaceToolsService
+    private readonly workspaceTools: WorkspaceToolsService,
+    private readonly workspaceBindings: InvocationWorkspaceBindingsService,
+    @Optional() private readonly toolAudit?: ToolInvocationAuditService
   ) {}
 
-  async run(input: AgentRunInput, signal?: AbortSignal): Promise<AgentRunResult> {
+  async checkAvailability() {
+    if (genericLlmMockFallbackEnabled()) return { available: true };
+    const connection = this.modelConfig.connectionForModelId(undefined);
+    const missing = this.missingConfig(connection);
+    if (missing.length) {
+      return { available: false, reason: `Generic LLM configuration is missing: ${missing.join(', ')}` };
+    }
+    const baseUrl = connection.baseUrl;
+    const apiKey = connection.apiKey;
+    if (!baseUrl || !apiKey) {
+      return { available: false, reason: 'Generic LLM configuration is missing: baseUrl, apiKey' };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5_000);
+    try {
+      const response = await fetch(`${baseUrl.replace(/\/$/, '')}/models`, {
+        method: 'GET',
+        signal: controller.signal,
+        headers: { authorization: `Bearer ${apiKey}` }
+      });
+      if (response.ok || response.status === 404 || response.status === 405) return { available: true };
+      return { available: false, reason: `Generic LLM preflight failed with HTTP ${response.status}` };
+    } catch (error) {
+      return {
+        available: false,
+        reason: error instanceof Error && error.name === 'AbortError'
+          ? 'Generic LLM preflight timed out.'
+          : `Generic LLM preflight failed: ${error instanceof Error ? error.message : String(error)}`
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  start(input: InvocationPlan, signal?: AbortSignal): AgentRuntimeRunHandle {
+    return withStructuredTermination(promiseHandle(this.execute(input, signal)), input, signal);
+  }
+
+  private async execute(input: InvocationPlan, signal?: AbortSignal): Promise<AgentRunResult> {
     const startedAt = nowIso();
-    const selectedConnection = this.modelConfig.connectionForModelId(input.agent.modelId);
+    const selectedConnection = this.modelConfig.connectionForModelId(input.executionTarget.modelId);
     if (signal?.aborted) {
       const timeoutMessage = this.upstreamTimeoutMessage(signal);
       return this.failedResult(
@@ -157,54 +211,20 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       ));
     }
 
-    const hasTools = input.contextPack.availableTools && input.contextPack.availableTools.length > 0;
-    if (hasTools && input.contextPack.workingDirectory?.kind === 'server_local' && input.contextPack.workingDirectory?.path) {
+    const hasTools = input.toolCatalog.tools.length > 0;
+    if (hasTools && this.workspaceBindings.resolveServerRoot(input)) {
       return this.withTokenEstimationDiagnostic(input, await this.runWithToolLoop(input, selectedConnection, signal));
     }
 
     return this.withTokenEstimationDiagnostic(input, await this.runOpenAiCompatible(input, selectedConnection, signal));
   }
 
-  private withTokenEstimationDiagnostic(input: AgentRunInput, result: AgentRunResult): AgentRunResult {
-    const drift = inputTokenEstimationDrift(input.estimatedInputTokens, result.usage.inputTokens);
-    if (!drift) {
-      return result;
-    }
-    const model = result.usage.model ?? input.agent.modelId ?? result.runtimeType;
-    return {
-      ...result,
-      events: [
-        ...result.events,
-        {
-          runId: input.runId,
-          type: 'runtime_progress',
-          content: `GLM input token estimation drift detected for ${model}: estimated ${drift.estimated}, actual ${drift.actual}.`,
-          metadata: {
-            code: 'TOKEN_ESTIMATION_DRIFT',
-            model,
-            estimated: drift.estimated,
-            actual: drift.actual,
-            ratio: drift.ratio,
-            relativeError: Math.abs(drift.ratio - 1),
-            threshold: DEFAULT_INPUT_TOKEN_ESTIMATION_ERROR_THRESHOLD
-          },
-          createdAt: nowIso()
-        }
-      ]
-    };
+  private withTokenEstimationDiagnostic(input: InvocationPlan, result: AgentRunResult): AgentRunResult {
+    return result;
   }
 
-  private async runFallback(input: AgentRunInput, selectedModel: string, signal?: AbortSignal): Promise<AgentRunResult> {
-    const result = await this.mockRuntime.run(
-      {
-        ...input,
-        options: {
-          ...(input.options ?? {}),
-          allowMockFallback: true
-        }
-      },
-      signal
-    );
+  private async runFallback(input: InvocationPlan, selectedModel: string, signal?: AbortSignal): Promise<AgentRunResult> {
+    const result = await this.mockRuntime.start(input, signal).result;
     return {
       ...result,
       runtimeType: 'generic_llm',
@@ -220,7 +240,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   }
 
   private async runOpenAiCompatible(
-    input: AgentRunInput,
+    input: InvocationPlan,
     selectedConnection: RuntimeModelConnection,
     signal?: AbortSignal
   ): Promise<AgentRunResult> {
@@ -238,7 +258,17 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       let timedOut = false;
       const onAbort = () => {
         cancelledByUser = true;
-        controller.abort();
+        abortWithTermination(
+          controller,
+          isExecutionTermination(signal?.reason)
+            ? signal.reason
+            : createExecutionTermination({
+                kind: 'user_cancelled',
+                source: 'user',
+                scope: 'invocation',
+                phase: input.phase
+              })
+        );
       };
       if (signal?.aborted) {
         const timeoutMessage = this.upstreamTimeoutMessage(signal);
@@ -253,7 +283,16 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       signal?.addEventListener('abort', onAbort, { once: true });
       const timer = setTimeout(() => {
         timedOut = true;
-        controller.abort();
+        abortWithTermination(
+          controller,
+          createExecutionTermination({
+            kind: 'runtime_timeout',
+            source: 'runtime',
+            scope: 'invocation',
+            phase: input.phase,
+            timeout: { mode: 'absolute', timeoutMs }
+          })
+        );
       }, timeoutMs);
       try {
         const messages = [
@@ -269,7 +308,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
             content: JSON.stringify({
               phase: input.phase,
               expectedOutput: input.expectedOutput,
-              contextPack: input.contextPack,
+              contextEnvelope: input.contextEnvelope,
+              toolCatalog: input.toolCatalog,
               budget: input.budget
             })
           }
@@ -306,7 +346,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
             startedAt,
             selectedModel,
             `Expected ${input.expectedOutput.kind}${detected}; model output remained unusable after ${repairAttempts} schema repair attempt(s).`,
-            'OUTPUT_SCHEMA_INVALID',
+            'RUNTIME_OUTPUT_CONTRACT_VIOLATION',
             {
               responseShape: this.summarizeResponseShape(completion.rawBody),
               parseState: diagnostics.parseState,
@@ -323,25 +363,28 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         const output = evaluated.output;
 
         return {
-          runId: input.runId,
+          invocationId: input.invocationId,
           runtimeType: 'generic_llm',
           status: 'completed',
           output,
           events: [
             {
-              runId: input.runId,
+              invocationId: input.invocationId,
               type: 'runtime_started',
+              visibility: 'user',
               content: `${input.agent.name} GenericLlmRuntime started ${input.phase}`,
               createdAt: startedAt
             },
             {
-              runId: input.runId,
+              invocationId: input.invocationId,
               type: 'runtime_completed',
+              visibility: 'user',
               content: `${input.agent.name} GenericLlmRuntime completed ${input.phase}`,
               createdAt: nowIso()
             }
           ],
-          artifacts: [],
+          artifacts: output.kind === 'task_execution_result' ? output.changedArtifacts : [],
+          systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
           usage
         };
       } catch (error) {
@@ -364,7 +407,11 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
             : error instanceof Error
               ? error.message
               : String(error);
-        lastDetails = this.errorDetails(error);
+        lastDetails = {
+          ...this.errorDetails(error),
+          ...(!isAbort ? { providerFailure: true } : {}),
+          ...(isAbort && timedOut ? { timeoutMs } : {})
+        };
         const retryable =
           !wasUserCancelled && !wasUpstreamTimeout && (isAbort || (error as { retryable?: boolean }).retryable !== false);
         if (!retryable || attempt === maxRetries) {
@@ -381,7 +428,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   }
 
   private async requestCompletion(
-    input: AgentRunInput,
+    input: InvocationPlan,
     connection: RuntimeModelConnection,
     messages: Array<{ role: string; content: string }>,
     signal: AbortSignal,
@@ -441,7 +488,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   }
 
   private completionRequestBody(
-    input: AgentRunInput,
+    input: InvocationPlan,
     connection: RuntimeModelConnection,
     messages: Array<{ role: string; content: string }>,
     structuredOutputMode?: ActiveStructuredOutputMode
@@ -523,19 +570,19 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   }
 
   /**
-   * Multi-turn tool-loop mode for availableTools. Iterates up to MAX_TOOL_ROUNDS,
+   * Multi-turn tool-loop mode for the resolved Tool Catalog. Iterates up to MAX_TOOL_ROUNDS,
    * parsing `<<TOOL_CALL>>` blocks from model output, executing them, feeding results
    * back as `<<TOOL_RESULT>>` blocks. Final round forces JSON output to match the
    * expected RuntimeOutput kind.
    */
   private async runWithToolLoop(
-    input: AgentRunInput,
+    input: InvocationPlan,
     selectedConnection: RuntimeModelConnection,
     signal?: AbortSignal
   ): Promise<AgentRunResult> {
     const startedAt = nowIso();
     const selectedModel = selectedConnection.model;
-    const rootPath = input.contextPack.workingDirectory?.path ?? '';
+    const rootPath = this.workspaceBindings.resolveServerRoot(input) ?? '';
     const MAX_TOOL_ROUNDS = 5;
     const MAX_TOOL_CALLS_TOTAL = 12;
     const MAX_TOOL_OUTPUT_CHARS = 80_000;
@@ -564,7 +611,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       '',
       'You may call multiple tools in one response. When you have enough information, return the final JSON output without any tool calls.',
       '',
-      'Use contextPack.taskContext, projectMap, workspaceManifest, and selectedEvidenceContents as usual.',
+      'Use ContextEnvelopeV2 L1/L2 for navigation and L3 for grounded evidence.',
       input.expectedOutput.kind === 'agent_message'
         ? 'For agent_message, "content" must be a plain-text string in Chinese.'
         : '',
@@ -579,7 +626,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     const contextPayload = JSON.stringify({
       phase: input.phase,
       expectedOutput: input.expectedOutput,
-      contextPack: input.contextPack,
+      contextEnvelope: input.contextEnvelope,
+      toolCatalog: input.toolCatalog,
       budget: input.budget
     });
 
@@ -635,12 +683,31 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         let timedOut = false;
         const onAbort = () => {
           cancelledByUser = true;
-          controller.abort();
+          abortWithTermination(
+            controller,
+            isExecutionTermination(signal?.reason)
+              ? signal.reason
+              : createExecutionTermination({
+                  kind: 'user_cancelled',
+                  source: 'user',
+                  scope: 'invocation',
+                  phase: input.phase
+                })
+          );
         };
         signal?.addEventListener('abort', onAbort, { once: true });
         const timer = setTimeout(() => {
           timedOut = true;
-          controller.abort();
+          abortWithTermination(
+            controller,
+            createExecutionTermination({
+              kind: 'runtime_timeout',
+              source: 'runtime',
+              scope: 'invocation',
+              phase: input.phase,
+              timeout: { mode: 'absolute', timeoutMs }
+            })
+          );
         }, timeoutMs);
         try {
           const response = await fetch(this.chatCompletionsUrl(selectedConnection.baseUrl), {
@@ -692,7 +759,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
                 wasUserCancelled
                   ? 'Tool loop cancelled by user.'
                   : timeoutMessage ?? (timedOut ? `Tool-loop LLM request timed out after ${timeoutMs}ms` : 'Tool loop cancelled by user.'),
-                wasUserCancelled ? 'RUNTIME_CANCELLED' : 'RUNTIME_TIMEOUT'
+                wasUserCancelled ? 'RUNTIME_CANCELLED' : 'RUNTIME_TIMEOUT',
+                wasUserCancelled ? undefined : { timeoutMs }
               );
             }
             return this.failedResult(
@@ -735,20 +803,19 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
             startedAt,
             selectedModel,
             `Tool-loop completed but model did not return valid JSON. Raw: ${rawResponse.slice(0, 500)}`,
-            'OUTPUT_SCHEMA_INVALID'
+            'RUNTIME_OUTPUT_CONTRACT_VIOLATION'
           );
         }
-        let output = extracted.output;
+        const output = extracted.output;
         if (output.kind !== input.expectedOutput.kind) {
           return this.failedResult(
             input,
             startedAt,
             selectedModel,
             `Expected ${input.expectedOutput.kind}, got ${String(output.kind)}`,
-            'OUTPUT_SCHEMA_INVALID'
+            'RUNTIME_OUTPUT_CONTRACT_VIOLATION'
           );
         }
-        output = this.normalizeOutput(output);
         const validation = validateRuntimeOutput(output, input.expectedOutput.kind);
         if (!validation.valid) {
           return this.failedResult(
@@ -756,7 +823,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
             startedAt,
             selectedModel,
             `Tool-loop output failed RuntimeOutput validation: ${validation.errors.join('; ')}`,
-            'OUTPUT_SCHEMA_INVALID',
+            'RUNTIME_OUTPUT_CONTRACT_VIOLATION',
             {
               parseState: 'schema_invalid',
               validationErrors: validation.errors,
@@ -766,25 +833,28 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         }
 
         return {
-          runId: input.runId,
+          invocationId: input.invocationId,
           runtimeType: 'generic_llm',
           status: 'completed',
           output,
           events: [
             {
-              runId: input.runId,
+              invocationId: input.invocationId,
               type: 'runtime_started',
+              visibility: 'user',
               content: `${input.agent.name} GenericLlmRuntime tool-loop started`,
               createdAt: startedAt
             },
             {
-              runId: input.runId,
+              invocationId: input.invocationId,
               type: 'runtime_completed',
+              visibility: 'user',
               content: `${input.agent.name} GenericLlmRuntime tool-loop completed (${toolCallHistory.length} tool calls)`,
               createdAt: nowIso()
             }
           ],
-          artifacts: [],
+          artifacts: output.kind === 'task_execution_result' ? output.changedArtifacts : [],
+          systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
           usage: {
             model: selectedModel,
             inputTokens: 0,
@@ -806,8 +876,24 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         totalToolCalls += 1;
 
         if (call.name === 'read_file') {
+          const toolStartedAt = nowIso();
           const result = await this.workspaceTools.readFile(rootPath, call.input as { path?: unknown });
           const output = result.ok ? result.output : `ERROR [${result.errorCode}]: ${result.errorMessage}`;
+          await this.toolAudit?.record({
+            externalId: `tool:${input.invocationId}:${totalToolCalls}`,
+            runtimeInvocationExternalId: input.invocationId,
+            toolName: call.name,
+            providerCallId: `${input.invocationId}:${totalToolCalls}`,
+            provider: 'generic_llm',
+            arguments: call.input,
+            result,
+            success: result.ok,
+            errorCode: result.ok ? undefined : result.errorCode,
+            errorMessage: result.ok ? undefined : result.errorMessage,
+            agentExternalId: input.agent.agentId,
+            startedAt: toolStartedAt,
+            completedAt: nowIso()
+          });
           const truncated = result.truncated ? 'true' : 'false';
           const error = result.ok ? '' : ` error="${result.errorCode}"`;
           toolResults.push(
@@ -885,8 +971,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
    * (especially <7B params) struggle with verbose multi-conditional prompts,
    * so we strip down to the bare essentials.
    */
-  private buildLocalSystemPrompt(input: AgentRunInput): string {
-    // For local small models, use ultra-minimal prompts to avoid triggering reasoning mode
+  private buildLocalSystemPrompt(input: InvocationPlan): string {
+    // Keep local-model output instructions concise to avoid triggering reasoning mode.
     const parts = ['Return only valid JSON.', `Output kind: ${input.expectedOutput.kind}`];
 
     if (input.expectedOutput.kind === 'task_brief') {
@@ -915,7 +1001,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
    * Build the full system prompt for remote (cloud) models. These can handle
    * the detailed multi-conditional instructions.
    */
-  private buildRemoteSystemPrompt(input: AgentRunInput): string {
+  private buildRemoteSystemPrompt(input: InvocationPlan): string {
     return [
       input.agent.systemPrompt,
       'Return only valid JSON matching the requested RuntimeOutput kind.',
@@ -927,18 +1013,16 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         ? 'For task_acceptance_decision, status must be exactly one of: accepted, blocked, rejected.'
         : 'When task_execution_result has a status field, status must be exactly one of: completed, failed, blocked, needs_review.',
       'Do not call tools, modify files, or perform external side effects.',
-      'Use contextPack.taskContext as the Task Context Pack: follow its stagePlan read/do/validate items, taskMap, evidenceSelection.selectedRefs/evidenceRefs, validationRules, and agentResponsibilities. Keep conclusions traceable to those fields.',
-      'Use contextPack.projectMap when present as the structured project index; prefer its modules, sourceRefs, validationCommands, and riskBoundaries over guessing project layout.',
+      'Use ContextEnvelopeV2 L1 for the task and navigation, L2 for the project map, and L3 for grounded evidence.',
       'Treat taskContext.evidenceSelection.omittedRefs as intentionally excluded context; ask for more evidence instead of inventing details when selected evidence is insufficient.',
       'When selected evidence is insufficient for the expected output, return the expected JSON kind with status "blocked" when supported, summary explaining the gap, and requestedContext containing reason, requestedRefs, requestedPaths, requestedCommands, and followUpInstruction. Do not fabricate file contents, APIs, test results, or logs.',
-      'Use contextPack.continuationState to resume or hand off work consistently across phases, agents, pauses, validation, review, and final delivery.',
       'For non-coding tasks, validate fact consistency, scope consistency, traceability, and delivery completeness instead of inventing implementation evidence.',
       input.expectedOutput.kind === 'task_brief'
         ? 'When the user asks to analyze, understand, or become familiar with a project/repository architecture, assign exactly one architect task. The architect scenario is only: analyze the current project structure and main execution/collaboration path from an architecture viewpoint, then provide architecture ideas, risks, and suggestions grounded in workspaceManifest/projectMap/selectedEvidenceContents. Do not add a separate review/test task unless the user explicitly asks for validation.'
         : '',
-      input.contextPack.workspaceManifest
-        ? 'Before analyzing the user requirement, inspect contextPack.workspaceManifest for project structure and contextPack.selectedEvidenceContents for readable evidence content. workspaceSnapshot is only a manifest-style fallback and may omit file contents.'
-        : 'No workspace manifest is available; say when file-level conclusions are assumptions.',
+      input.contextEnvelope.L1.navigation.entries.length > 0
+        ? 'Inspect L1 navigation for project structure and L3 for readable evidence content.'
+        : 'No workspace navigation is available; say when file-level conclusions are assumptions.',
       'Be specific and useful. Avoid one-sentence generic output; include concrete decisions, assumptions, risks, and next actions.',
       input.expectedOutput.kind === 'agent_message'
         ? 'For agent_message, the "content" field must be one plain-text string (never an object or array). Write a detailed Chinese response with 3-6 concise paragraphs or bullets covering understanding, concerns, and recommendations.'
@@ -946,14 +1030,11 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       input.expectedOutput.kind === 'task_acceptance_decision'
         ? 'For task_acceptance_decision, decide whether this assigned agent can execute the currentTask. Return status accepted, blocked, or rejected; reason; optional missingContext; optional requestedContext { reason, requestedRefs, requestedPaths, requestedCommands, followUpInstruction } when evidence is insufficient; optional handoffSuggestion { targetAgentKey or targetAgentId, reason, riskLevel }; optional confidence; optional alternativeAgentKeys/alternativeAgentIds; and optional agentMessages. Do not reassign the task yourself.'
         : '',
-      input.expectedOutput.kind === 'task_claim_decision'
-        ? 'For legacy task_claim_decision, decide whether this agent should accept the currentTask. Return accepted, reason, optional confidence, optional alternativeAgentKeys/alternativeAgentIds, optional handoffSuggestion, and optional agentMessages for coordination. Do not reassign the task yourself.'
-        : '',
       input.expectedOutput.kind === 'task_execution_result'
         ? 'For task_execution_result, include changedArtifacts. If this is a validation task or the agent is the Validation Agent, include a test_report artifact with metadata.validationEvidence mapping each taskContext.validationRules item to verdicts and taskContext.evidenceRefs, plus validatorAgentKey, validatorAgentId, and independentFromAgentKeys from taskContext.agentResponsibilities. If workspaceManifest is present, analyze the impact surface from manifest paths, but ground content-specific changes only in selectedEvidenceContents. Do not collapse a multi-file requirement into one file. Use agent-output only for auxiliary summaries. Include optional agentMessages when progress, risks, questions, or handoffs should be sent to other agents; target them with targetAgentKeys such as coordinator, frontend, backend, test, review.'
         : '',
       input.expectedOutput.kind === 'post_review_report' ? POST_REVIEW_CONTEXT_ACTION_INSTRUCTION : '',
-      input.contextPack.workingDirectory
+      this.workspaceBindings.resolveServerRoot(input)
         ? 'A local working directory is selected. Return file changes only as RuntimeArtifactOutput.metadata.fileChanges with safe relative paths. The browser applies those changes inside the selected directory.'
         : 'No local working directory is selected. Do not return fileChanges.'
     ]
@@ -967,11 +1048,10 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   ): { output?: RuntimeOutput; diagnostics: RuntimeOutputDiagnostics } {
     const extracted = this.extractRuntimeOutput(body, expectedKind);
     if (extracted.output) {
-      const output = this.normalizeOutput(extracted.output);
-      const validation = validateRuntimeOutput(output, expectedKind);
+      const validation = validateRuntimeOutput(extracted.output, expectedKind);
       if (validation.valid) {
         return {
-          output,
+          output: validation.value,
           diagnostics: this.runtimeOutputDiagnostics(body, expectedKind, 'valid', validation.errors)
         };
       }
@@ -1089,30 +1169,6 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     return redacted.replace(/\s+/g, ' ').trim().slice(0, llmDiagnosticPreviewChars());
   }
 
-  /** Small local models sometimes return nested objects where the contract expects plain text. */
-  private normalizeOutput(output: RuntimeOutput): RuntimeOutput {
-    if (output.kind === 'agent_message' && typeof output.content !== 'string') {
-      const fallbackFields = { ...(output as unknown as Record<string, unknown>) };
-      delete fallbackFields.kind;
-      delete fallbackFields.messageKind;
-      delete fallbackFields.content;
-      const normalized = this.toPlainText(output.content).trim() || this.toPlainText(fallbackFields).trim();
-      return { ...output, content: normalized };
-    }
-    return output;
-  }
-
-  private toPlainText(value: unknown): string {
-    if (typeof value === 'string') return value;
-    if (Array.isArray(value)) return value.map((item) => this.toPlainText(item)).join('\n');
-    if (value && typeof value === 'object') {
-      return Object.entries(value as Record<string, unknown>)
-        .map(([key, item]) => `${key}: ${this.toPlainText(item)}`)
-        .join('\n');
-    }
-    return String(value ?? '');
-  }
-
   private extractMessageContent(body: GenericLlmResponseBody): { content?: string; source?: string } {
     const candidates: Array<[string, unknown]> = [
       ['choices[0].message.content', body.choices?.[0]?.message?.content],
@@ -1139,23 +1195,9 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     body: GenericLlmResponseBody,
     expectedKind: RuntimeOutputKind
   ): { output?: RuntimeOutput; source?: string } {
-    const candidates: Array<[string, unknown]> = [
-      ['response_body', body],
-      ['choices[0].message.content', body.choices?.[0]?.message?.content],
-      ['choices[0].message.reasoning', body.choices?.[0]?.message?.reasoning],
-      ['choices[0].message.reasoning_content', body.choices?.[0]?.message?.reasoning_content],
-      ['choices[0].text', body.choices?.[0]?.text],
-      ['output_text', body.output_text],
-      ['output', body.output],
-      ['message', body.message],
-      ['response', body.response]
-    ];
-
-    for (const [source, value] of candidates) {
-      const output = this.toRuntimeOutput(value, expectedKind);
-      if (output) {
-        return { output, source };
-      }
+    const directOutput = this.toRuntimeOutput(body, expectedKind);
+    if (directOutput) {
+      return { output: directOutput, source: 'response_body' };
     }
 
     const extracted = this.extractMessageContent(body);
@@ -1167,69 +1209,37 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     return output ? { output, source: extracted.source } : {};
   }
 
-  private toRuntimeOutput(value: unknown, expectedKind: RuntimeOutputKind, depth = 0): RuntimeOutput | undefined {
-    if (depth > 4 || value === undefined || value === null) {
+  private toRuntimeOutput(value: unknown, expectedKind: RuntimeOutputKind): RuntimeOutput | undefined {
+    if (value === undefined || value === null) {
       return undefined;
     }
 
     if (typeof value === 'string') {
-      return this.parseRuntimeOutputText(value, expectedKind, depth);
+      return this.parseRuntimeOutputText(value, expectedKind);
     }
 
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        const output = this.toRuntimeOutput(item, expectedKind, depth + 1);
-        if (output) {
-          return output;
-        }
-      }
-      return undefined;
-    }
-
-    if (typeof value !== 'object') {
+    if (typeof value !== 'object' || Array.isArray(value)) {
       return undefined;
     }
 
     const record = value as Record<string, unknown>;
     if (record.kind === expectedKind) {
-      // 带 kind 的输出同样要走字段归一化：模型可能返回 "success" 等非法 status，
-      // 原样透传会被编排器误判为任务失败。清洗失败时回退原记录，保持旧行为。
-      return this.coerceRuntimeOutputWithoutKind(record, expectedKind) ?? (record as RuntimeOutput);
+      const validation = validateRuntimeOutput(record, expectedKind);
+      return validation.valid ? validation.value : undefined;
     }
-    if (expectedKind === 'task_acceptance_decision' && record.kind === 'task_claim_decision') {
-      return this.coerceRuntimeOutputWithoutKind(record, expectedKind);
-    }
-    if (typeof record.kind === 'string') {
-      return undefined;
-    }
-
-    const directOutput = this.coerceRuntimeOutputWithoutKind(record, expectedKind);
-    if (directOutput && this.isDirectRuntimeOutputShape(record, expectedKind)) {
-      return directOutput;
-    }
-
-    for (const key of ['output', 'result', 'final_output', 'data', 'content', 'message', 'text', 'output_text', 'value']) {
-      const output = this.toRuntimeOutput(record[key], expectedKind, depth + 1);
-      if (output) {
-        return output;
-      }
-    }
-
-    return directOutput;
+    return undefined;
   }
 
-  private parseRuntimeOutputText(content: string, expectedKind: RuntimeOutputKind, depth: number) {
+  private parseRuntimeOutputText(content: string, expectedKind: RuntimeOutputKind) {
     const trimmed = content.trim();
     if (!trimmed) {
       return undefined;
     }
 
-    let sawExplicitWrongKind = false;
     for (const candidate of this.jsonTextCandidates(trimmed)) {
       try {
         const parsed = JSON.parse(candidate) as unknown;
-        sawExplicitWrongKind ||= this.hasExplicitWrongKind(parsed, expectedKind);
-        const output = this.toRuntimeOutput(parsed, expectedKind, depth + 1);
+        const output = this.toRuntimeOutput(parsed, expectedKind);
         if (output) {
           return output;
         }
@@ -1238,408 +1248,11 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       }
     }
 
-    if (expectedKind === 'agent_message' && !sawExplicitWrongKind) {
-      return {
-        kind: 'agent_message',
-        messageKind: 'summary',
-        content: trimmed
-      } satisfies AgentMessageOutput;
-    }
-
     return undefined;
-  }
-
-  private coerceRuntimeOutputWithoutKind(
-    record: Record<string, unknown>,
-    expectedKind: RuntimeOutputKind
-  ): RuntimeOutput | undefined {
-    if (expectedKind === 'agent_message') {
-      const content = this.firstPlainText(record.content, record.message, record.text, record.output_text, record.value).trim();
-      if (!content) {
-        return undefined;
-      }
-      return {
-        kind: 'agent_message',
-        messageKind: this.asAgentMessageKind(record.messageKind),
-        content,
-        targetAgentIds: this.optionalStringArray(record.targetAgentIds),
-        targetAgentKeys: this.optionalStringArray(record.targetAgentKeys),
-        mentionedAgentIds: this.optionalStringArray(record.mentionedAgentIds),
-        relatedTaskIds: this.optionalStringArray(record.relatedTaskIds)
-      } satisfies AgentMessageOutput;
-    }
-
-    if (expectedKind === 'task_brief') {
-      const goal = this.firstPlainText(record.goal, record.summary, record.content).trim();
-      if (!goal) {
-        return undefined;
-      }
-      return {
-        kind: 'task_brief',
-        goal,
-        scope: this.stringArray(record.scope),
-        outOfScope: this.stringArray(record.outOfScope),
-        constraints: this.stringArray(record.constraints),
-        acceptanceCriteria: this.stringArray(record.acceptanceCriteria),
-        risks: this.stringArray(record.risks),
-        openQuestions: this.stringArray(record.openQuestions),
-        suggestedTasks: Array.isArray(record.suggestedTasks) ? (record.suggestedTasks as never[]) : []
-      };
-    }
-
-    if (expectedKind === 'task_execution_result') {
-      const summary = this.firstPlainText(record.summary, record.content, record.message, record.text).trim();
-      if (!summary) {
-        return undefined;
-      }
-      const changedArtifacts = this.artifacts(record.changedArtifacts);
-      if (!changedArtifacts) {
-        return undefined;
-      }
-      return {
-        kind: 'task_execution_result',
-        status: this.asTaskExecutionStatus(record.status),
-        summary,
-        completedItems: this.stringArray(record.completedItems),
-        changedArtifacts,
-        requestedContext: this.optionalContextRequest(record.requestedContext),
-        agentMessages: this.agentMessages(record.agentMessages),
-        nextSuggestedActions: this.stringArray(record.nextSuggestedActions),
-        risks: this.stringArray(record.risks)
-      };
-    }
-
-    if (expectedKind === 'task_acceptance_decision') {
-      const reason = this.firstPlainText(record.reason, record.summary, record.content, record.message).trim();
-      if (!reason && record.status === undefined && typeof record.accepted !== 'boolean') {
-        return undefined;
-      }
-      return {
-        kind: 'task_acceptance_decision',
-        status: this.asTaskAcceptanceStatus(record.status, record.accepted),
-        reason: reason || 'Model returned an acceptance decision without a reason.',
-        missingContext: this.optionalStringArray(record.missingContext),
-        requestedContext: this.optionalContextRequest(record.requestedContext),
-        handoffSuggestion: this.optionalHandoffSuggestion(record.handoffSuggestion),
-        confidence: typeof record.confidence === 'number' ? record.confidence : undefined,
-        alternativeAgentKeys: this.optionalStringArray(record.alternativeAgentKeys),
-        alternativeAgentIds: this.optionalStringArray(record.alternativeAgentIds),
-        agentMessages: this.agentMessages(record.agentMessages)
-      } satisfies TaskAcceptanceDecisionOutput;
-    }
-
-    if (expectedKind === 'task_claim_decision') {
-      const reason = this.firstPlainText(record.reason, record.summary, record.content, record.message).trim();
-      if (!reason && typeof record.accepted !== 'boolean') {
-        return undefined;
-      }
-      return {
-        kind: 'task_claim_decision',
-        accepted: typeof record.accepted === 'boolean' ? record.accepted : true,
-        reason: reason || 'Model returned a claim decision without a reason.',
-        confidence: typeof record.confidence === 'number' ? record.confidence : undefined,
-        missingContext: this.optionalStringArray(record.missingContext),
-        requestedContext: this.optionalContextRequest(record.requestedContext),
-        handoffSuggestion: this.optionalHandoffSuggestion(record.handoffSuggestion),
-        alternativeAgentKeys: this.optionalStringArray(record.alternativeAgentKeys),
-        alternativeAgentIds: this.optionalStringArray(record.alternativeAgentIds),
-        agentMessages: this.agentMessages(record.agentMessages)
-      } satisfies TaskClaimDecisionOutput;
-    }
-
-    if (expectedKind === 'post_review_report') {
-      const recommendation = this.asPostReviewRecommendation(record.recommendation);
-      if (!recommendation && record.isConsistentWithBrief === undefined) {
-        return undefined;
-      }
-      const actions = normalizePostReviewActions(record.actions);
-      if (record.actions !== undefined && record.actions !== null && !actions) {
-        return undefined;
-      }
-      return {
-        kind: 'post_review_report',
-        isConsistentWithBrief: record.isConsistentWithBrief !== false,
-        matchedItems: this.stringArray(record.matchedItems),
-        mismatchedItems: this.stringArray(record.mismatchedItems),
-        missingItems: this.stringArray(record.missingItems),
-        outOfScopeChanges: this.stringArray(record.outOfScopeChanges),
-        testResults: this.stringArray(record.testResults),
-        recommendation: recommendation ?? 'ask_user',
-        actions
-      } satisfies PostReviewReportOutput;
-    }
-
-    if (expectedKind === 'final_delivery') {
-      const summary = this.firstPlainText(record.summary, record.content, record.message, record.text).trim();
-      if (!summary) {
-        return undefined;
-      }
-      return {
-        kind: 'final_delivery',
-        summary,
-        completedItems: this.stringArray(record.completedItems),
-        incompleteItems: this.stringArray(record.incompleteItems),
-        risks: this.stringArray(record.risks),
-        artifactRefs: this.stringArray(record.artifactRefs)
-      } satisfies FinalDeliveryOutput;
-    }
-
-    if (expectedKind === 'user_message_handling_plan') {
-      const coordinatorInstruction = this.firstPlainText(
-        record.coordinatorInstruction,
-        record.instruction,
-        record.summary,
-        record.content
-      ).trim();
-      if (!coordinatorInstruction && !record.intent) {
-        return undefined;
-      }
-      return {
-        kind: 'user_message_handling_plan',
-        intent: this.asUserMessageIntent(record.intent),
-        priority: this.asEventPriority(record.priority),
-        shouldPause: record.shouldPause === true,
-        affectedTaskIds: this.stringArray(record.affectedTaskIds),
-        affectedAgentIds: this.stringArray(record.affectedAgentIds),
-        requiresBriefRevision: record.requiresBriefRevision === true,
-        requiresUserConfirmation: record.requiresUserConfirmation === true,
-        coordinatorInstruction: coordinatorInstruction || 'Handle the user message according to the current session state.'
-      } satisfies UserMessageHandlingPlanOutput;
-    }
-
-    return undefined;
-  }
-
-  private isDirectRuntimeOutputShape(record: Record<string, unknown>, expectedKind: RuntimeOutputKind) {
-    if (expectedKind === 'agent_message') {
-      return (
-        record.content !== undefined ||
-        record.messageKind !== undefined ||
-        record.targetAgentKeys !== undefined ||
-        record.targetAgentIds !== undefined
-      );
-    }
-    if (expectedKind === 'task_brief') {
-      return record.goal !== undefined || record.acceptanceCriteria !== undefined || record.suggestedTasks !== undefined;
-    }
-    if (expectedKind === 'task_execution_result') {
-      return record.summary !== undefined || record.status !== undefined || record.completedItems !== undefined;
-    }
-    if (expectedKind === 'task_acceptance_decision') {
-      return record.status !== undefined || record.accepted !== undefined || record.reason !== undefined;
-    }
-    if (expectedKind === 'task_claim_decision') {
-      return record.accepted !== undefined || record.reason !== undefined;
-    }
-    if (expectedKind === 'post_review_report') {
-      return record.recommendation !== undefined || record.isConsistentWithBrief !== undefined;
-    }
-    if (expectedKind === 'final_delivery') {
-      return record.summary !== undefined || record.completedItems !== undefined || record.artifactRefs !== undefined;
-    }
-    return record.intent !== undefined || record.coordinatorInstruction !== undefined;
-  }
-
-  private hasExplicitWrongKind(value: unknown, expectedKind: RuntimeOutputKind, depth = 0): boolean {
-    if (depth > 4 || value === undefined || value === null) {
-      return false;
-    }
-    if (Array.isArray(value)) {
-      return value.some((item) => this.hasExplicitWrongKind(item, expectedKind, depth + 1));
-    }
-    if (typeof value !== 'object') {
-      return false;
-    }
-    const record = value as Record<string, unknown>;
-    if (typeof record.kind === 'string') {
-      return record.kind !== expectedKind;
-    }
-    return ['output', 'result', 'final_output', 'data', 'content', 'message', 'text', 'output_text', 'value'].some((key) =>
-      this.hasExplicitWrongKind(record[key], expectedKind, depth + 1)
-    );
-  }
-
-  private firstPlainText(...values: unknown[]) {
-    for (const value of values) {
-      const text = this.toPlainText(value).trim();
-      if (text) {
-        return text;
-      }
-    }
-    return '';
-  }
-
-  private stringArray(value: unknown): string[] {
-    return this.optionalStringArray(value) ?? [];
-  }
-
-  private optionalStringArray(value: unknown): string[] | undefined {
-    if (value === undefined || value === null) {
-      return undefined;
-    }
-    const values = Array.isArray(value) ? value : [value];
-    return values.map((item) => this.toPlainText(item).trim()).filter(Boolean);
-  }
-
-  private agentMessages(value: unknown): AgentMessageOutput[] | undefined {
-    if (!Array.isArray(value)) {
-      return undefined;
-    }
-    const messages = value
-      .map((item) =>
-        item && typeof item === 'object'
-          ? this.coerceRuntimeOutputWithoutKind(item as Record<string, unknown>, 'agent_message')
-          : this.toRuntimeOutput(item, 'agent_message')
-      )
-      .filter((item): item is AgentMessageOutput => item?.kind === 'agent_message');
-    return messages.length ? messages : undefined;
-  }
-
-  private artifacts(value: unknown): RuntimeArtifactOutput[] | undefined {
-    if (value === undefined || value === null) {
-      return [];
-    }
-    if (!Array.isArray(value)) {
-      return undefined;
-    }
-    const normalized = value.map(normalizeRuntimeArtifact);
-    return normalized.every((artifact): artifact is RuntimeArtifactOutput => Boolean(artifact))
-      ? normalized
-      : undefined;
-  }
-
-  private optionalContextRequest(value: unknown): RuntimeContextRequest | undefined {
-    return value && typeof value === 'object' && !Array.isArray(value) ? (value as RuntimeContextRequest) : undefined;
-  }
-
-  private optionalHandoffSuggestion(value: unknown): TaskAcceptanceDecisionOutput['handoffSuggestion'] {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      return undefined;
-    }
-    const record = value as Record<string, unknown>;
-    const reason = this.firstPlainText(record.reason, record.summary, record.content, record.message).trim();
-    if (!reason) {
-      return undefined;
-    }
-    const riskLevel = ['low', 'medium', 'high'].includes(String(record.riskLevel))
-      ? (record.riskLevel as 'low' | 'medium' | 'high')
-      : undefined;
-    return {
-      targetAgentKey: typeof record.targetAgentKey === 'string' ? record.targetAgentKey : undefined,
-      targetAgentId: typeof record.targetAgentId === 'string' ? record.targetAgentId : undefined,
-      reason,
-      missingContext: this.optionalStringArray(record.missingContext),
-      riskLevel
-    };
-  }
-
-  private asAgentMessageKind(value: unknown): AgentMessageOutput['messageKind'] {
-    return ['discussion', 'answer', 'handoff', 'progress', 'risk', 'decision', 'summary'].includes(String(value))
-      ? (value as AgentMessageOutput['messageKind'])
-      : 'summary';
-  }
-
-  private asTaskExecutionStatus(value: unknown) {
-    return ['completed', 'failed', 'blocked', 'needs_review'].includes(String(value))
-      ? (value as 'completed' | 'failed' | 'blocked' | 'needs_review')
-      : 'completed';
-  }
-
-  private asTaskAcceptanceStatus(status: unknown, accepted?: unknown): TaskAcceptanceDecisionOutput['status'] {
-    if (['accepted', 'blocked', 'rejected'].includes(String(status))) {
-      return status as TaskAcceptanceDecisionOutput['status'];
-    }
-    if (typeof accepted === 'boolean') {
-      return accepted ? 'accepted' : 'rejected';
-    }
-    return 'accepted';
-  }
-
-  private asPostReviewRecommendation(value: unknown) {
-    return ['deliver', 'rework', 'ask_user'].includes(String(value))
-      ? (value as 'deliver' | 'rework' | 'ask_user')
-      : undefined;
-  }
-
-  private asUserMessageIntent(value: unknown) {
-    return ['clarification', 'constraint', 'command', 'question', 'correction', 'knowledge_input', 'preference_input'].includes(
-      String(value)
-    )
-      ? (value as UserMessageHandlingPlanOutput['intent'])
-      : 'question';
-  }
-
-  private asEventPriority(value: unknown) {
-    return ['low', 'normal', 'high', 'critical'].includes(String(value))
-      ? (value as UserMessageHandlingPlanOutput['priority'])
-      : 'normal';
   }
 
   private jsonTextCandidates(content: string) {
-    const candidates = new Set<string>([content]);
-    const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
-    if (fenced) {
-      candidates.add(fenced);
-    }
-
-    const firstBrace = content.indexOf('{');
-    const lastBrace = content.lastIndexOf('}');
-    if (firstBrace >= 0 && lastBrace > firstBrace) {
-      candidates.add(content.slice(firstBrace, lastBrace + 1));
-    }
-
-    // 修复变体放在原始候选之后:合法 JSON 先按原样命中,坏的再尝试修复版。
-    for (const candidate of [...candidates]) {
-      const repaired = this.escapeControlCharsInJsonStrings(candidate);
-      if (repaired !== candidate) {
-        candidates.add(repaired);
-      }
-    }
-
-    return [...candidates];
-  }
-
-  /**
-   * 模型(尤其 Claude 系)输出长中文时,常在 JSON 字符串字面量里写入裸换行等
-   * 控制字符,严格 JSON.parse 会直接拒绝。只转义字符串内部的 U+0000–U+001F,
-   * 字符串外的控制字符是合法空白,原样保留。
-   */
-  private escapeControlCharsInJsonStrings(text: string) {
-    let result = '';
-    let inString = false;
-    let escaped = false;
-    for (const char of text) {
-      if (!inString) {
-        if (char === '"') {
-          inString = true;
-        }
-        result += char;
-        continue;
-      }
-      if (escaped) {
-        escaped = false;
-        result += char;
-        continue;
-      }
-      if (char === '\\') {
-        escaped = true;
-        result += char;
-        continue;
-      }
-      if (char === '"') {
-        inString = false;
-        result += char;
-        continue;
-      }
-      const code = char.charCodeAt(0);
-      if (code < 0x20) {
-        result +=
-          code === 0x0a ? '\\n' : code === 0x0d ? '\\r' : code === 0x09 ? '\\t' : `\\u${code.toString(16).padStart(4, '0')}`;
-        continue;
-      }
-      result += char;
-    }
-    return result;
+    return [content];
   }
 
   private asResponseBody(value: unknown): GenericLlmResponseBody {
@@ -1700,6 +1313,11 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       return undefined;
     }
     const reason = signal.reason;
+    if (isExecutionTermination(reason)) {
+      return reason.kind === 'phase_timeout' || reason.kind === 'runtime_timeout'
+        ? safeTerminationMessage(reason)
+        : undefined;
+    }
     const message =
       typeof reason === 'string' ? reason : reason instanceof Error ? reason.message : reason ? String(reason) : '';
     const normalized = message.toLowerCase();
@@ -1870,6 +1488,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     const contentType = response.headers.get('content-type') ?? 'unknown content-type';
     const retryable = response.status === 429 || response.status >= 500;
     const timeoutStatus = response.status === 408 || response.status === 504 || response.status === 524;
+    const retryAfterMs = this.retryAfterMs(response.headers.get('retry-after'));
     const code: RuntimeError['code'] = timeoutStatus ? 'RUNTIME_TIMEOUT' : 'MODEL_ERROR';
     const providerMessage = this.httpStatusMessage(response.status, context);
     const htmlHint =
@@ -1883,11 +1502,27 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       code,
       retryable,
       details: {
+        provider: 'openai-compatible',
+        providerFailure: true,
+        stage: 'provider_response',
         httpStatus: response.status,
+        ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
         contentType,
         responsePreview: preview
       }
     };
+  }
+
+  private retryAfterMs(value: string | null) {
+    if (!value) {
+      return undefined;
+    }
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.round(seconds * 1_000);
+    }
+    const retryAt = Date.parse(value);
+    return Number.isFinite(retryAt) ? Math.max(0, retryAt - Date.now()) : undefined;
   }
 
   private httpStatusMessage(status: number, context: string) {
@@ -1923,7 +1558,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       'RUNTIME_TIMEOUT',
       'RUNTIME_CANCELLED',
       'MODEL_ERROR',
-      'OUTPUT_SCHEMA_INVALID',
+      'RUNTIME_OUTPUT_CONTRACT_VIOLATION',
       'CAPABILITY_BLOCKED',
       'CONTEXT_INSUFFICIENT',
       'TOKEN_BUDGET_EXCEEDED',
@@ -1932,7 +1567,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   }
 
   private failedResult(
-    input: AgentRunInput,
+    input: InvocationPlan,
     startedAt: string,
     model: string,
     message: string,
@@ -1941,38 +1576,48 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     usage?: RuntimeUsage
   ): AgentRunResult {
     return {
-      runId: input.runId,
+      invocationId: input.invocationId,
       runtimeType: 'generic_llm',
       status: 'failed',
-      output: {
-        kind: 'agent_message',
+      output: createAgentMessageOutput({
         messageKind: 'risk',
         content: `GenericLlmRuntime failed during ${input.phase}.`
-      } satisfies AgentMessageOutput,
+      }) satisfies AgentMessageOutput,
       events: [
         {
-          runId: input.runId,
+          invocationId: input.invocationId,
           type: 'runtime_started',
+          visibility: 'user',
           content: `${input.agent.name} GenericLlmRuntime started ${input.phase}`,
           createdAt: startedAt
         },
         {
-          runId: input.runId,
+          invocationId: input.invocationId,
           type: 'runtime_failed',
+          visibility: 'user',
           content: `${input.agent.name} GenericLlmRuntime failed ${input.phase}`,
           metadata: { message, code, details },
           createdAt: nowIso()
         }
       ],
       artifacts: [],
+      systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
       usage: usage ?? this.toUsage(undefined, model),
       error: {
         code,
         message,
-        retryable: !['OUTPUT_SCHEMA_INVALID', 'RUNTIME_CANCELLED', 'CAPABILITY_BLOCKED'].includes(code),
+        retryable: this.retryableRuntimeError(code, details),
         details
       }
     };
+  }
+
+  private retryableRuntimeError(code: RuntimeError['code'], details?: Record<string, unknown>) {
+    const httpStatus = details?.httpStatus;
+    if (typeof httpStatus === 'number') {
+      return httpStatus === 408 || httpStatus === 429 || httpStatus === 504 || httpStatus === 524 || httpStatus >= 500;
+    }
+    return !['RUNTIME_OUTPUT_CONTRACT_VIOLATION', 'RUNTIME_CANCELLED', 'CAPABILITY_BLOCKED'].includes(code);
   }
 
   private mergeUsage(left: RuntimeUsage, right: RuntimeUsage): RuntimeUsage {

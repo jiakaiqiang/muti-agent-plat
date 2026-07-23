@@ -1,5 +1,5 @@
 import type {
-  ContextPack,
+  ContextAssembly,
   WorkspaceManifestCoverage,
   WorkspaceSkippedReason
 } from './contracts';
@@ -36,7 +36,7 @@ type SkippedValues = WorkspaceManifestCoverage['skippedByReason'][WorkspaceSkipp
 type SkippedValuesAreNumbers = Assert<IsExact<SkippedValues, number | undefined>>;
 
 // Test 4: WorkspaceManifest.coverage is an optional field of the new type.
-type Manifest = NonNullable<ContextPack['workspaceManifest']>;
+type Manifest = NonNullable<ContextAssembly['workspaceManifest']>;
 type ManifestCoverage = Manifest['coverage'];
 type ManifestCoverageIsOptional = Assert<
   IsExact<ManifestCoverage, WorkspaceManifestCoverage | undefined>

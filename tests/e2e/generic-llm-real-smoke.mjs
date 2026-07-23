@@ -120,10 +120,14 @@ const llmServer = createServer(async (request, response) => {
             role: 'assistant',
             content: JSON.stringify({
               kind: 'task_execution_result',
-              schemaVersion: '0.1',
+              schemaVersion: '1.0',
               status: 'completed',
               summary: 'Real OpenAI-compatible runtime smoke completed.',
               completedItems: ['HTTP chat completions endpoint was called'],
+              changedArtifacts: [],
+              requestedContext: null,
+              agentMessages: [],
+              nextSuggestedActions: [],
               risks: []
             })
           },
@@ -149,7 +153,7 @@ const server = spawn(process.execPath, ['apps/server/dist/apps/server/src/main.j
     ...process.env,
     SERVER_PORT: serverPort,
     AGENT_CLUSTER_DATA_FILE: dataFile,
-    DEFAULT_AGENT_RUNTIME_TYPE: 'generic_llm',
+    GLOBAL_DEFAULT_RUNTIME_TYPE: 'generic_llm',
     LLM_PROVIDER: 'openai-compatible',
     LLM_MODEL: 'real-smoke-model',
     LLM_API_KEY: 'real-smoke-key',

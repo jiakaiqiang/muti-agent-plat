@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import type {
+  AgentDefinition,
   CapabilityDefinition,
+  CompiledAgentIdentity,
   CompiledAgentProfile,
   ProfileDiagnostic,
   ProfileDiagnosticCode,
@@ -19,6 +21,17 @@ export type CompileProfileInput = {
   agentCapabilityIds: string[];
   budget?: ProfileBudget;
 };
+
+export class AgentProfileCompilationError extends Error {
+  readonly code = 'AGENT_PROFILE_INVALID';
+  readonly diagnostics: ProfileDiagnostic[];
+
+  constructor(diagnostics: ProfileDiagnostic[]) {
+    super(diagnostics.map((item) => item.message).join('; ') || 'Agent profile is invalid.');
+    this.name = 'AgentProfileCompilationError';
+    this.diagnostics = diagnostics;
+  }
+}
 
 export interface ProfileSkillRepository {
   findByKey(key: string): Skill | undefined;
@@ -52,6 +65,65 @@ export class AgentProfileCompilerService {
     @Optional() @Inject(PROFILE_SKILL_REPOSITORY) private readonly skills?: ProfileSkillRepository,
     @Optional() @Inject(PROFILE_CAPABILITY_REPOSITORY) private readonly capabilities?: ProfileCapabilityRepository
   ) {}
+
+  compileIdentity(input: { agent: AgentDefinition; budget?: ProfileBudget }): CompiledAgentIdentity {
+    const { agent } = input;
+    const compiled = this.compile({
+      profileMarkdown: agent.profileMarkdown,
+      agentCapabilityIds: agent.capabilityIds,
+      budget: input.budget
+    });
+    const errors = compiled.diagnostics.filter((item) => item.severity === 'error');
+    if (errors.length) throw new AgentProfileCompilationError(errors);
+
+    const skillBindings = compiled.skillIds.map((skillId) => {
+      const skill = this.skills?.findById(skillId);
+      if (!skill) {
+        throw new AgentProfileCompilationError([
+          {
+            severity: 'error',
+            code: 'unknown_skill',
+            message: `未找到 Skill: ${skillId}`,
+            kind: 'skill',
+            refKey: skillId
+          }
+        ]);
+      }
+      const key = skill.key ?? skillId;
+      const contentHash = createHash('sha256')
+        .update(JSON.stringify({
+          id: skill.id,
+          key,
+          revision: skill.revision ?? 1,
+          name: skill.name,
+          description: skill.description ?? '',
+          content: skill.content,
+          files: skill.files
+        }))
+        .digest('hex');
+      return {
+        id: skill.id,
+        key,
+        revision: skill.revision ?? 1,
+        contentHash
+      };
+    });
+
+    return {
+      agentId: agent.id,
+      key: agent.key,
+      name: agent.name,
+      role: agent.role,
+      systemPrompt: compiled.systemPrompt,
+      profileHash: compiled.contentHash,
+      profileRevision: agent.profileRevision,
+      skillBindings,
+      requestedToolIds: [...compiled.toolIds],
+      requestedToolKeys: [...compiled.toolKeys],
+      capabilityIds: [...agent.capabilityIds],
+      knowledgeBaseIds: [...agent.defaultKnowledgeBaseIds]
+    };
+  }
 
   compile(input: CompileProfileInput): CompiledAgentProfile {
     const sourceMarkdown = input.profileMarkdown ?? '';

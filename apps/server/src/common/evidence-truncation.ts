@@ -118,7 +118,7 @@ function tsSymbolWindow(
 
 /**
  * Trims a workspace file's text to fit a byte budget for inclusion in a
- * ContextPack's selectedEvidenceContents. T08 ships the baseline slice
+ * ContextAssembly's selectedEvidenceContents. T08 ships the baseline slice
  * strategy; T09 adds ts-symbol-window for TS/JS/Vue.
  */
 export function truncateContentForEvidence(

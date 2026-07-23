@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
+import { storeToRefs } from 'pinia'
+import { useWorkspaceUiStore } from '@/stores/workspaceUi'
 import UiIcon from './UiIcon.vue'
 
 const props = withDefaults(
@@ -20,7 +22,8 @@ const emit = defineEmits<{
   send: [content: string]
 }>()
 
-const draft = ref('')
+const workspaceUiStore = useWorkspaceUiStore()
+const { messageDraft: draft } = storeToRefs(workspaceUiStore)
 const canSend = computed(() => draft.value.trim().length > 0 && !props.disabled && !props.busy)
 
 function submit() {

@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { AgentCardState, CollaborationEvent, ConfirmationCardState, SessionStatus, TaskViewState } from '@/types/contracts'
+import { storeToRefs } from 'pinia'
+import { actorAgentId } from '@/composables/useActor'
+import { useWorkspaceUiStore, type WorkflowStageKey } from '@/stores/workspaceUi'
+import { applicableArtifactFileChanges } from './artifactFileChangeModel'
+import type { ActorRef, AgentCardState, ArtifactEventPayload, CollaborationEvent, ConfirmationCardState, SessionStatus, TaskViewState } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
 import UiIcon from './UiIcon.vue'
 
@@ -18,7 +22,6 @@ const emit = defineEmits<{
   switchView: [mode: 'chat' | 'collaboration_graph' | 'workflow' | 'debug']
 }>()
 
-type WorkflowStageKey = 'intake' | 'brief' | 'dispatch' | 'execution' | 'review'
 type WorkflowStage = {
   key: WorkflowStageKey
   title: string
@@ -42,7 +45,8 @@ type DragTarget =
   | { kind: 'edge'; edgeId: string; endpoint: 'from' | 'to' }
   | { kind: 'edge-line'; edgeId: string; origin: { from: GraphPoint; to: GraphPoint; pointer: GraphPoint } }
 
-const selectedStageKey = ref<WorkflowStageKey>('intake')
+const workspaceUiStore = useWorkspaceUiStore()
+const { selectedWorkflowStage: selectedStageKey } = storeToRefs(workspaceUiStore)
 const workflowScale = ref(1)
 const workflowNodePositions = ref<Record<string, GraphPoint>>({})
 const workflowEdgePositions = ref<Record<string, { from?: GraphPoint; to?: GraphPoint }>>({})
@@ -92,7 +96,7 @@ const stages: WorkflowStage[] = [
     agent: 'Assigned Agents',
     points: ['创建任务池', 'Agent 接受任务', '依赖就绪后启动'],
     eventTypes: ['task_created', 'task_assigned', 'task_accepted', 'task_claimed', 'task_blocked', 'task_reassigned', 'task_started', 'task_waiting', 'agent_message'],
-    eventPhases: ['task_acceptance', 'task_acceptance_decision', 'task_acceptance_blocked', 'task_claim_decision', 'task_claim_declined', 'task_handoff'],
+    eventPhases: ['task_acceptance', 'task_acceptance_decision', 'task_acceptance_blocked', 'task_handoff'],
     successEventTypes: ['task_accepted', 'task_claimed', 'task_started']
   },
   {
@@ -136,8 +140,9 @@ const selectedStage = computed(() => stages.find((stage) => stage.key === select
 const agentTasksById = computed(() => {
   const tasks = new Map<string, TaskViewState[]>()
   for (const task of props.tasks) {
-    if (!task.assigneeAgentId) continue
-    tasks.set(task.assigneeAgentId, [...(tasks.get(task.assigneeAgentId) ?? []), task])
+    const assigneeId = actorAgentId(task.assignee)
+    if (!assigneeId) continue
+    tasks.set(assigneeId, [...(tasks.get(assigneeId) ?? []), task])
   }
   return tasks
 })
@@ -197,31 +202,31 @@ const workflowAgentEdges = computed<WorkflowAgentEdge[]>(() => {
   const taskEdges: WorkflowAgentEdge[] = []
   const coordinatorId = workflowAgentNodes.value[0]?.agent.agentId
   for (const event of props.events) {
-    const payload = event.metadata.payload as { taskId?: string; assigneeAgentId?: string; dependsOnTaskIds?: string[] } | undefined
+    const payload = event.metadata.payload as { taskId?: string; assignee?: ActorRef; dependsOnTaskIds?: string[] } | undefined
     const taskId = payload?.taskId ?? event.taskId
-    const assigneeAgentId = payload?.assigneeAgentId
-    if (!taskId || !assigneeAgentId || !agentIds.has(assigneeAgentId)) continue
-    taskOwnerById.set(taskId, assigneeAgentId)
+    const assigneeId = actorAgentId(payload?.assignee)
+    if (!taskId || !assigneeId || !agentIds.has(assigneeId)) continue
+    taskOwnerById.set(taskId, assigneeId)
     if (
       coordinatorId &&
-      coordinatorId !== assigneeAgentId &&
+      coordinatorId !== assigneeId &&
       ['task_created', 'task_assigned', 'task_accepted', 'task_claimed', 'task_blocked', 'task_reassigned', 'task_started', 'task_waiting'].includes(event.type)
     ) {
       taskEdges.push({
-        id: `${event.id}:${coordinatorId}:${assigneeAgentId}`,
+        id: `${event.id}:${coordinatorId}:${assigneeId}`,
         fromAgentId: coordinatorId,
-        toAgentId: assigneeAgentId,
+        toAgentId: assigneeId,
         phase: event.type === 'task_created' || event.type === 'task_assigned' ? 'task_acceptance' : 'task_handoff',
         kind: 'task'
       })
     }
-    for (const dependsOnTaskId of payload.dependsOnTaskIds ?? []) {
+    for (const dependsOnTaskId of payload?.dependsOnTaskIds ?? []) {
       const upstreamAgentId = taskOwnerById.get(dependsOnTaskId)
-      if (!upstreamAgentId || upstreamAgentId === assigneeAgentId || !agentIds.has(upstreamAgentId)) continue
+      if (!upstreamAgentId || upstreamAgentId === assigneeId || !agentIds.has(upstreamAgentId)) continue
       taskEdges.push({
-        id: `${event.id}:${upstreamAgentId}:${assigneeAgentId}:${dependsOnTaskId}`,
+        id: `${event.id}:${upstreamAgentId}:${assigneeId}:${dependsOnTaskId}`,
         fromAgentId: upstreamAgentId,
-        toAgentId: assigneeAgentId,
+        toAgentId: assigneeId,
         phase: 'task_handoff',
         kind: 'task'
       })
@@ -399,12 +404,14 @@ const workflowKeySignals = computed(() => {
   }
   for (const event of props.events) {
     const phase = eventPhase(event)
-    const payload = event.metadata.payload as { fileChanges?: unknown[] } | undefined
-    if (phase === 'task_acceptance_decision' || phase === 'task_claim_decision' || phase === 'task_acceptance') counts.claim += 1
+    const payload = event.metadata.payload
+    if (phase === 'task_acceptance_decision' || phase === 'task_acceptance') counts.claim += 1
     if (phase === 'task_acceptance_blocked' || phase === 'task_claim_declined') counts.decline += 1
     if (phase === 'user_message_routing') counts.routing += 1
     if (phase === 'agent_runtime_communication') counts.communication += 1
-    counts.fileChanges += payload?.fileChanges?.length ?? 0
+    if (event.type === 'artifact_created') {
+      counts.fileChanges += applicableArtifactFileChanges(payload as ArtifactEventPayload | undefined).length
+    }
     if (event.type === 'final_delivery_created') counts.delivery += 1
   }
   return [
@@ -423,13 +430,15 @@ function workflowEventTitle(event: CollaborationEvent) {
 }
 
 function workflowEventMeta(event: CollaborationEvent) {
-  const payload = event.metadata.payload as { fileChanges?: unknown[]; reason?: string; code?: string } | undefined
+  const payload = event.metadata.payload as (Partial<ArtifactEventPayload> & { reason?: string; code?: string }) | undefined
   const items: string[] = []
   const phase = eventPhase(event)
   if (phase) items.push(phase)
   if (payload?.reason) items.push(payload.reason)
   if (payload?.code) items.push(payload.code)
-  const fileChangeCount = payload?.fileChanges?.length ?? 0
+  const fileChangeCount = event.type === 'artifact_created'
+    ? applicableArtifactFileChanges(payload as ArtifactEventPayload | undefined).length
+    : 0
   if (fileChangeCount) items.push(`${fileChangeCount} file changes`)
   return items
 }

@@ -79,7 +79,7 @@ test('validateChangeSetBaseHashes returns conflict when file was modified', asyn
   });
 });
 
-test('validateChangeSetBaseHashes ignores create ops (no expectedHash required)', async () => {
+test('validateChangeSetBaseHashes allows create when the target does not exist', async () => {
   await withTempRoot(async (root) => {
     const changeSet = {
       id: '00000000-0000-4000-8000-000000000058',

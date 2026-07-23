@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import type {
-  Agent,
+  AgentDefinition,
   AgentCardState,
   ConfirmationCardState,
   RuntimeCapabilityDefinition,
@@ -12,7 +12,7 @@ import ConfirmationCard from './ConfirmationCard.vue'
 
 const props = defineProps<{
   agents: AgentCardState[]
-  availableAgents: Agent[]
+  availableAgents: AgentDefinition[]
   capabilities: RuntimeCapabilityDefinition[]
   tasks: TaskViewState[]
   activeConfirmation?: ConfirmationCardState

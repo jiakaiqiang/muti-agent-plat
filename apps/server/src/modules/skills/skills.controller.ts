@@ -36,18 +36,3 @@ export class SkillsController {
     return ok(this.skills.remove(skillId));
   }
 }
-
-@Controller('agents')
-export class AgentSkillsController {
-  constructor(private readonly skills: SkillsService) {}
-
-  @Post(':agentId/skills/:skillId')
-  bind(@Param('agentId') agentId: string, @Param('skillId') skillId: string) {
-    return ok(this.skills.bind(agentId, skillId));
-  }
-
-  @Delete(':agentId/skills/:skillId')
-  unbind(@Param('agentId') agentId: string, @Param('skillId') skillId: string) {
-    return ok(this.skills.unbind(agentId, skillId));
-  }
-}

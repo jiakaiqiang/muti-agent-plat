@@ -181,7 +181,7 @@ const server = spawn(process.execPath, ['apps/server/dist/apps/server/src/main.j
     AGENT_CLUSTER_POSTGRES_COLLECTION_TABLE: tableName,
     AGENT_CLUSTER_SEED_DEFAULT_AGENTS: 'false',
     DATABASE_URL: databaseUrl,
-    DEFAULT_AGENT_RUNTIME_TYPE: 'generic_llm',
+    GLOBAL_DEFAULT_RUNTIME_TYPE: 'generic_llm',
     LLM_DRY_RUN: 'false',
     LLM_MOCK_FALLBACK: 'false',
     MOCK_RUNTIME_ENABLED: 'false'

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import type { FileHash, ReadFileInput, ReadFileResult, WorkspaceRevision } from '@agent-cluster/shared';
 import { isSensitivePath } from '../../common/path-safety.js';
 import { resolveWorkspacePath } from './workspace-path.js';
+import { assertWorkspacePathWithinRoot } from './workspace-symlink-guard.js';
 
 const DEFAULT_MAX_BYTES = 512 * 1024;
 const BINARY_PROBE_BYTES = 8000;
@@ -20,6 +21,8 @@ export async function readServerLocalFile(args: ReadServerLocalFileArgs): Promis
   if (isSensitivePath(relative)) {
     throw new Error(`workspace read denied for sensitive path: ${relative}`);
   }
+
+  await assertWorkspacePathWithinRoot(rootPath, relative);
 
   const buffer = await readFile(absolute);
   if (looksBinary(buffer)) {

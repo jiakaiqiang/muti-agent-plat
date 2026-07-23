@@ -1,10 +1,8 @@
-import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
 import { ok } from '../../common/api-response.js';
 import type {
-  EngineeringRuntimeConfig,
-  ExecutionTarget,
   PostReviewAction,
-  RuntimeType,
+  RuntimePreference,
   SessionWorkingDirectory,
   WorkspaceSnapshot
 } from '@agent-cluster/shared';
@@ -33,11 +31,10 @@ export class SessionsController {
       knowledgeBaseIds?: string[];
       workingDirectory?: SessionWorkingDirectory;
       workspaceSnapshot?: WorkspaceSnapshot;
-      engineeringRuntimeType?: RuntimeType;
-      engineeringRuntime?: EngineeringRuntimeConfig;
-      executionTarget?: ExecutionTarget;
+      runtimePreference?: RuntimePreference;
     }
   ) {
+    assertSessionCreateContract(body);
     return this.sessions.create(body).then(ok);
   }
 
@@ -46,9 +43,20 @@ export class SessionsController {
     return ok(this.sessions.get(sessionId));
   }
 
+  @Post('sessions/:sessionId/workspace/snapshot')
+  refreshWorkspaceSnapshot(
+    @Param('sessionId') sessionId: string,
+    @Body() body: { workspaceId: string; workspaceSnapshot: WorkspaceSnapshot }
+  ) {
+    if (!body?.workspaceId || !body.workspaceSnapshot) {
+      throw new BadRequestException('workspaceId and workspaceSnapshot are required.');
+    }
+    return ok(this.sessions.refreshBrowserWorkspaceSnapshot(sessionId, body.workspaceId, body.workspaceSnapshot));
+  }
+
   @Delete('sessions/:sessionId')
-  delete(@Param('sessionId') sessionId: string) {
-    return ok(this.sessions.delete(sessionId));
+  async delete(@Param('sessionId') sessionId: string) {
+    return ok(await this.sessions.delete(sessionId));
   }
 
   @Post('sessions/:sessionId/messages')
@@ -83,11 +91,11 @@ export class SessionsController {
   }
 
   @Post('sessions/:sessionId/post-review/actions')
-  resolvePostReviewAction(
+  async resolvePostReviewAction(
     @Param('sessionId') sessionId: string,
     @Body() body: { confirmationId: string; action: PostReviewAction['action'] }
   ) {
-    return ok(this.sessions.resolvePostReviewAction(sessionId, body));
+    return ok(await this.sessions.resolvePostReviewAction(sessionId, body));
   }
 
   @Get('sessions/:sessionId/briefs')
@@ -100,11 +108,39 @@ export class SessionsController {
     return this.sessions.confirmBrief(sessionId, briefId).then(ok);
   }
 
+  @Post('sessions/:sessionId/workflow/select')
+  async selectWorkflow(
+    @Param('sessionId') sessionId: string,
+    @Body() body: { workflowId: string; workflowVersion?: number; confirmationId: string }
+  ) {
+    return ok(await this.sessions.selectWorkflow(sessionId, body));
+  }
+
+  @Post('sessions/:sessionId/workspace/empty-decision')
+  async resolveEmptyWorkspaceDecision(
+    @Param('sessionId') sessionId: string,
+    @Body() body: {
+      confirmationId: string;
+      decision: 'initialize_project' | 'reselect_workspace' | 'cancel';
+    }
+  ) {
+    return ok(await this.sessions.resolveEmptyWorkspaceDecision(sessionId, body));
+  }
+
+  @Post('sessions/:sessionId/workflow/steps/:taskId/decision')
+  resolveWorkflowStep(
+    @Param('sessionId') sessionId: string,
+    @Param('taskId') taskId: string,
+    @Body() body: { confirmationId: string; decision: 'approve' | 'revise'; instruction?: string }
+  ) {
+    return ok(this.sessions.resolveWorkflowStep(sessionId, { ...body, taskId }));
+  }
+
   @Post('sessions/:sessionId/briefs/:briefId/reject')
   rejectBrief(
     @Param('sessionId') sessionId: string,
     @Param('briefId') briefId: string,
-    @Body() body: { reason?: string; userMessage?: string; confirmationId?: string }
+    @Body() body: { reason?: string; userMessage?: string; confirmationId?: string; assignedAgentKeys?: string[] }
   ) {
     return ok(this.sessions.reviseBrief(sessionId, briefId, body));
   }
@@ -120,5 +156,44 @@ export class SessionsController {
     }
   ) {
     return ok(this.sessions.decideFeishuNotification(sessionId, body));
+  }
+
+  @Post('sessions/:sessionId/reports/local-save/decision')
+  decideLocalReportSave(
+    @Param('sessionId') sessionId: string,
+    @Body()
+    body: {
+      confirmationId: string;
+      artifactId: string;
+      decision: 'save_local' | 'keep_in_session';
+    }
+  ) {
+    if (!body.confirmationId || !body.artifactId || !['save_local', 'keep_in_session'].includes(body.decision)) {
+      throw new BadRequestException('A valid report save confirmation decision is required.');
+    }
+    return this.sessions.decideLocalReportSave(sessionId, body).then(ok);
+  }
+}
+
+const SESSION_CREATE_FIELDS = new Set([
+  'input',
+  'agentIds',
+  'projectId',
+  'tokenBudget',
+  'knowledgeBaseIds',
+  'workingDirectory',
+  'workspaceSnapshot',
+  'runtimePreference'
+]);
+
+export function assertSessionCreateContract(body: unknown): asserts body is Record<string, unknown> {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new BadRequestException('Session create body must be an object.');
+  }
+  const unsupportedFields = Object.keys(body).filter((field) => !SESSION_CREATE_FIELDS.has(field));
+  if (unsupportedFields.length) {
+    throw new BadRequestException(
+      `Unsupported Session create fields: ${unsupportedFields.sort().join(', ')}. Use the v2 runtimePreference contract.`
+    );
   }
 }

@@ -58,7 +58,10 @@ test('completed inline run creates a traceable autopilot session', async () => {
   assert.equal(sessionCreates.length, 1);
   assert.equal(sessionCreates[0].origin, 'autopilot');
   assert.equal(sessionCreates[0].autopilotRunId, completed.id);
-  assert.equal(sessionCreates[0].engineeringRuntimeType, 'mock');
+  assert.deepEqual(sessionCreates[0].runtimePreference, {
+    preferredRuntimeType: 'mock',
+    allowedRuntimeTypes: ['mock']
+  });
 });
 
 test('worker restart resumes polling an existing session without creating another one', async () => {

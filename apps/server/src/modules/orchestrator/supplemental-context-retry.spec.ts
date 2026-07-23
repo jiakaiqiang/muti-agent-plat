@@ -23,6 +23,15 @@ test('canRetryWithSupplementalContext requires a non-empty requestedContext', ()
     canRetryWithSupplementalContext('CONTEXT_INSUFFICIENT', undefined, 0, 3),
     false
   );
+  assert.equal(
+    canRetryWithSupplementalContext(
+      'CONTEXT_INSUFFICIENT',
+      { reason: 'command-only requests are not automatically hydrated', requestedRefs: [], requestedCommands: ['npm test'] },
+      0,
+      3
+    ),
+    false
+  );
 });
 
 test('canRetryWithSupplementalContext allows retry up to but not including the max', () => {

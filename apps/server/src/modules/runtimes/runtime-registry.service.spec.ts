@@ -1,21 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { AgentRunInput, AgentRunResult, AgentRuntimeAdapter, RuntimeType } from '@agent-cluster/shared';
+import type { AgentRunResult, AgentRuntimeAdapter, RuntimeType } from '@agent-cluster/shared';
+import { createAgentMessageOutput, createRuntimeArtifactSystemEvidence } from '@agent-cluster/shared';
 import { RuntimeRegistryService } from './runtime-registry.service.js';
 import { RuntimeService } from './runtime.service.js';
+import { makeInvocationPlan } from './invocation-plan.fixture.js';
 
-function makeResult(runtimeType: RuntimeType, runId = 'run-1'): AgentRunResult {
+function makeResult(runtimeType: RuntimeType, invocationId = 'run-1'): AgentRunResult {
   return {
-    runId,
+    invocationId,
     runtimeType,
     status: 'completed',
-    output: {
-      kind: 'agent_message',
-      messageKind: 'summary',
-      content: `${runtimeType} completed`
-    },
+    output: createAgentMessageOutput({ messageKind: 'summary', content: `${runtimeType} completed` }),
     events: [],
     artifacts: [],
+    systemEvidence: createRuntimeArtifactSystemEvidence(invocationId),
     usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }
   };
 }
@@ -36,43 +35,31 @@ function makeAdapter(
       version: '0.1.0',
       category,
       provider: options.provider ?? 'test',
-      capabilityIds: ['cap-test']
+      capabilityIds: ['cap-test'],
+      supportedWorkspaceCapabilities: ['read'],
+      supportedToolNames: []
     },
     async checkAvailability() {
       return options.available === false
         ? { available: false, reason: `${type} unavailable` }
         : { available: true };
     },
-    async run(input) {
-      return options.runResult ?? makeResult(type, input.runId);
+    start(input) {
+      return {
+        events: (async function* () {})(),
+        result: Promise.resolve(options.runResult ?? makeResult(type, input.invocationId)),
+        async cancel() {}
+      };
     }
   };
-}
-
-function makeRunInput(runtimeType: RuntimeType): AgentRunInput {
-  return {
-    runId: 'run-1',
-    sessionId: 'session-1',
-    phase: 'execute_task',
-    agent: {
-      id: 'agent-1',
-      key: 'agent',
-      name: 'Agent',
-      role: 'worker',
-      profileMarkdown: '',
-      systemPrompt: '',
-      runtimeType,
-      capabilityIds: []
-    },
-    contextPack: {},
-    expectedOutput: { kind: 'agent_message', schemaVersion: '0.1' },
-    budget: { maxTokens: 1000 }
-  } as unknown as AgentRunInput;
 }
 
 function makePersistence() {
   const collections = new Map<string, unknown>();
   return {
+    currentDataEpoch() {
+      return 'epoch-test';
+    },
     getCollection<T>(name: string, fallback: T): T {
       return (collections.get(name) as T | undefined) ?? fallback;
     },
@@ -107,6 +94,26 @@ test('does not register unavailable adapters', async () => {
   await registry.registerAdapter(makeAdapter('codex', 'external', { available: false }));
 
   assert.equal(registry.getAdapter('codex'), undefined);
+});
+
+test('refresh removes an unhealthy Adapter and restores it after recovery', async () => {
+  const registry = new RuntimeRegistryService();
+  let available = true;
+  const adapter = makeAdapter('generic_llm', 'external');
+  adapter.checkAvailability = async () => available
+    ? { available: true }
+    : { available: false, reason: 'provider offline' };
+
+  await registry.refreshAdapter(adapter);
+  assert.equal(registry.getAdapter('generic_llm'), adapter);
+
+  available = false;
+  await registry.refreshAdapter(adapter);
+  assert.equal(registry.getAdapter('generic_llm'), undefined);
+
+  available = true;
+  await registry.refreshAdapter(adapter);
+  assert.equal(registry.getAdapter('generic_llm'), adapter);
 });
 
 test('lists runtimes by category', async () => {
@@ -179,7 +186,10 @@ test('RuntimeService resolves adapters through RuntimeRegistryService', async ()
     testRunner as never
   );
 
-  const result = await service.run(makeRunInput('mock'));
+  const result = await service.run(makeInvocationPlan({
+    sessionId: 'session-1',
+    executionTarget: { runtimeType: 'mock' }
+  }));
 
   assert.equal(result.status, 'completed');
   assert.equal(result.runtimeType, 'mock');

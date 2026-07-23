@@ -46,11 +46,11 @@ test('finds matching file, line number, content, and match text', async () => {
     const result = await tool.execute({ pattern: 'console\\.log', filePattern: 'src/' }, { workingDirectory: workspace, sessionId: 's1' });
 
     assert.equal(result.success, true);
-    const first = output(result).results[0];
-    assert.equal(first.file, 'src/helper.ts');
-    assert.equal(first.line, 1);
-    assert.equal(first.content, 'export const helper = () => console.log("helper");');
-    assert.equal(first.match, 'console.log');
+    const helperMatch = output(result).results.find((match) => match.file === 'src/helper.ts');
+    assert.ok(helperMatch);
+    assert.equal(helperMatch.line, 1);
+    assert.equal(helperMatch.content, 'export const helper = () => console.log("helper");');
+    assert.equal(helperMatch.match, 'console.log');
   });
 });
 

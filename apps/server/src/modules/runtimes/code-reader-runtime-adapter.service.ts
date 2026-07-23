@@ -1,17 +1,23 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import type {
   AgentMessageOutput,
-  AgentRunInput,
+  InvocationPlan,
   AgentRunResult,
   AgentRuntimeAdapter,
+  AgentRuntimeRunHandle,
   RuntimeError,
   RuntimeType,
   TaskExecutionResultOutput
 } from '@agent-cluster/shared';
+import { createAgentMessageOutput, createRuntimeArtifactSystemEvidence } from '@agent-cluster/shared';
 import { nowIso } from '../../common/time.js';
 import { getToolsForCapabilities } from '../tools/capability-tool-mapping.js';
 import { ToolRegistryService } from '../tools/tool-registry.service.js';
 import type { ToolResult } from '../tools/tool.interface.js';
+import { ToolInvocationAuditService } from '../tools/tool-invocation-audit.service.js';
+import { InvocationWorkspaceBindingsService } from './invocation-workspace-bindings.service.js';
+import { promiseHandle } from './promise-run-handle.js';
+import { withStructuredTermination } from './structured-termination-run-handle.js';
 
 @Injectable()
 export class CodeReaderRuntimeAdapterService implements AgentRuntimeAdapter {
@@ -23,16 +29,26 @@ export class CodeReaderRuntimeAdapterService implements AgentRuntimeAdapter {
     version: '0.1.0',
     category: 'internal' as const,
     provider: 'self-hosted',
-    capabilityIds: ['cap-file-read', 'cap-code-search'] as const
+    capabilityIds: ['cap-file-read', 'cap-code-search'] as const,
+    supportedWorkspaceCapabilities: ['read'] as const,
+    supportedToolNames: ['read_file', 'search_code'] as const
   };
 
-  constructor(private readonly toolRegistry: ToolRegistryService) {}
+  constructor(
+    private readonly toolRegistry: ToolRegistryService,
+    private readonly workspaceBindings: InvocationWorkspaceBindingsService,
+    @Optional() private readonly toolAudit?: ToolInvocationAuditService
+  ) {}
 
   async checkAvailability() {
     return { available: true };
   }
 
-  async run(input: AgentRunInput, signal?: AbortSignal): Promise<AgentRunResult> {
+  start(input: InvocationPlan, signal?: AbortSignal): AgentRuntimeRunHandle {
+    return withStructuredTermination(promiseHandle(this.execute(input, signal)), input, signal);
+  }
+
+  private async execute(input: InvocationPlan, signal?: AbortSignal): Promise<AgentRunResult> {
     const startedAt = nowIso();
     try {
       const targetFiles = this.identifyTargetFiles(input);
@@ -45,16 +61,25 @@ export class CodeReaderRuntimeAdapterService implements AgentRuntimeAdapter {
       this.logger.log(`Code reader available tools: ${availableToolNames.join(', ')}`);
 
       const readResults: ToolResult[] = [];
-      for (const file of targetFiles) {
-        const result = await readFileTool.execute(
-          { path: file },
-          {
-            workingDirectory: input.contextPack.workingDirectory?.path ?? '',
-            sessionId: input.sessionId,
-            agentId: input.agent.id,
-            signal
-          }
-        );
+      for (const [index, file] of targetFiles.entries()) {
+        const argumentsValue = { path: file };
+        const toolStartedAt = nowIso();
+        let result: ToolResult;
+        try {
+          result = await readFileTool.execute(
+            argumentsValue,
+            {
+              workingDirectory: this.workspaceBindings.resolveServerRoot(input) ?? '',
+              sessionId: input.sessionId,
+              agentId: input.agent.agentId,
+              signal
+            }
+          );
+        } catch (error) {
+          await this.recordToolInvocation(input, index, argumentsValue, undefined, false, toolStartedAt, error);
+          throw error;
+        }
+        await this.recordToolInvocation(input, index, argumentsValue, result, result.success, toolStartedAt, result.error);
         if (!result.success) {
           throw new Error(result.error ?? `read_file failed for ${file}`);
         }
@@ -67,41 +92,66 @@ export class CodeReaderRuntimeAdapterService implements AgentRuntimeAdapter {
     }
   }
 
-  private identifyTargetFiles(input: AgentRunInput): string[] {
-    const taskContext = input.contextPack.taskContext as { targetFiles?: unknown } | undefined;
-    const targetFiles = Array.isArray(taskContext?.targetFiles)
-      ? taskContext.targetFiles.filter((file): file is string => typeof file === 'string')
-      : [];
-
-    if (targetFiles.length > 0) {
-      return [...new Set(targetFiles)];
-    }
-
-    return [...new Set(input.contextPack.workspaceFocus?.relevantFiles ?? [])];
+  private async recordToolInvocation(
+    input: InvocationPlan,
+    index: number,
+    argumentsValue: unknown,
+    result: unknown,
+    success: boolean,
+    startedAt: string,
+    error?: unknown
+  ): Promise<void> {
+    const persisted = await this.toolAudit?.record({
+      externalId: `tool:${input.invocationId}:read_file:${index + 1}`,
+      runtimeInvocationExternalId: input.invocationId,
+      sessionExternalId: input.sessionId,
+      toolName: 'read_file',
+      providerCallId: `${input.invocationId}:read_file:${index + 1}`,
+      provider: this.type,
+      arguments: argumentsValue,
+      result,
+      success,
+      errorMessage: error ? (error instanceof Error ? error.message : String(error)) : undefined,
+      agentExternalId: input.agent.agentId,
+      startedAt,
+      completedAt: nowIso()
+    });
+    if (persisted === false) this.logger.warn(`Tool audit was not persisted for ${input.invocationId}:read_file:${index + 1}`);
   }
 
-  private completedResult(input: AgentRunInput, readResults: ToolResult[], startedAt: string): AgentRunResult {
+  private identifyTargetFiles(input: InvocationPlan): string[] {
+    const evidencePaths = input.contextEnvelope.L3.files.map((file) => file.path);
+    const navigationPaths = input.contextEnvelope.L1.navigation.entries
+      .filter((entry) => entry.kind === 'file' && !entry.generated && !entry.sensitive)
+      .map((entry) => entry.path);
+    return [...new Set([...evidencePaths, ...navigationPaths])].slice(0, 12);
+  }
+
+  private completedResult(input: InvocationPlan, readResults: ToolResult[], startedAt: string): AgentRunResult {
     const output = this.analysisOutput(readResults);
     return {
-      runId: input.runId,
+      invocationId: input.invocationId,
       runtimeType: this.type,
       status: 'completed',
       output,
       events: [
         {
-          runId: input.runId,
+          invocationId: input.invocationId,
           type: 'runtime_started',
+          visibility: 'user',
           content: `${input.agent.name} started code reading`,
           createdAt: startedAt
         },
         {
-          runId: input.runId,
+          invocationId: input.invocationId,
           type: 'runtime_completed',
+          visibility: 'user',
           content: `${input.agent.name} completed code reading`,
           createdAt: nowIso()
         }
       ],
       artifacts: [],
+      systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
       usage: {
         inputTokens: 0,
         outputTokens: 0,
@@ -111,7 +161,7 @@ export class CodeReaderRuntimeAdapterService implements AgentRuntimeAdapter {
     };
   }
 
-  private failedResult(input: AgentRunInput, error: unknown, startedAt: string): AgentRunResult {
+  private failedResult(input: InvocationPlan, error: unknown, startedAt: string): AgentRunResult {
     const message = error instanceof Error ? error.message : String(error);
     const runtimeError: RuntimeError = {
       code: 'UNKNOWN_ERROR',
@@ -119,30 +169,29 @@ export class CodeReaderRuntimeAdapterService implements AgentRuntimeAdapter {
       retryable: false
     };
     return {
-      runId: input.runId,
+      invocationId: input.invocationId,
       runtimeType: this.type,
       status: 'failed',
-      output: {
-        kind: 'agent_message',
-        messageKind: 'risk',
-        content: message
-      } satisfies AgentMessageOutput,
+      output: createAgentMessageOutput({ messageKind: 'risk', content: message }) satisfies AgentMessageOutput,
       events: [
         {
-          runId: input.runId,
+          invocationId: input.invocationId,
           type: 'runtime_started',
+          visibility: 'user',
           content: `${input.agent.name} started code reading`,
           createdAt: startedAt
         },
         {
-          runId: input.runId,
+          invocationId: input.invocationId,
           type: 'runtime_failed',
+          visibility: 'user',
           content: message,
           metadata: { code: runtimeError.code },
           createdAt: nowIso()
         }
       ],
       artifacts: [],
+      systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
       usage: {
         inputTokens: 0,
         outputTokens: 0,
@@ -172,6 +221,7 @@ export class CodeReaderRuntimeAdapterService implements AgentRuntimeAdapter {
     const fileWord = fileSummaries.length === 1 ? 'file' : 'files';
 
     return {
+      schemaVersion: '1.0',
       kind: 'task_execution_result',
       status: 'completed',
       summary: `Analyzed ${fileSummaries.length} ${fileWord}.`,
@@ -179,6 +229,8 @@ export class CodeReaderRuntimeAdapterService implements AgentRuntimeAdapter {
         (file) => `${file.path}: ${file.lineCount} lines, ${file.byteLength} bytes${file.truncated ? ' (truncated)' : ''}`
       ),
       changedArtifacts: [],
+      requestedContext: null,
+      agentMessages: [],
       nextSuggestedActions: [],
       risks: []
     };

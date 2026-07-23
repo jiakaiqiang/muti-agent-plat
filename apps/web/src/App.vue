@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import SessionWorkspace from '@/components/SessionWorkspace.vue'
+import AppShell from '@/components/AppShell.vue'
 </script>
 
 <template>
-  <SessionWorkspace />
+  <AppShell />
 </template>

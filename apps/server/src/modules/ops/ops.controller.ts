@@ -1,10 +1,22 @@
-import { Controller, Get } from '@nestjs/common';
-import { DEFAULT_CONTEXT_PIPELINE_VERSION, SUPPORTED_CONTEXT_PIPELINE_VERSIONS } from '@agent-cluster/shared';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Headers,
+  Post,
+  ServiceUnavailableException,
+  UnauthorizedException
+} from '@nestjs/common';
+import { DEFAULT_CONTEXT_PIPELINE_VERSION } from '@agent-cluster/shared';
 import type { OpsHealth } from '@agent-cluster/shared';
+import { timingSafeEqual } from 'node:crypto';
 import { Queue, type ConnectionOptions } from 'bullmq';
 import { ok } from '../../common/api-response.js';
+import { resolveBuildCommit } from '../../common/build-metadata.js';
 import { bullMqEnabled, bullMqPrefix, redisConnectionOptions } from '../../common/redis.js';
-import { contextPipelineV2Enabled, contextPipelineVersionForNewSession } from '../../common/runtime-config.js';
+import { MaintenanceCoordinatorService } from '../persistence/maintenance-coordinator.service.js';
+import { PersistenceService } from '../persistence/persistence.service.js';
 
 const queueNames = [
   'agent-discussion-queue',
@@ -14,26 +26,56 @@ const queueNames = [
   'notification-queue',
   'post-review-queue'
 ];
+const processStartedAt = new Date(Date.now() - process.uptime() * 1_000).toISOString();
 
 @Controller()
 export class OpsController {
+  private readonly buildCommit = resolveBuildCommit();
+
+  constructor(
+    private readonly persistence: PersistenceService,
+    private readonly maintenance: MaintenanceCoordinatorService
+  ) {}
+
   @Get('health')
   health() {
-    const pipelineVersion = contextPipelineVersionForNewSession();
     const health: OpsHealth = {
       status: 'ok',
       service: 'agent-cluster-server',
       version: '0.1.0',
       buildTime: this.buildTime(),
       commit: this.commit(),
-      pipelineVersion,
-      defaultContextPipelineVersion: DEFAULT_CONTEXT_PIPELINE_VERSION,
-      contextPipelineVersion: pipelineVersion,
-      contextPipelineV2Enabled: contextPipelineV2Enabled(),
-      supportedContextPipelineVersions: SUPPORTED_CONTEXT_PIPELINE_VERSIONS,
+      processId: process.pid,
+      startedAt: processStartedAt,
+      pipelineVersion: DEFAULT_CONTEXT_PIPELINE_VERSION,
+      dataSchemaVersion: 3,
+      dataEpoch: this.persistence.currentDataEpoch(),
+      persistenceBackend: this.persistence.backendName(),
+      persistenceLocation: this.persistence.locationSummary(),
+      maintenanceMode: this.persistence.isInMaintenanceMode(),
       timestamp: new Date().toISOString()
     };
     return ok(health);
+  }
+
+  @Get('ops/maintenance')
+  maintenanceStatus() {
+    const state = this.maintenance.current() ?? null;
+    return ok({ active: this.persistence.isInMaintenanceMode(), state });
+  }
+
+  @Post('ops/maintenance/enter')
+  async enterMaintenance(
+    @Headers('x-maintenance-token') callerToken: string | undefined,
+    @Body() body: { reason?: string; requestedBy?: string }
+  ) {
+    this.assertMaintenanceAuthorized(callerToken);
+    const reason = body.reason?.trim();
+    const requestedBy = body.requestedBy?.trim();
+    if (!reason || !requestedBy) {
+      throw new BadRequestException('MAINTENANCE_REQUEST_INVALID: reason and requestedBy are required.');
+    }
+    return ok(await this.maintenance.enter({ reason, requestedBy }));
   }
 
   @Get('ops/queues')
@@ -105,12 +147,24 @@ export class OpsController {
   }
 
   private commit() {
-    return (
-      process.env.AGENT_CLUSTER_COMMIT?.trim() ||
-      process.env.GIT_COMMIT?.trim() ||
-      process.env.COMMIT_SHA?.trim() ||
-      'unknown'
-    );
+    return this.buildCommit;
+  }
+
+  private assertMaintenanceAuthorized(callerToken: string | undefined) {
+    const configuredToken = process.env.AGENT_CLUSTER_MAINTENANCE_TOKEN;
+    if (!configuredToken) {
+      throw new ServiceUnavailableException(
+        'MAINTENANCE_TOKEN_NOT_CONFIGURED: maintenance entry is disabled.'
+      );
+    }
+    if (!callerToken) {
+      throw new UnauthorizedException('MAINTENANCE_UNAUTHORIZED: invalid maintenance token.');
+    }
+    const expected = Buffer.from(configuredToken, 'utf8');
+    const supplied = Buffer.from(callerToken, 'utf8');
+    if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) {
+      throw new UnauthorizedException('MAINTENANCE_UNAUTHORIZED: invalid maintenance token.');
+    }
   }
 
 }

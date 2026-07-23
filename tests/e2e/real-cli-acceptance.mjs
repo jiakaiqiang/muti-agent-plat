@@ -15,7 +15,11 @@ if (process.env.RUN_REAL_CLI_ACCEPTANCE !== 'true') {
 
 const execFileAsync = promisify(execFile);
 const runCount = Number(process.env.REAL_CLI_RUNS_PER_RUNTIME ?? 3);
-assert.ok(Number.isInteger(runCount) && runCount >= 3, 'REAL_CLI_RUNS_PER_RUNTIME must be at least 3.');
+const minimumRunCount = process.env.REAL_CLI_PHASE === 'sample' ? 20 : 1;
+assert.ok(
+  Number.isInteger(runCount) && runCount >= minimumRunCount,
+  `REAL_CLI_RUNS_PER_RUNTIME must be at least ${minimumRunCount} for this phase.`
+);
 const reportPath = process.env.REAL_CLI_ACCEPTANCE_REPORT_PATH ?? join(
   process.cwd(),
   '.cache',
@@ -23,6 +27,11 @@ const reportPath = process.env.REAL_CLI_ACCEPTANCE_REPORT_PATH ?? join(
   'real-cli-acceptance-status.json'
 );
 const report = { startedAt: new Date().toISOString(), status: 'running', checkpoints: [] };
+const reportHistoryPath = process.env.REAL_CLI_ACCEPTANCE_HISTORY_PATH ?? join(
+  dirname(reportPath),
+  'real-cli-acceptance-runs',
+  `${report.startedAt.replace(/[:.]/g, '-')}.json`
+);
 const sampleGoalsPath = process.env.REAL_CLI_SAMPLE_GOALS_PATH;
 const sampleGoals = sampleGoalsPath
   ? JSON.parse(await readFile(sampleGoalsPath, 'utf8'))
@@ -39,7 +48,9 @@ async function checkpoint(stage, details = {}) {
   report.stage = stage;
   report.checkpoints.push({ at: report.updatedAt, stage, ...details });
   await mkdir(dirname(reportPath), { recursive: true });
+  await mkdir(dirname(reportHistoryPath), { recursive: true });
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+  await writeFile(reportHistoryPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
 }
 
 function resultSummary(execution) {
@@ -116,52 +127,84 @@ function makeRuntime(runtimeType, adapter) {
   return { runtime, stored };
 }
 
-function input(runtimeType, workDir, runId, options, goal) {
+function input(runtimeType, workDir, invocationId, options, goal) {
+  const sessionId = `real-${runtimeType}-session`;
+  const taskId = `real-${runtimeType}-task`;
+  const workspaceId = `real-${runtimeType}-workdir`;
+  const agentId = `${runtimeType}-agent`;
+  const agentName = runtimeType === 'codex' ? 'Codex acceptance' : 'Claude acceptance';
   return {
-    runId,
-    sessionId: `real-${runtimeType}-session`,
-    taskId: `real-${runtimeType}-task`,
+    invocationId: invocationId,
+    sessionId,
+    taskId,
     phase: 'task_execution',
     agent: {
-      id: `${runtimeType}-agent`,
+      agentId,
       key: runtimeType,
-      name: runtimeType === 'codex' ? 'Codex acceptance' : 'Claude acceptance',
+      name: agentName,
       role: 'backend',
-      systemPrompt: '',
+      systemPrompt: 'Perform the read-only acceptance task and return the requested structured output.',
+      profileHash: `real-${runtimeType}-profile`,
+      profileRevision: 1,
+      skillBindings: [],
+      requestedToolIds: [],
+      requestedToolKeys: [],
+      capabilityIds: [],
+      knowledgeBaseIds: []
+    },
+    executionTarget: {
       runtimeType,
-      capabilityIds: []
+      source: 'task_override',
+      reason: 'Explicit real CLI acceptance target.',
+      requiredCapabilities: ['read'],
+      requiredToolIds: [],
+      writeMode: 'none',
+      workspaceProviderKind: 'server_local'
     },
-    contextPack: {
-      systemRules: [],
-      sessionGoal: goal,
-      taskBrief: {
-        goal,
-        constraints: ['Do not edit files.', 'Return only the requested structured JSON result.'],
-        acceptanceCriteria: ['Return a valid agent_message RuntimeOutput.']
-      },
-      currentTask: { id: `real-${runtimeType}-task`, title: '真实 CLI 流式协议验收', status: 'ready' },
-      taskContext: { validationRules: ['Return a valid agent_message RuntimeOutput.'] },
-      summaryMemory: {},
-      continuationState: {},
-      workingDirectory: {
-        id: `real-${runtimeType}-workdir`,
-        name: 'real-cli-isolated-workspace',
-        kind: 'server_local',
-        path: workDir,
-        selectedAt: new Date().toISOString()
-      },
-      agentProfile: {},
-      relevantEvents: [],
-      relevantMemories: [],
-      ragSnippets: [],
-      artifacts: [],
-      capabilities: [],
-      constraints: ['No filesystem writes are required for this acceptance.'],
-      budget: {}
+    toolCatalog: {
+      tools: [],
+      decisions: [],
+      catalogHash: `real-${runtimeType}-catalog`
     },
-    expectedOutput: { kind: 'agent_message', schemaVersion: '0.1' },
-    budget: {},
-    options
+    contextEnvelope: {
+      version: 'v2',
+      createdAt: new Date().toISOString(),
+      workspaceId,
+      sessionId,
+      L0: {
+        systemRules: ['Do not edit files.', 'Return only the requested structured JSON result.'],
+        agentId,
+        profileHash: `real-${runtimeType}-profile`,
+        profileRevision: 1,
+        toolCatalogHash: `real-${runtimeType}-catalog`,
+        workspace: {
+          workspaceId,
+          rootName: 'real-cli-isolated-workspace',
+          providerKind: 'server_local',
+          revision: { id: invocationId, observedAt: new Date().toISOString() }
+        }
+      },
+      L1: {
+        sessionGoal: goal,
+        phase: 'task_execution',
+        task: {
+          id: taskId,
+          title: '真实 CLI 流式协议验收',
+          description: goal,
+          acceptanceCriteria: ['Return a valid agent_message RuntimeOutput.']
+        },
+        navigation: { entries: [], truncated: false }
+      },
+      L2: { source: 'generated', modules: [] },
+      L3: { files: [], totalByteLength: 0, truncated: false },
+      L4: { calls: [] },
+      L5: { bullets: [], turnCount: 0 },
+      L6: { changeSetIds: [], reportIds: [] },
+      budget: { inputTokens: 8_000, navigationTokens: 800, projectMapTokens: 500, evidenceTokens: 3_600 }
+    },
+    expectedOutput: { kind: 'agent_message', schemaVersion: '1.0' },
+    budget: { maxInputTokens: 8_000, maxOutputTokens: 2_000, maxTotalTokens: 10_000 },
+    ...(options?.resume ? { resume: options.resume } : {})
   };
 }
 
@@ -199,10 +242,11 @@ async function acceptRuntime(runtimeType, phase = 'all') {
   await writeFile(instructionFile, originalInstruction);
 
   process.env.AGENT_CLUSTER_BRIEF_STAGING_DIR = stagingDir;
-  const brief = new WorkdirBriefService();
+  const workspaceBindings = { resolveServerRoot: () => workDir };
+  const brief = new WorkdirBriefService(workspaceBindings);
   const adapter = runtimeType === 'codex'
-    ? new CodexRuntimeAdapterService(brief)
-    : new ClaudeCodeRuntimeAdapterService(brief);
+    ? new CodexRuntimeAdapterService(workspaceBindings, brief)
+    : new ClaudeCodeRuntimeAdapterService(workspaceBindings, brief);
   const { runtime } = makeRuntime(runtimeType, adapter);
   const goal = [
     '请用中文给出三条简短的流式协议验收结论，并在 content 中包含以下代码块：',
@@ -215,7 +259,7 @@ async function acceptRuntime(runtimeType, phase = 'all') {
 
   try {
     let sessionId;
-    const primaryRunCount = phase === 'all' || phase === 'sample' ? runCount : 1;
+    const primaryRunCount = phase === 'remaining' ? 1 : runCount;
     for (let index = 0; index < primaryRunCount; index += 1) {
       const options = phase === 'all' && sessionId ? { resume: { cliSessionId: sessionId, workDir } } : undefined;
       const runGoal = phase === 'sample' ? sampleGoals[index] : goal;
@@ -310,12 +354,12 @@ async function acceptRuntime(runtimeType, phase = 'all') {
       assert.ok((invocation.usage?.totalTokens ?? 0) > 0);
     }
 
-    const previousMode = process.env.ENGINEERING_RUNTIME_STREAMING;
+    const previousMode = process.env.RUNTIME_STREAMING;
     const previousCommand = runtimeType === 'codex'
       ? process.env.CODEX_RUNTIME_COMMAND
       : process.env.CLAUDE_CODE_COMMAND;
     const previousArgs = process.env.CODEX_RUNTIME_ARGS_JSON;
-    process.env.ENGINEERING_RUNTIME_STREAMING = 'off';
+    process.env.RUNTIME_STREAMING = 'off';
     if (runtimeType === 'codex') {
       process.env.CODEX_RUNTIME_COMMAND = process.execPath;
       process.env.CODEX_RUNTIME_ARGS_JSON = JSON.stringify(['-e', 'process.exit(7)']);
@@ -331,7 +375,7 @@ async function acceptRuntime(runtimeType, phase = 'all') {
       assert.equal(legacy.result.status, 'failed');
       assert.notEqual(legacy.result.runtimeType, 'mock');
     } finally {
-      process.env.ENGINEERING_RUNTIME_STREAMING = previousMode;
+      process.env.RUNTIME_STREAMING = previousMode;
       if (runtimeType === 'codex') {
         process.env.CODEX_RUNTIME_COMMAND = previousCommand;
         if (previousArgs === undefined) delete process.env.CODEX_RUNTIME_ARGS_JSON;
@@ -372,7 +416,7 @@ Object.assign(process.env, {
   CODEX_RUNTIME_SHELL: 'false',
   CLAUDE_CODE_COMMAND: claudeCommand,
   CLAUDE_CODE_SHELL: 'false',
-  ENGINEERING_RUNTIME_STREAMING: 'all',
+  RUNTIME_STREAMING: 'all',
   AGENT_CLUSTER_WORKDIR_BRIEF: 'true',
   CODEX_RUNTIME_FIRST_FRAME_TIMEOUT_MS: process.env.CODEX_RUNTIME_FIRST_FRAME_TIMEOUT_MS ?? '60000',
   CODEX_RUNTIME_IDLE_TIMEOUT_MS: process.env.CODEX_RUNTIME_IDLE_TIMEOUT_MS ?? '180000',

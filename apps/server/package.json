@@ -4,11 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "npm run build && node --watch dist/apps/server/src/main.js",
+    "dev": "node scripts/dev-entry.mjs",
     "start": "node dist/apps/server/src/main.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node scripts/run-unit-tests.mjs"
+    "test": "node scripts/run-unit-tests.mjs && node --test scripts/dev-server-guard.spec.mjs"
   },
   "dependencies": {
     "@agent-cluster/shared": "0.1.0",
@@ -20,11 +20,13 @@
     "ioredis": "^5.11.0",
     "pg": "^8.21.0",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/pg": "^8.20.0",
+    "@types/ws": "^8.5.13",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3"
   }

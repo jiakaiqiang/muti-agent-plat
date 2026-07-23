@@ -1,5 +1,6 @@
 import type { JsonRpcMessage } from './codex-appserver-codec.js';
 import type { RawUsage, RuntimeStreamFrame } from './runtime-stream-frame.js';
+import { classifyRuntimeNotification } from '@agent-cluster/shared';
 
 /**
  * 把 Codex app-server 的 JSON-RPC notification 翻译成 `RuntimeStreamFrame`。
@@ -29,14 +30,14 @@ function asRawUsage(v: unknown): RawUsage | undefined {
   };
 }
 
-function parseJsonOrText(value: unknown): unknown {
+function parseStructuredOutput(value: unknown): unknown {
   if (typeof value !== 'string') return value;
   const trimmed = value.trim();
-  if (!trimmed) return {};
+  if (!trimmed) return value;
   try {
     return JSON.parse(trimmed) as unknown;
   } catch {
-    return { content: value, messageKind: 'summary' };
+    return value;
   }
 }
 
@@ -99,7 +100,7 @@ function turnPayload(params: Record<string, unknown> | undefined): {
   const status = asString(turn?.status);
   const error = asRecord(turn?.error);
   return {
-    payload: parseJsonOrText(finalMessage?.text),
+    payload: parseStructuredOutput(finalMessage?.text),
     turnId: asString(turn?.id),
     status:
       status === 'completed' || status === 'interrupted' || status === 'failed' || status === 'inProgress'
@@ -133,7 +134,15 @@ export function parseCodexNotification(msg: JsonRpcMessage): RuntimeStreamFrame 
     case 'item/completed': {
       const item = threadItem(params);
       const id = asString(item?.id);
-      if (!item || !id || !isToolItem(item)) break;
+      if (!item || !id) break;
+      if (asString(item.type) === 'agentMessage') {
+        return {
+          kind: 'provider_output',
+          payload: parseStructuredOutput(item.text),
+          source: 'item/completed'
+        };
+      }
+      if (!isToolItem(item)) break;
       const status = asString(item.status);
       return {
         kind: 'tool_result',
@@ -169,44 +178,17 @@ export function parseCodexNotification(msg: JsonRpcMessage): RuntimeStreamFrame 
         errorMessage: parsed.errorMessage
       };
     }
-    // v0.1 fixture compatibility. Production uses the v2 methods above.
-    case 'agent.text_delta': {
-      const text = asString(params?.text);
-      if (!params || text === undefined) break;
-      return { kind: 'assistant_text', text };
-    }
-    case 'tool.called': {
-      const id = asString(params?.id);
-      const name = asString(params?.name);
-      if (!params || !id || !name) break;
-      return { kind: 'tool_use', toolCallId: id, tool: name, input: params.input };
-    }
-    case 'tool.completed': {
-      const id = asString(params?.id);
-      const name = asString(params?.name);
-      const output = asString(params?.output);
-      if (!params || !id || !name || output === undefined) break;
-      return {
-        kind: 'tool_result',
-        toolCallId: id,
-        tool: name,
-        output,
-        isError: params.isError === true
-      };
-    }
-    case 'run.completed': {
-      if (!params) break;
-      return {
-        kind: 'result',
-        payload: params.payload,
-        usage: asRawUsage(params.usage),
-        cliSessionId: asString(params.sessionId)
-      };
-    }
     default:
       // 落 system 分支
       break;
   }
 
-  return { kind: 'system', subtype: method || 'unknown', raw: msg };
+  const subtype = method || 'unknown';
+  const disposition = classifyRuntimeNotification('codex', subtype, params);
+  return {
+    kind: 'system',
+    subtype,
+    raw: msg,
+    disposition: disposition === 'runtime_error' ? 'runtime_error' : 'debug_only'
+  };
 }

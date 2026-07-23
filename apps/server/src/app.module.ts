@@ -19,6 +19,9 @@ import { SessionsModule } from './modules/sessions/sessions.module.js';
 import { TasksModule } from './modules/tasks/tasks.module.js';
 import { SkillsModule } from './modules/skills/skills.module.js';
 import { AutopilotModule } from './modules/autopilot/autopilot.module.js';
+import { WorkspacesModule } from './modules/workspaces/workspaces.module.js';
+import { MaintenanceModule } from './modules/persistence/maintenance.module.js';
+import { WorkflowsModule } from './modules/workflows/workflows.module.js';
 
 @Module({
   imports: [
@@ -31,6 +34,8 @@ import { AutopilotModule } from './modules/autopilot/autopilot.module.js';
     TasksModule,
     SkillsModule,
     AutopilotModule,
+    WorkspacesModule,
+    WorkflowsModule,
     RuntimeModule,
     IntentRecognitionModule,
     OrchestratorModule,
@@ -41,7 +46,8 @@ import { AutopilotModule } from './modules/autopilot/autopilot.module.js';
     ArtifactsModule,
     SessionsModule,
     ExecutionModule,
-    RecoveryModule
+    RecoveryModule,
+    MaintenanceModule
   ]
 })
 export class AppModule {}

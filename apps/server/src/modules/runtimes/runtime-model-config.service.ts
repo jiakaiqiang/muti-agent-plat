@@ -16,7 +16,7 @@ import {
   llmProvider
 } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
-import { AgentsService } from '../agents/agents.service.js';
+import { decodeSecret, encodeSecret } from '../../common/secret-cipher.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 
 type PersistedRuntimeModelOption = {
@@ -36,9 +36,6 @@ type PersistedRuntimeModelConfig = {
   currentModelId?: string;
   models?: PersistedRuntimeModelOption[];
   updatedAt?: string;
-  // Legacy shape kept for migration from the first model-switch version.
-  currentModel?: string;
-  customModels?: string[];
 };
 
 type OllamaTagsResponse = {
@@ -65,12 +62,10 @@ export class RuntimeModelConfigService {
   private localDiscoveredModels: string[] = [];
   private localDiscoveryLoadedAt = 0;
 
-  constructor(
-    private readonly persistence: PersistenceService,
-    private readonly agents: AgentsService
-  ) {
-    this.config = this.persistence.getCollection<PersistedRuntimeModelConfig>(collectionKey, {});
-    this.migrateLegacyConfig();
+  constructor(private readonly persistence: PersistenceService) {
+    const stored = this.persistence.getCollection<PersistedRuntimeModelConfig>(collectionKey, {});
+    this.assertCurrentSchema(stored);
+    this.config = revealPersistedConfig(stored);
     this.persist();
   }
 
@@ -93,8 +88,8 @@ export class RuntimeModelConfigService {
       availableModelsWithoutAgents.find((model) => model.id === this.defaultModelId(defaultModel)) ??
       availableModelsWithoutAgents[0] ??
       this.toOption(this.createConfiguredModel(defaultModel, 'env', provider));
-    const availableModels = availableModelsWithoutAgents.map((model) => this.withAgents(model, selectedModelOption.id));
-    const currentModelOption = this.withAgents(selectedModelOption, selectedModelOption.id);
+    const availableModels = availableModelsWithoutAgents;
+    const currentModelOption = selectedModelOption;
 
     return {
       provider,
@@ -363,68 +358,22 @@ export class RuntimeModelConfigService {
       baseUrl: model.baseUrl,
       hasApiKey: model.kind === 'remote' ? Boolean(model.apiKey ?? llmApiKey()) : false,
       persisted: (this.config.models ?? []).some((item) => item.id === model.id),
-      agents: [],
       createdAt: model.createdAt,
       updatedAt: model.updatedAt
     };
   }
 
-  private withAgents(model: RuntimeModelOption, currentModelId: string): RuntimeModelOption {
-    return {
-      ...model,
-      agents: this.agentsForModel(model.id, currentModelId)
-    };
-  }
-
-  private agentsForModel(modelId: string, currentModelId: string) {
-    return this.agents
-      .list()
-      .filter((agent) => agent.runtimeType === 'generic_llm' && (agent.modelId ?? currentModelId) === modelId)
-      .map((agent) => ({
-        id: agent.id,
-        key: agent.key,
-        name: agent.name,
-        role: agent.role,
-        status: agent.status,
-        runtimeType: agent.runtimeType,
-        modelId: agent.modelId,
-        capabilityIds: agent.capabilityIds
-      }));
-  }
-
-  private migrateLegacyConfig() {
-    const legacyModels = new Set<string>(this.config.customModels ?? []);
-    if (this.config.currentModel) {
-      legacyModels.add(this.config.currentModel);
+  private assertCurrentSchema(config: PersistedRuntimeModelConfig) {
+    const record = config as unknown as Record<string, unknown>;
+    if ('currentModel' in record || 'customModels' in record) {
+      throw new Error('CUTOVER_REQUIRED: Runtime model configuration uses a legacy schema.');
     }
-
-    if (!legacyModels.size && this.config.currentModelId) {
-      return;
+    const hasAgentBindings = Array.isArray(record.models) && record.models.some(
+      (model) => Boolean(model) && typeof model === 'object' && 'agents' in model
+    );
+    if (hasAgentBindings) {
+      throw new Error('CUTOVER_REQUIRED: Runtime model configuration contains legacy Agent bindings.');
     }
-
-    const now = nowIso();
-    const provider = llmProvider();
-    const kind = provider === 'ollama' ? 'local' : 'remote';
-    const baseUrl = kind === 'local' ? this.localBaseUrl() : llmBaseUrl();
-    const migrated: PersistedRuntimeModelOption[] = [...legacyModels].map((model) => ({
-      id: this.modelId(kind, model, baseUrl),
-      label: model,
-      provider,
-      source: provider === 'ollama' ? ('local' as const) : ('remote' as const),
-      kind,
-      model,
-      baseUrl,
-      createdAt: now,
-      updatedAt: now
-    }));
-
-    this.config = {
-      ...this.config,
-      currentModelId: this.config.currentModel ? this.modelId(kind, this.config.currentModel, baseUrl) : this.config.currentModelId,
-      models: [...(this.config.models ?? []), ...migrated],
-      currentModel: undefined,
-      customModels: undefined
-    };
   }
 
   private modelId(kind: RuntimeModelKind, model: string, baseUrl?: string) {
@@ -493,6 +442,26 @@ export class RuntimeModelConfigService {
   }
 
   private persist() {
-    this.persistence.setCollection(collectionKey, this.config);
+    this.persistence.setCollection(collectionKey, obfuscatePersistedConfig(this.config));
   }
+}
+
+function obfuscatePersistedConfig(config: PersistedRuntimeModelConfig): PersistedRuntimeModelConfig {
+  if (!config.models) return config;
+  return {
+    ...config,
+    models: config.models.map((model) =>
+      model.apiKey ? { ...model, apiKey: encodeSecret(model.apiKey) } : model
+    )
+  };
+}
+
+function revealPersistedConfig(config: PersistedRuntimeModelConfig): PersistedRuntimeModelConfig {
+  if (!config.models) return config;
+  return {
+    ...config,
+    models: config.models.map((model) =>
+      model.apiKey ? { ...model, apiKey: decodeSecret(model.apiKey) } : model
+    )
+  };
 }

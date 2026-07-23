@@ -7,6 +7,7 @@ import { IntentRecognitionModule } from '../intent-recognition/intent-recognitio
 import { OrchestratorModule } from '../orchestrator/orchestrator.module.js';
 import { RuntimeModule } from '../runtimes/runtime.module.js';
 import { TasksModule } from '../tasks/tasks.module.js';
+import { WorkflowsModule } from '../workflows/workflows.module.js';
 import { SessionsController } from './sessions.controller.js';
 import { SessionsService } from './sessions.service.js';
 
@@ -19,7 +20,8 @@ import { SessionsService } from './sessions.service.js';
     OrchestratorModule,
     RuntimeModule,
     forwardRef(() => ExecutionModule),
-    TasksModule
+    TasksModule,
+    forwardRef(() => WorkflowsModule)
   ],
   controllers: [SessionsController],
   providers: [SessionsService],

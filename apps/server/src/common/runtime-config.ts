@@ -1,4 +1,4 @@
-import { DEFAULT_CONTEXT_PIPELINE_VERSION, type ContextPipelineVersion, type RuntimeType } from '@agent-cluster/shared';
+import type { AgentRunPhase, RuntimeType } from '@agent-cluster/shared';
 
 export type LlmProvider = 'openai-compatible' | 'ollama';
 export type LlmStructuredOutputMode = 'auto' | 'json_schema' | 'json_object';
@@ -15,7 +15,6 @@ const runtimeTypes = new Set<RuntimeType>([
   'mcp_tool',
   'human'
 ]);
-const defaultAgentRuntimeTypes = new Set<RuntimeType>(['mock', 'generic_llm']);
 const ollamaProviderValues = new Set(['ollama', 'local-ollama']);
 const openAiDefaultBaseUrl = 'https://api.openai.com/v1';
 const openAiDefaultModel = 'gpt-4.1-mini';
@@ -25,22 +24,6 @@ const ollamaDefaultModel = 'llama3.2';
 export function envFlag(name: string, fallback = false) {
   const value = process.env[name];
   return value === undefined ? fallback : truthyValues.has(value.trim().toLowerCase());
-}
-
-export function contextPipelineV2Enabled() {
-  return envFlag('CONTEXT_PIPELINE_V2_ENABLED', false);
-}
-
-export function contextPipelineVersionForNewSession(): ContextPipelineVersion {
-  return contextPipelineV2Enabled() ? 'v2' : DEFAULT_CONTEXT_PIPELINE_VERSION;
-}
-
-export function defaultAgentRuntimeType(): RuntimeType {
-  const configured = process.env.DEFAULT_AGENT_RUNTIME_TYPE ?? process.env.AGENT_RUNTIME_TYPE ?? 'generic_llm';
-  if (defaultAgentRuntimeTypes.has(configured as RuntimeType)) {
-    return configured as RuntimeType;
-  }
-  return 'generic_llm';
 }
 
 export function isRuntimeType(value: unknown): value is RuntimeType {
@@ -57,15 +40,12 @@ function configuredRuntimeType(...names: string[]) {
   return undefined;
 }
 
-export function defaultEngineeringRuntimeType(): RuntimeType {
-  return (
-    configuredRuntimeType('DEFAULT_ENGINEERING_RUNTIME_TYPE', 'ENGINEERING_RUNTIME_TYPE') ??
-    defaultAgentRuntimeType()
-  );
+export function globalDefaultRuntimeType(): RuntimeType {
+  return configuredRuntimeType('GLOBAL_DEFAULT_RUNTIME_TYPE') ?? 'generic_llm';
 }
 
-export function projectDefaultEngineeringRuntimeType(): RuntimeType | undefined {
-  return configuredRuntimeType('PROJECT_DEFAULT_ENGINEERING_RUNTIME_TYPE');
+export function projectPolicyRuntimeType(): RuntimeType | undefined {
+  return configuredRuntimeType('PROJECT_POLICY_RUNTIME_TYPE');
 }
 
 export function llmProvider(): LlmProvider {
@@ -163,8 +143,18 @@ export function llmLocalNumCtx() {
 }
 
 export function discussionTimeoutMs() {
-  const parsed = Number(process.env.DISCUSSION_TIMEOUT_MS ?? 30_000);
-  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 30_000;
+  const parsed = Number(process.env.DISCUSSION_TIMEOUT_MS ?? 0);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;
+}
+
+export function phaseTimeoutMs(phase: AgentRunPhase) {
+  const name = `PHASE_TIMEOUT_${phase.toUpperCase()}_MS`;
+  const configured = process.env[name]?.trim();
+  if (configured !== undefined && configured !== '') {
+    const parsed = Number(configured);
+    return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;
+  }
+  return phase === 'discussion' ? discussionTimeoutMs() : 0;
 }
 
 export function reworkMaxRounds() {
@@ -179,15 +169,15 @@ export function mockRuntimeEnabled() {
   return envFlag('MOCK_RUNTIME_ENABLED', false);
 }
 
-export type EngineeringRuntimeStreamingMode = 'off' | 'codex' | 'all';
+export type RuntimeStreamingMode = 'off' | 'codex' | 'all';
 
-const engineeringStreamingValues = new Set<EngineeringRuntimeStreamingMode>(['off', 'codex', 'all']);
+const runtimeStreamingValues = new Set<RuntimeStreamingMode>(['off', 'codex', 'all']);
 const MAX_RUNTIME_TIMEOUT_MS = 2_147_483_647;
 
-export function engineeringRuntimeStreaming(): EngineeringRuntimeStreamingMode {
-  const raw = process.env.ENGINEERING_RUNTIME_STREAMING?.trim().toLowerCase();
-  if (raw && engineeringStreamingValues.has(raw as EngineeringRuntimeStreamingMode)) {
-    return raw as EngineeringRuntimeStreamingMode;
+export function runtimeStreamingMode(): RuntimeStreamingMode {
+  const raw = process.env.RUNTIME_STREAMING?.trim().toLowerCase();
+  if (raw && runtimeStreamingValues.has(raw as RuntimeStreamingMode)) {
+    return raw as RuntimeStreamingMode;
   }
   return 'off';
 }
@@ -206,8 +196,8 @@ export function optionalRuntimeTimeoutMs(name: string) {
   return Number.isFinite(parsed) && normalized > 0 && normalized <= MAX_RUNTIME_TIMEOUT_MS ? normalized : undefined;
 }
 
-export function engineeringRuntimeStreamingEnabledFor(runtimeType: RuntimeType): boolean {
-  const mode = engineeringRuntimeStreaming();
+export function runtimeStreamingEnabledFor(runtimeType: RuntimeType): boolean {
+  const mode = runtimeStreamingMode();
   return runtimeType === 'codex' ? mode === 'codex' || mode === 'all' : runtimeType === 'claude_code' && mode === 'all';
 }
 

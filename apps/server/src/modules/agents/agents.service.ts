@@ -1,7 +1,6 @@
 import { BadRequestException, Inject, Injectable, NotFoundException, Optional, forwardRef } from '@nestjs/common';
 import { defaultAgents } from '@agent-cluster/shared';
-import type { Agent, CompiledAgentProfile } from '@agent-cluster/shared';
-import { defaultAgentRuntimeType } from '../../common/runtime-config.js';
+import type { AgentDefinition as Agent, CompiledAgentProfile } from '@agent-cluster/shared';
 import { defaultCapabilityIdsByAgentKey } from '../capabilities/default-capabilities.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { AgentProfileCompilerService } from '../agent-profile/agent-profile-compiler.service.js';
@@ -24,7 +23,6 @@ export class AgentsService {
     private readonly profileCompiler?: AgentProfileCompilerService
   ) {
     const persistedAgents = this.persistence.getCollection<Agent[]>('agents', []);
-    const defaultRuntimeType = defaultAgentRuntimeType();
     this.seedDefaultAgents = this.defaultAgentSeedEnabled();
     const persistedDefaultAgents = persistedAgents.filter((agent) => this.isDefaultAgent(agent));
     persistedDefaultAgents.forEach((agent) => {
@@ -41,14 +39,12 @@ export class AgentsService {
     const persistedCustomAgents = persistedAgents.filter((agent) => !this.isDefaultAgent(agent));
     for (const agent of [...visibleDefaultAgents, ...persistedCustomAgents]) {
       const defaultCapabilityIds = defaultCapabilityIdsByAgentKey[agent.key] ?? [];
-      const runtimeType = defaultAgentKeys.has(agent.key) ? defaultRuntimeType : agent.runtimeType;
       this.agents.set(agent.id, {
         ...agent,
-        modelId: agent.modelId,
-        profileMarkdown: agent.profileMarkdown?.trim() || this.defaultProfileMarkdown(agent),
-        runtimeType,
+        profileMarkdown: agent.profileMarkdown.trim() || this.defaultProfileMarkdown(agent),
+        tags: this.normalizeStringList(agent.tags),
         capabilityIds: Array.from(new Set([...defaultCapabilityIds, ...agent.capabilityIds])),
-        skillIds: this.normalizeStringList(agent.skillIds)
+        profileRevision: agent.profileRevision
       });
     }
     this.persist();
@@ -83,10 +79,7 @@ export class AgentsService {
     const now = new Date().toISOString();
     const profileMarkdown = input.profileMarkdown?.trim() || this.defaultProfileMarkdown(input);
     const capabilityIds = this.normalizeStringList(input.capabilityIds);
-    const compiled = this.compileOrThrow(profileMarkdown, capabilityIds);
-    const derivedSkillIds = compiled
-      ? Array.from(new Set([...compiled.skillIds, ...this.normalizeStringList(input.skillIds)]))
-      : this.normalizeStringList(input.skillIds);
+    this.compileOrThrow(profileMarkdown, capabilityIds);
     const agent: Agent = {
       id: input.id ?? crypto.randomUUID(),
       key: this.uniqueAgentKey(input.key ?? input.name),
@@ -95,11 +88,10 @@ export class AgentsService {
       description: input.description?.trim() || undefined,
       profileMarkdown,
       tags: this.normalizeStringList(input.tags),
-      // v0.4: 新数据不再写入 modelId/runtimeType,交由 Session.executionTarget 决定。
       status: input.status ?? 'active',
       capabilityIds,
-      skillIds: derivedSkillIds,
       defaultKnowledgeBaseIds: this.normalizeStringList(input.defaultKnowledgeBaseIds),
+      profileRevision: 1,
       createdAt: input.createdAt ?? now,
       updatedAt: input.updatedAt ?? now
     };
@@ -114,22 +106,23 @@ export class AgentsService {
     const capabilityIds = patch.capabilityIds
       ? this.normalizeStringList(patch.capabilityIds)
       : current.capabilityIds;
-    // Markdown 引用是 skillIds 的事实来源；仅当传入 markdown 或能力变化时重新编译。
-    const compiled =
+    // Markdown references are the source of truth for profile resources.
+    if (
       patch.profileMarkdown !== undefined || patch.capabilityIds !== undefined
-        ? this.compileOrThrow(profileMarkdown ?? '', capabilityIds)
-        : undefined;
+    ) {
+      this.compileOrThrow(profileMarkdown, capabilityIds);
+    }
     const updated: Agent = {
       ...current,
       ...patch,
       id: current.id,
       profileMarkdown,
+      tags: patch.tags ? this.normalizeStringList(patch.tags) : current.tags,
       capabilityIds,
-      skillIds: compiled
-        ? compiled.skillIds
-        : patch.skillIds
-          ? this.normalizeStringList(patch.skillIds)
-          : current.skillIds ?? [],
+      defaultKnowledgeBaseIds: patch.defaultKnowledgeBaseIds
+        ? this.normalizeStringList(patch.defaultKnowledgeBaseIds)
+        : current.defaultKnowledgeBaseIds,
+      profileRevision: current.profileRevision + 1,
       updatedAt: new Date().toISOString()
     };
     if (this.isDefaultAgent(updated)) {
@@ -186,35 +179,6 @@ export class AgentsService {
     });
   }
 
-  bindSkill(agentId: string, skillId: string) {
-    const agent = this.getByIdOrKey(agentId);
-    return this.update(agent.id, {
-      skillIds: Array.from(new Set([...(agent.skillIds ?? []), skillId]))
-    });
-  }
-
-  unbindSkill(agentId: string, skillId: string) {
-    const agent = this.getByIdOrKey(agentId);
-    return this.update(agent.id, {
-      skillIds: (agent.skillIds ?? []).filter((id) => id !== skillId)
-    });
-  }
-
-  removeSkillReferences(skillId: string) {
-    const updated: Agent[] = [];
-    for (const agent of this.list()) {
-      if (!(agent.skillIds ?? []).includes(skillId)) continue;
-      updated.push({
-        ...agent,
-        skillIds: (agent.skillIds ?? []).filter((id) => id !== skillId),
-        updatedAt: new Date().toISOString()
-      });
-    }
-    for (const agent of updated) this.agents.set(agent.id, agent);
-    if (updated.length > 0) this.persist();
-    return updated;
-  }
-
   private persist() {
     this.persistence.setCollection('agents', this.persistableAgents());
   }
@@ -240,11 +204,12 @@ export class AgentsService {
 
     return {
       ...seed,
-      modelId: persisted.modelId,
-      runtimeType: seed.runtimeType,
       status: persisted.status ?? seed.status,
+      profileMarkdown: persisted.profileMarkdown,
+      tags: this.normalizeStringList(persisted.tags),
+      capabilityIds: this.normalizeStringList(persisted.capabilityIds),
       defaultKnowledgeBaseIds: this.normalizeStringList(persisted.defaultKnowledgeBaseIds),
-      skillIds: this.normalizeStringList(persisted.skillIds),
+      profileRevision: persisted.profileRevision,
       createdAt: persisted.createdAt ?? seed.createdAt,
       updatedAt: seed.updatedAt
     };

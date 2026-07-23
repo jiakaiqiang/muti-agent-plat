@@ -4,13 +4,13 @@ import type {
   AgentTask,
   Artifact,
   CollaborationEvent,
-  ContextPack,
+  ContextAssembly,
   ProjectMap,
-  RuntimeFileChange,
   SessionDetail,
   TaskBrief,
   TaskContext
 } from '@agent-cluster/shared';
+import { shouldPublishRuntimeEventToCollaboration } from '@agent-cluster/shared';
 
 export type ContextRouteInput = {
   session: SessionDetail;
@@ -18,9 +18,9 @@ export type ContextRouteInput = {
   task?: AgentTask;
   phase: AgentRunPhase;
   projectMap?: ProjectMap;
-  workspaceFocus?: ContextPack['workspaceFocus'];
-  relevantMemories: ContextPack['relevantMemories'];
-  ragSnippets: ContextPack['ragSnippets'];
+  workspaceFocus?: ContextAssembly['workspaceFocus'];
+  relevantMemories: ContextAssembly['relevantMemories'];
+  ragSnippets: ContextAssembly['ragSnippets'];
   artifacts: Artifact[];
   events: CollaborationEvent[];
   participatingAgentKeys: string[];
@@ -33,8 +33,16 @@ export class ContextRouterService {
     const domain = session.taskDomain ?? (session.workspaceSnapshot ? 'mixed' : 'non_coding');
     const intent = session.taskIntent ?? (brief ? 'implementation' : 'analysis');
     const isArchitectureAnalysis = this.isArchitectureAnalysis(session, task);
-    const recentEvents = events.slice(-6);
-    const decisionEvents = events
+    const contextEvents = events.filter((event) => {
+      const payload = event.metadata?.payload as { code?: unknown; visibility?: unknown } | undefined;
+      return shouldPublishRuntimeEventToCollaboration({
+        type: event.type,
+        visibility: payload?.visibility,
+        code: payload?.code
+      });
+    });
+    const recentEvents = contextEvents.slice(-6);
+    const decisionEvents = contextEvents
       .filter((event) => ['brief_created', 'brief_confirmed', 'post_review_completed'].includes(event.type))
       .slice(-4);
     const workspaceEvidenceFiles = this.uniqueFirstStrings(
@@ -96,7 +104,7 @@ export class ContextRouterService {
         label: artifact.title,
         ref: artifact.id
       })),
-      ...artifacts.flatMap((artifact) => this.artifactFileChangeEvidence(artifact.metadata)),
+      ...artifacts.flatMap((artifact) => this.artifactFileChangeEvidence(artifact)),
       ...relevantMemories.map((memory) => ({
         type: 'memory' as const,
         label: `${memory.scope}: ${this.shortText(memory.content, 96)}`,
@@ -326,7 +334,7 @@ export class ContextRouterService {
             action: 'do',
             label: `Advance ${phase} for ${domain}/${intent}`,
             refs: [taskRef],
-            reason: 'Follow the current phase boundary and Task Context Pack.'
+            reason: 'Follow the current phase boundary and Task Context Assembly.'
           }
         ];
     }
@@ -342,7 +350,7 @@ export class ContextRouterService {
 
   private architectureEvidenceRefs(
     session: SessionDetail,
-    workspaceFocus: ContextPack['workspaceFocus'],
+    workspaceFocus: ContextAssembly['workspaceFocus'],
     projectMap: ProjectMap | undefined
   ): TaskContext['evidenceRefs'] {
     const snapshot = session.workspaceSnapshot;
@@ -382,20 +390,29 @@ export class ContextRouterService {
     const lower = path.toLowerCase();
     const fileName = lower.split('/').at(-1) ?? lower;
     let score = 0;
-    if (['package.json', 'readme.md', 'agents.md', 'claude.md', 'tsconfig.json', 'nest-cli.json'].includes(fileName)) {
+    if (/^(package\.json|readme\.md|agents\.md|claude\.md|tsconfig\.json|nest-cli\.json)$/.test(lower)) {
       score += 118;
+    } else if (fileName === 'package.json') {
+      score += 96;
+    } else if (['readme.md', 'agents.md', 'claude.md'].includes(fileName)) {
+      score += 18;
     }
     if (/^(vite|webpack|rollup|eslint|vitest|playwright)\.config\.(ts|js|mjs|cjs)$/.test(fileName)) {
       score += 100;
     }
-    if (/(^|\/)(main|index|app|server|bootstrap)\.(ts|tsx|js|jsx|mjs|cjs|vue)$/.test(lower)) {
+    if (/(^|\/)(main|app|server|bootstrap)\.(ts|tsx|js|jsx|mjs|cjs|vue)$/.test(lower)) {
       score += 126;
     }
-    if (/\/(modules?|services?|runtimes?|orchestrator|sessions?|tasks?|agents?|events?|intent|router|routes|stores?|api|contracts?|types?|schemas?)\//.test(lower)) {
+    if (/^(src|app|server|apps\/[^/]+\/src)\/index\.(ts|tsx|js|jsx|mjs|cjs)$/.test(lower)) {
+      score += 118;
+    } else if (/(^|\/)index\.(ts|tsx|js|jsx|mjs|cjs)$/.test(lower)) {
+      score += 28;
+    }
+    if (/\/(modules?|services?|runtimes?|orchestrator|sessions?|tasks?|agents?|events?|intent|router|routes|stores?|api|contracts?|types?|schemas?|chains?|rag|memory|prompts?|tools?|llm|models?|middleware)\//.test(lower)) {
       score += 86;
     }
-    if (/\/(runtime|service|controller|module|provider|store|router|route|contract|schema|types?)\.(ts|tsx|js|jsx|mjs|cjs)$/.test(lower)) {
-      score += 58;
+    if (/\/(runtime|service|controller|module|provider|store|router|route|contract|schema|types?|model|prompt|agent|chain|pipeline|retriever|loader|vectorstore|memory|tool)\.(ts|tsx|js|jsx|mjs|cjs)$/.test(lower)) {
+      score += 104;
     }
     if (/^docs\/(ai-agent-context|design|product|contracts|quality)\//.test(lower)) {
       score += 62;
@@ -408,12 +425,14 @@ export class ContextRouterService {
 
   private architectureEvidenceReason(path: string) {
     const lower = path.toLowerCase();
-    if (/(^|\/)(main|index|app|server|bootstrap)\./.test(lower)) return 'entrypoint evidence for the main execution path.';
+    if (/(^|\/)(main|app|server|bootstrap)\./.test(lower) || /^(src|app|server|apps\/[^/]+\/src)\/index\./.test(lower)) {
+      return 'entrypoint evidence for the main execution path.';
+    }
     if (/(^|\/)(package\.json|readme\.md|agents\.md|claude\.md|tsconfig\.json|nest-cli\.json)$/.test(lower)) {
       return 'project setup, instructions, or stack configuration evidence.';
     }
-    if (/\/(modules?|services?|runtimes?|orchestrator|sessions?|tasks?|agents?|events?|intent|router|routes|stores?|api|contracts?|types?|schemas?)\//.test(lower)) {
-      return 'module boundary, service/runtime flow, route, store, or contract evidence.';
+    if (/\/(modules?|services?|runtimes?|orchestrator|sessions?|tasks?|agents?|events?|intent|router|routes|stores?|api|contracts?|types?|schemas?|chains?|rag|memory|prompts?|tools?|llm|models?|middleware)\//.test(lower)) {
+      return 'module boundary, service/runtime flow, model, chain, RAG, memory, tool, route, store, or contract evidence.';
     }
     if (/^docs\/(ai-agent-context|design|product|contracts|quality)\//.test(lower)) {
       return 'project map, product/design, contract, or quality evidence.';
@@ -578,6 +597,7 @@ export class ContextRouterService {
         ...shared,
         'Prefer workspace manifest, project map, entrypoints, configs, module boundaries, runtime/services, routes/stores, contracts, and selected readable file contents.',
         'Use directory routing as navigation evidence, but ground architecture conclusions in selectedEvidenceContents whenever file content is available.',
+        'Treat AGENTS, README, and design documents as navigation claims; cross-check them against current entrypoint and module source before describing data flow.',
         'If key entrypoint or module boundary content is omitted, request supplemental context instead of reassigning the task.'
       ];
     }
@@ -674,23 +694,26 @@ export class ContextRouterService {
     const requests = (session.supplementalContextRequests ?? []).filter((request) => !taskId || request.taskId === taskId);
     return requests.flatMap((request) => {
       const reason = `Requested by runtime after CONTEXT_INSUFFICIENT: ${request.requestedContext.reason}`;
-      const requestedRefs = request.requestedContext.requestedRefs.map((ref) => ({
-        ...ref,
-        selectionReason: reason
-      }));
-      const requestedPaths = (request.requestedContext.requestedPaths ?? []).map((path) => ({
+      const hydratedPaths = request.resolution ? new Set(request.resolution.hydratedPaths) : undefined;
+      const requestedRefs = request.requestedContext.requestedRefs
+        .filter(
+          (ref) =>
+            !hydratedPaths ||
+            !['workspace_file', 'workspace_symbol', 'test'].includes(ref.type) ||
+            Boolean(ref.ref && hydratedPaths.has(ref.ref))
+        )
+        .map((ref) => ({
+          ...ref,
+          selectionReason: reason
+        }));
+      const paths = request.resolution?.hydratedPaths ?? request.requestedContext.requestedPaths ?? [];
+      const requestedPaths = paths.map((path) => ({
         type: 'workspace_file' as const,
         label: path,
         ref: path,
         selectionReason: reason
       }));
-      const requestedCommands = (request.requestedContext.requestedCommands ?? []).map((command) => ({
-        type: 'test' as const,
-        label: `requested command: ${command}`,
-        ref: command,
-        selectionReason: reason
-      }));
-      return [...requestedRefs, ...requestedPaths, ...requestedCommands];
+      return [...requestedRefs, ...requestedPaths];
     });
   }
 
@@ -699,7 +722,7 @@ export class ContextRouterService {
     domain: TaskContext['domain'],
     brief: TaskBrief | undefined,
     projectMap: ProjectMap | undefined,
-    focus: ContextPack['workspaceFocus'],
+    focus: ContextAssembly['workspaceFocus'],
     evidenceSelection: TaskContext['evidenceSelection']
   ): TaskContext['taskMap'] {
     if (domain === 'coding' || domain === 'mixed') {
@@ -908,16 +931,16 @@ export class ContextRouterService {
     ];
   }
 
-  private artifactFileChangeEvidence(metadata: Record<string, unknown>): TaskContext['evidenceRefs'] {
-    if (!Array.isArray(metadata.fileChanges)) return [];
-    return metadata.fileChanges
-      .filter((change): change is RuntimeFileChange => Boolean(change) && typeof (change as RuntimeFileChange).path === 'string')
+  private artifactFileChangeEvidence(artifact: Artifact): TaskContext['evidenceRefs'] {
+    return (artifact.systemEvidence?.workspaceChangeSet?.changes ?? [])
       .slice(0, 12)
-      .map((change) => ({
-        type: 'diff' as const,
-        label: `${change.operation}: ${change.path}`,
-        ref: change.path
-      }));
+      .map((change) => {
+        const ref = change.operation === 'move' ? change.toPath : change.path;
+        const label = change.operation === 'move'
+          ? `move: ${change.fromPath} -> ${change.toPath}`
+          : `${change.operation}: ${change.path}`;
+        return { type: 'diff' as const, label, ref };
+      });
   }
 
   private eventEvidenceType(domain: TaskContext['domain'], type: string): TaskContext['evidenceRefs'][number]['type'] {

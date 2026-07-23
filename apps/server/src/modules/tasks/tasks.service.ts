@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { AgentTask, SuggestedAgentTask, TaskRoutingMode, UUID } from '@agent-cluster/shared';
+import type { ActorRef, AgentTask, SuggestedAgentTask, TaskRoutingMode, UUID } from '@agent-cluster/shared';
 import { nowIso } from '../../common/time.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 
@@ -10,7 +10,7 @@ export class TasksService {
   constructor(private readonly persistence: PersistenceService) {
     const persisted = this.persistence.getCollection<Record<string, AgentTask[]>>('tasksBySession', {});
     for (const [sessionId, tasks] of Object.entries(persisted)) {
-      this.tasksBySession.set(sessionId, tasks.map((task) => this.normalizeActorFields(task)));
+      this.tasksBySession.set(sessionId, tasks);
     }
   }
 
@@ -18,12 +18,11 @@ export class TasksService {
     sessionId: UUID,
     suggestions: SuggestedAgentTask[],
     agentIdByKey: Map<string, string>,
-    options: { assignedByAgentId?: UUID; routingMode?: TaskRoutingMode } = {}
+    options: { assignedBy?: ActorRef; routingMode?: TaskRoutingMode } = {}
   ) {
     const titleToId = new Map<string, string>();
     const tasks: AgentTask[] = suggestions.map((suggestion) => {
-      const assignedByAgentId = options.assignedByAgentId;
-      const assigneeAgentId = suggestion.suggestedAgentKey
+      const assigneeId = suggestion.suggestedAgentKey
         ? agentIdByKey.get(suggestion.suggestedAgentKey)
         : undefined;
       const task: AgentTask = {
@@ -32,13 +31,11 @@ export class TasksService {
         title: suggestion.title,
         description: suggestion.description,
         status: 'assigned',
-        assignedBy: assignedByAgentId ? { type: 'agent', id: assignedByAgentId } : undefined,
-        assignee: assigneeAgentId ? { type: 'agent', id: assigneeAgentId } : undefined,
-        assignedByAgentId,
-        assigneeAgentId,
+        assignedBy: options.assignedBy,
+        assignee: assigneeId ? { type: 'agent', id: assigneeId } : undefined,
         routingMode: options.routingMode ?? suggestion.routingMode ?? 'coordinator_controlled',
         autoResolutionAttempted: false,
-        assignmentReason: suggestion.assignmentReason,
+        assignmentReason: suggestion.assignmentReason ?? undefined,
         contextRequirements: suggestion.contextRequirements,
         verificationPlan: suggestion.verificationPlan,
         riskNotes: suggestion.riskNotes,
@@ -69,15 +66,19 @@ export class TasksService {
   }
 
   add(task: AgentTask) {
-    this.normalizeActorFields(task);
+    const existing = this.list(task.sessionId).find((candidate) => candidate.id === task.id);
+    if (existing) return existing;
     this.tasksBySession.set(task.sessionId, [...this.list(task.sessionId), task]);
     this.persist();
     return task;
   }
 
+  find(sessionId: string, taskId: string) {
+    return this.list(sessionId).find((task) => task.id === taskId);
+  }
+
   update(task: AgentTask, patch: Partial<AgentTask>) {
     Object.assign(task, patch, { updatedAt: nowIso() });
-    this.normalizeActorFields(task);
     this.persist();
     return task;
   }
@@ -123,19 +124,4 @@ export class TasksService {
     return title.trim().toLocaleLowerCase();
   }
 
-  private normalizeActorFields(task: AgentTask) {
-    if (!task.assignee && task.assigneeAgentId) {
-      task.assignee = { type: 'agent', id: task.assigneeAgentId };
-    }
-    if (!task.assigneeAgentId && task.assignee?.type === 'agent') {
-      task.assigneeAgentId = task.assignee.id;
-    }
-    if (!task.assignedBy && task.assignedByAgentId) {
-      task.assignedBy = { type: 'agent', id: task.assignedByAgentId };
-    }
-    if (!task.assignedByAgentId && task.assignedBy?.type === 'agent') {
-      task.assignedByAgentId = task.assignedBy.id;
-    }
-    return task;
-  }
 }

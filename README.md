@@ -57,11 +57,16 @@ For local demos or E2E tests, explicitly enable mock mode with
 
 The server supports both local file persistence and PostgreSQL persistence.
 With `AGENT_CLUSTER_PERSISTENCE_BACKEND=file`, it writes a JSON snapshot to
-`.cache/agent-cluster/state.v0.1.json`; override this with
+`.cache/agent-cluster/state.v3.json`; override this with
 `AGENT_CLUSTER_DATA_DIR` or `AGENT_CLUSTER_DATA_FILE`. With
-`AGENT_CLUSTER_PERSISTENCE_BACKEND=postgres`, it uses a `pg.Pool`, loads
-collections on startup, and upserts changed collections through the configured
-`AGENT_CLUSTER_POSTGRES_COLLECTION_TABLE`.
+`AGENT_CLUSTER_PERSISTENCE_BACKEND=postgres`, it runs the checksum-protected
+`agent_cluster` relational migrations, writes catalog/session/runtime data to
+normalized tables, and restores the existing API DTOs from those records.
+Large file bodies and raw tool output remain in the content-addressed local
+store configured by `AGENT_CLUSTER_CONTENT_DIR`; PostgreSQL stores their
+`content_objects` references. `AGENT_CLUSTER_POSTGRES_COLLECTION_TABLE` is a
+read-only compatibility fallback for pre-migration data and is not used for new writes.
+See `docs/contracts/relational-persistence-v2.md` for the table map and cutover commands.
 
 Session creation and brief confirmation are accepted immediately. The Agent
 discussion, task execution, post-review, and final delivery happen in the
@@ -82,7 +87,9 @@ invocation logs instead of silently falling back to mock output.
 Multi-agent discussion is controlled by `DISCUSSION_AGENT_KEYS`,
 `DISCUSSION_MAX_ROUNDS`, and `DISCUSSION_TIMEOUT_MS`. A discussion timeout is
 recorded as a risk message and a `RUNTIME_TIMEOUT` invocation, then brief
-generation continues. If a local model is too slow during brief creation, set
+generation continues. The timeout defaults to `0`, which delegates termination
+to each runtime's own watchdog; set a positive value only for a stricter
+discussion deadline. If a local model is too slow during brief creation, set
 `DISCUSSION_MAX_ROUNDS=0` to skip pre-brief discussion temporarily, or reduce
 `DISCUSSION_AGENT_KEYS` to fewer agents. Token accounting uses estimated counts
 by default and updates `session.tokenUsed` after runtime calls;

@@ -13,7 +13,9 @@ import {
   writeFileSync
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import type { AgentRunInput, RuntimeType } from '@agent-cluster/shared';
+import type { InvocationPlan, RuntimeType } from '@agent-cluster/shared';
+import { removeRuntimeDirectorySync } from '../../../common/runtime-directory-cleanup.js';
+import { InvocationWorkspaceBindingsService } from '../invocation-workspace-bindings.service.js';
 
 type BriefRuntimeType = Extract<RuntimeType, 'codex' | 'claude_code'>;
 
@@ -28,7 +30,7 @@ type BriefTargetManifest = {
 type BriefManifest = {
   version: '0.1';
   status: 'active' | 'restored';
-  runId: string;
+  invocationId: string;
   sessionId: string;
   runtimeType: BriefRuntimeType;
   executionWorkDir: string;
@@ -51,19 +53,18 @@ export type WorkdirBriefLease = {
 export class WorkdirBriefService {
   private readonly logger = new Logger(WorkdirBriefService.name);
 
-  prepare(input: AgentRunInput, runtimeType: BriefRuntimeType): WorkdirBriefLease | undefined {
+  constructor(private readonly workspaceBindings: InvocationWorkspaceBindingsService) {}
+
+  prepare(input: InvocationPlan, runtimeType: BriefRuntimeType): WorkdirBriefLease | undefined {
     if ((process.env.AGENT_CLUSTER_WORKDIR_BRIEF ?? 'true').trim().toLowerCase() === 'false') {
       return undefined;
     }
-    const configuredWorkDir = input.contextPack.workingDirectory;
-    const executionWorkDir =
-      configuredWorkDir?.kind === 'server_local' && configuredWorkDir.path
-        ? resolve(configuredWorkDir.path)
-        : undefined;
+    const boundRoot = this.workspaceBindings.resolveServerRoot(input);
+    const executionWorkDir = boundRoot ? resolve(boundRoot) : undefined;
     if (!executionWorkDir || !existsSync(executionWorkDir)) return undefined;
 
     const root = this.stagingRoot();
-    const briefStagingDir = join(root, 'runs', input.sessionId, input.runId);
+    const briefStagingDir = join(root, 'runs', input.sessionId, input.invocationId);
     const leasePath = join(root, 'leases', `${sha256(Buffer.from(executionWorkDir, 'utf8'))}.json`);
     mkdirSync(dirname(leasePath), { recursive: true });
     mkdirSync(join(briefStagingDir, 'backups'), { recursive: true });
@@ -88,7 +89,7 @@ export class WorkdirBriefService {
     const manifest: BriefManifest = {
       version: '0.1',
       status: 'active',
-      runId: input.runId,
+      invocationId: input.invocationId,
       sessionId: input.sessionId,
       runtimeType,
       executionWorkDir,
@@ -146,9 +147,23 @@ export class WorkdirBriefService {
     return { restored, failed, expiredRemoved: this.cleanupExpired(root) };
   }
 
+  deleteSessionDirectory(sessionId: string): void {
+    const root = this.stagingRoot();
+    const sessionDirectory = resolve(root, 'runs', sessionId);
+    assertPathInside(root, sessionDirectory, 'workdir brief session directory');
+    for (const manifestPath of findFiles(sessionDirectory, 'backup-manifest.json')) {
+      const manifest = this.readManifest(manifestPath);
+      if (manifest.sessionId !== sessionId) {
+        throw new Error(`Workdir brief manifest does not belong to Session ${sessionId}: ${manifestPath}`);
+      }
+      if (manifest.status === 'active') this.restoreManifest(manifestPath);
+    }
+    removeRuntimeDirectorySync(sessionDirectory);
+  }
+
   private acquireLease(
     leasePath: string,
-    input: AgentRunInput,
+    input: InvocationPlan,
     executionWorkDir: string,
     briefStagingDir: string
   ) {
@@ -157,7 +172,7 @@ export class WorkdirBriefService {
       fd = openSync(leasePath, 'wx');
       writeFileSync(
         fd,
-        `${JSON.stringify({ runId: input.runId, sessionId: input.sessionId, executionWorkDir, briefStagingDir })}\n`,
+        `${JSON.stringify({ invocationId: input.invocationId, sessionId: input.sessionId, executionWorkDir, briefStagingDir })}\n`,
         'utf8'
       );
     } catch (error) {
@@ -200,21 +215,15 @@ export class WorkdirBriefService {
     atomicWrite(path, Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'));
   }
 
-  private instructionBlock(input: AgentRunInput, runtimeType: BriefRuntimeType, sidecarPath: string) {
-    const optionSkillRules = Array.isArray(input.options?.workdirBriefSkills)
-      ? (input.options?.workdirBriefSkills as unknown[]).filter((item): item is string => typeof item === 'string')
-      : [];
-    const skillRules = [
-      ...input.contextPack.systemRules.filter((rule) => rule.startsWith('[Skill:')),
-      ...optionSkillRules
-    ];
+  private instructionBlock(input: InvocationPlan, runtimeType: BriefRuntimeType, sidecarPath: string) {
+    const skillRules = input.contextEnvelope.L0.systemRules.filter((rule) => rule.startsWith('[Skill:'));
     return [
       '<!-- agent-cluster:workdir-brief:start -->',
       '# Agent Cluster execution brief',
       '',
       `- Runtime: ${runtimeType}`,
       `- Agent role: ${input.agent.role}`,
-      `- Current task: ${input.contextPack.currentTask?.title ?? input.contextPack.sessionGoal}`,
+      `- Current task: ${input.contextEnvelope.L1.task?.title ?? input.contextEnvelope.L1.sessionGoal}`,
       `- Expected output: ${input.expectedOutput.kind}`,
       `- Task sidecar: ${sidecarPath}`,
       ...(skillRules.length > 0 ? ['', '## Bound skills', ...skillRules.map((rule) => `- ${rule}`)] : []),
@@ -222,24 +231,20 @@ export class WorkdirBriefService {
     ].join('\n');
   }
 
-  private taskSidecar(input: AgentRunInput) {
+  private taskSidecar(input: InvocationPlan) {
     return {
-      schemaVersion: '0.1',
-      runId: input.runId,
+      schemaVersion: '1.0',
+      invocationId: input.invocationId,
       sessionId: input.sessionId,
       taskId: input.taskId,
       phase: input.phase,
       agent: {
-        id: input.agent.id,
+        id: input.agent.agentId,
         key: input.agent.key,
         role: input.agent.role
       },
-      goal: input.contextPack.sessionGoal,
-      taskBrief: input.contextPack.taskBrief,
-      currentTask: input.contextPack.currentTask,
       expectedOutput: input.expectedOutput,
-      constraints: input.contextPack.constraints,
-      validation: input.contextPack.taskContext?.validationRules ?? []
+      contextEnvelope: input.contextEnvelope
     };
   }
 
@@ -278,6 +283,14 @@ function mergeInstructionBytes(original: Buffer, block: string): Buffer {
 
 function sha256(value: Buffer): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function assertPathInside(root: string, candidate: string, label: string) {
+  const normalizedRoot = resolve(root).replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase();
+  const normalizedCandidate = resolve(candidate).replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase();
+  if (normalizedCandidate === normalizedRoot || !normalizedCandidate.startsWith(`${normalizedRoot}/`)) {
+    throw new Error(`${label} must be a child of ${root}: ${candidate}`);
+  }
 }
 
 function atomicWrite(path: string, content: Buffer) {

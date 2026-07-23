@@ -1,4 +1,4 @@
-import type { AgentRunInput, RuntimeType } from '@agent-cluster/shared';
+import type { InvocationPlan, RuntimeType } from '@agent-cluster/shared';
 import type { WatchdogTimeoutObservation } from './liveness-watchdog.js';
 
 const STDERR_SUMMARY_CHARS = 1_000;
@@ -11,7 +11,7 @@ const COMMON_SECRET_PATTERN = /\b(?:sk|gh[pousr]|xox[baprs])[-_][A-Za-z0-9_-]{8,
 
 export function buildWatchdogTimeoutDetails(params: {
   runtimeType: RuntimeType;
-  input: AgentRunInput;
+  input: InvocationPlan;
   observation: WatchdogTimeoutObservation;
   stderrTail?: string;
 }) {
@@ -19,7 +19,7 @@ export function buildWatchdogTimeoutDetails(params: {
   return {
     watchdog: observation.reason,
     runtimeType,
-    runId: input.runId,
+    invocationId: input.invocationId,
     phase: input.phase,
     thresholdMs: observation.thresholdMs,
     startedAt: new Date(observation.startedAtMs).toISOString(),

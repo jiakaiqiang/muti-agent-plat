@@ -1,14 +1,13 @@
-import type { Agent, AgentStatus, CollaborationEvent, SessionDetail, TaskBrief } from './contracts.js';
+import type { AgentDefinition, AgentStatus, CollaborationEvent, SessionDetail, TaskBrief } from './contracts.js';
 import { defaultAgents } from './default-agents.js';
 import { createMetadata } from './metadata.js';
 import { nowIso } from './time.js';
 
-export const mockAgents: Agent[] = defaultAgents.map((agent) => {
+export const mockAgents: AgentDefinition[] = defaultAgents.map((agent) => {
   const now = nowIso();
 
   return {
     ...agent,
-    runtimeType: 'mock',
     createdAt: now,
     updatedAt: now
   };
@@ -16,6 +15,7 @@ export const mockAgents: Agent[] = defaultAgents.map((agent) => {
 
 export const createMockSession = (): SessionDetail => ({
   id: '10000000-0000-0000-0000-000000000001',
+  dataEpoch: 'epoch-demo',
   title: 'Login module refactor',
   originalInput:
     'Help me refactor the login module, keep legacy token compatibility, and prepare a delivery notification draft.',

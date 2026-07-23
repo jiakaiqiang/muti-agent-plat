@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { actorAgentId } from '@/composables/useActor'
 import type {
   AgentCardState,
   BriefEventPayload,
@@ -11,6 +12,7 @@ import type {
 } from '@/types/contracts'
 import ConfirmationCard from './ConfirmationCard.vue'
 import UiIcon from './UiIcon.vue'
+import { summarizeContextSupplement } from './contextSupplementSummary'
 
 const props = defineProps<{
   brief?: BriefEventPayload
@@ -52,12 +54,7 @@ const latestReview = computed(() => {
     | undefined
   return payload
 })
-const contextSupplementCount = computed(
-  () =>
-    props.events.filter(
-      (event) => event.type === 'agent_message' && (event.metadata.payload as { phase?: string } | undefined)?.phase === 'context_supplement'
-    ).length
-)
+const contextSupplementSummary = computed(() => summarizeContextSupplement(props.events))
 const interruptionEvents = computed(() =>
   props.events
     .filter((event) => {
@@ -389,11 +386,14 @@ function formatActivityTime(value: string) {
             <span>{{ tasks.length ? `已完成 ${completedTaskCount}/${tasks.length}，执行中 ${runningTaskCount}` : `建议 ${suggestedTasks.length} 项` }}</span>
           </div>
         </article>
-        <article :class="{ active: waitingTaskCount || contextSupplementCount }">
+        <article :class="{ active: waitingTaskCount || contextSupplementSummary.deferred }">
           <UiIcon name="debug" :size="17" />
           <div>
             <strong>上下文</strong>
-            <span>补充 {{ contextSupplementCount }} 项，等待 {{ waitingTaskCount }} 项</span>
+            <span>
+              已补充 {{ contextSupplementSummary.hydrated }} 项，失败 {{ contextSupplementSummary.failed }} 项，等待
+              {{ waitingTaskCount + contextSupplementSummary.deferred }} 项
+            </span>
           </div>
         </article>
         <article :class="{ active: interruptionCount }">
@@ -468,15 +468,15 @@ function formatActivityTime(value: string) {
           <dl v-if="brief">
             <div>
               <dt>范围</dt>
-              <dd>{{ brief.scope.slice(0, 3).join(' / ') || '-' }}</dd>
+              <dd>{{ (brief.scope ?? []).slice(0, 3).join(' / ') || '-' }}</dd>
             </div>
             <div>
               <dt>验收标准</dt>
-              <dd>{{ brief.acceptanceCriteria.slice(0, 3).join(' / ') || '-' }}</dd>
+              <dd>{{ (brief.acceptanceCriteria ?? []).slice(0, 3).join(' / ') || '-' }}</dd>
             </div>
             <div>
               <dt>风险</dt>
-              <dd>{{ brief.risks.slice(0, 2).join(' / ') || '-' }}</dd>
+              <dd>{{ (brief.risks ?? []).slice(0, 2).join(' / ') || '-' }}</dd>
             </div>
           </dl>
           <p v-else>暂未生成已确认的任务契约。</p>
@@ -491,7 +491,7 @@ function formatActivityTime(value: string) {
                 <span :class="['task-board-status', taskStatusTone(task.status)]">{{ taskStatusLabel(task.status) }}</span>
               </header>
               <p>
-                <span v-if="task.assignedByAgentId">由 {{ agentName(task.assignedByAgentId) }} 分配给 </span>{{ agentName(task.assigneeAgentId) }}
+                <span v-if="actorAgentId(task.assignedBy)">由 {{ agentName(actorAgentId(task.assignedBy)) }} 分配给 </span>{{ agentName(actorAgentId(task.assignee)) }}
               </p>
               <small v-if="task.assignmentReason">分配理由：{{ task.assignmentReason }}</small>
               <small>路由模式：{{ task.routingMode ?? 'coordinator_controlled' }}</small>

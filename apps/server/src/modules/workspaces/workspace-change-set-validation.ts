@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import type {
   FileHash,
   WorkspaceChange,
@@ -22,7 +22,22 @@ export async function validateChangeSetBaseHashes(
   const { rootPath, currentRevision, changeSet } = args;
   const conflicts: WorkspaceConflictError[] = [];
   for (const change of changeSet.changes) {
-    if (change.operation === 'create') continue;
+    if (change.operation === 'create') {
+      const { absolute } = resolveWorkspacePath(rootPath, change.path);
+      const actual = await inspectPath(absolute);
+      if (actual.exists) {
+        conflicts.push({
+          code: WORKSPACE_BASE_HASH_MISMATCH,
+          message: `Create target already exists: ${change.path}`,
+          changeSetId: changeSet.id,
+          operation: 'create',
+          path: change.path,
+          ...(actual.hash ? { actualHash: actual.hash } : {}),
+          actualRevision: currentRevision
+        });
+      }
+      continue;
+    }
     const conflict = await checkChange(rootPath, currentRevision, changeSet.id, change);
     if (conflict) conflicts.push(conflict);
   }
@@ -62,6 +77,18 @@ async function hashFileIfExists(absolute: string): Promise<FileHash | null> {
     return { algorithm: 'sha256', value: createHash('sha256').update(buffer).digest('hex') };
   } catch (error) {
     if (isEnoent(error)) return null;
+    throw error;
+  }
+}
+
+async function inspectPath(absolute: string): Promise<{ exists: boolean; hash?: FileHash }> {
+  try {
+    const metadata = await stat(absolute);
+    if (!metadata.isFile()) return { exists: true };
+    const buffer = await readFile(absolute);
+    return { exists: true, hash: { algorithm: 'sha256', value: createHash('sha256').update(buffer).digest('hex') } };
+  } catch (error) {
+    if (isEnoent(error)) return { exists: false };
     throw error;
   }
 }

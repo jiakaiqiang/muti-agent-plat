@@ -1,12 +1,14 @@
-// Minimal tool-loop smoke test that bypasses the discussion phase entirely.
+// Minimal real-model tool-loop smoke using the current brief and workflow contracts.
 // Uses a very simple requirement that should be easy for even small models.
 
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
-  api,
   buildServer,
+  confirmBriefAndSelectWorkflow,
+  createPublishedAgentWorkflow,
+  createSessionAndWaitForBrief,
   startSmokeServer,
   stopSmokeServer,
   waitForStatus
@@ -25,12 +27,12 @@ try {
     LLM_MOCK_FALLBACK: 'false'
   });
 
-  // Create session with a simple requirement
-  const createResp = await fetch(`${server.apiBase}/sessions`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      userInput: 'Say hello in Chinese.',
+  const workflow = await createPublishedAgentWorkflow(server.apiBase, 'Minimal tool loop workflow', ['backend']);
+
+  const { sessionId, briefId } = await createSessionAndWaitForBrief(
+    server.apiBase,
+    'Say hello in Chinese.',
+    {
       workingDirectory: {
         kind: 'server_local',
         path: workspace,
@@ -49,26 +51,13 @@ try {
         detectedStack: [],
         entrypoints: ['README.md']
       }
-    })
-  });
+    }
+  );
+  console.log('Session created:', sessionId);
 
-  if (!createResp.ok) {
-    const errorText = await createResp.text();
-    throw new Error(`Failed to create session: ${createResp.status} - ${errorText}`);
-  }
-
-  const session = await createResp.json();
-  console.log('Session created:', session.id);
-
-  // Wait for brief or timeout
-  const finalStatus = await waitForStatus(server.apiBase, session.id, ['COMPLETED', 'FAILED'], 90_000);
-
-  if (finalStatus === 'COMPLETED' || finalStatus === 'DELIVERED') {
-    console.log('tool loop minimal smoke ok');
-  } else {
-    console.log(`[SKIP] Session ended with status ${finalStatus} (local small model limitation)`);
-    console.log('tool loop minimal smoke ok (skipped)');
-  }
+  await confirmBriefAndSelectWorkflow(server.apiBase, sessionId, briefId, workflow);
+  await waitForStatus(server.apiBase, sessionId, 'COMPLETED', 90_000);
+  console.log('tool loop minimal smoke ok');
 } catch (error) {
   console.error(error?.stack ?? error);
   process.exit(1);

@@ -1,7 +1,9 @@
 import {
   api,
   buildServer,
+  createPublishedAgentWorkflow,
   listEvents,
+  selectPublishedWorkflow,
   startSmokeServer,
   stopSmokeServer,
   waitForStatus
@@ -28,11 +30,21 @@ try {
     DISCUSSION_MAX_ROUNDS: '0'
   });
 
+  const workflow = await createPublishedAgentWorkflow(
+    server.apiBase,
+    'Requirement revision workflow',
+    ['requirements']
+  );
+
   const created = await api(server.apiBase, '/sessions', {
     method: 'POST',
     body: JSON.stringify({
-      input: 'Build a workflow that requires user confirmation before task assignment.',
-      agentIds: ['coordinator', 'requirements', 'backend', 'test', 'review', 'notification']
+      input: '分析需要用户确认后再分配任务的协作流程，仅输出说明。',
+      agentIds: ['coordinator', 'requirements', 'backend', 'test', 'review', 'notification'],
+      runtimePreference: {
+        preferredRuntimeType: 'mock',
+        allowedRuntimeTypes: ['mock']
+      }
     })
   });
   const sessionId = created.data.session.id;
@@ -62,6 +74,7 @@ try {
   }
 
   await api(server.apiBase, `/sessions/${sessionId}/briefs/${secondBrief.id}/confirm`, { method: 'POST' });
+  await selectPublishedWorkflow(server.apiBase, sessionId, workflow);
   await waitForStatus(server.apiBase, sessionId, 'COMPLETED', 30_000);
 
   const events = await listEvents(server.apiBase, sessionId);

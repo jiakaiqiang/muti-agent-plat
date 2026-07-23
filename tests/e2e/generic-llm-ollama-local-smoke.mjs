@@ -61,11 +61,13 @@ const llmServer = createServer(async (request, response) => {
             role: 'assistant',
             content: JSON.stringify({
               kind: 'task_execution_result',
-              schemaVersion: '0.1',
+              schemaVersion: '1.0',
               status: 'completed',
               summary: 'Ollama local runtime completed without response_format.',
               completedItems: ['Local runtime request omitted response_format'],
               changedArtifacts: [],
+              requestedContext: null,
+              agentMessages: [],
               nextSuggestedActions: [],
               risks: []
             }),
@@ -81,7 +83,7 @@ const llmServer = createServer(async (request, response) => {
 await new Promise((resolve) => llmServer.listen(llmPort, '127.0.0.1', resolve));
 
 const serverHandle = await startSmokeServer('generic-llm-ollama-local', {
-  DEFAULT_AGENT_RUNTIME_TYPE: 'generic_llm',
+  GLOBAL_DEFAULT_RUNTIME_TYPE: 'generic_llm',
   LLM_PROVIDER: 'ollama',
   LLM_MODEL: 'ollama-local-smoke-model',
   LLM_BASE_URL: `http://127.0.0.1:${llmPort}/v1`,

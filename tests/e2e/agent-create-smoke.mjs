@@ -154,7 +154,7 @@ async function startServer() {
       AGENT_CLUSTER_POSTGRES_COLLECTION_TABLE: tableName,
       AGENT_CLUSTER_SEED_DEFAULT_AGENTS: 'false',
       DATABASE_URL: databaseUrl,
-      DEFAULT_AGENT_RUNTIME_TYPE: 'generic_llm',
+      GLOBAL_DEFAULT_RUNTIME_TYPE: 'generic_llm',
       LLM_DRY_RUN: 'false',
       LLM_MOCK_FALLBACK: 'false',
       MOCK_RUNTIME_ENABLED: 'false'
@@ -207,8 +207,8 @@ function assertAgent(agent) {
   if (agent.role !== 'Collects product and market context.') {
     throw new Error(`Agent role mismatch: ${JSON.stringify(agent)}`);
   }
-  if (agent.runtimeType !== 'generic_llm') {
-    throw new Error(`Agent runtimeType mismatch: ${JSON.stringify(agent)}`);
+  if ('runtimeType' in agent || 'modelId' in agent) {
+    throw new Error(`Agent identity must not persist Runtime selection fields: ${JSON.stringify(agent)}`);
   }
   if (JSON.stringify(agent.tags) !== JSON.stringify(['research', 'market'])) {
     throw new Error(`Agent tags mismatch: ${JSON.stringify(agent)}`);

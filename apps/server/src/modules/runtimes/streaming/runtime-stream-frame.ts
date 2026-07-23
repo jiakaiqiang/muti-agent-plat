@@ -15,6 +15,17 @@ export type RawUsage = {
 };
 
 export type AssistantTextFrame = { kind: 'assistant_text'; text: string };
+/**
+ * Authoritative structured output emitted by a provider before its terminal
+ * lifecycle notification. Codex app-server v2 sends this as the completed
+ * `agentMessage` item; `turn/completed` is authoritative for status/session,
+ * but is not guaranteed to repeat the item body.
+ */
+export type ProviderOutputFrame = {
+  kind: 'provider_output';
+  payload: unknown;
+  source: 'item/completed';
+};
 export type ToolUseFrame = {
   kind: 'tool_use';
   toolCallId: string;
@@ -38,11 +49,17 @@ export type ResultFrame = {
   errorMessage?: string;
 };
 export type UsageFrame = { kind: 'usage'; usage: RawUsage };
-export type SystemFrame = { kind: 'system'; subtype: string; raw: unknown };
+export type SystemFrame = {
+  kind: 'system';
+  subtype: string;
+  raw: unknown;
+  disposition: 'debug_only' | 'runtime_error';
+};
 export type StderrTailFrame = { kind: 'stderr_tail'; text: string };
 
 export type RuntimeStreamFrame =
   | AssistantTextFrame
+  | ProviderOutputFrame
   | ToolUseFrame
   | ToolResultFrame
   | UsageFrame
@@ -52,6 +69,8 @@ export type RuntimeStreamFrame =
 
 export const isAssistantTextFrame = (f: RuntimeStreamFrame): f is AssistantTextFrame =>
   f.kind === 'assistant_text';
+export const isProviderOutputFrame = (f: RuntimeStreamFrame): f is ProviderOutputFrame =>
+  f.kind === 'provider_output';
 export const isToolUseFrame = (f: RuntimeStreamFrame): f is ToolUseFrame => f.kind === 'tool_use';
 export const isToolResultFrame = (f: RuntimeStreamFrame): f is ToolResultFrame =>
   f.kind === 'tool_result';
@@ -60,3 +79,11 @@ export const isUsageFrame = (f: RuntimeStreamFrame): f is UsageFrame => f.kind =
 export const isSystemFrame = (f: RuntimeStreamFrame): f is SystemFrame => f.kind === 'system';
 export const isStderrTailFrame = (f: RuntimeStreamFrame): f is StderrTailFrame =>
   f.kind === 'stderr_tail';
+
+/**
+ * Provider diagnostics prove that the transport is alive, but they do not
+ * prove that the invocation is making progress. Repeated debug notifications
+ * must not keep the idle watchdog alive forever.
+ */
+export const isRuntimeActivityFrame = (frame: RuntimeStreamFrame): boolean =>
+  frame.kind !== 'system' && frame.kind !== 'stderr_tail';

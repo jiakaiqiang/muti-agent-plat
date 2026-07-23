@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { SessionDetail, WorkspaceSnapshot } from '@agent-cluster/shared';
+import type { ContextAssembly, SessionDetail, WorkspaceSnapshot } from '@agent-cluster/shared';
 import { ContextRouterService } from './context-router.service.js';
+import { buildEnvelopeFromContextAssembly } from '../context-v2/build-envelope-from-context-assembly.js';
 
 function workspaceSnapshot(): WorkspaceSnapshot {
   const files = [
@@ -30,6 +31,7 @@ function workspaceSnapshot(): WorkspaceSnapshot {
 function session(): SessionDetail {
   return {
     id: 'session-architecture',
+    dataEpoch: 'epoch-test',
     title: 'Architecture analysis',
     originalInput: 'Analyze this project architecture and main path',
     status: 'EXECUTING',
@@ -87,7 +89,7 @@ test('architecture analysis routing prioritizes entrypoint, config, service, and
       title: 'Analyze current project structure and main path from an architecture viewpoint',
       description: 'Use project evidence to explain structure and main path.',
       status: 'assigned',
-      assigneeAgentId: 'architect',
+      assignee: { type: 'agent', id: 'architect' },
       dependsOnTaskIds: [],
       acceptanceCriteria: [],
       createdAt: '2026-07-03T00:00:00.000Z',
@@ -126,11 +128,15 @@ test('non_coding session preserves artifact type instead of remapping to documen
     artifacts: [
       {
         id: architectArtifactId,
+        dataEpoch: 'epoch-test',
         sessionId: nonCodingSession.id,
         type: 'markdown',
         title: 'Architect project analysis',
         contentSummary: 'Architecture overview covering entrypoints and boundaries.',
-        metadata: {},
+        metadata: { phase: 'task_execution' },
+        runtimeProposals: [],
+        platformProjections: [],
+        systemEvidence: null,
         createdAt: '2026-07-07T00:00:00.000Z'
       }
     ]
@@ -143,4 +149,248 @@ test('non_coding session preserves artifact type instead of remapping to documen
     'artifact',
     'non_coding session must keep artifact type = artifact so orchestrator can inject its content'
   );
+});
+
+test('runtime infrastructure diagnostics are excluded from Agent context evidence', () => {
+  const router = new ContextRouterService();
+  const taskContext = router.route({
+    session: session(),
+    phase: 'task_execution',
+    relevantMemories: [],
+    ragSnippets: [],
+    artifacts: [],
+    participatingAgentKeys: ['architect'],
+    events: [
+      {
+        id: 'event-browser-mirror',
+        sessionId: session().id,
+        type: 'runtime_progress',
+        content: 'Prepared an isolated browser workspace mirror for this Runtime.',
+        toAgentIds: [],
+        metadata: {
+          schemaVersion: '0.1',
+          renderAs: 'system_notice',
+          payload: { code: 'BROWSER_MIRROR_PREPARED' }
+        },
+        createdAt: '2026-07-16T01:52:23.000Z'
+      },
+      {
+        id: 'event-user-message',
+        sessionId: session().id,
+        type: 'user_message',
+        content: 'Analyze the current implementation.',
+        toAgentIds: [],
+        metadata: { schemaVersion: '0.1', renderAs: 'chat_message', payload: {} },
+        createdAt: '2026-07-16T01:52:24.000Z'
+      }
+    ]
+  });
+
+  const refs = taskContext.evidenceRefs.map((ref) => ref.ref);
+  assert.equal(refs.includes('event-browser-mirror'), false);
+  assert.equal(refs.includes('event-user-message'), true);
+});
+
+test('artifact diff evidence comes only from platform systemEvidence, never runtime proposals', () => {
+  const router = new ContextRouterService();
+  const taskContext = router.route({
+    session: session(),
+    phase: 'task_execution',
+    relevantMemories: [],
+    ragSnippets: [],
+    events: [],
+    participatingAgentKeys: ['architect'],
+    artifacts: [{
+      id: 'artifact-trust-boundary',
+      dataEpoch: 'epoch-test',
+      sessionId: session().id,
+      type: 'json',
+      title: 'Runtime proposal and observed change',
+      metadata: { phase: 'task_execution' },
+      runtimeProposals: [{
+        type: 'markdown',
+        title: 'Model proposal',
+        content: 'proposal',
+        uri: null,
+        summary: null,
+        metadata: {
+          fileChanges: [{
+            path: 'src/proposed-only.ts',
+            operation: 'create',
+            content: 'proposal',
+            previousContent: null,
+            encoding: 'utf-8',
+            source: 'runtime_proposed_change'
+          }],
+          validationEvidence: null,
+          summaryMemoryCheckpoint: null
+        }
+      }],
+      platformProjections: [],
+      systemEvidence: {
+        invocationId: 'invocation-trust-boundary',
+        capturedAt: '2026-07-15T00:00:00.000Z',
+        verifiedTestResults: [],
+        workspaceChangeSet: {
+          id: 'change-set-trust-boundary',
+          baseRevision: { id: 'revision-1', observedAt: '2026-07-15T00:00:00.000Z' },
+          changes: [{ operation: 'create', path: 'src/observed.ts', content: 'observed', encoding: 'utf-8' }],
+          createdAt: '2026-07-15T00:00:00.000Z'
+        }
+      },
+      createdAt: '2026-07-15T00:00:00.000Z'
+    }]
+  });
+
+  assert.equal(taskContext.evidenceRefs.some((ref) => ref.type === 'diff' && ref.ref === 'src/proposed-only.ts'), false);
+  assert.equal(taskContext.evidenceRefs.some((ref) => ref.type === 'diff' && ref.ref === 'src/observed.ts'), true);
+});
+
+test('supplemental routing promotes only paths that were actually hydrated', () => {
+  const router = new ContextRouterService();
+  const activeSession = session();
+  activeSession.supplementalContextRequests = [
+    {
+      id: 'request-1',
+      taskId: 'task-architecture',
+      agentId: 'architect',
+      createdAt: '2026-07-13T00:00:00.000Z',
+      requestedContext: {
+        reason: 'Need two files',
+        requestedRefs: [],
+        requestedPaths: ['src/main.ts', 'src/missing.ts']
+      },
+      resolution: {
+        requestedPaths: ['src/main.ts', 'src/missing.ts'],
+        hydratedPaths: ['src/main.ts'],
+        failedPaths: [{ path: 'src/missing.ts', code: 'NOT_FOUND', retryable: false }],
+        deferredPaths: [],
+        contentBytes: 32
+      }
+    }
+  ];
+  const taskContext = router.route({
+    session: activeSession,
+    phase: 'task_execution',
+    relevantMemories: [],
+    ragSnippets: [],
+    artifacts: [],
+    events: [],
+    participatingAgentKeys: ['architect'],
+    task: {
+      id: 'task-architecture',
+      sessionId: activeSession.id,
+      title: 'Analyze project architecture',
+      description: 'Use hydrated evidence only.',
+      status: 'assigned',
+      assignee: { type: 'agent', id: 'architect' },
+      dependsOnTaskIds: [],
+      acceptanceCriteria: [],
+      createdAt: '2026-07-13T00:00:00.000Z',
+      updatedAt: '2026-07-13T00:00:00.000Z'
+    }
+  });
+
+  const refs = taskContext.evidenceRefs.map((ref) => ref.ref);
+  assert.ok(refs.includes('src/main.ts'));
+  assert.equal(refs.includes('src/missing.ts'), false);
+});
+
+test('ai-langchain architecture routing keeps real data-flow source ahead of nested demo indexes', () => {
+  const activeSession = session();
+  const keyFiles = [
+    'AGENTS.md',
+    'package.json',
+    'src/main.ts',
+    'src/index.ts',
+    'src/shared/model.ts',
+    'src/prompts/assistantPrompt.ts',
+    'src/chains/articleChain.ts',
+    'src/rag/loader.ts',
+    'src/rag/vectorStore.ts',
+    'src/rag/retriever.ts',
+    'src/demos/08-rag/pipeline.ts',
+    'src/agents/assistantAgent.ts',
+    'src/memory/chatMemory.ts',
+    'src/tools/weatherTool.ts',
+    'nuxtjs/langchain-nuxt-demo/package.json',
+    'nuxtjs/langchain-nuxt-demo/app/app.vue'
+  ];
+  const demoIndexes = Array.from({ length: 40 }, (_, index) =>
+    `src/demos/${String(index).padStart(2, '0')}/index.ts`
+  );
+  const paths = [...keyFiles, ...demoIndexes];
+  activeSession.originalInput = '分析 D:/demo/ai-langchain 的架构、数据流转和问题定位';
+  activeSession.workspaceSnapshot = {
+    rootName: 'ai-langchain',
+    scannedAt: '2026-07-13T00:00:00.000Z',
+    fileCount: paths.length,
+    totalBytes: paths.length * 100,
+    tree: paths.map((path) => ({ path, kind: 'file' as const })),
+    files: paths.map((path) => ({ path, size: 100, content: `// current source: ${path}` })),
+    skipped: [],
+    detectedStack: ['typescript', 'langchain', 'nuxt'],
+    entrypoints: ['src/main.ts', 'nuxtjs/langchain-nuxt-demo/app/app.vue']
+  };
+
+  const taskContext = new ContextRouterService().route({
+    session: activeSession,
+    phase: 'task_execution',
+    relevantMemories: [],
+    ragSnippets: [],
+    artifacts: [],
+    events: [],
+    participatingAgentKeys: ['receiver', 'requirements_analyst', 'system_architect'],
+    workspaceFocus: {
+      relevantFiles: [],
+      impactedFiles: [],
+      testFiles: [],
+      configFiles: ['package.json', 'nuxtjs/langchain-nuxt-demo/package.json'],
+      possibleEntryPoints: ['src/main.ts', 'nuxtjs/langchain-nuxt-demo/app/app.vue'],
+      detectedStack: ['typescript', 'langchain', 'nuxt'],
+      validationCommands: ['pnpm build'],
+      rationale: 'ai-langchain architecture fixture'
+    }
+  });
+
+  const selected = new Set(taskContext.evidenceRefs.map((ref) => ref.ref));
+  for (const path of keyFiles.filter((path) => path !== 'AGENTS.md')) {
+    assert.ok(selected.has(path), `expected data-flow evidence ${path}`);
+  }
+  assert.ok(
+    taskContext.evidenceSelection.rules.some((rule) => rule.includes('cross-check')),
+    'architecture routing must require source cross-checking for potentially stale docs'
+  );
+
+  const envelope = buildEnvelopeFromContextAssembly({
+    session: activeSession,
+    phase: 'task_execution',
+    contextAssembly: {
+      systemRules: taskContext.evidenceSelection.rules,
+      sessionGoal: activeSession.originalInput,
+      taskContext,
+      selectedEvidenceContents: taskContext.evidenceRefs.flatMap((ref) => {
+        const file = activeSession.workspaceSnapshot?.files.find((item) => item.path === ref.ref);
+        return file?.content
+          ? [{ type: ref.type, label: ref.label, ref: ref.ref, source: 'workspace_file' as const, content: file.content }]
+          : [];
+      }),
+      summaryMemory: {
+        currentState: 'analysis', confirmedFacts: [], completed: [], decisions: [], openQuestions: [], risks: [], nextSteps: []
+      },
+      relevantEvents: [],
+      artifacts: [],
+      budget: { maxInputTokens: 32_000 }
+    } as unknown as ContextAssembly,
+    identity: {
+      agentId: 'system_architect', key: 'architect', name: 'Architect', role: 'architect', systemPrompt: 'Analyze.',
+      profileHash: 'architect-profile', profileRevision: 1, skillBindings: [], requestedToolIds: [],
+      requestedToolKeys: [], capabilityIds: [], knowledgeBaseIds: []
+    },
+    toolCatalogHash: 'read-only-catalog'
+  });
+  const l3Paths = new Set(envelope.L3.files.map((file) => file.path));
+  for (const path of keyFiles.filter((path) => path.startsWith('src/') || path.endsWith('/app/app.vue'))) {
+    assert.ok(l3Paths.has(path), `expected final L3 data-flow body ${path}`);
+  }
 });

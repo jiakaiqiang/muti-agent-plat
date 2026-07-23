@@ -170,6 +170,43 @@ test('onTimeout fires exactly once per watchdog lifecycle', () => {
   mock.timers.reset();
 });
 
+test('diagnostic frames clear first-frame timeout without extending idle timeout', () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const c = makeCollector();
+  const wd = new LivenessWatchdog({
+    firstFrameTimeoutMs: 500,
+    idleTimeoutMs: 1_000,
+    onTimeout: c.onTimeout
+  });
+  wd.start();
+  mock.timers.tick(200);
+  wd.notifyFrame(false);
+  mock.timers.tick(900);
+  wd.notifyFrame(false);
+  mock.timers.tick(100);
+  assert.deepEqual(c.calls, ['idle']);
+  mock.timers.reset();
+});
+
+test('meaningful activity refreshes idle after an initial diagnostic frame', () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const c = makeCollector();
+  const wd = new LivenessWatchdog({
+    firstFrameTimeoutMs: 500,
+    idleTimeoutMs: 1_000,
+    onTimeout: c.onTimeout
+  });
+  wd.start();
+  wd.notifyFrame(false);
+  mock.timers.tick(900);
+  wd.notifyFrame(true);
+  mock.timers.tick(999);
+  assert.deepEqual(c.calls, []);
+  mock.timers.tick(1);
+  assert.deepEqual(c.calls, ['idle']);
+  mock.timers.reset();
+});
+
 test('timeout observation records threshold, last activity and elapsed time', () => {
   mock.timers.enable({ apis: ['setTimeout'] });
   let current = 1_000;

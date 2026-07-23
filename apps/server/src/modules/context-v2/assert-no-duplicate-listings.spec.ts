@@ -13,8 +13,15 @@ function envelope(overrides: Partial<ContextEnvelopeV2>): ContextEnvelopeV2 {
     createdAt: '2026-07-11T00:00:00.000Z',
     workspaceId: 'ws-78',
     sessionId: '00000000-0000-4000-8000-000000000078',
-    L0: { workspaceId: 'ws-78', rootName: 'demo', providerKind: 'server_local', revision },
-    L1: { entries: [], truncated: false },
+    L0: {
+      systemRules: [],
+      agentId: '00000000-0000-4000-8000-000000000078',
+      profileHash: 'profile-78',
+      profileRevision: 1,
+      toolCatalogHash: 'catalog-78',
+      workspace: { workspaceId: 'ws-78', rootName: 'demo', providerKind: 'server_local', revision }
+    },
+    L1: { sessionGoal: 'test', phase: 'task_execution', navigation: { entries: [], truncated: false } },
     L2: { source: 'generated', modules: [] },
     L3: { files: [], totalByteLength: 0, truncated: false },
     L4: { calls: [] },
@@ -27,13 +34,13 @@ function envelope(overrides: Partial<ContextEnvelopeV2>): ContextEnvelopeV2 {
 
 test('assertNoDuplicateFileListings flags overlap between Manifest and ProjectMap entrypoints/tests', () => {
   const env = envelope({
-    L1: {
+    L1: { sessionGoal: 'test', phase: 'task_execution', navigation: {
       entries: [
         { path: 'src/index.ts', kind: 'file', generated: false, sensitive: false, size: 10 },
         { path: 'src/util.spec.ts', kind: 'file', generated: false, sensitive: false, size: 10 }
       ],
       truncated: false
-    },
+    } },
     L2: {
       source: 'generated',
       modules: [{
@@ -52,10 +59,10 @@ test('assertNoDuplicateFileListings flags overlap between Manifest and ProjectMa
 
 test('assertNoDuplicateFileListings flags overlap between Manifest and Evidence files', () => {
   const env = envelope({
-    L1: {
+    L1: { sessionGoal: 'test', phase: 'task_execution', navigation: {
       entries: [{ path: 'a.ts', kind: 'file', generated: false, sensitive: false, size: 5 }],
       truncated: false
-    },
+    } },
     L3: {
       files: [{ path: 'a.ts', content: 'x', byteLength: 1 }],
       totalByteLength: 1,
@@ -69,10 +76,10 @@ test('assertNoDuplicateFileListings flags overlap between Manifest and Evidence 
 
 test('assertNoDuplicateFileListings passes when only ProjectMap references paths not in Manifest', () => {
   const env = envelope({
-    L1: {
+    L1: { sessionGoal: 'test', phase: 'task_execution', navigation: {
       entries: [{ path: 'src', kind: 'directory', generated: false, sensitive: false }],
       truncated: false
-    },
+    } },
     L2: {
       source: 'generated',
       modules: [{
@@ -90,12 +97,12 @@ test('assertNoDuplicateFileListings passes when only ProjectMap references paths
 
 test('pruneDuplicatePathsFromProjectMap strips duplicated paths from ProjectMap while keeping Manifest intact', () => {
   const env = envelope({
-    L1: {
+    L1: { sessionGoal: 'test', phase: 'task_execution', navigation: {
       entries: [
         { path: 'src/index.ts', kind: 'file', generated: false, sensitive: false, size: 10 }
       ],
       truncated: false
-    },
+    } },
     L2: {
       source: 'generated',
       modules: [{
@@ -110,7 +117,7 @@ test('pruneDuplicatePathsFromProjectMap strips duplicated paths from ProjectMap 
   const pruned = pruneDuplicatePathsFromProjectMap(env);
   assert.deepEqual(pruned.L2.modules[0].entrypoints, ['src/other.ts']);
   assert.deepEqual(pruned.L2.modules[0].tests, ['src/index.spec.ts']);
-  assert.deepEqual(pruned.L1.entries.map((entry) => entry.path), ['src/index.ts']);
+  assert.deepEqual(pruned.L1.navigation.entries.map((entry) => entry.path), ['src/index.ts']);
   const afterReport = assertNoDuplicateFileListings(pruned);
   assert.equal(afterReport.hasDuplicates, false);
 });

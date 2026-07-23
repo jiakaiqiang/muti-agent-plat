@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { AgentCardState, CollaborationEvent } from '@/types/contracts'
+import { actorAgentId } from '@/composables/useActor'
+import type { ActorRef, AgentCardState, CollaborationEvent } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
 import UiIcon from './UiIcon.vue'
 
@@ -44,7 +45,6 @@ const dragTarget = ref<DragTarget | undefined>()
 const pinnedPhases = new Set([
   'task_acceptance_decision',
   'task_acceptance_blocked',
-  'task_claim_decision',
   'task_claim_declined',
   'task_acceptance',
   'user_message_routing',
@@ -77,22 +77,22 @@ const taskDerivedEdges = computed<CommunicationEdge[]>(() => {
   const coordinatorId = displayAgents.value[0]?.agentId
   const edges: CommunicationEdge[] = []
   for (const event of props.events) {
-    const payload = event.metadata.payload as { taskId?: string; assigneeAgentId?: string; title?: string; dependsOnTaskIds?: string[] } | undefined
+    const payload = event.metadata.payload as { taskId?: string; assignee?: ActorRef; title?: string; dependsOnTaskIds?: string[] } | undefined
     const taskId = payload?.taskId ?? event.taskId
-    const assigneeAgentId = payload?.assigneeAgentId
-    if (taskId && assigneeAgentId) {
-      seenTasks.set(taskId, assigneeAgentId)
+    const assigneeId = actorAgentId(payload?.assignee)
+    if (taskId && assigneeId) {
+      seenTasks.set(taskId, assigneeId)
       if (
         coordinatorId &&
-        coordinatorId !== assigneeAgentId &&
+        coordinatorId !== assigneeId &&
         ['task_created', 'task_assigned', 'task_accepted', 'task_claimed', 'task_blocked', 'task_reassigned', 'task_started', 'task_waiting'].includes(event.type)
       ) {
         edges.push({
-          id: `${event.id}:${coordinatorId}:${assigneeAgentId}`,
+          id: `${event.id}:${coordinatorId}:${assigneeId}`,
           fromAgentId: coordinatorId,
-          toAgentId: assigneeAgentId,
+          toAgentId: assigneeId,
           fromName: agentNameById.value.get(coordinatorId) ?? coordinatorId,
-          toName: agentNameById.value.get(assigneeAgentId) ?? assigneeAgentId,
+          toName: agentNameById.value.get(assigneeId) ?? assigneeId,
           kind: 'handoff',
           phase: event.type === 'task_created' || event.type === 'task_assigned' ? 'task_acceptance' : 'task_handoff',
           content: payload?.title ?? event.content,
@@ -101,13 +101,13 @@ const taskDerivedEdges = computed<CommunicationEdge[]>(() => {
       }
       for (const dependsOnTaskId of payload?.dependsOnTaskIds ?? []) {
         const upstreamAgentId = seenTasks.get(dependsOnTaskId)
-        if (!upstreamAgentId || upstreamAgentId === assigneeAgentId) continue
+        if (!upstreamAgentId || upstreamAgentId === assigneeId) continue
         edges.push({
-          id: `${event.id}:${upstreamAgentId}:${assigneeAgentId}:${dependsOnTaskId}`,
+          id: `${event.id}:${upstreamAgentId}:${assigneeId}:${dependsOnTaskId}`,
           fromAgentId: upstreamAgentId,
-          toAgentId: assigneeAgentId,
+          toAgentId: assigneeId,
           fromName: agentNameById.value.get(upstreamAgentId) ?? upstreamAgentId,
-          toName: agentNameById.value.get(assigneeAgentId) ?? assigneeAgentId,
+          toName: agentNameById.value.get(assigneeId) ?? assigneeId,
           kind: 'handoff',
           phase: 'task_handoff',
           content: payload?.title ?? event.content,
@@ -363,7 +363,6 @@ function phaseLabel(phase?: string) {
       task_acceptance: '任务分配',
       task_acceptance_decision: '接受决策',
       task_acceptance_blocked: '接受受阻',
-      task_claim_decision: '接受决策',
       task_claim_declined: '拒绝接受',
       task_handoff: '交接',
       task_execution: '执行',

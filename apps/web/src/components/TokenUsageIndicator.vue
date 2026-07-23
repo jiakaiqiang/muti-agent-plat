@@ -9,12 +9,6 @@
     </span>
     <el-icon class="token-info-icon"><InfoFilled /></el-icon>
 
-    <!-- 裁剪阶段标签 -->
-    <el-tag v-if="tokenInfo.stage && tokenInfo.stage !== 'initial'"
-            :type="getStageTagType(tokenInfo.stage)"
-            size="small">
-      {{ getStageLabel(tokenInfo.stage) }}
-    </el-tag>
   </div>
 
   <!-- Token 详情弹窗 -->
@@ -28,16 +22,6 @@
           <el-statistic title="预算上限" :value="tokenInfo.maxTokens" />
         </el-col>
       </el-row>
-
-      <el-divider />
-
-      <div class="stage-info">
-        <h4>裁剪阶段</h4>
-        <el-tag :type="getStageTagType(tokenInfo.stage)" size="large">
-          {{ getStageLabel(tokenInfo.stage) }}
-        </el-tag>
-        <p class="stage-desc">{{ getStageDescription(tokenInfo.stage) }}</p>
-      </div>
 
       <el-divider />
 
@@ -78,53 +62,40 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
-// Element Plus icons 通过 auto-import 自动导入，不需要显式导入
+import { computed, ref } from 'vue'
+import { InfoFilled } from '@element-plus/icons-vue'
+import { useSessionStore } from '@/stores/session'
 
 const props = defineProps<{
-  sessionId: string | null;
-}>();
+  sessionId: string | null
+}>()
 
-const tokenInfo = ref<any>(null);
-const showDetail = ref(false);
-
-async function loadTokenInfo() {
-  if (!props.sessionId) {
-    tokenInfo.value = null;
-    return;
-  }
-
-  try {
-    const res = await fetch(`/api/sessions/${props.sessionId}`);
-    const data = await res.json();
-
-    if (data.data) {
-      const session = data.data;
-      const maxTokens = (session.tokenBudget || 100000) * 0.7;
-
-      // 从最新的 runtime invocation 获取实际估算
-      // 这里简化处理，实际可以调用专门的端点
-      tokenInfo.value = {
-        estimatedTokens: session.workspaceSnapshot?.fileCount
-          ? Math.min(session.workspaceSnapshot.fileCount * 50, maxTokens * 0.9)
-          : 0,
-        maxTokens,
-        usage: 0,
-        stage: 'initial',
-        fileCount: session.workspaceSnapshot?.fileCount || 0,
-        breakdown: {}
-      };
-
-      if (tokenInfo.value.estimatedTokens > 0) {
-        tokenInfo.value.usage = Math.round((tokenInfo.value.estimatedTokens / maxTokens) * 100);
-      }
-    }
-  } catch (error) {
-    console.error('Failed to load token info:', error);
-  }
+type TokenInfo = {
+  estimatedTokens: number
+  maxTokens: number
+  usage: number
+  fileCount: number
+  breakdown: Record<string, number>
 }
 
-watch(() => props.sessionId, loadTokenInfo, { immediate: true });
+const sessionStore = useSessionStore()
+const showDetail = ref(false)
+
+const tokenInfo = computed<TokenInfo | null>(() => {
+  const session = sessionStore.currentSession
+  if (!props.sessionId || session?.id !== props.sessionId) return null
+  const maxTokens = (session.tokenBudget || 100000) * 0.7
+  const estimatedTokens = session.workspaceSnapshot?.fileCount
+    ? Math.min(session.workspaceSnapshot.fileCount * 50, maxTokens * 0.9)
+    : 0
+  return {
+    estimatedTokens,
+    maxTokens,
+    usage: estimatedTokens > 0 ? Math.round((estimatedTokens / maxTokens) * 100) : 0,
+    fileCount: session.workspaceSnapshot?.fileCount || 0,
+    breakdown: {}
+  }
+})
 
 function getStatusClass() {
   if (!tokenInfo.value) return '';
@@ -138,42 +109,6 @@ function getUsageClass() {
   if (tokenInfo.value.usage > 90) return 'usage-critical';
   if (tokenInfo.value.usage > 75) return 'usage-warning';
   return 'usage-normal';
-}
-
-function getStageTagType(stage: string) {
-  const types: Record<string, any> = {
-    initial: '',
-    focused: 'info',
-    compact: 'warning',
-    minimal: 'warning',
-    'ultra-minimal': 'danger',
-    emergency: 'danger'
-  };
-  return types[stage] || 'info';
-}
-
-function getStageLabel(stage: string) {
-  const labels: Record<string, string> = {
-    initial: '完整',
-    focused: '聚焦',
-    compact: '紧凑',
-    minimal: '最小',
-    'ultra-minimal': '超极限',
-    emergency: '应急'
-  };
-  return labels[stage] || stage;
-}
-
-function getStageDescription(stage: string) {
-  const descriptions: Record<string, string> = {
-    initial: '使用完整上下文，包含所有相关信息',
-    focused: '聚焦相关文件，保留主要信息',
-    compact: '紧凑模式，减少历史和产物',
-    minimal: '最小化，只保留核心导航',
-    'ultra-minimal': '超极限裁剪，仅保留必要引用',
-    emergency: '应急模式，仅保留目标和基本约束'
-  };
-  return descriptions[stage] || '未知裁剪阶段';
 }
 
 function formatNumber(num: number) {

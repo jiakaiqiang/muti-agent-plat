@@ -1,27 +1,49 @@
 import {
   api,
   buildServer,
+  confirmBriefAndSelectWorkflow,
+  createPublishedAgentWorkflow,
   createSessionAndWaitForBrief,
   startSmokeServer,
   stopSmokeServer,
   waitForMatchingEvent
 } from './smoke-server.mjs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 await buildServer();
 
 let server;
+const workspaceRoot = mkdtempSync(join(tmpdir(), 'context-insufficient-'));
 
 try {
+  mkdirSync(join(workspaceRoot, 'src'), { recursive: true });
+  writeFileSync(join(workspaceRoot, 'src', 'index.ts'), 'export const contextMarker = "CONTEXT_INSUFFICIENT_SOURCE";');
+  writeFileSync(join(workspaceRoot, 'package.json'), '{"scripts":{"typecheck":"tsc --noEmit","test":"vitest run","build":"vite build"}}');
   server = await startSmokeServer('context-insufficient-smoke', {
     DISCUSSION_MAX_ROUNDS: '0',
     MOCK_CONTEXT_INSUFFICIENT: 'true'
   });
+  const workflow = await createPublishedAgentWorkflow(
+    server.apiBase,
+    'Context insufficient workflow',
+    ['product-manager']
+  );
 
   const { sessionId, briefId } = await createSessionAndWaitForBrief(
     server.apiBase,
     'Implement a small workspace change, but request more context when selected evidence is not enough.',
     {
       tokenBudget: 50_000,
+      runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] },
+      workingDirectory: {
+        kind: 'server_local',
+        id: 'context-insufficient-workspace',
+        name: 'context-insufficient-project',
+        path: workspaceRoot,
+        selectedAt: new Date().toISOString()
+      },
       workspaceSnapshot: {
         rootName: 'context-insufficient-project',
         scannedAt: new Date().toISOString(),
@@ -47,7 +69,7 @@ try {
     }
   );
 
-  await api(server.apiBase, `/sessions/${sessionId}/briefs/${briefId}/confirm`, { method: 'POST' });
+  await confirmBriefAndSelectWorkflow(server.apiBase, sessionId, briefId, workflow);
 
   const runtimeFailed = await waitForMatchingEvent(
     server.apiBase,
@@ -56,7 +78,7 @@ try {
     (event) => event.metadata.payload?.code === 'CONTEXT_INSUFFICIENT'
   );
   const requestedContext = runtimeFailed.metadata.payload.requestedContext;
-  if (!requestedContext?.reason || !requestedContext.requestedRefs?.length) {
+  if (!requestedContext?.reason || !requestedContext.requestedPaths?.length) {
     throw new Error(`Expected runtime_failed requestedContext: ${JSON.stringify(runtimeFailed)}`);
   }
 
@@ -78,7 +100,7 @@ try {
 
   const invocations = await api(server.apiBase, `/sessions/${sessionId}/debug/runtime-invocations`);
   const blockedInvocation = invocations.data.items.find(
-    (item) => item.error?.code === 'CONTEXT_INSUFFICIENT' && item.contextPackSummary?.requestedContextRefCount > 0
+    (item) => item.error?.code === 'CONTEXT_INSUFFICIENT' && item.summary?.requestedContextPathCount > 0
   );
   if (!blockedInvocation) {
     throw new Error(`Expected debug invocation to expose requestedContext counts: ${JSON.stringify(invocations)}`);
@@ -89,4 +111,5 @@ try {
   if (server) {
     await stopSmokeServer(server);
   }
+  rmSync(workspaceRoot, { recursive: true, force: true });
 }

@@ -1,20 +1,51 @@
 import { defineStore } from 'pinia'
 import { apiDelete, apiGet, apiPatch, apiPost } from '@/api/client'
-import type { RuntimeModelConfig, RuntimeModelCreateInput, RuntimeModelUpdateInput } from '@/types/contracts'
+import type {
+  RuntimeAvailabilityStatus,
+  RuntimeModelConfig,
+  RuntimeModelCreateInput,
+  RuntimeModelKind,
+  RuntimeModelUpdateInput,
+  RuntimeType
+} from '@/types/contracts'
 
 export const useRuntimeModelStore = defineStore('runtimeModel', {
   state: () => ({
     config: undefined as RuntimeModelConfig | undefined,
+    availability: [] as RuntimeAvailabilityStatus[],
     loading: false,
     saving: false,
-    error: ''
+    error: '',
+    selectedModelId: '',
+    addMode: 'local' as RuntimeModelKind,
+    localModelName: '',
+    remoteLabel: '',
+    remoteModelName: '',
+    remoteBaseUrl: '',
+    remoteApiKey: '',
+    saveMessage: '',
+    editDialogOpen: false,
+    editingModelId: '',
+    editLabel: '',
+    editModelName: '',
+    editBaseUrl: '',
+    editApiKey: ''
   }),
   getters: {
     currentModel: (state) => state.config?.currentModel ?? '',
     currentModelId: (state) => state.config?.currentModelId ?? '',
-    availableModels: (state) => state.config?.availableModels ?? []
+    availableModels: (state) => state.config?.availableModels ?? [],
+    availabilityFor: (state) => (runtimeType: RuntimeType) =>
+      state.availability.find((item) => item.runtimeType === runtimeType),
+    isRuntimeAvailable: (state) => (runtimeType: RuntimeType) =>
+      state.availability.some((item) => item.runtimeType === runtimeType && item.available)
   },
   actions: {
+    async loadAvailability() {
+      const result = await apiGet<{ items: RuntimeAvailabilityStatus[] }>('/runtimes/availability')
+      this.availability = result.items
+      return this.availability
+    },
     async loadConfig() {
       this.loading = true
       this.error = ''

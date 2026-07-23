@@ -17,47 +17,71 @@ const { WorkdirBriefService } = await import(
   '../../apps/server/dist/apps/server/src/modules/runtimes/streaming/workdir-brief.service.js'
 );
 
-function input(workDir, runId, runtimeType = 'codex') {
+function input(workDir, invocationId, runtimeType = 'codex') {
+  const observedAt = new Date().toISOString();
   return {
-    runId,
-    sessionId: `session-${runId}`,
-    taskId: `task-${runId}`,
+    invocationId,
+    sessionId: `session-${invocationId}`,
+    taskId: `task-${invocationId}`,
     phase: 'task_execution',
     agent: {
-      id: 'agent-1',
+      agentId: 'agent-1',
       key: 'coder',
       name: 'Coder',
       role: 'coder',
       systemPrompt: '',
+      profileHash: 'profile-hash',
+      profileRevision: 1,
+      skillBindings: [],
+      requestedToolIds: [],
+      requestedToolKeys: [],
+      capabilityIds: [],
+      knowledgeBaseIds: []
+    },
+    executionTarget: {
       runtimeType,
-      capabilityIds: []
+      source: 'smart_router',
+      reason: 'workdir brief acceptance',
+      requiredCapabilities: [],
+      requiredToolIds: [],
+      writeMode: 'none',
+      workspaceProviderKind: 'server_local'
     },
-    contextPack: {
-      systemRules: ['[Skill:safe-edit] Preserve existing project instructions.'],
-      sessionGoal: 'Validate production-safe workdir brief handling.',
-      taskBrief: { goal: 'Run isolated acceptance.', constraints: [], acceptanceCriteria: [] },
-      currentTask: { id: `task-${runId}`, title: 'Workdir brief safety', status: 'ready' },
-      taskContext: { validationRules: ['Restore exact bytes.'] },
-      summaryMemory: {},
-      continuationState: {},
-      workingDirectory: {
-        id: `wd-${runId}`,
-        name: 'isolated-workspace',
-        kind: 'server_local',
-        path: workDir,
-        selectedAt: new Date().toISOString()
+    toolCatalog: { tools: [], decisions: [], catalogHash: 'tool-catalog-hash' },
+    contextEnvelope: {
+      version: 'v2',
+      createdAt: observedAt,
+      workspaceId: `wd-${invocationId}`,
+      sessionId: `session-${invocationId}`,
+      L0: {
+        systemRules: ['[Skill:safe-edit] Preserve existing project instructions.'],
+        agentId: 'agent-1',
+        profileHash: 'profile-hash',
+        profileRevision: 1,
+        toolCatalogHash: 'tool-catalog-hash',
+        workspace: {
+          workspaceId: `wd-${invocationId}`,
+          rootName: 'isolated-workspace',
+          providerKind: 'server_local',
+          rootPath: workDir,
+          revision: { id: `revision-${invocationId}`, observedAt }
+        }
       },
-      agentProfile: {},
-      relevantEvents: [],
-      relevantMemories: [],
-      ragSnippets: [],
-      artifacts: [],
-      capabilities: [],
-      constraints: [],
-      budget: {}
+      L1: {
+        sessionGoal: 'Validate production-safe workdir brief handling.',
+        phase: 'task_execution',
+        task: { id: `task-${invocationId}`, title: 'Workdir brief safety', description: 'Run isolated acceptance.', acceptanceCriteria: ['Restore exact bytes.'] },
+        navigation: { entries: [], truncated: false }
+      },
+      L2: { source: 'generated', modules: [] },
+      L3: { files: [], totalByteLength: 0, truncated: false },
+      L4: { calls: [] },
+      L5: { bullets: [], turnCount: 0 },
+      L6: { changeSetIds: [], reportIds: [] },
+      budget: { inputTokens: 1000, navigationTokens: 100, projectMapTokens: 100, evidenceTokens: 400 }
     },
-    expectedOutput: { kind: 'task_execution_result', schemaVersion: '0.1' },
-    budget: {}
+    expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' },
+    budget: { maxInputTokens: 1000 }
   };
 }
 
@@ -73,6 +97,10 @@ function findManifest(root) {
     }
   }
   return undefined;
+}
+
+function serviceFor(workDir) {
+  return new WorkdirBriefService({ resolveServerRoot: () => workDir });
 }
 
 async function withScenario(name, callback) {
@@ -107,7 +135,7 @@ await withScenario('brief-existing', async ({ workDir, stagingDir }) => {
   const target = join(workDir, 'AGENTS.md');
   writeFileSync(target, original);
 
-  const service = new WorkdirBriefService();
+  const service = serviceFor(workDir);
   const lease = service.prepare(input(workDir, 'existing'), 'codex');
   assert.ok(lease);
   assert.ok(lease.taskSidecarPath.startsWith(stagingDir));
@@ -118,7 +146,7 @@ await withScenario('brief-existing', async ({ workDir, stagingDir }) => {
     /WORKDIR_LEASE_CONFLICT/
   );
 
-  const recovered = new WorkdirBriefService().recoverAll();
+  const recovered = serviceFor(workDir).recoverAll();
   assert.equal(recovered.restored, 1);
   assert.equal(recovered.failed, 0);
   assert.deepEqual(readFileSync(target), original);
@@ -127,17 +155,17 @@ await withScenario('brief-existing', async ({ workDir, stagingDir }) => {
 
   process.env.AGENT_CLUSTER_BRIEF_TTL_MS = '1';
   await new Promise((resolve) => setTimeout(resolve, 10));
-  const cleanup = new WorkdirBriefService().recoverAll();
+  const cleanup = serviceFor(workDir).recoverAll();
   assert.equal(cleanup.expiredRemoved, 1);
   assert.ok(!existsSync(lease.briefStagingDir));
 });
 
 await withScenario('brief-new-file', async ({ workDir }) => {
   const target = join(workDir, 'CLAUDE.md');
-  const lease = new WorkdirBriefService().prepare(input(workDir, 'new-file', 'claude_code'), 'claude_code');
+  const lease = serviceFor(workDir).prepare(input(workDir, 'new-file', 'claude_code'), 'claude_code');
   assert.ok(lease);
   assert.ok(existsSync(target));
-  const recovered = new WorkdirBriefService().recoverAll();
+  const recovered = serviceFor(workDir).recoverAll();
   assert.equal(recovered.restored, 1);
   assert.ok(!existsSync(target), 'Recovery must remove an injected file that did not exist before the run.');
 });
@@ -150,21 +178,21 @@ await withScenario('brief-staging-failure', async ({ root, workDir }) => {
   writeFileSync(stagingBlocker, 'not a directory', 'utf8');
   process.env.AGENT_CLUSTER_BRIEF_STAGING_DIR = stagingBlocker;
 
-  assert.throws(() => new WorkdirBriefService().prepare(input(workDir, 'staging-failure'), 'codex'));
+  assert.throws(() => serviceFor(workDir).prepare(input(workDir, 'staging-failure'), 'codex'));
   assert.deepEqual(readFileSync(target), original, 'A staging failure must leave the workspace untouched.');
 });
 
 await withScenario('brief-corrupt-backup', async ({ workDir, stagingDir }) => {
   const target = join(workDir, 'AGENTS.md');
   writeFileSync(target, Buffer.from('original evidence\n', 'utf8'));
-  const lease = new WorkdirBriefService().prepare(input(workDir, 'corrupt-backup'), 'codex');
+  const lease = serviceFor(workDir).prepare(input(workDir, 'corrupt-backup'), 'codex');
   assert.ok(lease);
   const manifestPath = findManifest(stagingDir);
   assert.ok(manifestPath);
   const manifestBefore = JSON.parse(readFileSync(manifestPath, 'utf8'));
   writeFileSync(manifestBefore.targets[0].backupPath, 'tampered backup', 'utf8');
 
-  const recovery = new WorkdirBriefService().recoverAll();
+  const recovery = serviceFor(workDir).recoverAll();
   assert.equal(recovery.restored, 0);
   assert.equal(recovery.failed, 1);
   const manifestAfter = JSON.parse(readFileSync(manifestPath, 'utf8'));

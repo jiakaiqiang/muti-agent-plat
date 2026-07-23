@@ -1,11 +1,50 @@
 import { spawn } from 'node:child_process';
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import net from 'node:net';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const root = fileURLToPath(new URL('../..', import.meta.url));
 const npmCli = process.env.npm_execpath;
+
+export function createSmokeV2State() {
+  const now = new Date().toISOString();
+  const dataEpoch = randomUUID();
+  const cutoverAuditId = randomUUID();
+  return {
+    agents: [],
+    capabilities: { capabilities: [], approvals: [], definitionExtensions: {} },
+    skills: [],
+    sessions: [],
+    eventsBySession: {},
+    tasksBySession: {},
+    briefsBySession: {},
+    suggestedTasksByBriefId: {},
+    memoriesBySession: {},
+    runtimeInvocationsBySession: {},
+    artifacts: { artifactsById: {}, artifactIdsBySession: {} },
+    knowledge: { knowledgeBases: {}, documentsByBase: {}, chunksByBase: {} },
+    autopilots: [],
+    autopilotRuns: [],
+    systemDataMetadata: {
+      dataSchemaVersion: 3,
+      dataEpoch,
+      pipelineVersion: 'v2',
+      cutoverAt: now,
+      cutoverAuditId
+    },
+    cutoverAudits: [
+      {
+        id: cutoverAuditId,
+        appliedAt: now,
+        environment: 'e2e-smoke',
+        result: 'applied',
+        dataEpoch
+      }
+    ]
+  };
+}
 
 export function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -77,6 +116,8 @@ export async function startSmokeServer(name, env = {}) {
   const port = await findFreePort();
   const apiBase = `http://127.0.0.1:${port}/api`;
   const dataFile = join(root, '.cache', 'agent-cluster', `${name}-${Date.now()}.json`);
+  mkdirSync(dirname(dataFile), { recursive: true });
+  writeFileSync(dataFile, JSON.stringify(createSmokeV2State()), 'utf8');
   const server = spawn(process.execPath, ['apps/server/dist/apps/server/src/main.js'], {
     cwd: root,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -133,6 +174,56 @@ export async function listEvents(apiBase, sessionId) {
   return response.data.items;
 }
 
+export async function createPublishedAgentWorkflow(apiBase, name, agentKeys) {
+  if (!Array.isArray(agentKeys) || agentKeys.length === 0) {
+    throw new Error('createPublishedAgentWorkflow requires at least one Agent key.');
+  }
+  const agents = (await api(apiBase, '/agents')).data;
+  const byKey = new Map(agents.map((agent) => [agent.key, agent]));
+  const nodes = agentKeys.map((agentKey, index) => {
+    const agent = byKey.get(agentKey);
+    if (!agent) throw new Error(`Workflow Agent is unavailable: ${agentKey}`);
+    return {
+      id: `e2e-agent-${index + 1}-${agentKey}`,
+      type: 'agent',
+      agentId: agent.id,
+      order: index
+    };
+  });
+  const draft = (await api(apiBase, '/workflows', {
+    method: 'POST',
+    body: JSON.stringify({ name, nodes })
+  })).data;
+  return (await api(apiBase, `/workflows/${draft.id}/publish`, {
+    method: 'POST',
+    body: JSON.stringify({ expectedDraftRevision: draft.draftRevision })
+  })).data;
+}
+
+export async function selectPublishedWorkflow(apiBase, sessionId, workflow, timeoutMs = 20_000) {
+  await waitForStatus(apiBase, sessionId, 'WAIT_WORKFLOW_SELECT', timeoutMs);
+  const workflowSelection = await waitForMatchingEvent(
+    apiBase,
+    sessionId,
+    'user_confirmation_requested',
+    (event) => event.metadata.payload?.reason === 'select_workflow',
+    timeoutMs
+  );
+  return (await api(apiBase, `/sessions/${sessionId}/workflow/select`, {
+    method: 'POST',
+    body: JSON.stringify({
+      workflowId: workflow.id,
+      workflowVersion: workflow.currentPublishedVersion,
+      confirmationId: workflowSelection.metadata.payload.confirmationId
+    })
+  })).data;
+}
+
+export async function confirmBriefAndSelectWorkflow(apiBase, sessionId, briefId, workflow, timeoutMs = 20_000) {
+  await api(apiBase, `/sessions/${sessionId}/briefs/${briefId}/confirm`, { method: 'POST' });
+  return selectPublishedWorkflow(apiBase, sessionId, workflow, timeoutMs);
+}
+
 export async function waitForEvent(apiBase, sessionId, type, timeoutMs = 20_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -160,6 +251,17 @@ export async function waitForStatus(apiBase, sessionId, status, timeoutMs = 30_0
     const detail = await api(apiBase, `/sessions/${sessionId}`);
     last = detail.data.status;
     if (last === status) return detail.data;
+    if (last === 'FAILED' && status !== 'FAILED') {
+      const events = await listEvents(apiBase, sessionId);
+      const diagnostics = events
+        .filter((event) =>
+          ['error_reported', 'runtime_failed', 'session_status_changed', 'workflow_run_failed'].includes(event.type)
+        )
+        .slice(-8);
+      throw new Error(
+        `Session failed while waiting for ${status}: ${JSON.stringify({ session: detail.data, diagnostics })}`
+      );
+    }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error(`Timed out waiting for status ${status}, last=${last}`);

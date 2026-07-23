@@ -23,17 +23,12 @@ type CreateEventInput<TPayload extends Record<string, unknown> = Record<string, 
 export class EventsService implements OnModuleDestroy {
   private readonly eventsBySession = new Map<string, CollaborationEvent[]>();
   private readonly subjectsBySession = new Map<string, Subject<CollaborationEvent>>();
-  private persistTimer?: NodeJS.Timeout;
-  private persistDirty = false;
-  private readonly flushOnProcessExit = () => this.flushPersist();
 
   constructor(private readonly persistence: PersistenceService) {
     const persisted = this.persistence.getCollection<Record<string, CollaborationEvent[]>>('eventsBySession', {});
     for (const [sessionId, events] of Object.entries(persisted)) {
       this.eventsBySession.set(sessionId, events);
     }
-    // OnModuleDestroy only runs on graceful shutdown; 'exit' also covers process.exit and post-crash termination.
-    process.on('exit', this.flushOnProcessExit);
   }
 
   create<TPayload extends Record<string, unknown> = Record<string, unknown>>(
@@ -64,9 +59,31 @@ export class EventsService implements OnModuleDestroy {
     const current = this.eventsBySession.get(input.sessionId) ?? [];
     current.push(event as CollaborationEvent);
     this.eventsBySession.set(input.sessionId, current);
-    this.subjectFor(input.sessionId).next(event as CollaborationEvent);
-    this.schedulePersist();
+    const committed = this.persist();
+    void committed.then((success) => {
+      if (success) {
+        this.subjectFor(input.sessionId).next(event as CollaborationEvent);
+        void this.persistence.markEventPublished(event.id);
+      }
+    });
     return event;
+  }
+
+  createOnce<TPayload extends Record<string, unknown> = Record<string, unknown>>(
+    idempotencyKey: string,
+    input: CreateEventInput<TPayload>
+  ): CollaborationEvent<TPayload> {
+    const existing = (this.eventsBySession.get(input.sessionId) ?? []).find(
+      (event) => event.metadata.idempotencyKey === idempotencyKey
+    );
+    if (existing) return existing as CollaborationEvent<TPayload>;
+    return this.create({
+      ...input,
+      metadata: {
+        ...(input.metadata ?? { schemaVersion: '0.1', payload: {} as TPayload }),
+        idempotencyKey
+      }
+    });
   }
 
   list(sessionId: string, afterEventId?: string) {
@@ -87,7 +104,7 @@ export class EventsService implements OnModuleDestroy {
     const subject = this.subjectsBySession.get(sessionId);
     subject?.complete();
     this.subjectsBySession.delete(sessionId);
-    this.schedulePersist();
+    void this.persist();
   }
 
   private subjectFor(sessionId: string) {
@@ -101,27 +118,10 @@ export class EventsService implements OnModuleDestroy {
   }
 
   onModuleDestroy() {
-    process.removeListener('exit', this.flushOnProcessExit);
-    this.flushPersist();
+    return this.persistence.flush();
   }
 
-  private schedulePersist() {
-    this.persistDirty = true;
-    if (this.persistTimer) {
-      return;
-    }
-    this.persistTimer = setTimeout(() => this.flushPersist(), 200);
-  }
-
-  private flushPersist() {
-    if (this.persistTimer) {
-      clearTimeout(this.persistTimer);
-      this.persistTimer = undefined;
-    }
-    if (!this.persistDirty) {
-      return;
-    }
-    this.persistDirty = false;
-    this.persistence.setCollection('eventsBySession', Object.fromEntries(this.eventsBySession));
+  private persist() {
+    return this.persistence.setCollection('eventsBySession', Object.fromEntries(this.eventsBySession));
   }
 }

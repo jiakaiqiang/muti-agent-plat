@@ -1,4 +1,4 @@
-import type { Agent } from './contracts.js';
+import type { AgentDefinition } from './contracts.js';
 import { defaultAgentPresets } from './default-agent-presets.js';
 
 const defaultAgentTimestamp = '2026-05-28T00:00:00.000Z';
@@ -8,7 +8,7 @@ function listMarkdown(title: string, items: string[]) {
 }
 
 function profileMarkdown(preset: (typeof defaultAgentPresets)[number]) {
-  return [
+  const baseProfile = [
     `# ${preset.name}`,
     '',
     '## 角色定位',
@@ -27,9 +27,17 @@ function profileMarkdown(preset: (typeof defaultAgentPresets)[number]) {
     '',
     listMarkdown('标签', preset.tags)
   ].join('\n');
+  const toolKeys = preset.capabilityIds.flatMap((capabilityId) => {
+    if (capabilityId === 'cap-file-write') return ['tool.file_write'];
+    if (capabilityId === 'cap-command-run') return ['tool.command_run'];
+    return [];
+  });
+  return toolKeys.length
+    ? `${baseProfile}\n\n## Tools\n${toolKeys.map((key) => `\${tool:${key}}`).join('\n')}`
+    : baseProfile;
 }
 
-export const defaultAgents: Agent[] = defaultAgentPresets.map((preset) => ({
+export const defaultAgents: AgentDefinition[] = defaultAgentPresets.map((preset) => ({
   id: preset.id,
   key: preset.key,
   name: preset.name,
@@ -37,11 +45,10 @@ export const defaultAgents: Agent[] = defaultAgentPresets.map((preset) => ({
   description: preset.description,
   profileMarkdown: profileMarkdown(preset),
   tags: preset.tags,
-  runtimeType: 'generic_llm',
   status: 'active',
   capabilityIds: preset.capabilityIds,
-  skillIds: [],
   defaultKnowledgeBaseIds: [],
+  profileRevision: 1,
   createdAt: defaultAgentTimestamp,
   updatedAt: defaultAgentTimestamp
 }));

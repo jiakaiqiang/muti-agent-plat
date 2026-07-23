@@ -185,13 +185,13 @@ try {
   const briefId = await waitForBrief(apiBase, sessionId);
   await api(apiBase, `/sessions/${sessionId}/briefs/${briefId}/confirm`, { method: 'POST' });
 
-  const contextPacks = await api(apiBase, `/sessions/${sessionId}/debug/context-packs`);
-  if (!contextPacks.data.items.some((item) => item.contextPack.relevantMemories.length > 0)) {
+  const envelopes = await api(apiBase, `/sessions/${sessionId}/debug/context-envelopes`);
+  if (!envelopes.data.items.some((item) => item.contextEnvelope.L5.bullets.length > 0)) {
     throw new Error('Expected at least one debug context pack with relevant memories');
   }
 
   const invocations = await api(apiBase, `/sessions/${sessionId}/debug/runtime-invocations`);
-  if (!invocations.data.items.some((item) => item.contextPackSummary.memoryCount > 0)) {
+  if (!invocations.data.items.some((item) => item.summary.memoryBulletCount > 0)) {
     throw new Error('Expected runtime invocation summary to include memory usage');
   }
 

@@ -22,11 +22,13 @@ function readJsonRequest(request) {
 function runtimeOutput(summary) {
   return {
     kind: 'task_execution_result',
-    schemaVersion: '0.1',
+    schemaVersion: '1.0',
     status: 'completed',
     summary,
     completedItems: [summary],
     changedArtifacts: [],
+    requestedContext: null,
+    agentMessages: [],
     nextSuggestedActions: [],
     risks: []
   };
@@ -118,7 +120,7 @@ const llmServer = createServer(async (request, response) => {
 await new Promise((resolve) => llmServer.listen(llmPort, '127.0.0.1', resolve));
 
 const serverHandle = await startSmokeServer('generic-llm-response-shapes', {
-  DEFAULT_AGENT_RUNTIME_TYPE: 'generic_llm',
+  GLOBAL_DEFAULT_RUNTIME_TYPE: 'generic_llm',
   LLM_PROVIDER: 'openai-compatible',
   LLM_MODEL: 'response-shapes-smoke-model',
   LLM_API_KEY: 'response-shapes-smoke-key',

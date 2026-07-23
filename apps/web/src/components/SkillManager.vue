@@ -1,56 +1,22 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { useAgentStore } from '@/stores/agent'
-import { useSkillStore, type SkillInput } from '@/stores/skill'
-import type { Agent, Skill, SkillFile } from '@/types/contracts'
+import { computed, nextTick, onMounted, ref } from 'vue'
+import { storeToRefs } from 'pinia'
+import {
+  useSkillStore,
+  type SkillFormField as FormField,
+  type SkillFormState,
+  type SkillInput
+} from '@/stores/skill'
+import type { Skill } from '@/types/contracts'
 import UiIcon from './UiIcon.vue'
 
-type FormField = 'name' | 'description' | 'content' | 'files'
-
-type SkillFormState = {
-  name: string
-  description: string
-  content: string
-  files: SkillFile[]
-}
-
-const props = defineProps<{
-  agents: Agent[]
-}>()
-
 const skillStore = useSkillStore()
-const agentStore = useAgentStore()
-const selectedSkillId = ref('')
-const previewAgentId = ref('')
-const formMode = ref<'create' | 'edit' | undefined>()
-const form = ref<SkillFormState>(emptyForm())
-const fieldErrors = ref<Partial<Record<FormField, string>>>({})
-const operationError = ref('')
-const pendingDeleteSkillId = ref('')
+const { selectedSkillId, formMode, form, fieldErrors, operationError, pendingDeleteSkillId } = storeToRefs(skillStore)
 const nameInput = ref<HTMLInputElement | null>(null)
 
 const selectedSkill = computed(() => skillStore.skills.find((skill) => skill.id === selectedSkillId.value))
 const pendingDeleteSkill = computed(() => skillStore.skills.find((skill) => skill.id === pendingDeleteSkillId.value))
-const previewAgent = computed(() => props.agents.find((agent) => agent.id === previewAgentId.value))
-const previewSkills = computed(() => {
-  const skillIds = new Set(previewAgent.value?.skillIds ?? [])
-  return skillStore.skills.filter((skill) => skillIds.has(skill.id))
-})
-const selectedSkillAgents = computed(() => {
-  if (!selectedSkill.value) return []
-  return props.agents.filter((agent) => (agent.skillIds ?? []).includes(selectedSkill.value?.id ?? ''))
-})
 const canSave = computed(() => !skillStore.saving)
-
-watch(
-  () => props.agents.map((agent) => agent.id),
-  (agentIds) => {
-    if (!agentIds.includes(previewAgentId.value)) {
-      previewAgentId.value = agentIds[0] ?? ''
-    }
-  },
-  { immediate: true }
-)
 
 function emptyForm(): SkillFormState {
   return { name: '', description: '', content: '', files: [] }
@@ -195,21 +161,6 @@ async function saveSkill() {
   }
 }
 
-async function toggleBinding(agent: Agent) {
-  if (!selectedSkill.value) return
-  resetErrors()
-  try {
-    const isBound = (agent.skillIds ?? []).includes(selectedSkill.value.id)
-    const result = isBound
-      ? await skillStore.unbindSkill(agent.id, selectedSkill.value.id)
-      : await skillStore.bindSkill(agent.id, selectedSkill.value.id)
-    agentStore.applyServerAgent(result.agent)
-    if (!previewAgentId.value) previewAgentId.value = result.agent.id
-  } catch (error) {
-    operationError.value = error instanceof Error ? error.message : '更新 Agent 绑定失败'
-  }
-}
-
 function requestDelete() {
   if (selectedSkill.value) pendingDeleteSkillId.value = selectedSkill.value.id
 }
@@ -223,8 +174,7 @@ async function removeSkill() {
   if (!skill) return
   resetErrors()
   try {
-    const result = await skillStore.removeSkill(skill.id)
-    agentStore.removeSkillReference(skill.id, result.cleanedAgentIds)
+    await skillStore.removeSkill(skill.id)
     selectedSkillId.value = skillStore.skills[0]?.id ?? ''
     pendingDeleteSkillId.value = ''
   } catch (error) {
@@ -232,10 +182,10 @@ async function removeSkill() {
   }
 }
 
-async function refreshData(includeAgents = true) {
+async function refreshData() {
   resetErrors()
   try {
-    await Promise.all([skillStore.loadSkills(), ...(includeAgents ? [agentStore.loadAgents()] : [])])
+    await skillStore.loadSkills()
     if (!skillStore.skills.some((skill) => skill.id === selectedSkillId.value)) {
       selectedSkillId.value = skillStore.skills[0]?.id ?? ''
     }
@@ -249,9 +199,7 @@ function contentSummary(skill: Skill) {
   return `${skill.content.length.toLocaleString()} 字符 · ${fileLabel}`
 }
 
-onMounted(() => {
-  void refreshData(false)
-})
+onMounted(() => void refreshData())
 </script>
 
 <template>
@@ -259,7 +207,7 @@ onMounted(() => {
     <article class="admin-card skill-manager-toolbar">
       <div>
         <strong>Skill 管理</strong>
-        <p>维护可复用的工作规则，并按 Agent 绑定后以稳定顺序注入 ContextPack。</p>
+        <p>维护可复用工作规则；Agent 通过 Profile Markdown 中的稳定 key 引用 Skill。</p>
       </div>
       <dl>
         <div>
@@ -267,8 +215,8 @@ onMounted(() => {
           <dd>{{ skillStore.skills.length }}</dd>
         </div>
         <div>
-          <dt>已绑定 Agent</dt>
-          <dd>{{ new Set(agents.filter((agent) => (agent.skillIds ?? []).length).map((agent) => agent.id)).size }}</dd>
+          <dt>启用中</dt>
+          <dd>{{ skillStore.skills.filter((skill) => skill.status === 'active').length }}</dd>
         </div>
       </dl>
       <div class="skill-toolbar-actions">
@@ -301,7 +249,7 @@ onMounted(() => {
             <span>{{ contentSummary(skill) }}</span>
           </button>
         </div>
-        <p v-else-if="!skillStore.loading" class="admin-empty">暂无 Skill。新建后可将其绑定给一个或多个 Agent。</p>
+        <p v-else-if="!skillStore.loading" class="admin-empty">暂无 Skill。新建后可在 Agent Profile 中插入稳定引用。</p>
       </aside>
 
       <section class="skill-detail-panel" aria-live="polite">
@@ -309,7 +257,7 @@ onMounted(() => {
           <header>
             <div>
               <strong>{{ formMode === 'edit' ? '编辑 Skill' : '新建 Skill' }}</strong>
-              <p>内容会在绑定 Agent 的 ContextPack 中使用；仅在必要时添加文件附件。</p>
+              <p>内容会在 Agent Profile 编译时展开；仅在必要时添加文件附件。</p>
             </div>
             <button type="button" @click="cancelForm">
               <UiIcon name="x" :size="16" />
@@ -385,8 +333,12 @@ onMounted(() => {
           </header>
           <dl>
             <div>
-              <dt>绑定 Agent</dt>
-              <dd>{{ selectedSkillAgents.length ? selectedSkillAgents.map((agent) => agent.name).join('、') : '尚未绑定' }}</dd>
+              <dt>稳定引用</dt>
+              <dd><code>${skill:{{ selectedSkill.key }}}</code></dd>
+            </div>
+            <div>
+              <dt>修订版本</dt>
+              <dd>v{{ selectedSkill.revision }}</dd>
             </div>
             <div>
               <dt>最后更新</dt>
@@ -415,74 +367,17 @@ onMounted(() => {
       </section>
     </div>
 
-    <section v-if="selectedSkill && !formMode" class="skill-support-grid">
-      <article class="admin-card skill-bindings">
-        <header>
-          <div>
-            <strong>Agent 绑定</strong>
-            <p>绑定后，新的会话会为该 Agent 注入本 Skill。</p>
-          </div>
-          <span>{{ selectedSkillAgents.length }} 个 Agent</span>
-        </header>
-        <div class="skill-binding-list">
-          <button
-            v-for="agent in agents"
-            :key="agent.id"
-            :data-testid="`skill-binding-${agent.id}`"
-            type="button"
-            :class="{ bound: (agent.skillIds ?? []).includes(selectedSkill.id) }"
-            :disabled="skillStore.saving"
-            @click="toggleBinding(agent)"
-          >
-            <span class="skill-binding-check" aria-hidden="true"><UiIcon :name="(agent.skillIds ?? []).includes(selectedSkill.id) ? 'check' : 'plus'" :size="15" /></span>
-            <span>
-              <strong>{{ agent.name }}</strong>
-              <small>{{ agent.role }}</small>
-            </span>
-            <em>{{ (agent.skillIds ?? []).includes(selectedSkill.id) ? '已绑定' : '绑定' }}</em>
-          </button>
-          <p v-if="!agents.length" class="admin-empty">暂无可绑定的 Agent。</p>
-        </div>
-      </article>
-
-      <article class="admin-card skill-injection-preview">
-        <header>
-          <div>
-            <strong>注入预览</strong>
-            <p>按运行时稳定排序展示，不显示完整 Skill 内容。</p>
-          </div>
-        </header>
-        <label class="skill-preview-agent-field">
-          <span>Agent</span>
-          <select v-model="previewAgentId" data-testid="skill-preview-agent">
-            <option v-for="agent in agents" :key="agent.id" :value="agent.id">{{ agent.name }}</option>
-          </select>
-        </label>
-        <ol v-if="previewSkills.length" class="skill-injection-list">
-          <li v-for="(skill, index) in previewSkills" :key="skill.id">
-            <span>{{ index + 1 }}</span>
-            <div>
-              <code data-testid="skill-injection-marker">[Skill:{{ skill.name }}]</code>
-              <small>{{ contentSummary(skill) }}</small>
-            </div>
-          </li>
-        </ol>
-        <p v-else class="skill-preview-empty">该 Agent 尚未绑定 Skill；ContextPack 不会增加 Skill 规则。</p>
-      </article>
-    </section>
-
     <div v-if="pendingDeleteSkill" class="skill-delete-backdrop" role="presentation">
       <section class="admin-card skill-delete-dialog" role="dialog" aria-modal="true" aria-labelledby="skill-delete-title">
         <header>
           <div>
             <strong id="skill-delete-title">删除 {{ pendingDeleteSkill.name }}？</strong>
-            <p>删除后无法恢复，系统会同时清理所有 Agent 的悬空 Skill 引用。</p>
+            <p>删除后无法恢复。仍被 Agent Profile 引用时，服务端会拒绝删除。</p>
           </div>
         </header>
         <div class="skill-delete-impact">
-          <span>将解除以下 Agent 的绑定</span>
-          <p v-if="selectedSkillAgents.length">{{ selectedSkillAgents.map((agent) => agent.name).join('、') }}</p>
-          <p v-else>当前没有 Agent 绑定该 Skill。</p>
+          <span>删除前检查</span>
+          <p>请先从所有 Agent Profile 中移除 <code>${skill:{{ pendingDeleteSkill.key }}}</code>。</p>
         </div>
         <footer class="form-actions">
           <button type="button" @click="cancelDelete">取消</button>

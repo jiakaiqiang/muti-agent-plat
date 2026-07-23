@@ -17,8 +17,19 @@ function makeEnvelope(
     createdAt: '2026-07-11T00:00:00.000Z',
     workspaceId: 'ws-79',
     sessionId: '00000000-0000-4000-8000-000000000079',
-    L0: { workspaceId: 'ws-79', rootName: 'demo', providerKind: 'server_local', revision },
-    L1: { entries: manifest, truncated: false },
+    L0: {
+      systemRules: [],
+      agentId: '00000000-0000-4000-8000-000000000079',
+      profileHash: 'profile-79',
+      profileRevision: 1,
+      toolCatalogHash: 'catalog-79',
+      workspace: { workspaceId: 'ws-79', rootName: 'demo', providerKind: 'server_local', revision }
+    },
+    L1: {
+      sessionGoal: 'test',
+      phase: 'task_execution',
+      navigation: { entries: manifest, truncated: false }
+    },
     L2: { source: 'generated', modules: [] },
     L3: {
       files: evidence,
@@ -69,4 +80,12 @@ test('gate blocks when only sensitive evidence is present', () => {
   );
   const decision = evaluateGroundedEvidenceGate({ envelope, requiresEvidence: true });
   assert.deepEqual(decision, { ok: false, reason: 'evidence-only-sensitive' });
+});
+
+test('gate blocks evidence that is absent from the safe navigation allowlist', () => {
+  const envelope = makeEnvelope([], [{ path: '.env', content: 'SECRET=1', byteLength: 8 }]);
+  assert.deepEqual(evaluateGroundedEvidenceGate({ envelope, requiresEvidence: true }), {
+    ok: false,
+    reason: 'evidence-not-navigable'
+  });
 });

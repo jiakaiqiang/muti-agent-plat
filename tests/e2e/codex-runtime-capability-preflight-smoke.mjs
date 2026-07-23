@@ -2,9 +2,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  api,
   buildServer,
+  confirmBriefAndSelectWorkflow,
+  createPublishedAgentWorkflow,
   createSessionAndWaitForBrief,
+  listEvents,
   startSmokeServer,
   stopSmokeServer,
   waitForMatchingEvent
@@ -26,9 +28,14 @@ try {
     stubScript,
     [
       "import { writeFileSync } from 'node:fs';",
-      "writeFileSync('.codex-preflight-ran', 'runtime started\\n');",
-      "writeFileSync('src/feature.txt', 'after unauthorized runtime\\n');",
-      "console.log(JSON.stringify({ kind: 'task_execution_result', status: 'completed', summary: 'should not run', completedItems: [], changedArtifacts: [], nextSuggestedActions: [], risks: [] }));"
+      "const requiredKind = process.env.AGENT_CLUSTER_EXPECTED_OUTPUT_KIND ?? 'task_execution_result';",
+      "if (requiredKind === 'task_brief') {",
+      "  console.log(JSON.stringify({ schemaVersion: '1.0', kind: 'task_brief', goal: 'Verify Codex capability preflight.', scope: [], outOfScope: [], constraints: [], acceptanceCriteria: [], risks: [], openQuestions: [], suggestedTasks: [] }));",
+      "} else {",
+      "  writeFileSync('.codex-preflight-ran', 'runtime started\\n');",
+      "  writeFileSync('src/feature.txt', 'after unauthorized runtime\\n');",
+      "  console.log(JSON.stringify({ schemaVersion: '1.0', kind: 'task_execution_result', status: 'completed', summary: 'should not run', completedItems: [], changedArtifacts: [], requestedContext: null, agentMessages: [], nextSuggestedActions: [], risks: [] }));",
+      "}"
     ].join('\n')
   );
 
@@ -39,46 +46,63 @@ try {
     CODEX_RUNTIME_COMMAND: 'node',
     CODEX_RUNTIME_ARGS_JSON: JSON.stringify([stubScript]),
     CODEX_RUNTIME_PROMPT_MODE: 'file',
-    CODEX_RUNTIME_SHELL: 'false'
+    CODEX_RUNTIME_SHELL: 'false',
+    RUNTIME_STREAMING: 'off'
   });
 
-  await api(server.apiBase, '/agents/backend', {
-    method: 'PATCH',
-    body: JSON.stringify({ runtimeType: 'codex' })
-  });
-  await api(server.apiBase, '/agents/test', {
-    method: 'PATCH',
-    body: JSON.stringify({ runtimeType: 'mock' })
-  });
-  await api(server.apiBase, '/agents/review', {
-    method: 'PATCH',
-    body: JSON.stringify({ runtimeType: 'mock' })
-  });
+  const workflow = await createPublishedAgentWorkflow(
+    server.apiBase,
+    'Codex capability preflight workflow',
+    ['backend']
+  );
 
   const { sessionId, briefId } = await createSessionAndWaitForBrief(
     server.apiBase,
-    `Use Codex to update files in ${workspaceRoot}`
+    `Use Codex to update files in ${workspaceRoot}`,
+    {
+      workingDirectory: {
+        kind: 'server_local',
+        id: workspaceRoot,
+        name: 'codex-preflight-workspace',
+        path: workspaceRoot,
+        selectedAt: new Date().toISOString()
+      },
+      runtimePreference: { preferredRuntimeType: 'codex', allowedRuntimeTypes: ['codex'] }
+    }
   );
-  await api(server.apiBase, `/sessions/${sessionId}/briefs/${briefId}/confirm`, { method: 'POST' });
+  await confirmBriefAndSelectWorkflow(server.apiBase, sessionId, briefId, workflow);
 
-  const blockedTool = await waitForMatchingEvent(
-    server.apiBase,
-    sessionId,
-    'tool_failed',
-    (event) =>
-      event.metadata.payload?.capabilityId === 'cap-file-write' &&
-      event.metadata.payload?.code === 'CAPABILITY_REQUIRES_CONFIRMATION'
-  );
-  if (!blockedTool.metadata.payload.requiresUserConfirmation) {
-    throw new Error(`Expected file-write preflight to require confirmation: ${JSON.stringify(blockedTool)}`);
+  let blockedRuntime;
+  try {
+    blockedRuntime = await waitForMatchingEvent(
+      server.apiBase,
+      sessionId,
+      'runtime_failed',
+      (event) =>
+        event.metadata.payload?.code === 'CAPABILITY_BLOCKED' &&
+        event.metadata.payload?.message?.includes('tool.file_write')
+    );
+  } catch (error) {
+    const events = await listEvents(server.apiBase, sessionId);
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)}\nEvents: ${JSON.stringify(
+        events.map((event) => ({ type: event.type, taskId: event.taskId, content: event.content, payload: event.metadata.payload })),
+        null,
+        2
+      )}`
+    );
+  }
+  if (blockedRuntime.metadata.payload.runtimeError?.retryable !== false) {
+    throw new Error(`Expected blocked capability preflight to fail closed without retry: ${JSON.stringify(blockedRuntime)}`);
   }
 
-  await waitForMatchingEvent(
-    server.apiBase,
-    sessionId,
-    'task_waiting',
-    (event) => event.metadata.payload?.relatedCapabilityId === 'cap-file-write'
+  const events = await listEvents(server.apiBase, sessionId);
+  const taskRuntimeStarted = events.find(
+    (event) => event.type === 'runtime_started' && event.taskId === blockedRuntime.taskId
   );
+  if (taskRuntimeStarted) {
+    throw new Error(`Blocked task must not start its runtime: ${JSON.stringify(taskRuntimeStarted)}`);
+  }
 
   const source = await readFile(join(workspaceRoot, 'src', 'feature.txt'), 'utf8');
   if (source !== 'before preflight\n') {

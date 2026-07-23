@@ -4,10 +4,9 @@
 // Reference Binding Phase 3 makes Agent prompts and runtime context obey
 // Context Protocol (02) and Agent Role Protocol (03). The
 // deliverable is conformance SPECS, not prompt/code changes — so this validates
-// the spec docs and REALITY-SYNCS them against source: it parses the ContextPack
-// fields + AgentRunPhase from contracts.ts and the agent keys from
-// default-agents.ts, asserting both contracts cover every one. Add a ContextPack
-// field, a phase, or an agent in code and this test fails until the contract
+// the spec docs and REALITY-SYNCS them against source: it parses the internal
+// ContextAssembly fields, Runtime-facing ContextEnvelopeV2 layers, AgentRunPhase,
+// and agent keys. Add a field, layer, phase, or agent and this test fails until the contract
 // catches up. Pure Node ESM, no deps.
 //
 // Usage: node tests/harness-engineering/validate-phase3.mjs
@@ -65,7 +64,8 @@ function parseObjectFields(source, typeName) {
 
 const contractsSrc = await readFile(contractsPath, 'utf8');
 const agentsSrc = `${await readFile(agentsPath, 'utf8')}\n${await readFile(agentPresetsPath, 'utf8')}`;
-const contextPackFields = parseObjectFields(contractsSrc, 'ContextPack');
+const contextAssemblyFields = parseObjectFields(contractsSrc, 'ContextAssembly');
+const contextEnvelopeFields = parseObjectFields(contractsSrc, 'ContextEnvelopeV2');
 const agentRunPhases = parseUnion(contractsSrc, 'AgentRunPhase');
 const agentKeys = [...agentsSrc.matchAll(/key: '([^']+)'/g)].map((x) => x[1]);
 
@@ -74,7 +74,7 @@ const docs = [
   {
     file: 'README.md',
     markers: [
-      '工程化', 'system message', 'user message', 'ContextPack', 'profileMarkdown',
+      '工程化', 'system message', 'user message', 'ContextAssembly', 'ContextEnvelopeV2', 'profileMarkdown',
       'agent-prompt-contract.md', 'runtime-context-contract.md', 'gap-analysis.md',
       '02-context-protocol', '03-agent-role-protocol'
     ]
@@ -88,13 +88,14 @@ const docs = [
     file: 'runtime-context-contract.md',
     markers: ['分阶段注入矩阵', '不应该看到', 'Rubric'],
     reality: [
-      { name: 'ContextPack field', values: contextPackFields },
+      { name: 'ContextAssembly field', values: contextAssemblyFields },
+      { name: 'ContextEnvelopeV2 field', values: contextEnvelopeFields },
       { name: 'AgentRunPhase', values: agentRunPhases }
     ]
   },
   {
     file: 'gap-analysis.md',
-    markers: ['完整', '部分', '缺失', 'P1', 'P6', 'profileMarkdown', 'createContextPack', 'relevantEvents', 'Definition of Done']
+    markers: ['完整', '部分', '缺失', 'P1', 'P6', 'profileMarkdown', 'createContextAssembly', 'relevantEvents', 'Definition of Done']
   }
 ];
 
@@ -130,7 +131,7 @@ const RESET = '\x1b[0m';
 
 console.log('\nHarness Engineering — Phase 3 (Prompt & Context Conformance)\n');
 console.log(`docs dir:  ${path.relative(repoRoot, dir)}`);
-console.log(`reality:   ContextPack(${contextPackFields.length}) · AgentRunPhase(${agentRunPhases.length}) · agentKeys(${agentKeys.length}) parsed from source\n`);
+console.log(`reality:   ContextAssembly(${contextAssemblyFields.length}) · ContextEnvelopeV2(${contextEnvelopeFields.length}) · AgentRunPhase(${agentRunPhases.length}) · agentKeys(${agentKeys.length}) parsed from source\n`);
 
 let total = 0;
 let failed = 0;

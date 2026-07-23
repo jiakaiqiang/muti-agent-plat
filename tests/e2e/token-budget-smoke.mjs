@@ -1,6 +1,8 @@
 import {
   api,
   buildServer,
+  confirmBriefAndSelectWorkflow,
+  createPublishedAgentWorkflow,
   createSessionAndWaitForBrief,
   startSmokeServer,
   stopSmokeServer,
@@ -17,10 +19,16 @@ try {
     DISCUSSION_MAX_ROUNDS: '0'
   });
 
-  const normal = await createSessionAndWaitForBrief(server.apiBase, 'Token usage should be recorded for runtime calls.', {
-    tokenBudget: 50_000
+  const workflow = await createPublishedAgentWorkflow(server.apiBase, 'Token budget workflow', ['product-manager']);
+
+  const normal = await createSessionAndWaitForBrief(server.apiBase, '分析并记录 token 使用情况，仅输出说明。', {
+    tokenBudget: 50_000,
+    runtimePreference: {
+      preferredRuntimeType: 'mock',
+      allowedRuntimeTypes: ['mock']
+    }
   });
-  await api(server.apiBase, `/sessions/${normal.sessionId}/briefs/${normal.briefId}/confirm`, { method: 'POST' });
+  await confirmBriefAndSelectWorkflow(server.apiBase, normal.sessionId, normal.briefId, workflow);
   await waitForStatus(server.apiBase, normal.sessionId, 'COMPLETED');
   const tokenUsage = await api(server.apiBase, `/sessions/${normal.sessionId}/debug/token-usage`);
   if (tokenUsage.data.invocationCount < 1 || tokenUsage.data.tokenUsed < 1 || tokenUsage.data.totalTokens < 1) {
@@ -40,14 +48,19 @@ try {
     server.apiBase,
     tinySessionId,
     'error_reported',
-    (event) => event.metadata.payload.code === 'TOKEN_BUDGET_EXCEEDED'
+    (event) =>
+      event.metadata.payload.code === 'TOKEN_BUDGET_EXCEEDED' ||
+      event.metadata.payload.runtimeError?.code === 'TOKEN_BUDGET_EXCEEDED',
+    60_000
   );
   const tinyEvents = await api(server.apiBase, `/sessions/${tinySessionId}/events`);
   const budgetError = tinyEvents.data.items.find(
-    (event) => event.type === 'error_reported' && event.metadata.payload?.code === 'TOKEN_BUDGET_EXCEEDED'
+    (event) =>
+      event.type === 'error_reported' && event.metadata.payload?.runtimeError?.code === 'TOKEN_BUDGET_EXCEEDED'
   );
-  if (!budgetError?.metadata?.payload?.diagnostics?.dominantSections?.length) {
-    throw new Error(`Expected token budget diagnostics on failure: ${JSON.stringify(budgetError)}`);
+  const budgetDetails = budgetError?.metadata?.payload?.runtimeError?.details;
+  if (!(budgetDetails?.estimatedTokens > budgetDetails?.maxInputTokens)) {
+    throw new Error(`Expected structured token budget details on failure: ${JSON.stringify(budgetError)}`);
   }
 
   console.log('token budget smoke ok');

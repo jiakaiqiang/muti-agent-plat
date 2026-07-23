@@ -128,6 +128,32 @@ test('applyServerLocalChangeSet returns ok:false with conflicts when baseHash mi
   });
 });
 
+test('applyServerLocalChangeSet rejects create when the target already exists', async () => {
+  await withTempRoot(async (root) => {
+    await writeFile(join(root, 'existing.ts'), 'user content\n');
+    const changeSet = {
+      id: '00000000-0000-4000-8000-000000000060',
+      baseRevision,
+      changes: [
+        { operation: 'create', path: 'existing.ts', content: 'runtime content\n', encoding: 'utf-8' }
+      ],
+      createdAt: '2026-07-11T00:00:00.000Z'
+    } satisfies WorkspaceChangeSet;
+
+    const result = await applyServerLocalChangeSet({
+      rootPath: root,
+      currentRevision: baseRevision,
+      nextRevision,
+      changeSet
+    });
+
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.conflicts[0]?.operation, 'create');
+    assert.equal(await readFile(join(root, 'existing.ts'), 'utf8'), 'user content\n');
+  });
+});
+
 test('applyServerLocalChangeSet creates nested parent directories on create/move', async () => {
   await withTempRoot(async (root) => {
     const changeSet = {

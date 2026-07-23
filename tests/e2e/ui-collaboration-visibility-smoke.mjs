@@ -25,8 +25,8 @@ const workflow = read('apps/web/src/components/WorkflowRuntimeView.vue');
 for (const phase of [
   'task_acceptance_decision',
   'task_acceptance_blocked',
-  'task_claim_decision',
-  'task_claim_declined',
+  'task_acceptance_decision',
+  'task_acceptance_blocked',
   'task_acceptance',
   'user_message_routing',
   'agent_runtime_communication'

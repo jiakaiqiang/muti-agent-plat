@@ -1,10 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import type { ContextPack, ProjectMap, ProjectMapModule, SessionDetail, WorkspaceSnapshot } from '@agent-cluster/shared';
+import type { ContextAssembly, ProjectMap, ProjectMapModule, SessionDetail, WorkspaceSnapshot } from '@agent-cluster/shared';
 import { nowIso } from '../../common/time.js';
 
 @Injectable()
 export class ProjectMapService {
-  buildProjectMap(session: SessionDetail, workspaceFocus?: ContextPack['workspaceFocus']): ProjectMap | undefined {
+  buildProjectMap(session: SessionDetail, workspaceFocus?: ContextAssembly['workspaceFocus']): ProjectMap | undefined {
     const snapshot = session.workspaceSnapshot;
     if (!snapshot) return undefined;
 
@@ -35,7 +35,7 @@ export class ProjectMapService {
     };
   }
 
-  workspaceFocus(session: SessionDetail): ContextPack['workspaceFocus'] {
+  workspaceFocus(session: SessionDetail): ContextAssembly['workspaceFocus'] {
     const snapshot = session.workspaceSnapshot;
     if (!snapshot) return undefined;
     const relevantFiles = snapshot.files
@@ -68,7 +68,7 @@ export class ProjectMapService {
     };
   }
 
-  private projectMapModules(snapshot: WorkspaceSnapshot, focus?: ContextPack['workspaceFocus']): ProjectMapModule[] {
+  private projectMapModules(snapshot: WorkspaceSnapshot, focus?: ContextAssembly['workspaceFocus']): ProjectMapModule[] {
     const filesByTopLevel = new Map<string, string[]>();
     for (const file of snapshot.files) {
       const topLevel = file.path.split('/')[0] || file.path;

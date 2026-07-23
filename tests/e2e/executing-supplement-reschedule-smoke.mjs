@@ -1,6 +1,8 @@
 import {
   api,
   buildServer,
+  confirmBriefAndSelectWorkflow,
+  createPublishedAgentWorkflow,
   createSessionAndWaitForBrief,
   listEvents,
   startSmokeServer,
@@ -20,11 +22,23 @@ try {
     MOCK_RUNTIME_DELAY_MS: '1800'
   });
 
+  const workflow = await createPublishedAgentWorkflow(
+    server.apiBase,
+    'Executing supplement reschedule workflow',
+    ['product-manager']
+  );
+
   const { sessionId, briefId } = await createSessionAndWaitForBrief(
     server.apiBase,
-    'Execute a delayed task so a supplemental requirement can be absorbed before completion.'
+    '分析并记录一个延迟协作流程，仅输出说明，以便在完成前补充需求。',
+    {
+      runtimePreference: {
+        preferredRuntimeType: 'mock',
+        allowedRuntimeTypes: ['mock']
+      }
+    }
   );
-  await api(server.apiBase, `/sessions/${sessionId}/briefs/${briefId}/confirm`, { method: 'POST' });
+  await confirmBriefAndSelectWorkflow(server.apiBase, sessionId, briefId, workflow);
 
   const firstTaskStarted = await waitForEvent(server.apiBase, sessionId, 'task_started', 20_000);
   const firstTaskId = firstTaskStarted.taskId;

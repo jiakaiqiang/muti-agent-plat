@@ -8,15 +8,13 @@ type IsExact<T, Expected> = [T] extends [Expected]
     : false
   : false;
 
-const v1: ContextPipelineVersion = 'v1';
 const v2: ContextPipelineVersion = 'v2';
 
-type ContextPipelineVersionIsStableUnion = Assert<IsExact<ContextPipelineVersion, 'v1' | 'v2'>>;
+type ContextPipelineVersionIsV2Only = Assert<IsExact<ContextPipelineVersion, 'v2'>>;
 
 const supportedVersions = SUPPORTED_CONTEXT_PIPELINE_VERSIONS satisfies readonly ContextPipelineVersion[];
 const defaultVersion: ContextPipelineVersion = DEFAULT_CONTEXT_PIPELINE_VERSION;
 
-void v1;
 void v2;
 void supportedVersions;
 void defaultVersion;

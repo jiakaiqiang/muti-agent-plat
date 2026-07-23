@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import type { SessionDetail } from './contracts.js';
 import { DEFAULT_CONTEXT_PIPELINE_VERSION } from './contracts.js';
 
-function baseSession(): Omit<SessionDetail, 'contextPipelineVersion'> {
+function baseSession(): SessionDetail {
   return {
     id: 'session-1',
+    dataEpoch: 'epoch-test',
     title: 'Pipeline version',
     originalInput: 'Use context pipeline',
     status: 'AGENT_DISCUSSING',
@@ -18,13 +19,8 @@ function baseSession(): Omit<SessionDetail, 'contextPipelineVersion'> {
   };
 }
 
-test('SessionDetail accepts a fixed Context Pipeline version while legacy data can omit it', () => {
-  const legacySession: SessionDetail = baseSession();
-  assert.equal(legacySession.contextPipelineVersion, undefined);
-
-  const versionedSession: SessionDetail = {
-    ...baseSession(),
-    contextPipelineVersion: DEFAULT_CONTEXT_PIPELINE_VERSION
-  };
-  assert.equal(versionedSession.contextPipelineVersion, 'v1');
+test('SessionDetail no longer stores a pipeline version while product health remains v2', () => {
+  const session = baseSession();
+  assert.equal('contextPipelineVersion' in session, false);
+  assert.equal(DEFAULT_CONTEXT_PIPELINE_VERSION, 'v2');
 });

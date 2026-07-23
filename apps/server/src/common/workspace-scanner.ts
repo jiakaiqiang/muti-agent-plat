@@ -174,8 +174,19 @@ export function workspaceFileScanPriority(path: string) {
   const extension = extensionOf(normalizedPath);
 
   if (ruleFileNames.has(name)) return 0;
-  if (/^(?:.*\/)?(?:src\/)?(?:main|index)\.(?:ts|tsx|js|jsx|mjs|cjs|vue)$/.test(normalizedPath) || name === 'app.vue') return 10;
+  if (
+    /^(?:(?:src\/)?(?:main|index)|apps\/[^/]+\/src\/(?:main|index))\.(?:ts|tsx|js|jsx|mjs|cjs|vue)$/.test(normalizedPath) ||
+    name === 'app.vue'
+  ) return 10;
   if (configFileNames.has(name) || name.includes('.config.')) return 20;
+  if (
+    /^(?:src\/)?(?:shared|models?|prompts?|chains?|rag|agents?|memory|tools?)\//.test(normalizedPath) ||
+    /\/(?:shared|models?|prompts?|chains?|rag|agents?|memory|tools?)\//.test(normalizedPath) ||
+    /(?:^|\/)(?:pipeline|loader|vector-?store|retriever|agent|memory|model|tool)\.(?:ts|tsx|js|jsx|mjs|cjs)$/.test(normalizedPath)
+  ) return 25;
+  // Tutorial/demo routers are useful navigation, but must not consume the
+  // bounded content window ahead of current data-flow implementations.
+  if (/\/(?:demos?|examples?)\/.*\/index\.(?:ts|tsx|js|jsx|mjs|cjs)$/.test(normalizedPath)) return 35;
   if (sourceExtensions.has(extension)) return 30;
   if (extension === '.md' || extension === '.txt') return 40;
   return 50;

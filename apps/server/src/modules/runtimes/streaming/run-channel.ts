@@ -1,7 +1,7 @@
 import type { RuntimeStreamFrame } from './runtime-stream-frame.js';
 
 /**
- * per-runId 帧通道:adapter 生产 → orchestrator 消费。
+ * per-invocationId 帧通道:adapter 生产 → orchestrator 消费。
  * - **有界**:达到 capacity 时优先丢弃 `assistant_text`(增量文本),保留
  *   `tool_use`/`tool_result`/`result`/`system`/`stderr_tail`。
  * - **单消费者**:第二次 `[Symbol.asyncIterator]()` 抛错。

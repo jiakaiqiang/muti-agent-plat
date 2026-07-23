@@ -1,18 +1,29 @@
 import {
   api,
   buildServer,
+  confirmBriefAndSelectWorkflow,
+  createPublishedAgentWorkflow,
   createSessionAndWaitForBrief,
   listEvents,
   startSmokeServer,
   stopSmokeServer,
   waitForStatus
 } from './smoke-server.mjs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 await buildServer();
 
 let server;
+const workspaceRoot = mkdtempSync(join(tmpdir(), 'context-insufficient-multi-retry-'));
 
 try {
+  mkdirSync(join(workspaceRoot, 'src'), { recursive: true });
+  writeFileSync(join(workspaceRoot, 'src', 'index.ts'), 'export const indexMarker = "MULTI_RETRY_INDEX_AAA";');
+  writeFileSync(join(workspaceRoot, 'src', 'utils.ts'), 'export const utilsMarker = "MULTI_RETRY_UTILS_BBB";');
+  writeFileSync(join(workspaceRoot, 'src', 'config.ts'), 'export const configMarker = "MULTI_RETRY_CONFIG_CCC";');
+  writeFileSync(join(workspaceRoot, 'package.json'), '{"scripts":{"typecheck":"tsc --noEmit","test":"vitest run","build":"vite build"}}');
   server = await startSmokeServer('context-insufficient-multi-retry-smoke', {
     DISCUSSION_MAX_ROUNDS: '0',
     // Mock returns CONTEXT_INSUFFICIENT for the first 2 task_execution attempts,
@@ -20,12 +31,25 @@ try {
     // allows the retry through. The 3rd attempt succeeds.
     MOCK_CONTEXT_INSUFFICIENT_TIMES: '2'
   });
+  const workflow = await createPublishedAgentWorkflow(
+    server.apiBase,
+    'Context insufficient multi-retry workflow',
+    ['product-manager']
+  );
 
   const { sessionId, briefId } = await createSessionAndWaitForBrief(
     server.apiBase,
     'Implement a small workspace change and retry the current phase after requesting missing source context more than once.',
     {
       tokenBudget: 50_000,
+      runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] },
+      workingDirectory: {
+        kind: 'server_local',
+        id: 'context-insufficient-multi-retry-workspace',
+        name: 'context-insufficient-multi-retry-project',
+        path: workspaceRoot,
+        selectedAt: new Date().toISOString()
+      },
       workspaceSnapshot: {
         rootName: 'context-insufficient-multi-retry-project',
         scannedAt: new Date().toISOString(),
@@ -73,7 +97,7 @@ try {
     }
   );
 
-  await api(server.apiBase, `/sessions/${sessionId}/briefs/${briefId}/confirm`, { method: 'POST' });
+  await confirmBriefAndSelectWorkflow(server.apiBase, sessionId, briefId, workflow);
   await waitForStatus(server.apiBase, sessionId, 'COMPLETED', 90_000);
 
   const events = await listEvents(server.apiBase, sessionId);
@@ -85,7 +109,7 @@ try {
       `Expected at least 2 CONTEXT_INSUFFICIENT runtime_failed events for a multi-retry session, got ${insufficientEvents.length}: ${JSON.stringify(
         insufficientEvents.map((event) => ({
           taskId: event.taskId,
-          requestedRefs: event.metadata.payload?.requestedContext?.requestedRefs
+          requestedPaths: event.metadata.payload?.requestedContext?.requestedPaths
         }))
       )}`
     );
@@ -98,16 +122,16 @@ try {
     );
   }
 
-  // Each retry must have requested a different ref — otherwise T06 dedupe would
+  // Each retry must have requested a different path - otherwise dedupe would
   // have rejected the second attempt and the session would have failed.
-  const requestedRefs = sameTaskFailures.map((event) => {
-    const refs = event.metadata.payload?.requestedContext?.requestedRefs ?? [];
-    return refs[0]?.ref;
+  const requestedPaths = sameTaskFailures.map((event) => {
+    const paths = event.metadata.payload?.requestedContext?.requestedPaths ?? [];
+    return paths[0];
   });
-  const uniqueRefs = new Set(requestedRefs.filter(Boolean));
-  if (uniqueRefs.size < 2) {
+  const uniquePaths = new Set(requestedPaths.filter(Boolean));
+  if (uniquePaths.size < 2) {
     throw new Error(
-      `Expected at least 2 distinct refs across retries (so dedupe lets each one through), got ${JSON.stringify(requestedRefs)}.`
+      `Expected at least 2 distinct paths across retries (so dedupe lets each one through), got ${JSON.stringify(requestedPaths)}.`
     );
   }
 
@@ -153,4 +177,5 @@ try {
   if (server) {
     await stopSmokeServer(server);
   }
+  rmSync(workspaceRoot, { recursive: true, force: true });
 }

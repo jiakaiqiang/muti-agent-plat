@@ -1,13 +1,14 @@
 import type {
-  AgentRunInput,
   AgentRunResult,
   AgentRuntimeAdapter,
+  InvocationPlan,
   RuntimeAdapterCategory,
   RuntimeAdapterMetadata,
   RuntimeAvailability,
   RuntimeHealthStatus,
   UUID
 } from './contracts';
+import { createRuntimeArtifactSystemEvidence } from './runtime-contracts/factories.js';
 
 type Assert<T extends true> = T;
 type IsExact<T, Expected> = [T] extends [Expected]
@@ -26,7 +27,9 @@ const metadata: RuntimeAdapterMetadata = {
   version: '0.1.0',
   category: internalCategory,
   provider: 'self-hosted',
-  capabilityIds: ['cap-file-read']
+  capabilityIds: ['cap-file-read'],
+  supportedWorkspaceCapabilities: ['read'],
+  supportedToolNames: ['read_file']
 };
 
 // Test 3: availability checks return a boolean and optional reason.
@@ -43,27 +46,42 @@ const health: RuntimeHealthStatus = {
   message: 'slow dependency'
 };
 
-// Test 5: existing run(input, signal?) signature remains compatible.
-const runAdapter: AgentRuntimeAdapter = {
+// Test 5: adapters consume the immutable InvocationPlan boundary.
+const baseAdapter: AgentRuntimeAdapter = {
   type: 'mock',
-  async run(input: AgentRunInput, signal?: AbortSignal): Promise<AgentRunResult> {
+  start(input: InvocationPlan, signal?: AbortSignal) {
     void input;
     void signal;
-    return {
-      runId: 'run-1',
+    const result: AgentRunResult = {
+      invocationId: 'invocation-1',
       runtimeType: 'mock',
       status: 'completed',
       events: [],
       artifacts: [],
+      systemEvidence: createRuntimeArtifactSystemEvidence('invocation-1'),
       usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-      output: { kind: 'agent_message', messageKind: 'summary', content: 'done' }
+      output: {
+        schemaVersion: '1.0',
+        kind: 'agent_message',
+        messageKind: 'summary',
+        content: 'done',
+        targetAgentIds: [],
+        targetAgentKeys: [],
+        mentionedAgentIds: [],
+        relatedTaskIds: []
+      }
+    };
+    return {
+      events: (async function* () {})(),
+      result: Promise.resolve(result),
+      async cancel() {}
     };
   }
 };
 
-// Test 6: metadata can be attached without forcing old adapters to change.
+// Test 6: metadata can be attached to the single start-handle contract.
 const metadataAdapter: AgentRuntimeAdapter = {
-  ...runAdapter,
+  ...baseAdapter,
   metadata
 };
 
@@ -78,19 +96,23 @@ const observableAdapter: AgentRuntimeAdapter = {
   }
 };
 
-// Test 8: stream and cancel remain available for adapters that support them.
+// Test 8: streaming and cancellation are scoped to the start() handle.
 const streamingAdapter: AgentRuntimeAdapter = {
   ...observableAdapter,
-  async *stream(runId: UUID) {
-    yield {
-      runId,
-      type: 'runtime_started',
-      content: 'started',
-      createdAt: '2026-06-22T00:00:00.000Z'
+  start(input) {
+    return {
+      events: (async function* () {
+        yield {
+          invocationId: input.invocationId,
+          type: 'runtime_started' as const,
+          visibility: 'user' as const,
+          content: 'started',
+          createdAt: '2026-06-22T00:00:00.000Z'
+        };
+      })(),
+      result: baseAdapter.start(input).result,
+      async cancel() {}
     };
-  },
-  async cancel(runId: UUID) {
-    void runId;
   }
 };
 

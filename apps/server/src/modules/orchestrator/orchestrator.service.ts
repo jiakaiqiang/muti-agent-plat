@@ -1,13 +1,16 @@
-import { Injectable, Optional } from '@nestjs/common';
+import { BadRequestException, Injectable, Optional } from '@nestjs/common';
 import type {
-  Agent,
+  ActorRef,
+  AgentDefinition as Agent,
   AgentMessageOutput,
   AgentRunPhase,
-  AgentRunInput,
   AgentRunResult,
   AgentTask,
-  ContextPack,
-  EngineeringRuntimeSelection,
+  Artifact,
+  CollaborationEvent,
+  ContextAssembly,
+  ExpectedRuntimeOutput,
+  InvocationPlan,
   SummaryMemory,
   SummaryMemoryCheckpoint,
   TaskContext,
@@ -19,59 +22,64 @@ import type {
   RuntimeContextRequest,
   RuntimeError,
   RuntimeFileChange,
+  RuntimeOutput,
+  RuntimeOutputKind,
   RuntimeType,
+  ExecutionTermination,
   SessionDetail,
+  SupplementalContextPathFailureCode,
+  SupplementalContextResolution,
   SuggestedAgentTask,
   TaskAcceptanceDecisionOutput,
   TaskBrief,
   TaskBriefOutput,
-  TaskClaimDecisionOutput,
   TaskExecutionResultOutput,
   ValidationEvidenceReport,
-  WorkspaceSnapshot,
-  WorkspaceToolDescriptor
+  WorkspaceSnapshot
 } from '@agent-cluster/shared';
-import { createMetadata } from '@agent-cluster/shared';
+import {
+  createAgentMessageOutput,
+  createRuntimeArtifactSystemEvidence,
+  createMetadata,
+  shouldPublishRuntimeEventToCollaboration,
+  validateRuntimeOutput
+} from '@agent-cluster/shared';
 import { applyServerLocalFileChanges } from '../../common/server-file-changes.js';
 import { messages } from '../../common/messages.js';
 import {
-  defaultAgentRuntimeType,
-  defaultEngineeringRuntimeType,
-  discussionTimeoutMs,
-  genericLlmMockFallbackEnabled,
-  llmInputSafetyMarginRatio,
-  llmLocalMaxInputTokens,
-  llmLocalMaxOutputTokens,
-  llmRemoteMaxOutputTokens,
-  projectDefaultEngineeringRuntimeType,
+  abortWithTermination,
+  createExecutionTermination,
+  isExecutionTermination,
+  normalizeTerminatedResult
+} from '../../common/execution-termination.js';
+import {
+  globalDefaultRuntimeType,
+  phaseTimeoutMs,
+  projectPolicyRuntimeType,
   runtimeModeLabel
 } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
-import {
-  buildBudget,
-  estimateRuntimeInputTokens,
-  fitContextToBudget,
-  reserveInputTokenSafetyMargin
-} from '../../common/token.js';
+import { buildBudget, estimateTokens } from '../../common/token.js';
 import { AgentsService } from '../agents/agents.service.js';
 import { ArtifactsService } from '../artifacts/artifacts.service.js';
 import { CapabilitiesService } from '../capabilities/capabilities.service.js';
-import { CapabilityAuditService } from '../capabilities/capability-audit.service.js';
 import { EventsService } from '../events/events.service.js';
 import { MemoryService } from '../memory/memory.service.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { KnowledgeService } from '../rag/knowledge.service.js';
-import { RuntimeModelConfigService } from '../runtimes/runtime-model-config.service.js';
-import { runtimeOutputExample, runtimeOutputSchema } from '../runtimes/runtime-output-schema.js';
 import { RuntimeService } from '../runtimes/runtime.service.js';
 import { TasksService } from '../tasks/tasks.service.js';
-import { SkillsService } from '../skills/skills.service.js';
 import { AgentProfileCompilerService } from '../agent-profile/agent-profile-compiler.service.js';
+import { buildEnvelopeFromContextAssembly } from '../context-v2/build-envelope-from-context-assembly.js';
+import {
+  evaluateGroundedEvidenceGate,
+  requiresGroundedRuntimeEvidence
+} from '../context-v2/grounded-evidence-gate.js';
 import { ContextRouterService } from './context-router.service.js';
 import { ProjectMapService } from './project-map.service.js';
 import { consumeRuntimeEvents } from './runtime-stream-consumer.js';
 import { shouldEmitHeartbeat } from './runtime-heartbeat-policy.js';
-import { buildResumeOptions } from './build-resume-options.js';
+import { smartRuntimePick } from './smart-runtime-pick.js';
 import { buildCoverageSystemRule, buildWorkspaceManifest } from './workspace-manifest.js';
 import {
   canRetryWithSupplementalContext,
@@ -82,13 +90,20 @@ import {
   trimToNovelContext
 } from './supplemental-context-dedupe.js';
 import { truncateContentForEvidence } from '../../common/evidence-truncation.js';
+import { WorkspaceProviderResolver } from '../workspaces/workspace-provider-resolver.js';
+import {
+  InvocationResolutionError,
+  InvocationResolverService
+} from '../runtime-routing/invocation-resolver.service.js';
+import { InvocationWorkspaceBindingsService } from '../runtimes/invocation-workspace-bindings.service.js';
 
 export type ExecutionOutcome =
   | { kind: 'delivered' }
   | { kind: 'rework'; reason: string }
   | { kind: 'ask_user'; reason: string; actions?: PostReviewAction[] }
+  | { kind: 'workflow_step_completed'; taskId: string; resultSummary: string }
   | { kind: 'cancelled'; reason: string }
-  | { kind: 'failed'; reason: string };
+  | { kind: 'failed'; reason: string; error?: RuntimeError };
 
 type TaskRunOutcome =
   | { ok: true }
@@ -97,18 +112,51 @@ type TaskRunOutcome =
       message: string;
       code?: RuntimeError['code'];
       retryable?: boolean;
+      error?: RuntimeError;
     };
 
-// 慢模型（如本地 Ollama）单次调用可达数分钟，心跳让时间线可见"仍在生成"，
-// 与"卡死"可区分。心跳事件不回流进 relevantEvents（见 createContextPack）。
-const RUNTIME_HEARTBEAT_INTERVAL_MS = 30_000;
-const ARCHITECTURE_ANALYSIS_REMOTE_MAX_INPUT_TOKENS = 12_000;
-const ARCHITECTURE_ANALYSIS_REMOTE_MAX_OUTPUT_TOKENS = 3_000;
+type RuntimeInvocationDraft = {
+  invocationId: string;
+  sessionId: string;
+  taskId?: string;
+  phase: AgentRunPhase;
+  agent: Agent;
+  contextAssembly: ContextAssembly;
+  expectedOutput: ExpectedRuntimeOutput;
+  budget: RuntimeBudget;
+  excludedRuntimeTypes?: RuntimeType[];
+  runtimeCandidateOverride?: RuntimeType;
+  attempt?: InvocationPlan['attempt'];
+};
 
+type SuggestedAgentTaskDraft = Pick<SuggestedAgentTask, 'title' | 'description' | 'acceptanceCriteria'> &
+  Partial<Omit<SuggestedAgentTask, 'title' | 'description' | 'acceptanceCriteria'>>;
+
+function agentIdFromActor(actor?: ActorRef): string | undefined {
+  return actor?.type === 'agent' ? actor.id : undefined;
+}
+
+export function usableAgentMessageOutput(value: unknown): value is AgentMessageOutput {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<AgentMessageOutput>;
+  return (
+    candidate.kind === 'agent_message' &&
+    typeof candidate.content === 'string' &&
+    candidate.content.trim().length > 0 &&
+    ['discussion', 'answer', 'handoff', 'progress', 'risk', 'decision', 'summary'].includes(
+      String(candidate.messageKind)
+    )
+  );
+}
+
+// 慢模型（如本地 Ollama）单次调用可达数分钟，心跳让时间线可见"仍在生成"，
+// 与"卡死"可区分。心跳事件不回流进 relevantEvents（见 createContextAssembly）。
+const RUNTIME_HEARTBEAT_INTERVAL_MS = 30_000;
 @Injectable()
 export class OrchestratorService {
   private readonly briefsBySession = new Map<string, TaskBrief[]>();
   private readonly suggestedTasksByBriefId = new Map<string, SuggestedAgentTask[]>();
+  private readonly runtimeProviderCircuits = new Map<RuntimeType, number>();
 
   constructor(
     private readonly agents: AgentsService,
@@ -119,13 +167,13 @@ export class OrchestratorService {
     private readonly memories: MemoryService,
     private readonly artifacts: ArtifactsService,
     private readonly capabilities: CapabilitiesService,
-    private readonly capabilityAudit: CapabilityAuditService,
     private readonly persistence: PersistenceService,
     private readonly contextRouter: ContextRouterService,
     private readonly projectMap: ProjectMapService,
-    private readonly runtimeModels: RuntimeModelConfigService,
-    @Optional() private readonly skills?: SkillsService,
-    @Optional() private readonly profileCompiler?: AgentProfileCompilerService
+    private readonly profileCompiler: AgentProfileCompilerService,
+    @Optional() private readonly workspaceProviders?: WorkspaceProviderResolver,
+    @Optional() private readonly invocationResolver?: InvocationResolverService,
+    @Optional() private readonly workspaceBindings?: InvocationWorkspaceBindingsService
   ) {
     const persistedBriefs = this.persistence.getCollection<Record<string, TaskBrief[]>>('briefsBySession', {});
     for (const [sessionId, briefs] of Object.entries(persistedBriefs)) {
@@ -141,9 +189,10 @@ export class OrchestratorService {
     }
   }
 
-  async discussAndCreateBrief(session: SessionDetail) {
+  async discussAndCreateBrief(session: SessionDetail, signal?: AbortSignal) {
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
     await this.emitWorkspaceAnalyzedEvent(session, coordinator);
+    throwIfAborted(signal);
     this.events.create({
       sessionId: session.id,
       type: 'agent_status_changed',
@@ -168,17 +217,19 @@ export class OrchestratorService {
         phase: 'requirement_intake'
       })
     });
-    await this.runDiscussion(session, coordinator);
+    await this.runDiscussion(session, coordinator, signal);
+    throwIfAborted(signal);
     const result = await this.runRuntime(session, {
-      runId: crypto.randomUUID(),
+      invocationId: crypto.randomUUID(),
       sessionId: session.id,
       phase: 'brief_generation',
-      agent: this.toRuntimeAgent(coordinator),
-      contextPack: this.createContextPack(session, coordinator, undefined, undefined, 'brief_generation'),
-      expectedOutput: { kind: 'task_brief', schemaVersion: '0.1' },
+      agent: coordinator,
+      contextAssembly: this.createContextAssembly(session, coordinator, undefined, undefined, 'brief_generation'),
+      expectedOutput: { kind: 'task_brief', schemaVersion: '1.0' },
       budget: buildBudget(session)
-    });
-    const output = this.normalizeTaskBriefOutput(this.completedOutput<TaskBriefOutput>(result, 'task_brief'));
+    }, signal);
+    throwIfAborted(signal);
+    const output = this.completedOutput<TaskBriefOutput>(result, 'task_brief');
     const suggestedTasks = this.selectSuggestedTasks(session, output.suggestedTasks);
     const allowGeneratedFileWrites = this.shouldWriteGeneratedFiles(session);
 
@@ -199,6 +250,10 @@ export class OrchestratorService {
 
     this.briefsBySession.set(session.id, [...(this.briefsBySession.get(session.id) ?? []), brief]);
     this.suggestedTasksByBriefId.set(brief.id, suggestedTasks);
+    // 每次讨论产出新契约时,同步会话级最新目标。originalInput 保留用户原始需求,
+    // latestContractGoal 反映当前权威目标,供后续 Agent 上下文注入(见 createContextAssembly)。
+    // 该赋值会在随后 sessions.service 的 setStatus/persist 中落库(同一 session 对象引用)。
+    session.latestContractGoal = brief.goal;
     this.persistBriefs();
 
     this.events.create({
@@ -232,10 +287,10 @@ export class OrchestratorService {
       type: 'markdown',
       title: `任务契约 v${brief.version}`,
       contentSummary: brief.goal,
+      platformProjections: briefFileChanges,
       metadata: {
         phase: 'task_brief',
-        briefId: brief.id,
-        fileChanges: briefFileChanges
+        briefId: brief.id
       }
     });
     this.events.create({
@@ -248,7 +303,7 @@ export class OrchestratorService {
         type: briefArtifact.type,
         title: briefArtifact.title,
         contentSummary: briefArtifact.contentSummary,
-        fileChanges: briefFileChanges
+        platformProjections: briefFileChanges
       })
     });
     await this.applyServerLocalArtifactChanges(session, briefFileChanges);
@@ -276,6 +331,355 @@ export class OrchestratorService {
     return brief;
   }
 
+  async runDirectedBriefRevision(
+    session: SessionDetail,
+    oldBrief: TaskBrief,
+    userModification: string,
+    assignedAgentKeys: string[],
+    sourceEventId: string,
+    signal?: AbortSignal
+  ): Promise<TaskBrief> {
+    const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    const allAgents = this.participatingAgents(session);
+    const assignedAgents = allAgents.filter((agent) => assignedAgentKeys.includes(agent.key));
+
+    if (!assignedAgents.length) {
+      // 无指定 Agent 时直接由 coordinator 定稿
+      return this.finalizeBriefRevisionByCoordinator(session, oldBrief, userModification, signal);
+    }
+
+    // 记录定向修订的 memory（只给指定 Agent）
+    for (const agent of assignedAgents) {
+      this.memories.create({
+        sessionId: session.id,
+        agentId: agent.id,
+        scope: 'session',
+        content: `用户对任务契约进行定向修订，指定你审阅以下修改内容（以此为权威基线，只做增量修订，不得推翻）：\n\n${userModification}`,
+        sourceEventId,
+        confidence: 1.0
+      });
+    }
+
+    // 各指定 Agent 跑一轮 brief_revision
+    throwIfAborted(signal);
+    for (const agent of assignedAgents) {
+      throwIfAborted(signal);
+      const invocationId = crypto.randomUUID();
+      const contextAssembly = this.createContextAssembly(session, agent, oldBrief, undefined, 'brief_revision');
+
+      this.events.create({
+        sessionId: session.id,
+        type: 'agent_status_changed',
+        fromAgentId: agent.id,
+        content: `${agent.name} 正在审阅用户的契约修改...`,
+        metadata: createMetadata('system_notice', {
+          agentId: agent.id,
+          status: 'thinking',
+          thoughtSummary: '审阅用户修改',
+          actionSummary: '基于用户修改提出增量修订意见'
+        })
+      });
+
+      const result = await this.runRuntime(
+        session,
+        {
+          invocationId,
+          sessionId: session.id,
+          phase: 'brief_revision',
+          agent,
+          contextAssembly,
+          expectedOutput: { kind: 'agent_message', schemaVersion: '1.0' },
+          budget: buildBudget(session)
+        },
+        signal
+      );
+      throwIfAborted(signal);
+
+      const output =
+        result.status === 'completed' && usableAgentMessageOutput(result.output)
+          ? (result.output as AgentMessageOutput)
+          : createAgentMessageOutput({
+              messageKind: 'risk',
+              content: `${agent.name} 审阅失败：${result.error?.message ?? '未产出有效意见'}`
+            });
+
+      this.events.create({
+        sessionId: session.id,
+        type: 'agent_message',
+        fromAgentId: agent.id,
+        toAgentIds: [coordinator.id],
+        content: output.content,
+        metadata: createMetadata('chat_message', {
+          messageKind: output.messageKind,
+          mentionedAgentIds: output.mentionedAgentIds ?? [],
+          relatedBriefId: oldBrief.id,
+          runtimeInvocationId: invocationId
+        })
+      });
+    }
+
+    // coordinator 定稿
+    throwIfAborted(signal);
+    return this.finalizeBriefRevisionByCoordinator(session, oldBrief, userModification, signal);
+  }
+
+  private async finalizeBriefRevisionByCoordinator(
+    session: SessionDetail,
+    oldBrief: TaskBrief,
+    userModification: string,
+    signal?: AbortSignal
+  ): Promise<TaskBrief> {
+    const coordinator = this.pickSessionAgent(session, ['coordinator']);
+
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_status_changed',
+      fromAgentId: coordinator.id,
+      content: `${coordinator.name} 正在基于用户修改和 Agent 意见定稿新契约...`,
+      metadata: createMetadata('system_notice', {
+        agentId: coordinator.id,
+        status: 'thinking',
+        thoughtSummary: '整合用户修改与 Agent 意见',
+        actionSummary: '生成新版任务契约'
+      })
+    });
+
+    const result = await this.runRuntime(
+      session,
+      {
+        invocationId: crypto.randomUUID(),
+        sessionId: session.id,
+        phase: 'brief_generation',
+        agent: coordinator,
+        contextAssembly: this.createContextAssembly(session, coordinator, oldBrief, undefined, 'brief_generation'),
+        expectedOutput: { kind: 'task_brief', schemaVersion: '1.0' },
+        budget: buildBudget(session)
+      },
+      signal
+    );
+    throwIfAborted(signal);
+
+    const output = this.completedOutput<TaskBriefOutput>(result, 'task_brief');
+    const suggestedTasks = this.selectSuggestedTasks(session, output.suggestedTasks);
+    const allowGeneratedFileWrites = this.shouldWriteGeneratedFiles(session);
+
+    const brief: TaskBrief = {
+      id: crypto.randomUUID(),
+      sessionId: session.id,
+      version: (this.briefsBySession.get(session.id)?.length ?? 0) + 1,
+      goal: output.goal,
+      scope: output.scope,
+      outOfScope: output.outOfScope,
+      constraints: output.constraints,
+      acceptanceCriteria: output.acceptanceCriteria,
+      risks: output.risks,
+      openQuestions: output.openQuestions,
+      confirmedByUser: false,
+      createdAt: nowIso()
+    };
+
+    this.briefsBySession.set(session.id, [...(this.briefsBySession.get(session.id) ?? []), brief]);
+    this.suggestedTasksByBriefId.set(brief.id, suggestedTasks);
+    session.latestContractGoal = brief.goal;
+    this.persistBriefs();
+
+    this.events.create({
+      sessionId: session.id,
+      type: 'brief_created',
+      fromAgentId: coordinator.id,
+      content: messages.briefCreated,
+      metadata: createMetadata(
+        'brief_card',
+        {
+          briefId: brief.id,
+          version: brief.version,
+          goal: brief.goal,
+          scope: brief.scope,
+          outOfScope: brief.outOfScope,
+          constraints: brief.constraints,
+          acceptanceCriteria: brief.acceptanceCriteria,
+          risks: brief.risks,
+          openQuestions: brief.openQuestions,
+          suggestedTasks,
+          requiresUserConfirmation: true
+        },
+        messages.briefCardTitle
+      )
+    });
+
+    const briefFileChanges = allowGeneratedFileWrites ? this.briefFileChanges(brief, suggestedTasks) : [];
+    const briefArtifact = this.artifacts.create({
+      sessionId: session.id,
+      agentId: coordinator.id,
+      type: 'markdown',
+      title: `任务契约 v${brief.version}（定向修订）`,
+      contentSummary: brief.goal,
+      platformProjections: briefFileChanges,
+      metadata: {
+        phase: 'task_brief',
+        briefId: brief.id
+      }
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'artifact_created',
+      fromAgentId: coordinator.id,
+      content: messages.artifactCreated(briefArtifact.title),
+      metadata: createMetadata('artifact_card', {
+        artifactId: briefArtifact.id,
+        type: briefArtifact.type,
+        title: briefArtifact.title,
+        contentSummary: briefArtifact.contentSummary,
+        platformProjections: briefFileChanges
+      })
+    });
+    await this.applyServerLocalArtifactChanges(session, briefFileChanges);
+
+    this.events.create({
+      sessionId: session.id,
+      type: 'user_confirmation_requested',
+      fromAgentId: coordinator.id,
+      content: messages.confirmBrief,
+      metadata: createMetadata('confirmation_card', {
+        confirmationId: crypto.randomUUID(),
+        reason: 'confirm_task_brief',
+        title: messages.confirmBriefTitle,
+        description: messages.confirmBriefDescription,
+        relatedBriefId: brief.id,
+        options: [
+          { key: 'approve', label: messages.approve, style: 'primary' },
+          { key: 'revise', label: messages.revise, style: 'default' }
+        ]
+      })
+    });
+
+    this.createSummaryMemoryCheckpoint(session, coordinator, 'brief_generation', brief);
+
+    return brief;
+  }
+
+  /**
+   * P2 契约持续探讨:在 WAIT_USER_CONFIRM 下,用户 @ 单个 Agent 就当前契约做轻量探讨。
+   * 只调被 @ 的 Agent 一次,注入当前契约全文 + 本轮探讨对话历史,产出 agent_message,不修改契约。
+   */
+  async consultBriefWithAgent(
+    session: SessionDetail,
+    content: string,
+    mentionedAgentIds: string[]
+  ): Promise<{ userEvent: CollaborationEvent; consultedAgent: Agent; output: AgentMessageOutput }> {
+    const briefId = session.currentTaskBriefId;
+    if (!briefId) {
+      throw new BadRequestException('当前会话没有可探讨的任务契约。');
+    }
+    const brief = this.getBrief(session.id, briefId);
+    if (!brief) {
+      throw new BadRequestException(`Brief not found: ${briefId}`);
+    }
+
+    const allAgents = this.participatingAgents(session);
+    const consultedAgent = allAgents.find((agent) => mentionedAgentIds.includes(agent.id));
+    if (!consultedAgent) {
+      throw new BadRequestException('被 @ 的 Agent 未参与本会话');
+    }
+
+    const userEvent = this.events.create({
+      sessionId: session.id,
+      type: 'user_message',
+      userMessageIntent: 'clarification',
+      priority: 'normal',
+      content,
+      toAgentIds: [consultedAgent.id],
+      metadata: createMetadata('chat_message', {
+        text: content,
+        mentionedAgentIds: [consultedAgent.id],
+        relatedBriefId: briefId
+      })
+    });
+
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_status_changed',
+      fromAgentId: consultedAgent.id,
+      content: `${consultedAgent.name} 正在就当前契约回应用户探讨...`,
+      metadata: createMetadata('system_notice', {
+        agentId: consultedAgent.id,
+        status: 'thinking',
+        thoughtSummary: '契约持续探讨',
+        actionSummary: '针对用户问题提供建议或澄清'
+      })
+    });
+
+    const invocationId = crypto.randomUUID();
+    const contextAssembly = this.createContextAssembly(
+      session,
+      consultedAgent,
+      brief,
+      undefined,
+      'brief_consultation'
+    );
+
+    // 注入本轮探讨对话历史(按 relatedBriefId 过滤最近的)
+    const consultationHistory = this.events
+      .list(session.id)
+      .filter(
+        (event) =>
+          event.metadata?.relatedBriefId === brief.id &&
+          (event.type === 'user_message' || event.type === 'agent_message')
+      )
+      .slice(-8);
+
+    for (const event of consultationHistory) {
+      const speaker =
+        event.type === 'user_message'
+          ? '用户'
+          : event.fromAgentId
+            ? allAgents.find((agent) => agent.id === event.fromAgentId)?.name ?? 'Agent'
+            : 'System';
+      this.memories.create({
+        sessionId: session.id,
+        agentId: consultedAgent.id,
+        scope: 'session',
+        content: `${speaker}：${event.content}`,
+        sourceEventId: event.id,
+        confidence: 0.9
+      });
+    }
+
+    const result = await this.runRuntime(session, {
+      invocationId,
+      sessionId: session.id,
+      phase: 'brief_consultation',
+      agent: consultedAgent,
+      contextAssembly,
+      expectedOutput: { kind: 'agent_message', schemaVersion: '1.0' },
+      budget: buildBudget(session)
+    });
+
+    const output: AgentMessageOutput =
+      result.status === 'completed' && usableAgentMessageOutput(result.output)
+        ? (result.output as AgentMessageOutput)
+        : createAgentMessageOutput({
+            messageKind: 'risk',
+            content: `${consultedAgent.name} 回应失败：${result.error?.message ?? '未产出有效回复'}`
+          });
+
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      fromAgentId: consultedAgent.id,
+      toAgentIds: [],
+      content: output.content,
+      metadata: createMetadata('chat_message', {
+        messageKind: output.messageKind,
+        mentionedAgentIds: output.mentionedAgentIds ?? [],
+        relatedBriefId: brief.id,
+        runtimeInvocationId: invocationId
+      })
+    });
+
+    return { userEvent, consultedAgent, output };
+  }
+
   private async emitWorkspaceAnalyzedEvent(session: SessionDetail, coordinator: Agent) {
     const snapshot = session.workspaceSnapshot;
     if (!snapshot) return;
@@ -288,10 +692,10 @@ export class OrchestratorService {
       type: 'markdown',
       title: '工作区架构分析',
       contentSummary: analysis.summary,
+      platformProjections: fileChanges,
       metadata: {
         phase: 'workspace_analysis',
-        workspace: analysis.payload,
-        fileChanges
+        workspace: analysis.payload
       }
     });
     this.events.create({
@@ -304,7 +708,7 @@ export class OrchestratorService {
         phase: 'workspace_analysis',
         workspace: analysis.payload,
         artifactId: artifact.id,
-        fileChanges
+        platformProjections: fileChanges
       })
     });
     this.events.create({
@@ -317,7 +721,7 @@ export class OrchestratorService {
         type: artifact.type,
         title: artifact.title,
         contentSummary: artifact.contentSummary,
-        fileChanges
+        platformProjections: fileChanges
       })
     });
     await this.applyServerLocalArtifactChanges(session, fileChanges);
@@ -341,28 +745,14 @@ export class OrchestratorService {
   }
 
   prepareExecution(session: SessionDetail, briefId: string): { brief: TaskBrief; tasks: AgentTask[] } {
-    const brief = this.getBrief(session.id, briefId);
-    if (!brief) {
-      throw new Error(`Brief not found: ${briefId}`);
-    }
-
-    brief.confirmedByUser = true;
-    brief.confirmedAt = nowIso();
-    this.persistBriefs();
+    const brief = this.confirmBrief(session, briefId);
 
     const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
     const agentIdByKey = new Map(this.participatingAgents(session).map((agent) => [agent.key, agent.id]));
     const suggestions = this.suggestedTasksByBriefId.get(brief.id) ?? this.defaultSuggestedTasks(session);
     const tasks = this.tasks.createFromSuggestions(session.id, suggestions, agentIdByKey, {
-      assignedByAgentId: coordinator.id,
+      assignedBy: { type: 'agent', id: coordinator.id },
       routingMode: 'coordinator_controlled'
-    });
-
-    this.events.create({
-      sessionId: session.id,
-      type: 'brief_confirmed',
-      content: messages.briefConfirmed,
-      metadata: createMetadata('system_notice', { briefId: brief.id })
     });
 
     for (const task of tasks) {
@@ -376,8 +766,8 @@ export class OrchestratorService {
           title: task.title,
           description: task.description,
           status: task.status,
-          assignedByAgentId: task.assignedByAgentId,
-          assigneeAgentId: task.assigneeAgentId,
+          assignedBy: task.assignedBy,
+          assignee: task.assignee,
           routingMode: task.routingMode,
           autoResolutionAttempted: task.autoResolutionAttempted,
           assignmentReason: task.assignmentReason,
@@ -393,15 +783,15 @@ export class OrchestratorService {
         type: 'task_assigned',
         taskId: task.id,
         fromAgentId: coordinator.id,
-        toAgentIds: task.assigneeAgentId ? [task.assigneeAgentId] : [],
+        toAgentIds: agentIdFromActor(task.assignee) ? [agentIdFromActor(task.assignee)!] : [],
         content: `Coordinator 已分配任务：${task.title}`,
         metadata: createMetadata('task_card', {
           taskId: task.id,
           title: task.title,
           description: task.description,
           status: 'assigned',
-          assignedByAgentId: coordinator.id,
-          assigneeAgentId: task.assigneeAgentId,
+          assignedBy: { type: 'agent', id: coordinator.id },
+          assignee: task.assignee,
           routingMode: task.routingMode,
           autoResolutionAttempted: task.autoResolutionAttempted,
           assignmentReason: task.assignmentReason,
@@ -418,6 +808,25 @@ export class OrchestratorService {
     return { brief, tasks };
   }
 
+  confirmBrief(session: SessionDetail, briefId: string) {
+    const brief = this.getBrief(session.id, briefId);
+    if (!brief) {
+      throw new Error(`Brief not found: ${briefId}`);
+    }
+    if (!brief.confirmedByUser) {
+      brief.confirmedByUser = true;
+      brief.confirmedAt = nowIso();
+      this.persistBriefs();
+      this.events.create({
+        sessionId: session.id,
+        type: 'brief_confirmed',
+        content: messages.briefConfirmed,
+        metadata: createMetadata('system_notice', { briefId: brief.id })
+      });
+    }
+    return brief;
+  }
+
   async runPipeline(
     session: SessionDetail,
     brief: TaskBrief,
@@ -430,7 +839,7 @@ export class OrchestratorService {
       }
 
       const allTasks = this.tasks.list(session.id);
-      const executableTasks = allTasks.length ? allTasks : tasks;
+      const executableTasks = this.executionScopeTasks(tasks, allTasks);
       const remaining = executableTasks.filter((task) => !this.isTerminalTask(task));
       if (!remaining.length) {
         break;
@@ -462,9 +871,27 @@ export class OrchestratorService {
       const failedTask = taskResults.find((item) => !item.result.ok);
       if (failedTask && !failedTask.result.ok) {
         if (this.isInfrastructureTaskFailure(failedTask.result)) {
-          return { kind: 'failed', reason: `${messages.taskFailed(failedTask.task.title)}: ${failedTask.result.message}` };
+          return {
+            kind: 'failed',
+            reason: `${messages.taskFailed(failedTask.task.title)}: ${failedTask.result.message}`,
+            ...(failedTask.result.error ? { error: failedTask.result.error } : {})
+          };
         }
         return { kind: 'ask_user', reason: `${messages.taskFailed(failedTask.task.title)}: ${failedTask.result.message}` };
+      }
+      const completedWorkflowStep = taskResults.find(
+        ({ task, result }) =>
+          result.ok &&
+          ((task.workflowNodeRunId && task.workflowRunId) ||
+            (session.workflowRun?.nodeTaskIds.includes(task.id) &&
+              !session.workflowRun.completedTaskIds.includes(task.id)))
+      );
+      if (completedWorkflowStep) {
+        return {
+          kind: 'workflow_step_completed',
+          taskId: completedWorkflowStep.task.id,
+          resultSummary: completedWorkflowStep.task.resultSummary ?? messages.taskCompleted(completedWorkflowStep.task.title)
+        };
       }
     }
 
@@ -520,7 +947,7 @@ export class OrchestratorService {
   ): Promise<TaskRunOutcome> {
     const backend = this.pickSessionAgent(session, ['backend'], 0);
     const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
-    if (!task.assigneeAgentId && this.isArchitectureAnalysisTask(session, task, brief)) {
+    if (!agentIdFromActor(task.assignee) && this.isArchitectureAnalysisTask(session, task, brief)) {
       const message = '当前架构分析任务需要架构师执行，但本会话未选择架构师。请添加或选择架构师后继续。';
       this.tasks.update(task, { status: 'waiting', resultSummary: message });
       this.events.create({
@@ -539,29 +966,8 @@ export class OrchestratorService {
       });
       return { ok: false, message };
     }
-    const taskAgent = task.assigneeAgentId ? this.agents.getByIdOrKey(task.assigneeAgentId) : backend;
-    const executionRuntimeSelection = this.selectEngineeringRuntime(session, taskAgent);
-    const executionRuntimeType = executionRuntimeSelection.effectiveRuntimeType;
-    const runtimePreflight = this.preflightCodingRuntimeSourceWrite(session, task, taskAgent, executionRuntimeType);
-    if (!runtimePreflight.allowed) {
-      this.tasks.update(task, { status: 'waiting', resultSummary: runtimePreflight.message });
-      this.events.create({
-        sessionId: session.id,
-        type: 'task_waiting',
-        taskId: task.id,
-        fromAgentId: taskAgent.id,
-        content: runtimePreflight.message,
-        metadata: createMetadata('task_card', {
-          taskId: task.id,
-          title: task.title,
-          status: 'waiting',
-          resultSummary: runtimePreflight.message,
-          relatedCapabilityId: 'cap-file-write',
-          requiresUserConfirmation: true
-        })
-      });
-      return { ok: false, message: runtimePreflight.message };
-    }
+    const taskAssigneeId = agentIdFromActor(task.assignee);
+    const taskAgent = taskAssigneeId ? this.agents.getByIdOrKey(taskAssigneeId) : backend;
     const claim = await this.resolveTaskClaim(
       session,
       brief,
@@ -573,7 +979,13 @@ export class OrchestratorService {
       contextRetryCount
     );
     if (!claim.ok) {
-      return { ok: false, message: claim.message };
+      return {
+        ok: false,
+        message: claim.message,
+        error: claim.error,
+        code: claim.error?.code,
+        retryable: claim.error?.retryable
+      };
     }
     if (claim.agent.id !== taskAgent.id) {
       return this.runOneTask(session, brief, task, signal, attemptedAgentIds, contextRetryCount, runtimeRetryCount);
@@ -590,8 +1002,8 @@ export class OrchestratorService {
         taskId: task.id,
         title: task.title,
         status: 'accepted',
-        assignedByAgentId: task.assignedByAgentId,
-        assigneeAgentId: taskAgent.id,
+        assignedBy: task.assignedBy,
+        assignee: { type: 'agent', id: taskAgent.id },
         routingMode: task.routingMode,
         autoResolutionAttempted: task.autoResolutionAttempted,
         assignmentReason: task.assignmentReason,
@@ -614,8 +1026,8 @@ export class OrchestratorService {
         taskId: task.id,
         title: task.title,
         status: 'claimed',
-        assignedByAgentId: task.assignedByAgentId,
-        assigneeAgentId: taskAgent.id,
+        assignedBy: task.assignedBy,
+        assignee: { type: 'agent', id: taskAgent.id },
         routingMode: task.routingMode,
         autoResolutionAttempted: task.autoResolutionAttempted,
         assignmentReason: task.assignmentReason,
@@ -639,8 +1051,8 @@ export class OrchestratorService {
         phase: 'task_acceptance',
         relatedTaskIds: [task.id],
         mentionedAgentIds: [coordinator.id],
-        claimDecision: claim.decision,
-        runtimeInvocationId: claim.runId
+        acceptanceDecision: claim.decision,
+        runtimeInvocationId: claim.invocationId
       })
     });
     this.tasks.update(task, { status: 'running' });
@@ -654,42 +1066,29 @@ export class OrchestratorService {
         taskId: task.id,
         title: task.title,
         status: 'running',
-        assigneeAgentId: task.assigneeAgentId
+        assignee: task.assignee
       })
     });
 
-    const runId = crypto.randomUUID();
-    this.events.create({
-      sessionId: session.id,
-      type: 'runtime_started',
-      taskId: task.id,
-      fromAgentId: taskAgent.id,
-      content: messages.runtimeStarted(taskAgent.name, runtimeModeLabel(executionRuntimeType)),
-      metadata: createMetadata('system_notice', {
-        runtimeInvocationId: runId,
-        runtimeType: executionRuntimeType,
-        runtimeSelection: executionRuntimeSelection,
-        status: 'running'
-      })
-    });
-
-    const contextPack = this.createContextPack(session, taskAgent, brief, task, 'task_execution', executionRuntimeSelection);
-    this.emitMemoryUsedEvent(session.id, task.id, taskAgent.id, contextPack);
+    const invocationId = crypto.randomUUID();
+    const contextAssembly = this.createContextAssembly(session, taskAgent, brief, task, 'task_execution');
+    this.emitMemoryUsedEvent(session.id, task.id, taskAgent.id, contextAssembly);
 
     const result = await this.runRuntime(session, {
-      runId,
+      invocationId: invocationId,
       sessionId: session.id,
       taskId: task.id,
       phase: 'task_execution',
-      agent: this.toRuntimeAgent(taskAgent, executionRuntimeSelection),
-      contextPack,
-      expectedOutput: { kind: 'task_execution_result', schemaVersion: '0.1' },
-      budget: contextPack.budget
+      agent: taskAgent,
+      contextAssembly,
+      expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' },
+      budget: contextAssembly.budget
     }, signal);
+    const executionRuntimeType = result.runtimeType;
 
     if (signal?.aborted) {
       const message = messages.cancelled;
-      this.markTaskCancelled(session.id, task, taskAgent.id, runId, message, executionRuntimeType);
+      this.markTaskCancelled(session.id, task, taskAgent.id, invocationId, message, executionRuntimeType);
       return { ok: false, message };
     }
 
@@ -698,7 +1097,7 @@ export class OrchestratorService {
       const requestedContext = result.error?.requestedContext;
       const code = result.error?.code;
       if (this.canRetryRuntimeTimeout(result.error, runtimeRetryCount)) {
-        this.recordRuntimeTimeoutRetry(session, task, taskAgent.id, runId, message, runtimeRetryCount + 1);
+        this.recordRuntimeTimeoutRetry(session, task, taskAgent.id, invocationId, message, runtimeRetryCount + 1);
         this.tasks.update(task, { status: 'pending', resultSummary: `Retrying after runtime timeout: ${message}` });
         await this.backoffRuntimeRetry(runtimeRetryCount, signal);
         return this.runOneTask(
@@ -715,26 +1114,32 @@ export class OrchestratorService {
         session.id,
         task,
         taskAgent.id,
-        runId,
+        invocationId,
         message,
         executionRuntimeType,
         code,
         requestedContext,
-        result.error?.details
+        result.error?.details,
+        result.error?.retryable ?? false
       );
       if (this.canRetryWithSupplementalContext(code, requestedContext, contextRetryCount)) {
         const novelContext = this.resolveRetryRequest(session, code, requestedContext, contextRetryCount);
         if (novelContext) {
-          this.recordSupplementalContextRequest(session, task, taskAgent.id, novelContext);
-          this.tasks.update(task, { status: 'pending', resultSummary: `Retrying with supplemental context: ${message}` });
-          return this.runOneTask(session, brief, task, signal, new Set<string>(), contextRetryCount + 1, 0);
+          const resolution = await this.hydrateSupplementalContext(session, novelContext);
+          this.recordSupplementalContextRequest(session, task, taskAgent.id, novelContext, resolution);
+          if (this.hasUsableSupplementalContext(session, novelContext, resolution)) {
+            this.tasks.update(task, { status: 'pending', resultSummary: `Retrying with supplemental context: ${message}` });
+            return this.runOneTask(session, brief, task, signal, new Set<string>(), contextRetryCount + 1, 0);
+          }
+        } else {
+          this.emitSupplementalContextRejected(session, task, taskAgent.id, requestedContext, 'duplicate_request');
         }
-        this.emitSupplementalContextRejected(session, task, taskAgent.id, requestedContext, 'duplicate_request');
       }
-      return { ok: false, message, code, retryable: result.error?.retryable };
+      return { ok: false, message, code, retryable: result.error?.retryable, error: result.error };
     }
 
     const output = this.completedOutput<TaskExecutionResultOutput>(result, 'task_execution_result');
+    const knowledgeQuery = this.taskKnowledgeQuery(session, brief, task);
     this.events.create({
       sessionId: session.id,
       type: 'rag_retrieved',
@@ -744,8 +1149,8 @@ export class OrchestratorService {
       metadata: createMetadata('rag_card', {
         retrievalLogId: crypto.randomUUID(),
         agentId: taskAgent.id,
-        query: task.title,
-        matchedChunks: this.searchAgentKnowledge(session, taskAgent, task.title)
+        query: knowledgeQuery,
+        matchedChunks: this.searchAgentKnowledge(session, taskAgent, knowledgeQuery)
       })
     });
 
@@ -754,24 +1159,29 @@ export class OrchestratorService {
     const needsReview = output.status === 'needs_review';
     if (output.status !== 'completed' && !needsReview) {
       const code = output.status === 'blocked' ? 'CONTEXT_INSUFFICIENT' : 'MODEL_ERROR';
+      const requestedContext = this.runtimeOutputContextRequest(output.requestedContext);
       this.markTaskFailed(
         session.id,
         task,
         taskAgent.id,
-        runId,
+        invocationId,
         output.summary,
         executionRuntimeType,
         code,
-        output.requestedContext
+        requestedContext
       );
-      if (this.canRetryWithSupplementalContext(code, output.requestedContext, contextRetryCount)) {
-        const novelContext = this.resolveRetryRequest(session, code, output.requestedContext, contextRetryCount);
+      if (this.canRetryWithSupplementalContext(code, requestedContext, contextRetryCount)) {
+        const novelContext = this.resolveRetryRequest(session, code, requestedContext, contextRetryCount);
         if (novelContext) {
-          this.recordSupplementalContextRequest(session, task, taskAgent.id, novelContext);
-          this.tasks.update(task, { status: 'pending', resultSummary: `Retrying with supplemental context: ${output.summary}` });
-          return this.runOneTask(session, brief, task, signal, new Set<string>(), contextRetryCount + 1, 0);
+          const resolution = await this.hydrateSupplementalContext(session, novelContext);
+          this.recordSupplementalContextRequest(session, task, taskAgent.id, novelContext, resolution);
+          if (this.hasUsableSupplementalContext(session, novelContext, resolution)) {
+            this.tasks.update(task, { status: 'pending', resultSummary: `Retrying with supplemental context: ${output.summary}` });
+            return this.runOneTask(session, brief, task, signal, new Set<string>(), contextRetryCount + 1, 0);
+          }
+        } else {
+          this.emitSupplementalContextRejected(session, task, taskAgent.id, requestedContext, 'duplicate_request');
         }
-        this.emitSupplementalContextRejected(session, task, taskAgent.id, output.requestedContext, 'duplicate_request');
       }
       return { ok: false, message: output.summary, code, retryable: false };
     }
@@ -783,10 +1193,11 @@ export class OrchestratorService {
       task,
       taskAgent.id,
       output,
-      result.artifacts,
-      allowGeneratedFileWrites
+      result.systemEvidence,
+      allowGeneratedFileWrites,
+      result.workspaceExecution
     );
-    const fileChanges = this.fileChangesForArtifact(executionArtifact.metadata);
+    const fileChanges = this.platformFileChangesForArtifact(executionArtifact);
     this.events.create({
       sessionId: session.id,
       type: 'artifact_created',
@@ -798,11 +1209,12 @@ export class OrchestratorService {
         type: executionArtifact.type,
         title: executionArtifact.title,
         contentSummary: executionArtifact.contentSummary,
-        runtimeArtifacts: executionArtifact.metadata.runtimeArtifacts,
-        fileChanges
+        runtimeProposals: executionArtifact.runtimeProposals,
+        systemEvidence: executionArtifact.systemEvidence,
+        workspaceExecution: result.workspaceExecution
       })
     });
-    this.emitRuntimeAgentMessages(session, task, taskAgent, output.agentMessages ?? [], runId);
+    this.emitRuntimeAgentMessages(session, task, taskAgent, output.agentMessages ?? [], invocationId);
     this.events.create({
       sessionId: session.id,
       type: 'runtime_completed',
@@ -810,9 +1222,8 @@ export class OrchestratorService {
       fromAgentId: taskAgent.id,
       content: messages.runtimeCompleted(taskAgent.name, runtimeModeLabel(executionRuntimeType)),
       metadata: createMetadata('system_notice', {
-        runtimeInvocationId: runId,
+        runtimeInvocationId: invocationId,
         runtimeType: executionRuntimeType,
-        runtimeSelection: executionRuntimeSelection,
         status: 'completed',
         usage: result.usage
       })
@@ -849,14 +1260,17 @@ export class OrchestratorService {
           relatedTaskIds: [task.id],
           mentionedAgentIds: reviewNoticeTargets,
           risks: output.risks,
-          runtimeInvocationId: runId
+          runtimeInvocationId: invocationId
         })
       });
     }
     this.emitTaskHandoff(session, task, taskAgent, output.summary);
     this.createSummaryMemoryCheckpoint(session, taskAgent, 'task_execution', brief, task);
     await this.applyServerLocalArtifactChanges(session, fileChanges, {
-      allowSourceFileChanges: allowGeneratedFileWrites && this.canApplySourceFileChanges(taskAgent, executionRuntimeType)
+      allowSourceFileChanges:
+        !result.workspaceExecution &&
+        allowGeneratedFileWrites &&
+        this.canApplySourceFileChanges(taskAgent, executionRuntimeType)
     });
     return { ok: true };
   }
@@ -871,45 +1285,73 @@ export class OrchestratorService {
     attemptedAgentIds: Set<string>,
     contextRetryCount = 0
   ): Promise<
-    | { ok: true; agent: Agent; decision: TaskAcceptanceDecisionOutput; runId: string }
-    | { ok: false; message: string }
+    | { ok: true; agent: Agent; decision: TaskAcceptanceDecisionOutput; invocationId: string }
+    | { ok: false; message: string; error?: RuntimeError }
   > {
     if (attemptedAgentIds.has(candidate.id) && contextRetryCount === 0) {
-      return { ok: true, agent: candidate, decision: this.fallbackAcceptanceDecision(candidate, task), runId: crypto.randomUUID() };
+      return {
+        ok: false,
+        message: `Task acceptance was already attempted for ${candidate.name}; refusing an implicit acceptance fallback.`
+      };
     }
     if (contextRetryCount === 0) {
       attemptedAgentIds.add(candidate.id);
     }
-    const runId = crypto.randomUUID();
-    const runtimeSelection = this.selectEngineeringRuntime(session, candidate);
-    const contextPack = this.createContextPack(session, candidate, brief, task, 'task_acceptance', runtimeSelection);
+    const invocationId = crypto.randomUUID();
+    const contextAssembly = this.createContextAssembly(session, candidate, brief, task, 'task_acceptance');
     const result = await this.runRuntime(
       session,
       {
-        runId,
+        invocationId: invocationId,
         sessionId: session.id,
         taskId: task.id,
         phase: 'task_acceptance',
-        agent: this.toRuntimeAgent(candidate, runtimeSelection),
-        contextPack,
-        expectedOutput: { kind: 'task_acceptance_decision', schemaVersion: '0.1' },
-        budget: contextPack.budget
+        agent: candidate,
+        contextAssembly,
+        expectedOutput: { kind: 'task_acceptance_decision', schemaVersion: '1.0' },
+        budget: contextAssembly.budget
       },
       signal
     );
     if (signal?.aborted) {
       return { ok: false, message: messages.cancelled };
     }
-    const decision =
-      result.status === 'completed'
-        ? this.normalizeTaskAcceptanceDecision(candidate, task, result.output)
-        : this.fallbackAcceptanceDecision(candidate, task, result.error?.message ?? result.status);
+    if (result.status !== 'completed') {
+      const message = result.error?.message ?? `Task acceptance Runtime ended with status ${result.status}.`;
+      const runtimeError: RuntimeError = result.error ?? {
+        code: 'UNKNOWN_ERROR',
+        message,
+        retryable: false,
+        details: { phase: 'task_acceptance', status: result.status }
+      };
+      this.markTaskFailed(
+        session.id,
+        task,
+        candidate.id,
+        invocationId,
+        message,
+        result.runtimeType,
+        runtimeError.code,
+        runtimeError.requestedContext,
+        runtimeError.details,
+        runtimeError.retryable
+      );
+      return {
+        ok: false,
+        message,
+        error: runtimeError
+      };
+    }
+    const decision = this.completedOutput<TaskAcceptanceDecisionOutput>(
+      result,
+      'task_acceptance_decision'
+    );
 
-    this.emitTaskClaimDecisionEvent(session, task, candidate, coordinator, decision, runId, runtimeSelection);
-    this.emitRuntimeAgentMessages(session, task, candidate, decision.agentMessages ?? [], runId);
+    this.emitTaskAcceptanceDecisionEvent(session, task, candidate, coordinator, decision, invocationId, result.runtimeType);
+    this.emitRuntimeAgentMessages(session, task, candidate, decision.agentMessages, invocationId);
 
     if (decision.status === 'accepted') {
-      return { ok: true, agent: candidate, decision, runId };
+      return { ok: true, agent: candidate, decision, invocationId };
     }
 
     const isArchitectureTask = this.isArchitectureAnalysisTask(session, task, brief);
@@ -918,27 +1360,31 @@ export class OrchestratorService {
       if (this.canRetryWithSupplementalContext('CONTEXT_INSUFFICIENT', requestedContext, contextRetryCount)) {
         const novelContext = this.resolveRetryRequest(session, 'CONTEXT_INSUFFICIENT', requestedContext, contextRetryCount);
         if (novelContext) {
-          this.recordSupplementalContextRequest(session, task, candidate.id, novelContext);
-          this.tasks.update(task, {
-            status: 'assigned',
-            resultSummary: `Retrying architect acceptance with supplemental context: ${decision.reason}`
-          });
-          return this.resolveTaskClaim(
-            session,
-            brief,
-            task,
-            candidate,
-            coordinator,
-            signal,
-            attemptedAgentIds,
-            contextRetryCount + 1
-          );
+          const resolution = await this.hydrateSupplementalContext(session, novelContext);
+          this.recordSupplementalContextRequest(session, task, candidate.id, novelContext, resolution);
+          if (this.hasUsableSupplementalContext(session, novelContext, resolution)) {
+            this.tasks.update(task, {
+              status: 'assigned',
+              resultSummary: `Retrying architect acceptance with supplemental context: ${decision.reason}`
+            });
+            return this.resolveTaskClaim(
+              session,
+              brief,
+              task,
+              candidate,
+              coordinator,
+              signal,
+              attemptedAgentIds,
+              contextRetryCount + 1
+            );
+          }
+        } else {
+          this.emitSupplementalContextRejected(session, task, candidate.id, requestedContext, 'duplicate_request');
         }
-        this.emitSupplementalContextRejected(session, task, candidate.id, requestedContext, 'duplicate_request');
       }
     }
 
-    const canAutoResolve = task.autoResolutionAttempted !== true;
+    const canAutoResolve = task.autoResolutionAttempted !== true && session.workspaceMode !== 'bootstrap';
     const alternative = canAutoResolve ? this.findAlternativeClaimAgent(session, task, decision, attemptedAgentIds) : undefined;
     this.tasks.update(task, {
       status: 'blocked',
@@ -953,7 +1399,7 @@ export class OrchestratorService {
 
     this.tasks.update(task, {
       status: 'assigned',
-      assigneeAgentId: alternative.id,
+      assignee: { type: 'agent', id: alternative.id },
       resultSummary: `${candidate.name} cannot accept; Coordinator reassigned to ${alternative.name}. ${decision.reason}`
     });
     this.events.create({
@@ -967,8 +1413,8 @@ export class OrchestratorService {
         taskId: task.id,
         title: task.title,
         status: 'assigned',
-        assignedByAgentId: coordinator.id,
-        assigneeAgentId: alternative.id,
+        assignedBy: { type: 'agent', id: coordinator.id },
+        assignee: { type: 'agent', id: alternative.id },
         routingMode: task.routingMode,
         autoResolutionAttempted: task.autoResolutionAttempted,
         assignmentReason: task.assignmentReason,
@@ -976,7 +1422,7 @@ export class OrchestratorService {
         verificationPlan: task.verificationPlan,
         riskNotes: task.riskNotes,
         requiresUserConfirmation: task.requiresUserConfirmation,
-        previousAssigneeAgentId: candidate.id,
+        previousAssignee: { type: 'agent', id: candidate.id },
         resultSummary: decision.reason,
         handoffSuggestion: decision.handoffSuggestion
       })
@@ -993,8 +1439,8 @@ export class OrchestratorService {
         title: task.title,
         description: task.description,
         status: 'assigned',
-        assignedByAgentId: coordinator.id,
-        assigneeAgentId: alternative.id,
+        assignedBy: { type: 'agent', id: coordinator.id },
+        assignee: { type: 'agent', id: alternative.id },
         routingMode: task.routingMode,
         autoResolutionAttempted: task.autoResolutionAttempted,
         assignmentReason: task.assignmentReason,
@@ -1006,20 +1452,19 @@ export class OrchestratorService {
         acceptanceCriteria: task.acceptanceCriteria
       })
     });
-    return { ok: true, agent: alternative, decision, runId };
+    return { ok: true, agent: alternative, decision, invocationId };
   }
 
-  private emitTaskClaimDecisionEvent(
+  private emitTaskAcceptanceDecisionEvent(
     session: SessionDetail,
     task: AgentTask,
     candidate: Agent,
     coordinator: Agent,
     decision: TaskAcceptanceDecisionOutput,
-    runId: string,
-    runtimeSelection: EngineeringRuntimeSelection
+    invocationId: string,
+    runtimeType: RuntimeType
   ) {
-    const alternativeAgentIds = this.claimDecisionAlternativeIds(session, decision);
-    const legacyClaimDecision = this.acceptanceDecisionToLegacyClaimDecision(decision);
+    const alternativeAgentIds = this.acceptanceDecisionAlternativeIds(session, decision);
     this.events.create({
       sessionId: session.id,
       type: 'agent_message',
@@ -1033,11 +1478,9 @@ export class OrchestratorService {
         relatedTaskIds: [task.id],
         mentionedAgentIds: alternativeAgentIds.length ? alternativeAgentIds : [coordinator.id],
         acceptanceDecision: decision,
-        claimDecision: legacyClaimDecision,
         handoffSuggestion: decision.handoffSuggestion,
-        runtimeInvocationId: runId,
-        runtimeType: runtimeSelection.effectiveRuntimeType,
-        runtimeSelection
+        runtimeInvocationId: invocationId,
+        runtimeType
       })
     });
   }
@@ -1061,8 +1504,8 @@ export class OrchestratorService {
         title: task.title,
         description: task.description,
         status: 'blocked',
-        assignedByAgentId: task.assignedByAgentId,
-        assigneeAgentId: candidate.id,
+        assignedBy: task.assignedBy,
+        assignee: { type: 'agent', id: candidate.id },
         routingMode: task.routingMode,
         autoResolutionAttempted: task.autoResolutionAttempted,
         assignmentReason: task.assignmentReason,
@@ -1085,7 +1528,7 @@ export class OrchestratorService {
     isArchitectureTask: boolean
   ): RuntimeContextRequest | undefined {
     if (decision.requestedContext) {
-      return decision.requestedContext;
+      return this.runtimeOutputContextRequest(decision.requestedContext);
     }
     if (!isArchitectureTask || !decision.missingContext?.length) {
       return undefined;
@@ -1099,6 +1542,26 @@ export class OrchestratorService {
       requestedRefs: [],
       requestedPaths,
       followUpInstruction: `Retry architecture task "${task.title}" after reading the requested entrypoint, config, module boundary, and runtime files.`
+    };
+  }
+
+  private runtimeOutputContextRequest(
+    value: TaskExecutionResultOutput['requestedContext'] | TaskAcceptanceDecisionOutput['requestedContext']
+  ): RuntimeContextRequest | undefined {
+    if (!value) return undefined;
+    return {
+      reason: value.reason,
+      requestedRefs: value.requestedRefs.map((ref) => ({
+        type: ref.type,
+        label: ref.label,
+        ...(ref.ref === null ? {} : { ref: ref.ref }),
+        ...(ref.estimatedTokens === null ? {} : { estimatedTokens: ref.estimatedTokens }),
+        ...(ref.selectionReason === null ? {} : { selectionReason: ref.selectionReason }),
+        ...(ref.omissionReason === null ? {} : { omissionReason: ref.omissionReason })
+      })),
+      requestedPaths: value.requestedPaths,
+      requestedCommands: value.requestedCommands,
+      ...(value.followUpInstruction === null ? {} : { followUpInstruction: value.followUpInstruction })
     };
   }
 
@@ -1150,64 +1613,6 @@ export class OrchestratorService {
       score -= 48;
     }
     return score;
-  }
-
-  private normalizeTaskAcceptanceDecision(
-    candidate: Agent,
-    task: AgentTask,
-    output: unknown
-  ): TaskAcceptanceDecisionOutput {
-    const kind = (output as { kind?: string } | undefined)?.kind;
-    if (kind === 'task_acceptance_decision') {
-      const decision = output as TaskAcceptanceDecisionOutput;
-      return {
-        ...decision,
-        status: ['accepted', 'blocked', 'rejected'].includes(decision.status) ? decision.status : 'accepted'
-      };
-    }
-    if (kind === 'task_claim_decision') {
-      const legacy = output as TaskClaimDecisionOutput;
-      return {
-        kind: 'task_acceptance_decision',
-        status: legacy.accepted ? 'accepted' : 'rejected',
-        reason: legacy.reason,
-        confidence: legacy.confidence,
-        missingContext: legacy.missingContext,
-        requestedContext: legacy.requestedContext,
-        handoffSuggestion: legacy.handoffSuggestion,
-        alternativeAgentKeys: legacy.alternativeAgentKeys,
-        alternativeAgentIds: legacy.alternativeAgentIds,
-        agentMessages: legacy.agentMessages
-      };
-    }
-    return this.fallbackAcceptanceDecision(candidate, task, `unexpected output kind: ${kind ?? 'missing'}`);
-  }
-
-  private fallbackAcceptanceDecision(candidate: Agent, task: AgentTask, fallbackReason?: string): TaskAcceptanceDecisionOutput {
-    return {
-      kind: 'task_acceptance_decision',
-      status: 'accepted',
-      reason:
-        fallbackReason && fallbackReason !== 'completed'
-          ? `${candidate.name} accepts "${task.title}" by fallback because acceptance decision failed: ${fallbackReason}`
-          : `${candidate.name} accepts "${task.title}".`,
-      confidence: 0.5
-    };
-  }
-
-  private acceptanceDecisionToLegacyClaimDecision(decision: TaskAcceptanceDecisionOutput): TaskClaimDecisionOutput {
-    return {
-      kind: 'task_claim_decision',
-      accepted: decision.status === 'accepted',
-      reason: decision.reason,
-      confidence: decision.confidence,
-      missingContext: decision.missingContext,
-      requestedContext: decision.requestedContext,
-      handoffSuggestion: decision.handoffSuggestion,
-      alternativeAgentKeys: decision.alternativeAgentKeys,
-      alternativeAgentIds: decision.alternativeAgentIds,
-      agentMessages: decision.agentMessages
-    };
   }
 
   private findAlternativeClaimAgent(
@@ -1267,7 +1672,7 @@ export class OrchestratorService {
     );
   }
 
-  private claimDecisionAlternativeIds(session: SessionDetail, decision: TaskAcceptanceDecisionOutput) {
+  private acceptanceDecisionAlternativeIds(session: SessionDetail, decision: TaskAcceptanceDecisionOutput) {
     const participants = this.participatingAgents(session);
     return [
       decision.handoffSuggestion?.targetAgentId,
@@ -1333,7 +1738,7 @@ export class OrchestratorService {
     const downstreamAgentIds = this.tasks
       .list(session.id)
       .filter((task) => task.dependsOnTaskIds.includes(completedTask.id) && !this.isTerminalTask(task))
-      .map((task) => task.assigneeAgentId)
+      .map((task) => agentIdFromActor(task.assignee))
       .filter((agentId): agentId is string => Boolean(agentId));
     const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
     const toAgentIds = Array.from(new Set(downstreamAgentIds.length ? downstreamAgentIds : [coordinator.id]));
@@ -1368,15 +1773,15 @@ export class OrchestratorService {
       metadata: createMetadata('review_card', { briefId: brief.id })
     });
 
-    const reviewContextPack = this.createContextPack(session, review, brief, undefined, 'post_review');
+    const reviewContextAssembly = this.createContextAssembly(session, review, brief, undefined, 'post_review');
     const reviewRun = await this.runRuntime(session, {
-      runId: crypto.randomUUID(),
+      invocationId: crypto.randomUUID(),
       sessionId: session.id,
       phase: 'post_review',
-      agent: this.toRuntimeAgent(review),
-      contextPack: reviewContextPack,
-      expectedOutput: { kind: 'post_review_report', schemaVersion: '0.1' },
-      budget: reviewContextPack.budget
+      agent: review,
+      contextAssembly: reviewContextAssembly,
+      expectedOutput: { kind: 'post_review_report', schemaVersion: '1.0' },
+      budget: reviewContextAssembly.budget
     }, signal);
     if (signal?.aborted) {
       throw new Error(messages.cancelled);
@@ -1390,10 +1795,9 @@ export class OrchestratorService {
       type: 'test_report',
       title: messages.reviewReportTitle,
       contentSummary: reviewOutput.recommendation,
+      platformProjections: reviewFileChanges,
       metadata: {
-        ...(reviewOutput as unknown as Record<string, unknown>),
-        phase: 'post_review',
-        fileChanges: reviewFileChanges
+        phase: 'post_review'
       }
     });
     this.events.create({
@@ -1416,7 +1820,7 @@ export class OrchestratorService {
         type: reviewArtifact.type,
         title: reviewArtifact.title,
         contentSummary: reviewArtifact.contentSummary,
-        fileChanges: reviewFileChanges
+        platformProjections: reviewFileChanges
       })
     });
     await this.applyServerLocalArtifactChanges(session, reviewFileChanges);
@@ -1445,67 +1849,88 @@ export class OrchestratorService {
   ): Promise<void> {
     const review = this.pickSessionAgent(session, ['review', 'test'], 1);
     const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
-    const finalContextPack = this.createContextPack(session, coordinator, brief, undefined, 'final_delivery');
+    const finalContextAssembly = this.createContextAssembly(session, coordinator, brief, undefined, 'final_delivery');
     if (limitations.length) {
-      finalContextPack.constraints = [
-        ...finalContextPack.constraints,
+      finalContextAssembly.constraints = [
+        ...finalContextAssembly.constraints,
         'The user selected limited delivery. Preserve every listed limitation in the final delivery risks and do not claim it was verified.',
         ...limitations.map((limitation) => `Limited delivery: ${limitation}`)
       ];
     }
     const finalRun = await this.runRuntime(session, {
-      runId: crypto.randomUUID(),
+      invocationId: crypto.randomUUID(),
       sessionId: session.id,
       phase: 'final_delivery',
-      agent: this.toRuntimeAgent(coordinator),
-      contextPack: finalContextPack,
-      expectedOutput: { kind: 'final_delivery', schemaVersion: '0.1' },
-      budget: finalContextPack.budget
+      agent: coordinator,
+      contextAssembly: finalContextAssembly,
+      expectedOutput: { kind: 'final_delivery', schemaVersion: '1.0' },
+      budget: finalContextAssembly.budget
     }, signal);
     if (signal?.aborted) {
       throw new Error(messages.cancelled);
     }
     const finalOutput = this.completedOutput<FinalDeliveryOutput>(finalRun, 'final_delivery');
-    const notification = this.pickSessionAgent(session, ['notification'], 0);
+    const isArchitectureAnalysis = this.isArchitectureAnalysisSession(session, brief);
     const allowGeneratedFileWrites = this.shouldWriteGeneratedFiles(session, brief);
-    const deliveryFileChanges = allowGeneratedFileWrites ? this.finalDeliveryFileChanges(session, brief, finalOutput) : [];
-    const notificationFileChanges = allowGeneratedFileWrites ? this.notificationDraftFileChanges(brief, finalOutput) : [];
+    const deliveryFileChanges = isArchitectureAnalysis
+      ? this.finalDeliveryFileChanges(session, brief, finalOutput)
+      : allowGeneratedFileWrites
+        ? this.finalDeliveryFileChanges(session, brief, finalOutput)
+        : [];
+    const reportChange = isArchitectureAnalysis
+      ? deliveryFileChanges.find((change) => change.path === 'agent-output/project-architecture-analysis.md')
+      : undefined;
+    const report = reportChange?.content
+      ? {
+          title: '完整系统架构说明',
+          format: 'markdown' as const,
+          content: reportChange.content,
+          suggestedPath: reportChange.path,
+          requiresUserConfirmation: true as const
+        }
+      : undefined;
     const deliveryArtifact = this.artifacts.create({
       sessionId: session.id,
       agentId: coordinator.id,
       type: 'markdown',
-      title: this.isArchitectureAnalysisSession(session, brief) ? '项目架构分析交付说明' : messages.finalDeliveryTitle,
+      title: isArchitectureAnalysis ? '完整系统架构说明' : messages.finalDeliveryTitle,
       contentSummary: finalOutput.summary,
+      platformProjections: deliveryFileChanges,
       metadata: {
-        ...(finalOutput as unknown as Record<string, unknown>),
         phase: 'final_delivery',
         limitations,
-        fileChanges: deliveryFileChanges
+        ...(report ? { report } : {})
       }
     });
-    const notificationDraft = this.artifacts.create({
-      sessionId: session.id,
-      agentId: notification.id,
-      type: 'feishu_draft',
-      title: messages.notificationDraftTitle,
-      contentSummary: messages.notificationDraftSummary,
-      metadata: {
-        channel: 'feishu',
-        mode: 'draft',
-        dryRun: true,
-        status: 'pending_user_confirmation',
-        title: messages.notificationDraftMetadataTitle,
-        body: {
+    const notification = isArchitectureAnalysis ? undefined : this.pickSessionAgent(session, ['notification'], 0);
+    const notificationFileChanges =
+      notification && allowGeneratedFileWrites ? this.notificationDraftFileChanges(brief, finalOutput) : [];
+    const notificationDraft = notification
+      ? this.artifacts.create({
           sessionId: session.id,
-          goal: brief.goal,
-          summary: finalOutput.summary,
-          completedItems: finalOutput.completedItems,
-          risks: [...finalOutput.risks, ...limitations]
-        },
-        sourceArtifactId: deliveryArtifact.id,
-        fileChanges: notificationFileChanges
-      }
-    });
+          agentId: notification.id,
+          type: 'feishu_draft',
+          title: messages.notificationDraftTitle,
+          contentSummary: messages.notificationDraftSummary,
+          platformProjections: notificationFileChanges,
+          metadata: {
+            phase: 'notification_draft',
+            channel: 'feishu',
+            mode: 'draft',
+            dryRun: true,
+            status: 'pending_user_confirmation',
+            title: messages.notificationDraftMetadataTitle,
+            body: {
+              sessionId: session.id,
+              goal: brief.goal,
+              summary: finalOutput.summary,
+              completedItems: finalOutput.completedItems,
+              risks: [...finalOutput.risks, ...limitations]
+            },
+            sourceArtifactId: deliveryArtifact.id
+          }
+        })
+      : undefined;
     const artifactRefs = [...this.artifacts.listBySession(session.id).map((artifact) => artifact.id)];
     this.events.create({
       sessionId: session.id,
@@ -1516,7 +1941,8 @@ export class OrchestratorService {
         ...finalOutput,
         limitations,
         artifactRefs,
-        notificationDraftArtifactId: notificationDraft.id
+        ...(notificationDraft ? { notificationDraftArtifactId: notificationDraft.id } : {}),
+        ...(report ? { report: { ...report, artifactId: deliveryArtifact.id } } : {})
       })
     });
     this.events.create({
@@ -1529,48 +1955,78 @@ export class OrchestratorService {
         type: deliveryArtifact.type,
         title: deliveryArtifact.title,
         contentSummary: deliveryArtifact.contentSummary,
-        fileChanges: deliveryFileChanges
+        ...(report
+          ? {
+              report: {
+                kind: 'project_architecture_analysis',
+                title: report.title,
+                content: report.content
+              }
+            }
+          : {}),
+        platformProjections: report ? [] : deliveryFileChanges
       })
     });
-    this.events.create({
-      sessionId: session.id,
-      type: 'artifact_created',
-      fromAgentId: notification.id,
-      content: messages.artifactCreated(notificationDraft.title),
-      metadata: createMetadata('artifact_card', {
-        artifactId: notificationDraft.id,
-        type: notificationDraft.type,
-        title: notificationDraft.title,
-        contentSummary: notificationDraft.contentSummary,
-        relatedCapabilityId: 'cap-feishu-draft',
-        fileChanges: notificationFileChanges
-      })
-    });
-    this.events.create({
-      sessionId: session.id,
-      type: 'user_confirmation_requested',
-      fromAgentId: notification.id,
-      content: '请确认是否发送飞书通知。',
-      metadata: createMetadata('confirmation_card', {
-        confirmationId: crypto.randomUUID(),
-        reason: 'confirm_feishu_notification',
-        title: '是否发送飞书通知',
-        description: '最终交付已生成飞书通知草稿。选择发送通知会记录一次通知动作；选择不通知则仅保留草稿。',
-        relatedArtifactId: notificationDraft.id,
-        relatedCapabilityId: 'cap-feishu-draft',
-        options: [
-          { key: 'send_notification', label: '发送通知', style: 'primary' },
-          { key: 'skip_notification', label: '不通知', style: 'default' }
-        ]
-      })
-    });
-    await this.applyServerLocalArtifactChanges(session, deliveryFileChanges);
-    await this.applyServerLocalArtifactChanges(session, notificationFileChanges);
+    if (report) {
+      this.events.create({
+        sessionId: session.id,
+        type: 'user_confirmation_requested',
+        fromAgentId: coordinator.id,
+        content: '完整系统架构说明已生成，请确认是否保存到本地工作区。',
+        metadata: createMetadata('confirmation_card', {
+          confirmationId: crypto.randomUUID(),
+          reason: 'confirm_local_report_save',
+          title: '是否保存系统架构说明',
+          description: `报告全文已在群聊中展示。确认后才会写入 ${report.suggestedPath}；选择不保存则只保留在当前会话。`,
+          relatedArtifactId: deliveryArtifact.id,
+          targetPath: report.suggestedPath,
+          options: [
+            { key: 'save_local', label: '保存到本地', style: 'primary' },
+            { key: 'keep_in_session', label: '暂不保存', style: 'default' }
+          ]
+        })
+      });
+    } else if (notification && notificationDraft) {
+      this.events.create({
+        sessionId: session.id,
+        type: 'artifact_created',
+        fromAgentId: notification.id,
+        content: messages.artifactCreated(notificationDraft.title),
+        metadata: createMetadata('artifact_card', {
+          artifactId: notificationDraft.id,
+          type: notificationDraft.type,
+          title: notificationDraft.title,
+          contentSummary: notificationDraft.contentSummary,
+          relatedCapabilityId: 'cap-feishu-draft',
+          platformProjections: notificationFileChanges
+        })
+      });
+      this.events.create({
+        sessionId: session.id,
+        type: 'user_confirmation_requested',
+        fromAgentId: notification.id,
+        content: '请确认是否发送飞书通知。',
+        metadata: createMetadata('confirmation_card', {
+          confirmationId: crypto.randomUUID(),
+          reason: 'confirm_feishu_notification',
+          title: '是否发送飞书通知',
+          description: '最终交付已生成飞书通知草稿。选择发送通知会记录一次通知动作；选择不通知则仅保留草稿。',
+          relatedArtifactId: notificationDraft.id,
+          relatedCapabilityId: 'cap-feishu-draft',
+          options: [
+            { key: 'send_notification', label: '发送通知', style: 'primary' },
+            { key: 'skip_notification', label: '不通知', style: 'default' }
+          ]
+        })
+      });
+      await this.applyServerLocalArtifactChanges(session, deliveryFileChanges);
+      await this.applyServerLocalArtifactChanges(session, notificationFileChanges);
+    }
     this.createSummaryMemoryCheckpoint(session, coordinator, 'final_delivery', brief);
   }
 
-  private emitMemoryUsedEvent(sessionId: string, taskId: string, agentId: string, contextPack: ContextPack) {
-    if (!contextPack.relevantMemories.length) {
+  private emitMemoryUsedEvent(sessionId: string, taskId: string, agentId: string, contextAssembly: ContextAssembly) {
+    if (!contextAssembly.relevantMemories.length) {
       return;
     }
     this.events.create({
@@ -1582,20 +2038,22 @@ export class OrchestratorService {
       metadata: createMetadata('system_notice', {
         agentId,
         taskId,
-        memoryIds: contextPack.relevantMemories.map((memory) => memory.id),
-        memories: contextPack.relevantMemories
+        memoryIds: contextAssembly.relevantMemories.map((memory) => memory.id),
+        memories: contextAssembly.relevantMemories
       })
     });
   }
 
-  private async runDiscussion(session: SessionDetail, coordinator: Agent) {
+  private async runDiscussion(session: SessionDetail, coordinator: Agent, signal?: AbortSignal) {
+    await this.runtime.refreshRuntimeAvailability?.();
+    throwIfAborted(signal);
     const participants = this.discussionParticipants(session, coordinator);
     const rounds = this.discussionMaxRounds();
-    const timeoutMs = discussionTimeoutMs();
     for (let round = 1; round <= rounds; round += 1) {
       for (const agent of participants) {
-        const runId = crypto.randomUUID();
-        const contextPack = this.createContextPack(session, agent, undefined, undefined, 'discussion');
+        throwIfAborted(signal);
+        const invocationId = crypto.randomUUID();
+        const contextAssembly = this.createContextAssembly(session, agent, undefined, undefined, 'discussion');
         this.events.create({
           sessionId: session.id,
           type: 'agent_status_changed',
@@ -1609,31 +2067,53 @@ export class OrchestratorService {
             waitingFor: [coordinator.id]
           })
         });
-        const result = await this.runDiscussionRuntime(session, agent, runId, contextPack, timeoutMs);
+        const result = await this.runDiscussionRuntime(session, agent, invocationId, contextAssembly, signal);
+        throwIfAborted(signal);
         const timedOut = result.error?.code === 'RUNTIME_TIMEOUT';
+        const discussionRuntimeError: RuntimeError | undefined = result.error ?? (
+          result.status === 'completed' && !usableAgentMessageOutput(result.output)
+            ? {
+                code: 'RUNTIME_OUTPUT_CONTRACT_VIOLATION',
+                message: 'Discussion Runtime returned an invalid or empty agent_message output.',
+                retryable: false,
+                details: { expectedKind: 'agent_message' }
+              }
+            : undefined
+        );
+        const discussionFailed = Boolean(discussionRuntimeError) || result.status !== 'completed';
         const output =
-          result.status === 'completed' && (result.output as { kind?: string }).kind === 'agent_message'
+          result.status === 'completed' && usableAgentMessageOutput(result.output)
             ? (result.output as AgentMessageOutput)
-            : ({
-                kind: 'agent_message',
+            : createAgentMessageOutput({
                 messageKind: 'risk',
                 content: timedOut
                   ? messages.discussionTimedOutMessage(agent.name)
-                  : messages.discussionFailedMessage(agent.name, result.error?.message ?? result.status)
-              } satisfies AgentMessageOutput);
+                  : messages.discussionFailedMessage(
+                      agent.name,
+                      result.error?.message ??
+                        (result.status === 'completed' ? 'invalid or empty agent_message output' : result.status)
+                    )
+              }) satisfies AgentMessageOutput;
         this.events.create({
           sessionId: session.id,
           type: 'agent_status_changed',
           fromAgentId: agent.id,
           content: timedOut
             ? messages.discussionTimedOutStatus(agent.name)
-            : messages.discussionCompletedStatus(agent.name),
+            : discussionFailed
+              ? messages.discussionFailedStatus(agent.name)
+              : messages.discussionCompletedStatus(agent.name),
           metadata: createMetadata('system_notice', {
             agentId: agent.id,
-            status: timedOut ? 'waiting' : 'thinking',
-            thoughtSummary: timedOut ? messages.discussionTimedOutThought : messages.discussionCompletedThought,
+            status: timedOut ? 'waiting' : discussionFailed ? 'failed' : 'thinking',
+            thoughtSummary: timedOut
+              ? messages.discussionTimedOutThought
+              : discussionFailed
+                ? messages.discussionFailedThought
+                : messages.discussionCompletedThought,
             actionSummary: output.content,
-            waitingFor: timedOut ? [coordinator.id] : []
+            waitingFor: timedOut ? [coordinator.id] : [],
+            runtimeError: discussionRuntimeError
           })
         });
         this.events.create({
@@ -1646,54 +2126,50 @@ export class OrchestratorService {
             messageKind: output.messageKind,
             mentionedAgentIds: output.mentionedAgentIds ?? [],
             relatedTaskIds: output.relatedTaskIds ?? [],
-            runtimeInvocationId: runId,
+            runtimeInvocationId: invocationId,
+            runtimeError: discussionRuntimeError,
             round
           })
         });
+        if (discussionRuntimeError && this.isFatalDiscussionRuntimeError(discussionRuntimeError)) {
+          throw Object.assign(new Error(discussionRuntimeError.message), {
+            cause: discussionRuntimeError,
+            runtimeError: discussionRuntimeError
+          });
+        }
       }
     }
   }
   private async runDiscussionRuntime(
     session: SessionDetail,
     agent: Agent,
-    runId: string,
-    contextPack: ContextPack,
-    timeoutMs: number
+    invocationId: string,
+    contextAssembly: ContextAssembly,
+    signal?: AbortSignal
   ) {
-    if (timeoutMs <= 0) {
-      return this.runRuntime(session, {
-        runId,
-        sessionId: session.id,
+    return this.runRuntime(session, {
+      invocationId,
+      sessionId: session.id,
+      phase: 'discussion',
+      agent,
+      contextAssembly,
+      expectedOutput: { kind: 'agent_message', schemaVersion: '1.0' },
+      budget: contextAssembly.budget
+    }, signal);
+  }
+
+  private normalizeDiscussionTimeoutResult(result: AgentRunResult, agentName: string, timeoutMs: number): AgentRunResult {
+    return normalizeTerminatedResult(
+      result,
+      createExecutionTermination({
+        kind: 'phase_timeout',
+        source: 'orchestrator',
+        scope: 'phase',
         phase: 'discussion',
-        agent: this.toRuntimeAgent(agent),
-        contextPack,
-        expectedOutput: { kind: 'agent_message', schemaVersion: '0.1' },
-        budget: contextPack.budget
-      });
-    }
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => {
-      controller.abort(`Discussion runtime timed out after ${timeoutMs}ms during ${agent.name} discussion.`);
-    }, timeoutMs);
-
-    try {
-      return await this.runRuntime(
-        session,
-        {
-          runId,
-          sessionId: session.id,
-          phase: 'discussion',
-          agent: this.toRuntimeAgent(agent),
-          contextPack,
-          expectedOutput: { kind: 'agent_message', schemaVersion: '0.1' },
-          budget: contextPack.budget
-        },
-        controller.signal
-      );
-    } finally {
-      clearTimeout(timer);
-    }
+        timeout: { mode: 'deadline', timeoutMs },
+        diagnosticRef: agentName
+      })
+    );
   }
 
   private discussionParticipants(session: SessionDetail, coordinator: Agent) {
@@ -1725,8 +2201,34 @@ export class OrchestratorService {
     return Math.max(0, Math.min(3, Math.floor(parsed)));
   }
 
+  private isFatalDiscussionRuntimeError(error: RuntimeError) {
+    return error.code === 'RUNTIME_INVOCATION_ERROR' ||
+      error.code === 'RUNTIME_OUTPUT_CONTRACT_VIOLATION' ||
+      error.code === 'CAPABILITY_BLOCKED' ||
+      error.details?.providerFailure === true ||
+      typeof error.details?.httpStatus === 'number';
+  }
+
   private isTerminalTask(task: AgentTask) {
     return ['completed', 'cancelled', 'failed', 'rejected'].includes(task.status);
+  }
+
+  private executionScopeTasks(requestedTasks: AgentTask[], allTasks: AgentTask[]) {
+    if (!requestedTasks.length) return allTasks;
+    const byId = new Map(allTasks.map((task) => [task.id, task]));
+    const scoped = new Map(requestedTasks.map((task) => [task.id, task]));
+    const pending = [...requestedTasks];
+    while (pending.length) {
+      const task = pending.pop();
+      if (!task) continue;
+      for (const dependencyId of task.dependsOnTaskIds) {
+        const dependency = byId.get(dependencyId);
+        if (!dependency || scoped.has(dependency.id)) continue;
+        scoped.set(dependency.id, dependency);
+        pending.push(dependency);
+      }
+    }
+    return [...scoped.values()];
   }
 
   private isTaskReady(task: AgentTask, tasks: AgentTask[]) {
@@ -1741,12 +2243,13 @@ export class OrchestratorService {
     sessionId: string,
     task: AgentTask,
     agentId: string,
-    runId: string,
+    invocationId: string,
     message: string,
-    runtimeType: Agent['runtimeType'],
+    runtimeType: RuntimeType,
     code: RuntimeError['code'] = 'MODEL_ERROR',
     requestedContext?: RuntimeContextRequest,
-    details?: Record<string, unknown>
+    details?: Record<string, unknown>,
+    retryable = false
   ) {
     const needsMoreContext = code === 'CONTEXT_INSUFFICIENT';
     const taskStatus: AgentTask['status'] = needsMoreContext ? 'waiting' : 'failed';
@@ -1758,7 +2261,7 @@ export class OrchestratorService {
       fromAgentId: agentId,
       content: needsMoreContext ? `Runtime requested more context for task: ${task.title}` : messages.runtimeFailed(task.title),
       metadata: createMetadata('error_card', {
-        runtimeInvocationId: runId,
+        runtimeInvocationId: invocationId,
         runtimeType,
         taskId: task.id,
         title: task.title,
@@ -1766,7 +2269,14 @@ export class OrchestratorService {
         code,
         message,
         requestedContext,
-        details
+        details,
+        runtimeError: {
+          code,
+          message,
+          retryable,
+          ...(requestedContext ? { requestedContext } : {}),
+          ...(details ? { details } : {})
+        } satisfies RuntimeError
       })
     });
     this.events.create({
@@ -1789,9 +2299,9 @@ export class OrchestratorService {
     sessionId: string,
     task: AgentTask,
     agentId: string,
-    runId: string,
+    invocationId: string,
     message: string,
-    runtimeType: Agent['runtimeType']
+    runtimeType: RuntimeType
   ) {
     this.tasks.update(task, { status: 'waiting', resultSummary: message });
     this.events.create({
@@ -1801,13 +2311,18 @@ export class OrchestratorService {
       fromAgentId: agentId,
       content: messages.runtimeFailed(task.title),
       metadata: createMetadata('error_card', {
-        runtimeInvocationId: runId,
+        runtimeInvocationId: invocationId,
         runtimeType,
         taskId: task.id,
         title: task.title,
         status: 'cancelled',
         code: 'RUNTIME_CANCELLED',
-        message
+        message,
+        runtimeError: {
+          code: 'RUNTIME_CANCELLED',
+          message,
+          retryable: false
+        } satisfies RuntimeError
       })
     });
     this.events.create({
@@ -1826,14 +2341,17 @@ export class OrchestratorService {
   }
 
   private canRetryRuntimeTimeout(error: AgentRunResult['error'] | undefined, runtimeRetryCount: number) {
-    return error?.code === 'RUNTIME_TIMEOUT' && error.retryable === true && runtimeRetryCount < 1;
+    return error?.code === 'RUNTIME_TIMEOUT' &&
+      error.retryable === true &&
+      error.details?.providerFailure !== true &&
+      runtimeRetryCount < 1;
   }
 
   private recordRuntimeTimeoutRetry(
     session: SessionDetail,
     task: AgentTask,
     agentId: string,
-    runId: string,
+    invocationId: string,
     message: string,
     nextAttempt: number
   ) {
@@ -1844,7 +2362,7 @@ export class OrchestratorService {
       fromAgentId: agentId,
       content: `运行时超时，正在自动重试任务：${task.title}`,
       metadata: createMetadata('system_notice', {
-        runtimeInvocationId: runId,
+        runtimeInvocationId: invocationId,
         code: 'RUNTIME_TIMEOUT_RETRY',
         taskId: task.id,
         title: task.title,
@@ -1871,37 +2389,6 @@ export class OrchestratorService {
         { once: true }
       );
     });
-  }
-
-  private preflightCodingRuntimeSourceWrite(
-    session: SessionDetail,
-    task: AgentTask,
-    agent: Agent,
-    runtimeType: RuntimeType
-  ) {
-    if (!['codex', 'claude_code'].includes(runtimeType)) {
-      return { allowed: true, message: '' };
-    }
-    if (!agent.capabilityIds.includes('cap-file-write')) {
-      return {
-        allowed: false,
-        message: `${agent.name} cannot start ${runtimeType} for "${task.title}" because cap-file-write is not assigned.`
-      };
-    }
-    const input = {
-      sessionId: session.id,
-      agentId: agent.id,
-      reason: `Start ${runtimeType} for task "${task.title}" with permission to edit files inside the selected server_local workspace.`
-    };
-    const result = this.capabilities.checkInvocation('cap-file-write', input);
-    this.capabilityAudit.recordCheck(input, result);
-    if (!result.allowed) {
-      return {
-        allowed: false,
-        message: `${agent.name} is waiting for file-write approval before starting ${runtimeType} for "${task.title}".`
-      };
-    }
-    return { allowed: true, message: '' };
   }
 
   private canRetryWithSupplementalContext(
@@ -1943,7 +2430,8 @@ export class OrchestratorService {
     session: SessionDetail,
     task: AgentTask,
     agentId: string,
-    requestedContext: RuntimeContextRequest | undefined
+    requestedContext: RuntimeContextRequest | undefined,
+    resolution: SupplementalContextResolution
   ) {
     if (!requestedContext) return;
     session.supplementalContextRequests = [
@@ -1953,6 +2441,7 @@ export class OrchestratorService {
         taskId: task.id,
         agentId,
         requestedContext,
+        resolution,
         createdAt: nowIso()
       }
     ].slice(-12);
@@ -1968,6 +2457,9 @@ export class OrchestratorService {
       `Requested refs: ${requestedRefs || 'none'}`,
       `Requested paths: ${requestedPaths}`,
       `Requested commands: ${requestedCommands}`,
+      `Hydrated paths: ${resolution.hydratedPaths.join(', ') || 'none'}`,
+      `Failed paths: ${resolution.failedPaths.map((item) => `${item.path}:${item.code}`).join(', ') || 'none'}`,
+      `Deferred paths: ${resolution.deferredPaths.join(', ') || 'none'}`,
       requestedContext.followUpInstruction ? `Follow-up: ${requestedContext.followUpInstruction}` : ''
     ]
       .filter(Boolean)
@@ -1979,18 +2471,24 @@ export class OrchestratorService {
       content,
       confidence: 0.92
     });
+    const eventContent = resolution.hydratedPaths.length
+      ? `Supplemental context hydrated for retry: ${requestedContext.reason}`
+      : resolution.failedPaths.length
+        ? `Supplemental context could not be hydrated: ${requestedContext.reason}`
+        : `Supplemental context request deferred: ${requestedContext.reason}`;
     this.events.create({
       sessionId: session.id,
       type: 'agent_message',
       taskId: task.id,
       fromAgentId: agentId,
-      content: `Supplemental context request recorded for retry: ${requestedContext.reason}`,
+      content: eventContent,
       metadata: createMetadata('chat_message', {
         messageKind: 'progress',
         phase: 'context_supplement',
         relatedTaskIds: [task.id],
         memoryId: memory.id,
-        requestedContext
+        requestedContext,
+        resolution
       })
     });
   }
@@ -2030,8 +2528,9 @@ export class OrchestratorService {
     task: AgentTask,
     agentId: string,
     output: TaskExecutionResultOutput,
-    runtimeArtifacts: RuntimeArtifactOutput[],
-    allowFileChanges = true
+    systemEvidence: AgentRunResult['systemEvidence'],
+    allowFileChanges = true,
+    _workspaceExecution?: AgentRunResult['workspaceExecution']
   ) {
     const testAgent = this.agents.findByIdOrKey('test');
     const outputForMetadata = allowFileChanges
@@ -2040,12 +2539,10 @@ export class OrchestratorService {
           ...output,
           changedArtifacts: this.withoutRuntimeArtifactFileChanges(output.changedArtifacts)
         };
-    const runtimeArtifactsForMetadata = allowFileChanges
-      ? runtimeArtifacts
-      : this.withoutRuntimeArtifactFileChanges(runtimeArtifacts);
-    const allRuntimeArtifacts = [...outputForMetadata.changedArtifacts, ...runtimeArtifactsForMetadata];
-    const fileChanges = this.fileChangesFromRuntimeArtifacts(allRuntimeArtifacts);
-    const validationEvidence = this.validationEvidenceFromRuntimeArtifacts(allRuntimeArtifacts);
+    const proposalsForPersistence = outputForMetadata.changedArtifacts;
+    const platformProjections = allowFileChanges
+      ? this.runtimeStageFileChangeProjections(proposalsForPersistence)
+      : [];
     return this.artifacts.create({
       sessionId,
       taskId: task.id,
@@ -2053,13 +2550,12 @@ export class OrchestratorService {
       type: testAgent && agentId === testAgent.id ? 'test_report' : 'json',
       title: `${task.title}执行结果`,
       contentSummary: output.summary,
+      runtimeProposals: proposalsForPersistence,
+      platformProjections,
+      systemEvidence,
       metadata: {
         phase: 'task_execution',
-        status: output.status,
-        output: outputForMetadata,
-        runtimeArtifacts: allRuntimeArtifacts,
-        fileChanges,
-        ...(validationEvidence ? { validationEvidence } : {})
+        status: output.status
       }
     });
   }
@@ -2078,31 +2574,19 @@ export class OrchestratorService {
     );
   }
 
-  private validationEvidenceFromRuntimeArtifacts(artifacts: RuntimeArtifactOutput[]): ValidationEvidenceReport | undefined {
-    for (const artifact of artifacts) {
-      const validationEvidence = artifact.metadata?.validationEvidence;
-      if (validationEvidence) {
-        return validationEvidence;
-      }
-    }
-    return undefined;
-  }
-
-  private fileChangesFromRuntimeArtifacts(artifacts: RuntimeArtifactOutput[]) {
-    const seen = new Set<string>();
-    return artifacts.flatMap((artifact) => artifact.metadata?.fileChanges ?? []).filter((change) => {
-      const key = [
-        change.path,
-        change.operation,
-        change.source ?? '',
-        change.content ?? ''
-      ].join('\u0000');
-      if (seen.has(key)) {
-        return false;
-      }
-      seen.add(key);
-      return true;
-    });
+  private runtimeStageFileChangeProjections(artifacts: RuntimeArtifactOutput[]): RuntimeFileChange[] {
+    return artifacts.flatMap((artifact) =>
+      (artifact.metadata.fileChanges ?? [])
+        .filter((change) => this.isStageArtifactFileChange(change))
+        .map((change) => ({
+          path: change.path,
+          operation: change.operation,
+          encoding: change.encoding,
+          source: 'stage_artifact' as const,
+          ...(typeof change.content === 'string' ? { content: change.content } : {}),
+          ...(change.previousContent !== undefined ? { previousContent: change.previousContent } : {})
+        }))
+    );
   }
 
   private briefFileChanges(brief: TaskBrief, suggestedTasks: SuggestedAgentTask[]): RuntimeFileChange[] {
@@ -2132,7 +2616,7 @@ export class OrchestratorService {
       const report = this.projectArchitectureAnalysisFileChange(session.id);
       return [
         {
-          path: 'agent-output/final-delivery.md',
+          path: 'agent-output/project-architecture-analysis.md',
           operation: 'create',
           encoding: 'utf-8',
           content: this.architectureAnalysisDeliveryMarkdown(brief, delivery, report)
@@ -2155,7 +2639,7 @@ export class OrchestratorService {
     report: RuntimeFileChange | undefined
   ) {
     return [
-      '# 项目架构分析交付说明',
+      '# 完整系统架构说明',
       '',
       `任务契约 ID：${brief.id}`,
       '',
@@ -2170,8 +2654,8 @@ export class OrchestratorService {
       '- agent-output/project-architecture-analysis.md',
       '',
       report?.content
-        ? ['## 项目架构分析报告正文', '', report.content].join('\n')
-        : '## 项目架构分析报告正文\n\n- 未在当前会话产物中找到项目架构分析报告正文，请检查任务执行阶段是否成功生成 agent-output/project-architecture-analysis.md。'
+        ? ['## 详细架构分析正文', '', report.content].join('\n')
+        : '## 详细架构分析正文\n\n- 未在当前会话产物中找到项目架构分析报告正文，请检查任务执行阶段是否成功生成 agent-output/project-architecture-analysis.md。'
     ].join('\n');
   }
 
@@ -2440,18 +2924,257 @@ export class OrchestratorService {
     );
   }
 
-  private fileChangesForArtifact(metadata: Record<string, unknown>) {
-    const fileChanges = metadata.fileChanges;
-    return Array.isArray(fileChanges) ? fileChanges : [];
+  private platformFileChangesForArtifact(artifact: Artifact): RuntimeFileChange[] {
+    const byPath = new Map(artifact.platformProjections.map((change) => [change.path, { ...change }]));
+    for (const change of artifact.systemEvidence?.workspaceChangeSet?.changes ?? []) {
+      if (change.operation === 'move') continue;
+      byPath.set(change.path, {
+        path: change.path,
+        operation: change.operation,
+        source: 'actual_filesystem_snapshot' as const,
+        ...(change.operation === 'create' || change.operation === 'update'
+          ? { content: change.content, encoding: change.encoding }
+          : {})
+      });
+    }
+    return [...byPath.values()];
   }
 
   private projectArchitectureAnalysisFileChange(sessionId: string) {
     for (const artifact of this.artifacts.listBySession(sessionId)) {
-      const fileChanges = this.fileChangesForArtifact(artifact.metadata);
+      const fileChanges = this.platformFileChangesForArtifact(artifact);
       const report = fileChanges.find((change) => change.path === 'agent-output/project-architecture-analysis.md');
       if (report) return report;
+
+      const runtimeReport = artifact.runtimeProposals.find(
+        (item) =>
+          /项目架构|系统架构|architecture/i.test(item.title)
+      );
+      if (runtimeReport?.content?.trim()) {
+        return {
+          path: 'agent-output/project-architecture-analysis.md',
+          operation: 'create' as const,
+          encoding: 'utf-8' as const,
+          content: runtimeReport.content
+        };
+      }
     }
     return undefined;
+  }
+
+  async decideLocalReportSave(
+    session: SessionDetail,
+    input: {
+      confirmationId: string;
+      artifactId: string;
+      decision: 'save_local' | 'keep_in_session';
+    }
+  ) {
+    const request = this.events.list(session.id).find((event) => {
+      if (event.type !== 'user_confirmation_requested') return false;
+      const payload = event.metadata.payload as Record<string, unknown> | undefined;
+      return (
+        payload?.confirmationId === input.confirmationId &&
+        payload.reason === 'confirm_local_report_save' &&
+        payload.relatedArtifactId === input.artifactId
+      );
+    });
+    const alreadyResolved = this.events.list(session.id).some((event) => {
+      if (event.type !== 'user_confirmation_resolved') return false;
+      const payload = event.metadata.payload as Record<string, unknown> | undefined;
+      return payload?.confirmationId === input.confirmationId;
+    });
+    if (!request || alreadyResolved) {
+      throw new BadRequestException('Local report save confirmation is missing or already resolved.');
+    }
+
+    const artifact = this.artifacts.get(input.artifactId);
+    if (artifact.sessionId !== session.id) {
+      throw new BadRequestException('Report artifact does not belong to this session.');
+    }
+    const report = artifact.metadata.report as
+      | {
+          title?: string;
+          format?: string;
+          content?: string;
+          suggestedPath?: string;
+        }
+      | undefined;
+    if (report?.format !== 'markdown' || !report.content?.trim() || !report.suggestedPath?.trim()) {
+      throw new BadRequestException('Report artifact does not contain a saveable Markdown body.');
+    }
+
+    if (input.decision === 'save_local') {
+      if (session.workingDirectory?.kind !== 'server_local' || !session.workingDirectory.path) {
+        throw new BadRequestException('Saving this report requires a server_local working directory.');
+      }
+      try {
+        await applyServerLocalFileChanges(session.workingDirectory.path, [
+          {
+            path: report.suggestedPath,
+            operation: 'create',
+            encoding: 'utf-8',
+            content: report.content,
+            previousContent: null
+          }
+        ]);
+      } catch (error) {
+        throw new BadRequestException(
+          `Failed to save local report: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    const approved = input.decision === 'save_local';
+    const resolvedEvent = this.events.create({
+      sessionId: session.id,
+      type: 'user_confirmation_resolved',
+      content: approved ? '用户确认将系统架构说明保存到本地。' : '用户选择暂不将系统架构说明保存到本地。',
+      metadata: createMetadata('system_notice', {
+        confirmationId: input.confirmationId,
+        status: approved ? 'approved' : 'rejected',
+        selectedOptionKey: input.decision,
+        reason: 'confirm_local_report_save',
+        artifactId: artifact.id,
+        targetPath: report.suggestedPath
+      })
+    });
+    const resultEvent = this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      content: approved
+        ? `完整系统架构说明已保存到 ${report.suggestedPath}。`
+        : '完整系统架构说明已保留在当前会话中，未写入本地工作区。',
+      metadata: createMetadata('chat_message', {
+        messageKind: 'decision',
+        phase: 'final_delivery',
+        artifactId: artifact.id,
+        targetPath: report.suggestedPath,
+        saved: approved
+      })
+    });
+    return { artifact, resolvedEvent, resultEvent, saved: approved, path: report.suggestedPath };
+  }
+
+  ensureArchitectureReportSaveConfirmation(session: SessionDetail) {
+    if (
+      session.status !== 'COMPLETED' ||
+      session.workingDirectory?.kind !== 'server_local' ||
+      !this.isArchitectureAnalysisSession(session)
+    ) {
+      return false;
+    }
+    const sessionEvents = this.events.list(session.id);
+    const alreadyPrepared = sessionEvents.some((event) => {
+      if (event.type !== 'user_confirmation_requested') return false;
+      const payload = event.metadata.payload as Record<string, unknown> | undefined;
+      return payload?.reason === 'confirm_local_report_save';
+    });
+    if (alreadyPrepared) return false;
+
+    const sourceReport = this.projectArchitectureAnalysisFileChange(session.id);
+    if (!sourceReport?.content?.trim()) return false;
+    const finalDeliveryEvent = [...sessionEvents].reverse().find((event) => event.type === 'final_delivery_created');
+    const finalPayload = finalDeliveryEvent?.metadata.payload as Partial<FinalDeliveryOutput> | undefined;
+    const brief = this.listBriefs(session.id).at(-1);
+    const reportContent = brief && finalPayload?.summary
+      ? this.architectureAnalysisDeliveryMarkdown(
+          brief,
+          {
+            schemaVersion: '1.0',
+            kind: 'final_delivery',
+            summary: finalPayload.summary,
+            completedItems: finalPayload.completedItems ?? [],
+            incompleteItems: finalPayload.incompleteItems ?? [],
+            risks: finalPayload.risks ?? [],
+            artifactRefs: finalPayload.artifactRefs ?? []
+          },
+          sourceReport
+        )
+      : sourceReport.content;
+    const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
+    const artifact = this.artifacts.create({
+      sessionId: session.id,
+      agentId: coordinator.id,
+      type: 'markdown',
+      title: '完整系统架构说明',
+      contentSummary: finalPayload?.summary ?? '已从历史运行产物恢复完整系统架构说明。',
+      metadata: {
+        phase: 'final_delivery',
+        recoveredFromHistoricalRuntimeArtifact: true,
+        report: {
+          title: '完整系统架构说明',
+          format: 'markdown',
+          content: reportContent,
+          suggestedPath: 'agent-output/project-architecture-analysis.md',
+          requiresUserConfirmation: true
+        }
+      }
+    });
+
+    const pendingFeishu = [...sessionEvents].reverse().find((event) => {
+      if (event.type !== 'user_confirmation_requested') return false;
+      const payload = event.metadata.payload as Record<string, unknown> | undefined;
+      if (payload?.reason !== 'confirm_feishu_notification' || typeof payload.confirmationId !== 'string') return false;
+      return !sessionEvents.some((candidate) => {
+        if (candidate.type !== 'user_confirmation_resolved') return false;
+        const resolved = candidate.metadata.payload as Record<string, unknown> | undefined;
+        return resolved?.confirmationId === payload.confirmationId;
+      });
+    });
+    if (pendingFeishu) {
+      const payload = pendingFeishu.metadata.payload as Record<string, unknown>;
+      this.events.create({
+        sessionId: session.id,
+        type: 'user_confirmation_resolved',
+        content: '架构分析交付改为本地报告保存确认，旧飞书通知确认已关闭。',
+        metadata: createMetadata('system_notice', {
+          confirmationId: payload.confirmationId,
+          status: 'rejected',
+          selectedOptionKey: 'superseded_by_local_report_save',
+          reason: 'confirm_feishu_notification'
+        })
+      });
+    }
+
+    this.events.create({
+      sessionId: session.id,
+      type: 'artifact_created',
+      fromAgentId: coordinator.id,
+      content: messages.artifactCreated(artifact.title),
+      metadata: createMetadata('artifact_card', {
+        artifactId: artifact.id,
+        type: artifact.type,
+        title: artifact.title,
+        contentSummary: artifact.contentSummary,
+        report: {
+          kind: 'project_architecture_analysis',
+          title: artifact.title,
+          content: reportContent
+        },
+        platformProjections: []
+      })
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'user_confirmation_requested',
+      fromAgentId: coordinator.id,
+      content: '完整系统架构说明已恢复，请确认是否保存到本地工作区。',
+      metadata: createMetadata('confirmation_card', {
+        confirmationId: crypto.randomUUID(),
+        reason: 'confirm_local_report_save',
+        title: '是否保存系统架构说明',
+        description:
+          '报告全文已在群聊中展示。确认后才会写入 agent-output/project-architecture-analysis.md；选择不保存则只保留在当前会话。',
+        relatedArtifactId: artifact.id,
+        targetPath: 'agent-output/project-architecture-analysis.md',
+        options: [
+          { key: 'save_local', label: '保存到本地', style: 'primary' },
+          { key: 'keep_in_session', label: '暂不保存', style: 'default' }
+        ]
+      })
+    });
+    return true;
   }
 
   private isArchitectureAnalysisSession(session: SessionDetail, brief?: TaskBrief) {
@@ -2516,7 +3239,7 @@ export class OrchestratorService {
     return agent.capabilityIds.includes('cap-file-write') && ['claude_code', 'codex'].includes(runtimeType);
   }
 
-  private isStageArtifactFileChange(change: RuntimeFileChange) {
+  private isStageArtifactFileChange(change: { path: string }) {
     const normalizedPath = change.path.replace(/\\/g, '/').replace(/^\.\//, '');
     return normalizedPath.startsWith('agent-output/');
   }
@@ -2536,28 +3259,39 @@ export class OrchestratorService {
     });
   }
 
-  private createContextPack(
+  private createContextAssembly(
     session: SessionDetail,
     agent: Agent,
     brief?: TaskBrief,
     task?: AgentTask,
-    phase: AgentRunPhase = 'discussion',
-    runtimeSelection?: EngineeringRuntimeSelection
-  ): ContextPack {
-    const ragSnippets = task ? this.searchAgentKnowledge(session, agent, task.title) : [];
+    phase: AgentRunPhase = 'discussion'
+  ): ContextAssembly {
+    const ragSnippets = task
+      ? this.searchAgentKnowledge(session, agent, this.taskKnowledgeQuery(session, brief, task))
+      : [];
     const searchedMemories = this.memories.search(
       session.id,
-      [session.originalInput, brief?.goal, task?.title, task?.description].filter(Boolean).join(' '),
+      [session.originalInput, session.latestContractGoal, brief?.goal, task?.title, task?.description]
+        .filter(Boolean)
+        .join(' '),
       agent.id
     );
-    const recentAgentSessionMemories =
-      phase === 'task_execution'
-        ? this.memories
-            .list(session.id)
-            .filter((memory) => memory.scope === 'session' && (!memory.agentId || memory.agentId === agent.id))
-            .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-            .slice(0, 4)
-        : [];
+    // task_execution 一直无条件纳入最近 session memory;discussion/brief_generation
+    // 阶段也纳入,因为用户对契约的修改内容以 session memory 形式落库,不能只靠
+    // 关键词检索命中(检索 query 仍以原始需求为主,新增需求词很容易召不回)。
+    // brief_consultation 同样纳入,因为探讨对话历史存为 session memory。
+    const includeRecentSessionMemories =
+      phase === 'task_execution' ||
+      phase === 'discussion' ||
+      phase === 'brief_generation' ||
+      phase === 'brief_consultation';
+    const recentAgentSessionMemories = includeRecentSessionMemories
+      ? this.memories
+          .list(session.id)
+          .filter((memory) => memory.scope === 'session' && (!memory.agentId || memory.agentId === agent.id))
+          .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+          .slice(0, 4)
+      : [];
     const relevantMemories = this.uniqueMemories([...searchedMemories, ...recentAgentSessionMemories]).map((memory) =>
       this.memories.toRuntimeMemory(memory)
     );
@@ -2577,19 +3311,38 @@ export class OrchestratorService {
       participatingAgentKeys: this.participatingAgents(session).map((item) => item.key)
     });
     const summaryMemory = this.createSummaryMemory(session, brief, task, phase);
-    const runtimeAgent = this.toRuntimeAgent(agent, runtimeSelection);
+    const compiledIdentity = this.compileAgentIdentity(agent);
     const coverageRule = buildCoverageSystemRule(session.workspaceSnapshot);
-    const skillRules = this.skills?.systemRules(agent.skillIds ?? []) ?? [];
-    return {
+    const bootstrapRules = session.workspaceMode === 'bootstrap'
+      ? [
+          'The selected workspace is intentionally empty and the user authorized creating a new project from scratch.',
+          'Do not request files merely because conventional project files do not exist yet; propose create operations for the required project structure.',
+          'File creation is authorized as a proposed ChangeSet. Dependency installation and command execution still require separate user confirmation.'
+        ]
+      : [];
+    const contextAssembly: ContextAssembly = {
       systemRules: [
         'Return structured JSON matching the expected RuntimeOutput kind.',
         'Do not perform external side effects unless explicitly allowed by capability policy.',
         'Use workspaceManifest for project structure and selectedEvidenceContents for readable evidence content.',
         'Treat taskContext.evidenceRefs as the selected minimal evidence set; request more context instead of inferring omitted file contents.',
-        ...skillRules,
+        compiledIdentity.systemPrompt,
+        ...bootstrapRules,
         ...(coverageRule ? [coverageRule] : [])
       ],
       sessionGoal: session.originalInput,
+      // 契约仍在协商的阶段(discussion/brief_generation/brief_revision)不注入
+      // latestContractGoal:此时它还是旧契约的 goal,注入会强化旧目标、阻碍采纳
+      // 用户修改。仅在基于已确认契约执行的阶段把它作为当前权威目标注入。
+      // brief_consultation 也不注入:探讨是基于已确认契约,但目标是探讨本身,
+      // 不是重新协商目标,上下文已在 consultBrief 里注入契约全文。
+      currentContractGoal:
+        phase === 'discussion' ||
+        phase === 'brief_generation' ||
+        phase === 'brief_revision' ||
+        phase === 'brief_consultation'
+          ? undefined
+          : session.latestContractGoal,
       taskContext,
       summaryMemory,
       continuationState: this.createContinuationState(session, agent, task, phase, taskContext, summaryMemory),
@@ -2597,7 +3350,6 @@ export class OrchestratorService {
       workspaceSnapshot: this.runtimeWorkspaceSnapshot(session.workspaceSnapshot),
       workspaceManifest: buildWorkspaceManifest(session.workspaceSnapshot),
       selectedEvidenceContents: this.createSelectedEvidenceContents(session, taskContext),
-      runtimeSelection,
       projectMap,
       workspaceFocus,
       taskBrief: brief
@@ -2615,9 +3367,17 @@ export class OrchestratorService {
           }
         : undefined,
       currentTask: task,
-      agentProfile: runtimeAgent,
+      agentProfile: compiledIdentity,
       relevantEvents: this.events.list(session.id)
-        .filter((event) => (event.metadata?.payload as { code?: string } | undefined)?.code !== 'RUNTIME_HEARTBEAT')
+        .filter((event) => {
+          const payload = event.metadata?.payload as { code?: unknown; visibility?: unknown } | undefined;
+          if (payload?.code === 'RUNTIME_HEARTBEAT') return false;
+          return shouldPublishRuntimeEventToCollaboration({
+            type: event.type,
+            visibility: payload?.visibility,
+            code: payload?.code
+          });
+        })
         .slice(-12)
         .map((event) => ({
         eventId: event.id,
@@ -2635,46 +3395,151 @@ export class OrchestratorService {
       })),
       capabilities: this.capabilities.resolve(agent.capabilityIds),
       constraints: brief?.constraints ?? [],
-      budget: buildBudget(session),
-      availableTools: this.availableToolsFor(session, phase, runtimeSelection)
+      budget: buildBudget(session)
     };
+    return contextAssembly;
   }
 
-  /**
-   * Returns the workspace tool descriptors a runtime is allowed to invoke
-   * during this phase. Pull-mode tools are scoped to:
-   *  - generic_llm runtime only (codex/claude already drive their own CLI tools)
-   *  - server_local working directory with a real filesystem path
-   *  - task_acceptance / task_execution phases (not discussion/post_review)
-   */
-  private availableToolsFor(
+  async hydrateSupplementalContext(
     session: SessionDetail,
-    phase: AgentRunPhase,
-    runtimeSelection?: EngineeringRuntimeSelection
-  ): WorkspaceToolDescriptor[] | undefined {
-    if (phase !== 'task_acceptance' && phase !== 'task_execution') return undefined;
-    const runtimeType = runtimeSelection?.effectiveRuntimeType;
-    if (runtimeType !== 'generic_llm') return undefined;
-    const wd = session.workingDirectory;
-    if (!wd || wd.kind !== 'server_local' || !wd.path) return undefined;
-    return [
-      {
-        name: 'read_file',
-        description:
-          'Read a UTF-8 text file under the working directory. Path must be relative, must point to a non-binary file, and must not be a sensitive credential/key/.env file. Output is capped at 32KB; truncated reads are flagged.',
-        inputSchema: {
-          type: 'object',
-          required: ['path'],
-          properties: {
-            path: {
-              type: 'string',
-              description: 'Relative path under the working directory, e.g. "apps/server/src/main.ts".'
-            }
-          },
-          additionalProperties: false
+    requestedContext: RuntimeContextRequest
+  ): Promise<SupplementalContextResolution> {
+    const requestedPaths = this.uniqueFirstStrings(requestedContext.requestedPaths ?? [], 32);
+    const hydratedPaths: string[] = [];
+    const failedPaths: SupplementalContextResolution['failedPaths'] = [];
+    let contentBytes = 0;
+    if (!requestedPaths.length) {
+      return { requestedPaths, hydratedPaths, failedPaths, deferredPaths: [], contentBytes };
+    }
+    const provider = this.workspaceProviders?.resolve(session);
+    const files = [...(session.workspaceSnapshot?.files ?? [])];
+    let attemptedCount = 0;
+    while (attemptedCount < requestedPaths.length && hydratedPaths.length === 0) {
+      const batchStart = attemptedCount;
+      const paths = requestedPaths.slice(attemptedCount, attemptedCount + 8);
+      let processedInBatch = 0;
+      for (const path of paths) {
+        processedInBatch += 1;
+        const existing = files.find((file) => file.path === path && Boolean(file.content));
+        if (existing?.content) {
+          hydratedPaths.push(path);
+          contentBytes += Buffer.byteLength(existing.content, 'utf8');
+          if (batchStart > 0) break;
+          continue;
+        }
+        if (!provider || !provider.capabilities().read) {
+          failedPaths.push({
+            path,
+            code: session.workingDirectory?.kind === 'browser_local' ? 'BROKER_OFFLINE' : 'READ_UNAVAILABLE',
+            retryable: true,
+            message: 'Workspace provider is unavailable or does not grant read access.'
+          });
+          continue;
+        }
+        try {
+          if (path.endsWith('/')) {
+            const listed = await provider.listDirectory({ path: path.replace(/\/+$/, ''), limit: 200 });
+            const content = JSON.stringify(
+              listed.entries.map((entry) => ({ path: entry.path, kind: entry.kind })),
+              null,
+              2
+            );
+            files.push({
+              path,
+              size: Buffer.byteLength(content, 'utf8'),
+              content,
+              summary: 'Supplemental workspace directory listing.'
+            });
+            hydratedPaths.push(path);
+            contentBytes += Buffer.byteLength(content, 'utf8');
+            if (batchStart > 0) break;
+            continue;
+          }
+          const read = await provider.readFile({ path, maxBytes: 64 * 1024 });
+          if (!read.content) {
+            failedPaths.push({ path, code: 'READ_ERROR', retryable: false, message: 'Workspace file is empty.' });
+            continue;
+          }
+          const existingIndex = files.findIndex((file) => file.path === read.path);
+          const next = {
+            path: read.path,
+            size: read.byteLength,
+            content: read.content,
+            summary: read.truncated ? 'Supplemental workspace read (truncated).' : 'Supplemental workspace read.'
+          };
+          if (existingIndex >= 0) files[existingIndex] = { ...files[existingIndex], ...next };
+          else files.push(next);
+          hydratedPaths.push(read.path);
+          contentBytes += read.byteLength;
+          if (batchStart > 0) break;
+        } catch (error) {
+          failedPaths.push(this.supplementalPathFailure(path, error));
         }
       }
-    ];
+      attemptedCount += processedInBatch;
+    }
+    const deferredPaths = requestedPaths.slice(attemptedCount);
+    const snapshot = session.workspaceSnapshot ?? {
+      rootName: session.workingDirectory?.name ?? 'workspace',
+      scannedAt: nowIso(),
+      fileCount: 0,
+      totalBytes: 0,
+      tree: [],
+      files: [],
+      skipped: []
+    };
+    session.workspaceSnapshot = {
+      ...snapshot,
+      files,
+      fileCount: Math.max(snapshot.fileCount, files.length)
+    };
+    return { requestedPaths, hydratedPaths, failedPaths, deferredPaths, contentBytes };
+  }
+
+  private hasUsableSupplementalContext(
+    session: SessionDetail,
+    requestedContext: RuntimeContextRequest,
+    resolution: SupplementalContextResolution
+  ) {
+    if (resolution.hydratedPaths.length) return true;
+    return requestedContext.requestedRefs.some((ref) => {
+      if (['workspace_file', 'workspace_symbol', 'test'].includes(ref.type)) return false;
+      const content = this.selectedEvidenceContent(session, ref);
+      return Boolean(content?.content || content?.summary);
+    });
+  }
+
+  private supplementalPathFailure(
+    path: string,
+    error: unknown
+  ): SupplementalContextResolution['failedPaths'][number] {
+    const rawCode =
+      error && typeof error === 'object' && 'code' in error ? String((error as { code?: unknown }).code ?? '') : '';
+    const message = error instanceof Error ? error.message : String(error);
+    const signal = `${rawCode} ${message}`.toUpperCase();
+    let code: SupplementalContextPathFailureCode = 'READ_ERROR';
+    let retryable = true;
+    if (
+      signal.includes('NOT_FOUND') ||
+      signal.includes('NOTFOUND') ||
+      signal.includes('ENOENT') ||
+      signal.includes('COULD NOT BE FOUND') ||
+      signal.includes('WORKSPACE_FILE_NOT_FOUND')
+    ) {
+      code = 'NOT_FOUND';
+      retryable = false;
+    } else if (
+      signal.includes('PERMISSION') ||
+      signal.includes('DENIED') ||
+      signal.includes('EACCES') ||
+      signal.includes('NOTALLOWED') ||
+      signal.includes('SECURITYERROR')
+    ) {
+      code = 'PERMISSION_REQUIRED';
+    } else if (signal.includes('BROKER') || signal.includes('TIMEOUT') || signal.includes('DISCONNECT')) {
+      code = 'BROKER_OFFLINE';
+    }
+    return { path, code, retryable, message };
   }
 
   private runtimeWorkspaceSnapshot(snapshot: SessionDetail['workspaceSnapshot']): SessionDetail['workspaceSnapshot'] {
@@ -2696,8 +3561,8 @@ export class OrchestratorService {
     };
   }
 
-  private createSelectedEvidenceContents(session: SessionDetail, taskContext: TaskContext): ContextPack['selectedEvidenceContents'] {
-    const contents: NonNullable<ContextPack['selectedEvidenceContents']> = [];
+  private createSelectedEvidenceContents(session: SessionDetail, taskContext: TaskContext): ContextAssembly['selectedEvidenceContents'] {
+    const contents: NonNullable<ContextAssembly['selectedEvidenceContents']> = [];
     for (const evidence of taskContext.evidenceRefs) {
       const entry = this.selectedEvidenceContent(session, evidence);
       if (!entry) continue;
@@ -2716,7 +3581,7 @@ export class OrchestratorService {
   private selectedEvidenceContent(
     session: SessionDetail,
     evidence: TaskContext['evidenceRefs'][number]
-  ): Omit<NonNullable<ContextPack['selectedEvidenceContents']>[number], 'type' | 'label' | 'ref' | 'tokenEstimate' | 'selectionReason'> | undefined {
+  ): Omit<NonNullable<ContextAssembly['selectedEvidenceContents']>[number], 'type' | 'label' | 'ref' | 'tokenEstimate' | 'selectionReason'> | undefined {
     const ref = evidence.ref;
     if (evidence.type === 'workspace_snapshot') {
       return {
@@ -2756,10 +3621,16 @@ export class OrchestratorService {
     }
     if ((evidence.type === 'artifact' || evidence.type === 'diff') && ref) {
       const artifact = this.artifacts.listBySession(session.id).find((item) => {
-        const fileChanges = this.metadataFileChanges(item.metadata);
-        return item.id === ref || fileChanges.some((change) => change.path === ref);
+        const workspaceChanges = this.artifactWorkspaceChanges(item);
+        return item.id === ref || workspaceChanges.some((change) =>
+          change.operation === 'move'
+            ? change.fromPath === ref || change.toPath === ref
+            : change.path === ref
+        );
       });
-      const content = artifact ? artifact.contentSummary ?? JSON.stringify(this.metadataFileChanges(artifact.metadata)) : undefined;
+      const content = artifact
+        ? artifact.contentSummary ?? JSON.stringify(this.artifactWorkspaceChanges(artifact))
+        : undefined;
       return artifact
         ? {
             source: 'artifact',
@@ -2771,14 +3642,13 @@ export class OrchestratorService {
     }
     if ((evidence.type === 'event_log' || evidence.type === 'historical_decision' || evidence.type === 'log') && ref) {
       const event = this.events.list(session.id).find((item) => item.id === ref);
-      return event
-        ? {
-            source: 'event',
-            content: event.content,
-            summary: event.type,
-            contentLength: event.content.length
-          }
-        : undefined;
+      if (!event || typeof event.content !== 'string' || !event.content.trim()) return undefined;
+      return {
+        source: 'event',
+        content: event.content,
+        summary: event.type,
+        contentLength: event.content.length
+      };
     }
     if (evidence.type === 'project_map') {
       return {
@@ -2803,15 +3673,8 @@ export class OrchestratorService {
     };
   }
 
-  private metadataFileChanges(metadata: Record<string, unknown>): RuntimeFileChange[] {
-    const value = metadata.fileChanges;
-    if (!Array.isArray(value)) return [];
-    return value.filter(
-      (item): item is RuntimeFileChange =>
-        Boolean(item) &&
-        typeof (item as RuntimeFileChange).path === 'string' &&
-        typeof (item as RuntimeFileChange).operation === 'string'
-    );
+  private artifactWorkspaceChanges(artifact: Artifact) {
+    return artifact.systemEvidence?.workspaceChangeSet?.changes ?? [];
   }
 
   private createTaskContext(
@@ -2819,8 +3682,8 @@ export class OrchestratorService {
     brief: TaskBrief | undefined,
     task: AgentTask | undefined,
     phase: AgentRunPhase,
-    relevantMemories: ContextPack['relevantMemories'],
-    ragSnippets: ContextPack['ragSnippets']
+    relevantMemories: ContextAssembly['relevantMemories'],
+    ragSnippets: ContextAssembly['ragSnippets']
   ): TaskContext {
     const domain = session.taskDomain ?? (session.workspaceSnapshot ? 'mixed' : 'non_coding');
     const intent = session.taskIntent ?? (brief ? 'implementation' : 'analysis');
@@ -2877,7 +3740,7 @@ export class OrchestratorService {
         label: artifact.title,
         ref: artifact.id
       })),
-      ...artifacts.flatMap((artifact) => this.artifactFileChangeEvidence(artifact.metadata)),
+      ...artifacts.flatMap((artifact) => this.artifactFileChangeEvidence(artifact)),
       ...relevantMemories.map((memory) => ({
         type: 'memory' as const,
         label: `${memory.scope}: ${this.shortText(memory.content, 96)}`,
@@ -3097,7 +3960,7 @@ export class OrchestratorService {
             action: 'do',
             label: `Advance ${phase} for ${domain}/${intent}`,
             refs: [taskRef],
-            reason: 'Follow the current phase boundary and Task Context Pack.'
+            reason: 'Follow the current phase boundary and Task Context Assembly.'
           }
         ];
     }
@@ -3167,19 +4030,16 @@ export class OrchestratorService {
       .filter((ref): ref is string => Boolean(ref));
   }
 
-  private artifactFileChangeEvidence(metadata: Record<string, unknown>): TaskContext['evidenceRefs'] {
-    const fileChanges = metadata.fileChanges;
-    if (!Array.isArray(fileChanges)) {
-      return [];
-    }
-    return fileChanges
-      .filter((change): change is RuntimeFileChange => Boolean(change) && typeof (change as RuntimeFileChange).path === 'string')
+  private artifactFileChangeEvidence(artifact: Artifact): TaskContext['evidenceRefs'] {
+    return this.artifactWorkspaceChanges(artifact)
       .slice(0, 12)
-      .map((change) => ({
-        type: 'diff' as const,
-        label: `${change.operation}: ${change.path}`,
-        ref: change.path
-      }));
+      .map((change) => {
+        const ref = change.operation === 'move' ? change.toPath : change.path;
+        const label = change.operation === 'move'
+          ? `move: ${change.fromPath} -> ${change.toPath}`
+          : `${change.operation}: ${change.path}`;
+        return { type: 'diff' as const, label, ref };
+      });
   }
 
   private eventEvidenceType(domain: TaskContext['domain'], type: string): TaskContext['evidenceRefs'][number]['type'] {
@@ -3527,8 +4387,9 @@ export class OrchestratorService {
     const agents = this.participatingAgents(session);
     const choose = (preferredKeys: string[], fallback: string) =>
       agents.find((agent) => preferredKeys.includes(agent.key))?.key ?? fallback;
-    const assignedAgentKey = task?.assigneeAgentId
-      ? agents.find((agent) => agent.id === task.assigneeAgentId)?.key
+    const assignedAgentId = agentIdFromActor(task?.assignee);
+    const assignedAgentKey = assignedAgentId
+      ? agents.find((agent) => agent.id === assignedAgentId)?.key
       : undefined;
     const taskText = `${task?.title ?? ''} ${task?.description ?? ''}`;
     const isPlanningTask = /plan|planning|requirement|analysis|scope|需求|计划|规划|分析|范围/i.test(taskText);
@@ -3555,7 +4416,7 @@ export class OrchestratorService {
     phase: AgentRunPhase,
     taskContext: TaskContext,
     summaryMemory: SummaryMemory
-  ): ContextPack['continuationState'] {
+  ): ContextAssembly['continuationState'] {
     const tasks = this.tasks.list(session.id);
     const recentEvents = this.events.list(session.id).slice(-12);
     const recentArtifacts = this.artifacts.listBySession(session.id).slice(-12);
@@ -3619,7 +4480,7 @@ export class OrchestratorService {
     taskContext: TaskContext,
     summaryMemory: SummaryMemory,
     taskIds: Pick<
-      ContextPack['continuationState'],
+      ContextAssembly['continuationState'],
       'pendingTaskIds' | 'runningTaskIds' | 'completedTaskIds' | 'blockedTaskIds'
     >
   ) {
@@ -3663,8 +4524,12 @@ export class OrchestratorService {
       .map((event) => event.content)
       .slice(-4);
     const previous = prior?.checkpoint.summaryMemory;
+    // 协商阶段(讨论/契约生成/修订)goal 回落到原始需求,不锚定上一版契约的旧
+    // goal;否则用户修改契约后重新讨论时,summaryMemory 仍把旧目标带回上下文。
+    const isBriefNegotiationPhase =
+      phase === 'discussion' || phase === 'brief_generation' || phase === 'brief_revision';
     return {
-      goal: brief?.goal ?? previous?.goal ?? session.originalInput,
+      goal: brief?.goal ?? (isBriefNegotiationPhase ? session.originalInput : previous?.goal ?? session.originalInput),
       currentState: `${session.status} / ${phase}${task ? ` / ${task.status}: ${task.title}` : ''}`,
       confirmedFacts: this.uniqueStrings([...(previous?.confirmedFacts ?? []), ...confirmedFacts], 12),
       completed: this.uniqueStrings([...(previous?.completed ?? []), ...completed], 12),
@@ -3748,6 +4613,8 @@ export class OrchestratorService {
         type: artifact.type,
         title: artifact.title,
         contentSummary: artifact.contentSummary,
+        phase: 'summary_memory_checkpoint',
+        visibility: 'internal',
         checkpointId,
         memoryId: memory.id
       })
@@ -3953,235 +4820,404 @@ export class OrchestratorService {
     return score;
   }
 
-  /**
-   * Session 固化执行目标（设计 8：executionTarget 优先于 Agent 自身 runtime/model）。
-   * 仅当 runtime 无 per-agent override 时覆盖 runtimeType；modelId 始终以 executionTarget 为准。
-   */
-  private applyExecutionTarget(session: SessionDetail, input: AgentRunInput): AgentRunInput {
-    const target = session.executionTarget;
-    if (!target) {
-      return input;
+  private invocationWorkspace(session: SessionDetail) {
+    const provider = this.workspaceProviders?.resolve(session);
+    if (provider) {
+      return {
+        workspaceId: session.workspaceId,
+        providerKind: provider.kind,
+        capabilities: provider.capabilities()
+      };
     }
-    const hasSessionOverride =
-      input.agent.runtimeSelection?.source === 'agent_override' &&
-      Boolean(session.engineeringRuntime?.agentRuntimeOverrides?.[input.agent.id] ??
-        session.engineeringRuntime?.agentRuntimeOverrides?.[input.agent.key]);
     return {
-      ...input,
-      executionTarget: hasSessionOverride ? undefined : target,
-      agent: {
-        ...input.agent,
-        runtimeType: hasSessionOverride ? input.agent.runtimeType : target.runtimeType,
-        modelId: target.modelId
-      }
+      workspaceId: session.workspaceId,
+      providerKind: session.workingDirectory?.kind === 'browser_local' ? 'browser_broker' as const : 'server_local' as const,
+      capabilities: { read: false, write: false, command: false, test: false }
     };
   }
 
-  private async runRuntime(inputSession: SessionDetail, input: AgentRunInput, signal?: AbortSignal) {
-    // v0.4: 新 Session 使用固化的 executionTarget 覆盖 Agent 自身 runtime/model。
-    // 旧 Session（无 executionTarget）保持既有选择逻辑不变。
-    input = this.applyExecutionTarget(inputSession, input);
-    const budget = this.runtimeBudgetForInput(input);
-    const inputSafetyMargin = reserveInputTokenSafetyMargin(
-      budget.maxInputTokens,
-      llmInputSafetyMarginRatio()
-    );
-    const effectiveMaxInputTokens = inputSafetyMargin.effectiveMaxInputTokens;
-    const inputEstimateParts = this.runtimeInputEstimateParts(input);
-    const fixedInputEstimate = estimateRuntimeInputTokens({
-      contextPack: { ...input.contextPack, budget: { ...budget, maxInputTokens: 0 } },
-      ...inputEstimateParts
-    });
-    const originalContextEstimate = fixedInputEstimate.contextTokens;
-    const fixedInputTokens = fixedInputEstimate.totalTokens - originalContextEstimate;
-    const contextInputBudget = effectiveMaxInputTokens
-      ? Math.max(1, effectiveMaxInputTokens - fixedInputTokens)
-      : effectiveMaxInputTokens;
-    const contextPack = {
-      ...input.contextPack,
-      budget: {
-        ...budget,
-        maxInputTokens: contextInputBudget
-      }
-    };
-    const fitted = fitContextToBudget(contextPack);
-    const inputEstimate = estimateRuntimeInputTokens({
-      contextPack: fitted.contextPack,
-      ...inputEstimateParts
-    });
-    if (effectiveMaxInputTokens && inputEstimate.totalTokens > effectiveMaxInputTokens) {
-      const result = this.tokenBudgetExceededResult(input, inputEstimate.totalTokens, effectiveMaxInputTokens);
-      const fileCount = inputSession.workspaceSnapshot?.fileCount || 0;
-      const finalStage = fitted.diagnostics.stages.at(-1);
+  private async runRuntime(inputSession: SessionDetail, input: RuntimeInvocationDraft, signal?: AbortSignal) {
+    const attemptGroupId = input.invocationId;
+    const excludedRuntimeTypes = new Set<RuntimeType>([
+      ...(input.excludedRuntimeTypes ?? []),
+      ...this.activeRuntimeProviderCircuits()
+    ]);
+    let retryOfInvocationId: string | undefined;
+    const preferredRuntimeType = inputSession.runtimePreference?.preferredRuntimeType;
+    let fallbackFromRuntimeType = preferredRuntimeType && excludedRuntimeTypes.has(preferredRuntimeType)
+      ? preferredRuntimeType
+      : undefined;
+    let fallbackReason = fallbackFromRuntimeType ? 'Provider circuit was already open.' : undefined;
+    let runtimeCandidateOverride = fallbackFromRuntimeType
+      ? this.nextAllowedRuntimeFallback(inputSession, excludedRuntimeTypes)
+      : undefined;
+    let sameRuntimeRetried = false;
+    let lastResult: AgentRunResult | undefined;
+    const maxAttempts = this.runtimeProviderMaxAttempts();
 
-      this.events.create({
-        sessionId: input.sessionId,
-        type: 'error_reported',
-        priority: 'high',
-        content: messages.tokenBudgetExceeded(inputEstimate.totalTokens, effectiveMaxInputTokens) +
-                 '\n\n' + messages.tokenBudgetTooLow(inputEstimate.totalTokens, effectiveMaxInputTokens, fileCount) +
-                 '\n\n' + messages.tokenBudgetSuggestion(fileCount) +
-                 `\n\n已尝试裁剪至 ${finalStage?.name || 'unknown'} 阶段，仍无法满足预算。`,
-        metadata: createMetadata('error_card', {
-          code: 'TOKEN_BUDGET_EXCEEDED',
-          estimatedTokens: inputEstimate.totalTokens,
-          contextEstimatedTokens: inputEstimate.contextTokens,
-          fixedPromptEstimatedTokens: fixedInputTokens,
-          inputEstimate,
-          maxInputTokens: inputSafetyMargin.configuredMaxInputTokens,
-          effectiveMaxInputTokens,
-          inputSafetyMarginTokens: inputSafetyMargin.safetyMarginTokens,
-          inputSafetyMarginRatio: inputSafetyMargin.safetyMarginRatio,
-          fileCount,
-          trimStage: finalStage?.name,
-          suggestedBudget: fileCount < 100 ? 150_000 : fileCount < 300 ? 300_000 : 500_000,
-          diagnostics: fitted.diagnostics
-        })
-      });
-      return result;
-    }
-
-    if (
-      fitted.diagnostics.finalStage === 'navigation_only' &&
-      fitted.contextPack.taskContext.intent === 'analysis' &&
-      !(fitted.contextPack.selectedEvidenceContents ?? []).some((item) => Boolean(item.content))
-    ) {
-      const requestedPaths = this.uniqueFirstStrings(
-        [
-          ...(input.contextPack.taskContext.evidenceSelection.selectedRefs
-            .filter((ref) => ref.type === 'workspace_file' || ref.type === 'workspace_symbol')
-            .map((ref) => ref.ref ?? ref.label)),
-          ...(input.contextPack.workspaceManifest?.entrypoints ?? []),
-          ...(input.contextPack.workspaceSnapshot?.entrypoints ?? []),
-          ...(input.contextPack.workspaceFocus?.relevantFiles ?? []),
-          ...(input.contextPack.workspaceFocus?.possibleEntryPoints ?? [])
-        ],
-        8
-      );
-      const requestedContext: RuntimeContextRequest = {
-        reason: 'Analysis requires source evidence, but token fitting reached navigation_only and removed all evidence bodies.',
-        requestedRefs: input.contextPack.taskContext.evidenceSelection.selectedRefs.slice(0, 8),
-        requestedPaths: requestedPaths.length ? requestedPaths : undefined,
-        followUpInstruction: 'Read at least one requested source file, then retry the analysis with grounded evidence.'
-      };
-      return {
-        runId: input.runId,
-        runtimeType: input.agent.runtimeType,
-        status: 'failed',
-        output: {
-          kind: 'agent_message',
-          messageKind: 'risk',
-          content: requestedContext.reason
-        },
-        events: [],
-        artifacts: [],
-        usage: {
-          inputTokens: fitted.estimatedTokens,
-          outputTokens: 0,
-          totalTokens: fitted.estimatedTokens,
-          model: input.agent.modelId ?? input.agent.runtimeType
-        },
-        error: {
-          code: 'CONTEXT_INSUFFICIENT',
-          message: requestedContext.reason,
-          retryable: true,
-          requestedContext,
-          details: {
-            trimStage: fitted.diagnostics.finalStage,
-            diagnostics: fitted.diagnostics
-          }
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const invocationId = attempt === 1 ? input.invocationId : crypto.randomUUID();
+      const result = await this.runRuntimeAttempt(inputSession, {
+        ...input,
+        invocationId,
+        excludedRuntimeTypes: [...excludedRuntimeTypes],
+        runtimeCandidateOverride,
+        attempt: {
+          attemptGroupId,
+          attempt,
+          ...(retryOfInvocationId ? { retryOfInvocationId } : {}),
+          ...(fallbackFromRuntimeType ? { fallbackFromRuntimeType } : {}),
+          ...(fallbackReason ? { fallbackReason } : {})
         }
-      } satisfies AgentRunResult;
-    }
+      }, signal);
+      lastResult = result;
+      if (result.status === 'completed' || result.status === 'cancelled' || signal?.aborted) return result;
+      if (!this.isRetryableProviderFailure(result.error)) return result;
 
-    if (fitted.trimmed) {
-      const finalStage = fitted.diagnostics.stages.at(-1);
-      this.events.create({
+      if (!sameRuntimeRetried) {
+        sameRuntimeRetried = true;
+        retryOfInvocationId = invocationId;
+        const delayMs = this.runtimeProviderRetryDelayMs(result.error);
+        this.recordRuntimeProviderRetry(inputSession, input, result, attemptGroupId, attempt + 1, delayMs);
+        await this.backoffRuntimeProviderRetry(delayMs, signal);
+        if (signal?.aborted) return result;
+        continue;
+      }
+
+      const failedRuntimeType = result.runtimeType;
+      const circuitTtlMs = this.openRuntimeProviderCircuit(failedRuntimeType, result.error);
+      excludedRuntimeTypes.add(failedRuntimeType);
+      runtimeCandidateOverride = this.nextAllowedRuntimeFallback(inputSession, excludedRuntimeTypes);
+      if (!runtimeCandidateOverride || attempt >= maxAttempts) {
+        return result;
+      }
+      retryOfInvocationId = invocationId;
+      fallbackFromRuntimeType = failedRuntimeType;
+      fallbackReason = `${result.error?.code ?? 'MODEL_ERROR'} after retry; provider circuit open for ${circuitTtlMs}ms.`;
+      this.recordRuntimeProviderFallback(inputSession, input, result, attemptGroupId, attempt + 1, circuitTtlMs);
+    }
+    return lastResult ?? this.runtimeRoutingBlockedResult(inputSession, input, 'Runtime provider attempts were exhausted.');
+  }
+
+  private async runRuntimeAttempt(inputSession: SessionDetail, input: RuntimeInvocationDraft, signal?: AbortSignal) {
+    if (!this.invocationResolver) {
+      throw new Error('InvocationResolverService is unavailable.');
+    }
+    this.workspaceBindings?.bindSession(inputSession);
+
+    let resolvedPlan: InvocationPlan;
+    try {
+      resolvedPlan = this.invocationResolver.resolve({
+        invocationId: input.invocationId,
         sessionId: input.sessionId,
-        type: 'runtime_progress',
-        taskId: input.taskId,
-        fromAgentId: input.agent.id,
-        content: `上下文已裁剪至 ${finalStage?.name || 'unknown'} 阶段 (${fitted.estimatedTokens} tokens)`,
-        metadata: createMetadata('system_notice', {
-          runtimeInvocationId: input.runId,
-          code: 'TOKEN_CONTEXT_TRIMMED',
-          estimatedTokens: inputEstimate.totalTokens,
-          contextEstimatedTokens: inputEstimate.contextTokens,
-          fixedPromptEstimatedTokens: fixedInputTokens,
-          inputEstimate,
-          maxInputTokens: inputSafetyMargin.configuredMaxInputTokens,
-          effectiveMaxInputTokens,
-          inputSafetyMarginTokens: inputSafetyMargin.safetyMarginTokens,
-          inputSafetyMarginRatio: inputSafetyMargin.safetyMarginRatio,
-          trimStage: finalStage?.name,
-          diagnostics: fitted.diagnostics
-        })
+        ...(input.taskId ? { taskId: input.taskId } : {}),
+        taskKind: input.contextAssembly.taskContext.intent,
+        phase: input.phase,
+        agent: input.agent,
+        taskRequiresCodeChanges: input.contextAssembly.taskContext.requiresCodeChanges,
+        workspace: this.invocationWorkspace(inputSession),
+        sessionPreference: inputSession.runtimePreference,
+        projectPolicyRuntime: projectPolicyRuntimeType(),
+        smartRouterPick: input.runtimeCandidateOverride ?? smartRuntimePick({
+          phase: input.phase,
+          requiresCodeChanges: input.contextAssembly.taskContext.requiresCodeChanges
+        }),
+        globalDefaultRuntime: globalDefaultRuntimeType(),
+        excludedRuntimeTypes: input.excludedRuntimeTypes,
+        contextEnvelopeFactory: ({ identity, toolCatalog }) =>
+          buildEnvelopeFromContextAssembly({
+            session: inputSession,
+            phase: input.phase,
+            contextAssembly: input.contextAssembly,
+            identity,
+            toolCatalogHash: toolCatalog.catalogHash
+          }),
+        expectedOutput: input.expectedOutput,
+        budget: input.budget
       });
+      resolvedPlan = { ...resolvedPlan, attempt: input.attempt };
+    } catch (error) {
+      if (error instanceof InvocationResolutionError) {
+        return this.runtimeRoutingBlockedResult(inputSession, input, error.message);
+      }
+      throw error;
+    }
+    const priorRuntimeSession =
+      resolvedPlan.phase === 'task_execution' && resolvedPlan.taskId
+        ? this.runtime.findPriorInvocation(
+            resolvedPlan.sessionId,
+            resolvedPlan.agent.agentId,
+            resolvedPlan.taskId,
+            resolvedPlan.executionTarget.runtimeType
+          )
+        : undefined;
+    const plan: InvocationPlan = priorRuntimeSession
+      ? { ...resolvedPlan, resume: priorRuntimeSession }
+      : resolvedPlan;
+
+    const requiresGroundedEvidence = requiresGroundedRuntimeEvidence(
+      input.phase,
+      input.contextAssembly.taskContext.requiresCodeChanges,
+      input.contextAssembly.taskContext.evidenceSelection.strategy
+    ) && inputSession.workspaceMode !== 'bootstrap';
+    const evidenceDecision = evaluateGroundedEvidenceGate({
+      envelope: plan.contextEnvelope,
+      requiresEvidence: requiresGroundedEvidence
+    });
+    if (!evidenceDecision.ok) {
+      return this.groundedEvidenceMissingResult(plan, evidenceDecision.reason);
     }
 
-    const adapter = this.runtime.getAdapter(input.agent.runtimeType);
-    const resumeOptions = buildResumeOptions(
-      input.phase,
-      input.taskId
-        ? this.runtime.findPriorInvocation(
-            input.sessionId,
-            input.agent.id,
-            input.taskId,
-            input.agent.runtimeType
-          )
-        : undefined
-    );
-    const streamedInput: AgentRunInput = {
-      ...input,
-      contextPack: fitted.contextPack,
-      budget,
-      estimatedInputTokens: inputEstimate.totalTokens,
-      options: resumeOptions ? { ...(input.options ?? {}), ...resumeOptions } : input.options
-    };
+    const estimatedInputTokens = estimateTokens({
+      agent: plan.agent.systemPrompt,
+      contextEnvelope: plan.contextEnvelope,
+      toolCatalog: plan.toolCatalog,
+      expectedOutput: plan.expectedOutput
+    });
+    if (plan.budget.maxInputTokens && estimatedInputTokens > plan.budget.maxInputTokens) {
+      return this.tokenBudgetExceededResult(plan, estimatedInputTokens, plan.budget.maxInputTokens);
+    }
 
+    this.events.create({
+      sessionId: plan.sessionId,
+      type: 'runtime_started',
+      taskId: plan.taskId,
+      fromAgentId: plan.agent.agentId,
+      content: messages.runtimeStarted(plan.agent.name, runtimeModeLabel(plan.executionTarget.runtimeType)),
+      metadata: createMetadata('system_notice', {
+        runtimeInvocationId: plan.invocationId,
+        runtimeType: plan.executionTarget.runtimeType,
+        executionTarget: plan.executionTarget,
+        toolCatalogHash: plan.toolCatalog.catalogHash,
+        status: 'running'
+      })
+    });
+
+    const adapter = this.runtime.getAdapter(plan.executionTarget.runtimeType);
     const heartbeatStartedAt = Date.now();
-    const execution = this.runtime.start(streamedInput, signal);
+    let lastVisibleRuntimeActivityAt = heartbeatStartedAt;
+    const timeoutMs = phaseTimeoutMs(plan.phase);
+    const phaseController = timeoutMs > 0 ? new AbortController() : undefined;
+    const onParentAbort = phaseController
+      ? () => {
+          const reason = signal?.reason;
+          abortWithTermination(
+            phaseController,
+            isExecutionTermination(reason)
+              ? reason
+              : createExecutionTermination({
+                  kind: 'user_cancelled',
+                  source: 'user',
+                  scope: 'session',
+                  phase: plan.phase
+                })
+          );
+        }
+      : undefined;
+    if (phaseController && signal) {
+      if (signal.aborted) onParentAbort?.();
+      else signal.addEventListener('abort', onParentAbort!, { once: true });
+    }
+    const phaseTimer = phaseController
+      ? setTimeout(() => {
+          abortWithTermination(
+            phaseController,
+            createExecutionTermination({
+              kind: 'phase_timeout',
+              source: 'orchestrator',
+              scope: 'phase',
+              phase: plan.phase,
+              timeout: { mode: 'deadline', timeoutMs }
+            })
+          );
+        }, timeoutMs)
+      : undefined;
+    const execution = this.runtime.start(plan, phaseController?.signal ?? signal);
     const heartbeatTimer = shouldEmitHeartbeat(adapter, execution.hasStreamingEvents)
       ? setInterval(() => {
+          const now = Date.now();
+          if (now - lastVisibleRuntimeActivityAt < RUNTIME_HEARTBEAT_INTERVAL_MS) return;
           this.events.create({
-            sessionId: input.sessionId,
+            sessionId: plan.sessionId,
             type: 'runtime_progress',
-            taskId: input.taskId,
-            fromAgentId: input.agent.id,
+            taskId: plan.taskId,
+            fromAgentId: plan.agent.agentId,
             content: messages.runtimeHeartbeat(
-              input.agent.name,
-              Math.round((Date.now() - heartbeatStartedAt) / 1000)
+              plan.agent.name,
+              Math.round((now - heartbeatStartedAt) / 1000)
             ),
             metadata: createMetadata('system_notice', {
-              runtimeInvocationId: input.runId,
+              runtimeInvocationId: plan.invocationId,
               code: 'RUNTIME_HEARTBEAT',
-              elapsedMs: Date.now() - heartbeatStartedAt
+              elapsedMs: now - heartbeatStartedAt
             })
           });
+          lastVisibleRuntimeActivityAt = now;
         }, RUNTIME_HEARTBEAT_INTERVAL_MS)
       : undefined;
 
     const streamConsumer = execution.hasStreamingEvents
-      ? consumeRuntimeEvents(execution.events, streamedInput, {
-        events: this.events,
-        createMetadata
-      })
+      ? consumeRuntimeEvents(execution.events, plan, {
+          events: this.events,
+          createMetadata,
+          onPublished: () => {
+            lastVisibleRuntimeActivityAt = Date.now();
+          }
+        })
       : Promise.resolve();
 
     try {
       const result = await execution.result;
       await streamConsumer;
-      if (!execution.hasStreamingEvents) {
-        this.recordRuntimeResultDiagnostics(streamedInput, result);
-      }
+      if (!execution.hasStreamingEvents) this.recordRuntimeResultDiagnostics(plan, result);
+      this.recordRuntimeTermination(plan, result);
       this.recordTokenUsage(inputSession, result);
       return result;
     } finally {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (phaseTimer) clearTimeout(phaseTimer);
+      if (signal && onParentAbort) signal.removeEventListener('abort', onParentAbort);
     }
   }
+  private activeRuntimeProviderCircuits() {
+    const now = Date.now();
+    const active: RuntimeType[] = [];
+    for (const [runtimeType, openUntil] of this.runtimeProviderCircuits) {
+      if (openUntil <= now) this.runtimeProviderCircuits.delete(runtimeType);
+      else active.push(runtimeType);
+    }
+    return active;
+  }
 
-  private recordRuntimeResultDiagnostics(input: AgentRunInput, result: AgentRunResult) {
+  private runtimeProviderMaxAttempts() {
+    const parsed = Number(process.env.RUNTIME_PROVIDER_MAX_ATTEMPTS ?? 3);
+    return Number.isFinite(parsed) ? Math.max(1, Math.min(5, Math.floor(parsed))) : 3;
+  }
+
+  private isRetryableProviderFailure(error: RuntimeError | undefined) {
+    return error?.retryable === true && error.details?.providerFailure === true;
+  }
+
+  private runtimeProviderRetryDelayMs(error: RuntimeError | undefined) {
+    const reported = Number(error?.details?.retryAfterMs ?? 1_000);
+    const configuredCap = Number(process.env.RUNTIME_PROVIDER_RETRY_MAX_DELAY_MS ?? 120_000);
+    const cap = Number.isFinite(configuredCap) ? Math.max(0, Math.min(configuredCap, 10 * 60_000)) : 120_000;
+    return Number.isFinite(reported) ? Math.max(0, Math.min(reported, cap)) : Math.min(1_000, cap);
+  }
+
+  private openRuntimeProviderCircuit(runtimeType: RuntimeType, error: RuntimeError | undefined) {
+    const reported = Number(error?.details?.retryAfterMs ?? 0);
+    const configured = Number(process.env.RUNTIME_PROVIDER_CIRCUIT_TTL_MS ?? 120_000);
+    const configuredTtl = Number.isFinite(configured) ? Math.max(1_000, configured) : 120_000;
+    const ttlMs = Math.min(Math.max(Number.isFinite(reported) ? reported : 0, configuredTtl), 10 * 60_000);
+    this.runtimeProviderCircuits.set(runtimeType, Date.now() + ttlMs);
+    return ttlMs;
+  }
+
+  private nextAllowedRuntimeFallback(session: SessionDetail, excluded: ReadonlySet<RuntimeType>) {
+    const allowed = session.runtimePreference?.allowedRuntimeTypes ?? [];
+    return allowed.find((runtimeType) => !excluded.has(runtimeType));
+  }
+
+  private recordRuntimeProviderRetry(
+    session: SessionDetail,
+    input: RuntimeInvocationDraft,
+    result: AgentRunResult,
+    attemptGroupId: string,
+    nextAttempt: number,
+    delayMs: number
+  ) {
+    this.events.create({
+      sessionId: session.id,
+      type: 'runtime_progress',
+      taskId: input.taskId,
+      fromAgentId: input.agent.id,
+      content: `${input.agent.name} 的模型网关暂时不可用，将在 ${Math.ceil(delayMs / 1_000)} 秒后自动重试。`,
+      metadata: createMetadata('system_notice', {
+        code: 'RUNTIME_PROVIDER_RETRY_SCHEDULED',
+        runtimeInvocationId: result.invocationId,
+        runtimeType: result.runtimeType,
+        attemptGroupId,
+        nextAttempt,
+        delayMs,
+        runtimeError: result.error
+      })
+    });
+  }
+
+  private recordRuntimeProviderFallback(
+    session: SessionDetail,
+    input: RuntimeInvocationDraft,
+    result: AgentRunResult,
+    attemptGroupId: string,
+    nextAttempt: number,
+    circuitTtlMs: number
+  ) {
+    this.events.create({
+      sessionId: session.id,
+      type: 'runtime_progress',
+      taskId: input.taskId,
+      fromAgentId: input.agent.id,
+      content: `${runtimeModeLabel(result.runtimeType)} 重试失败，正在切换到允许的备用 Runtime。`,
+      metadata: createMetadata('system_notice', {
+        code: 'RUNTIME_PROVIDER_FALLBACK',
+        runtimeInvocationId: result.invocationId,
+        runtimeType: result.runtimeType,
+        attemptGroupId,
+        nextAttempt,
+        circuitTtlMs,
+        allowedRuntimeTypes: session.runtimePreference?.allowedRuntimeTypes ?? [],
+        runtimeError: result.error
+      })
+    });
+  }
+
+  private async backoffRuntimeProviderRetry(delayMs: number, signal?: AbortSignal) {
+    await new Promise<void>((resolve) => {
+      if (signal?.aborted || delayMs <= 0) {
+        resolve();
+        return;
+      }
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, delayMs);
+      signal?.addEventListener('abort', finish, { once: true });
+    });
+  }
+
+  private recordRuntimeTermination(input: InvocationPlan, result: AgentRunResult) {
+    if (!result.termination) return;
+    this.events.create({
+      sessionId: input.sessionId,
+      type: 'runtime_failed',
+      taskId: input.taskId,
+      fromAgentId: input.agent.agentId,
+      content: result.error?.message ?? '运行时执行已终止。',
+      metadata: createMetadata(
+        result.termination.kind === 'phase_timeout' || result.termination.kind === 'runtime_timeout'
+          ? 'error_card'
+          : 'system_notice',
+        {
+          runtimeInvocationId: input.invocationId,
+          runtimeType: result.runtimeType,
+          agentId: input.agent.agentId,
+          taskId: input.taskId,
+          status: result.status,
+          code: result.error?.code,
+          message: result.error?.message,
+          error: result.error,
+          termination: result.termination
+        }
+      )
+    });
+  }
+  private recordRuntimeResultDiagnostics(input: InvocationPlan, result: AgentRunResult) {
     for (const event of result.events) {
       if (event.type !== 'runtime_progress' || event.metadata?.code !== 'TOKEN_ESTIMATION_DRIFT') {
         continue;
@@ -4190,88 +5226,14 @@ export class OrchestratorService {
         sessionId: input.sessionId,
         type: 'runtime_progress',
         taskId: input.taskId,
-        fromAgentId: input.agent.id,
+        fromAgentId: input.agent.agentId,
         content: event.content,
         metadata: createMetadata('system_notice', {
           ...event.metadata,
-          runtimeInvocationId: input.runId
+          runtimeInvocationId: input.invocationId
         })
       });
     }
-  }
-
-  private runtimeInputEstimateParts(input: AgentRunInput) {
-    return {
-      systemPrompt: input.agent.systemPrompt,
-      outputSchema: input.expectedOutput.jsonSchema ?? runtimeOutputSchema(input.expectedOutput.kind),
-      outputExample: runtimeOutputExample(input.expectedOutput.kind),
-      additionalPromptText: [
-        `Runtime phase: ${input.phase}`,
-        `Expected output: ${JSON.stringify(input.expectedOutput)}`,
-        'Return exactly one valid JSON object matching the requested RuntimeOutput kind.',
-        'Follow taskContext.stagePlan and ground conclusions in selectedEvidenceContents.',
-        'When evidence is insufficient, return CONTEXT_INSUFFICIENT with requestedContext instead of guessing.'
-      ]
-    };
-  }
-
-  private runtimeBudgetForInput(input: AgentRunInput): RuntimeBudget {
-    if (input.agent.runtimeType !== 'generic_llm') {
-      return input.budget;
-    }
-
-    // Mock fallback path never calls a real local LLM, so the local-cap (4k) is
-    // a phantom limit that traps test harnesses with realistic context sizes.
-    if (genericLlmMockFallbackEnabled()) {
-      return input.budget;
-    }
-
-    const connection = this.runtimeModels.connectionForModelId(input.agent.modelId);
-    if (connection.kind !== 'local') {
-      if (this.isArchitectureAnalysisInput(input)) {
-        const maxInputTokens = this.capBudgetValue(
-          input.budget.maxInputTokens,
-          ARCHITECTURE_ANALYSIS_REMOTE_MAX_INPUT_TOKENS
-        );
-        const maxOutputTokens = this.capBudgetValue(
-          input.budget.maxOutputTokens,
-          Math.min(ARCHITECTURE_ANALYSIS_REMOTE_MAX_OUTPUT_TOKENS, llmRemoteMaxOutputTokens())
-        );
-        return {
-          ...input.budget,
-          maxInputTokens,
-          maxOutputTokens,
-          maxTotalTokens: this.capBudgetValue(input.budget.maxTotalTokens, maxInputTokens + maxOutputTokens)
-        };
-      }
-      return input.budget;
-    }
-
-    const maxInputTokens = this.capBudgetValue(input.budget.maxInputTokens, llmLocalMaxInputTokens());
-    const maxOutputTokens = this.capBudgetValue(input.budget.maxOutputTokens, llmLocalMaxOutputTokens());
-    return {
-      ...input.budget,
-      maxInputTokens,
-      maxOutputTokens,
-      maxTotalTokens: this.capBudgetValue(input.budget.maxTotalTokens, maxInputTokens + maxOutputTokens)
-    };
-  }
-
-  private capBudgetValue(value: number | undefined, cap: number) {
-    return value && value > 0 ? Math.min(value, cap) : cap;
-  }
-
-  private isArchitectureAnalysisInput(input: AgentRunInput) {
-    return this.isArchitectureAnalysisText(
-      [
-        input.contextPack.sessionGoal,
-        input.contextPack.taskBrief?.goal,
-        input.contextPack.currentTask?.title,
-        input.contextPack.currentTask?.description
-      ]
-        .filter(Boolean)
-        .join('\n')
-    );
   }
 
   private recordTokenUsage(session: SessionDetail, result: AgentRunResult) {
@@ -4289,23 +5251,23 @@ export class OrchestratorService {
     );
   }
 
-  private tokenBudgetExceededResult(input: AgentRunInput, estimatedTokens: number, maxInputTokens: number): AgentRunResult {
+  private tokenBudgetExceededResult(input: InvocationPlan, estimatedTokens: number, maxInputTokens: number): AgentRunResult {
     return {
-      runId: input.runId,
-      runtimeType: input.agent.runtimeType,
+      invocationId: input.invocationId,
+      runtimeType: input.executionTarget.runtimeType,
       status: 'failed',
-      output: {
-        kind: 'agent_message',
+      output: createAgentMessageOutput({
         messageKind: 'risk',
         content: messages.tokenBudgetInsufficient
-      } satisfies AgentMessageOutput,
+      }) satisfies AgentMessageOutput,
       events: [],
       artifacts: [],
+      systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
       usage: {
         inputTokens: estimatedTokens,
         outputTokens: 0,
         totalTokens: estimatedTokens,
-        model: input.agent.runtimeType
+        model: input.executionTarget.modelId ?? input.executionTarget.runtimeType
       },
       error: {
         code: 'TOKEN_BUDGET_EXCEEDED',
@@ -4319,89 +5281,75 @@ export class OrchestratorService {
     };
   }
 
-  private selectEngineeringRuntime(session: SessionDetail, agent: Agent): EngineeringRuntimeSelection {
-    const globalRuntimeType = defaultEngineeringRuntimeType();
-    const defaultAgentRuntime = defaultAgentRuntimeType();
-    const projectRuntimeType =
-      session.engineeringRuntime?.projectDefaultRuntimeType ?? projectDefaultEngineeringRuntimeType();
-    const sessionRuntimeType = session.engineeringRuntime?.sessionDefaultRuntimeType;
-    const agentOverride = session.engineeringRuntime?.agentRuntimeOverrides?.[agent.id] ??
-      session.engineeringRuntime?.agentRuntimeOverrides?.[agent.key];
-    const agentRuntimeType = agentOverride ?? agent.runtimeType;
-    const hasAgentOverride =
-      Boolean(agentOverride) || (agent.runtimeType !== undefined && agent.runtimeType !== defaultAgentRuntime);
-
-    if (hasAgentOverride && agentRuntimeType) {
-      return {
-        effectiveRuntimeType: agentRuntimeType,
-        source: 'agent_override',
-        agentRuntimeType,
-        sessionRuntimeType,
-        projectRuntimeType,
-        globalRuntimeType,
-        reason: agentOverride
-          ? `Agent runtime override for ${agent.key} was provided by the session.`
-          : `Agent ${agent.key} runtimeType differs from the default agent runtime.`
-      };
-    }
-
-    if (sessionRuntimeType) {
-      return {
-        effectiveRuntimeType: sessionRuntimeType,
-        source: 'session_override',
-        agentRuntimeType,
-        sessionRuntimeType,
-        projectRuntimeType,
-        globalRuntimeType,
-        reason: 'Session engineering runtime override has priority over project and global defaults.'
-      };
-    }
-
-    if (projectRuntimeType) {
-      return {
-        effectiveRuntimeType: projectRuntimeType,
-        source: 'project_default',
-        agentRuntimeType,
-        projectRuntimeType,
-        globalRuntimeType,
-        reason: 'Project default engineering runtime is used because no agent or session override was set.'
-      };
-    }
-
+  private groundedEvidenceMissingResult(
+    input: InvocationPlan,
+    reason: 'evidence-empty' | 'evidence-only-generated' | 'evidence-only-sensitive' | 'evidence-not-navigable'
+  ): AgentRunResult {
+    const requestedPaths = input.contextEnvelope.L1.navigation.entries
+      .filter((entry) => entry.kind === 'file' && !entry.generated && !entry.sensitive)
+      .map((entry) => entry.path)
+      .slice(0, 8);
+    const message = `Context v2 blocked an ungrounded runtime call: ${reason}.`;
     return {
-      effectiveRuntimeType: globalRuntimeType,
-      source: 'global_default',
-      agentRuntimeType,
-      globalRuntimeType,
-      reason: 'Global engineering runtime default is used.'
+      invocationId: input.invocationId,
+      runtimeType: input.executionTarget.runtimeType,
+      status: 'failed',
+      output: createAgentMessageOutput({
+        messageKind: 'risk',
+        content: message
+      }),
+      events: [],
+      artifacts: [],
+      systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        model: input.executionTarget.modelId ?? input.executionTarget.runtimeType
+      },
+      error: {
+        code: 'CONTEXT_INSUFFICIENT',
+        message,
+        retryable: true,
+        requestedContext: {
+          reason: message,
+          requestedRefs: [],
+          requestedPaths,
+          followUpInstruction: 'Read at least one non-sensitive source file and retry the same phase.'
+        },
+        details: { contextPipelineVersion: 'v2', groundedEvidenceReason: reason }
+      }
     };
   }
 
-  private toRuntimeAgent(agent: Agent, runtimeSelection?: EngineeringRuntimeSelection) {
-    const fallbackRuntime = defaultAgentRuntimeType();
-    const configuredRuntimeType = agent.runtimeType ?? fallbackRuntime;
+  private runtimeRoutingBlockedResult(
+    session: SessionDetail,
+    input: RuntimeInvocationDraft,
+    reason: string
+  ): AgentRunResult {
+    const runtimeType = session.runtimePreference?.preferredRuntimeType ?? globalDefaultRuntimeType();
+    return {
+      invocationId: input.invocationId,
+      runtimeType,
+      status: 'failed',
+      output: createAgentMessageOutput({ messageKind: 'risk', content: reason }),
+      events: [],
+      artifacts: [],
+      systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: runtimeType },
+      error: {
+        code: 'CAPABILITY_BLOCKED',
+        message: reason,
+        retryable: false,
+        details: { contextPipelineVersion: 'v2', routingMode: 'dynamic_fail_closed', phase: input.phase }
+      }
+    };
+  }
+
+  private compileAgentIdentity(agent: Agent) {
     // 编译 Markdown Profile：展开 ${skill:key}/${tool:key}，作为所有 Runtime 的统一 systemPrompt。
     // 编译器缺席（部分测试环境）时回退到原始 Markdown。
-    const compiled = this.profileCompiler?.compile({
-      profileMarkdown: agent.profileMarkdown ?? '',
-      agentCapabilityIds: agent.capabilityIds
-    });
-    const systemPrompt =
-      compiled?.systemPrompt?.trim() || agent.profileMarkdown?.trim() || `${agent.name}: ${agent.role}`;
-    return {
-      id: agent.id,
-      key: agent.key,
-      name: agent.name,
-      role: agent.role,
-      profileMarkdown: agent.profileMarkdown,
-      systemPrompt,
-      runtimeType: runtimeSelection?.effectiveRuntimeType ?? configuredRuntimeType,
-      configuredRuntimeType,
-      runtimeSelection,
-      modelId: agent.modelId,
-      capabilityIds: agent.capabilityIds,
-      skillIds: compiled?.skillIds ?? agent.skillIds ?? []
-    };
+    return this.profileCompiler.compileIdentity({ agent });
   }
 
   private participatingAgents(session: SessionDetail) {
@@ -4441,58 +5389,60 @@ export class OrchestratorService {
     return [];
   }
 
-  private completedOutput<TOutput extends { kind: string }>(result: AgentRunResult, expectedKind: TOutput['kind']) {
+  private taskKnowledgeQuery(session: SessionDetail, brief: TaskBrief | undefined, task: AgentTask) {
+    return Array.from(
+      new Set(
+        [
+          session.originalInput,
+          brief?.goal,
+          task.title,
+          task.description,
+          task.assignmentReason,
+          ...(task.contextRequirements ?? []),
+          ...(task.acceptanceCriteria ?? [])
+        ]
+          .map((item) => item?.trim())
+          .filter((item): item is string => Boolean(item))
+      )
+    ).join('\n');
+  }
+
+  private completedOutput<TOutput extends RuntimeOutput>(
+    result: AgentRunResult,
+    expectedKind: RuntimeOutputKind
+  ): TOutput {
     if (result.status !== 'completed') {
       throw this.runtimeError(result, expectedKind);
     }
-    const output = result.output as { kind?: string };
-    if (output.kind !== expectedKind) {
-      throw new Error(`Expected runtime output kind=${expectedKind}, got ${String(output.kind)}`);
+    const validation = validateRuntimeOutput(expectedKind, result.output);
+    if (!validation.valid) {
+      const runtimeError: RuntimeError = {
+        code: 'RUNTIME_OUTPUT_CONTRACT_VIOLATION',
+        message: `Orchestrator received invalid ${expectedKind}: ${validation.errors.join('; ')}`,
+        retryable: false,
+        details: { expectedKind, validationErrors: validation.errors }
+      };
+      throw Object.assign(new Error(`RUNTIME_OUTPUT_CONTRACT_VIOLATION: ${runtimeError.message}`), {
+        cause: runtimeError,
+        runtimeError
+      });
     }
-    return result.output as unknown as TOutput;
+    return validation.value as TOutput;
   }
 
-  private normalizeTaskBriefOutput(output: TaskBriefOutput): TaskBriefOutput {
+  private suggestedTask(input: SuggestedAgentTaskDraft): SuggestedAgentTask {
     return {
-      ...output,
-      goal: this.safeString(output.goal) || 'Pending confirmed task goal',
-      scope: this.stringList(output.scope),
-      outOfScope: this.stringList(output.outOfScope),
-      constraints: this.stringList(output.constraints),
-      acceptanceCriteria: this.stringList(output.acceptanceCriteria),
-      risks: this.stringList(output.risks),
-      openQuestions: this.stringList(output.openQuestions),
-      suggestedTasks: Array.isArray(output.suggestedTasks)
-        ? output.suggestedTasks
-            .map((task, index) => this.normalizeSuggestedTask(task, index))
-            .filter((task): task is SuggestedAgentTask => Boolean(task))
-        : []
-    };
-  }
-
-  private normalizeSuggestedTask(value: unknown, index: number): SuggestedAgentTask | undefined {
-    if (!value || typeof value !== 'object') {
-      return undefined;
-    }
-
-    const task = value as Partial<SuggestedAgentTask>;
-    const title =
-      this.safeString(task.title) ||
-      this.shortText(this.safeString(task.description), 60) ||
-      `Suggested task ${index + 1}`;
-    const description = this.safeString(task.description) || title;
-    return {
-      ...task,
-      title,
-      description,
-      routingMode: this.normalizeRoutingMode(task.routingMode),
-      assignmentReason: this.safeString(task.assignmentReason) || undefined,
-      contextRequirements: this.stringList(task.contextRequirements),
-      verificationPlan: this.stringList(task.verificationPlan),
-      riskNotes: this.stringList(task.riskNotes),
-      requiresUserConfirmation: task.requiresUserConfirmation === true,
-      dependsOnTaskTitles: this.stringList(task.dependsOnTaskTitles),
-      acceptanceCriteria: this.stringList(task.acceptanceCriteria)
+      title: input.title,
+      description: input.description,
+      suggestedAgentKey: input.suggestedAgentKey ?? null,
+      routingMode: input.routingMode ?? null,
+      assignmentReason: input.assignmentReason ?? null,
+      contextRequirements: input.contextRequirements ?? [],
+      verificationPlan: input.verificationPlan ?? [],
+      riskNotes: input.riskNotes ?? [],
+      requiresUserConfirmation: input.requiresUserConfirmation ?? false,
+      dependsOnTaskTitles: input.dependsOnTaskTitles ?? [],
+      acceptanceCriteria: input.acceptanceCriteria
     };
   }
 
@@ -4510,16 +5460,22 @@ export class OrchestratorService {
   }
 
   private runtimeError(result: AgentRunResult, phase: string) {
-    return Object.assign(new Error(messages.runtimeError(result.runtimeType, phase, result.error?.message ?? result.status)), {
-      cause: result.error
-    });
+    return Object.assign(
+      new Error(messages.runtimeError(result.runtimeType, phase, result.error?.message ?? result.status)),
+      { cause: result.error, runtimeError: result.error }
+    );
   }
 
   private isInfrastructureTaskFailure(result: TaskRunOutcome) {
     if (result.ok) {
       return false;
     }
-    return result.code === 'RUNTIME_TIMEOUT' || (result.code === 'MODEL_ERROR' && result.retryable === true);
+    const code = result.error?.code ?? result.code;
+    const retryable = result.error?.retryable ?? result.retryable;
+    return code === 'RUNTIME_TIMEOUT' ||
+      code === 'RUNTIME_INVOCATION_ERROR' ||
+      code === 'RUNTIME_OUTPUT_CONTRACT_VIOLATION' ||
+      (code === 'MODEL_ERROR' && retryable === true);
   }
 
   private defaultSuggestedTasks(session: SessionDetail): SuggestedAgentTask[] {
@@ -4537,7 +5493,7 @@ export class OrchestratorService {
     if (session.taskDomain === 'non_coding') {
       const analysisTitle = '产出分析或方案建议';
       const validationTitle = '验证事实与交付完整性';
-      const tasks: SuggestedAgentTask[] = [
+      const tasks: SuggestedAgentTaskDraft[] = [
         {
           title: analysisTitle,
           description: '围绕当前目标沉淀结构化分析、方案、计划或说明。',
@@ -4564,11 +5520,11 @@ export class OrchestratorService {
           });
         }
       }
-      return tasks;
+      return tasks.map((task) => this.suggestedTask(task));
     }
 
     if (session.taskDomain === 'mixed') {
-      const tasks: SuggestedAgentTask[] = [
+      const tasks: SuggestedAgentTaskDraft[] = [
         {
           title: '形成需求与实现计划',
           description: '先沉淀需求理解、范围、关键约束和实现路线。',
@@ -4592,10 +5548,10 @@ export class OrchestratorService {
           dependsOnTaskTitles: [messages.defaultTaskExecuteTitle]
         });
       }
-      return tasks;
+      return tasks.map((task) => this.suggestedTask(task));
     }
 
-    const tasks: SuggestedAgentTask[] = [
+    const tasks: SuggestedAgentTaskDraft[] = [
       {
         title: messages.defaultTaskExecuteTitle,
         description: messages.defaultTaskExecuteDescription,
@@ -4611,7 +5567,7 @@ export class OrchestratorService {
         acceptanceCriteria: [messages.defaultTaskValidateAcceptance]
       });
     }
-    return tasks;
+    return tasks.map((task) => this.suggestedTask(task));
   }
 
   private shouldAppendValidationTask(session: SessionDetail): boolean {
@@ -4711,7 +5667,7 @@ export class OrchestratorService {
     const keptTitles = new Set(filtered.map((task) => task.title));
     return filtered.map((task) => ({
       ...task,
-      dependsOnTaskTitles: task.dependsOnTaskTitles?.filter((title) => keptTitles.has(title))
+      dependsOnTaskTitles: task.dependsOnTaskTitles.filter((title) => keptTitles.has(title))
     }));
   }
 
@@ -4720,7 +5676,7 @@ export class OrchestratorService {
       return this.architectureAnalysisSuggestedTasks(session)[0];
     }
 
-    return {
+    return this.suggestedTask({
       title: '查看并说明整体需求内容',
       description: '在会话中整理和说明用户需要查看的整体内容，不生成文件、不写入工作区。',
       suggestedAgentKey: this.resolveParticipatingAgentKey(session, ['requirements', 'product-manager', 'review']),
@@ -4728,13 +5684,13 @@ export class OrchestratorService {
         '输出可直接在会话中阅读的分析结果。',
         '不返回 fileChanges，不写入 agent-output、docs 或其他工作区文件。'
       ]
-    };
+    });
   }
 
   private architectureAnalysisSuggestedTasks(session: SessionDetail): SuggestedAgentTask[] {
     const analysisTitle = '从架构视角分析当前项目结构与主链路';
     return [
-      {
+      this.suggestedTask({
         title: analysisTitle,
         description:
           '作为唯一的架构师场景，基于用户目标、workspaceManifest、projectMap 和 selectedEvidenceContents 直接分析当前项目结构与主链路，并给出架构方面的想法和建议。',
@@ -4759,7 +5715,7 @@ export class OrchestratorService {
           '分析覆盖项目定位、目录职责、核心入口、模块边界、主链路、技术栈、架构想法、建议和风险缺口。',
           '结论引用 workspaceManifest、projectMap 或 selectedEvidenceContents 中的证据。'
         ]
-      }
+      })
     ];
   }
 
@@ -4790,17 +5746,17 @@ export class OrchestratorService {
     const lastTaskTitle = normalized.at(-1)?.title;
     return this.withSuggestedTaskPlanningDetails(session, [
       ...normalized,
-      {
+      this.suggestedTask({
         title: fallbackValidation?.title ?? 'Validate task output',
         description:
           fallbackValidation?.description ??
-          'Independently validate the execution output against the Task Context Pack validation rules.',
+          'Independently validate the execution output against the Task Context Assembly validation rules.',
         suggestedAgentKey: validationAgentKey,
         acceptanceCriteria: fallbackValidation?.acceptanceCriteria ?? [
           'Validation result maps rules to evidence and records gaps, risks, and remaining work.'
         ],
         dependsOnTaskTitles: lastTaskTitle ? [lastTaskTitle] : fallbackValidation?.dependsOnTaskTitles
-      }
+      })
     ]);
   }
 
@@ -4963,4 +5919,9 @@ export class OrchestratorService {
       /^(验证|验收|校验|测试)/.test(description)
     );
   }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw signal.reason ?? Object.assign(new Error('Session runtime was terminated.'), { name: 'AbortError' });
 }

@@ -6,7 +6,7 @@ let server;
 
 try {
   server = await startSmokeServer('workspace-snapshot-payload-smoke', {
-    DEFAULT_AGENT_RUNTIME_TYPE: 'mock',
+    GLOBAL_DEFAULT_RUNTIME_TYPE: 'mock',
     MOCK_RUNTIME_ENABLED: 'true',
     DISCUSSION_MAX_ROUNDS: '0'
   });
@@ -89,21 +89,21 @@ try {
     throw new Error(`Expected workspace context to be compacted before runtime: ${tokenBudgetExceeded.content}`);
   }
 
-  const contextPacks = await api(server.apiBase, `/sessions/${manyFilesSessionId}/debug/context-packs`);
-  const invocation = contextPacks.data.items.find((item) => item.contextPack?.workspaceManifest && item.contextPack?.selectedEvidenceContents);
+  const envelopes = await api(server.apiBase, `/sessions/${manyFilesSessionId}/debug/context-envelopes`);
+  const invocation = envelopes.data.items.find((item) => item.contextEnvelope?.L1.navigation && item.contextEnvelope?.L3.files);
   if (!invocation) {
-    throw new Error(`Expected a runtime invocation with manifest and selected evidence: ${JSON.stringify(contextPacks)}`);
+    throw new Error(`Expected a runtime invocation with navigation and selected evidence: ${JSON.stringify(envelopes)}`);
   }
-  const manifest = invocation.contextPack.workspaceManifest;
-  if (!manifest || manifest.files.length > 80 || manifest.tree.length > 121) {
-    throw new Error(`workspaceManifest should be compacted: ${JSON.stringify(manifest)}`);
+  const navigation = invocation.contextEnvelope.L1.navigation;
+  if (navigation.entries.length > 121) {
+    throw new Error(`L1 navigation should be compacted: ${JSON.stringify(navigation)}`);
   }
-  const selectedEvidence = invocation.contextPack.selectedEvidenceContents ?? [];
+  const selectedEvidence = invocation.contextEnvelope.L3.files;
   if (selectedEvidence.length > 8) {
-    throw new Error(`selectedEvidenceContents must be bounded: ${selectedEvidence.length}`);
+    throw new Error(`L3 evidence must be bounded: ${selectedEvidence.length}`);
   }
   if (selectedEvidence.some((item) => item.content && item.content.length > 4000)) {
-    throw new Error(`selectedEvidenceContents content must be trimmed: ${JSON.stringify(selectedEvidence)}`);
+    throw new Error(`L3 evidence content must be trimmed: ${JSON.stringify(selectedEvidence)}`);
   }
 
   console.log('workspace snapshot payload smoke ok');

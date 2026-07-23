@@ -16,9 +16,7 @@ function makePersistence() {
   };
 }
 
-const agentsStub = { list: () => [] };
-
-const ENV_KEYS = ['LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL'] as const;
+const ENV_KEYS = ['LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL', 'AGENT_CLUSTER_SECRET_KEY'] as const;
 
 function withRemoteEnv() {
   const saved = new Map<string, string | undefined>(ENV_KEYS.map((key) => [key, process.env[key]]));
@@ -26,6 +24,7 @@ function withRemoteEnv() {
   process.env.LLM_BASE_URL = 'https://relay.test/v1';
   process.env.LLM_API_KEY = 'sk-test';
   process.env.LLM_MODEL = 'test-remote-model';
+  process.env.AGENT_CLUSTER_SECRET_KEY = 'runtime-model-config-test-master-key';
   return () => {
     for (const [key, value] of saved) {
       if (value === undefined) {
@@ -46,7 +45,7 @@ test('env-configured remote model is listed and survives local discovery', async
     })) as typeof fetch;
 
   try {
-    const service = new RuntimeModelConfigService(makePersistence() as never, agentsStub as never);
+    const service = new RuntimeModelConfigService(makePersistence() as never);
     const config = await service.getConfig();
 
     const envModel = config.availableModels.find(
@@ -76,7 +75,7 @@ test('persisted user-added model keeps priority over env entry with the same id'
     })) as typeof fetch;
 
   try {
-    const service = new RuntimeModelConfigService(makePersistence() as never, agentsStub as never);
+    const service = new RuntimeModelConfigService(makePersistence() as never);
     await service.addModel({
       kind: 'remote',
       model: 'test-remote-model',
@@ -108,7 +107,7 @@ test('updateModel edits label/apiKey in place and migrates id when baseUrl chang
     })) as typeof fetch;
 
   try {
-    const service = new RuntimeModelConfigService(makePersistence() as never, agentsStub as never);
+    const service = new RuntimeModelConfigService(makePersistence() as never);
     const added = await service.addModel({
       kind: 'remote',
       model: 'glm-5.2',
@@ -147,7 +146,7 @@ test('deleteModel removes the entry and falls back to the env default model', as
     })) as typeof fetch;
 
   try {
-    const service = new RuntimeModelConfigService(makePersistence() as never, agentsStub as never);
+    const service = new RuntimeModelConfigService(makePersistence() as never);
     const added = await service.addModel({
       kind: 'remote',
       model: 'glm-5.2',
@@ -177,7 +176,7 @@ test('update/delete reject non-persisted entries (env and discovered models)', a
     })) as typeof fetch;
 
   try {
-    const service = new RuntimeModelConfigService(makePersistence() as never, agentsStub as never);
+    const service = new RuntimeModelConfigService(makePersistence() as never);
     const config = await service.getConfig();
     const envModel = config.availableModels.find((model) => model.source === 'env');
     const discovered = config.availableModels.find((model) => model.model === 'qwen2.5:7b');

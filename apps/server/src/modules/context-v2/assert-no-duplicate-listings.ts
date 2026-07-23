@@ -7,7 +7,7 @@ export interface DuplicateListingReport {
 
 export function assertNoDuplicateFileListings(envelope: ContextEnvelopeV2): DuplicateListingReport {
   const manifestPaths = new Set<string>();
-  for (const entry of envelope.L1.entries) {
+  for (const entry of envelope.L1.navigation.entries) {
     if (entry.kind === 'file') manifestPaths.add(entry.path);
   }
 
@@ -33,7 +33,7 @@ export function assertNoDuplicateFileListings(envelope: ContextEnvelopeV2): Dupl
 
 export function pruneDuplicatePathsFromProjectMap(envelope: ContextEnvelopeV2): ContextEnvelopeV2 {
   const manifestPaths = new Set<string>();
-  for (const entry of envelope.L1.entries) {
+  for (const entry of envelope.L1.navigation.entries) {
     if (entry.kind === 'file') manifestPaths.add(entry.path);
   }
   const prunedModules = envelope.L2.modules.map((module) => ({

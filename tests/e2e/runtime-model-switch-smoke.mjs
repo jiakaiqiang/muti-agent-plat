@@ -1,6 +1,17 @@
 import { createServer } from 'node:http';
-import { rmSync } from 'node:fs';
-import { buildServer, findFreePort, root, waitForEvent, waitForServer, waitForStatus } from './smoke-server.mjs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  buildServer,
+  confirmBriefAndSelectWorkflow,
+  createPublishedAgentWorkflow,
+  createSmokeV2State,
+  findFreePort,
+  listEvents,
+  root,
+  waitForEvent,
+  waitForServer,
+  waitForStatus
+} from './smoke-server.mjs';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 
@@ -43,14 +54,20 @@ function runtimeOutputFor(body) {
 
   if (kind === 'agent_message') {
     return {
+      schemaVersion: '1.0',
       kind,
       messageKind: 'discussion',
-      content: 'Runtime model switch session discussion completed.'
+      content: 'Runtime model switch session discussion completed.',
+      targetAgentIds: [],
+      targetAgentKeys: [],
+      mentionedAgentIds: [],
+      relatedTaskIds: []
     };
   }
 
   if (kind === 'task_brief') {
     return {
+      schemaVersion: '1.0',
       kind,
       goal: 'Verify switched model across the session execution path.',
       scope: ['Session-level runtime invocation uses selected model'],
@@ -64,20 +81,45 @@ function runtimeOutputFor(body) {
           title: 'Verify session runtime model',
           description: 'Run a task after switching the active model.',
           suggestedAgentKey: 'backend',
+          routingMode: 'coordinator_controlled',
+          assignmentReason: null,
+          contextRequirements: [],
+          verificationPlan: [],
+          riskNotes: [],
+          requiresUserConfirmation: false,
+          dependsOnTaskTitles: [],
           acceptanceCriteria: ['The LLM request body contains the switched model id']
         }
       ]
     };
   }
 
+  if (kind === 'task_acceptance_decision') {
+    return {
+      schemaVersion: '1.0',
+      kind,
+      status: 'accepted',
+      reason: 'The runtime model switch task has sufficient context.',
+      missingContext: [],
+      requestedContext: null,
+      handoffSuggestion: null,
+      confidence: 1,
+      alternativeAgentKeys: [],
+      alternativeAgentIds: [],
+      agentMessages: []
+    };
+  }
+
   if (kind === 'task_execution_result') {
     return {
       kind,
-      schemaVersion: '0.1',
+      schemaVersion: '1.0',
       status: 'completed',
       summary: 'Runtime model switch session task completed.',
       completedItems: ['The selected model was used by a session task runtime request'],
       changedArtifacts: [],
+      requestedContext: null,
+      agentMessages: [],
       nextSuggestedActions: [],
       risks: []
     };
@@ -85,6 +127,7 @@ function runtimeOutputFor(body) {
 
   if (kind === 'post_review_report') {
     return {
+      schemaVersion: '1.0',
       kind,
       isConsistentWithBrief: true,
       matchedItems: ['Selected model was used for runtime requests'],
@@ -92,12 +135,14 @@ function runtimeOutputFor(body) {
       missingItems: [],
       outOfScopeChanges: [],
       testResults: ['session runtime model switch passed'],
-      recommendation: 'deliver'
+      recommendation: 'deliver',
+      actions: []
     };
   }
 
   if (kind === 'final_delivery') {
     return {
+      schemaVersion: '1.0',
       kind,
       summary: 'Session-level runtime model switch verified.',
       completedItems: ['All session runtime calls used the switched model'],
@@ -117,6 +162,8 @@ const remoteRequests = [];
 const llmPort = await findFreePort();
 const remotePort = await findFreePort();
 const dataFile = join(root, '.cache', 'agent-cluster', `runtime-model-switch-${Date.now()}.json`);
+mkdirSync(join(root, '.cache', 'agent-cluster'), { recursive: true });
+writeFileSync(dataFile, JSON.stringify(createSmokeV2State()), 'utf8');
 function createLlmServer(targetRequests) {
   return createServer(async (request, response) => {
   if (request.method !== 'POST' || request.url !== '/v1/chat/completions') {
@@ -167,7 +214,8 @@ const server = spawn(process.execPath, ['apps/server/dist/apps/server/src/main.j
     ...process.env,
     SERVER_PORT: serverPort,
     AGENT_CLUSTER_DATA_FILE: dataFile,
-    DEFAULT_AGENT_RUNTIME_TYPE: 'generic_llm',
+    AGENT_CLUSTER_SECRET_KEY: 'runtime-model-switch-smoke-master-key',
+    GLOBAL_DEFAULT_RUNTIME_TYPE: 'generic_llm',
     LLM_PROVIDER: 'openai-compatible',
     LLM_MODEL: 'initial-smoke-model',
     LLM_MODEL_OPTIONS: 'initial-smoke-model,switched-smoke-model',
@@ -186,13 +234,17 @@ server.stderr.on('data', (chunk) => process.stderr.write(chunk));
 
 try {
   await waitForServer(apiBase);
+  const workflow = await createPublishedAgentWorkflow(apiBase, 'Runtime model switch smoke', ['requirements']);
 
   const initial = await api(apiBase, '/runtimes/model-config');
   if (initial.data.defaultModel !== 'initial-smoke-model') {
     throw new Error(`Unexpected initial model config: ${JSON.stringify(initial.data)}`);
   }
-  if (initial.data.availableModels.some((model) => ['env', 'default'].includes(model.source))) {
-    throw new Error(`Model management should not expose env/default model presets: ${JSON.stringify(initial.data.availableModels)}`);
+  const initialEnvModel = initial.data.availableModels.find(
+    (model) => model.source === 'env' && model.model === 'initial-smoke-model'
+  );
+  if (!initialEnvModel) {
+    throw new Error(`Model management should expose the configured env model: ${JSON.stringify(initial.data.availableModels)}`);
   }
   if (initial.data.availableModels.some((model) => model.model === 'switched-smoke-model')) {
     throw new Error(`Environment model options should not be exposed in model management: ${JSON.stringify(initial.data.availableModels)}`);
@@ -208,8 +260,8 @@ try {
       apiKey: 'model-switch-smoke-key'
     })
   });
-  if (!switchableConfig.data.currentModelOption?.agents?.length) {
-    throw new Error(`Configured model should include its agent list: ${JSON.stringify(switchableConfig.data.currentModelOption)}`);
+  if (switchableConfig.data.currentModelOption?.model !== 'switched-smoke-model') {
+    throw new Error(`Configured model should become current: ${JSON.stringify(switchableConfig.data.currentModelOption)}`);
   }
 
   const remoteConfig = await api(apiBase, '/runtimes/model-config/models', {
@@ -263,16 +315,26 @@ try {
   const created = await api(apiBase, '/sessions', {
     method: 'POST',
     body: JSON.stringify({
-      input: 'Verify runtime model switch through a real session.',
+      input: '分析并记录本次会话实际使用的运行时模型，仅输出说明。',
       agentIds: ['coordinator', 'backend', 'test', 'review', 'notification'],
+      runtimePreference: { preferredRuntimeType: 'generic_llm', allowedRuntimeTypes: ['generic_llm'] },
       tokenBudget: 50_000
     })
   });
   const sessionId = created.data.session.id;
   const briefEvent = await waitForEvent(apiBase, sessionId, 'brief_created');
   const briefId = briefEvent.metadata.payload.briefId;
-  await api(apiBase, `/sessions/${sessionId}/briefs/${briefId}/confirm`, { method: 'POST' });
-  await waitForStatus(apiBase, sessionId, 'COMPLETED');
+  await confirmBriefAndSelectWorkflow(apiBase, sessionId, briefId, workflow);
+  try {
+    await waitForStatus(apiBase, sessionId, 'COMPLETED');
+  } catch (error) {
+    const detail = await api(apiBase, `/sessions/${sessionId}`);
+    const events = await listEvents(apiBase, sessionId);
+    throw new Error(
+      `Runtime model switch session did not complete: ${JSON.stringify({ status: detail.data.status, events: events.slice(-16) })}`,
+      { cause: error }
+    );
+  }
 
   const invocations = await api(apiBase, `/sessions/${sessionId}/debug/runtime-invocations`);
   const wrongInvocation = invocations.data.items.find((item) => item.usage?.model !== 'switched-smoke-model');

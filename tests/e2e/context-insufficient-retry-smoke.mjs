@@ -1,28 +1,50 @@
 import {
   api,
   buildServer,
+  confirmBriefAndSelectWorkflow,
+  createPublishedAgentWorkflow,
   createSessionAndWaitForBrief,
   listEvents,
   startSmokeServer,
   stopSmokeServer,
   waitForStatus
 } from './smoke-server.mjs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 await buildServer();
 
 let server;
+const workspaceRoot = mkdtempSync(join(tmpdir(), 'context-insufficient-retry-'));
 
 try {
+  mkdirSync(join(workspaceRoot, 'src'), { recursive: true });
+  writeFileSync(join(workspaceRoot, 'src', 'index.ts'), 'export const supplementalRetryMarker = "REQUESTED_SOURCE_CONTEXT_7421";');
+  writeFileSync(join(workspaceRoot, 'package.json'), '{"scripts":{"typecheck":"tsc --noEmit","test":"vitest run","build":"vite build"}}');
   server = await startSmokeServer('context-insufficient-retry-smoke', {
     DISCUSSION_MAX_ROUNDS: '0',
     MOCK_CONTEXT_INSUFFICIENT_ONCE: 'true'
   });
+  const workflow = await createPublishedAgentWorkflow(
+    server.apiBase,
+    'Context insufficient retry workflow',
+    ['product-manager']
+  );
 
   const { sessionId, briefId } = await createSessionAndWaitForBrief(
     server.apiBase,
     'Implement a small workspace change and retry the current phase after requesting missing source context.',
     {
       tokenBudget: 50_000,
+      runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] },
+      workingDirectory: {
+        kind: 'server_local',
+        id: 'context-insufficient-retry-workspace',
+        name: 'context-insufficient-retry-project',
+        path: workspaceRoot,
+        selectedAt: new Date().toISOString()
+      },
       workspaceSnapshot: {
         rootName: 'context-insufficient-retry-project',
         scannedAt: new Date().toISOString(),
@@ -54,7 +76,7 @@ try {
     }
   );
 
-  await api(server.apiBase, `/sessions/${sessionId}/briefs/${briefId}/confirm`, { method: 'POST' });
+  await confirmBriefAndSelectWorkflow(server.apiBase, sessionId, briefId, workflow);
   await waitForStatus(server.apiBase, sessionId, 'COMPLETED', 90_000);
 
   const events = await listEvents(server.apiBase, sessionId);
@@ -98,25 +120,20 @@ try {
     throw new Error(`Expected blocked and completed debug invocations for retry: ${JSON.stringify(invocations)}`);
   }
 
-  const contextPacks = await api(server.apiBase, `/sessions/${sessionId}/debug/context-packs`);
-  const retriedPack = contextPacks.data.items
+  const envelopes = await api(server.apiBase, `/sessions/${sessionId}/debug/context-envelopes`);
+  const retriedEnvelope = envelopes.data.items
     .filter((item) => item.taskId === failedTaskId)
-    .at(-1)?.contextPack;
-  const selectedContents = retriedPack?.selectedEvidenceContents ?? [];
-  const requestedSource = selectedContents.find((item) => item.ref === 'src/index.ts');
+    .at(-1)?.contextEnvelope;
+  const selectedContents = retriedEnvelope?.L3.files ?? [];
+  const requestedSource = selectedContents.find((item) => item.path === 'src/index.ts');
   if (!requestedSource?.content?.includes('REQUESTED_SOURCE_CONTEXT_7421')) {
     throw new Error(`Expected requested source path content to be injected on retry: ${JSON.stringify(selectedContents)}`);
   }
-  const selectedRefs = retriedPack?.taskContext?.evidenceSelection?.selectedRefs ?? [];
-  const requestedRef = selectedRefs.find((item) => item.ref === 'src/index.ts');
-  if (!requestedRef?.selectionReason?.includes('Requested by runtime after CONTEXT_INSUFFICIENT')) {
-    throw new Error(`Expected requested source path to be selected with supplemental reason: ${JSON.stringify(selectedRefs)}`);
+  if ((retriedEnvelope?.L1.navigation.entries.length ?? 0) > 20) {
+    throw new Error(`Expected navigation manifest to stay compact after retry: ${JSON.stringify(retriedEnvelope?.L1.navigation)}`);
   }
-  if ((retriedPack?.workspaceManifest?.files.length ?? 0) > 20) {
-    throw new Error(`Expected manifest to stay compact after retry: ${JSON.stringify(retriedPack?.workspaceManifest)}`);
-  }
-  if ((retriedPack?.selectedEvidenceContents?.length ?? 0) > 3) {
-    throw new Error(`Expected selected evidence contents to stay compact after retry: ${JSON.stringify(retriedPack?.selectedEvidenceContents)}`);
+  if (selectedContents.length > 3) {
+    throw new Error(`Expected selected evidence to stay compact after retry: ${JSON.stringify(selectedContents)}`);
   }
 
   console.log('context insufficient retry smoke ok');
@@ -124,4 +141,5 @@ try {
   if (server) {
     await stopSmokeServer(server);
   }
+  rmSync(workspaceRoot, { recursive: true, force: true });
 }

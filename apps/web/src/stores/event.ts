@@ -4,6 +4,8 @@ import { useAgentStore } from '@/stores/agent'
 import { useKnowledgeStore } from '@/stores/knowledge'
 import { useLocalWorkspaceStore } from '@/stores/localWorkspace'
 import { actorAgentId, eventAgentId } from '@/composables/useActor'
+import { applicableArtifactFileChanges } from '@/components/artifactFileChangeModel'
+import { shouldPublishRuntimeEventToCollaboration } from '@agent-cluster/shared'
 import type {
   AgentCardState,
   ArtifactEventPayload,
@@ -54,8 +56,33 @@ function payloadOf<T>(event: CollaborationEvent): T {
   return (event.metadata.payload ?? {}) as T
 }
 
+const INTERNAL_RUNTIME_METHODS = new Set([
+  'thread/started',
+  'mcpServer/startupStatus/updated',
+  'remoteControl/status/changed'
+])
+
+export function normalizeCollaborationEvent(event: CollaborationEvent): CollaborationEvent {
+  const unsafeContent = (event as unknown as { content?: unknown }).content
+  if (typeof unsafeContent === 'string' && unsafeContent.trim()) return event
+
+  const payload = event.metadata?.payload ?? {}
+  const fallback = [payload.message, payload.fullMessage, payload.resultSummary, payload.reason].find(
+    (value): value is string => typeof value === 'string' && value.trim().length > 0
+  )
+
+  return {
+    ...event,
+    content: fallback?.trim() || '该事件缺少可展示内容'
+  }
+}
+
 function messageTypeOf(event: CollaborationEvent): ChatMessage['messageType'] {
   const mapped = eventTypeToMessageType[event.type] ?? 'text'
+  if (event.type === 'runtime_failed') {
+    const kind = payloadOf<RuntimeEventPayload>(event).termination?.kind
+    if (kind && !['phase_timeout', 'runtime_timeout'].includes(kind)) return 'text'
+  }
   // runtime_* 进度事件可能携带 system_notice（上下文裁剪、心跳等系统通知），
   // 其 payload 没有任务卡片所需字段，按纯文本渲染。
   if (mapped === 'task' && event.metadata.renderAs === 'system_notice') return 'text'
@@ -73,10 +100,35 @@ function senderAgentIdOf(event: CollaborationEvent): string | undefined {
   return eventAgentId(event)
 }
 
-function shouldRenderInTimeline(event: CollaborationEvent) {
+export function shouldRenderInTimeline(event: CollaborationEvent) {
+  const payload = payloadOf<{
+    visibility?: unknown
+    code?: unknown
+    method?: unknown
+    subtype?: unknown
+    phase?: unknown
+    checkpointId?: unknown
+    memoryId?: unknown
+  }>(event)
+  if (
+    event.type === 'artifact_created' &&
+    (payload.phase === 'summary_memory_checkpoint' ||
+      typeof payload.checkpointId === 'string' && typeof payload.memoryId === 'string')
+  ) return false
+  const unsafeVisibility = (event as unknown as { visibility?: unknown }).visibility
+  if (!shouldPublishRuntimeEventToCollaboration({
+    type: event.type,
+    visibility: unsafeVisibility ?? payload.visibility,
+    code: payload.code
+  })) return false
+  const protocolMethod = typeof payload.method === 'string'
+    ? payload.method
+    : typeof payload.subtype === 'string'
+      ? payload.subtype
+      : event.content.trim()
+  if (INTERNAL_RUNTIME_METHODS.has(protocolMethod)) return false
   if (event.type === 'agent_message') {
-    const payload = payloadOf<{ internal?: boolean }>(event)
-    return !payload.internal
+    return !(payload as { internal?: boolean }).internal
   }
   return eventTypeToMessageType[event.type] !== undefined
 }
@@ -137,6 +189,7 @@ function confirmationStatuses(events: CollaborationEvent[]) {
 }
 
 const streams = new Map<string, EventSource>()
+export type SseConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnected'
 
 const agentStatusStrength: Partial<Record<AgentCardState['status'], number>> = {
   idle: 0,
@@ -153,7 +206,7 @@ const agentStatusStrength: Partial<Record<AgentCardState['status'], number>> = {
 
 function derivedAgentId(event: CollaborationEvent) {
   const payload = payloadOf<TaskEventPayload & { agentId?: string }>(event)
-  return actorAgentId(payload.assignee, payload.assigneeAgentId) ?? payload.agentId ?? eventAgentId(event)
+  return actorAgentId(payload.assignee) ?? payload.agentId ?? eventAgentId(event)
 }
 
 function statusFromEvent(event: CollaborationEvent): AgentCardState['status'] | undefined {
@@ -167,7 +220,14 @@ function statusFromEvent(event: CollaborationEvent): AgentCardState['status'] | 
   if (event.type === 'task_completed' || event.type === 'runtime_completed' || event.type === 'post_review_completed') {
     return 'completed'
   }
-  if (event.type === 'task_rejected' || event.type === 'runtime_failed') return 'failed'
+  if (event.type === 'task_rejected') return 'failed'
+  if (event.type === 'runtime_failed') {
+    const kind = (payload as RuntimeEventPayload).termination?.kind
+    if (kind === 'service_shutdown' || kind === 'maintenance') return 'waiting'
+    if (kind === 'superseded') return 'thinking'
+    if (kind === 'user_cancelled') return 'idle'
+    return 'failed'
+  }
   if (event.type === 'agent_message') return 'discussing'
   if (payload.status === 'failed') return 'failed'
   if (payload.status === 'completed') return 'completed'
@@ -192,6 +252,8 @@ export const useEventStore = defineStore('event', {
     eventsBySessionId: {} as Record<string, CollaborationEvent[]>,
     connectedSessionId: undefined as string | undefined,
     sseConnected: false,
+    sseConnectionState: 'idle' as SseConnectionState,
+    lastSseErrorAt: undefined as string | undefined,
     lastEventIdBySessionId: {} as Record<string, string>
   }),
   getters: {
@@ -345,7 +407,7 @@ export const useEventStore = defineStore('event', {
                 type: payload.type,
                 title: payload.title,
                 contentSummary: payload.contentSummary,
-                fileChangeCount: payload.fileChanges?.length ?? 0
+                fileChangeCount: applicableArtifactFileChanges(payload).length
               }
             ])
           }
@@ -362,9 +424,6 @@ export const useEventStore = defineStore('event', {
           status: payload.status,
           assignedBy: payload.assignedBy ?? current?.assignedBy,
           assignee: payload.assignee ?? current?.assignee,
-          assignedByAgentId:
-            actorAgentId(payload.assignedBy, payload.assignedByAgentId) ?? current?.assignedByAgentId,
-          assigneeAgentId: actorAgentId(payload.assignee, payload.assigneeAgentId) ?? current?.assigneeAgentId,
           routingMode: payload.routingMode ?? current?.routingMode,
           autoResolutionAttempted: payload.autoResolutionAttempted ?? current?.autoResolutionAttempted,
           assignmentReason: payload.assignmentReason ?? current?.assignmentReason,
@@ -401,7 +460,18 @@ export const useEventStore = defineStore('event', {
             relatedBriefId: payload.relatedBriefId as string | undefined,
             relatedTaskId: payload.relatedTaskId as string | undefined,
             relatedCapabilityId: payload.relatedCapabilityId as string | undefined,
-            relatedArtifactId: payload.relatedArtifactId as string | undefined
+            relatedArtifactId: payload.relatedArtifactId as string | undefined,
+            targetPath: payload.targetPath as string | undefined,
+            workflowId: payload.workflowId as string | undefined,
+            workflowName: payload.workflowName as string | undefined,
+            workflowRunId: payload.workflowRunId as string | undefined,
+            workflowNodeId: payload.workflowNodeId as string | undefined,
+            workflowNodeRunId: payload.workflowNodeRunId as string | undefined,
+            expectedRunRevision: payload.expectedRunRevision as number | undefined,
+            workflowStepIndex: payload.workflowStepIndex as number | undefined,
+            workflowStepCount: payload.workflowStepCount as number | undefined,
+            outputSummary: payload.outputSummary as string | undefined,
+            workflowOptions: payload.workflowOptions
           }
         }
         if (event.type === 'user_confirmation_resolved' && card) {
@@ -421,35 +491,47 @@ export const useEventStore = defineStore('event', {
     }
   },
   actions: {
+    removeEvent(sessionId: string, eventId: string) {
+      const events = this.eventsBySessionId[sessionId]
+      if (!events) return
+      this.eventsBySessionId[sessionId] = events.filter((event) => event.id !== eventId)
+      if (this.lastEventIdBySessionId[sessionId] === eventId) {
+        this.lastEventIdBySessionId[sessionId] = this.eventsBySessionId[sessionId].at(-1)?.id ?? ''
+      }
+    },
     async loadEvents(sessionId: string, options: { append?: boolean; afterEventId?: string } = {}) {
       const afterEventId = options.afterEventId ?? (options.append ? this.lastEventIdBySessionId[sessionId] : undefined)
       const suffix = afterEventId ? `?afterEventId=${encodeURIComponent(afterEventId)}` : ''
       const page = await apiPage<CollaborationEvent>(`/sessions/${sessionId}/events${suffix}`)
+      const normalizedItems = page.items.map(normalizeCollaborationEvent)
       if (options.append) {
-        page.items.forEach((event) => this.appendEvent(event))
+        normalizedItems.forEach((event) => this.appendEvent(event))
       } else {
-        this.eventsBySessionId[sessionId] = page.items
-        this.lastEventIdBySessionId[sessionId] = page.items.at(-1)?.id ?? ''
-        page.items.forEach((event) => {
+        this.eventsBySessionId[sessionId] = normalizedItems
+        this.lastEventIdBySessionId[sessionId] = normalizedItems.at(-1)?.id ?? ''
+        normalizedItems.forEach((event) => {
           void this.applyLocalFileChanges(event)
         })
       }
     },
     appendEvent(event: CollaborationEvent) {
-      const events = this.eventsBySessionId[event.sessionId] ?? []
-      if (events.some((item) => item.id === event.id)) return
-      this.eventsBySessionId[event.sessionId] = [...events, event]
-      this.lastEventIdBySessionId[event.sessionId] = event.id
-      void this.applyLocalFileChanges(event)
+      const normalizedEvent = normalizeCollaborationEvent(event)
+      const events = this.eventsBySessionId[normalizedEvent.sessionId] ?? []
+      if (events.some((item) => item.id === normalizedEvent.id)) return
+      this.eventsBySessionId[normalizedEvent.sessionId] = [...events, normalizedEvent]
+      this.lastEventIdBySessionId[normalizedEvent.sessionId] = normalizedEvent.id
+      void this.applyLocalFileChanges(normalizedEvent)
     },
     async applyLocalFileChanges(event: CollaborationEvent) {
       const payload = artifactPayload(event)
-      if (!payload?.fileChanges?.length) return
+      if (!payload) return
+      const fileChanges = applicableArtifactFileChanges(payload)
+      if (!fileChanges.length) return
       const localWorkspaceStore = useLocalWorkspaceStore()
       localWorkspaceStore.enqueueArtifactFileChanges(
         event.sessionId,
         payload.artifactId,
-        payload.fileChanges,
+        fileChanges,
         payload.title
       )
     },
@@ -461,14 +543,19 @@ export const useEventStore = defineStore('event', {
     connectSse(sessionId: string) {
       this.disconnectSse()
       this.connectedSessionId = sessionId
+      this.sseConnectionState = 'connecting'
       const stream = new EventSource(eventStreamUrl(sessionId))
       streams.set(sessionId, stream)
       stream.onopen = () => {
         this.sseConnected = true
+        this.sseConnectionState = 'connected'
+        this.lastSseErrorAt = undefined
         void this.loadEvents(sessionId, { append: true })
       }
       stream.onerror = () => {
         this.sseConnected = false
+        this.sseConnectionState = 'disconnected'
+        this.lastSseErrorAt = new Date().toISOString()
       }
       stream.addEventListener('collaboration-event', (message) => {
         this.appendEvent(parseSseEvent(message as MessageEvent))
@@ -481,6 +568,7 @@ export const useEventStore = defineStore('event', {
       }
       this.connectedSessionId = undefined
       this.sseConnected = false
+      this.sseConnectionState = 'idle'
     }
   }
 })

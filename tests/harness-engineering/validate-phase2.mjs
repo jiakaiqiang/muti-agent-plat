@@ -5,8 +5,8 @@
 // session / orchestrator / events / artifacts with the protocols. The
 // deliverable is alignment SPECS, not feature code — so this validator checks
 // the alignment docs, and additionally REALITY-SYNCS them against the source:
-// it parses the real SessionStatus / AgentRunPhase / ArtifactType unions from
-// packages/shared/src/contracts.ts and asserts every value is documented. Add a
+// it parses SessionStatus / AgentRunPhase from contracts.ts and ArtifactType
+// from the Runtime contract registry source, then asserts every value is documented. Add a
 // new enum value in code and this test fails until the alignment doc catches up.
 //
 // Usage: node tests/harness-engineering/validate-phase2.mjs
@@ -21,18 +21,34 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..');
 const alignDir = path.join(repoRoot, 'docs', 'harness-engineering', 'alignment');
 const contractsPath = path.join(repoRoot, 'packages', 'shared', 'src', 'contracts.ts');
+const runtimeContractTypesPath = path.join(
+  repoRoot,
+  'packages',
+  'shared',
+  'src',
+  'runtime-contracts',
+  'contract-types.ts'
+);
 
 // ---- Parse real string-union enums from contracts.ts (reality sync) ----
 function parseUnion(source, typeName) {
   const match = source.match(new RegExp(`export type ${typeName}\\s*=([\\s\\S]*?);`));
   if (!match) return null;
-  return [...match[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  const literals = [...match[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  if (literals.length > 0) return literals;
+
+  const tupleRef = match[1].match(/\(typeof\s+([A-Z0-9_]+)\)\[number\]/);
+  if (!tupleRef) return null;
+  const tupleMatch = source.match(new RegExp(`export const ${tupleRef[1]}\\s*=\\s*\\[([\\s\\S]*?)\\]\\s*as const`));
+  if (!tupleMatch) return null;
+  return [...tupleMatch[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
 }
 
 const contractsSrc = await readFile(contractsPath, 'utf8');
+const runtimeContractTypesSrc = await readFile(runtimeContractTypesPath, 'utf8');
 const sessionStatuses = parseUnion(contractsSrc, 'SessionStatus');
 const agentRunPhases = parseUnion(contractsSrc, 'AgentRunPhase');
-const artifactTypes = parseUnion(contractsSrc, 'ArtifactType');
+const artifactTypes = parseUnion(runtimeContractTypesSrc, 'RuntimeArtifactType');
 
 // Curated, stable markers that aren't clean string unions in source.
 const executionOutcomeKinds = ['delivered', 'rework', 'ask_user', 'cancelled', 'failed'];
@@ -103,7 +119,7 @@ for (const doc of docs) {
   if (doc.realityCheck) {
     const { name, values } = doc.realityCheck;
     if (!values || !values.length) {
-      checks.push({ label: `parse ${name} from contracts.ts`, ok: false, detail: 'union not found' });
+      checks.push({ label: `parse ${name} from its authoritative contract source`, ok: false, detail: 'union not found' });
     } else {
       for (const value of values) {
         checks.push({ label: `${name} '${value}' documented`, ok: has(content, value) });
@@ -126,7 +142,7 @@ const RESET = '\x1b[0m';
 
 console.log('\nHarness Engineering — Phase 2 (Runtime Alignment) conformance\n');
 console.log(`docs dir:  ${path.relative(repoRoot, alignDir)}`);
-console.log(`reality:   SessionStatus(${sessionStatuses?.length ?? 0}) · AgentRunPhase(${agentRunPhases?.length ?? 0}) · ArtifactType(${artifactTypes?.length ?? 0}) parsed from contracts.ts\n`);
+console.log(`reality:   SessionStatus(${sessionStatuses?.length ?? 0}) · AgentRunPhase(${agentRunPhases?.length ?? 0}) · ArtifactType(${artifactTypes?.length ?? 0}) parsed from authoritative shared sources\n`);
 
 let total = 0;
 let failed = 0;

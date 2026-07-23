@@ -20,12 +20,3 @@ test('AgentTask.assignedBy 接受 system ActorRef (R7 autopilot 预留)', () => 
   const task = { assignedBy: actor } as unknown as Pick<AgentTask, 'assignedBy'>;
   assert.equal(task.assignedBy?.type, 'system');
 });
-
-test('AgentTask 兼容旧字段 assigneeAgentId / assignedByAgentId', () => {
-  const task = {
-    assigneeAgentId: 'agent-legacy',
-    assignedByAgentId: 'coord-legacy'
-  } as unknown as Pick<AgentTask, 'assigneeAgentId' | 'assignedByAgentId'>;
-  assert.equal(task.assigneeAgentId, 'agent-legacy');
-  assert.equal(task.assignedByAgentId, 'coord-legacy');
-});

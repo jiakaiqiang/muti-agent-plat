@@ -204,11 +204,51 @@ async function waitForEventCount(apiBase, sessionId, count, timeoutMs = 15_000) 
   throw new Error(`Timed out waiting for ${count} persisted PostgreSQL events, last=${last}`);
 }
 
+async function assertRelationalFacts(sessionId) {
+  const client = new Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    const missingComments = await client.query(`
+      select c.relname table_name, null column_name
+        from pg_class c join pg_namespace n on n.oid=c.relnamespace
+       where n.nspname='agent_cluster' and c.relkind in ('r','p') and obj_description(c.oid,'pg_class') is null
+      union all
+      select c.relname, a.attname
+        from pg_class c join pg_namespace n on n.oid=c.relnamespace join pg_attribute a on a.attrelid=c.oid
+       where n.nspname='agent_cluster' and c.relkind in ('r','p') and a.attnum>0 and not a.attisdropped
+         and col_description(c.oid,a.attnum) is null
+    `);
+    if (missingComments.rows.length) {
+      throw new Error(`Relational comments are incomplete: ${JSON.stringify(missingComments.rows)}`);
+    }
+    const facts = await client.query(`
+      select
+        (select count(*) from agent_cluster.sessions where external_id=$1) session_count,
+        (select count(*) from agent_cluster.collaboration_events e join agent_cluster.sessions s on s.id=e.session_id where s.external_id=$1) event_count,
+        (select count(*) from agent_cluster.event_outbox o where o.aggregate_external_id=$1) outbox_count,
+        (select count(*) from agent_cluster.session_progress p join agent_cluster.sessions s on s.id=p.session_id where s.external_id=$1) progress_count,
+        (select count(*) from agent_cluster.session_status_history h join agent_cluster.sessions s on s.id=h.session_id where s.external_id=$1) status_history_count,
+        (select count(*) from agent_cluster.tools where provider='agent-cluster' and deleted_at is null) builtin_tool_count,
+        (select count(*) from agent_cluster.tool_versions) tool_version_count
+    `, [sessionId]);
+    const row = facts.rows[0];
+    if (Number(row.session_count) !== 1 || Number(row.event_count) < 2 || Number(row.outbox_count) < Number(row.event_count)) {
+      throw new Error(`Relational session facts are incomplete: ${JSON.stringify(row)}`);
+    }
+    if (Number(row.progress_count) !== 1 || Number(row.status_history_count) < 1 || Number(row.builtin_tool_count) < 4 || Number(row.tool_version_count) < 4) {
+      throw new Error(`Relational projections are incomplete: ${JSON.stringify(row)}`);
+    }
+  } finally {
+    await client.end();
+  }
+}
+
 async function dropSmokeTable() {
   const client = new Client({ connectionString: databaseUrl });
   await client.connect();
   try {
-    await client.query(`drop table if exists ${tableName}`);
+    await client.query(`drop table if exists public.${tableName}`);
+    await client.query(`drop table if exists agent_cluster.${tableName}`);
   } finally {
     await client.end();
   }
@@ -233,6 +273,7 @@ try {
   });
   const sessionId = created.data.session.id;
   await waitForEventCount(first.apiBase, sessionId, 2);
+  await assertRelationalFacts(sessionId);
   await stopServer(first.server);
   first = undefined;
 

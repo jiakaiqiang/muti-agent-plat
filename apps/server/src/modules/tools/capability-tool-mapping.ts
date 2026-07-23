@@ -1,6 +1,13 @@
 /** Planned capability IDs that are mapped now but not yet part of defaultCapabilities. */
 export const PLANNED_TOOL_CAPABILITY_IDS = ['cap-file-read', 'cap-code-search'] as const;
 
+export const TOOL_WORKSPACE_CAPABILITY_MAPPING = {
+  read_file: ['read'],
+  search_code: ['read'],
+  write_file: ['write'],
+  run_test: ['command', 'test']
+} as const;
+
 /** Maps runtime capability IDs to executable tool names. */
 export const CAPABILITY_TOOL_MAPPING: Record<string, string[]> = {
   'cap-file-read': ['read_file'],
@@ -34,4 +41,16 @@ export function getToolsForCapabilities(capabilities: string[]): string[] {
 /** Return whether a capability currently maps to at least one tool. */
 export function hasToolsForCapability(capability: string): boolean {
   return getToolsForCapability(capability).length > 0;
+}
+
+export function getWorkspaceRequirementsForTools(toolNames: readonly string[]) {
+  const requirements = new Set<'read' | 'write' | 'command' | 'test'>();
+  for (const toolName of toolNames) {
+    for (const requirement of TOOL_WORKSPACE_CAPABILITY_MAPPING[
+      toolName as keyof typeof TOOL_WORKSPACE_CAPABILITY_MAPPING
+    ] ?? []) {
+      requirements.add(requirement);
+    }
+  }
+  return [...requirements];
 }

@@ -30,7 +30,7 @@ export function presentContextEnvelopeV2Debug(envelope: ContextEnvelopeV2): Cont
     summarizeL6(envelope)
   ];
   const droppedReasons: string[] = [];
-  if (envelope.L1.truncated) droppedReasons.push('L1 navigation truncated');
+  if (envelope.L1.navigation.truncated) droppedReasons.push('L1 navigation truncated');
   if (envelope.L3.truncated) droppedReasons.push('L3 evidence truncated');
   return {
     version: envelope.version,
@@ -48,8 +48,12 @@ function summarizeL0(envelope: ContextEnvelopeV2): LayerDebugSummary {
 }
 
 function summarizeL1(envelope: ContextEnvelopeV2): LayerDebugSummary {
-  const summary = baseSummary('L1', envelope.L1.entries.length, JSON.stringify(envelope.L1.entries).length);
-  if (envelope.L1.truncated) summary.truncated = true;
+  const summary = baseSummary(
+    'L1',
+    envelope.L1.navigation.entries.length,
+    JSON.stringify(envelope.L1.navigation.entries).length
+  );
+  if (envelope.L1.navigation.truncated) summary.truncated = true;
   return summary;
 }
 

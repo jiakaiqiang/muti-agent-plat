@@ -1,10 +1,28 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import type { SessionListItem } from '@/types/contracts'
+import { storeToRefs } from 'pinia'
+import { useWorkspaceUiStore } from '@/stores/workspaceUi'
+import type { SessionListItem, SessionStatus } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
 import UiIcon from './UiIcon.vue'
 
-type SessionTab = 'all' | 'mine' | 'favorites'
+type SessionStatusTone = 'draft' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled'
+
+const sessionStatusPresentation: Record<SessionStatus, { label: string; tone: SessionStatusTone }> = {
+  DRAFT_INPUT: { label: '待理解', tone: 'draft' },
+  AGENT_DISCUSSING: { label: '讨论中', tone: 'running' },
+  WAIT_USER_CONFIRM: { label: '待确认', tone: 'waiting' },
+  WAIT_WORKFLOW_SELECT: { label: '选流程', tone: 'waiting' },
+  WAIT_WORKFLOW_STEP_CONFIRM: { label: '待确认', tone: 'waiting' },
+  REVISING_BRIEF: { label: '修订中', tone: 'running' },
+  EXECUTING: { label: '执行中', tone: 'running' },
+  POST_REVIEW: { label: '复盘中', tone: 'running' },
+  REWORKING: { label: '返工中', tone: 'running' },
+  WAIT_USER_DECISION: { label: '待决策', tone: 'waiting' },
+  COMPLETED: { label: '已完成', tone: 'completed' },
+  FAILED: { label: '失败', tone: 'failed' },
+  CANCELLED: { label: '已取消', tone: 'cancelled' }
+}
 
 const props = defineProps<{
   sessions: SessionListItem[]
@@ -20,8 +38,8 @@ const emit = defineEmits<{
   toggleFavorite: [sessionId: string]
 }>()
 
-const activeTab = ref<SessionTab>('all')
-const search = ref('')
+const workspaceUiStore = useWorkspaceUiStore()
+const { sessionListTab: activeTab, sessionSearchQuery: search } = storeToRefs(workspaceUiStore)
 const contextMenu = ref<{ sessionId: string; x: number; y: number } | undefined>()
 
 const favoriteIds = computed(() => new Set(props.favoriteSessionIds))
@@ -66,6 +84,10 @@ function isFavorite(sessionId: string) {
 
 function isDeletingSession(sessionId: string) {
   return deletingIds.value.has(sessionId)
+}
+
+function sessionStatus(status: SessionStatus) {
+  return sessionStatusPresentation[status]
 }
 
 function handleGlobalPointerDown(event: PointerEvent) {
@@ -117,7 +139,16 @@ onBeforeUnmount(() => {
       @click="emit('select', session.id)"
       @contextmenu="openContextMenu($event, session.id)"
     >
-      <AgentPortrait :tone="(index % 5) + 1" :label="session.title" size="md" />
+      <span class="session-avatar">
+        <AgentPortrait :tone="(index % 5) + 1" :label="session.title" size="md" />
+        <span
+          :class="['session-status-badge', `status-${sessionStatus(session.status).tone}`]"
+          :aria-label="`会话状态：${sessionStatus(session.status).label}`"
+          :title="sessionStatus(session.status).label"
+        >
+          {{ sessionStatus(session.status).label }}
+        </span>
+      </span>
       <span class="session-item-main">
         <span class="session-title">{{ session.title }}</span>
       </span>

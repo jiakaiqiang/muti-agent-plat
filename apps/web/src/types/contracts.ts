@@ -1,7 +1,7 @@
 import type {
   ActorRef,
   ActorType,
-  Agent,
+  AgentDefinition,
   AgentStatus,
   AgentTaskStatus,
   CapabilityDefinition,
@@ -9,16 +9,17 @@ import type {
   CapabilityRiskLevel,
   CollaborationEvent,
   CompiledAgentProfile,
+  ContextEnvelopeV2,
   ContextPipelineVersion,
-  EngineeringRuntimeSelection,
   EventPriority,
-  ExecutionTarget,
+  ExecutionTermination,
   KnowledgeBase,
   KnowledgeDocument,
   OpsHealth,
   PostReviewAction,
   ProfileDiagnostic,
   RagMatchedChunk,
+  RuntimeAvailabilityStatus,
   RuntimeCapabilityDefinition,
   RuntimeFileChange,
   RuntimeModelConfig,
@@ -28,6 +29,10 @@ import type {
   RuntimeModelProvider,
   RuntimeModelUpdateInput,
   RuntimeInvocationStatus,
+  RuntimeInvocationProfileSnapshot,
+  RuntimePreference,
+  ResolvedToolCatalog,
+  ResolvedExecutionTarget,
   HandoffSuggestion,
   TaskRoutingMode,
   RuntimeType,
@@ -35,6 +40,7 @@ import type {
   SessionListItem,
   SessionWorkingDirectory,
   SessionStatus,
+  SupplementalContextResolution,
   Skill,
   SkillFile,
   SuggestedAgentTask,
@@ -42,13 +48,15 @@ import type {
   WorkspaceSnapshot,
   WorkspaceSkippedReason,
   WorkspaceTreeNode,
-  UserMessageIntent
+  WorkspaceChange,
+  UserMessageIntent,
+  WorkflowStatus
 } from '@agent-cluster/shared'
 
 export type {
   ActorRef,
   ActorType,
-  Agent,
+  AgentDefinition,
   AgentStatus,
   AgentTaskStatus,
   Artifact,
@@ -59,13 +67,12 @@ export type {
   CollaborationEvent,
   CollaborationEventType,
   CompiledAgentProfile,
+  ContextEnvelopeV2,
   ContextPipelineVersion,
-  EngineeringRuntimeConfig,
-  EngineeringRuntimeSelection,
   EventMetadata,
   EventPriority,
+  ExecutionTermination,
   EventRenderType,
-  ExecutionTarget,
   KnowledgeBase,
   KnowledgeDocument,
   KnowledgeScope,
@@ -73,6 +80,7 @@ export type {
   PostReviewAction,
   ProfileDiagnostic,
   RagMatchedChunk,
+  RuntimeAvailabilityStatus,
   RuntimeCapabilityDefinition,
   RuntimeFileChange,
   RuntimeModelConfig,
@@ -82,6 +90,10 @@ export type {
   RuntimeModelProvider,
   RuntimeModelUpdateInput,
   RuntimeInvocationStatus,
+  RuntimeInvocationProfileSnapshot,
+  RuntimePreference,
+  ResolvedExecutionTarget,
+  ResolvedToolCatalog,
   HandoffSuggestion,
   TaskRoutingMode,
   RuntimeType,
@@ -89,6 +101,7 @@ export type {
   SessionListItem,
   SessionWorkingDirectory,
   SessionStatus,
+  SupplementalContextResolution,
   Skill,
   SkillFile,
   SuggestedAgentTask,
@@ -96,7 +109,20 @@ export type {
   WorkspaceSnapshot,
   WorkspaceSkippedReason,
   WorkspaceTreeNode,
-  UserMessageIntent
+  WorkspaceChange,
+  UserMessageIntent,
+  AgentWorkflowNode,
+  HumanApprovalWorkflowNode,
+  RobotApprovalWorkflowNode,
+  WorkflowNode,
+  WorkflowDefinition,
+  WorkflowEdge,
+  WorkflowVersion,
+  WorkflowRun,
+  WorkflowNodeRun,
+  WorkflowApprovalRecord,
+  WorkflowRunState,
+  WorkflowStatus
 } from '@agent-cluster/shared'
 
 export { DEFAULT_CONTEXT_PIPELINE_VERSION, SUPPORTED_CONTEXT_PIPELINE_VERSIONS } from '@agent-cluster/shared'
@@ -105,9 +131,14 @@ export type SessionViewMode = 'chat' | 'collaboration_graph' | 'workflow' | 'deb
 
 export type ConfirmationReason =
   | 'confirm_task_brief'
+  | 'select_workflow'
+  | 'initialize_empty_workspace'
+  | 'confirm_workflow_step'
+  | 'confirm_workflow_human_gate'
   | 'approve_high_risk_capability'
   | 'resolve_contract_conflict'
   | 'confirm_memory_write'
+  | 'confirm_local_report_save'
   | 'confirm_feishu_notification'
   | 'continue_after_budget_warning'
 
@@ -121,15 +152,18 @@ export type RuntimeError = {
   code:
     | 'RUNTIME_TIMEOUT'
     | 'RUNTIME_CANCELLED'
+    | 'RUNTIME_INVOCATION_ERROR'
     | 'MODEL_ERROR'
-    | 'OUTPUT_SCHEMA_INVALID'
+    | 'RUNTIME_OUTPUT_CONTRACT_VIOLATION'
     | 'CAPABILITY_BLOCKED'
     | 'CONTEXT_INSUFFICIENT'
     | 'TOKEN_BUDGET_EXCEEDED'
     | 'UNKNOWN_ERROR'
   message: string
   retryable: boolean
+  requestedContext?: RuntimeContextRequest
   details?: Record<string, unknown>
+  termination?: ExecutionTermination
 }
 
 export type BriefEventPayload = {
@@ -157,6 +191,26 @@ export type ConfirmationRequestedPayload = {
   relatedTaskId?: string
   relatedCapabilityId?: string
   relatedArtifactId?: string
+  targetPath?: string
+  workflowId?: string
+  workflowName?: string
+  workflowRunId?: string
+  workflowNodeId?: string
+  workflowNodeRunId?: string
+  expectedRunRevision?: number
+  workflowStepIndex?: number
+  workflowStepCount?: number
+  outputSummary?: string
+  workflowOptions?: Array<{
+    id: string
+    name: string
+    version: number
+    nodeCount: number
+    agentCount?: number
+    humanApprovalCount?: number
+    robotApprovalCount?: number
+    status: WorkflowStatus
+  }>
   candidate?: {
     content?: string
     sourceEventId?: string
@@ -171,8 +225,6 @@ export type TaskEventPayload = {
   status: AgentTaskStatus
   assignedBy?: ActorRef
   assignee?: ActorRef
-  assignedByAgentId?: string
-  assigneeAgentId?: string
   routingMode?: TaskRoutingMode
   autoResolutionAttempted?: boolean
   assignmentReason?: string
@@ -214,7 +266,7 @@ export type AgentStatusChangedPayload = {
 export type RuntimeEventPayload = {
   runtimeInvocationId: string
   runtimeType: RuntimeType
-  runtimeSelection?: EngineeringRuntimeSelection
+  executionTarget?: ResolvedExecutionTarget
   agentId: string
   taskId?: string
   status: RuntimeInvocationStatus
@@ -223,6 +275,7 @@ export type RuntimeEventPayload = {
   tokenOutput?: number
   cost?: number
   error?: RuntimeError
+  termination?: ExecutionTermination
   requestedContext?: RuntimeContextRequest
 }
 
@@ -249,14 +302,38 @@ export type ArtifactEventPayload = {
   title: string
   contentSummary?: string
   relatedCapabilityId?: string
-  runtimeArtifacts?: Array<{
+  platformProjections?: RuntimeFileChange[]
+  runtimeProposals?: Array<{
     type: string
     title: string
-    summary?: string
-    content?: string
-    metadata?: Record<string, unknown>
+    summary: string | null
+    content: string
+    uri: string | null
+    metadata: {
+      fileChanges: RuntimeFileChange[]
+      validationEvidence: unknown | null
+      summaryMemoryCheckpoint: unknown | null
+    }
   }>
-  fileChanges?: RuntimeFileChange[]
+  systemEvidence?: {
+    workspaceChangeSet: { id: string; changes: WorkspaceChange[] } | null
+    verifiedTestResults: Array<{
+      command: string
+      status: 'passed' | 'failed'
+      exitCode: number | null
+      stdout: string
+      stderr: string
+      startedAt: string
+      completedAt: string
+    }>
+    capturedAt: string
+    invocationId: string
+  } | null
+  report?: {
+    kind: 'project_architecture_analysis'
+    title: string
+    content: string
+  }
 }
 
 export type RagRetrievedPayload = {
@@ -277,6 +354,14 @@ export type FinalDeliveryPayload = {
   artifactIds?: string[]
   artifactRefs?: string[]
   notificationDraftArtifactId?: string
+  report?: {
+    artifactId: string
+    title: string
+    format: 'markdown'
+    content: string
+    suggestedPath: string
+    requiresUserConfirmation: boolean
+  }
 }
 
 export type ChatMessage = {
@@ -342,6 +427,17 @@ export type ConfirmationCardState = {
   relatedTaskId?: string
   relatedCapabilityId?: string
   relatedArtifactId?: string
+  targetPath?: string
+  workflowId?: string
+  workflowName?: string
+  workflowRunId?: string
+  workflowNodeId?: string
+  workflowNodeRunId?: string
+  expectedRunRevision?: number
+  workflowStepIndex?: number
+  workflowStepCount?: number
+  outputSummary?: string
+  workflowOptions?: ConfirmationRequestedPayload['workflowOptions']
 }
 
 export type TaskViewState = {
@@ -350,8 +446,6 @@ export type TaskViewState = {
   status: AgentTaskStatus
   assignedBy?: ActorRef
   assignee?: ActorRef
-  assignedByAgentId?: string
-  assigneeAgentId?: string
   routingMode?: TaskRoutingMode
   autoResolutionAttempted?: boolean
   assignmentReason?: string
@@ -378,6 +472,8 @@ export const sessionStatusLabel: Record<SessionStatus, string> = {
   DRAFT_INPUT: '待理解',
   AGENT_DISCUSSING: 'Agent 讨论中',
   WAIT_USER_CONFIRM: '等待确认',
+  WAIT_WORKFLOW_SELECT: '选择工作流',
+  WAIT_WORKFLOW_STEP_CONFIRM: '确认工作流环节',
   REVISING_BRIEF: '修订任务契约',
   EXECUTING: '执行中',
   POST_REVIEW: '复盘中',

@@ -1,10 +1,11 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import {
   api,
   buildServer,
+  createSmokeV2State,
   findFreePort,
   listEvents,
   root,
@@ -40,14 +41,20 @@ function outputFor(request) {
   const kind = request.expectedOutput?.kind;
   if (kind === 'agent_message') {
     return {
+      schemaVersion: '1.0',
       kind,
       messageKind: 'discussion',
-      content: 'This slow discussion response should arrive after the orchestrator timeout.'
+      content: 'This slow discussion response should arrive after the orchestrator timeout.',
+      targetAgentIds: [],
+      targetAgentKeys: [],
+      mentionedAgentIds: [],
+      relatedTaskIds: []
     };
   }
 
   if (kind === 'task_brief') {
     return {
+      schemaVersion: '1.0',
       kind,
       goal: 'Verify brief generation survives a slow discussion runtime.',
       scope: ['Create a task brief after discussion timeout degradation'],
@@ -61,6 +68,13 @@ function outputFor(request) {
           title: 'Validate discussion timeout handling',
           description: 'Confirm the session reaches the brief confirmation stage.',
           suggestedAgentKey: 'backend',
+          routingMode: 'coordinator_controlled',
+          assignmentReason: null,
+          contextRequirements: [],
+          verificationPlan: [],
+          riskNotes: [],
+          requiresUserConfirmation: false,
+          dependsOnTaskTitles: [],
           acceptanceCriteria: ['The timed-out discussion invocation is recorded as RUNTIME_TIMEOUT']
         }
       ]
@@ -120,6 +134,8 @@ await new Promise((resolve) => llmServer.listen(llmPort, '127.0.0.1', resolve));
 const serverPort = await findFreePort();
 const apiBase = `http://127.0.0.1:${serverPort}/api`;
 const dataFile = join(root, '.cache', 'agent-cluster', `discussion-timeout-brief-${Date.now()}.json`);
+mkdirSync(dirname(dataFile), { recursive: true });
+writeFileSync(dataFile, JSON.stringify(createSmokeV2State()), 'utf8');
 const server = spawn(process.execPath, ['apps/server/dist/apps/server/src/main.js'], {
   cwd: root,
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -130,7 +146,7 @@ const server = spawn(process.execPath, ['apps/server/dist/apps/server/src/main.j
     AGENT_CLUSTER_PERSISTENCE_BACKEND: 'file',
     AGENT_CLUSTER_DATA_FILE: dataFile,
     AGENT_CLUSTER_SEED_DEFAULT_AGENTS: 'true',
-    DEFAULT_AGENT_RUNTIME_TYPE: 'generic_llm',
+    GLOBAL_DEFAULT_RUNTIME_TYPE: 'generic_llm',
     LLM_PROVIDER: 'openai-compatible',
     LLM_MODEL: 'discussion-timeout-smoke-model',
     LLM_API_KEY: 'discussion-timeout-smoke-key',
@@ -156,12 +172,29 @@ try {
     body: JSON.stringify({
       input: 'Trigger a slow discussion and still generate a task brief.',
       agentIds: ['coordinator', 'requirements', 'backend'],
-      tokenBudget: 50_000
+      tokenBudget: 50_000,
+      runtimePreference: {
+        preferredRuntimeType: 'generic_llm',
+        allowedRuntimeTypes: ['generic_llm']
+      }
     })
   });
   const sessionId = created.data.session.id;
-  await waitForEvent(apiBase, sessionId, 'brief_created', 20_000);
-  await waitForStatus(apiBase, sessionId, 'WAIT_USER_CONFIRM', 20_000);
+  try {
+    await waitForEvent(apiBase, sessionId, 'brief_created', 20_000);
+    await waitForStatus(apiBase, sessionId, 'WAIT_USER_CONFIRM', 20_000);
+  } catch (error) {
+    const [events, invocations] = await Promise.all([
+      listEvents(apiBase, sessionId),
+      api(apiBase, `/sessions/${sessionId}/debug/runtime-invocations`)
+    ]);
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)}; ` +
+        `LLM requests=${JSON.stringify(llmRequests)}; ` +
+        `invocations=${JSON.stringify(invocations.data.items)}; ` +
+        `events=${JSON.stringify(events)}`
+    );
+  }
 
   const invocations = await api(apiBase, `/sessions/${sessionId}/debug/runtime-invocations`);
   const discussionInvocation = invocations.data.items.find((item) => item.phase === 'discussion');

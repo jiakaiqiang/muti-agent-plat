@@ -1,5 +1,5 @@
 import type {
-  Agent,
+  AgentDefinition,
   CollaborationEvent,
   KnowledgeBase,
   KnowledgeDocument,
@@ -9,16 +9,18 @@ import type {
 
 export const mockSessionId = 'session-demo-001'
 
-export const mockAgents: Agent[] = [
+export const mockAgents: AgentDefinition[] = [
   {
     id: 'agent-coordinator',
     key: 'coordinator',
     name: 'Coordinator',
     role: '协作编排',
-    runtimeType: 'mock',
+    profileMarkdown: '# Coordinator\n\nCoordinate task ownership, evidence, and delivery.',
+    tags: ['coordination', 'routing'],
     status: 'active',
     capabilityIds: ['cap-brief', 'cap-router'],
     defaultKnowledgeBaseIds: ['kb-project'],
+    profileRevision: 1,
     createdAt: '2026-05-27T12:00:00.000Z',
     updatedAt: '2026-05-27T12:00:00.000Z'
   },
@@ -27,10 +29,12 @@ export const mockAgents: Agent[] = [
     key: 'architect',
     name: 'Architect',
     role: '架构方案',
-    runtimeType: 'mock',
+    profileMarkdown: '# Architect\n\nDesign system boundaries and review architecture decisions.',
+    tags: ['architecture', 'review'],
     status: 'active',
     capabilityIds: ['cap-design-review'],
     defaultKnowledgeBaseIds: ['kb-project'],
+    profileRevision: 1,
     createdAt: '2026-05-27T12:00:00.000Z',
     updatedAt: '2026-05-27T12:00:00.000Z'
   },
@@ -39,10 +43,12 @@ export const mockAgents: Agent[] = [
     key: 'backend',
     name: 'Backend',
     role: '后端实现',
-    runtimeType: 'mock',
+    profileMarkdown: '# Backend\n\nImplement and validate server-side behavior.',
+    tags: ['backend', 'implementation'],
     status: 'active',
     capabilityIds: ['cap-dry-run'],
     defaultKnowledgeBaseIds: ['kb-api'],
+    profileRevision: 1,
     createdAt: '2026-05-27T12:00:00.000Z',
     updatedAt: '2026-05-27T12:00:00.000Z'
   },
@@ -51,10 +57,12 @@ export const mockAgents: Agent[] = [
     key: 'test',
     name: 'Test',
     role: '验证与回归',
-    runtimeType: 'mock',
+    profileMarkdown: '# Test\n\nValidate acceptance criteria and report reproducible evidence.',
+    tags: ['testing', 'validation'],
     status: 'active',
     capabilityIds: ['cap-test-report'],
     defaultKnowledgeBaseIds: ['kb-api'],
+    profileRevision: 1,
     createdAt: '2026-05-27T12:00:00.000Z',
     updatedAt: '2026-05-27T12:00:00.000Z'
   },
@@ -63,10 +71,12 @@ export const mockAgents: Agent[] = [
     key: 'review',
     name: 'Review',
     role: '最终复盘',
-    runtimeType: 'mock',
+    profileMarkdown: '# Review\n\nReview outcomes, risks, and delivery completeness.',
+    tags: ['review', 'delivery'],
     status: 'active',
     capabilityIds: ['cap-post-review'],
     defaultKnowledgeBaseIds: ['kb-project'],
+    profileRevision: 1,
     createdAt: '2026-05-27T12:00:00.000Z',
     updatedAt: '2026-05-27T12:00:00.000Z'
   }
@@ -74,6 +84,7 @@ export const mockAgents: Agent[] = [
 
 export const mockSession: SessionDetail = {
   id: mockSessionId,
+  dataEpoch: 'epoch-demo',
   title: '合同驱动的群聊协作闭环',
   originalInput: '基于五份 v0.1 契约实现三栏群聊最小骨架。',
   status: 'WAIT_USER_CONFIRM',
@@ -342,7 +353,7 @@ export const mockEvents: CollaborationEvent[] = [
         taskId: 'task-dry-run',
         title: '后端 Agent dry-run 执行',
         status: 'running',
-        assigneeAgentId: 'agent-backend',
+        assignee: { type: 'agent', id: 'agent-backend' },
         acceptanceCriteria: ['产出 dry-run 摘要', '不修改前端文件']
       }
     },
@@ -388,7 +399,7 @@ export const mockEvents: CollaborationEvent[] = [
         taskId: 'task-dry-run',
         title: '后端 Agent dry-run 执行',
         status: 'completed',
-        assigneeAgentId: 'agent-backend',
+        assignee: { type: 'agent', id: 'agent-backend' },
         resultSummary: 'dry-run 通过，未发现阻塞问题。'
       }
     },
@@ -409,7 +420,7 @@ export const mockEvents: CollaborationEvent[] = [
         taskId: 'task-verify',
         title: '测试 Agent dry-run 验证',
         status: 'completed',
-        assigneeAgentId: 'agent-test',
+        assignee: { type: 'agent', id: 'agent-test' },
         resultSummary: 'mock 流程覆盖创建、讨论、确认、执行、验证、复盘与交付。'
       }
     },

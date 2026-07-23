@@ -22,6 +22,8 @@
 
 ## 变更规则
 
+- [relational-persistence-v2.md](./relational-persistence-v2.md)：PostgreSQL 关系模型、会话写入边界、JSON 迁移和回滚合同。
+
 契约字段变更分三级：
 
 - patch：新增可选字段，不影响既有前后端。

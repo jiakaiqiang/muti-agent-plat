@@ -1,8 +1,8 @@
 import type {
   ContextEnvelopeV2,
   ContextEnvelopeV2Layer,
-  ContextL0WorkspaceIdentity,
-  ContextL1NavigationManifest,
+  ContextL0Authority,
+  ContextL1Invocation,
   ContextL2ProjectMap,
   ContextL3SelectedEvidence,
   ContextL4ToolResults,
@@ -26,19 +26,30 @@ type LayersAreStable = Assert<
 
 type VersionIsFixed = Assert<IsExact<ContextEnvelopeV2['version'], 'v2'>>;
 
-const l0: ContextL0WorkspaceIdentity = {
-  workspaceId: 'ws-1',
-  rootName: 'demo',
-  providerKind: 'server_local',
-  revision: { id: 'rev-69', observedAt: '2026-07-11T00:00:00.000Z' }
+const l0: ContextL0Authority = {
+  systemRules: ['Stay grounded.'],
+  agentId: 'agent-1',
+  profileHash: 'profile-hash',
+  profileRevision: 1,
+  toolCatalogHash: 'catalog-hash',
+  workspace: {
+    workspaceId: 'ws-1',
+    rootName: 'demo',
+    providerKind: 'server_local',
+    revision: { id: 'rev-69', observedAt: '2026-07-11T00:00:00.000Z' }
+  }
 };
 
-const l1: ContextL1NavigationManifest = {
-  entries: [
-    { path: 'src', kind: 'directory', generated: false, sensitive: false },
-    { path: 'src/index.ts', kind: 'file', generated: false, sensitive: false, size: 100 }
-  ],
-  truncated: false
+const l1: ContextL1Invocation = {
+  sessionGoal: 'Add auth',
+  phase: 'task_execution',
+  navigation: {
+    entries: [
+      { path: 'src', kind: 'directory', generated: false, sensitive: false },
+      { path: 'src/index.ts', kind: 'file', generated: false, sensitive: false, size: 100 }
+    ],
+    truncated: false
+  }
 };
 
 const l2: ContextL2ProjectMap = {

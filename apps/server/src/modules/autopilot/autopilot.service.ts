@@ -178,7 +178,7 @@ export class AutopilotService implements OnModuleInit, OnModuleDestroy {
           input: autopilot.prompt,
           agentIds: autopilot.agentIds,
           tokenBudget: autopilot.tokenBudget,
-          engineeringRuntimeType: 'mock',
+          runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] },
           origin: 'autopilot',
           autopilotRunId: run.id
         });

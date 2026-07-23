@@ -12,10 +12,10 @@ test('encode writes one JSONL message', () => {
 
 test('decoder reads a single complete frame', () => {
   const dec = new JsonRpcDecoder();
-  const buf = encodeJsonRpc({ jsonrpc: '2.0', method: 'agent.text_delta', params: { text: 'hi' } });
+  const buf = encodeJsonRpc({ jsonrpc: '2.0', method: 'thread/started', params: { threadId: 'thread-1' } });
   const msgs = dec.feed(buf);
   assert.equal(msgs.length, 1);
-  assert.equal(msgs[0].method, 'agent.text_delta');
+  assert.equal(msgs[0].method, 'thread/started');
 });
 
 test('decoder assembles frame across split chunks', () => {

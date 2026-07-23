@@ -1,23 +1,24 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { execFile } from 'node:child_process';
 import { readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { extname, join, relative } from 'node:path';
+import { extname, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type {
-  AgentRunInput,
+  InvocationPlan,
   AgentRunResult,
   AgentRuntimeAdapter,
   AgentRuntimeEvent,
   AgentRuntimeRunHandle,
-  RuntimeArtifactOutput,
+  RuntimeError,
   RuntimeFileChange,
   RuntimeOutput,
-  TaskExecutionResultOutput,
+  VerifiedTestResult,
   UUID
 } from '@agent-cluster/shared';
+import { createAgentMessageOutput } from '@agent-cluster/shared';
 import {
-  engineeringRuntimeStreaming,
+  runtimeStreamingMode,
   optionalRuntimeTimeoutMs,
   positiveRuntimeTimeoutMs
 } from '../../common/runtime-config.js';
@@ -29,36 +30,49 @@ import {
   type ClaudeStreamingRunnerOptions
 } from './streaming/claude-streaming-runner.js';
 import { frameToRuntimeEvent } from './streaming/frame-to-runtime-event.js';
+import type { RuntimeStreamFrame } from './streaming/runtime-stream-frame.js';
 import { WorkdirBriefService, type WorkdirBriefLease } from './streaming/workdir-brief.service.js';
+import { InvocationWorkspaceBindingsService } from './invocation-workspace-bindings.service.js';
+import { withStructuredTermination } from './structured-termination-run-handle.js';
+import { isChildProcessTimeoutError } from '../../common/execution-termination.js';
+import { extractRuntimeError } from '../../common/runtime-error.js';
+import { resolveCliToolAuthority } from './cli-tool-authority.js';
+import {
+  runtimeOutputExample,
+  runtimeOutputSchema,
+  validateRuntimeOutput,
+  type RuntimeOutputKind
+} from './runtime-output-schema.js';
+import { emptyRuntimeSystemEvidence, runtimeSystemEvidence } from './runtime-system-evidence.js';
+import {
+  resolveClaudeCommand,
+  sanitizeClaudeProcessError
+} from './claude-cli-launcher.js';
+import { ToolInvocationAuditService } from '../tools/tool-invocation-audit.service.js';
 
-/**
- * M4-05 · 组装 ClaudeAdapter 传给 startClaudeStreaming 的 options。
- *
- * 从 runStreaming 抽出为纯函数,便于单测:
- *   - input.options.resume.workDir → spawn 的 cwd
- *   - input.options.resume.cliSessionId → 追加到 args 尾: [...args, '--resume', <id>]
- * 非字符串类型静默忽略,保持默认行为。
- */
 export function buildClaudeStreamingOptions(params: {
-  input: AgentRunInput;
   command: string;
   args: string[];
   baseEnv: Record<string, string | undefined>;
   firstFrameTimeoutMs: number;
   idleTimeoutMs: number;
   absoluteTimeoutMs?: number;
+  workDir?: string;
+  resumeCliSessionId?: string;
 }): ClaudeStreamingRunnerOptions {
-  const { input, command, args, baseEnv, firstFrameTimeoutMs, idleTimeoutMs, absoluteTimeoutMs } = params;
-  const resume = extractResume(input.options);
-  const workDir =
-    resume.workDir ??
-    (input.contextPack.workingDirectory?.kind === 'server_local'
-      ? input.contextPack.workingDirectory.path
-      : undefined);
-  const finalArgs = resume.cliSessionId ? [...args, '--resume', resume.cliSessionId] : [...args];
+  const {
+    command,
+    args,
+    baseEnv,
+    firstFrameTimeoutMs,
+    idleTimeoutMs,
+    absoluteTimeoutMs,
+    workDir,
+    resumeCliSessionId
+  } = params;
   return {
     command,
-    args: finalArgs,
+    args: resumeCliSessionId ? [...args, '--resume', resumeCliSessionId] : [...args],
     cwd: workDir,
     env: { ...baseEnv },
     firstFrameTimeoutMs,
@@ -67,23 +81,85 @@ export function buildClaudeStreamingOptions(params: {
   };
 }
 
-function extractResume(options: AgentRunInput['options']): { cliSessionId?: string; workDir?: string } {
-  if (!options || typeof options !== 'object') return {};
-  const resumeRaw = (options as Record<string, unknown>).resume;
-  if (!resumeRaw || typeof resumeRaw !== 'object') return {};
-  const resume = resumeRaw as Record<string, unknown>;
-  return {
-    cliSessionId: typeof resume.cliSessionId === 'string' ? resume.cliSessionId : undefined,
-    workDir: typeof resume.workDir === 'string' ? resume.workDir : undefined
-  };
-}
-
 const execFileAsync = promisify(execFile);
 
-export type ClaudeRunMode = 'legacy' | 'streaming';
+export type ClaudeRunMode = 'buffered' | 'streaming';
 
 export function pickClaudeRunMode(): ClaudeRunMode {
-  return engineeringRuntimeStreaming() === 'all' ? 'streaming' : 'legacy';
+  return runtimeStreamingMode() === 'all' ? 'streaming' : 'buffered';
+}
+
+export function buildClaudeBufferedArgs(params: {
+  outputSchema: Record<string, unknown>;
+  permissionMode: string;
+  rootPath: string;
+  allowedTools: string;
+}): string[] {
+  return [
+    '-p',
+    '--output-format',
+    'json',
+    '--json-schema',
+    JSON.stringify(params.outputSchema),
+    '--permission-mode',
+    params.permissionMode,
+    '--add-dir',
+    params.rootPath,
+    '--allowedTools',
+    params.allowedTools
+  ];
+}
+
+function unwrapClaudeJsonFence(value: string) {
+  const trimmed = value.trim();
+  const match = /^```json[ \t]*\r?\n([\s\S]*?)\r?\n```$/i.exec(trimmed);
+  return match?.[1]?.trim() ?? trimmed;
+}
+
+export function parseClaudeBufferedOutput(
+  stdout: string,
+  expectedKind: RuntimeOutputKind
+): RuntimeOutput {
+  const parsed = JSON.parse(stdout.trim()) as unknown;
+  const outer = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : undefined;
+  const providerOutput = outer && Object.prototype.hasOwnProperty.call(outer, 'structured_output')
+    ? outer.structured_output
+    : outer && Object.prototype.hasOwnProperty.call(outer, 'result')
+      ? outer.result
+      : parsed;
+  const candidate = typeof providerOutput === 'string'
+    ? JSON.parse(unwrapClaudeJsonFence(providerOutput))
+    : providerOutput;
+  const validation = validateRuntimeOutput(candidate, expectedKind);
+  if (!validation.valid) {
+    throw new Error(
+      `RUNTIME_OUTPUT_CONTRACT_VIOLATION: Claude buffered output for ${expectedKind}: ${validation.errors.join('; ')}`
+    );
+  }
+  return validation.value as RuntimeOutput;
+}
+
+function parseClaudeBufferedOutputWithRuntimeError(
+  stdout: string,
+  expectedKind: RuntimeOutputKind
+): RuntimeOutput {
+  try {
+    return parseClaudeBufferedOutput(stdout, expectedKind);
+  } catch (error) {
+    const originalMessage = error instanceof Error ? error.message : String(error);
+    const message = originalMessage.startsWith('RUNTIME_OUTPUT_CONTRACT_VIOLATION:')
+      ? originalMessage
+      : `RUNTIME_OUTPUT_CONTRACT_VIOLATION: Claude buffered output for ${expectedKind}: ${originalMessage}`;
+    const runtimeError: RuntimeError = {
+      code: 'RUNTIME_OUTPUT_CONTRACT_VIOLATION',
+      message,
+      retryable: false,
+      details: { provider: 'claude_code', expectedKind }
+    };
+    throw Object.assign(new Error(message), { cause: runtimeError, runtimeError });
+  }
 }
 const ignoredDirectories = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.cache', 'coverage']);
 const textExtensions = new Set(['.css', '.html', '.js', '.json', '.jsx', '.md', '.mjs', '.cjs', '.ts', '.tsx', '.vue', '.yml', '.yaml', '.txt']);
@@ -94,104 +170,139 @@ const maxSnapshotFileBytes = 200_000;
 @Injectable()
 export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
   readonly type = 'claude_code' as const;
+  readonly metadata = {
+    name: 'claude-code',
+    version: '2.0.0',
+    category: 'external' as const,
+    provider: 'anthropic',
+    capabilityIds: ['cap-file-read', 'cap-code-search', 'cap-file-write', 'cap-command-run', 'cap-test-report'] as const,
+    supportedWorkspaceCapabilities: ['read', 'write', 'command', 'test'] as const,
+    supportedWorkspaceProviderKinds: ['server_local', 'browser_broker'] as const,
+    supportedToolNames: ['read_file', 'search_code', 'write_file', 'run_test'] as const
+  };
 
   private readonly streamingHandles = new Map<UUID, ClaudeStreamingRunHandle>();
 
-  constructor(private readonly workdirBrief?: WorkdirBriefService) {}
+  constructor(
+    private readonly workspaceBindings: InvocationWorkspaceBindingsService,
+    private readonly workdirBrief?: WorkdirBriefService,
+    @Optional() private readonly toolAudit?: ToolInvocationAuditService
+  ) {}
 
-  start(input: AgentRunInput, signal?: AbortSignal): AgentRuntimeRunHandle {
+  async checkAvailability() {
     if (process.env.CLAUDE_CODE_ENABLED !== 'true') {
-      return settledHandle(this.blockedResult(input, 'Claude Code runtime is disabled. Set CLAUDE_CODE_ENABLED=true to run controlled local coding agents.'));
+      return { available: false, reason: 'Set CLAUDE_CODE_ENABLED=true to register Claude Code.' };
     }
-    const rootPath = input.contextPack.workingDirectory?.kind === 'server_local'
-      ? input.contextPack.workingDirectory.path
-      : undefined;
+    try {
+      const command = resolveClaudeCommand();
+      await execFileAsync(command.executable, ['--version'], {
+        shell: false,
+        windowsHide: true,
+        timeout: 5_000,
+        maxBuffer: 64 * 1024
+      });
+      return { available: true };
+    } catch (error) {
+      return {
+        available: false,
+        reason: extractRuntimeError(error)?.message ?? 'Claude Code native executable is unavailable.'
+      };
+    }
+  }
+
+  start(input: InvocationPlan, signal?: AbortSignal): AgentRuntimeRunHandle {
+    if (process.env.CLAUDE_CODE_ENABLED !== 'true') {
+      return withStructuredTermination(settledHandle(this.blockedResult(input, 'Claude Code runtime is disabled. Set CLAUDE_CODE_ENABLED=true to run controlled local coding agents.')), input, signal);
+    }
+    const rootPath = this.workspaceBindings.resolveServerRoot(input);
     if (!rootPath) {
-      return settledHandle(this.blockedResult(input, 'Claude Code runtime requires a server_local working directory.'));
+      return withStructuredTermination(settledHandle(this.blockedResult(input, 'Claude Code runtime requires a server_local or materialized browser working directory.')), input, signal);
+    }
+    if (input.resume?.workDir && resolve(input.resume.workDir) !== resolve(rootPath)) {
+      return withStructuredTermination(settledHandle(this.failedResult(input, new Error('Resume workDir does not match the current workspace binding.'))), input, signal);
     }
     if (pickClaudeRunMode() !== 'streaming') {
-      return promiseHandle(this.run(input, signal));
+      return withStructuredTermination(promiseHandle(this.execute(input, signal)), input, signal);
     }
     let runner: ClaudeStreamingRunHandle;
     try {
       runner = this.createStreamingRunnerWithBrief(input, signal);
     } catch (error) {
-      return settledHandle(this.failedResult(input, error));
+      return withStructuredTermination(settledHandle(this.failedResult(input, error)), input, signal);
     }
-    return {
-      events: runtimeEvents(input.runId, runner),
+    return withStructuredTermination({
+      events: runtimeEvents(input.invocationId, runner),
       result: runner.result,
       cancel: runner.cancel
-    };
+    }, input, signal);
   }
 
-  async run(input: AgentRunInput, signal?: AbortSignal): Promise<AgentRunResult> {
+  private async execute(input: InvocationPlan, signal?: AbortSignal): Promise<AgentRunResult> {
     if (process.env.CLAUDE_CODE_ENABLED !== 'true') {
       return this.blockedResult(input, 'Claude Code runtime is disabled. Set CLAUDE_CODE_ENABLED=true to run controlled local coding agents.');
     }
 
-    const rootPath = input.contextPack.workingDirectory?.kind === 'server_local'
-      ? input.contextPack.workingDirectory.path
-      : undefined;
+    const rootPath = this.workspaceBindings.resolveServerRoot(input);
     if (!rootPath) {
-      return this.blockedResult(input, 'Claude Code runtime requires a server_local working directory.');
+      return this.blockedResult(input, 'Claude Code runtime requires a server_local or materialized browser working directory.');
+    }
+    if (input.resume?.workDir && resolve(input.resume.workDir) !== resolve(rootPath)) {
+      return this.failedResult(input, new Error('Resume workDir does not match the current workspace binding.'));
     }
 
     if (pickClaudeRunMode() === 'streaming') {
       return this.runStreaming(input, signal);
     }
 
-    const command = process.env.CLAUDE_CODE_COMMAND ?? 'claude';
-    const timeout = Number(process.env.CLAUDE_CODE_TIMEOUT_MS ?? 120_000);
+    const timeout = optionalRuntimeTimeoutMs('CLAUDE_CODE_TIMEOUT_MS') ?? 0;
     let promptFilePath: string | undefined;
     let briefLease: WorkdirBriefLease | undefined;
+    let beforeFiles: Map<string, string> | undefined;
     try {
       briefLease = this.workdirBrief?.prepare(input, 'claude_code');
       const prompt = this.prompt(input, briefLease?.taskSidecarPath);
       promptFilePath = await this.writePromptFileIfConfigured(input, prompt);
-      const beforeFiles = await this.snapshotTextFiles(rootPath);
-      const { stdout, stderr } = await execFileAsync(
-        command,
-        [
-          '-p',
-          '--output-format',
-          'json',
-          '--permission-mode',
-          process.env.CLAUDE_CODE_PERMISSION_MODE ?? 'acceptEdits',
-          '--add-dir',
+      beforeFiles = await this.snapshotTextFiles(rootPath);
+      const authority = resolveCliToolAuthority(input);
+      const command = resolveClaudeCommand();
+      const { stdout, stderr } = await this.runBufferedCommand(
+        command.executable,
+        buildClaudeBufferedArgs({
+          outputSchema: runtimeOutputSchema(input.expectedOutput.kind),
+          permissionMode: authority.claudePermissionMode,
           rootPath,
-          '--allowedTools',
-          process.env.CLAUDE_CODE_ALLOWED_TOOLS ?? 'Read,Edit,MultiEdit,Write,Bash(npm test*),Bash(npm run test*)',
-          promptFilePath ?? prompt
-        ],
+          allowedTools: authority.claudeAllowedTools
+        }),
+        prompt,
         {
           cwd: rootPath,
           timeout,
-          shell: this.useShell(),
           signal,
           env: this.runtimeEnv(input, promptFilePath),
-          maxBuffer: Number(process.env.CLAUDE_CODE_MAX_BUFFER ?? 8 * 1024 * 1024)
+          maxBuffer: Number(process.env.CLAUDE_CODE_MAX_BUFFER ?? 8 * 1024 * 1024),
+          diagnosticRef: input.invocationId
         }
       );
-      const parsedOutput = this.parseOutput(stdout);
+      const parsedOutput = parseClaudeBufferedOutputWithRuntimeError(stdout, input.expectedOutput.kind);
       const actualFileChanges = await this.actualFileChanges(rootPath, beforeFiles);
-      const testArtifact = await this.runConfiguredTests(rootPath, signal);
-      const output = this.withRuntimeEvidence(parsedOutput, actualFileChanges, testArtifact);
+      const testResult = authority.canRunTests ? await this.runConfiguredTests(rootPath, signal) : undefined;
       return {
-        runId: input.runId,
+        invocationId: input.invocationId,
         runtimeType: this.type,
         status: 'completed',
-        output,
+        output: parsedOutput,
         events: [
           {
-            runId: input.runId,
+            invocationId: input.invocationId,
             type: 'runtime_completed',
+            visibility: 'user',
             content: `${input.agent.name} completed ${input.phase} with Claude Code.`,
             metadata: { stderr: stderr.trim() || undefined },
             createdAt: nowIso()
           }
         ],
-        artifacts: this.outputArtifacts(output),
+        artifacts: this.outputArtifacts(parsedOutput),
+        systemEvidence: runtimeSystemEvidence(input, actualFileChanges, testResult ? [testResult] : []),
         usage: {
           inputTokens: 0,
           outputTokens: 0,
@@ -201,36 +312,127 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const timedOut = !signal?.aborted && isChildProcessTimeoutError(error);
+      const processFailure = error as {
+        stdout?: unknown;
+        stderr?: unknown;
+        exitCode?: unknown;
+      };
+      if (
+        !signal?.aborted &&
+        !timedOut &&
+        typeof processFailure.exitCode === 'number' &&
+        processFailure.exitCode !== 0 &&
+        typeof processFailure.stdout === 'string' &&
+        processFailure.stdout.trim()
+      ) {
+        try {
+          const recoveredOutput = parseClaudeBufferedOutputWithRuntimeError(
+            processFailure.stdout,
+            input.expectedOutput.kind
+          );
+          const actualFileChanges = beforeFiles
+            ? await this.actualFileChanges(rootPath, beforeFiles)
+            : [];
+          const stderrTail = typeof processFailure.stderr === 'string'
+            ? processFailure.stderr.slice(-16 * 1024)
+            : null;
+          return {
+            invocationId: input.invocationId,
+            runtimeType: this.type,
+            status: 'completed',
+            output: recoveredOutput,
+            events: [
+              {
+                invocationId: input.invocationId,
+                type: 'runtime_completed',
+                visibility: 'user',
+                content: `${input.agent.name} completed ${input.phase} with Claude Code; the CLI returned a non-zero exit code after producing a valid result.`,
+                metadata: {
+                  warning: 'CLAUDE_NONZERO_EXIT_WITH_VALID_OUTPUT',
+                  exitCode: processFailure.exitCode
+                },
+                createdAt: nowIso()
+              }
+            ],
+            artifacts: this.outputArtifacts(recoveredOutput),
+            systemEvidence: runtimeSystemEvidence(input, actualFileChanges, []),
+            usage: {
+              inputTokens: 0,
+              outputTokens: 0,
+              totalTokens: 0,
+              model: 'claude_code'
+            },
+            runtimeDiagnostics: {
+              providerNotifications: [],
+              unknownNotificationCount: 0,
+              stderrTail
+            }
+          };
+        } catch {
+          // The process result remains a failure when stdout is not a valid
+          // instance of the expected Runtime output contract.
+        }
+      }
+      const preservedRuntimeError = extractRuntimeError(error);
+      const runtimeError: RuntimeError = signal?.aborted
+        ? { code: 'RUNTIME_CANCELLED', message, retryable: false }
+        : timedOut
+          ? { code: 'RUNTIME_TIMEOUT', message, retryable: true, details: { timeoutMs: timeout } }
+          : preservedRuntimeError ?? { code: 'MODEL_ERROR', message, retryable: true };
+      const stderrTail = typeof processFailure.stderr === 'string'
+        ? processFailure.stderr.slice(-16 * 1024)
+        : null;
+      const providerFailure = runtimeError.details?.providerFailure === true
+        ? [{
+            method: 'provider_error',
+            disposition: 'debug_only' as const,
+            payload: {
+              provider: runtimeError.details.provider,
+              stage: runtimeError.details.stage,
+              httpStatus: runtimeError.details.httpStatus,
+              errorName: runtimeError.details.errorName,
+              errorCategory: runtimeError.details.errorCategory,
+              gatewayZone: runtimeError.details.gatewayZone,
+              rayId: runtimeError.details.rayId,
+              retryAfterMs: runtimeError.details.retryAfterMs,
+              exitCode: runtimeError.details.exitCode,
+              diagnosticRef: runtimeError.details.diagnosticRef
+            }
+          }]
+        : [];
       return {
-        runId: input.runId,
+        invocationId: input.invocationId,
         runtimeType: this.type,
         status: signal?.aborted ? 'cancelled' : 'failed',
-        output: {
-          kind: 'agent_message',
+        output: createAgentMessageOutput({
           messageKind: 'risk',
           content: `${input.agent.name} Claude Code runtime failed: ${message}`
-        },
+        }),
         events: [
           {
-            runId: input.runId,
+            invocationId: input.invocationId,
             type: 'runtime_failed',
+            visibility: 'user',
             content: `${input.agent.name} Claude Code runtime failed.`,
-            metadata: { message },
+            metadata: { message, code: runtimeError.code },
             createdAt: nowIso()
           }
         ],
         artifacts: [],
+        systemEvidence: emptyRuntimeSystemEvidence(input.invocationId),
         usage: {
           inputTokens: 0,
           outputTokens: 0,
           totalTokens: 0,
           model: 'claude_code'
         },
-        error: {
-          code: signal?.aborted ? 'RUNTIME_CANCELLED' : 'MODEL_ERROR',
-          message,
-          retryable: !signal?.aborted
-        }
+        runtimeDiagnostics: {
+          providerNotifications: providerFailure,
+          unknownNotificationCount: 0,
+          stderrTail
+        },
+        error: runtimeError
       };
     } finally {
       if (promptFilePath) {
@@ -240,13 +442,22 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
     }
   }
 
-  private prompt(input: AgentRunInput, taskSidecarPath?: string) {
+  private prompt(input: InvocationPlan, taskSidecarPath?: string) {
+    const outputSchema = runtimeOutputSchema(input.expectedOutput.kind);
+    const outputExample = runtimeOutputExample(input.expectedOutput.kind);
     if (taskSidecarPath) {
       return [
         'You are running as an Agent Cluster Claude Code runtime.',
         `Act as the ${input.agent.role} agent for the current task.`,
         `Read the workdir CLAUDE.md block and task sidecar at: ${taskSidecarPath}`,
-        `Return exactly one JSON object of kind ${input.expectedOutput.kind}.`,
+        `Return exactly one JSON object of kind ${input.expectedOutput.kind} without markdown fences.`,
+        input.expectedOutput.kind === 'task_brief'
+          ? 'For every suggestedTasks item, routingMode must be exactly "coordinator_controlled", "agent_suggested", "agent_delegated", or null. Copy the underscore-separated spelling exactly.'
+          : '',
+        'Output JSON Schema:',
+        JSON.stringify(outputSchema, null, 2),
+        'Output JSON example:',
+        JSON.stringify(outputExample, null, 2),
         input.expectedOutput.kind === 'post_review_report' ? POST_REVIEW_CONTEXT_ACTION_INSTRUCTION : ''
       ].filter(Boolean).join('\n');
     }
@@ -255,39 +466,30 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
       'Work inside the allowed server_local directory only.',
       'Return one JSON object and no markdown fences.',
       `Required output kind: ${input.expectedOutput.kind}.`,
-      'Follow taskContext.stagePlan: read only the listed evidence/map refs first, do the listed stage actions, and report validation against the listed validate items.',
-      'Use taskContext.evidenceSelection.selectedRefs and taskContext.evidenceRefs as the selected minimal evidence set; omittedRefs are intentionally excluded unless you ask for more evidence.',
-      'Use workspaceManifest only for workspace structure and file metadata. Use selectedEvidenceContents for readable file/log/artifact content. workspaceSnapshot is a manifest-style fallback and may omit all file contents.',
+      'Use ContextEnvelopeV2 L1/L2 for navigation and L3 for readable evidence.',
       'If selected evidence is insufficient, return a blocked task_execution_result or runtime error with code CONTEXT_INSUFFICIENT and requestedContext; do not fabricate unread file contents, APIs, logs, or test results.',
-      'Use continuationState to resume or hand off work consistently across phases, agents, pauses, validation, review, and final delivery.',
       'For task_acceptance_decision, decide whether this assigned agent can execute the currentTask. Return status accepted, blocked, or rejected; reason; optional missingContext; optional handoffSuggestion { targetAgentKey or targetAgentId, reason, riskLevel }; optional confidence; optional alternativeAgentKeys/alternativeAgentIds; and optional agentMessages. Do not reassign the task yourself.',
-      'For legacy task_claim_decision, return accepted, reason, optional confidence, optional alternativeAgentKeys/alternativeAgentIds, optional handoffSuggestion, and optional agentMessages. Do not reassign the task yourself.',
+      'For task_acceptance_decision, return status, reason, optional confidence, optional alternativeAgentKeys/alternativeAgentIds, optional handoffSuggestion, and optional agentMessages. Do not reassign the task yourself.',
       'For task_execution_result, include changedArtifacts with metadata.fileChanges for every file you changed or propose to change.',
       'For validation task_execution_result, include a test_report changedArtifact with metadata.validationEvidence mapping each taskContext.validationRules item to verdict status, evidenceRefs, notes, and missingEvidence, plus validatorAgentKey, validatorAgentId, and independentFromAgentKeys from taskContext.agentResponsibilities.',
       'For task_execution_result, include optional agentMessages when you need to communicate progress, risks, questions, or handoffs to other agents. Use targetAgentKeys such as coordinator, frontend, backend, test, review.',
       input.expectedOutput.kind === 'post_review_report' ? POST_REVIEW_CONTEXT_ACTION_INSTRUCTION : '',
       'If you run tests, include the test result summary in completedItems or risks.',
+      input.expectedOutput.kind === 'task_brief'
+        ? 'For every suggestedTasks item, routingMode must be exactly "coordinator_controlled", "agent_suggested", "agent_delegated", or null. Copy the underscore-separated spelling exactly.'
+        : '',
       '',
       'Runtime input JSON:',
       JSON.stringify(
         {
           phase: input.phase,
           agent: input.agent,
-          sessionGoal: input.contextPack.sessionGoal,
-          taskBrief: input.contextPack.taskBrief,
-          currentTask: input.contextPack.currentTask,
-          taskContext: input.contextPack.taskContext,
-          projectMap: input.contextPack.projectMap,
-          continuationState: input.contextPack.continuationState,
-          workspaceFocus: input.contextPack.workspaceFocus,
-          workspaceManifest: input.contextPack.workspaceManifest,
-          selectedEvidenceContents: input.contextPack.selectedEvidenceContents,
-          relevantEvents: input.contextPack.relevantEvents,
-          relevantMemories: input.contextPack.relevantMemories,
-          ragSnippets: input.contextPack.ragSnippets,
-          artifacts: input.contextPack.artifacts,
-          constraints: input.contextPack.constraints,
-          expectedOutput: input.expectedOutput
+          contextEnvelope: input.contextEnvelope,
+          executionTarget: input.executionTarget,
+          toolCatalog: input.toolCatalog,
+          expectedOutput: input.expectedOutput,
+          outputSchema,
+          outputExample
         },
         null,
         2
@@ -295,87 +497,68 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
     ].filter(Boolean).join('\n');
   }
 
-  private async writePromptFileIfConfigured(input: AgentRunInput, prompt: string) {
+  private async writePromptFileIfConfigured(input: InvocationPlan, prompt: string) {
     if (process.env.CLAUDE_CODE_PROMPT_MODE !== 'file') {
       return undefined;
     }
-    const promptFilePath = join(tmpdir(), `agent-cluster-claude-${input.runId}.prompt.txt`);
+    const promptFilePath = join(tmpdir(), `agent-cluster-claude-${input.invocationId}.prompt.txt`);
     await writeFile(promptFilePath, prompt, 'utf8');
     return promptFilePath;
   }
 
-  private useShell() {
-    const configured = process.env.CLAUDE_CODE_SHELL?.trim();
-    if (configured) {
-      return configured === 'true';
+  private runBufferedCommand(
+    command: string,
+    args: string[],
+    prompt: string,
+    options: {
+      cwd: string;
+      timeout: number;
+      signal?: AbortSignal;
+      env: NodeJS.ProcessEnv;
+      maxBuffer: number;
+      diagnosticRef: string;
     }
-    return process.platform === 'win32';
+  ): Promise<{ stdout: string; stderr: string }> {
+    return new Promise((resolveCommand, rejectCommand) => {
+      const { diagnosticRef, ...execOptions } = options;
+      const child = execFile(command, args, { ...execOptions, shell: false, encoding: 'utf8' }, (error, stdout, stderr) => {
+        if (error) {
+          const failure = Object.assign(error, { stdout, stderr });
+          const sanitized = sanitizeClaudeProcessError(failure, diagnosticRef);
+          Object.assign(sanitized, {
+            stdout,
+            stderr,
+            exitCode: typeof error.code === 'number' ? error.code : undefined
+          });
+          rejectCommand(
+            options.signal?.aborted || isChildProcessTimeoutError(failure)
+              ? failure
+              : sanitized
+          );
+          return;
+        }
+        resolveCommand({ stdout, stderr });
+      });
+      child.stdin?.end(prompt, 'utf8');
+    });
   }
 
-  private runtimeEnv(input: AgentRunInput, promptFilePath?: string) {
+  private runtimeEnv(input: InvocationPlan, promptFilePath?: string) {
     return {
       ...process.env,
       AGENT_CLUSTER_RUNTIME_TYPE: this.type,
       AGENT_CLUSTER_RUNTIME_PHASE: input.phase,
       AGENT_CLUSTER_SESSION_ID: input.sessionId,
       AGENT_CLUSTER_TASK_ID: input.taskId ?? '',
-      AGENT_CLUSTER_AGENT_ID: input.agent.id,
+      AGENT_CLUSTER_AGENT_ID: input.agent.agentId,
       AGENT_CLUSTER_AGENT_KEY: input.agent.key,
       AGENT_CLUSTER_EXPECTED_OUTPUT_KIND: input.expectedOutput.kind,
       AGENT_CLUSTER_PROMPT_FILE: promptFilePath
     };
   }
 
-  private parseOutput(stdout: string): RuntimeOutput {
-    const parsed = JSON.parse(stdout.trim());
-    const candidate = typeof parsed.result === 'string' ? JSON.parse(parsed.result) : parsed;
-    if (!candidate || typeof candidate.kind !== 'string') {
-      throw new Error('Claude Code output did not contain a RuntimeOutput kind.');
-    }
-    return candidate as RuntimeOutput;
-  }
-
   private outputArtifacts(output: RuntimeOutput) {
     return output.kind === 'task_execution_result' ? output.changedArtifacts : [];
-  }
-
-  private evidenceArtifacts(actualFileChanges: RuntimeFileChange[], testArtifact?: RuntimeArtifactOutput) {
-    const actualChangeArtifact: RuntimeArtifactOutput | undefined = actualFileChanges.length
-      ? {
-          type: 'code_diff',
-          title: 'Claude Code 实际文件变更',
-          content: actualFileChanges.map((change) => `${change.operation}: ${change.path}`).join('\n'),
-          summary: `捕获 ${actualFileChanges.length} 个真实落盘文件变更。`,
-          metadata: {
-            source: 'claude_code_filesystem_snapshot',
-            fileChanges: actualFileChanges
-          }
-        }
-      : undefined;
-    return [
-      ...(actualChangeArtifact ? [actualChangeArtifact] : []),
-      ...(testArtifact ? [testArtifact] : [])
-    ];
-  }
-
-  private withRuntimeEvidence(
-    output: RuntimeOutput,
-    actualFileChanges: RuntimeFileChange[],
-    testArtifact?: RuntimeArtifactOutput
-  ): RuntimeOutput {
-    if (output.kind !== 'task_execution_result') {
-      return output;
-    }
-    const evidenceItems = [
-      ...output.completedItems,
-      ...(actualFileChanges.length ? [`捕获 ${actualFileChanges.length} 个真实文件变更。`] : []),
-      ...(testArtifact?.summary ? [`测试结果：${testArtifact.summary}`] : [])
-    ];
-    return {
-      ...output,
-      completedItems: evidenceItems,
-      changedArtifacts: [...output.changedArtifacts, ...this.evidenceArtifacts(actualFileChanges, testArtifact)]
-    } satisfies TaskExecutionResultOutput;
   }
 
   private async snapshotTextFiles(rootPath: string) {
@@ -458,11 +641,12 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
     return changes;
   }
 
-  private async runConfiguredTests(rootPath: string, signal?: AbortSignal): Promise<RuntimeArtifactOutput | undefined> {
+  private async runConfiguredTests(rootPath: string, signal?: AbortSignal): Promise<VerifiedTestResult | undefined> {
     const testCommand = process.env.CLAUDE_CODE_TEST_COMMAND?.trim();
     if (!testCommand) {
       return undefined;
     }
+    const startedAt = nowIso();
     try {
       const { stdout, stderr } = await execFileAsync(testCommand, {
         cwd: rootPath,
@@ -471,29 +655,25 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
         timeout: Number(process.env.CLAUDE_CODE_TEST_TIMEOUT_MS ?? 120_000),
         maxBuffer: Number(process.env.CLAUDE_CODE_MAX_BUFFER ?? 8 * 1024 * 1024)
       });
-      const content = [stdout.trim(), stderr.trim()].filter(Boolean).join('\n') || 'Test command completed without output.';
       return {
-        type: 'test_report',
-        title: 'Claude Code 测试结果',
-        content,
-        summary: '测试命令执行成功。',
-        metadata: {
-          command: testCommand,
-          status: 'completed'
-        }
+        command: testCommand,
+        status: 'passed',
+        exitCode: 0,
+        stdout,
+        stderr,
+        startedAt,
+        completedAt: nowIso()
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const failure = error as { code?: unknown; stdout?: unknown; stderr?: unknown };
       return {
-        type: 'test_report',
-        title: 'Claude Code 测试结果',
-        content: message,
-        summary: `测试命令失败：${message}`,
-        metadata: {
-          command: testCommand,
-          status: 'failed',
-          message
-        }
+        command: testCommand,
+        status: 'failed',
+        exitCode: typeof failure.code === 'number' ? failure.code : null,
+        stdout: typeof failure.stdout === 'string' ? failure.stdout : '',
+        stderr: typeof failure.stderr === 'string' ? failure.stderr : error instanceof Error ? error.message : String(error),
+        startedAt,
+        completedAt: nowIso()
       };
     }
   }
@@ -503,26 +683,24 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
     return configFileNames.has(name) || textExtensions.has(extname(path).toLowerCase());
   }
 
-  private blockedResult(input: AgentRunInput, message: string): AgentRunResult {
+  private blockedResult(input: InvocationPlan, message: string): AgentRunResult {
     return {
-      runId: input.runId,
+      invocationId: input.invocationId,
       runtimeType: this.type,
       status: 'blocked',
-      output: {
-        kind: 'agent_message',
-        messageKind: 'risk',
-        content: message
-      },
+      output: createAgentMessageOutput({ messageKind: 'risk', content: message }),
       events: [
         {
-          runId: input.runId,
+          invocationId: input.invocationId,
           type: 'runtime_failed',
+          visibility: 'user',
           content: message,
           metadata: { code: 'CAPABILITY_BLOCKED', message },
           createdAt: nowIso()
         }
       ],
       artifacts: [],
+      systemEvidence: emptyRuntimeSystemEvidence(input.invocationId),
       usage: {
         inputTokens: 0,
         outputTokens: 0,
@@ -537,17 +715,17 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
     };
   }
 
-  private async runStreaming(input: AgentRunInput, signal?: AbortSignal): Promise<AgentRunResult> {
+  private async runStreaming(input: InvocationPlan, signal?: AbortSignal): Promise<AgentRunResult> {
     const handle = this.createStreamingRunnerWithBrief(input, signal);
-    this.streamingHandles.set(input.runId, handle);
+    this.streamingHandles.set(input.invocationId, handle);
     try {
       return await handle.result;
     } finally {
-      this.streamingHandles.delete(input.runId);
+      this.streamingHandles.delete(input.invocationId);
     }
   }
 
-  private createStreamingRunnerWithBrief(input: AgentRunInput, signal?: AbortSignal): ClaudeStreamingRunHandle {
+  private createStreamingRunnerWithBrief(input: InvocationPlan, signal?: AbortSignal): ClaudeStreamingRunHandle {
     const briefLease = this.workdirBrief?.prepare(input, 'claude_code');
     try {
       const runner = this.createStreamingRunner(input, signal, briefLease?.taskSidecarPath);
@@ -559,14 +737,27 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
   }
 
   private createStreamingRunner(
-    input: AgentRunInput,
+    input: InvocationPlan,
     signal?: AbortSignal,
     taskSidecarPath?: string
   ): ClaudeStreamingRunHandle {
-    const command = process.env.CLAUDE_CODE_COMMAND ?? 'claude';
+    const command = resolveClaudeCommand();
     const argsJson = process.env.CLAUDE_CODE_ARGS_JSON?.trim();
-    const args = argsJson
-      ? (JSON.parse(argsJson) as string[])
+    const configuredArgs = argsJson ? (JSON.parse(argsJson) as string[]) : undefined;
+    if (configuredArgs && !configuredArgs.every((item) => typeof item === 'string')) {
+      throw new Error('CLAUDE_CODE_ARGS_JSON must be a JSON string array.');
+    }
+    const authority = resolveCliToolAuthority(input);
+    const pendingTools = new Map<string, { toolName: string; argumentsValue: unknown; startedAt: string }>();
+    const auditWrites = new Set<Promise<boolean>>();
+    const scheduleAudit = (write: Promise<boolean> | undefined) => {
+      if (!write) return;
+      let tracked: Promise<boolean>;
+      tracked = write.catch(() => false).finally(() => auditWrites.delete(tracked));
+      auditWrites.add(tracked);
+    };
+    const args = configuredArgs
+      ? [...configuredArgs]
       : [
           '-p',
           '--output-format',
@@ -574,19 +765,19 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
           '--input-format',
           'stream-json',
           '--verbose',
-          '--strict-mcp-config',
-          '--permission-mode',
-          'bypassPermissions'
+          '--strict-mcp-config'
         ];
+    args.push('--permission-mode', authority.claudePermissionMode, '--allowedTools', authority.claudeAllowedTools);
     const streamingOptions: ClaudeStreamingRunnerOptions = {
       ...buildClaudeStreamingOptions({
-      input,
-      command,
-      args,
-      baseEnv: this.runtimeEnv(input),
-      firstFrameTimeoutMs: positiveRuntimeTimeoutMs('CLAUDE_CODE_FIRST_FRAME_TIMEOUT_MS', 30_000),
-      idleTimeoutMs: positiveRuntimeTimeoutMs('CLAUDE_CODE_IDLE_TIMEOUT_MS', 600_000),
-      absoluteTimeoutMs: optionalRuntimeTimeoutMs('CLAUDE_CODE_ABSOLUTE_TIMEOUT_MS')
+        command: command.executable,
+        args,
+        baseEnv: this.runtimeEnv(input),
+        firstFrameTimeoutMs: positiveRuntimeTimeoutMs('CLAUDE_CODE_FIRST_FRAME_TIMEOUT_MS', 30_000),
+        idleTimeoutMs: positiveRuntimeTimeoutMs('CLAUDE_CODE_IDLE_TIMEOUT_MS', 600_000),
+        absoluteTimeoutMs: optionalRuntimeTimeoutMs('CLAUDE_CODE_ABSOLUTE_TIMEOUT_MS'),
+        workDir: this.workspaceBindings.resolveServerRoot(input),
+        resumeCliSessionId: input.resume?.cliSessionId
       }),
       prompt: this.prompt(input, taskSidecarPath),
       // Claude `-p --input-format stream-json` treats stdin EOF as the end of
@@ -594,11 +785,94 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
       // control_request integrations.
       closeStdinAfterPrompt: process.env.CLAUDE_CODE_STREAM_KEEP_STDIN_OPEN !== 'true'
     };
-    return startClaudeStreaming(input, streamingOptions, signal);
+    streamingOptions.onFrame = (frame: RuntimeStreamFrame) => {
+      if (frame.kind === 'tool_use') {
+        pendingTools.set(frame.toolCallId, { toolName: frame.tool, argumentsValue: frame.input, startedAt: nowIso() });
+        return;
+      }
+      if (frame.kind !== 'tool_result') return;
+      const pending = pendingTools.get(frame.toolCallId);
+      if (!pending) return;
+      pendingTools.delete(frame.toolCallId);
+      const mcp = parseMcpToolName(pending.toolName);
+      if (mcp) {
+        scheduleAudit(this.toolAudit?.recordMcp({
+          serverExternalId: `mcp:${mcp.server}`,
+          serverName: mcp.server,
+          toolName: mcp.tool,
+          providerCallId: frame.toolCallId,
+          runtimeInvocationExternalId: input.invocationId,
+          sessionExternalId: input.sessionId,
+          agentExternalId: input.agent.agentId,
+          arguments: pending.argumentsValue,
+          result: frame.output,
+          success: !frame.isError,
+          startedAt: pending.startedAt,
+          completedAt: nowIso(),
+          errorMessage: frame.isError ? frame.output : undefined
+        }));
+      } else {
+        scheduleAudit(this.toolAudit?.record({
+          externalId: `tool:${input.invocationId}:${frame.toolCallId}`,
+          runtimeInvocationExternalId: input.invocationId,
+          sessionExternalId: input.sessionId,
+          toolName: pending.toolName || frame.tool || 'unknown',
+          providerCallId: frame.toolCallId,
+          provider: this.type,
+          arguments: pending.argumentsValue,
+          result: frame.output,
+          success: !frame.isError,
+          errorMessage: frame.isError ? frame.output : undefined,
+          agentExternalId: input.agent.agentId,
+          startedAt: pending.startedAt,
+          completedAt: nowIso()
+        }));
+      }
+    };
+    const runner = startClaudeStreaming(input, streamingOptions, signal);
+    const settleAudits = async () => {
+      for (const [toolCallId, pending] of pendingTools) {
+        const mcp = parseMcpToolName(pending.toolName);
+        if (mcp) {
+          scheduleAudit(this.toolAudit?.recordMcp({
+            serverExternalId: `mcp:${mcp.server}`,
+            serverName: mcp.server,
+            toolName: mcp.tool,
+            providerCallId: toolCallId,
+            runtimeInvocationExternalId: input.invocationId,
+            sessionExternalId: input.sessionId,
+            agentExternalId: input.agent.agentId,
+            arguments: pending.argumentsValue,
+            success: false,
+            errorMessage: 'Runtime ended before the MCP Tool returned a result.',
+            startedAt: pending.startedAt,
+            completedAt: nowIso()
+          }));
+        } else {
+          scheduleAudit(this.toolAudit?.record({
+            externalId: `tool:${input.invocationId}:${toolCallId}`,
+            runtimeInvocationExternalId: input.invocationId,
+            sessionExternalId: input.sessionId,
+            toolName: pending.toolName || 'unknown',
+            providerCallId: toolCallId,
+            provider: this.type,
+            arguments: pending.argumentsValue,
+            success: false,
+            errorMessage: 'Runtime ended before the Tool returned a result.',
+            agentExternalId: input.agent.agentId,
+            startedAt: pending.startedAt,
+            completedAt: nowIso()
+          }));
+        }
+      }
+      pendingTools.clear();
+      await Promise.allSettled([...auditWrites]);
+    };
+    return { ...runner, result: runner.result.finally(settleAudits) };
   }
 
-  stream(runId: UUID): AsyncIterable<AgentRuntimeEvent> {
-    const handle = this.streamingHandles.get(runId);
+  stream(invocationId: UUID): AsyncIterable<AgentRuntimeEvent> {
+    const handle = this.streamingHandles.get(invocationId);
     const runtimeType = this.type;
     if (!handle) {
       return {
@@ -610,45 +884,48 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
     return {
       async *[Symbol.asyncIterator]() {
         for await (const frame of handle.channel) {
-          const event = frameToRuntimeEvent(runId, frame);
+          const event = frameToRuntimeEvent(invocationId, frame);
           if (event) yield event;
         }
       }
     };
   }
 
-  async cancel(runId: UUID): Promise<void> {
-    await this.streamingHandles.get(runId)?.cancel();
+  async cancel(invocationId: UUID): Promise<void> {
+    await this.streamingHandles.get(invocationId)?.cancel();
   }
 
-  private failedResult(input: AgentRunInput, error: unknown): AgentRunResult {
+  private failedResult(input: InvocationPlan, error: unknown): AgentRunResult {
     const message = error instanceof Error ? error.message : String(error);
+    const runtimeError = extractRuntimeError(error) ?? { code: 'MODEL_ERROR' as const, message, retryable: true };
     return {
-      runId: input.runId,
+      invocationId: input.invocationId,
       runtimeType: this.type,
       status: 'failed',
-      output: { kind: 'agent_message', messageKind: 'risk', content: message },
+      output: createAgentMessageOutput({ messageKind: 'risk', content: message }),
       events: [
         {
-          runId: input.runId,
+          invocationId: input.invocationId,
           type: 'runtime_failed',
+          visibility: 'user',
           content: message,
-          metadata: { code: 'MODEL_ERROR', message },
+          metadata: { code: runtimeError.code, message: runtimeError.message },
           createdAt: nowIso()
         }
       ],
       artifacts: [],
+      systemEvidence: emptyRuntimeSystemEvidence(input.invocationId),
       usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: 'claude_code' },
-      error: { code: 'MODEL_ERROR', message, retryable: true }
+      error: runtimeError
     };
   }
 }
 
-function runtimeEvents(runId: UUID, handle: ClaudeStreamingRunHandle): AsyncIterable<AgentRuntimeEvent> {
+function runtimeEvents(invocationId: UUID, handle: ClaudeStreamingRunHandle): AsyncIterable<AgentRuntimeEvent> {
   return {
     async *[Symbol.asyncIterator]() {
       for await (const frame of handle.channel) {
-        const event = frameToRuntimeEvent(runId, frame);
+        const event = frameToRuntimeEvent(invocationId, frame);
         if (event) yield event;
       }
     }
@@ -669,4 +946,18 @@ function settledHandle(result: AgentRunResult): AgentRuntimeRunHandle {
 
 function promiseHandle(result: Promise<AgentRunResult>): AgentRuntimeRunHandle {
   return { events: emptyEvents(), result, cancel: async () => {} };
+}
+
+function parseMcpToolName(toolName: string): { server: string; tool: string } | undefined {
+  if (toolName.startsWith('mcp__')) {
+    const [server, ...toolParts] = toolName.slice(5).split('__');
+    const tool = toolParts.join('__');
+    if (server && tool) return { server, tool };
+  }
+  if (toolName.includes('/')) {
+    const [server, ...toolParts] = toolName.split('/');
+    const tool = toolParts.join('/');
+    if (server && tool) return { server, tool };
+  }
+  return undefined;
 }

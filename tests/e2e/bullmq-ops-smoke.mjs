@@ -1,10 +1,15 @@
 import { spawn } from 'node:child_process';
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Queue } from 'bullmq';
 import IORedis from 'ioredis';
+import {
+  createSmokeV2State,
+  createPublishedAgentWorkflow,
+  selectPublishedWorkflow
+} from './smoke-server.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const npmCli = process.env.npm_execpath;
@@ -195,6 +200,8 @@ await runNpm(['run', 'build', '-w', '@agent-cluster/server']);
 
 const port = await findFreePort();
 const apiBase = `http://127.0.0.1:${port}/api`;
+mkdirSync(dirname(dataFile), { recursive: true });
+writeFileSync(dataFile, JSON.stringify(createSmokeV2State()), 'utf8');
 const server = spawn(process.execPath, ['apps/server/dist/apps/server/src/main.js'], {
   cwd: root,
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -241,6 +248,7 @@ try {
       throw new Error(`agent-task-queue ${key} should be numeric: ${JSON.stringify(taskQueue)}`);
     }
   }
+  const workflow = await createPublishedAgentWorkflow(apiBase, 'BullMQ queued backend smoke', ['backend']);
   const created = await api(apiBase, '/sessions', {
     method: 'POST',
     body: JSON.stringify({
@@ -252,6 +260,7 @@ try {
   const briefEvent = await waitForEvent(apiBase, sessionId, 'brief_created');
   const briefId = briefEvent.metadata.payload.briefId;
   await api(apiBase, `/sessions/${sessionId}/briefs/${briefId}/confirm`, { method: 'POST' });
+  await selectPublishedWorkflow(apiBase, sessionId, workflow);
   await waitForStatus(apiBase, sessionId, 'COMPLETED');
 
   const queuesAfterExecution = await api(apiBase, '/ops/queues');

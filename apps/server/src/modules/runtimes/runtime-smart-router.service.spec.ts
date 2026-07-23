@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { AgentRunInput, AgentRunResult, AgentRuntimeAdapter, RuntimeHealthStatus, RuntimeType } from '@agent-cluster/shared';
+import type { AgentRunResult, AgentRuntimeAdapter, InvocationPlan, RuntimeHealthStatus, RuntimeType } from '@agent-cluster/shared';
+import { createAgentMessageOutput, createRuntimeArtifactSystemEvidence } from '@agent-cluster/shared';
 import { RuntimeSmartRouterService } from './runtime-smart-router.service.js';
 
 function makeAdapter(
@@ -16,7 +17,9 @@ function makeAdapter(
       version: '0.1.0',
       category,
       provider: category === 'internal' ? 'self-hosted' : 'external',
-      capabilityIds
+      capabilityIds,
+      supportedWorkspaceCapabilities: ['read'],
+      supportedToolNames: []
     },
     async healthCheck() {
       if (health instanceof Error) {
@@ -24,15 +27,21 @@ function makeAdapter(
       }
       return health ?? { status: 'healthy', lastCheckAt: '2026-06-22T00:00:00.000Z' };
     },
-    async run(input: AgentRunInput): Promise<AgentRunResult> {
-      return {
-        runId: input.runId,
+    start(input: InvocationPlan) {
+      const result: AgentRunResult = {
+        invocationId: input.invocationId,
         runtimeType: type,
         status: 'completed',
-        output: { kind: 'agent_message', messageKind: 'summary', content: 'ok' },
+        output: createAgentMessageOutput({ messageKind: 'summary', content: 'ok' }),
         events: [],
         artifacts: [],
+        systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
         usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }
+      };
+      return {
+        events: (async function* () {})(),
+        result: Promise.resolve(result),
+        async cancel() {}
       };
     }
   };

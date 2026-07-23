@@ -1,21 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type {
-  Agent,
+  AgentDefinition,
   CapabilityDefinition,
   CapabilityKind,
   CompiledAgentProfile,
-  ExecutionTarget,
   ProfileDiagnostic,
   ProfileReferenceKind,
   RuntimeInvocationProfileSnapshot,
-  RuntimeType,
   SessionDetail,
   Skill
 } from './contracts.js';
 
-test('Agent 新数据不再要求 modelId/runtimeType,兼容期保留 optional', () => {
-  const agent: Agent = {
+test('AgentDefinition contains identity only and has no runtime compatibility fields', () => {
+  const agent: AgentDefinition = {
     id: 'a-1',
     key: 'frontend',
     name: '前端开发',
@@ -23,21 +21,15 @@ test('Agent 新数据不再要求 modelId/runtimeType,兼容期保留 optional',
     profileMarkdown: '# ${skill:vue}',
     tags: [],
     status: 'active',
-    skillIds: [],
     capabilityIds: [],
     defaultKnowledgeBaseIds: [],
+    profileRevision: 1,
     createdAt: '2026-07-10T00:00:00.000Z',
     updatedAt: '2026-07-10T00:00:00.000Z'
   };
-  assert.equal(agent.runtimeType, undefined);
-  assert.equal(agent.modelId, undefined);
-
-  const legacy: Agent = {
-    ...agent,
-    modelId: 'gpt-4',
-    runtimeType: 'generic_llm'
-  };
-  assert.equal(legacy.runtimeType, 'generic_llm');
+  assert.equal('runtimeType' in agent, false);
+  assert.equal('modelId' in agent, false);
+  assert.equal('skillIds' in agent, false);
 });
 
 test('Skill 增加 key/status/revision 字段', () => {
@@ -74,10 +66,10 @@ test('CapabilityDefinition 新增 kind 与 systemOwned 属性', () => {
   assert.equal(capability.systemOwned, true);
 });
 
-test('Session 新增 executionTarget,兼容期保留 engineeringRuntime', () => {
-  const target: ExecutionTarget = { runtimeType: 'generic_llm', modelId: 'gpt-4' };
+test('Session carries a non-authoritative runtime preference', () => {
   const session: SessionDetail = {
     id: 's-1',
+    dataEpoch: 'epoch-test',
     title: 't',
     originalInput: '',
     status: 'AGENT_DISCUSSING',
@@ -85,12 +77,16 @@ test('Session 新增 executionTarget,兼容期保留 engineeringRuntime', () => 
     workspaceId: 'w',
     tokenUsed: 0,
     participatingAgentIds: [],
-    executionTarget: target,
+    runtimePreference: {
+      preferredRuntimeType: 'generic_llm',
+      preferredModelId: 'gpt-4',
+      allowedRuntimeTypes: ['generic_llm', 'codex']
+    },
     createdAt: '2026-07-10T00:00:00.000Z',
     updatedAt: '2026-07-10T00:00:00.000Z'
   };
-  assert.equal(session.executionTarget?.runtimeType, 'generic_llm');
-  assert.equal(session.executionTarget?.modelId, 'gpt-4');
+  assert.equal(session.runtimePreference?.preferredRuntimeType, 'generic_llm');
+  assert.equal(session.runtimePreference?.preferredModelId, 'gpt-4');
 });
 
 test('CompiledAgentProfile 结构与诊断类型', () => {
@@ -125,16 +121,17 @@ test('CompiledAgentProfile 结构与诊断类型', () => {
   assert.equal(compiled.systemPrompt, '# Agent');
 });
 
-test('RuntimeInvocationProfileSnapshot 记录已解析的模型/技能/工具', () => {
+test('RuntimeInvocationProfileSnapshot records identity resources without target fields', () => {
   const snapshot: RuntimeInvocationProfileSnapshot = {
-    runtimeType: 'generic_llm' as RuntimeType,
-    modelId: 'gpt-4',
     agentId: 'a-1',
     profileHash: 'hash',
+    profileRevision: 3,
     resolvedSkillIds: ['skill-1'],
     resolvedSkillRevisions: { 'skill-1': 2 },
     resolvedToolIds: ['cap-file-write']
   };
   assert.equal(snapshot.profileHash, 'hash');
+  assert.equal(snapshot.profileRevision, 3);
+  assert.equal('runtimeType' in snapshot, false);
   assert.equal(snapshot.resolvedSkillRevisions['skill-1'], 2);
 });

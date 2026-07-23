@@ -14,18 +14,17 @@ export class DebugController {
     private readonly sessions: SessionsService
   ) {}
 
-  @Get('context-packs')
-  contextPacks(@Param('sessionId') sessionId: string) {
+  @Get('context-envelopes')
+  contextEnvelopes(@Param('sessionId') sessionId: string) {
     return ok({
       items: this.runtime.listInvocations(sessionId).map((invocation) => ({
-        invocationId: invocation.id,
-        runId: invocation.runId,
+        invocationId: invocation.invocationId,
         taskId: invocation.taskId,
         agentId: invocation.agentId,
         agentKey: invocation.agentKey,
         phase: invocation.phase,
         status: invocation.status,
-        contextPack: invocation.contextPack,
+        contextEnvelope: invocation.contextEnvelope,
         createdAt: invocation.startedAt
       })),
       hasMore: false
@@ -35,61 +34,45 @@ export class DebugController {
   @Get('runtime-invocations')
   runtimeInvocations(@Param('sessionId') sessionId: string) {
     return ok({
-      items: this.runtime.listInvocations(sessionId).map(({ contextPack, ...invocation }) => ({
-        ...invocation,
-        contextPackSummary: {
-          sessionGoal: contextPack.sessionGoal,
-          agentKey: contextPack.agentProfile.key,
-          configuredRuntimeType: contextPack.agentProfile.configuredRuntimeType,
-          effectiveRuntimeType: contextPack.agentProfile.runtimeType,
-          runtimeSelectionSource: contextPack.runtimeSelection?.source,
-          runtimeSelectionReason: contextPack.runtimeSelection?.reason,
-          taskDomain: contextPack.taskContext.domain,
-          taskIntent: contextPack.taskContext.intent,
-          currentStage: contextPack.taskContext.currentStage,
-          taskMapKind: contextPack.taskContext.taskMap.kind,
-          taskMapItemCount: contextPack.taskContext.taskMap.items.length,
-          projectMapSource: contextPack.projectMap?.source,
-          projectMapModuleCount: contextPack.projectMap?.modules.length ?? 0,
-          projectMapSourceRefCount: contextPack.projectMap?.sourceRefs.length ?? 0,
-          projectMapValidationCommandCount: contextPack.projectMap?.validationCommands.length ?? 0,
-          stagePlanReadCount: contextPack.taskContext.stagePlan.read.length,
-          stagePlanDoCount: contextPack.taskContext.stagePlan.do.length,
-          stagePlanValidateCount: contextPack.taskContext.stagePlan.validate.length,
-          executionMode: contextPack.taskContext.executionMode,
-          validationMode: contextPack.taskContext.validationMode,
-          validationRuleCount: contextPack.taskContext.validationRules.length,
-          agentResponsibilityCount: contextPack.taskContext.agentResponsibilities.length,
-          evidenceSelectionStrategy: contextPack.taskContext.evidenceSelection.strategy,
-          evidenceSelectionMaxRefs: contextPack.taskContext.evidenceSelection.maxEvidenceRefs,
-          evidenceSelectionSelectedCount: contextPack.taskContext.evidenceSelection.selectedCount,
-          evidenceSelectionOmittedCount: contextPack.taskContext.evidenceSelection.omittedCount,
-          evidenceSelectionSelectedTokenEstimate: contextPack.taskContext.evidenceSelection.selectedRefs.reduce(
-            (total, ref) => total + (ref.estimatedTokens ?? 0),
-            0
-          ),
-          evidenceSelectionOmittedTokenEstimate: contextPack.taskContext.evidenceSelection.omittedRefs.reduce(
-            (total, ref) => total + (ref.estimatedTokens ?? 0),
-            0
-          ),
-          evidenceCount: contextPack.taskContext.evidenceRefs.length,
-          summaryConfirmedFactCount: contextPack.summaryMemory.confirmedFacts.length,
-          summaryCompletedCount: contextPack.summaryMemory.completed.length,
-          summaryRiskCount: contextPack.summaryMemory.risks.length,
-          continuationPhase: contextPack.continuationState.phase,
-          continuationActiveTaskId: contextPack.continuationState.activeTaskId,
-          continuationPendingTaskCount: contextPack.continuationState.pendingTaskIds.length,
-          continuationRunningTaskCount: contextPack.continuationState.runningTaskIds.length,
-          continuationCompletedTaskCount: contextPack.continuationState.completedTaskIds.length,
-          continuationBlockedTaskCount: contextPack.continuationState.blockedTaskIds.length,
-          continuationResumeHintCount: contextPack.continuationState.resumeHints.length,
-          eventCount: contextPack.relevantEvents.length,
-          memoryCount: contextPack.relevantMemories.length,
-          ragSnippetCount: contextPack.ragSnippets.length,
-          artifactCount: contextPack.artifacts.length,
-          capabilityCount: contextPack.capabilities.length,
-          constraintCount: contextPack.constraints.length,
-          errorCode: invocation.error?.code,
+      items: this.runtime.listInvocations(sessionId).map((invocation) => ({
+        id: invocation.id,
+        dataEpoch: invocation.dataEpoch,
+        invocationId: invocation.invocationId,
+        sessionId: invocation.sessionId,
+        taskId: invocation.taskId,
+        agentId: invocation.agentId,
+        agentKey: invocation.agentKey,
+        phase: invocation.phase,
+        status: invocation.status,
+        identity: invocation.profileSnapshot,
+        executionTarget: invocation.executionTarget,
+        toolCatalog: invocation.toolCatalog,
+        contextEnvelope: invocation.contextEnvelope,
+        expectedOutput: invocation.expectedOutput,
+        outputContract: invocation.outputContract,
+        budget: invocation.budget,
+        attempt: invocation.attempt,
+        usage: invocation.usage,
+        error: invocation.error,
+        termination: invocation.termination,
+        streamMetrics: invocation.streamMetrics,
+        runtimeDiagnostics: invocation.runtimeDiagnostics,
+        systemEvidence: invocation.systemEvidence,
+        cliSessionId: invocation.cliSessionId,
+        startedAt: invocation.startedAt,
+        completedAt: invocation.completedAt,
+        summary: {
+          sessionGoal: invocation.contextEnvelope.L1.sessionGoal,
+          workspaceId: invocation.contextEnvelope.workspaceId,
+          navigationCount: invocation.contextEnvelope.L1.navigation.entries.length,
+          evidenceCount: invocation.contextEnvelope.L3.files.length,
+          evidenceBytes: invocation.contextEnvelope.L3.totalByteLength,
+          projectModuleCount: invocation.contextEnvelope.L2.modules.length,
+          toolCount: invocation.toolCatalog.tools.length,
+          blockedToolCount: invocation.toolCatalog.decisions.filter((decision) => decision.status === 'blocked').length,
+          memoryBulletCount: invocation.contextEnvelope.L5.bullets.length,
+          artifactRefCount:
+            invocation.contextEnvelope.L6.changeSetIds.length + invocation.contextEnvelope.L6.reportIds.length,
           requestedContextRefCount: invocation.error?.requestedContext?.requestedRefs.length ?? 0,
           requestedContextPathCount: invocation.error?.requestedContext?.requestedPaths?.length ?? 0,
           requestedContextCommandCount: invocation.error?.requestedContext?.requestedCommands?.length ?? 0
@@ -136,10 +119,10 @@ export class DebugController {
       ...total,
       invocationCount: invocations.length,
       byInvocation: invocations.map((invocation) => ({
-        invocationId: invocation.id,
-        runId: invocation.runId,
+        invocationId: invocation.invocationId,
         agentKey: invocation.agentKey,
         phase: invocation.phase,
+        runtimeType: invocation.runtimeType,
         usage: invocation.usage
       }))
     });
@@ -159,10 +142,6 @@ export class DebugController {
         const checkpoint = item.checkpoint as { kind?: string } | undefined;
         return checkpoint?.kind === 'summary_memory_checkpoint';
       });
-    return ok({
-      latest: checkpoints.at(-1) ?? null,
-      items: checkpoints,
-      hasMore: false
-    });
+    return ok({ latest: checkpoints.at(-1) ?? null, items: checkpoints, hasMore: false });
   }
 }

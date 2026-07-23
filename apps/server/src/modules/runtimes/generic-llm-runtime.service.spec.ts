@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import type { AgentRunInput, ExpectedRuntimeOutput, RuntimeOutput } from '@agent-cluster/shared';
+import type { ExpectedRuntimeOutput, InvocationPlan, RuntimeOutput } from '@agent-cluster/shared';
+import { runtimeOutputExamples } from '@agent-cluster/shared';
 import { GenericLlmRuntimeService } from './generic-llm-runtime.service.js';
+import { makeInvocationPlan } from './invocation-plan.fixture.js';
 
 const originalFetch = globalThis.fetch;
 
@@ -30,42 +32,73 @@ function makeServiceWithCurrentFetch() {
         };
       }
     } as never,
-    {} as never
+    {} as never,
+    { resolveServerRoot: () => 'D:/tmp/workspace' } as never
   );
 }
 
-function makeInput(kind: ExpectedRuntimeOutput['kind']): AgentRunInput {
-  return {
-    runId: `run-${kind}`,
+test('Generic LLM preflight accepts a complete selected model configuration', async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({ data: [] }), { status: 200 });
+  try {
+    assert.deepEqual(await makeServiceWithCurrentFetch().checkAvailability(), { available: true });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Generic LLM preflight rejects an incomplete selected model configuration', async () => {
+  const service = new GenericLlmRuntimeService(
+    {} as never,
+    {
+      connectionForModelId() {
+        return { id: 'remote:missing', model: '', baseUrl: '', apiKey: '', kind: 'remote' };
+      }
+    } as never,
+    {} as never,
+    { resolveServerRoot: () => undefined } as never
+  );
+  const result = await service.checkAvailability();
+  assert.equal(result.available, false);
+  assert.match(result.reason ?? '', /model|baseUrl|apiKey/i);
+});
+
+test('Generic LLM preflight rejects provider rate limiting before Agent fan-out', async () => {
+  globalThis.fetch = async () => new Response('', { status: 429 });
+  try {
+    const result = await makeServiceWithCurrentFetch().checkAvailability();
+    assert.equal(result.available, false);
+    assert.match(result.reason ?? '', /HTTP 429/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Generic LLM preflight tolerates gateways without a models endpoint', async () => {
+  globalThis.fetch = async () => new Response('', { status: 404 });
+  try {
+    assert.deepEqual(await makeServiceWithCurrentFetch().checkAvailability(), { available: true });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+function makeInput(kind: ExpectedRuntimeOutput['kind']): InvocationPlan {
+  return makeInvocationPlan({
+    invocationId: `run-${kind}`,
     sessionId: 'session-1',
     phase: 'discussion',
     agent: {
-      id: 'agent-1',
+      agentId: 'agent-1',
       key: 'qa',
       name: 'Quality Agent',
       role: 'quality',
-      systemPrompt: 'Analyze requirements.',
-      runtimeType: 'generic_llm',
-      capabilityIds: []
+      systemPrompt: 'Analyze requirements.'
     },
-    contextPack: {
-      sessionGoal: 'Analyze the project requirement.',
-      taskContext: {
-        currentStage: 'discussion'
-      },
-      summaryMemory: {},
-      continuationState: {},
-      agentProfile: {},
-      relevantEvents: [],
-      relevantMemories: [],
-      ragSnippets: [],
-      artifacts: [],
-      capabilities: [],
-      constraints: []
-    },
-    expectedOutput: { kind, schemaVersion: '0.1' },
+    executionTarget: { runtimeType: 'generic_llm', modelId: 'remote:test-model' },
+    contextEnvelope: { L1: { sessionGoal: 'Analyze the project requirement.', phase: 'discussion' } },
+    expectedOutput: { kind, schemaVersion: '1.0' },
     budget: { maxOutputTokens: 500 }
-  } as unknown as AgentRunInput;
+  });
 }
 
 async function runWithResponse(kind: ExpectedRuntimeOutput['kind'], responseBody: unknown) {
@@ -80,7 +113,7 @@ async function runWithFetch(kind: ExpectedRuntimeOutput['kind'], fetchImpl: type
 async function runWithService(
   kind: ExpectedRuntimeOutput['kind'],
   makeRuntime: () => GenericLlmRuntimeService,
-  configureInput?: (input: AgentRunInput) => void
+  configureInput?: (input: InvocationPlan) => void
 ) {
   const previousRetries = process.env.LLM_MAX_RETRIES;
   const previousFallback = process.env.LLM_MOCK_FALLBACK;
@@ -97,7 +130,7 @@ async function runWithService(
   try {
     const input = makeInput(kind);
     configureInput?.(input);
-    return await makeRuntime().run(input);
+    return await makeRuntime().start(input).result;
   } finally {
     globalThis.fetch = originalFetch;
     if (previousRetries === undefined) {
@@ -148,13 +181,9 @@ function chatContent(content: unknown) {
 function completedTaskExecutionContent(summary = 'Completed the requested analysis.') {
   return chatContent(
     JSON.stringify({
-      kind: 'task_execution_result',
-      status: 'completed',
+      ...runtimeOutputExamples.task_execution_result,
       summary,
-      completedItems: ['Analyzed the requirement.'],
-      changedArtifacts: [],
-      nextSuggestedActions: [],
-      risks: []
+      completedItems: ['Analyzed the requirement.']
     })
   );
 }
@@ -184,7 +213,7 @@ test('requests strict json_schema output for remote models in auto mode', async 
   assert.equal(requestBody?.max_tokens, 500);
 });
 
-test('normalizes legacy GLM Artifacts before schema validation and orchestration', async () => {
+test('rejects legacy GLM Artifacts instead of normalizing them', async () => {
   let requestCount = 0;
   const result = await runWithFetch('task_execution_result', (async () => {
     requestCount += 1;
@@ -215,18 +244,9 @@ test('normalizes legacy GLM Artifacts before schema validation and orchestration
     );
   }) as typeof fetch);
 
-  assert.equal(result.status, 'completed');
-  assert.equal(requestCount, 1);
-  assert.equal(result.output.kind, 'task_execution_result');
-  if (result.output.kind !== 'task_execution_result') return;
-  assert.deepEqual(result.output.changedArtifacts, [
-    {
-      type: 'markdown',
-      title: '项目架构分析报告',
-      content: '# 项目架构\n\n旧格式正文',
-      metadata: { reportKind: 'project_architecture_analysis' }
-    }
-  ]);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
+  assert.equal(requestCount, 2);
 });
 
 test('preserves traceable workspace-context actions from Post Review output', async () => {
@@ -241,6 +261,7 @@ test('preserves traceable workspace-context actions from Post Review output', as
     'post_review_report',
     chatContent(
       JSON.stringify({
+        schemaVersion: '1.0',
         kind: 'post_review_report',
         isConsistentWithBrief: false,
         matchedItems: [],
@@ -260,59 +281,14 @@ test('preserves traceable workspace-context actions from Post Review output', as
   assert.deepEqual(result.output.actions, actions);
 });
 
-test('regresses the captured GLM architecture Artifact anomaly fixture', async () => {
+test('rejects the captured GLM architecture Artifact anomaly fixture', async () => {
   const result = await runWithResponse(
     'task_execution_result',
     loadJsonFixture('glm-architecture-artifact-anomaly.json')
   );
 
-  assert.equal(result.status, 'completed');
-  assert.equal(result.output.kind, 'task_execution_result');
-  if (result.output.kind !== 'task_execution_result') return;
-  const report = result.output.changedArtifacts[0];
-  assert.equal(report?.type, 'markdown');
-  assert.equal(report?.title, '项目架构分析报告');
-  assert.match(report?.content ?? '', /# 项目架构分析报告/);
-  assert.equal(report?.metadata?.reportKind, 'project_architecture_analysis');
-  assert.equal('content' in (report?.metadata ?? {}), false);
-});
-
-test('emits token estimation diagnostics when actual GLM input usage exceeds the error threshold', async () => {
-  const response = completedTaskExecutionContent();
-  response.usage = { prompt_tokens: 150, completion_tokens: 10, total_tokens: 160 };
-  const result = await runWithService(
-    'task_execution_result',
-    () => makeService(response),
-    (input) => {
-      input.estimatedInputTokens = 100;
-    }
-  );
-
-  const diagnostic = result.events.find((event) => event.metadata?.code === 'TOKEN_ESTIMATION_DRIFT');
-  assert.ok(diagnostic);
-  assert.deepEqual(
-    {
-      model: diagnostic.metadata?.model,
-      estimated: diagnostic.metadata?.estimated,
-      actual: diagnostic.metadata?.actual,
-      ratio: diagnostic.metadata?.ratio
-    },
-    { model: 'test-model', estimated: 100, actual: 150, ratio: 1.5 }
-  );
-});
-
-test('does not emit token estimation diagnostics within the error threshold', async () => {
-  const response = completedTaskExecutionContent();
-  response.usage = { prompt_tokens: 110, completion_tokens: 10, total_tokens: 120 };
-  const result = await runWithService(
-    'task_execution_result',
-    () => makeService(response),
-    (input) => {
-      input.estimatedInputTokens = 100;
-    }
-  );
-
-  assert.equal(result.events.some((event) => event.metadata?.code === 'TOKEN_ESTIMATION_DRIFT'), false);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
 });
 
 test('caps remote max_tokens by LLM_REMOTE_MAX_OUTPUT_TOKENS', async () => {
@@ -333,13 +309,18 @@ test('caps remote max_tokens by LLM_REMOTE_MAX_OUTPUT_TOKENS', async () => {
 test('aggregates OpenAI-compatible streaming chunks before runtime output parsing', async () => {
   const encoder = new TextEncoder();
   let requestBody: Record<string, unknown> | undefined;
+  const serialized = JSON.stringify({
+    ...runtimeOutputExamples.task_execution_result,
+    summary: 'Streamed output'
+  });
+  const splitAt = Math.floor(serialized.length / 2);
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(
         encoder.encode(
           [
-            'data: {"choices":[{"delta":{"content":"{\\"kind\\":\\"task_execution_result\\",\\"status\\":\\"completed\\","}}]}\n\n',
-            'data: {"choices":[{"delta":{"content":"\\"summary\\":\\"Streamed output\\",\\"changedArtifacts\\":[]}"}}]}\n\n',
+            `data: ${JSON.stringify({ choices: [{ delta: { content: serialized.slice(0, splitAt) } }] })}\n\n`,
+            `data: ${JSON.stringify({ choices: [{ delta: { content: serialized.slice(splitAt) } }] })}\n\n`,
             'data: [DONE]\n\n'
           ].join('')
         )
@@ -444,7 +425,7 @@ test('reports sanitized schema diagnostics after the repair attempt fails', asyn
   }) as typeof fetch);
 
   assert.equal(result.status, 'failed');
-  assert.equal(result.error?.code, 'OUTPUT_SCHEMA_INVALID');
+  assert.equal(result.error?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
   assert.equal(requestCount, 2);
   assert.equal(result.error?.details?.detectedKind, 'task_brief');
   assert.equal(result.error?.details?.parseState, 'wrong_kind');
@@ -456,7 +437,7 @@ test('reports sanitized schema diagnostics after the repair attempt fails', asyn
   assert.match(result.error?.message ?? '', /Expected task_execution_result, detected task_brief/);
 });
 
-test('returns OUTPUT_SCHEMA_INVALID when Artifact schema repair still fails', async () => {
+test('returns RUNTIME_OUTPUT_CONTRACT_VIOLATION when Artifact schema repair still fails', async () => {
   let requestCount = 0;
   const invalidArtifactOutput = chatContent(
     JSON.stringify({
@@ -481,7 +462,7 @@ test('returns OUTPUT_SCHEMA_INVALID when Artifact schema repair still fails', as
 
   assert.equal(requestCount, 2);
   assert.equal(result.status, 'failed');
-  assert.equal(result.error?.code, 'OUTPUT_SCHEMA_INVALID');
+  assert.equal(result.error?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
   assert.equal(result.error?.details?.parseState, 'schema_invalid');
   assert.equal(result.error?.details?.repairAttempts, 1);
   assert.match(
@@ -490,33 +471,24 @@ test('returns OUTPUT_SCHEMA_INVALID when Artifact schema repair still fails', as
   );
 });
 
-test('wraps plain text discussion output as agent_message', async () => {
+test('rejects plain text discussion output instead of wrapping it', async () => {
   const result = await runWithResponse('agent_message', chatContent('需求分析可以继续，但需要先补齐验收标准。'));
 
-  assert.equal(result.status, 'completed');
-  assert.equal(result.output.kind, 'agent_message');
-  assert.equal(result.output.content, '需求分析可以继续，但需要先补齐验收标准。');
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
 });
 
-test('coerces missing-kind agent_message JSON without losing messageKind', async () => {
+test('rejects missing-kind agent_message JSON', async () => {
   const result = await runWithResponse(
     'agent_message',
     chatContent(JSON.stringify({ messageKind: 'risk', content: '当前需求缺少异常路径说明。' }))
   );
 
-  assert.equal(result.status, 'completed');
-  assert.deepEqual(result.output, {
-    kind: 'agent_message',
-    messageKind: 'risk',
-    content: '当前需求缺少异常路径说明。',
-    targetAgentIds: undefined,
-    targetAgentKeys: undefined,
-    mentionedAgentIds: undefined,
-    relatedTaskIds: undefined
-  });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
 });
 
-test('coerces missing-kind task_execution_result JSON', async () => {
+test('rejects missing-kind task_execution_result JSON', async () => {
   const result = await runWithResponse(
     'task_execution_result',
     chatContent(
@@ -530,13 +502,11 @@ test('coerces missing-kind task_execution_result JSON', async () => {
     )
   );
 
-  assert.equal(result.status, 'completed');
-  assert.equal(result.output.kind, 'task_execution_result');
-  assert.equal(result.output.status, 'blocked');
-  assert.equal(result.output.summary, '缺少可验证的需求证据。');
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
 });
 
-test('normalizes non-canonical status in explicit-kind task_execution_result JSON', async () => {
+test('rejects non-canonical status in explicit-kind task_execution_result JSON', async () => {
   const result = await runWithResponse(
     'task_execution_result',
     chatContent(
@@ -548,13 +518,11 @@ test('normalizes non-canonical status in explicit-kind task_execution_result JSO
     )
   );
 
-  assert.equal(result.status, 'completed');
-  assert.equal(result.output.kind, 'task_execution_result');
-  assert.equal(result.output.status, 'completed');
-  assert.equal(result.output.summary, '已完成项目架构与技术栈分析。');
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
 });
 
-test('defaults missing status in explicit-kind task_execution_result JSON to completed', async () => {
+test('rejects missing status in explicit-kind task_execution_result JSON', async () => {
   const result = await runWithResponse(
     'task_execution_result',
     chatContent(
@@ -565,9 +533,8 @@ test('defaults missing status in explicit-kind task_execution_result JSON to com
     )
   );
 
-  assert.equal(result.status, 'completed');
-  assert.equal(result.output.kind, 'task_execution_result');
-  assert.equal(result.output.status, 'completed');
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
 });
 
 test('keeps canonical non-completed status in explicit-kind task_execution_result JSON', async () => {
@@ -575,7 +542,7 @@ test('keeps canonical non-completed status in explicit-kind task_execution_resul
     'task_execution_result',
     chatContent(
       JSON.stringify({
-        kind: 'task_execution_result',
+        ...runtimeOutputExamples.task_execution_result,
         status: 'blocked',
         summary: '缺少可验证的需求证据。'
       })
@@ -587,29 +554,62 @@ test('keeps canonical non-completed status in explicit-kind task_execution_resul
   assert.equal(result.output.status, 'blocked');
 });
 
-test('repairs raw control characters inside JSON string literals', async () => {
-  const rawJson = `{"kind":"task_execution_result","status":"completed","summary":"第一段分析结论。
-第二段包含	制表符与换行。"}`;
+test('rejects raw control characters instead of repairing legacy JSON', async () => {
+  const rawJson = JSON.stringify({
+    ...runtimeOutputExamples.task_execution_result,
+    summary: '第一段分析结论。__RAW_CONTROL__第二段包含制表符与换行。'
+  }).replace('__RAW_CONTROL__', '\n\t');
   const result = await runWithResponse('task_execution_result', chatContent(rawJson));
 
-  assert.equal(result.status, 'completed');
-  assert.equal(result.output.kind, 'task_execution_result');
-  assert.equal(result.output.status, 'completed');
-  assert.equal(result.output.summary, '第一段分析结论。\n第二段包含\t制表符与换行。');
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
 });
 
-test('control-char repair honors escaped quotes inside string literals', async () => {
-  const rawJson = `{"kind":"task_execution_result","status":"completed","summary":"引用 \\" 之后
-仍在字符串内"}`;
+test('rejects control-char JSON even when it contains escaped quotes', async () => {
+  const rawJson = JSON.stringify({
+    ...runtimeOutputExamples.task_execution_result,
+    summary: '引用 " 之后__RAW_NEWLINE__仍在字符串内'
+  }).replace('__RAW_NEWLINE__', '\n');
   const result = await runWithResponse('task_execution_result', chatContent(rawJson));
 
-  assert.equal(result.status, 'completed');
-  assert.equal(result.output.kind, 'task_execution_result');
-  assert.equal(result.output.summary, '引用 " 之后\n仍在字符串内');
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
+});
+
+test('rejects fenced and prose-surrounded JSON instead of extracting a local candidate', async () => {
+  const valid = JSON.stringify(runtimeOutputExamples.task_execution_result);
+  for (const content of [`\`\`\`json\n${valid}\n\`\`\``, `Model result follows:\n${valid}\nEnd result.`]) {
+    const result = await runWithResponse('task_execution_result', chatContent(content));
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
+  }
+});
+
+test('rejects model-content result/output/final_output wrappers instead of recursively unwrapping them', async () => {
+  const valid = JSON.stringify(runtimeOutputExamples.task_execution_result);
+  for (const wrapper of ['result', 'output', 'final_output']) {
+    const result = await runWithResponse(
+      'task_execution_result',
+      chatContent(JSON.stringify({ [wrapper]: valid }))
+    );
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
+  }
+});
+
+test('rejects top-level result/output/final_output object wrappers as non-provider contracts', async () => {
+  for (const wrapper of ['result', 'output', 'final_output']) {
+    const result = await runWithResponse('task_execution_result', {
+      [wrapper]: runtimeOutputExamples.task_execution_result
+    });
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
+  }
 });
 
 test('does not wrap explicit wrong-kind JSON as agent_message', async () => {
   const wrongKind = {
+    schemaVersion: '1.0',
     kind: 'task_brief',
     goal: 'Wrong output kind',
     scope: [],
@@ -624,7 +624,7 @@ test('does not wrap explicit wrong-kind JSON as agent_message', async () => {
   const result = await runWithResponse('agent_message', chatContent(JSON.stringify(wrongKind)));
 
   assert.equal(result.status, 'failed');
-  assert.equal(result.error?.code, 'OUTPUT_SCHEMA_INVALID');
+  assert.equal(result.error?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
 });
 
 test('reports HTML provider responses as model configuration errors', async () => {
@@ -648,15 +648,33 @@ test('classifies HTTP 524 provider responses as runtime timeouts without leaking
   const result = await runWithFetch('task_execution_result', (async () =>
     new Response('<!DOCTYPE html><html><body>Gateway timeout</body></html>', {
       status: 524,
-      headers: { 'content-type': 'text/html; charset=utf-8' }
+      headers: { 'content-type': 'text/html; charset=utf-8', 'retry-after': '120' }
     })) as typeof fetch);
 
   assert.equal(result.status, 'failed');
   assert.equal(result.error?.code, 'RUNTIME_TIMEOUT');
-  assert.match(result.error?.message ?? '', /HTTP 524/);
+  assert.match(result.error?.message ?? '', /运行时执行超时/);
   assert.doesNotMatch(result.error?.message ?? '', /<!DOCTYPE html>/i);
   assert.equal(result.error?.retryable, true);
   assert.equal(result.error?.details?.httpStatus, 524);
+  assert.equal(result.error?.details?.providerFailure, true);
+  assert.equal(result.error?.details?.stage, 'provider_response');
+  assert.equal(result.error?.details?.retryAfterMs, 120_000);
+  assert.equal(result.termination?.kind, 'runtime_timeout');
+});
+
+test('maps HTTP 401 to a non-retryable model error', async () => {
+  const result = await runWithFetch('task_execution_result', (async () =>
+    new Response(JSON.stringify({ error: { message: 'Invalid token' } }), {
+      status: 401,
+      headers: { 'content-type': 'application/json' }
+    })) as typeof fetch);
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'MODEL_ERROR');
+  assert.match(result.error?.message ?? '', /HTTP 401/);
+  assert.equal(result.error?.retryable, false);
+  assert.equal(result.error?.details?.httpStatus, 401);
 });
 
 test('tool-loop aborts a hung LLM request after LLM_TIMEOUT_MS', async () => {
@@ -686,20 +704,20 @@ test('tool-loop aborts a hung LLM request after LLM_TIMEOUT_MS', async () => {
         };
       }
     } as never,
-    {} as never
+    {} as never,
+    { resolveServerRoot: () => 'D:/tmp/workspace' } as never
   );
 
   const input = makeInput('agent_message');
-  const contextPack = input.contextPack as Record<string, unknown>;
-  contextPack.availableTools = [{ name: 'read_file', description: 'read', inputSchema: { type: 'object' } }];
-  contextPack.workingDirectory = { kind: 'server_local', path: 'D:/tmp/workspace' };
+  input.toolCatalog.tools = [{ name: 'read_file', description: 'read', inputSchema: { type: 'object' } }];
 
   try {
-    const result = await service.run(input);
+    const result = await service.start(input).result;
 
     assert.equal(result.status, 'failed');
     assert.equal(result.error?.code, 'RUNTIME_TIMEOUT');
-    assert.match(result.error?.message ?? '', /timed out/);
+    assert.match(result.error?.message ?? '', /运行时执行超时/);
+    assert.equal(result.termination?.kind, 'runtime_timeout');
   } finally {
     globalThis.fetch = originalFetch;
     if (previousTimeout === undefined) {
@@ -742,12 +760,10 @@ test('tool-loop retries HTTP 429 provider responses', async () => {
 
   const service = makeServiceWithCurrentFetch();
   const input = makeInput('task_execution_result');
-  const contextPack = input.contextPack as Record<string, unknown>;
-  contextPack.availableTools = [{ name: 'read_file', description: 'read', inputSchema: { type: 'object' } }];
-  contextPack.workingDirectory = { kind: 'server_local', path: 'D:/tmp/workspace' };
+  input.toolCatalog.tools = [{ name: 'read_file', description: 'read', inputSchema: { type: 'object' } }];
 
   try {
-    const result = await service.run(input);
+    const result = await service.start(input).result;
 
     assert.equal(result.status, 'completed');
     assert.equal(result.output.kind, 'task_execution_result');
@@ -781,17 +797,17 @@ test('tool-loop classifies HTTP 524 provider responses as runtime timeouts', asy
 
   const service = makeServiceWithCurrentFetch();
   const input = makeInput('task_execution_result');
-  const contextPack = input.contextPack as Record<string, unknown>;
-  contextPack.availableTools = [{ name: 'read_file', description: 'read', inputSchema: { type: 'object' } }];
-  contextPack.workingDirectory = { kind: 'server_local', path: 'D:/tmp/workspace' };
+  input.toolCatalog.tools = [{ name: 'read_file', description: 'read', inputSchema: { type: 'object' } }];
 
   try {
-    const result = await service.run(input);
+    const result = await service.start(input).result;
 
     assert.equal(result.status, 'failed');
     assert.equal(result.error?.code, 'RUNTIME_TIMEOUT');
-    assert.match(result.error?.message ?? '', /HTTP 524/);
+    assert.match(result.error?.message ?? '', /运行时执行超时/);
     assert.doesNotMatch(result.error?.message ?? '', /<!DOCTYPE html>/i);
+    assert.equal(result.error?.details?.httpStatus, 524);
+    assert.equal(result.termination?.kind, 'runtime_timeout');
   } finally {
     globalThis.fetch = originalFetch;
     if (previousRetries === undefined) {

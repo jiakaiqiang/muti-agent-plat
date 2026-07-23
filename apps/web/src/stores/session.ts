@@ -1,10 +1,10 @@
 import { defineStore } from 'pinia'
 import { apiDelete, apiGet, apiPage, apiPost } from '@/api/client'
+import { expectedBackendCommit } from '@/config/runtime'
 import type {
+  OpsHealth,
   SessionDetail,
-  EngineeringRuntimeConfig,
-  ExecutionTarget,
-  RuntimeType,
+  RuntimePreference,
   SessionListItem,
   SessionStatus,
   SessionViewMode,
@@ -22,9 +22,7 @@ type CreateSessionInput = {
   knowledgeBaseIds?: string[]
   workingDirectory?: SessionWorkingDirectory
   workspaceSnapshot?: WorkspaceSnapshot
-  engineeringRuntimeType?: RuntimeType
-  engineeringRuntime?: EngineeringRuntimeConfig
-  executionTarget?: ExecutionTarget
+  runtimePreference?: RuntimePreference
 }
 
 const favoriteStorageKey = 'agent-cluster.favorite-session-ids'
@@ -61,13 +59,48 @@ export const useSessionStore = defineStore('session', {
     currentViewMode: 'chat' as SessionViewMode,
     loading: false,
     favoriteSessionIds: loadFavoriteSessionIds() as string[],
-    deletingSessionIds: [] as string[]
+    deletingSessionIds: [] as string[],
+    runtimeHealth: undefined as OpsHealth | undefined,
+    runtimeHealthChecked: false,
+    runtimeHealthError: undefined as string | undefined
   }),
   getters: {
-    isFavorite: (state) => (sessionId: string) => state.favoriteSessionIds.includes(sessionId)
+    isFavorite: (state) => (sessionId: string) => state.favoriteSessionIds.includes(sessionId),
+    backendCompatible: (state) => runtimeHealthCompatible(state.runtimeHealth, expectedBackendCommit)
   },
   actions: {
+    async loadRuntimeHealth(force = false) {
+      if (this.runtimeHealthChecked && !force) return this.runtimeHealth
+      try {
+        this.runtimeHealth = await apiGet<OpsHealth>('/health')
+        this.runtimeHealthError = this.backendCompatible
+          ? undefined
+          : `BACKEND_VERSION_MISMATCH: expected pipeline=v2 schema=3${expectedBackendCommit ? ` commit=${expectedBackendCommit}` : ''}; received pipeline=${this.runtimeHealth.pipelineVersion} schema=${this.runtimeHealth.dataSchemaVersion} commit=${this.runtimeHealth.commit}.`
+        if (this.runtimeHealthError) {
+          this.sessions = []
+          this.currentSession = undefined
+        }
+        return this.runtimeHealth
+      } catch (error) {
+        this.runtimeHealth = undefined
+        this.runtimeHealthError = error instanceof Error ? error.message : 'BACKEND_HEALTH_UNAVAILABLE'
+        this.sessions = []
+        this.currentSession = undefined
+        throw error
+      } finally {
+        this.runtimeHealthChecked = true
+      }
+    },
+    async assertBackendCompatible() {
+      await this.loadRuntimeHealth(true)
+      if (!this.backendCompatible) {
+        this.sessions = []
+        this.currentSession = undefined
+        throw new Error(this.runtimeHealthError ?? 'BACKEND_VERSION_MISMATCH')
+      }
+    },
     async loadSessions() {
+      await this.assertBackendCompatible()
       this.loading = true
       try {
         const page = await apiPage<SessionListItem>('/sessions')
@@ -77,6 +110,7 @@ export const useSessionStore = defineStore('session', {
       }
     },
     async createSession(input: CreateSessionInput) {
+      await this.assertBackendCompatible()
       const result = await apiPost<{ session: SessionDetail }>('/sessions', input)
       const session = result.session
       this.currentSession = session
@@ -97,6 +131,7 @@ export const useSessionStore = defineStore('session', {
       return session
     },
     async loadSession(sessionId?: string) {
+      await this.assertBackendCompatible()
       this.loading = true
       const selectedSessionId = sessionId ?? this.sessions[0]?.id
       if (!sessionId && !this.sessions.length) {
@@ -111,7 +146,17 @@ export const useSessionStore = defineStore('session', {
       }
     },
     async sendMessage(sessionId: string, content: string, mentionedAgentIds: string[] = []) {
+      await this.assertBackendCompatible()
       return apiPost<{ event: CollaborationEvent }>(`/sessions/${sessionId}/messages`, { content, mentionedAgentIds })
+    },
+    async refreshWorkspaceSnapshot(sessionId: string, workspaceId: string, workspaceSnapshot: WorkspaceSnapshot) {
+      await this.assertBackendCompatible()
+      const result = await apiPost<{
+        session: SessionDetail
+        updatedSessionIds: string[]
+      }>(`/sessions/${sessionId}/workspace/snapshot`, { workspaceId, workspaceSnapshot })
+      if (this.currentSession?.id === sessionId) this.currentSession = result.session
+      return result
     },
     removeSessionFromState(sessionId: string) {
       this.sessions = this.sessions.filter((session) => session.id !== sessionId)
@@ -122,6 +167,7 @@ export const useSessionStore = defineStore('session', {
       }
     },
     async deleteSession(sessionId: string) {
+      await this.assertBackendCompatible()
       if (this.deletingSessionIds.includes(sessionId)) {
         return false
       }
@@ -153,6 +199,7 @@ export const useSessionStore = defineStore('session', {
       persistFavoriteSessionIds(this.favoriteSessionIds)
     },
     async confirmBrief(sessionId: string, briefId: string) {
+      await this.assertBackendCompatible()
       // Execution now runs in the background; confirm returns "accepted" and the
       // UI follows execution over SSE rather than waiting for the full result.
       const result = await apiPost<{ accepted: boolean; status: SessionStatus }>(
@@ -164,8 +211,9 @@ export const useSessionStore = defineStore('session', {
     async reviseBrief(
       sessionId: string,
       briefId: string,
-      input: { userMessage: string; confirmationId?: string; reason?: string }
+      input: { userMessage: string; confirmationId?: string; reason?: string; assignedAgentKeys?: string[] }
     ) {
+      await this.assertBackendCompatible()
       const result = await apiPost<{ accepted: boolean; status: SessionStatus }>(
         `/sessions/${sessionId}/briefs/${briefId}/reject`,
         input
@@ -174,14 +222,17 @@ export const useSessionStore = defineStore('session', {
       return result
     },
     async pauseSession(sessionId: string, confirmationId?: string) {
+      await this.assertBackendCompatible()
       await apiPost(`/sessions/${sessionId}/pause`, confirmationId ? { confirmationId } : undefined)
       this.setCurrentStatus(sessionId, 'WAIT_USER_DECISION')
     },
     async resumeSession(sessionId: string, confirmationId?: string) {
+      await this.assertBackendCompatible()
       await apiPost(`/sessions/${sessionId}/resume`, confirmationId ? { confirmationId } : undefined)
       this.setCurrentStatus(sessionId, 'EXECUTING')
     },
     async cancelSession(sessionId: string, confirmationId?: string) {
+      await this.assertBackendCompatible()
       await apiPost(`/sessions/${sessionId}/cancel`, confirmationId ? { confirmationId } : undefined)
       this.setCurrentStatus(sessionId, 'CANCELLED')
     },
@@ -189,8 +240,62 @@ export const useSessionStore = defineStore('session', {
       sessionId: string,
       input: { confirmationId: string; action: PostReviewAction['action'] }
     ) {
+      await this.assertBackendCompatible()
       const result = await apiPost<{ session: SessionDetail; action: PostReviewAction }>(
         `/sessions/${sessionId}/post-review/actions`,
+        input
+      )
+      await this.loadSession(sessionId)
+      return result
+    },
+    async selectWorkflow(
+      sessionId: string,
+      input: { workflowId: string; workflowVersion: number; confirmationId: string }
+    ) {
+      await this.assertBackendCompatible()
+      const result = await apiPost<{ session: SessionDetail }>(`/sessions/${sessionId}/workflow/select`, input)
+      await this.loadSession(sessionId)
+      return result
+    },
+    async resolveEmptyWorkspaceDecision(
+      sessionId: string,
+      input: {
+        confirmationId: string
+        decision: 'initialize_project' | 'reselect_workspace' | 'cancel'
+      }
+    ) {
+      await this.assertBackendCompatible()
+      const result = await apiPost<{ session: SessionDetail }>(
+        `/sessions/${sessionId}/workspace/empty-decision`,
+        input
+      )
+      await this.loadSession(sessionId)
+      return result
+    },
+    async resolveWorkflowHumanDecision(
+      sessionId: string,
+      runId: string,
+      nodeRunId: string,
+      input: {
+        confirmationId: string
+        expectedRunRevision?: number
+        decision: 'approve' | 'revise' | 'cancel'
+        instruction?: string
+      }
+    ) {
+      await this.assertBackendCompatible()
+      const result = await apiPost(`/workflow-runs/${runId}/nodes/${nodeRunId}/decision`, input)
+      await this.loadSession(sessionId)
+      return result
+    },
+    async resolveWorkflowStep(
+      sessionId: string,
+      taskId: string,
+      input: { confirmationId: string; decision: 'approve' | 'revise'; instruction?: string }
+    ) {
+      await this.assertBackendCompatible()
+      const result = await apiPost<{ session: SessionDetail }>(
+        `/sessions/${sessionId}/workflow/steps/${taskId}/decision`,
         input
       )
       await this.loadSession(sessionId)
@@ -200,6 +305,7 @@ export const useSessionStore = defineStore('session', {
       sessionId: string,
       input: { content: string; confirmationId?: string; sourceEventId?: string; confidence?: number }
     ) {
+      await this.assertBackendCompatible()
       return apiPost(`/sessions/${sessionId}/memories/confirm`, input)
     },
     async decideFeishuNotification(
@@ -210,7 +316,19 @@ export const useSessionStore = defineStore('session', {
         decision: 'send_notification' | 'skip_notification'
       }
     ) {
+      await this.assertBackendCompatible()
       return apiPost(`/sessions/${sessionId}/notifications/feishu/decision`, input)
+    },
+    async decideLocalReportSave(
+      sessionId: string,
+      input: {
+        confirmationId: string
+        artifactId: string
+        decision: 'save_local' | 'keep_in_session'
+      }
+    ) {
+      await this.assertBackendCompatible()
+      return apiPost(`/sessions/${sessionId}/reports/local-save/decision`, input)
     },
     switchViewMode(mode: SessionViewMode) {
       this.currentViewMode = mode
@@ -226,3 +344,11 @@ export const useSessionStore = defineStore('session', {
     }
   }
 })
+
+export function runtimeHealthCompatible(health: OpsHealth | undefined, expectedCommit = '') {
+  return (
+    health?.pipelineVersion === 'v2' &&
+    health.dataSchemaVersion === 3 &&
+    (!expectedCommit || health.commit === expectedCommit)
+  )
+}

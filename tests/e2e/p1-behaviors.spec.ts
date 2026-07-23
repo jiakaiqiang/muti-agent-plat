@@ -71,17 +71,44 @@ async function waitForStatus(sessionId: string, status: string, timeoutMs = 15_0
     const detail = await api<{ data: Json }>(`/sessions/${sessionId}`);
     last = String(detail.data.status);
     if (last === status) return;
+    if (last === "FAILED" && status !== "FAILED") {
+      const diagnostics = (await listEvents(sessionId))
+        .filter((event) =>
+          ["error_reported", "runtime_failed", "session_status_changed", "workflow_run_failed"].includes(
+            String(event.type)
+          )
+        )
+        .slice(-8);
+      throw new Error(`Session failed while waiting for ${status}: ${JSON.stringify({ detail: detail.data, diagnostics })}`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   throw new Error(`Timed out waiting for status ${status}, last=${last}`);
 }
 
+async function waitForAnyStatus(sessionId: string, statuses: string[], timeoutMs = 60_000) {
+  const expected = new Set(statuses);
+  const deadline = Date.now() + timeoutMs;
+  let last = "";
+  while (Date.now() < deadline) {
+    const detail = await api<{ data: Json }>(`/sessions/${sessionId}`);
+    last = String(detail.data.status);
+    if (expected.has(last)) return last;
+    if (["FAILED", "CANCELLED"].includes(last)) {
+      throw new Error(`Session terminated while waiting for ${statuses.join("/")}: ${JSON.stringify(detail.data)}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error(`Timed out waiting for ${statuses.join("/")}, last=${last}`);
+}
+
 async function waitForRagMarker(sessionId: string, marker: string, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
+  let lastRagEvents: Json[] = [];
   while (Date.now() < deadline) {
     const events = await listEvents(sessionId);
-    const matched = events
-      .filter((event) => event.type === "rag_retrieved")
+    lastRagEvents = events.filter((event) => event.type === "rag_retrieved");
+    const matched = lastRagEvents
       .some((event) =>
         (((event.metadata as Json).payload as Json).matchedChunks as Json[] | undefined)?.some((chunk) =>
           String(chunk.snippet).includes(marker)
@@ -90,7 +117,28 @@ async function waitForRagMarker(sessionId: string, marker: string, timeoutMs = 1
     if (matched) return;
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  throw new Error(`Timed out waiting for RAG marker: ${marker}`);
+  throw new Error(`Timed out waiting for RAG marker ${marker}: ${JSON.stringify(lastRagEvents)}`);
+}
+
+async function waitForTaskExecutionRuntimeStart(sessionId: string, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastRelevantEvents: Json[] = [];
+  while (Date.now() < deadline) {
+    const events = await listEvents(sessionId);
+    const taskStartedIndex = events.findIndex((event) => event.type === "task_started" && Boolean(event.taskId));
+    if (taskStartedIndex >= 0) {
+      const taskId = String(events[taskStartedIndex].taskId);
+      const runtimeStarted = events
+        .slice(taskStartedIndex + 1)
+        .find((event) => event.type === "runtime_started" && String(event.taskId) === taskId);
+      if (runtimeStarted) return runtimeStarted;
+    }
+    lastRelevantEvents = events.filter((event) =>
+      ["task_started", "runtime_started", "runtime_failed", "session_status_changed"].includes(String(event.type))
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Timed out waiting for task execution Runtime start: ${JSON.stringify(lastRelevantEvents)}`);
 }
 
 async function createSession(input: string, extra: Json = {}) {
@@ -98,11 +146,49 @@ async function createSession(input: string, extra: Json = {}) {
     method: "POST",
     body: JSON.stringify({
       input,
-      agentIds: ["coordinator", "requirements", "backend", "test", "review"],
+      agentIds: ["coordinator", "requirements", "product-manager", "backend", "test", "review"],
       ...extra
     })
   });
   return String(created.data.session.id);
+}
+
+async function createPublishedProductManagerWorkflow() {
+  const agents = await api<{ data: Json[] }>("/agents");
+  const productManager = agents.data.find((agent) => agent.key === "product-manager");
+  if (!productManager) throw new Error("Product Manager Agent is unavailable");
+  const draft = await api<{ data: Json }>("/workflows", {
+    method: "POST",
+    body: JSON.stringify({
+      name: "P1 executing interrupt workflow",
+      nodes: [{ id: "p1-product-manager", type: "agent", agentId: productManager.id, order: 0 }]
+    })
+  });
+  return (
+    await api<{ data: Json }>(`/workflows/${String(draft.data.id)}/publish`, {
+      method: "POST",
+      body: JSON.stringify({ expectedDraftRevision: draft.data.draftRevision })
+    })
+  ).data;
+}
+
+async function selectWorkflow(sessionId: string, workflow: Json) {
+  await waitForStatus(sessionId, "WAIT_WORKFLOW_SELECT");
+  const selection = (await listEvents(sessionId)).find(
+    (event) =>
+      event.type === "user_confirmation_requested" &&
+      (((event.metadata as Json).payload as Json | undefined)?.reason === "select_workflow")
+  );
+  if (!selection) throw new Error("Workflow selection confirmation was not emitted");
+  const payload = ((selection.metadata as Json).payload as Json);
+  await api(`/sessions/${sessionId}/workflow/select`, {
+    method: "POST",
+    body: JSON.stringify({
+      workflowId: workflow.id,
+      workflowVersion: workflow.currentPublishedVersion,
+      confirmationId: payload.confirmationId
+    })
+  });
 }
 
 function parseSseBlock(block: string) {
@@ -152,6 +238,7 @@ async function observeNextStreamEvent(sessionId: string, trigger: () => Promise<
 }
 
 async function runP1Behaviors() {
+  const executionWorkflow = await createPublishedProductManagerWorkflow();
   const transitionSessionId = await createSession("P1 illegal transition coverage");
   await expectApiError(
     `/sessions/${transitionSessionId}/resume`,
@@ -199,27 +286,28 @@ async function runP1Behaviors() {
       content: "P1_RAG_MARKER: runtime must keep dry-run non-destructive and preserve structured evidence."
     })
   });
-  await api(`/agents/backend/knowledge-bases/${knowledgeBaseId}`, { method: "POST" });
+  await api(`/agents/product-manager/knowledge-bases/${knowledgeBaseId}`, { method: "POST" });
 
-  const executionSessionId = await createSession("P1 executing interrupt and RAG coverage", {
-    knowledgeBaseIds: [knowledgeBaseId]
+  const executionSessionId = await createSession("分析 P1 执行中插话与 RAG 覆盖，输出行为说明。", {
+    knowledgeBaseIds: [knowledgeBaseId],
+    runtimePreference: { preferredRuntimeType: "generic_llm", allowedRuntimeTypes: ["generic_llm"] }
   });
   const briefPayload = ((await waitForEvent(executionSessionId, "brief_created")).metadata as Json).payload as Json;
   const briefId = String(briefPayload.briefId);
 
-  const confirmPromise = api(`/sessions/${executionSessionId}/briefs/${briefId}/confirm`, {
+  await api(`/sessions/${executionSessionId}/briefs/${briefId}/confirm`, {
     method: "POST",
     body: JSON.stringify({ note: "Start delayed dry-run for interrupt coverage." })
   });
-
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await selectWorkflow(executionSessionId, executionWorkflow);
+  await waitForTaskExecutionRuntimeStart(executionSessionId);
   const interrupt = await api<{ data: { event: Json; handlingPlan: Json } }>(
     `/sessions/${executionSessionId}/messages`,
     {
       method: "POST",
       body: JSON.stringify({
         content: "执行中插话：不要修改数据库，保持 dry-run non-destructive。",
-        mentionedAgentIds: ["coordinator", "backend"]
+        mentionedAgentIds: ["coordinator", "product-manager"]
       })
     }
   );
@@ -227,7 +315,6 @@ async function runP1Behaviors() {
     throw new Error("Executing constraint interrupt must pause and be high priority");
   }
 
-  await confirmPromise;
   const events = await listEvents(executionSessionId);
   const interruptTaskEvent = events.find(
     (event) =>
@@ -238,11 +325,18 @@ async function runP1Behaviors() {
     throw new Error("Executing interrupt must create a task to handle it");
   }
 
-  // 验证插话后执行继续完成
-  await waitForStatus(executionSessionId, "COMPLETED", 60_000);
+  // 插话后的工作流必须继续到交付，或在 Post Review 明确等待用户决策；不得失败或被误取消。
+  const settledStatus = await waitForAnyStatus(executionSessionId, ["COMPLETED", "WAIT_USER_DECISION"]);
+  if (settledStatus === "WAIT_USER_DECISION") {
+    const confirmation = (await listEvents(executionSessionId)).find(
+      (event) => event.type === "user_confirmation_requested"
+    );
+    if (!confirmation) throw new Error("WAIT_USER_DECISION must expose a user confirmation");
+  }
+  await waitForRagMarker(executionSessionId, "P1_RAG_MARKER");
   const completedSession = await api<{ data: Json }>(`/sessions/${executionSessionId}`);
-  if (completedSession.data.status !== "COMPLETED") {
-    throw new Error(`Interrupt with context should complete execution, got ${String(completedSession.data.status)}`);
+  if (!["COMPLETED", "WAIT_USER_DECISION"].includes(String(completedSession.data.status))) {
+    throw new Error(`Interrupt with context left an invalid state: ${String(completedSession.data.status)}`);
   }
 
   console.log("p1 behavior coverage ok");
