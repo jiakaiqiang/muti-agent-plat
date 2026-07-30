@@ -15,6 +15,29 @@
 - RAG 当前使用关键词检索；`knowledge_chunks.embedding` 和 pgvector 属于目标模型和后续迁移范围。
 - `capability_invocations` 的目标表语义当前主要由 capability 审计事件和 Runtime invocation log 承载。
 
+### 1.2 活动数据规范与硬切换
+
+当前进程只接受以下系统 metadata：
+
+```ts
+type SystemDataMetadata = {
+  dataSchemaVersion: 3
+  dataEpoch: string
+  pipelineVersion: 'v2'
+  cutoverAt: string
+  cutoverAuditId: string
+}
+```
+
+- `dataSchemaVersion: 3` 是唯一活动数据 schema；版本 2 及更早状态不会被兼容、补字段或迁移后加载。
+- `dataEpoch` 在每次受控 cutover 时重新生成。Session、Queue Job、Runtime Invocation、Artifact、Recovery 与 Local Runtime registration 必须与当前 epoch 完全一致。
+- file backend 的新默认文件为 `state.v3.json`。显式配置其他文件名不改变 schema 门禁。
+- 旧状态必须保留在活动数据根之外的加密只读归档中，供离线审计；Session/Queue/Recovery/Resume 不得读取该归档。
+- Runtime output 另有独立 `schemaVersion: "1.0"`，不能与系统 `dataSchemaVersion: 3` 混用。
+- Runtime Invocation 和 Artifact 加载时若缺少 `dataEpoch`、epoch 不匹配或不满足 v3 必填结构，启动门禁直接失败；不补字段、不清洗 metadata、不读取旧记录。
+- Artifact 顶层分别持久化必填的 `runtimeProposals`、`platformProjections` 与 `systemEvidence`。`metadata` 是平台白名单类型，不接受任意键，也不再包含 `output`、`fileChanges` 或 `validationEvidence`。模型提议不得混入平台投影；待写入投影不得冒充真实 ChangeSet；真实 ChangeSet 与真实测试不得混入 proposal。
+- 启动顺序固定为：加载持久化状态、校验 schema/epoch metadata、完成 Runtime 合同 preflight，然后才允许接收任务。
+
 ## 2. 命名约定
 
 - 数据库字段使用 `snake_case`。
@@ -459,6 +482,8 @@ create table artifacts (
 | `runtimeInvocations` | invocation log | CLI `cliSessionId/workDir`、status、usage 和 runtimeType |
 | `eventsBySession` | session-keyed events | `actor` 与旧 `fromAgentId` 双写 |
 | `tasksBySession` | session-keyed tasks | `assignee/assignedBy` 与旧 agentId 双写 |
+| `workflowCatalog` | `{ schemaVersion, workflows, versionsByWorkflowId }` | 可变草稿、三类节点、不可变发布版本和归档状态；兼容期双写旧 `workflows` |
+| `workflowRuntime` | `{ schemaVersion, runs, nodeRunsByRunId, approvalsByRunId, effectsByRunId }` | 运行快照、节点尝试、人工/机器人决策、幂等副作用和恢复状态 |
 
 新增 shared 数据结构：
 
@@ -497,4 +522,22 @@ type AutopilotRun = {
 
 Session 增加 `origin?: 'user' | 'autopilot'` 和 `autopilotRunId?: string`。Autopilot 创建的会话必须写入二者，保证事件、任务、artifact 可沿 session 回溯到 run。
 
+Session 使用 `workflowRunId` 关联独立运行实例；`workflowRun` 仅作为旧版兼容投影，不再是工作流事实源。工作流任务仍存入 `tasksBySession`，并携带 `workflowRunId/workflowNodeId/workflowNodeRunId/workflowAttempt/executionPurpose`。运行事实保存在 `workflowRuntime`，阶段输出和用户确认继续以协作事件形成可审计记录。
+
 Actor PostgreSQL 回填针对 collection 表执行，默认表名遵循 persistence 配置；`--apply` 前创建时间戳备份表并在事务内更新 `eventsBySession/tasksBySession`。默认仅 dry-run。
+
+## 10. 用户原文件修订数据
+
+`FileRevisionBaseline` 是用户编辑前的不可变 Workspace 基线；`FileRevisionChain` 保存链头、轮次、`workspaceExpectedHash` 和 `stateVersion`；`FileRevisionRun` 是每一轮冻结的处理事实；`FileRevisionEditorDraft` 是候选编辑器中尚未提交的用户草稿。基线、用户稿、内部 Diff、Agent 提案、Receiver 候选和草稿正文都通过 `ContentReference` 保存，确认前不写 Workspace。
+
+正文保留边界与 Session 生命周期一致。Session 存续时保留活动链和终态链正文；删除 Session 时先持久化删除修订状态，再删除当前持久状态中无引用的 ContentStore 对象。内容寻址导致相同正文跨 Session 或模块复用时，仍存在引用的对象不得删除。
+
+第一轮 Run 的 `baseKind='workspace_baseline'`，基线为 `W0`、用户稿为 `U1`；后续轮的 `baseKind='previous_candidate'`，基线为上一轮 `G(n-1)`、用户稿为当前 `Un`。Run 必须保存 `chainId/iteration/parentRevisionId/reprocessKey`、base/userDraft/diff 的 Hash 与内容引用、完整 Agent Result、Receiver invocation、候选 Hash/引用、确认标识、错误和时间戳。同一轮所有 Agent 使用相同 `revisionId/iteration/baseHash/userDraftHash/diffHash/contextSnapshotHash`。
+
+Run 活动状态为 `submitted/processing/synthesizing/awaiting_confirmation/applying`，历史或终态为 `superseded/applied/abandoned/stale/failed/interrupted`。Chain 状态为 `active/applying/applied/abandoned/stale/failed`。所有提交下一轮、应用、放弃和恢复操作按 `chainId` 串行，并通过 `stateVersion` CAS；最终写回以链创建时冻结的 `workspaceExpectedHash` 为乐观并发条件。显式恢复在 Run 保存 `recoveryRetryKey` 和 `recoveryRetryMode='run_agents'|'receiver_only'|'apply_reconcile'`，相同幂等键不得重复推进状态或重复副作用。
+
+`failed` Run 若错误码为 `REVISION_PARTIAL_AGENT_FAILURE`，必须保留每个 Agent 的成功或失败结果并等待显式决策。`retry_agents` 清空旧结果并把同一 Run 重新置为 `submitted`；`continue_with_successful` 保留全部结果、把 Run 置回 `processing` 并只将成功结果交给 Receiver；`abandon_revision` 将 Run 和 Chain 置为 `abandoned`。三种决策都校验链头和 `expectedStateVersion`，不得从其他失败类型恢复。
+
+持久化 collection 的活动结构固定为 `{ schemaVersion: 2, baselines, chains, runs, drafts }`。重启必须恢复待确认候选和草稿；`submitted/processing/synthesizing` 转为可见 `interrupted`，由用户显式重试后根据已持久化 Agent 结果选择 `run_agents` 或 `receiver_only`。`applying` 根据 Workspace Hash 对账为 `applied/awaiting_confirmation/stale`；若写回异常后连 Workspace 也无法读取，则保存 `REVISION_APPLY_OUTCOME_UNKNOWN`，后续显式重试只执行 `apply_reconcile`。删除 Session 时级联清理其修订记录。
+
+候选已经写回但 Run 终态或新基线持久化失败时，只允许保存稳定错误码 `REVISION_APPLY_PERSISTENCE_RECOVERY_REQUIRED` 或 `REVISION_POST_APPLY_BASELINE_FAILED`。Provider、文件系统或数据库的原始错误文本不得进入 Run、协作事件或前端状态。

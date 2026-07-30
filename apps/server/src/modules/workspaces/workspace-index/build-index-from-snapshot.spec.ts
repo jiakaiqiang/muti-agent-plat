@@ -47,7 +47,7 @@ test('buildIndexFromSnapshot emits directory + file entries with correct kind an
   if (indexFile!.kind === 'file') {
     assert.equal(indexFile!.size, 20);
     assert.equal(indexFile!.language, 'typescript');
-    assert.equal(indexFile!.hash.algorithm, 'sha256');
+    assert.equal(indexFile!.hash!.algorithm, 'sha256');
   }
 
   assert.ok(utilsFile);
@@ -86,7 +86,7 @@ test('buildIndexFromSnapshot returns files even when content is absent (fallback
   assert.equal(entry.kind, 'file');
   if (entry.kind === 'file') {
     assert.equal(entry.size, 100);
-    assert.equal(entry.hash.algorithm, 'sha256');
-    assert.equal(entry.hash.value.length, 64);
+    assert.equal(entry.hash!.algorithm, 'sha256');
+    assert.equal(entry.hash!.value.length, 64);
   }
 });

@@ -20,6 +20,7 @@ import { TasksModule } from './modules/tasks/tasks.module.js';
 import { SkillsModule } from './modules/skills/skills.module.js';
 import { AutopilotModule } from './modules/autopilot/autopilot.module.js';
 import { WorkspacesModule } from './modules/workspaces/workspaces.module.js';
+import { LocalRuntimeModule } from './modules/local-runtime/local-runtime.module.js';
 import { MaintenanceModule } from './modules/persistence/maintenance.module.js';
 import { WorkflowsModule } from './modules/workflows/workflows.module.js';
 
@@ -35,6 +36,7 @@ import { WorkflowsModule } from './modules/workflows/workflows.module.js';
     SkillsModule,
     AutopilotModule,
     WorkspacesModule,
+    LocalRuntimeModule,
     WorkflowsModule,
     RuntimeModule,
     IntentRecognitionModule,

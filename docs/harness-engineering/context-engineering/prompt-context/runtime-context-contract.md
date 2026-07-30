@@ -1,14 +1,14 @@
 ﻿# Runtime Context Contract
 
-> 最后修改时间：2026-06-12 11:20:34 +08:00
-> 修改人：Claude Code
-> 修改的 Agent：Claude Code
+> 最后修改时间：2026-07-12 +08:00
+> 修改人：Codex
+> 修改的 Agent：Codex
 
 ## Purpose
 
-ContextPack should provide enough context for the current phase and avoid unrelated noise. The pack is assembled per runtime invocation, not treated as a dump of all session state.
+ContextAssembly should provide enough internal evidence for the current phase and avoid unrelated noise. Before Runtime dispatch, it is compiled into `InvocationPlan.contextEnvelope: ContextEnvelopeV2`; adapters do not consume ContextAssembly directly.
 
-## ContextPack fields
+## ContextAssembly fields
 
 Top-level fields currently covered by this contract:
 
@@ -16,12 +16,16 @@ Top-level fields currently covered by this contract:
 | --- | --- | --- |
 | systemRules | Non-negotiable runtime behavior rules. | Must include side-effect and workspace grounding rules. |
 | sessionGoal | User's original or current goal. | Always present. |
+| currentContractGoal | Latest authoritative task-contract goal. | Keeps a revised brief goal distinct from the immutable original Session input. |
 | taskContext | Task Context Pack for the current invocation. | Carries task domain/intent, current stage, Project Map or Domain Map, stage plan, evidence selection, evidence refs, validation rules, and Execution/Validation/Review responsibilities. |
 | summaryMemory | Compact continuation memory for long chains. | Carries current goal, current state, confirmed facts, completed work, decisions, open questions, risks, and next steps. |
 | continuationState | Structured runtime continuation state. | Carries current phase/status, active task/agent, task queues, latest checkpoint, handoff refs, source refs, next agents, and resume hints. |
+| contextEnvelopeV2 | Authoritative L0-L6 context envelope for v2 sessions. | Carries policy, task, navigation, grounded evidence, history, state, and artifact layers; v2 runtime payloads do not duplicate legacy workspace fields. |
+| resolvedExecutionTarget | Auditable per-invocation runtime resolution. | Records runtime/model/source/reason after task, phase, workspace capability, policy, and availability checks; it must not be derived from the Agent profile in v2. |
 | workingDirectory | Selected workspace binding. | Present when browser or server-local workspace is attached. |
 | workspaceManifest | Runtime-facing workspace structure and file metadata. | Preferred structure input. Exposes tree, paths, sizes, readability, content length, stack, and entrypoints without file bodies. |
 | selectedEvidenceContents | Runtime-readable selected evidence content. | Preferred content input. Derived from selected evidence refs and trimmed by token budget. |
+| fileRevisionEvidence | Immutable evidence for one confirmed user-file revision. | Present only for `file_revision` and `revision_synthesis` tasks; carries bounded original/revised/Diff evidence and successful Agent proposals into L3. |
 | workspaceSnapshot | Compatibility workspace tree/files fallback. | Runtime-facing snapshots are manifest-style and may omit all file bodies. New runtime behavior should not rely on `files[].content`. |
 | workspaceFocus | Relevance summary for the current requirement. | Contains `relevantFiles`, `impactedFiles`, `testFiles`, `configFiles`, `possibleEntryPoints`, `detectedStack`, `validationCommands`, and `rationale`. |
 | relevantFiles | Workspace files likely related to the requirement. | Nested under `workspaceFocus`. |
@@ -43,6 +47,12 @@ Top-level fields currently covered by this contract:
 | constraints | Brief/user constraints. | Keep confirmed constraints distinct from assumptions. |
 | budget | Runtime token/cost budget. | Used by preflight trimming and debug token usage. |
 
+## ContextEnvelopeV2 fields
+
+The Runtime-facing envelope has only these top-level fields: `version`, `createdAt`, `workspaceId`, `sessionId`, `L0`, `L1`, `L2`, `L3`, `L4`, `L5`, `L6`, and `budget`. L0 carries authority and Workspace identity; L1 carries the invocation goal, task, and navigation; L2 carries the Project Map; L3 carries grounded readable evidence; L4 carries tool results; L5 carries bounded history; L6 carries delivery state. Adapters must not receive parallel legacy Workspace fields.
+
+Phase filtering must remain consistent with the grounded-evidence gate. Discussion and delivery may carry bounded L3 when the selected strategy requires evidence; delivery also keeps L1 navigation so every L3 path can be validated against the current Workspace manifest. Phase filtering must never require L3 and then erase it before Runtime dispatch.
+
 ## 分阶段注入矩阵
 
 | AgentRunPhase | Should see | 不应该看到 |
@@ -50,8 +60,9 @@ Top-level fields currently covered by this contract:
 | discussion | sessionGoal, taskContext, summaryMemory, continuationState, agentProfile, constraints, relevantEvents, workingDirectory, workspaceManifest, selectedEvidenceContents, workspaceFocus | Full implementation logs, full workspace file bodies, or unrelated artifacts. |
 | brief_generation | sessionGoal, taskContext, summaryMemory, continuationState, relevantEvents, relevantMemories, ragSnippets, workingDirectory, workspaceManifest, selectedEvidenceContents, workspaceFocus | Unconfirmed implementation details, full workspace file bodies, or hidden side effects. |
 | brief_revision | previous taskBrief, user feedback, taskContext, summaryMemory, continuationState, relevantEvents, relevantMemories, workspaceFocus | Unrelated tool output. |
+| brief_consultation | currentContractGoal, taskBrief, user question, taskContext, summaryMemory, relevantEvents, workspaceFocus | Unrelated execution output or authority to bypass brief confirmation. |
 | task_acceptance | taskBrief, currentTask, taskContext, summaryMemory, continuationState, agentProfile, constraints, budget | Other agents' unrelated tasks or full event history. |
-| task_execution | taskBrief, currentTask, taskContext, summaryMemory, continuationState, capabilities, artifacts, constraints, budget, workingDirectory, workspaceManifest, selectedEvidenceContents, workspaceFocus | Other agents' unrelated tasks, full workspace file bodies, or unapproved external side effects. |
+| task_execution | taskBrief, currentTask, taskContext, summaryMemory, continuationState, relevantMemories, capabilities, artifacts, constraints, budget, workingDirectory, workspaceManifest, selectedEvidenceContents, workspaceFocus, and task-scoped fileRevisionEvidence when applicable | Other agents' unrelated tasks, full workspace file bodies, or unapproved external side effects. |
 | post_review | taskBrief, taskContext, summaryMemory, continuationState, artifacts, relevantEvents, verification evidence, budget | Unverified guesses or private speculation. |
 | final_delivery | review result, taskContext, summaryMemory, continuationState, artifacts, risks, memory candidates, budget | Private speculation or unconfirmed external send actions. |
 | user_message_routing | current state, user message, taskContext, summaryMemory, continuationState, relevantEvents, constraints | Full history noise or irrelevant workspace contents. |
@@ -93,20 +104,29 @@ Top-level fields currently covered by this contract:
 
 ## Workspace context rules
 
+- `contextEnvelopeV2` is the sole authoritative workspace context channel delivered to the runtime. L0-L6 respectively carry policy, task, navigation, grounded evidence, history, state, and artifacts.
+- Before every runtime call, Orchestrator removes duplicated `workspaceSnapshot`, `workspaceManifest`, `selectedEvidenceContents`, and `projectMap` fields from the runtime-facing pack. There is no v1 compatibility payload.
+- `resolvedExecutionTarget` is resolved for every invocation and included for auditability. Agent role, Markdown, Skills, Tools, and capability declarations may constrain eligibility, but `Agent.runtimeType` and `Agent.modelId` do not select the target.
+- If no registered target satisfies required task/workspace capabilities, routing fails closed with `CAPABILITY_BLOCKED`; browser fallback may downgrade only to an eligible read-only runtime.
+
 - `workingDirectory` indicates where file changes may be proposed or applied; it is not permission to write outside that root.
 - `workspaceManifest` can include tree, file metadata, summaries, detected stack, and entrypoints. It must not include file bodies.
 - `selectedEvidenceContents` is the only default workspace-derived readable content channel for runtime prompts. It must be derived from `taskContext.evidenceSelection.selectedRefs`, token-trimmed, and traceable by source/ref.
+- `fileRevisionEvidence` is a dedicated exception for a confirmed file-revision task: the user-revised snapshot is authoritative, while the original snapshot and deterministic Diff are comparison evidence. The envelope builder must bound this evidence inside L3 and preserve content references when bodies are truncated.
+- Every Agent selected for one revision receives the same frozen `revisionId`, file path, original Hash, revised Hash, and Diff. A synthesis invocation may additionally receive completed Agent proposals from that same revision; unrelated revision runs must never be mixed.
+- File-revision evidence does not grant write authority. Revision tasks use proposal-only execution, and the live file can change only after a matching user confirmation and expected-Hash check.
 - `workspaceSnapshot` is retained for compatibility as a manifest-style fallback. Runtime prompts must not assume `workspaceSnapshot.files[].content` is present.
 - `workspaceFocus.relevantFiles` guides impact analysis, while `impactedFiles` narrows the likely modification surface. The Agent must still state uncertainty when the snapshot is incomplete.
 - `testFiles` and `validationCommands` should be used to choose scoped validation before broader typecheck/test/build/e2e runs.
 - `configFiles`, `possibleEntryPoints`, `detectedStack`, and `rationale` should be used to explain why a task affects specific files.
 - Token preflight may remove or truncate selected evidence contents. Agents must not pretend omitted or manifest-only content was read.
-- For real `codex` and `claude_code` runtime execution, ContextPack delivery is separate from permission. Orchestrator must pass `cap-file-write` preflight before launching a source-writing runtime, and a blocked preflight must leave the task waiting without starting the runtime process.
+- For real `codex` and `claude_code` runtime execution, ContextEnvelopeV2 delivery is separate from permission. Orchestrator must pass Tool Authority and write-mode preflight before launching a source-writing runtime, and a blocked preflight must leave the task waiting without starting the runtime process.
 
 ## Token and trimming rules
 
 - `budget.maxInputTokens` limits context sent to runtime.
 - If context exceeds budget, the system first trims `relevantEvents`, `ragSnippets`, `artifacts`, and `selectedEvidenceContents`.
+- The corresponding bounded L0-L6 arrays and evidence contents in `contextEnvelopeV2` are trimmed before assembly-only legacy duplicates are removed.
 - If still over budget, runtime receives a `TOKEN_BUDGET_EXCEEDED` failure rather than an oversized prompt.
 - Debug APIs must expose enough context and token usage for verification without leaking unrelated data.
 
@@ -133,8 +153,8 @@ Top-level fields currently covered by this contract:
 `WorkspaceManifestCoverage = { totalEntriesSeen, scannedEntries, readableFiles, skippedByReason }`，由扫描端（`apps/server/src/common/workspace-scanner.ts`、`apps/web/src/stores/local-workspace-scanner.ts`）在 finalize 阶段聚合 `skipped[]` 写入。
 
 - 服务端与浏览器端共用 `WorkspaceSkippedReason` 枚举：`ignored_directory | binary | too_large | sensitive | limit_exceeded | read_error`。
-- `coverage` 直通到 `ContextPack.workspaceManifest.coverage`，可用于 prompt 直接读取盲区比例。
-- 当 `scannedEntries < totalEntriesSeen` 或 `skippedByReason` 非空时，`ContextPack.systemRules` 自动追加一条 CONTEXT_INSUFFICIENT 提示，要求 runtime 用 `requestedPaths` 取回缺失内容而非凭空推测。
+- `coverage` 进入内部 `ContextAssembly.workspaceManifest.coverage`，再由 envelope builder 转换为受限的导航与规则信息。
+- 当 `scannedEntries < totalEntriesSeen` 或 `skippedByReason` 非空时，`ContextEnvelopeV2.L0.systemRules` 必须包含 CONTEXT_INSUFFICIENT 提示，要求 runtime 用 `requestedPaths` 取回缺失内容而非凭空推测。
 
 ### `selectedEvidenceContents[].truncatedHint`
 
@@ -150,7 +170,7 @@ Top-level fields currently covered by this contract:
 - Markdown（.md/.markdown/.mdx）：按 `^## ` 切段，优先保 `topRegion` 与命中 `options.query` 的章节，hint 写明 `keptSections` / `droppedSections`。
 - 其他扩展或上述策略未命中时回退 `slice`。
 
-`workspaceEvidenceContent` 调用截断接口后把 `truncatedHint` 透传给 `ContextPack.selectedEvidenceContents` 项，debug 接口可读。
+`workspaceEvidenceContent` 调用截断接口后把 `truncatedHint` 透传给内部 `ContextAssembly.selectedEvidenceContents` 项，最终可读证据进入 `ContextEnvelopeV2.L3`，debug 接口可读。
 
 ### CONTEXT_INSUFFICIENT 重试预算与 dedupe
 
@@ -158,11 +178,11 @@ Top-level fields currently covered by this contract:
 - `canRetryWithSupplementalContext(code, requestedContext, retryCount, maxRetries)` 校验：必须是 `CONTEXT_INSUFFICIENT` + 携带 `requestedContext` + `retryCount < maxRetries`。
 - 入库前 dedupe：`refSignature(ref) = "${type}::${ref ?? label}"`，paths 与 commands 按字符串精确去重。`trimToNovelContext(candidate, seen)` 只保留新条目，纯重复返回 `undefined` → orchestrator 在 `session.events` 落 `agent_message{phase:'context_supplement', rejectionReason:'duplicate_request'}`，不进入 retry 计数。
 
-### `navigation_only` 阶段（token preflight 终极兜底）
+### v2 预算与证据保留
 
-`fitContextToBudget` 阶段链：`initial → focused → compact → minimal → ultra-minimal → emergency → navigation_only`。
+v2 不再使用事后多阶段裁剪，也不存在 `ultra-minimal` 或 `navigation_only`。预算在 Envelope 组装时分配到 L0-L6，并由 Evidence selector 在 L3 内按任务意图、入口、模块边界和用户点名路径选择正文。
 
-- `ContextBudgetDiagnostics` 新增 `stagesTried`、`finalStage`、`droppedSections` 字段。
-- `navigation_only` 触发条件：emergency 后仍超 `budget.maxInputTokens`。
-- 产出形态：`workspaceManifest` 只保 `rootName + entrypoints + detectedStack`；`workspaceSnapshot` 收缩到同形 stub；`workspaceFocus` 只保 `relevantFiles + possibleEntryPoints + validationCommands + detectedStack`；`selectedEvidenceContents` 清空；`projectMap / relevantEvents / relevantMemories / ragSnippets / artifacts` 全清空；`taskContext / currentTask / taskBrief / agentProfile / summaryMemory` 压成 id+title+status 级别。
-- `systemRules` 末尾追加 `contextDegraded=true: ...` 行，runtime 必须按导航包工作并主动用 `CONTEXT_INSUFFICIENT.requestedPaths` 取回需要的文件。
+- 代码实现和架构分析要求 grounded evidence 时，L3 至少保留一份可读源码正文；不得为了适配预算清空 `selectedEvidenceContents` 后继续执行。
+- 当前预算无法容纳必要证据时，Runtime 返回 `CONTEXT_INSUFFICIENT` 和严格校验后的 `requestedPaths/requestedRefs`，由 Workspace Provider 补读后重新组装完整 v2 Invocation。
+- 补读结果记录 `hydratedPaths / failedPaths / deferredPaths / contentBytes`；只有成功 hydrate 的路径才进入 Evidence 和 dedupe 集合。
+- 读取失败必须区分 `NOT_FOUND / PERMISSION_REQUIRED / BROKER_OFFLINE / READ_UNAVAILABLE / READ_ERROR`，不得吞掉异常或把请求本身当成已获得证据。

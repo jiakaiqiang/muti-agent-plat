@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import type { SessionDetail } from '@agent-cluster/shared';
-import { BrokerGateway } from '../workspaces/browser-broker/broker-gateway.js';
+import { BrokerGateway } from '../workspaces/runtime-broker/broker-gateway.js';
 import { assertCurrentDataEpoch, filterSessionsForDataEpoch } from './data-epoch-guard.js';
 import { PersistenceService } from './persistence.service.js';
 
@@ -88,20 +88,20 @@ test('Recovery filtering returns only Sessions from the current epoch', () => {
   assert.deepEqual(filterSessionsForDataEpoch(sessions, 'epoch-a').map((session) => session.id), ['current']);
 });
 
-test('Browser Broker registrations are stamped with the current epoch', () => {
+test('Local Runtime workspace registrations are stamped with the current epoch', () => {
   const gateway = new BrokerGateway(() => 'epoch-a');
   const client = { clientId: 'client-1', send: () => undefined };
   const registration = gateway.registerWorkspace(client, {
     clientId: client.clientId,
     workspaceId: 'workspace-1',
-    providerKind: 'browser_broker',
+    providerKind: 'local_bridge',
     capabilities: { read: true, write: false, command: false, test: false },
     displayName: 'Workspace'
   });
   assert.equal(registration.dataEpoch, 'epoch-a');
 });
 
-test('Browser Broker rejects dispatch through a registration from an old epoch', () => {
+test('Local Runtime broker rejects dispatch through a registration from an old epoch', () => {
   let epoch = 'epoch-a';
   const sent: unknown[] = [];
   const gateway = new BrokerGateway(() => epoch);
@@ -109,26 +109,31 @@ test('Browser Broker rejects dispatch through a registration from an old epoch',
   gateway.registerWorkspace(client, {
     clientId: client.clientId,
     workspaceId: 'workspace-1',
-    providerKind: 'browser_broker',
+    providerKind: 'local_bridge',
     capabilities: { read: true, write: false, command: false, test: false },
     displayName: 'Workspace'
   });
   epoch = 'epoch-b';
   assert.throws(
-    () => gateway.dispatch({ requestId: 'request-1', workspaceId: 'workspace-1', operation: 'capabilities' }),
+    () => gateway.dispatch({
+      requestId: 'request-1',
+      invocationId: 'invocation-1',
+      workspaceId: 'workspace-1',
+      operation: 'capabilities'
+    }),
     /STALE_DATA_EPOCH/
   );
   assert.deepEqual(sent, []);
 });
 
-test('maintenance invalidates all Browser Broker registrations and notifies clients', () => {
+test('maintenance invalidates all Local Runtime broker registrations and notifies clients', () => {
   const sent: unknown[] = [];
   const gateway = new BrokerGateway(() => 'epoch-a');
   const client = { clientId: 'client-1', send: (payload: unknown) => sent.push(payload) };
   gateway.registerWorkspace(client, {
     clientId: client.clientId,
     workspaceId: 'workspace-1',
-    providerKind: 'browser_broker',
+    providerKind: 'local_bridge',
     capabilities: { read: true, write: false, command: false, test: false },
     displayName: 'Workspace'
   });

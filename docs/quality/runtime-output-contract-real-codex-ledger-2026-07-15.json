@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0",
+  "runtime": "codex",
+  "codexCliVersion": "0.144.1",
+  "authorizationLimit": 3,
+  "actualProviderCalls": 3,
+  "calls": [
+    {
+      "sequence": 1,
+      "status": "failed",
+      "durationMs": 47505,
+      "error": "agent_message: / must be object",
+      "rootCause": "The adapter read the terminal turn payload although the authoritative structured body was emitted by item/completed agentMessage.",
+      "evidence": {
+        "kind": "captured_acceptance_summary",
+        "reference": "docs/quality/runtime-output-contract-hard-cutover-verification-v1.md#3-三次真实-codex-调用"
+      }
+    },
+    {
+      "sequence": 2,
+      "status": "completed",
+      "durationMs": 41395,
+      "totalTokens": 15809,
+      "hasCliSessionId": true,
+      "validator": "shared runtime output registry",
+      "evidence": {
+        "kind": "captured_acceptance_summary",
+        "reference": "docs/quality/runtime-output-contract-hard-cutover-verification-v1.md#3-三次真实-codex-调用"
+      }
+    },
+    {
+      "sequence": 3,
+      "status": "completed",
+      "durationMs": 82516,
+      "totalTokens": 17578,
+      "hasCliSessionId": true,
+      "validator": "shared runtime output registry",
+      "evidence": {
+        "kind": "raw_status_file",
+        "path": ".cache/agent-cluster/real-cli-acceptance-status.json",
+        "sha256": "d02c199ddb98233b45726859d18e5de1c0f22fb14f0e87404a98edc86fca3f0c"
+      }
+    }
+  ],
+  "limitations": [
+    "The status writer previously overwrote its default file, so raw status files for calls 1 and 2 are no longer present.",
+    "Calls 1 and 2 are recorded from the terminal observations retained in the acceptance report; they are not represented as raw immutable logs.",
+    "No additional provider call was made to reconstruct missing raw evidence.",
+    "The acceptance script now writes a timestamped history file on every checkpoint so future runs cannot overwrite prior run evidence."
+  ]
+}

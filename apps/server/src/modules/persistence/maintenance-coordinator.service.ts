@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { createExecutionTermination } from '../../common/execution-termination.js';
 import { ExecutionService } from '../execution/execution.service.js';
 import { ExecutionQueue } from '../queue/execution.queue.js';
-import { BrokerGateway } from '../workspaces/browser-broker/broker-gateway.js';
-import { PendingRequestRegistry } from '../workspaces/browser-broker/pending-request-registry.js';
+import { BrokerGateway } from '../workspaces/runtime-broker/broker-gateway.js';
+import { PendingRequestRegistry } from '../workspaces/runtime-broker/pending-request-registry.js';
 import { PersistenceService } from './persistence.service.js';
 
 export type MaintenanceStatus = {

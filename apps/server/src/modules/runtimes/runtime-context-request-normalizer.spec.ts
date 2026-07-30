@@ -59,3 +59,14 @@ test('requires concrete refs for workspace-backed evidence and promotes them to 
     ['src/main.ts']
   );
 });
+
+test('normalizes bounded directory and search requests', () => {
+  const result = normalizeRuntimeContextRequest({
+    reason: 'Need module boundaries and symbol usage',
+    requestedRefs: [],
+    requestedDirectories: [{ path: 'src', depth: 2 }],
+    requestedSearches: [{ query: 'createSession', path: 'apps', include: ['**/*.ts'] }]
+  });
+  assert.deepEqual(result?.requestedDirectories, [{ path: 'src', depth: 2 }]);
+  assert.deepEqual(result?.requestedSearches, [{ query: 'createSession', path: 'apps', include: ['**/*.ts'] }]);
+});

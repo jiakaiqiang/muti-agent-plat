@@ -7,6 +7,7 @@ import {
   isPortListening,
   positivePort
 } from './dev-server-guard.mjs';
+import { devWatchRoots, startDevWatchTriggerLogger } from './dev-watch-scope.mjs';
 
 const serverRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workspaceRoot = resolve(serverRoot, '..', '..');
@@ -27,6 +28,10 @@ try {
   console.error(`[dev-server] ${error instanceof Error ? error.message : String(error)}`);
   process.exit(1);
 }
+
+const watchRoots = devWatchRoots(serverRoot, workspaceRoot);
+const watchTriggerLogger = startDevWatchTriggerLogger({ roots: watchRoots });
+console.log(`[dev-server] watcher pid=${process.pid} startedAt=${new Date().toISOString()} roots=${watchRoots.join(',')}`);
 
 const watcher = spawn(
   process.execPath,
@@ -56,4 +61,5 @@ try {
   process.off('SIGINT', onSigint);
   process.off('SIGTERM', onSigterm);
   instanceLock.release();
+  watchTriggerLogger.close();
 }

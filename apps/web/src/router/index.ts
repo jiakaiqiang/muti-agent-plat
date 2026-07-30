@@ -19,6 +19,12 @@ const routes: RouteRecordRaw[] = [
     meta: { section: 'session', title: '工作台' }
   },
   {
+    path: '/local-runtime/activate',
+    name: 'local-runtime-activate',
+    component: () => import('@/views/LocalRuntimeActivationView.vue'),
+    meta: { section: 'settings', title: '连接本机 Runtime' }
+  },
+  {
     path: '/workflows',
     name: 'workflows',
     component: () => import('@/views/AdminRouteView.vue'),

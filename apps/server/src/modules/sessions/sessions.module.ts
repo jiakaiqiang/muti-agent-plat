@@ -8,8 +8,10 @@ import { OrchestratorModule } from '../orchestrator/orchestrator.module.js';
 import { RuntimeModule } from '../runtimes/runtime.module.js';
 import { TasksModule } from '../tasks/tasks.module.js';
 import { WorkflowsModule } from '../workflows/workflows.module.js';
+import { CapabilitiesModule } from '../capabilities/capabilities.module.js';
 import { SessionsController } from './sessions.controller.js';
 import { SessionsService } from './sessions.service.js';
+import { FileRevisionsModule } from '../file-revisions/file-revisions.module.js';
 
 @Module({
   imports: [
@@ -19,8 +21,10 @@ import { SessionsService } from './sessions.service.js';
     IntentRecognitionModule,
     OrchestratorModule,
     RuntimeModule,
+    CapabilitiesModule,
     forwardRef(() => ExecutionModule),
     TasksModule,
+    FileRevisionsModule,
     forwardRef(() => WorkflowsModule)
   ],
   controllers: [SessionsController],

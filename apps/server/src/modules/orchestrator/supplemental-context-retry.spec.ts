@@ -46,11 +46,11 @@ test('canRetryWithSupplementalContext with maxRetries=0 rejects immediately', ()
   assert.equal(canRetryWithSupplementalContext('CONTEXT_INSUFFICIENT', requestedContext, 0, 0), false);
 });
 
-test('resolveContextInsufficientMaxRetries defaults to 3', () => {
+test('resolveContextInsufficientMaxRetries defaults to 2', () => {
   const previous = process.env.AGENT_CLUSTER_CONTEXT_INSUFFICIENT_MAX_RETRIES;
   delete process.env.AGENT_CLUSTER_CONTEXT_INSUFFICIENT_MAX_RETRIES;
   try {
-    assert.equal(resolveContextInsufficientMaxRetries(), 3);
+    assert.equal(resolveContextInsufficientMaxRetries(), 2);
   } finally {
     if (previous !== undefined) {
       process.env.AGENT_CLUSTER_CONTEXT_INSUFFICIENT_MAX_RETRIES = previous;
@@ -66,9 +66,9 @@ test('resolveContextInsufficientMaxRetries respects env override and clamps to n
     process.env.AGENT_CLUSTER_CONTEXT_INSUFFICIENT_MAX_RETRIES = '0';
     assert.equal(resolveContextInsufficientMaxRetries(), 0);
     process.env.AGENT_CLUSTER_CONTEXT_INSUFFICIENT_MAX_RETRIES = '-2';
-    assert.equal(resolveContextInsufficientMaxRetries(), 3, 'negative falls back to default');
+    assert.equal(resolveContextInsufficientMaxRetries(), 2, 'negative falls back to default');
     process.env.AGENT_CLUSTER_CONTEXT_INSUFFICIENT_MAX_RETRIES = 'nope';
-    assert.equal(resolveContextInsufficientMaxRetries(), 3, 'non-numeric falls back to default');
+    assert.equal(resolveContextInsufficientMaxRetries(), 2, 'non-numeric falls back to default');
     process.env.AGENT_CLUSTER_CONTEXT_INSUFFICIENT_MAX_RETRIES = '2.7';
     assert.equal(resolveContextInsufficientMaxRetries(), 2, 'truncates to integer');
   } finally {

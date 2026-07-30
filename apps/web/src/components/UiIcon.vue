@@ -115,6 +115,12 @@ withDefaults(
     <template v-else-if="name === 'check'">
       <path d="m20 6-11 11-5-5" />
     </template>
+    <template v-else-if="name === 'refresh-cw'">
+      <path d="M21 12a9 9 0 0 1-15.5 6.2L3 16" />
+      <path d="M3 21v-5h5" />
+      <path d="M3 12A9 9 0 0 1 18.5 5.8L21 8" />
+      <path d="M21 3v5h-5" />
+    </template>
     <template v-else-if="name === 'chevron'">
       <path d="m6 9 6 6 6-6" />
     </template>

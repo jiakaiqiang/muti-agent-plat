@@ -10,6 +10,7 @@ import {
 } from '@agent-cluster/shared';
 import {
   buildCodexExecArgs,
+  codexBufferedTimeoutMs,
   CodexRuntimeAdapterService,
   parseCodexExecOutput,
   pickCodexRunMode
@@ -74,6 +75,24 @@ test('Codex uses streaming mode for all', () => {
 
 test('Codex rejects unknown streaming modes to buffered', () => {
   withStreaming('bogus', () => assert.equal(pickCodexRunMode(), 'buffered'));
+});
+
+test('Codex buffered timeout cannot exceed the independent absolute deadline', () => {
+  const previousTimeout = process.env.CODEX_RUNTIME_TIMEOUT_MS;
+  const previousAbsoluteTimeout = process.env.CODEX_RUNTIME_ABSOLUTE_TIMEOUT_MS;
+  try {
+    process.env.CODEX_RUNTIME_TIMEOUT_MS = '2400000';
+    process.env.CODEX_RUNTIME_ABSOLUTE_TIMEOUT_MS = '1800000';
+    assert.equal(codexBufferedTimeoutMs(), 1_800_000);
+
+    process.env.CODEX_RUNTIME_TIMEOUT_MS = '600000';
+    assert.equal(codexBufferedTimeoutMs(), 600_000);
+  } finally {
+    if (previousTimeout === undefined) delete process.env.CODEX_RUNTIME_TIMEOUT_MS;
+    else process.env.CODEX_RUNTIME_TIMEOUT_MS = previousTimeout;
+    if (previousAbsoluteTimeout === undefined) delete process.env.CODEX_RUNTIME_ABSOLUTE_TIMEOUT_MS;
+    else process.env.CODEX_RUNTIME_ABSOLUTE_TIMEOUT_MS = previousAbsoluteTimeout;
+  }
 });
 
 test('Codex exec arguments match the current CLI and preserve sandbox authority', () => {

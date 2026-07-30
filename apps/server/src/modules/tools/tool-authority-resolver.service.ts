@@ -24,6 +24,7 @@ const PHASE_ALLOWED_CAPABILITIES: Readonly<Record<AgentRunPhase, readonly Worksp
   brief_consultation: ['read'],
   task_acceptance: ['read'],
   task_execution: ['read', 'write', 'command', 'test'],
+  revision_synthesis: ['read'],
   post_review: ['read', 'command', 'test'],
   final_delivery: ['read'],
   user_message_routing: []
@@ -43,6 +44,7 @@ export type ResolveToolAuthorityInput = {
   phase: AgentRunPhase;
   workspaceCapabilities: WorkspaceCapabilities;
   runtimeSupportedToolNames: readonly string[];
+  allowedToolNames?: readonly string[];
   sessionId: string;
   taskId?: string;
 };
@@ -56,6 +58,9 @@ export class ToolAuthorityResolverService {
 
   resolve(input: ResolveToolAuthorityInput): ResolvedToolCatalog {
     const runtimeTools = new Set(input.runtimeSupportedToolNames);
+    const invocationAllowedTools = input.allowedToolNames
+      ? new Set(input.allowedToolNames)
+      : undefined;
     const grants = new Set(input.identity.capabilityIds);
     const requestedKeys = new Map(
       input.identity.requestedToolIds.map((id, index) => [id, input.identity.requestedToolKeys[index] ?? id])
@@ -80,7 +85,14 @@ export class ToolAuthorityResolverService {
         continue;
       }
 
-      const executableNames = getToolsForCapability(toolId).sort();
+      const mappedNames = getToolsForCapability(toolId).sort();
+      const executableNames = invocationAllowedTools
+        ? mappedNames.filter((name) => invocationAllowedTools.has(name))
+        : mappedNames;
+      if (mappedNames.length > 0 && executableNames.length === 0) {
+        decisions.push({ toolId, toolKey, status: 'blocked', reasons: ['INVOCATION_POLICY_BLOCKED'] });
+        continue;
+      }
       if (executableNames.length === 0) {
         decisions.push({ toolId, toolKey, status: 'blocked', reasons: ['TOOL_MAPPING_UNAVAILABLE'] });
         continue;

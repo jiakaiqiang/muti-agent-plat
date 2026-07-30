@@ -63,3 +63,29 @@ test('addModel persists the runtime state without the plaintext apiKey', async (
     restoreEnv();
   }
 });
+
+test('a local credential never persists its API key on the server', async () => {
+  const restoreEnv = withRemoteEnv();
+  const persistence = makePersistence();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ models: [] }), { status: 200 })) as typeof fetch;
+  try {
+    const service = new RuntimeModelConfigService(persistence as never);
+    await service.addModel({
+      kind: 'remote',
+      provider: 'anthropic-compatible',
+      credentialLocation: 'local',
+      deviceId: 'device-local',
+      model: 'claude-compatible-model',
+      baseUrl: 'https://anthropic-gateway.test',
+      apiKey: 'local-only-secret'
+    });
+    const raw = JSON.stringify(Array.from(persistence.dump().entries()));
+    assert.equal(raw.includes('local-only-secret'), false);
+    assert.equal(service.currentConnection().apiKey, undefined);
+    assert.equal(service.getConfigSnapshot().currentModelOption.hasApiKey, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv();
+  }
+});

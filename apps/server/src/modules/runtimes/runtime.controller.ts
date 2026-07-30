@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Optional, Param, Patch, Post, Query } from '@nestjs/common';
 import type {
   InvocationPlan,
   RuntimeModelCreateInput,
@@ -8,12 +8,14 @@ import type {
 import { ok } from '../../common/api-response.js';
 import { RuntimeModelConfigService } from './runtime-model-config.service.js';
 import { RuntimeService } from './runtime.service.js';
+import { LocalRuntimeConnectionService } from '../local-runtime/local-runtime-connection.service.js';
 
 @Controller('runtimes')
 export class RuntimeController {
   constructor(
     private readonly runtime: RuntimeService,
-    private readonly modelConfig: RuntimeModelConfigService
+    private readonly modelConfig: RuntimeModelConfigService,
+    @Optional() private readonly localRuntime?: LocalRuntimeConnectionService
   ) {}
 
   @Get('model-config')
@@ -33,16 +35,44 @@ export class RuntimeController {
 
   @Post('model-config/models')
   async addModel(@Body() body: RuntimeModelCreateInput) {
-    return ok(await this.modelConfig.addModel(body));
+    const config = await this.modelConfig.addModel(body);
+    if (body.kind === 'remote' && (body.credentialLocation ?? 'server') === 'local') {
+      try {
+        await this.storeLocalCredential(config.currentModelId, body);
+      } catch (error) {
+        await this.modelConfig.deleteModel(config.currentModelId).catch(() => undefined);
+        throw error;
+      }
+    }
+    return ok(config);
   }
 
   @Patch('model-config/models/:modelId')
   async updateModel(@Param('modelId') modelId: string, @Body() body?: RuntimeModelUpdateInput) {
-    return ok(await this.modelConfig.updateModel(modelId, body ?? {}));
+    const input = body ?? {};
+    const config = await this.modelConfig.updateModel(modelId, input);
+    const selected = config.availableModels.find((model) => model.id === config.currentModelId) ??
+      config.availableModels.find((model) => model.id === modelId);
+    if (selected?.credentialLocation === 'local' && input.apiKey?.trim()) {
+      await this.storeLocalCredential(selected.id, {
+        kind: 'remote',
+        provider: selected.provider === 'anthropic-compatible' ? selected.provider : 'openai-compatible',
+        credentialLocation: 'local',
+        deviceId: selected.deviceId,
+        model: selected.model,
+        baseUrl: selected.baseUrl ?? '',
+        apiKey: input.apiKey
+      });
+    }
+    return ok(config);
   }
 
   @Delete('model-config/models/:modelId')
   async deleteModel(@Param('modelId') modelId: string) {
+    const existing = this.modelConfig.getConfigSnapshot().availableModels.find((model) => model.id === modelId);
+    if (existing?.credentialLocation === 'local' && existing.deviceId && this.localRuntime) {
+      await this.localRuntime.deleteProviderConnection(existing.deviceId, existing.id).catch(() => undefined);
+    }
     return ok(await this.modelConfig.deleteModel(modelId));
   }
 
@@ -91,7 +121,8 @@ export class RuntimeController {
         requiredCapabilities: [],
         requiredToolIds: [],
         writeMode: 'none',
-        workspaceProviderKind: 'server_local'
+        workspaceProviderKind: 'server_local',
+        executionLocation: 'server'
       },
       toolCatalog: {
         tools: [],
@@ -136,5 +167,19 @@ export class RuntimeController {
       expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' },
       budget: { maxInputTokens: 2_000, maxOutputTokens: 1_000, maxTotalTokens: 3_000 }
     };
+  }
+
+  private async storeLocalCredential(modelId: string, input: Extract<RuntimeModelCreateInput, { kind: 'remote' }>) {
+    if (!this.localRuntime) throw new Error('Local Runtime credential bridge is unavailable.');
+    const deviceId = input.deviceId?.trim();
+    if (!deviceId) throw new Error('A Local Runtime device must be selected for a local credential.');
+    const provider = input.provider ?? 'openai-compatible';
+    await this.localRuntime.upsertProviderConnection(deviceId, {
+      connectionId: modelId,
+      provider,
+      model: input.model,
+      baseUrl: input.baseUrl,
+      apiKey: input.apiKey
+    });
   }
 }

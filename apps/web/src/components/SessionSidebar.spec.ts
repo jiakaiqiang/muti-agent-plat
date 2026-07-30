@@ -15,6 +15,7 @@ const statuses: Array<{ status: SessionStatus; label: string; tone: string }> = 
   { status: 'POST_REVIEW', label: '复盘中', tone: 'running' },
   { status: 'REWORKING', label: '返工中', tone: 'running' },
   { status: 'WAIT_USER_DECISION', label: '待决策', tone: 'waiting' },
+  { status: 'INTERRUPTED', label: '已中断', tone: 'waiting' },
   { status: 'COMPLETED', label: '已完成', tone: 'completed' },
   { status: 'FAILED', label: '失败', tone: 'failed' },
   { status: 'CANCELLED', label: '已取消', tone: 'cancelled' }
@@ -71,5 +72,13 @@ describe('SessionSidebar status badges', () => {
     await wrapper.setProps({ sessions: [{ ...running, status: 'COMPLETED' }] })
     expect(wrapper.get('.session-status-badge').text()).toBe('已完成')
     expect(wrapper.get('.session-status-badge').classes()).toContain('status-completed')
+  })
+
+  it('emits the selected session id when the delete button is clicked', async () => {
+    const wrapper = mountSidebar([session('COMPLETED', 1)])
+
+    await wrapper.get('.session-delete-button').trigger('click')
+
+    expect(wrapper.emitted('delete')).toEqual([['session-1']])
   })
 })

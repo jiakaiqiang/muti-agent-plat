@@ -22,6 +22,8 @@ const EVIDENCE_TYPES = new Set<EvidenceSourceType>([
 const MAX_REFS = 32;
 const MAX_PATHS = 32;
 const MAX_COMMANDS = 8;
+const MAX_DIRECTORIES = 8;
+const MAX_SEARCHES = 8;
 const WORKSPACE_REF_TYPES = new Set<EvidenceSourceType>(['workspace_file', 'workspace_symbol', 'test']);
 
 export function normalizeRuntimeContextRequest(value: unknown): RuntimeContextRequest | undefined {
@@ -49,12 +51,17 @@ export function normalizeRuntimeContextRequest(value: unknown): RuntimeContextRe
   const requestedPaths = stringList(value.requestedPaths);
   const requestedCommands = stringList(value.requestedCommands);
   if (requestedPaths === undefined || requestedCommands === undefined) return undefined;
+  const requestedDirectories = normalizeDirectories(value.requestedDirectories);
+  const requestedSearches = normalizeSearches(value.requestedSearches);
+  if (requestedDirectories === undefined || requestedSearches === undefined) return undefined;
   paths.push(...requestedPaths);
 
   return {
     reason,
     requestedRefs: uniqueRefs(refs).slice(0, MAX_REFS),
     ...(paths.length ? { requestedPaths: uniqueStrings(paths).slice(0, MAX_PATHS) } : {}),
+    ...(requestedDirectories.length ? { requestedDirectories: requestedDirectories.slice(0, MAX_DIRECTORIES) } : {}),
+    ...(requestedSearches.length ? { requestedSearches: requestedSearches.slice(0, MAX_SEARCHES) } : {}),
     ...(requestedCommands.length
       ? { requestedCommands: uniqueStrings(requestedCommands).slice(0, MAX_COMMANDS) }
       : {}),
@@ -62,6 +69,38 @@ export function normalizeRuntimeContextRequest(value: unknown): RuntimeContextRe
       ? { followUpInstruction: plainText(value.followUpInstruction) }
       : {})
   };
+}
+
+function normalizeDirectories(value: unknown): NonNullable<RuntimeContextRequest['requestedDirectories']> | undefined {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) return undefined;
+  const result: NonNullable<RuntimeContextRequest['requestedDirectories']> = [];
+  for (const item of value) {
+    if (!isRecord(item) || !plainText(item.path)) return undefined;
+    const depth = item.depth === undefined ? undefined : Number(item.depth);
+    if (depth !== undefined && (!Number.isFinite(depth) || depth < 0 || depth > 4)) return undefined;
+    result.push({ path: plainText(item.path), ...(depth !== undefined ? { depth: Math.floor(depth) } : {}) });
+  }
+  return result;
+}
+
+function normalizeSearches(value: unknown): NonNullable<RuntimeContextRequest['requestedSearches']> | undefined {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) return undefined;
+  const result: NonNullable<RuntimeContextRequest['requestedSearches']> = [];
+  for (const item of value) {
+    if (!isRecord(item) || !plainText(item.query)) return undefined;
+    const include = stringList(item.include);
+    const exclude = stringList(item.exclude);
+    if (include === undefined || exclude === undefined) return undefined;
+    result.push({
+      query: plainText(item.query),
+      ...(plainText(item.path) ? { path: plainText(item.path) } : {}),
+      ...(include.length ? { include } : {}),
+      ...(exclude.length ? { exclude } : {})
+    });
+  }
+  return result;
 }
 
 function normalizeEvidenceRef(value: unknown): TaskEvidenceRef | undefined {

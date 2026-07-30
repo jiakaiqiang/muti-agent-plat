@@ -20,19 +20,28 @@ test('graceful shutdown aborts active execution with service_shutdown and reject
   const queue = { cancel() {}, cancelAll() {} };
   const service = new ExecutionService(orchestrator as never, queue as never);
   const outcomes: string[] = [];
+  const outcomeTerminations: Array<ExecutionTermination | undefined> = [];
   const session = { id: 'session-1', dataEpoch: 'epoch-1' };
   const brief = { id: 'brief-1' };
 
-  service.start(session as never, brief as never, [], (outcome) => outcomes.push(outcome.kind));
+  service.start(session as never, brief as never, [], (outcome) => {
+    outcomes.push(outcome.kind);
+    outcomeTerminations.push(outcome.kind === 'cancelled' ? outcome.termination : undefined);
+  });
   await service.beforeApplicationShutdown('SIGTERM');
 
   assert.equal(observedTermination?.kind, 'service_shutdown');
   assert.equal(observedTermination?.graceful, true);
   assert.deepEqual(outcomes, ['cancelled']);
 
-  service.start(session as never, brief as never, [], (outcome) => outcomes.push(outcome.kind));
+  service.start(session as never, brief as never, [], (outcome) => {
+    outcomes.push(outcome.kind);
+    outcomeTerminations.push(outcome.kind === 'cancelled' ? outcome.termination : undefined);
+  });
   assert.equal(runCount, 1);
   assert.deepEqual(outcomes, ['cancelled', 'cancelled']);
+  assert.equal(outcomeTerminations[1]?.kind, 'service_shutdown');
+  assert.equal(outcomeTerminations[1]?.scope, 'service');
 });
 
 test('pipeline rejection preserves structured RuntimeError in the failed outcome', async () => {

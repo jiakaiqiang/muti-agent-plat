@@ -5,6 +5,7 @@ export const RUNTIME_OUTPUT_KINDS = [
   'task_acceptance_decision',
   'task_brief',
   'task_execution_result',
+  'file_revision_candidate',
   'post_review_report',
   'final_delivery',
   'user_message_handling_plan'

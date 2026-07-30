@@ -6,18 +6,37 @@ import { join } from 'node:path';
 import type { SessionDetail } from '@agent-cluster/shared';
 import { SessionsService } from './sessions.service.js';
 
-function makeService(options: { failHydration?: boolean; cleanupCalls?: string[] } = {}) {
-  const persistedSessions: SessionDetail[] = [];
+function makeService(options: {
+  failHydration?: boolean;
+  cleanupCalls?: string[];
+  runtimeCalls?: string[];
+  permissionGrants?: string[];
+  executionRunning?: boolean;
+  initialSessions?: SessionDetail[];
+  localWorkspace?: { workspaceId: string; displayName: string; files?: Record<string, string> };
+  fileRevisions?: unknown;
+  fileRevisionDispatches?: string[];
+  fileRevisionContinuations?: string[];
+  receiverAvailable?: boolean;
+} = {}) {
+  const persistedSessions: SessionDetail[] = structuredClone(options.initialSessions ?? []);
+  const persistedSnapshots: SessionDetail[][] = [];
   const events: Array<Record<string, unknown>> = [];
   const executionStarts: Array<{ sessionId: string; taskCount: number }> = [];
   const executionCancels: string[] = [];
+  const executionTerminations: unknown[] = [];
+  const discussionTerminations: unknown[] = [];
+  const cancelledTasks: Array<{ sessionId: string; reason: string }> = [];
   const discussionStarts: string[] = [];
+  const followUpPreparations: Array<{ content: string; mentionedAgentIds: string[] }> = [];
+  const eventOnceKeys = new Set<string>();
   const service = new SessionsService(
     {
       resolveIds(agentIds?: string[]) {
         return agentIds ?? ['coordinator'];
       },
       findByIdOrKey(id: string) {
+        if (id === 'coordinator' && options.receiverAvailable === false) return undefined;
         return {
           id,
           key: id,
@@ -36,6 +55,17 @@ function makeService(options: { failHydration?: boolean; cleanupCalls?: string[]
     } as never,
     {
       create(input: Record<string, unknown>) {
+        const event = {
+          id: `event-${events.length + 1}`,
+          createdAt: '2026-07-11T00:00:00.000Z',
+          ...input
+        };
+        events.push(event);
+        return event;
+      },
+      createOnce(key: string, input: Record<string, unknown>) {
+        if (eventOnceKeys.has(key)) return undefined;
+        eventOnceKeys.add(key);
         const event = {
           id: `event-${events.length + 1}`,
           createdAt: '2026-07-11T00:00:00.000Z',
@@ -68,11 +98,51 @@ function makeService(options: { failHydration?: boolean; cleanupCalls?: string[]
       }
     } as never,
     {
+      async recognizeFollowUpMessage() {
+        return {
+          intent: 'command',
+          priority: 'normal',
+          shouldPause: false,
+          affectedTaskIds: [],
+          affectedAgentIds: [],
+          requiresBriefRevision: false,
+          requiresUserConfirmation: false,
+          coordinatorInstruction: 'receiver recognized intent'
+        };
+      },
+      async prepareFollowUpExecution(
+        session: SessionDetail,
+        content: string,
+        _sourceEventId: string,
+        mentionedAgentIds: string[]
+      ) {
+        followUpPreparations.push({ content, mentionedAgentIds });
+        return {
+          brief: {
+            id: `follow-up-brief-${followUpPreparations.length}`,
+            sessionId: session.id,
+            version: followUpPreparations.length,
+            goal: content,
+            scope: [content],
+            outOfScope: [],
+            constraints: [],
+            acceptanceCriteria: [],
+            risks: [],
+            openQuestions: [],
+            confirmedByUser: true,
+            createdAt: '2026-07-11T00:00:00.000Z'
+          },
+          tasks: [{ id: `follow-up-task-${followUpPreparations.length}` }]
+        };
+      },
       discussAndCreateBrief(_session: SessionDetail, signal?: AbortSignal) {
         discussionStarts.push('started');
         return new Promise((_resolve, reject) => {
           if (signal?.aborted) reject(signal.reason);
-          else signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+          else signal?.addEventListener('abort', () => {
+            discussionTerminations.push(signal.reason);
+            reject(signal.reason);
+          }, { once: true });
         });
       },
       getBrief(sessionId: string, briefId: string) {
@@ -104,17 +174,34 @@ function makeService(options: { failHydration?: boolean; cleanupCalls?: string[]
           contentBytes: hydratedPaths.length * 10
         };
       },
+      registerSavePendingInvocationCallback() {},
+      ensureArchitectureReportSaveConfirmation() {},
+      async processFileRevision(_session: SessionDetail, revisionId: string) {
+        options.fileRevisionDispatches?.push(revisionId);
+        await new Promise((resolve) => setImmediate(resolve));
+        return { id: revisionId };
+      },
+      async continueFileRevisionAfterPartialFailure(_session: SessionDetail, revisionId: string) {
+        options.fileRevisionContinuations?.push(revisionId);
+        await new Promise((resolve) => setImmediate(resolve));
+        return { id: revisionId };
+      },
       deleteSession() {}
     } as never,
     {
       start(session: SessionDetail, _brief: unknown, tasks: unknown[]) {
         executionStarts.push({ sessionId: session.id, taskCount: tasks.length });
       },
-      cancel(sessionId: string) {
-        executionCancels.push(sessionId);
+      isRunning() {
+        return options.executionRunning ?? false;
       },
-      async cancelAndWait(sessionId: string) {
+      cancel(sessionId: string, termination?: unknown) {
         executionCancels.push(sessionId);
+        if (termination) executionTerminations.push(termination);
+      },
+      async cancelAndWait(sessionId: string, termination: unknown) {
+        executionCancels.push(sessionId);
+        executionTerminations.push(termination);
         options.cleanupCalls?.push(`terminate:${sessionId}`);
         return { requested: true, completed: true, timedOut: false };
       }
@@ -124,7 +211,12 @@ function makeService(options: { failHydration?: boolean; cleanupCalls?: string[]
       unfinished() {
         return [];
       },
-      cancelUnfinished() {
+      cancelUnfinished(sessionId: string, reason: string) {
+        cancelledTasks.push({ sessionId, reason });
+        return undefined;
+      },
+      interruptUnfinished(sessionId: string, reason: string) {
+        cancelledTasks.push({ sessionId, reason });
         return undefined;
       },
       deleteSession() {}
@@ -138,17 +230,451 @@ function makeService(options: { failHydration?: boolean; cleanupCalls?: string[]
         return 'epoch-test';
       },
       setCollection(_key: string, value: SessionDetail[]) {
+        persistedSnapshots.push(structuredClone(value));
         persistedSessions.splice(0, persistedSessions.length, ...value);
       }
+    } as never,
+    {
+      checkInvocation() {
+        return { allowed: true };
+      },
+      registerApprovalListener() {}
     } as never,
     undefined,
     undefined,
     options.cleanupCalls ? { async deleteSessionDirectory(sessionId: string) { options.cleanupCalls!.push(`worktree:${sessionId}`); } } as never : undefined,
-    options.cleanupCalls ? { async deleteSessionDirectory(sessionId: string) { options.cleanupCalls!.push(`mirror:${sessionId}`); } } as never : undefined,
-    options.cleanupCalls ? { deleteSessionDirectory(sessionId: string) { options.cleanupCalls!.push(`brief:${sessionId}`); } } as never : undefined
+    options.cleanupCalls ? { deleteSessionDirectory(sessionId: string) { options.cleanupCalls!.push(`brief:${sessionId}`); } } as never : undefined,
+    options.runtimeCalls ? {
+      async cancelSessionAndWait(sessionId: string) {
+        options.runtimeCalls!.push(`runtime:${sessionId}`);
+        return { requested: 1, completed: 1, timedOut: false };
+      }
+    } as never : undefined,
+    options.localWorkspace ? {
+      getWorkspace(workspaceId: string) {
+        if (workspaceId !== options.localWorkspace?.workspaceId) return undefined;
+        return {
+          workspaceId,
+          displayName: options.localWorkspace.displayName,
+          capabilities: { read: true, write: true, command: true, test: true },
+          revision: { id: 'local-revision', observedAt: '2026-07-24T00:00:00.000Z' }
+        };
+      },
+      async grantWorkspacePermissionOnce(workspaceId: string, permission: string) {
+        options.permissionGrants?.push(`${workspaceId}:${permission}`);
+        return { workspaceId, displayName: options.localWorkspace?.displayName };
+      },
+      interruptions() {
+        return { subscribe() { return { unsubscribe() {} }; } };
+      }
+    } as never : undefined,
+    {
+      resolveWorkingDirectory(workingDirectory: { kind?: string }) {
+        if (workingDirectory.kind === 'local_bridge') {
+          return options.localWorkspace
+            ? localWorkspaceProvider(options.localWorkspace.files ?? { 'README.md': '# local project\n' })
+            : undefined;
+        }
+        if (workingDirectory.kind === 'server_local') {
+          const revision = { id: 'server-revision', observedAt: '2026-07-24T00:00:00.000Z' };
+          return {
+            kind: 'server_local',
+            capabilities: () => ({ read: true, write: true, command: true, test: true }),
+            getRevision: async () => revision,
+            listDirectory: async () => { throw new Error('Session creation must not list the workspace.'); },
+            readFile: async () => { throw new Error('Session creation must not read workspace files.'); }
+          };
+        }
+        return undefined;
+      }
+    } as never,
+    options.fileRevisions as never
   );
-  return { service, persistedSessions, events, executionStarts, executionCancels, discussionStarts };
+  return {
+    service,
+    persistedSessions,
+    persistedSnapshots,
+    events,
+    executionStarts,
+    executionCancels,
+    executionTerminations,
+    discussionStarts,
+    followUpPreparations,
+    discussionTerminations,
+    cancelledTasks
+  };
 }
+
+test('file revision background dispatch is single-flight per revision id', async () => {
+  const dispatches: string[] = [];
+  const fixture = makeService({
+    fileRevisionDispatches: dispatches,
+    fileRevisions: {
+      getRun() {
+        return { status: 'submitted' };
+      }
+    }
+  });
+  const dispatch = fixture.service as unknown as {
+    dispatchFileRevisionProcessing(session: SessionDetail, revisionId: string): void;
+  };
+  const session = { id: 'session-revision-dispatch' } as SessionDetail;
+
+  dispatch.dispatchFileRevisionProcessing(session, 'revision-single-flight');
+  dispatch.dispatchFileRevisionProcessing(session, 'revision-single-flight');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(dispatches, ['revision-single-flight']);
+});
+
+test('file revision start rejects before creating a run when the system Receiver is unavailable', async () => {
+  let createRunCalled = false;
+  const session = {
+    id: 'session-without-receiver',
+    dataEpoch: 'epoch-test',
+    title: 'File revision without Receiver',
+    originalInput: 'Process a file revision.',
+    status: 'COMPLETED',
+    ownerId: 'user-test',
+    workspaceId: 'default-workspace',
+    participatingAgentIds: ['backend'],
+    createdAt: '2026-07-29T00:00:00.000Z',
+    updatedAt: '2026-07-29T00:00:00.000Z'
+  } as SessionDetail;
+  const fixture = makeService({
+    receiverAvailable: false,
+    initialSessions: [session],
+    fileRevisions: {
+      listChains() {
+        return [];
+      },
+      async createRun() {
+        createRunCalled = true;
+        throw new Error('createRun must not be called');
+      }
+    }
+  });
+
+  await assert.rejects(
+    fixture.service.startFileRevision(session.id, {
+      baselineId: 'baseline-1',
+      targetAgentIds: ['backend']
+    }),
+    /REVISION_RECEIVER_UNAVAILABLE/
+  );
+  assert.equal(createRunCalled, false);
+});
+
+test('file revision applied event exposes post-apply baseline status without raw errors', async () => {
+  const candidateHash = { algorithm: 'sha256' as const, value: 'a'.repeat(64) };
+  const run = {
+    id: 'revision-applied-event',
+    chainId: 'chain-applied-event',
+    iteration: 1,
+    filePath: 'result.md',
+    status: 'awaiting_confirmation',
+    confirmationId: 'confirmation-applied-event',
+    candidateHash
+  };
+  const session = {
+    id: 'session-applied-event',
+    dataEpoch: 'epoch-test',
+    title: 'Applied event privacy',
+    originalInput: 'Apply a file revision candidate.',
+    status: 'WAIT_USER_DECISION',
+    ownerId: 'user-test',
+    workspaceId: 'default-workspace',
+    participatingAgentIds: ['coordinator', 'backend'],
+    createdAt: '2026-07-29T00:00:00.000Z',
+    updatedAt: '2026-07-29T00:00:00.000Z'
+  } as SessionDetail;
+  const fixture = makeService({
+    initialSessions: [session],
+    fileRevisions: {
+      getRun() {
+        return run;
+      },
+      async applyCandidate() {
+        run.status = 'applied';
+        return {
+          run,
+          chain: { id: run.chainId, postApplyBaselineStatus: 'failed' },
+          applied: true,
+          persistenceRecoveryRequired: false,
+          postApplyBaselineError: 'POST_APPLY_PROVIDER_SECRET',
+          changeSet: { id: 'changeset-applied-event' },
+          result: { ok: true, revision: { id: 'workspace-revision', observedAt: '2026-07-29T00:00:00.000Z' } }
+        };
+      }
+    }
+  });
+  fixture.events.push({
+    sessionId: session.id,
+    type: 'user_confirmation_requested',
+    metadata: {
+      payload: {
+        confirmationId: run.confirmationId,
+        reason: 'confirm_file_revision_apply'
+      }
+    }
+  });
+
+  await fixture.service.decideFileRevision(session.id, run.id, {
+    confirmationId: run.confirmationId,
+    candidateHash,
+    expectedStateVersion: 1,
+    decision: 'apply_candidate'
+  });
+
+  const event = fixture.events.find((item) => item.type === 'file_revision_applied');
+  assert.ok(event);
+  assert.equal((event.metadata as { payload?: { postApplyBaselineStatus?: string } }).payload?.postApplyBaselineStatus, 'failed');
+  assert.doesNotMatch(JSON.stringify(event), /POST_APPLY_PROVIDER_SECRET/);
+});
+
+test('partial file revision failure decision resumes only Receiver synthesis when requested', async () => {
+  const continuations: string[] = [];
+  const run = {
+    id: 'revision-partial',
+    chainId: 'chain-partial',
+    status: 'failed',
+    errorCode: 'REVISION_PARTIAL_AGENT_FAILURE',
+    agentResults: [
+      { id: 'result-ok', status: 'completed' },
+      { id: 'result-failed', status: 'failed' }
+    ]
+  };
+  const chain = { id: run.chainId, status: 'failed', stateVersion: 4 };
+  const fixture = makeService({
+    fileRevisionContinuations: continuations,
+    fileRevisions: {
+      getRun() {
+        return run;
+      },
+      async resolvePartialFailure(_sessionId: string, _revisionId: string, input: { decision: string }) {
+        run.status = input.decision === 'continue_with_successful' ? 'processing' : 'submitted';
+        chain.status = 'active';
+        chain.stateVersion += 1;
+        return { run, chain, decision: input.decision };
+      }
+    }
+  });
+  const { session } = await fixture.service.create({ input: 'Resolve a partial file revision failure.' });
+  session.status = 'WAIT_USER_DECISION';
+
+  await fixture.service.resolveFileRevisionFailure(session.id, run.id, {
+    expectedStateVersion: 4,
+    decision: 'continue_with_successful'
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(continuations, [run.id]);
+  assert.equal(session.status, 'WAIT_USER_DECISION');
+  assert.ok(fixture.events.some((event) => event.type === 'file_revision_failure_resolved'));
+});
+
+test('interrupted file revision public retry dispatches only the recovered stage', async () => {
+  const dispatches: string[] = [];
+  const continuations: string[] = [];
+  const runs = new Map([
+    ['revision-agent-retry', { id: 'revision-agent-retry', chainId: 'chain-agent-retry', status: 'submitted' }],
+    ['revision-receiver-retry', { id: 'revision-receiver-retry', chainId: 'chain-receiver-retry', status: 'processing' }],
+    ['revision-apply-reconcile', { id: 'revision-apply-reconcile', chainId: 'chain-apply-reconcile', status: 'awaiting_confirmation' }]
+  ]);
+  const fixture = makeService({
+    fileRevisionDispatches: dispatches,
+    fileRevisionContinuations: continuations,
+    fileRevisions: {
+      getRun(_sessionId: string, revisionId: string) {
+        return runs.get(revisionId);
+      },
+      async retryInterrupted(_session: SessionDetail, revisionId: string) {
+        const run = runs.get(revisionId)!;
+        const mode = revisionId === 'revision-agent-retry'
+          ? 'run_agents'
+          : revisionId === 'revision-receiver-retry'
+            ? 'receiver_only'
+            : 'apply_reconcile';
+        return {
+          run,
+          chain: { id: run.chainId, status: 'active', stateVersion: 5 },
+          mode
+        };
+      }
+    }
+  });
+  const { session } = await fixture.service.create({ input: 'Retry interrupted file revisions.' });
+
+  await fixture.service.retryInterruptedFileRevision(session.id, 'revision-agent-retry', {
+    expectedStateVersion: 4,
+    retryKey: 'retry-agent'
+  });
+  await fixture.service.retryInterruptedFileRevision(session.id, 'revision-receiver-retry', {
+    expectedStateVersion: 4,
+    retryKey: 'retry-receiver'
+  });
+  await fixture.service.retryInterruptedFileRevision(session.id, 'revision-apply-reconcile', {
+    expectedStateVersion: 4,
+    retryKey: 'retry-apply'
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(dispatches, ['revision-agent-retry']);
+  assert.deepEqual(continuations, ['revision-receiver-retry']);
+  assert.equal(
+    fixture.events.find((event) => (
+      event.metadata as { payload?: { retryMode?: string } }
+    )?.payload?.retryMode === 'apply_reconcile')?.content,
+    '文件修订已恢复，系统已根据当前 Workspace 状态完成写回结果核对。'
+  );
+});
+
+function localWorkspaceProvider(files: Record<string, string>) {
+  const revision = { id: 'local-revision', observedAt: '2026-07-24T00:00:00.000Z' };
+  return {
+    kind: 'local_bridge',
+    capabilities: () => ({ read: true, write: true, command: true, test: true }),
+    getRevision: async () => revision,
+    listDirectory: async () => ({
+      path: '.',
+      revision,
+      entries: Object.entries(files).map(([path, content]) => ({
+        path,
+        kind: 'file',
+        size: Buffer.byteLength(content),
+        hash: { algorithm: 'sha256', value: `hash-${path}` },
+        revision
+      }))
+    }),
+    readFile: async ({ path }: { path: string }) => ({
+      path,
+      content: files[path] ?? '',
+      encoding: 'utf-8',
+      byteLength: Buffer.byteLength(files[path] ?? ''),
+      truncated: false,
+      revision,
+      hash: { algorithm: 'sha256', value: `hash-${path}` },
+      startLine: 1,
+      endLine: (files[path] ?? '').split(/\r?\n/).length
+    }),
+    statFile: async () => { throw new Error('not used'); },
+    searchText: async () => { throw new Error('not used'); },
+    applyChangeSet: async () => { throw new Error('not used'); }
+  };
+}
+
+test('Local Runtime disconnect interrupts the invocation and persists a wakeable Session state', async () => {
+  const runtimeCalls: string[] = [];
+  const fixture = makeService({ runtimeCalls });
+  const { session } = await fixture.service.create({ input: 'Stop the invocation when Local Runtime disconnects' });
+
+  const cancelled = await fixture.service.interruptForRuntimeDisconnect({
+    sessionId: session.id,
+    invocationId: 'invocation-1',
+    reason: 'local_runtime_disconnected',
+    occurredAt: '2026-07-24T00:00:00.000Z'
+  });
+
+  assert.equal(cancelled, true);
+  assert.equal(session.status, 'INTERRUPTED');
+  assert.deepEqual(session.interruption, {
+    reason: 'local_runtime_disconnected',
+    invocationId: 'invocation-1',
+    occurredAt: '2026-07-24T00:00:00.000Z',
+    wakeable: true
+  });
+  assert.deepEqual(fixture.persistedSnapshots.at(-1)?.[0]?.interruption, session.interruption);
+  assert.deepEqual(fixture.executionCancels, [session.id]);
+  assert.equal((fixture.executionTerminations[0] as { kind?: string })?.kind, 'runtime_disconnected');
+  assert.equal((fixture.discussionTerminations[0] as { kind?: string })?.kind, 'runtime_disconnected');
+  assert.deepEqual(runtimeCalls, [`runtime:${session.id}`]);
+  assert.deepEqual(fixture.cancelledTasks, [{
+    sessionId: session.id,
+    reason: 'Local Runtime disconnected; waiting for a future user wake-up.'
+  }]);
+  const cancellationEvent = fixture.events.find((event) =>
+    event.type === 'session_status_changed' &&
+    (event.metadata as { payload?: { reason?: string } })?.payload?.reason === 'local_runtime_disconnected'
+  );
+  assert.ok(cancellationEvent);
+  assert.equal(
+    ((cancellationEvent.metadata as { payload?: { termination?: { kind?: string } } }).payload?.termination?.kind),
+    'runtime_disconnected'
+  );
+  assert.equal(await fixture.service.interruptForRuntimeDisconnect({
+    sessionId: session.id,
+    invocationId: 'invocation-1',
+    reason: 'local_runtime_disconnected',
+    occurredAt: '2026-07-24T00:00:00.000Z'
+  }), false);
+});
+
+test('backend shutdown persists active work as wakeable and ignores late execution outcomes', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Do not automatically resume after a backend restart' });
+
+  fixture.service.beforeApplicationShutdown('SIGTERM');
+
+  assert.equal(session.status, 'INTERRUPTED');
+  assert.deepEqual(session.interruption, {
+    reason: 'service_shutdown',
+    invocationId: undefined,
+    occurredAt: session.interruption?.occurredAt,
+    wakeable: true
+  });
+  assert.deepEqual(fixture.persistedSnapshots.at(-1)?.[0]?.interruption, session.interruption);
+  assert.equal((fixture.discussionTerminations[0] as { kind?: string })?.kind, 'service_shutdown');
+  assert.deepEqual(fixture.cancelledTasks, [{
+    sessionId: session.id,
+    reason: 'Platform backend stopped; waiting for a future user wake-up.'
+  }]);
+  const shutdownEvent = fixture.events.find((event) =>
+    event.type === 'session_status_changed' &&
+    (event.metadata as { payload?: { reason?: string } })?.payload?.reason === 'service_shutdown'
+  );
+  assert.equal(
+    ((shutdownEvent?.metadata as { payload?: { termination?: { kind?: string; graceful?: boolean } } })
+      ?.payload?.termination?.kind),
+    'service_shutdown'
+  );
+  assert.equal(
+    ((shutdownEvent?.metadata as { payload?: { termination?: { graceful?: boolean } } })
+      ?.payload?.termination?.graceful),
+    true
+  );
+
+  fixture.service.applyOutcome(session.id, { kind: 'delivered' });
+  assert.equal(session.status, 'INTERRUPTED');
+});
+
+test('pause cancels only the current invocation while explicit cancel terminates the Session', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Pause and resume the current workflow invocation' });
+  session.status = 'EXECUTING';
+
+  fixture.service.control(session.id, 'WAIT_USER_DECISION', '用户暂停当前执行');
+
+  assert.equal(session.status, 'WAIT_USER_DECISION');
+  assert.equal((fixture.executionTerminations[0] as { kind?: string })?.kind, 'user_cancelled');
+  assert.equal((fixture.executionTerminations[0] as { scope?: string })?.scope, 'invocation');
+
+  fixture.service.control(session.id, 'EXECUTING', '用户恢复当前执行');
+  fixture.service.control(session.id, 'CANCELLED', '用户取消整个会话');
+
+  assert.equal(session.status, 'CANCELLED');
+  assert.equal((fixture.executionTerminations[1] as { kind?: string })?.kind, 'user_cancelled');
+  assert.equal((fixture.executionTerminations[1] as { scope?: string })?.scope, 'session');
+});
+
+test('deleting a Session also stops Runtime-owned invocations', async () => {
+  const runtimeCalls: string[] = [];
+  const { service } = makeService({ runtimeCalls });
+  const { session } = await service.create({ input: 'Delete while Runtime is active' });
+
+  await service.delete(session.id);
+
+  assert.deepEqual(runtimeCalls, [`runtime:${session.id}`]);
+});
 
 test('deleting a Session clears all corresponding runtime directories before persistence', async () => {
   const cleanupCalls: string[] = [];
@@ -160,11 +686,22 @@ test('deleting a Session clears all corresponding runtime directories before per
   assert.deepEqual(cleanupCalls, [
     `terminate:${session.id}`,
     `worktree:${session.id}`,
-    `mirror:${session.id}`,
     `brief:${session.id}`
   ]);
   assert.deepEqual(result, { deleted: true, sessionId: session.id });
   assert.equal(persistedSessions.length, 0);
+});
+
+test('rejects Session deletion after backend shutdown starts without removing persisted state', async () => {
+  const cleanupCalls: string[] = [];
+  const { service, persistedSessions } = makeService({ cleanupCalls });
+  const { session } = await service.create({ input: 'Keep this Session while the backend shuts down' });
+
+  service.beforeApplicationShutdown('SIGTERM');
+
+  await assert.rejects(service.delete(session.id), /后端正在关闭/);
+  assert.equal(persistedSessions.length, 1);
+  assert.deepEqual(cleanupCalls, []);
 });
 
 test('new SessionDetail stores only the normalized Runtime preference routing input', async () => {
@@ -206,6 +743,55 @@ test('failed execution outcome persists structured RuntimeError in the error car
   const event = events.find((candidate) => candidate.type === 'error_reported');
   const metadata = event?.metadata as { payload?: { runtimeError?: unknown } } | undefined;
   assert.deepEqual(metadata?.payload?.runtimeError, runtimeError);
+});
+
+test('Local Runtime dangerous actions pause for one-time user approval and resume after the grant', async () => {
+  const permissionGrants: string[] = [];
+  const fixture = makeService({
+    permissionGrants,
+    localWorkspace: { workspaceId: 'workspace-local', displayName: 'local-project' }
+  });
+  const { session } = await fixture.service.create({
+    input: 'Delete a generated file after confirmation',
+    workingDirectory: {
+      kind: 'local_bridge',
+      id: 'workspace-local',
+      name: 'local-project',
+      selectedAt: '2026-07-25T00:00:00.000Z'
+    }
+  });
+  session.currentTaskBriefId = 'brief-local';
+  session.status = 'EXECUTING';
+  fixture.service.applyOutcome(session.id, {
+    kind: 'failed',
+    reason: 'LOCAL_CONFIRMATION_REQUIRED: workspace_delete',
+    error: {
+      code: 'CAPABILITY_BLOCKED',
+      message: 'LOCAL_CONFIRMATION_REQUIRED: workspace_delete',
+      retryable: false,
+      details: {
+        confirmationRequired: true,
+        permission: 'workspace_delete',
+        workspaceId: 'workspace-local',
+        phase: 'task_execution'
+      }
+    }
+  });
+
+  assert.equal(session.status, 'WAIT_USER_DECISION');
+  const request = fixture.events.find((event) => event.type === 'user_confirmation_requested');
+  const metadata = request?.metadata as { payload?: { confirmationId?: string; reason?: string } } | undefined;
+  assert.equal(metadata?.payload?.reason, 'approve_local_runtime_permission');
+  assert.ok(metadata?.payload?.confirmationId);
+
+  await fixture.service.resolveLocalRuntimePermission(session.id, {
+    confirmationId: metadata!.payload!.confirmationId!,
+    decision: 'approve_once'
+  });
+
+  assert.deepEqual(permissionGrants, ['workspace-local:workspace_delete']);
+  assert.equal(session.status, 'EXECUTING');
+  assert.equal(fixture.executionStarts.at(-1)?.sessionId, session.id);
 });
 
 test('workflow failure events prefer the safe structured RuntimeError message', async () => {
@@ -263,42 +849,113 @@ test('brief workflow failures surface the actual Runtime phase from structured e
   }
 });
 
-test('continue retries failed task-contract generation instead of only emitting a receiver message', async () => {
-  const { service, events, discussionStarts } = makeService();
+test('an idle existing Session routes a new message through receiver decomposition and starts execution', async () => {
+  const { service, executionStarts, followUpPreparations } = makeService();
   const { session } = await service.create({ input: 'Analyze the workspace' });
-  session.status = 'FAILED';
-  session.currentTaskBriefId = undefined;
+  (service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
+  session.status = 'COMPLETED';
 
-  await service.sendMessage(session.id, '继续');
+  const result = await service.sendMessage(session.id, '继续补充实现审计日志', ['backend']);
+  await new Promise<void>((resolve) => setImmediate(resolve));
 
-  assert.equal(session.status, 'AGENT_DISCUSSING');
-  assert.equal(discussionStarts.length, 2);
-  assert.ok(events.some((event) =>
-    event.type === 'session_status_changed' &&
-    event.content === '收到继续指令，正在重新生成任务契约。'
-  ));
+  assert.equal(result.deferred, false);
+  assert.deepEqual(followUpPreparations, [
+    { content: '继续补充实现审计日志', mentionedAgentIds: ['backend'] }
+  ]);
+  assert.equal(executionStarts.length, 1);
+  assert.equal(session.status, 'EXECUTING');
+  assert.equal(session.pendingFollowUpMessages?.[0]?.status, 'executing');
 });
 
-test('continue retries failed task-contract regeneration even when an older Brief exists', async () => {
-  const { service, events, discussionStarts, executionStarts } = makeService();
+test('a message received during execution is recognized immediately but deferred without interrupting the task', async () => {
+  const { service, executionStarts, followUpPreparations, events } = makeService({ executionRunning: true });
   const { session } = await service.create({ input: 'Analyze the workspace' });
-  session.currentTaskBriefId = 'brief-existing';
-  (service as unknown as {
-    failSession(session: SessionDetail, error: unknown, phase: string): void;
-  }).failSession(session, new Error('brief regeneration failed'), 'brief_generation');
+  session.status = 'EXECUTING';
 
-  await service.sendMessage(session.id, '重试');
+  const result = await service.sendMessage(session.id, '@backend 完成后增加缓存', ['backend']);
 
-  assert.equal(session.status, 'AGENT_DISCUSSING');
-  assert.equal(discussionStarts.length, 2);
+  assert.equal(result.deferred, true);
+  assert.equal(followUpPreparations.length, 0);
   assert.equal(executionStarts.length, 0);
+  assert.equal(session.pendingFollowUpMessages?.[0]?.status, 'queued');
   assert.ok(events.some((event) =>
     event.type === 'session_status_changed' &&
-    event.content === '收到继续指令，正在重新生成任务契约。'
+    (event.metadata as { payload?: { reason?: string } }).payload?.reason ===
+      'follow_up_deferred_until_current_task_finishes'
   ));
 });
 
-test('explicit server-local working directory is validated and scanned before persistence', async () => {
+test('queued worker outcomes close the active follow-up and publish the final Session status', async () => {
+  const { service, events } = makeService();
+  const { session } = await service.create({ input: 'Analyze the workspace' });
+  (service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
+  session.status = 'EXECUTING';
+  session.activeFollowUpMessageId = 'follow-up-active';
+  session.pendingFollowUpMessages = [{
+    id: 'follow-up-active',
+    sourceEventId: 'event-follow-up',
+    content: '增加缓存',
+    mentionedAgentIds: ['backend'],
+    handlingPlan: {
+      intent: 'command',
+      priority: 'normal',
+      shouldPause: false,
+      affectedTaskIds: [],
+      affectedAgentIds: ['backend'],
+      requiresBriefRevision: false,
+      requiresUserConfirmation: false,
+      coordinatorInstruction: 'dispatch'
+    },
+    status: 'executing',
+    queuedAt: '2026-07-11T00:00:00.000Z'
+  }];
+
+  await service.applyQueuedExecutionOutcome(session.id, { kind: 'delivered' });
+
+  assert.equal(session.activeFollowUpMessageId, undefined);
+  assert.deepEqual(session.pendingFollowUpMessages, []);
+  assert.equal(session.status, 'COMPLETED');
+  assert.ok(events.some((event) =>
+    event.type === 'session_status_changed' &&
+    (event.metadata as { payload?: { status?: string; reason?: string } }).payload?.status === 'COMPLETED' &&
+    (event.metadata as { payload?: { status?: string; reason?: string } }).payload?.reason === 'execution_delivered'
+  ));
+});
+
+test('a delivered outcome starts a queued follow-up without publishing a stale completed status', async () => {
+  const { service, events } = makeService();
+  const { session } = await service.create({ input: 'Analyze the workspace' });
+  (service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
+  session.status = 'EXECUTING';
+  session.pendingFollowUpMessages = [{
+    id: 'follow-up-queued',
+    sourceEventId: 'event-follow-up',
+    content: 'Add caching',
+    mentionedAgentIds: ['backend'],
+    handlingPlan: {
+      intent: 'command',
+      priority: 'normal',
+      shouldPause: false,
+      affectedTaskIds: [],
+      affectedAgentIds: ['backend'],
+      requiresBriefRevision: false,
+      requiresUserConfirmation: false,
+      coordinatorInstruction: 'dispatch'
+    },
+    status: 'queued',
+    queuedAt: '2026-07-11T00:00:00.000Z'
+  }];
+
+  service.applyOutcome(session.id, { kind: 'delivered' });
+
+  assert.notEqual(session.status, 'COMPLETED');
+  assert.equal(events.some((event) =>
+    event.type === 'session_status_changed' &&
+    (event.metadata as { payload?: { status?: string } }).payload?.status === 'COMPLETED'
+  ), false);
+});
+
+test('explicit server-local working directory is bound without scanning before persistence', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-cluster-server-workspace-'));
   try {
     await writeFile(join(root, 'package.json'), '{"name":"fixture"}', 'utf8');
@@ -317,75 +974,167 @@ test('explicit server-local working directory is validated and scanned before pe
 
     assert.equal(session.workingDirectory?.kind, 'server_local');
     assert.equal(session.workingDirectory?.path, root);
-    assert.equal(session.workspaceSnapshot?.rootName, session.workingDirectory?.name);
-    assert.ok(session.workspaceSnapshot?.files.some((file) => file.path === 'package.json'));
+    assert.equal(session.workspaceSnapshot, undefined);
+    assert.equal(session.workspaceContext?.binding.providerKind, 'server_local');
+    assert.equal(session.workspaceContext?.binding.boundRevision.id, 'server-revision');
+    assert.equal(session.workspaceContext?.indexComplete, false);
     assert.equal(persistedSessions[0]?.workingDirectory?.path, root);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test('browser-local working directory becomes the Session workspace identity', async () => {
+test('V1 rejects a second active Session for the same workspace and releases the lease after completion', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-cluster-workspace-lease-'));
+  try {
+    const { service } = makeService();
+    const workingDirectory = {
+      kind: 'server_local' as const,
+      id: 'client-placeholder',
+      name: 'lease-fixture',
+      path: root,
+      selectedAt: '2026-07-13T00:00:00.000Z'
+    };
+    const first = await service.create({ input: 'First active task', workingDirectory });
+
+    await assert.rejects(
+      service.create({ input: 'Second active task', workingDirectory }),
+      (error: unknown) => {
+        const response = (error as { getResponse?: () => unknown }).getResponse?.() as Record<string, unknown> | undefined;
+        assert.equal(response?.code, 'WORKSPACE_ACTIVE_SESSION_CONFLICT');
+        assert.equal(response?.activeSessionId, first.session.id);
+        assert.equal(response?.activeSessionStatus, first.session.status);
+        return true;
+      }
+    );
+
+    first.session.status = 'COMPLETED';
+    const next = await service.create({ input: 'Task after lease release', workingDirectory });
+    assert.notEqual(next.session.id, first.session.id);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('V1 rebuilds the active workspace lease from persisted interrupted Sessions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-cluster-workspace-lease-restart-'));
+  try {
+    const workingDirectory = {
+      kind: 'server_local' as const,
+      id: 'client-placeholder',
+      name: 'restart-fixture',
+      path: root,
+      selectedAt: '2026-07-13T00:00:00.000Z'
+    };
+    const created = await makeService().service.create({ input: 'Interrupted task', workingDirectory });
+    created.session.status = 'INTERRUPTED';
+    const restarted = makeService({ initialSessions: [created.session] });
+
+    await assert.rejects(
+      restarted.service.create({ input: 'Competing task after restart', workingDirectory }),
+      (error: unknown) => {
+        const response = (error as { getResponse?: () => unknown }).getResponse?.() as Record<string, unknown> | undefined;
+        assert.equal(response?.code, 'WORKSPACE_ACTIVE_SESSION_CONFLICT');
+        assert.equal(response?.activeSessionId, created.session.id);
+        assert.equal(response?.activeSessionStatus, 'INTERRUPTED');
+        return true;
+      }
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('retired browser-local working directories are rejected', async () => {
   const { service } = makeService();
+  await assert.rejects(
+    service.create({
+      input: 'Reject the retired browser workspace mode',
+      workingDirectory: {
+        kind: 'browser_local',
+        id: 'browser-workspace-id',
+        name: 'browser-project',
+        selectedAt: '2026-07-14T00:00:00.000Z'
+      } as never
+    }),
+    /must be local_bridge or server_local/
+  );
+});
+
+test('local_bridge Session stores only a connected opaque workspace identity', async () => {
+  const { service, persistedSessions } = makeService({
+    localWorkspace: { workspaceId: 'local-workspace-id', displayName: 'local-project' }
+  });
   const { session } = await service.create({
-    input: 'Analyze this browser workspace',
+    input: 'Modify the authorized local project',
     workingDirectory: {
-      kind: 'browser_local',
-      id: 'browser-workspace-id',
-      name: 'browser-project',
-      selectedAt: '2026-07-14T00:00:00.000Z'
-    },
-    workspaceSnapshot: {
-      rootName: 'browser-project',
-      tree: [],
-      files: [],
-      skipped: [],
-      fileCount: 0,
-      totalBytes: 0,
-      scannedAt: '2026-07-14T00:00:00.000Z'
+      kind: 'local_bridge',
+      id: 'local-workspace-id',
+      name: 'local-project',
+      selectedAt: '2026-07-24T00:00:00.000Z'
     },
     runtimePreference: { preferredRuntimeType: 'codex', allowedRuntimeTypes: ['codex'] }
   });
 
-  assert.equal(session.workspaceId, 'browser-workspace-id');
-  assert.equal(session.workingDirectory?.kind, 'browser_local');
+  assert.equal(session.workspaceId, 'local-workspace-id');
+  assert.equal(session.workingDirectory?.kind, 'local_bridge');
+  assert.equal(session.workingDirectory?.path, undefined);
+  assert.equal(session.workspaceSnapshot, undefined);
+  assert.equal(session.workspaceContext?.binding.providerKind, 'local_bridge');
+  assert.equal(session.workspaceContext?.binding.boundRevision.id, 'local-revision');
+  assert.equal(persistedSessions[0]?.workingDirectory?.path, undefined);
+  assert.equal(JSON.stringify(persistedSessions[0]).includes('C:\\'), false);
 });
 
-test('refreshing a canonical browser workspace updates every Session that shares its workspaceId', async () => {
-  const { service, persistedSessions } = makeService();
-  const workingDirectory = {
-    kind: 'browser_local' as const,
-    id: 'shared-browser-workspace',
-    name: 'shared-project',
-    selectedAt: '2026-07-14T00:00:00.000Z'
-  };
-  const initialSnapshot = {
-    rootName: 'shared-project',
-    scannedAt: '2026-07-14T00:00:00.000Z',
-    revision: { id: 'revision-1', observedAt: '2026-07-14T00:00:00.000Z' },
-    fileCount: 0,
-    totalBytes: 0,
-    tree: [],
-    files: [],
-    skipped: []
-  };
-  const first = (await service.create({ input: 'First task', workingDirectory, workspaceSnapshot: initialSnapshot })).session;
-  const second = (await service.create({ input: 'Second task', workingDirectory, workspaceSnapshot: initialSnapshot })).session;
-  const refreshedSnapshot = {
-    ...initialSnapshot,
-    scannedAt: '2026-07-14T00:01:00.000Z',
-    revision: { id: 'revision-2', observedAt: '2026-07-14T00:01:00.000Z' },
-    fileCount: 1,
-    totalBytes: 12,
-    files: [{ path: 'src/main.ts', size: 12, content: 'export {}\n' }]
+test('local_bridge Session rejects paths, offline workspaces, and mismatched registration names', async () => {
+  const fixture = makeService({
+    localWorkspace: { workspaceId: 'local-workspace-id', displayName: 'local-project' }
+  });
+  const base = {
+    kind: 'local_bridge' as const,
+    id: 'local-workspace-id',
+    name: 'local-project',
+    selectedAt: '2026-07-24T00:00:00.000Z'
   };
 
-  const result = service.refreshBrowserWorkspaceSnapshot(first.id, workingDirectory.id, refreshedSnapshot);
+  await assert.rejects(
+    fixture.service.create({ input: 'Reject leaked path', workingDirectory: { ...base, path: 'C:\\private\\project' } }),
+    /must not expose a server-accessible path/
+  );
+  await assert.rejects(
+    makeService().service.create({ input: 'Reject offline bridge', workingDirectory: base }),
+    /not connected/
+  );
+  await assert.rejects(
+    fixture.service.create({ input: 'Reject spoofed name', workingDirectory: { ...base, name: 'other-project' } }),
+    /name does not match/
+  );
+  await assert.rejects(
+    fixture.service.create({
+      input: 'Reject browser supplied Local Runtime evidence',
+      workingDirectory: base,
+      workspaceSnapshot: {
+        rootName: 'local-project',
+        scannedAt: '2026-07-24T00:00:00.000Z',
+        fileCount: 0,
+        totalBytes: 0,
+        tree: [],
+        files: [],
+        skipped: []
+      }
+    } as never),
+    /server-generated and cannot be supplied/
+  );
+});
 
-  assert.deepEqual(new Set(result.updatedSessionIds), new Set([first.id, second.id]));
-  assert.equal(service.get(first.id).workspaceSnapshot?.revision?.id, 'revision-2');
-  assert.equal(service.get(second.id).workspaceSnapshot?.revision?.id, 'revision-2');
-  assert.equal(persistedSessions.find((item) => item.id === second.id)?.workspaceSnapshot?.fileCount, 1);
+test('absolute paths in ordinary task text never become a server_local workspace', async () => {
+  const { service } = makeService();
+  const { session } = await service.create({
+    input: 'Please edit D:\\business-project\\src\\main.ts and run its tests'
+  });
+
+  assert.equal(session.workingDirectory, undefined);
+  assert.equal(session.workspaceSnapshot, undefined);
 });
 
 test('ask_user confirmation payload preserves structured Post Review actions', async () => {

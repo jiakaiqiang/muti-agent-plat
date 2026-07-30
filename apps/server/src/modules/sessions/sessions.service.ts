@@ -1,16 +1,38 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  Optional,
+  ServiceUnavailableException,
+  type BeforeApplicationShutdown,
+  type OnModuleDestroy
+} from '@nestjs/common';
+import type { Subscription } from 'rxjs';
 import crypto from 'node:crypto';
 import type {
   AgentDefinition as Agent,
   AgentMessageOutput,
   AgentTask,
+  CaptureFileRevisionBaselineInput,
   CollaborationEvent,
+  CreateFileRevisionRunInput,
+  DecideFileRevisionInput,
+  ReprocessFileRevisionInput,
+  ResolveFileRevisionFailureInput,
+  RetryInterruptedFileRevisionInput,
+  SaveFileRevisionDraftInput,
+  LocalRuntimePermission,
+  PendingInvocation,
   PostReviewAction,
+  RuntimeError,
   SessionDetail,
+  SessionFollowUpMessage,
   SessionStatus,
   RuntimePreference,
   SessionWorkingDirectory,
-  WorkspaceSnapshot,
+  SessionWorkspaceContext,
   TaskBrief
 } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
@@ -23,7 +45,7 @@ import {
   reworkMaxRounds
 } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
-import { extractServerWorkspacePath, scanServerWorkspace } from '../../common/workspace-scanner.js';
+import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import { AgentsService } from '../agents/agents.service.js';
 import { EventsService } from '../events/events.service.js';
 import { IntentRecognitionService } from '../intent-recognition/intent-recognition.service.js';
@@ -36,8 +58,13 @@ import { TasksService } from '../tasks/tasks.service.js';
 import { WorkflowRuntimeService, type WorkflowRuntimeUpdate } from '../workflows/workflow-runtime.service.js';
 import { WorkflowsService } from '../workflows/workflows.service.js';
 import { WorktreeExecutionService } from '../worktree-execution/worktree-execution.service.js';
-import { BrowserWorkspaceMirrorService } from '../worktree-execution/browser-workspace-mirror.service.js';
 import { WorkdirBriefService } from '../runtimes/streaming/workdir-brief.service.js';
+import { RuntimeService } from '../runtimes/runtime.service.js';
+import { LocalRuntimeConnectionService } from '../local-runtime/local-runtime-connection.service.js';
+import { WorkspaceProviderResolver } from '../workspaces/workspace-provider-resolver.js';
+import { validateServerLocalWorkspace } from '../workspaces/validate-server-local-workspace.js';
+import { CapabilitiesService } from '../capabilities/capabilities.service.js';
+import { FileRevisionsService } from '../file-revisions/file-revisions.service.js';
 
 type CreateSessionInput = {
   input: string;
@@ -46,21 +73,35 @@ type CreateSessionInput = {
   tokenBudget?: number;
   knowledgeBaseIds?: string[];
   workingDirectory?: SessionWorkingDirectory;
-  workspaceSnapshot?: WorkspaceSnapshot;
   runtimePreference?: RuntimePreference;
   origin?: 'user' | 'autopilot';
   autopilotRunId?: string;
 };
 
+const ACTIVE_INVOCATION_SESSION_STATUSES = new Set<SessionStatus>([
+  'AGENT_DISCUSSING',
+  'REVISING_BRIEF',
+  'EXECUTING',
+  'POST_REVIEW',
+  'REWORKING'
+]);
+const TERMINAL_SESSION_STATUSES = new Set<SessionStatus>(['COMPLETED', 'FAILED', 'CANCELLED']);
+
 @Injectable()
-export class SessionsService {
+export class SessionsService implements BeforeApplicationShutdown, OnModuleDestroy {
+  private readonly logger = new Logger(SessionsService.name);
   private readonly sessions = new Map<string, SessionDetail>();
   private readonly briefGenerationSeqBySession = new Map<string, number>();
   private readonly briefGenerationRuns = new Map<
     string,
     { controller: AbortController; done: Promise<void> }
   >();
+  private readonly followUpPlanningRuns = new Map<string, Promise<void>>();
   private readonly deletingSessionIds = new Set<string>();
+  private readonly fileRevisionDispatches = new Set<string>();
+  private shuttingDown = false;
+  private readonly runtimeInterruptingSessions = new Set<string>();
+  private readonly runtimeInterruptSubscription?: Subscription;
 
   constructor(
     private readonly agents: AgentsService,
@@ -71,11 +112,15 @@ export class SessionsService {
     private readonly execution: ExecutionService,
     private readonly tasks: TasksService,
     private readonly persistence: PersistenceService,
+    private readonly capabilities: CapabilitiesService,
     @Optional() private readonly workflows?: WorkflowsService,
     @Optional() private readonly workflowRuntime?: WorkflowRuntimeService,
     @Optional() private readonly worktreeExecution?: WorktreeExecutionService,
-    @Optional() private readonly browserWorkspaceMirror?: BrowserWorkspaceMirrorService,
-    @Optional() private readonly workdirBrief?: WorkdirBriefService
+    @Optional() private readonly workdirBrief?: WorkdirBriefService,
+    @Optional() private readonly runtime?: RuntimeService,
+    @Optional() private readonly localRuntime?: LocalRuntimeConnectionService,
+    @Optional() private readonly workspaceProviders?: WorkspaceProviderResolver,
+    @Optional() private readonly fileRevisions?: FileRevisionsService
   ) {
     const persisted = this.persistence.getCollection<SessionDetail[]>('sessions', []);
     for (const session of persisted) {
@@ -85,7 +130,35 @@ export class SessionsService {
     for (const session of this.sessions.values()) {
       this.orchestrator.ensureArchitectureReportSaveConfirmation(session);
     }
+    this.orchestrator.registerSavePendingInvocationCallback((sessionId, invocation) => {
+      this.savePendingInvocation(sessionId, invocation);
+    });
+    this.capabilities.registerApprovalListener(({ sessionId, capabilityId }) =>
+      this.retryPendingApprovalTasks(sessionId, capabilityId)
+    );
     this.workflowRuntime?.updates().subscribe((update) => this.applyWorkflowRuntimeUpdate(update));
+    this.runtimeInterruptSubscription = this.localRuntime?.interruptions().subscribe((interruption) => {
+      void this.interruptForRuntimeDisconnect(interruption).catch((error) => {
+        this.logger.error(`Failed to interrupt session ${interruption.sessionId} after Runtime disconnect: ${String(error)}`);
+      });
+    });
+  }
+
+  onModuleDestroy() {
+    this.runtimeInterruptSubscription?.unsubscribe();
+  }
+
+  beforeApplicationShutdown(signal?: string) {
+    this.shuttingDown = true;
+    const occurredAt = nowIso();
+    for (const session of this.sessions.values()) {
+      this.interruptForServiceShutdown({
+        sessionId: session.id,
+        occurredAt,
+        graceful: true,
+        diagnosticRef: signal
+      });
+    }
   }
 
   list() {
@@ -102,7 +175,8 @@ export class SessionsService {
           'WAIT_USER_CONFIRM',
           'WAIT_WORKFLOW_SELECT',
           'WAIT_WORKFLOW_STEP_CONFIRM',
-          'WAIT_USER_DECISION'
+          'WAIT_USER_DECISION',
+          'INTERRUPTED'
         ].includes(session.status),
         latestEventSummary: this.events.list(session.id).at(-1)?.content,
         createdAt: session.createdAt,
@@ -122,40 +196,437 @@ export class SessionsService {
     return [...this.sessions.values()];
   }
 
-  refreshBrowserWorkspaceSnapshot(
+  fileRevisionState(sessionId: string) {
+    this.get(sessionId);
+    return this.requireFileRevisions().state(sessionId);
+  }
+
+  fileRevisionCandidate(sessionId: string, revisionId: string) {
+    this.get(sessionId);
+    return this.requireFileRevisions().getCandidate(sessionId, revisionId);
+  }
+
+  fileRevisionDraft(sessionId: string, revisionId: string) {
+    this.get(sessionId);
+    return this.requireFileRevisions().getDraft(sessionId, revisionId);
+  }
+
+  async saveFileRevisionDraft(sessionId: string, revisionId: string, input: SaveFileRevisionDraftInput) {
+    const session = this.get(sessionId);
+    const draft = await this.requireFileRevisions().saveDraft(
+      sessionId,
+      revisionId,
+      input,
+      { type: 'user', id: session.ownerId }
+    );
+    this.events.create({
+      sessionId,
+      type: 'file_revision_draft_saved',
+      content: '文件修订草稿已保存。',
+      metadata: createMetadata('system_notice', {
+        chainId: draft.chainId,
+        revisionId: draft.sourceRevisionId,
+        candidateHash: draft.sourceCandidateHash,
+        draftHash: draft.contentHash,
+        sizeBytes: draft.sizeBytes
+      })
+    });
+    this.touchSession(session);
+    return draft;
+  }
+
+  async captureFileRevisionBaseline(sessionId: string, input: CaptureFileRevisionBaselineInput) {
+    const session = this.get(sessionId);
+    if (this.hasActiveSessionWork(session)) {
+      throw new ConflictException('Wait for the active session work to finish before capturing a file baseline.');
+    }
+    const baseline = await this.requireFileRevisions().captureBaseline(session, input);
+    this.events.create({
+      sessionId,
+      type: 'file_revision_baseline_captured',
+      content: `已记录文件修订基线：${baseline.filePath}`,
+      metadata: createMetadata('system_notice', {
+        baselineId: baseline.id,
+        filePath: baseline.filePath,
+        hash: baseline.hash,
+        sizeBytes: baseline.sizeBytes,
+        source: baseline.source
+      })
+    });
+    this.touchSession(session);
+    return baseline;
+  }
+
+  async startFileRevision(sessionId: string, input: CreateFileRevisionRunInput) {
+    const session = this.get(sessionId);
+    if (this.shuttingDown) throw new ServiceUnavailableException('The server is shutting down.');
+    if (this.hasActiveSessionWork(session)) {
+      throw new ConflictException('Wait for the active session work to finish before processing a file revision.');
+    }
+    const revisions = this.requireFileRevisions();
+    const unfinished = revisions.listChains(sessionId).find((chain) =>
+      ['active', 'applying'].includes(chain.status)
+    );
+    if (unfinished) {
+      throw new ConflictException(`Resolve the existing file revision first: ${unfinished.id}`);
+    }
+    const receiver = this.agents.findByIdOrKey('coordinator');
+    if (!receiver || receiver.status !== 'active') {
+      throw new BadRequestException(
+        'REVISION_RECEIVER_UNAVAILABLE: the active system default Receiver is required for file revision processing.'
+      );
+    }
+    const participantIds = new Set(session.participatingAgentIds);
+    const targetAgents = [...new Set(input.targetAgentIds ?? [])].map((agentId) => {
+      const agent = this.agents.getByIdOrKey(agentId);
+      if (!participantIds.has(agent.id)) throw new BadRequestException(`Agent is not part of this session: ${agentId}`);
+      if (agent.status !== 'active') throw new BadRequestException(`Agent is not active: ${agent.name}`);
+      if (agent.key === 'coordinator') throw new BadRequestException('The receiver cannot be selected as a processing Agent.');
+      return agent;
+    });
+    if (targetAgents.length === 0) throw new BadRequestException('Select at least one processing Agent.');
+    const run = await revisions.createRun(session, {
+      baselineId: input.baselineId,
+      targetAgentIds: targetAgents.map((agent) => agent.id),
+      instruction: input.instruction
+    });
+    this.events.create({
+      sessionId,
+      type: 'file_revision_chain_created',
+      toAgentIds: run.targetAgentIds,
+      content: `用户已确认处理 ${run.filePath} 的修订。`,
+      metadata: createMetadata('system_notice', {
+        revisionId: run.id,
+        chainId: run.chainId,
+        iteration: run.iteration,
+        baselineId: run.baselineId,
+        filePath: run.filePath,
+        baseHash: run.baseHash,
+        userDraftHash: run.userDraftHash,
+        diffHash: run.diffHash,
+        diffSummary: run.diffSummary,
+        targetAgentIds: run.targetAgentIds
+      })
+    });
+    this.setStatus(session, 'EXECUTING');
+    this.dispatchFileRevisionProcessing(session, run.id);
+    return run;
+  }
+
+  async reprocessFileRevision(sessionId: string, revisionId: string, input: ReprocessFileRevisionInput) {
+    const session = this.get(sessionId);
+    if (this.shuttingDown) throw new ServiceUnavailableException('The server is shutting down.');
+    const targetAgentIds = input.targetAgentIds === undefined
+      ? undefined
+      : this.validateFileRevisionAgents(session, input.targetAgentIds).map((agent) => agent.id);
+    const run = await this.requireFileRevisions().reprocess(sessionId, revisionId, {
+      ...input,
+      ...(targetAgentIds ? { targetAgentIds } : {})
+    });
+    const alreadyAnnounced = this.events.list(sessionId).some((event) =>
+      event.type === 'file_revision_iteration_submitted' &&
+      (event.metadata.payload as { revisionId?: string } | undefined)?.revisionId === run.id
+    );
+    if (!alreadyAnnounced) this.events.create({
+      sessionId,
+      type: 'file_revision_candidate_superseded',
+      content: '上一轮候选已由用户修改稿取代。',
+      metadata: createMetadata('system_notice', {
+        chainId: run.chainId,
+        revisionId: run.parentRevisionId,
+        supersededByRevisionId: run.id,
+        iteration: run.iteration
+      })
+    });
+    if (!alreadyAnnounced) this.events.create({
+      sessionId,
+      type: 'file_revision_iteration_submitted',
+      toAgentIds: run.targetAgentIds,
+      content: `已提交第 ${run.iteration} 轮文件修订处理。`,
+      metadata: createMetadata('system_notice', {
+        chainId: run.chainId,
+        revisionId: run.id,
+        parentRevisionId: run.parentRevisionId,
+        iteration: run.iteration,
+        baseHash: run.baseHash,
+        userDraftHash: run.userDraftHash,
+        diffHash: run.diffHash,
+        targetAgentIds: run.targetAgentIds
+      })
+    });
+    this.setStatus(session, 'EXECUTING');
+    this.dispatchFileRevisionProcessing(session, run.id);
+    return run;
+  }
+
+  async resolveFileRevisionFailure(
     sessionId: string,
-    workspaceId: string,
-    workspaceSnapshot: WorkspaceSnapshot
+    revisionId: string,
+    input: ResolveFileRevisionFailureInput
   ) {
-    this.persistence.assertWritable();
-    const sourceSession = this.get(sessionId);
-    if (sourceSession.workingDirectory?.kind !== 'browser_local') {
-      throw new BadRequestException('Workspace snapshot refresh is only available for browser-local Sessions.');
+    const session = this.get(sessionId);
+    if (this.shuttingDown) throw new ServiceUnavailableException('The server is shutting down.');
+    const resolved = await this.requireFileRevisions().resolvePartialFailure(sessionId, revisionId, input);
+    this.events.create({
+      sessionId,
+      type: 'file_revision_failure_resolved',
+      content: input.decision === 'retry_agents'
+        ? '已按用户决定重新运行本轮全部 Agent。'
+        : input.decision === 'continue_with_successful'
+          ? '已按用户决定使用成功结果继续由 Receiver 生成候选。'
+          : '已按用户决定放弃本次文件修订。',
+      metadata: createMetadata('system_notice', {
+        chainId: resolved.chain.id,
+        revisionId,
+        decision: input.decision,
+        stateVersion: resolved.chain.stateVersion,
+        successfulAgentCount: resolved.run.agentResults.filter((result) => result.status === 'completed').length,
+        failedAgentCount: resolved.run.agentResults.filter((result) => result.status === 'failed').length
+      })
+    });
+    if (input.decision === 'abandon_revision') {
+      this.setStatus(session, 'COMPLETED');
+      return resolved;
     }
-    if (sourceSession.workingDirectory.id !== workspaceId || sourceSession.workspaceId !== workspaceId) {
-      throw new BadRequestException('Workspace snapshot refresh does not match the Session workspace.');
+    this.setStatus(session, 'EXECUTING');
+    this.dispatchFileRevisionProcessing(
+      session,
+      revisionId,
+      input.decision === 'continue_with_successful' ? 'continue_with_successful' : 'run_agents'
+    );
+    return resolved;
+  }
+
+  async retryInterruptedFileRevision(
+    sessionId: string,
+    revisionId: string,
+    input: RetryInterruptedFileRevisionInput
+  ) {
+    const session = this.get(sessionId);
+    const retried = await this.requireFileRevisions().retryInterrupted(session, revisionId, input);
+    this.events.createOnce(`file-revision-retry:${revisionId}:${input.retryKey}`, {
+      sessionId,
+      type: 'file_revision_dispatched',
+      content: retried.mode === 'apply_reconcile'
+        ? '文件修订已恢复，系统已根据当前 Workspace 状态完成写回结果核对。'
+        : retried.mode === 'receiver_only'
+          ? '文件修订已恢复，Receiver 将基于已完成的 Agent 结果重新生成候选。'
+          : '文件修订已恢复，目标 Agent 将重新处理本轮修订。',
+      metadata: createMetadata('system_notice', {
+        revisionId,
+        chainId: retried.run.chainId,
+        retryKey: input.retryKey,
+        retryMode: retried.mode,
+        stateVersion: retried.chain.stateVersion
+      })
+    });
+    if (retried.mode === 'apply_reconcile') {
+      this.setStatus(session, retried.run.status === 'awaiting_confirmation' ? 'WAIT_USER_DECISION' : 'COMPLETED');
+      return retried;
     }
-    if (!workspaceSnapshot.revision?.id) {
-      throw new BadRequestException('Workspace snapshot refresh requires an immutable revision.');
+    this.setStatus(session, 'EXECUTING');
+    this.dispatchFileRevisionProcessing(
+      session,
+      revisionId,
+      retried.mode === 'receiver_only' ? 'continue_with_successful' : 'run_agents'
+    );
+    return retried;
+  }
+
+  private dispatchFileRevisionProcessing(
+    session: SessionDetail,
+    revisionId: string,
+    mode: 'run_agents' | 'continue_with_successful' = 'run_agents'
+  ) {
+    const sessionId = session.id;
+    const revisions = this.requireFileRevisions();
+    const run = revisions.getRun(sessionId, revisionId);
+    const dispatchable = mode === 'run_agents'
+      ? ['submitted', 'interrupted'].includes(run.status)
+      : run.status === 'processing';
+    if (!dispatchable || this.fileRevisionDispatches.has(revisionId)) return;
+    this.fileRevisionDispatches.add(revisionId);
+    const processing = mode === 'continue_with_successful'
+      ? this.orchestrator.continueFileRevisionAfterPartialFailure(session, revisionId)
+      : this.orchestrator.processFileRevision(session, revisionId);
+    void processing
+      .then(() => {
+        const current = this.sessions.get(sessionId);
+        if (!current || this.deletingSessionIds.has(sessionId)) return;
+        this.setStatus(current, 'WAIT_USER_DECISION');
+      })
+      .catch(async (error) => {
+        const current = this.sessions.get(sessionId);
+        if (!current || this.deletingSessionIds.has(sessionId)) return;
+        const message = error instanceof Error ? error.message : String(error);
+        const code = message.match(/^([A-Z][A-Z0-9_]+):/)?.[1] ?? 'REVISION_PROCESSING_FAILED';
+        const publicMessage = code === 'REVISION_PARTIAL_AGENT_FAILURE'
+          ? 'Some selected Agents did not return a valid complete proposal.'
+          : 'File revision processing failed. Retry or abandon this revision.';
+        const failedRun = await revisions.markFailed(sessionId, revisionId, code, publicMessage).catch(() => undefined);
+        this.events.create({
+          sessionId,
+          type: 'file_revision_failed',
+          priority: 'high',
+          content: '文件修订处理失败，请选择重试或放弃本轮修订。',
+          metadata: createMetadata('error_card', { revisionId, code })
+        });
+        if (code === 'REVISION_PARTIAL_AGENT_FAILURE' && failedRun) {
+          const chain = revisions.getChain(sessionId, failedRun.chainId);
+          const successfulAgentCount = failedRun.agentResults.filter((result) => result.status === 'completed').length;
+          const failedAgentCount = failedRun.agentResults.filter((result) => result.status === 'failed').length;
+          this.events.create({
+            sessionId,
+            type: 'file_revision_failure_decision_requested',
+            priority: 'high',
+            content: '部分 Agent 处理失败，请明确选择重试、使用成功结果继续，或放弃修订。',
+            metadata: createMetadata('confirmation_card', {
+              revisionId,
+              chainId: failedRun.chainId,
+              stateVersion: chain.stateVersion,
+              successfulAgentCount,
+              failedAgentCount,
+              options: [
+                { key: 'retry_agents', label: '重试全部 Agent', style: 'primary' },
+                ...(successfulAgentCount > 0
+                  ? [{ key: 'continue_with_successful', label: '使用成功结果继续', style: 'default' }]
+                  : []),
+                { key: 'abandon_revision', label: '放弃修订', style: 'danger' }
+              ]
+            })
+          });
+          this.setStatus(current, 'WAIT_USER_DECISION');
+        } else {
+          this.setStatus(current, 'COMPLETED');
+        }
+      })
+      .finally(() => this.fileRevisionDispatches.delete(revisionId));
+  }
+
+  async decideFileRevision(sessionId: string, revisionId: string, input: DecideFileRevisionInput) {
+    const session = this.get(sessionId);
+    const revisions = this.requireFileRevisions();
+    const run = revisions.getRun(sessionId, revisionId);
+    if (run.confirmationId !== input.confirmationId) {
+      throw new BadRequestException('File revision confirmation does not match the active run.');
     }
-    if (workspaceSnapshot.rootName !== sourceSession.workingDirectory.name) {
-      throw new BadRequestException('Workspace snapshot root does not match the selected directory.');
+    if (
+      input.decision === 'apply_candidate' &&
+      run.status === 'applied' &&
+      run.candidateHash?.algorithm === input.candidateHash.algorithm &&
+      run.candidateHash.value === input.candidateHash.value
+    ) {
+      this.setStatus(session, 'COMPLETED');
+      return { run, applied: true, idempotentReplay: true };
+    }
+    this.assertPendingConfirmation(sessionId, input.confirmationId, 'confirm_file_revision_apply');
+
+    if (input.decision === 'abandon_revision') {
+      const resolved = await revisions.abandon(sessionId, revisionId, input);
+      this.events.create({
+        sessionId,
+        type: 'user_confirmation_resolved',
+        content: '已保留用户直接修订的文件，未写入 Agent 候选结果。',
+        metadata: createMetadata('system_notice', {
+          confirmationId: input.confirmationId,
+          reason: 'confirm_file_revision_apply',
+          decision: input.decision,
+          revisionId
+        })
+      });
+      this.setStatus(session, 'COMPLETED');
+      return { run: resolved, applied: false };
     }
 
-    const updatedSessionIds: string[] = [];
-    const updatedAt = nowIso();
-    for (const session of this.sessions.values()) {
-      if (session.workingDirectory?.kind !== 'browser_local' || session.workspaceId !== workspaceId) continue;
-      session.workspaceSnapshot = structuredClone(workspaceSnapshot);
-      session.updatedAt = updatedAt;
-      updatedSessionIds.push(session.id);
+    this.events.createOnce(`file-revision-apply-started:${input.confirmationId}:${revisionId}:${input.candidateHash.value}`, {
+      sessionId,
+      type: 'file_revision_apply_started',
+      content: `开始校验并写回文件修订候选：${run.filePath}`,
+      metadata: createMetadata('system_notice', {
+        confirmationId: input.confirmationId,
+        chainId: run.chainId,
+        revisionId,
+        iteration: run.iteration,
+        filePath: run.filePath,
+        candidateHash: input.candidateHash,
+        expectedStateVersion: input.expectedStateVersion
+      })
+    });
+    const applied = await revisions.applyCandidate(session, revisionId, input);
+    this.events.createOnce(`file-revision-confirmation-resolved:${input.confirmationId}:${input.decision}`, {
+      sessionId,
+      type: 'user_confirmation_resolved',
+      content: applied.applied ? '已确认应用 Agent 候选结果。' : '写回前检测到文件已变化，未覆盖原文件。',
+      metadata: createMetadata('system_notice', {
+        confirmationId: input.confirmationId,
+        reason: 'confirm_file_revision_apply',
+        decision: input.decision,
+        revisionId,
+        candidateHash: input.candidateHash,
+        applied: applied.applied
+      })
+    });
+    if (!applied.applied) {
+      const conflicts = applied.result.ok ? [] : applied.result.conflicts;
+      this.events.create({
+        sessionId,
+        type: 'file_revision_stale',
+        priority: 'high',
+        content: '原文件在修订快照后再次变化，系统未执行覆盖。',
+        metadata: createMetadata('error_card', {
+          revisionId,
+          filePath: run.filePath,
+          conflicts
+        })
+      });
+      this.setStatus(session, 'COMPLETED');
+      return { run: applied.run, applied: false, conflicts };
     }
-    this.persist();
-    return { session: this.get(sessionId), updatedSessionIds, revision: workspaceSnapshot.revision };
+    this.events.createOnce(`file-revision-applied:${revisionId}:${input.candidateHash.value}`, {
+      sessionId,
+      type: 'file_revision_applied',
+      content: `已安全写回文件：${run.filePath}`,
+      metadata: createMetadata('system_notice', {
+        revisionId,
+        filePath: run.filePath,
+        changeSetId: applied.changeSet.id,
+        workspaceRevision: applied.result.revision,
+        baselineId: applied.baseline?.id,
+        persistenceRecoveryRequired: applied.persistenceRecoveryRequired,
+        postApplyBaselineStatus: applied.chain.postApplyBaselineStatus
+      })
+    });
+    if (applied.baseline) {
+      this.events.create({
+        sessionId,
+        type: 'file_revision_baseline_captured',
+        content: `已将写回结果记录为新基线：${applied.baseline.filePath}`,
+        metadata: createMetadata('system_notice', {
+          baselineId: applied.baseline.id,
+          filePath: applied.baseline.filePath,
+          hash: applied.baseline.hash,
+          source: applied.baseline.source
+        })
+      });
+    }
+    this.setStatus(session, 'COMPLETED');
+    return { run: applied.run, applied: true, baseline: applied.baseline };
+  }
+
+  async recoverFileRevisions() {
+    const recovered: Array<{ sessionId: string; revisionId: string; from: string; to: string }> = [];
+    for (const session of this.listRaw()) {
+      const items = await this.requireFileRevisions().recoverSession(session);
+      for (const item of items) recovered.push({ sessionId: session.id, ...item });
+    }
+    return recovered;
   }
 
   async delete(sessionId: string) {
     this.persistence.assertWritable();
+    if (this.shuttingDown) {
+      throw new ServiceUnavailableException('后端正在关闭，请在服务重启后重试删除。');
+    }
     const session = this.get(sessionId);
     if (this.deletingSessionIds.has(sessionId)) {
       throw new ConflictException(`Session deletion is already in progress: ${sessionId}`);
@@ -181,16 +652,21 @@ export class SessionsService {
         ? this.workflowRuntime.cancel(session.workflowRunId, '会话删除前终止工作流。')
         : Promise.resolve();
       const executionCancellation = this.execution.cancelAndWait(sessionId, termination);
+      const runtimeCancellation = this.runtime?.cancelSessionAndWait(sessionId, termination) ??
+        Promise.resolve({ requested: 0, completed: 0, timedOut: false });
       const briefStopped = briefRun ? await settlesWithin(briefRun.done, 10_000) : true;
-      const [executionStopped] = await Promise.all([executionCancellation, workflowCancellation]);
-      if (!briefStopped || executionStopped.timedOut) {
+      const [executionStopped, runtimeStopped] = await Promise.all([
+        executionCancellation,
+        runtimeCancellation,
+        workflowCancellation
+      ]);
+      if (!briefStopped || executionStopped.timedOut || runtimeStopped.timedOut) {
         throw new ConflictException(
           `Session runtime did not stop within the deletion grace period: ${sessionId}`
         );
       }
 
       await this.worktreeExecution?.deleteSessionDirectory(sessionId);
-      await this.browserWorkspaceMirror?.deleteSessionDirectory(sessionId);
       this.workdirBrief?.deleteSessionDirectory(sessionId);
       this.sessions.delete(sessionId);
       this.briefGenerationSeqBySession.delete(sessionId);
@@ -199,6 +675,7 @@ export class SessionsService {
       this.memories.deleteSession(sessionId);
       this.events.deleteSession(sessionId);
       this.orchestrator.deleteSession(sessionId);
+      await this.fileRevisions?.deleteSession(sessionId);
       this.persist();
       return { deleted: true, sessionId: session.id };
     } finally {
@@ -206,27 +683,71 @@ export class SessionsService {
     }
   }
 
+  async interruptForRuntimeDisconnect(interruption: {
+    sessionId: string;
+    invocationId: string;
+    reason: 'local_runtime_disconnected';
+    occurredAt: string;
+  }) {
+    return this.interruptForWorkspaceDisconnect(interruption);
+  }
+
+  interruptForServiceShutdown(interruption: {
+    sessionId: string;
+    invocationId?: string;
+    occurredAt: string;
+    graceful: boolean;
+    diagnosticRef?: string;
+  }) {
+    const session = this.sessions.get(interruption.sessionId);
+    if (!session || !ACTIVE_INVOCATION_SESSION_STATUSES.has(session.status)) return false;
+
+    const termination = createExecutionTermination({
+      kind: 'service_shutdown',
+      source: 'system',
+      scope: 'service',
+      graceful: interruption.graceful,
+      ...(interruption.diagnosticRef ? { diagnosticRef: interruption.diagnosticRef } : {})
+    });
+    this.markSessionInterrupted(
+      session,
+      {
+        reason: 'service_shutdown',
+        invocationId: interruption.invocationId,
+        occurredAt: interruption.occurredAt
+      },
+      termination,
+      'Platform backend stopped; waiting for a future user wake-up.',
+      '平台后端连接已中断，本次调用不会自动续跑。会话上下文已保留，可在后续唤醒功能中继续。'
+    );
+    return true;
+  }
+
   async create(input: CreateSessionInput) {
-    this.persistence.assertWritable();
-    const dataEpoch = this.persistence.currentDataEpoch();
-    const now = nowIso();
-    const participatingAgentIds = this.agents.resolveIds(input.agentIds);
-    const workspaceBinding = await this.resolveWorkspaceBinding(input);
-    const recognizedIntent = this.intentRecognition.recognizeTask(input.input, workspaceBinding.workspaceSnapshot);
-    const session: SessionDetail = {
+    const startedAt = Date.now();
+    try {
+      this.persistence.assertWritable();
+      const dataEpoch = this.persistence.currentDataEpoch();
+      const now = nowIso();
+      const participatingAgentIds = this.agents.resolveIds(input.agentIds);
+      const workspaceBinding = await this.resolveWorkspaceBinding(input);
+      const workspaceId = workspaceBinding.workingDirectory?.id ?? 'default-workspace';
+      this.assertWorkspaceLeaseAvailable(workspaceId);
+      const recognizedIntent = this.intentRecognition.recognizeTask(input.input);
+      const session: SessionDetail = {
       id: crypto.randomUUID(),
       dataEpoch,
       title: this.titleFromInput(input.input),
       originalInput: input.input,
       status: 'AGENT_DISCUSSING',
       ownerId: 'local-user',
-      workspaceId: workspaceBinding.workingDirectory?.id ?? 'default-workspace',
+      workspaceId,
       projectId: input.projectId,
       origin: input.origin ?? 'user',
       autopilotRunId: input.autopilotRunId,
       knowledgeBaseIds: input.knowledgeBaseIds ?? [],
       workingDirectory: workspaceBinding.workingDirectory,
-      workspaceSnapshot: workspaceBinding.workspaceSnapshot,
+      workspaceContext: workspaceBinding.workspaceContext,
       runtimePreference: this.normalizeRuntimePreference(input.runtimePreference),
       tokenBudget: input.tokenBudget,
       tokenUsed: 0,
@@ -236,38 +757,97 @@ export class SessionsService {
       participatingAgentIds,
       createdAt: now,
       updatedAt: now
-    };
-    this.sessions.set(session.id, session);
-    this.persist();
+      };
+      this.sessions.set(session.id, session);
+      this.persist();
 
-    const firstEvent = this.events.create({
-      sessionId: session.id,
-      type: 'user_message',
-      userMessageIntent: 'clarification',
-      priority: 'normal',
-      content: input.input,
-      toAgentIds: participatingAgentIds,
-      metadata: createMetadata('chat_message', {
-        text: input.input,
-        mentionedAgentIds: participatingAgentIds,
-        origin: session.origin,
-        autopilotRunId: session.autopilotRunId
-      })
-    });
+      const firstEvent = this.events.create({
+        sessionId: session.id,
+        type: 'user_message',
+        userMessageIntent: 'clarification',
+        priority: 'normal',
+        content: input.input,
+        toAgentIds: participatingAgentIds,
+        metadata: createMetadata('chat_message', {
+          text: input.input,
+          mentionedAgentIds: participatingAgentIds,
+          origin: session.origin,
+          autopilotRunId: session.autopilotRunId
+        })
+      });
 
-    this.generateBriefInBackground(session);
+      this.generateBriefInBackground(session);
 
-    return { session, firstEvent };
+      return { session, firstEvent };
+    } finally {
+      workspaceMetrics.observe('session_create_duration_ms', Date.now() - startedAt);
+    }
   }
 
   private async resolveWorkspaceBinding(input: CreateSessionInput) {
+    if ('workspaceSnapshot' in input) {
+      throw new BadRequestException('workspaceSnapshot is server-generated and cannot be supplied when creating a Session.');
+    }
+    const requestedKind = (input.workingDirectory as { kind?: string } | undefined)?.kind;
+    if (requestedKind && requestedKind !== 'local_bridge' && requestedKind !== 'server_local') {
+      throw new BadRequestException('workingDirectory.kind must be local_bridge or server_local.');
+    }
+    if (input.workingDirectory?.kind === 'local_bridge') {
+      if (input.workingDirectory.path) {
+        throw new BadRequestException('local_bridge workingDirectory must not expose a server-accessible path.');
+      }
+      const registration = this.localRuntime?.getWorkspace(input.workingDirectory.id);
+      if (!registration) {
+        throw new BadRequestException(`Local Runtime workspace is not connected: ${input.workingDirectory.id}`);
+      }
+      if (registration.displayName !== input.workingDirectory.name) {
+        throw new BadRequestException('Local Runtime workspace name does not match its registered workspaceId.');
+      }
+      return {
+        workingDirectory: input.workingDirectory,
+        workspaceContext: {
+          binding: {
+            workspaceId: registration.workspaceId,
+            providerKind: 'local_bridge',
+            displayName: registration.displayName,
+            capabilities: registration.capabilities,
+            boundRevision: registration.revision,
+            boundAt: nowIso()
+          },
+          indexComplete: registration.index?.complete ?? false,
+          ...(registration.index
+            ? {
+                indexGeneration: registration.index.generation,
+                indexRevision: registration.index.revision
+              }
+            : {})
+        } satisfies SessionWorkspaceContext
+      };
+    }
     if (input.workingDirectory?.kind === 'server_local') {
       const path = input.workingDirectory.path?.trim();
       if (!path) {
         throw new BadRequestException('server_local workingDirectory requires an absolute path.');
       }
       try {
-        return await scanServerWorkspace(path);
+        const workingDirectory = await validateServerLocalWorkspace(input.workingDirectory);
+        const provider = this.workspaceProviders?.resolveWorkingDirectory(workingDirectory);
+        if (!provider) throw new Error('Server workspace provider is unavailable.');
+        const revision = await provider.getRevision();
+        return {
+          workingDirectory,
+          workspaceContext: {
+            binding: {
+              workspaceId: workingDirectory.id,
+              providerKind: 'server_local',
+              displayName: workingDirectory.name,
+              capabilities: provider.capabilities(),
+              boundRevision: revision,
+              boundAt: nowIso()
+            },
+            indexComplete: false
+          } satisfies SessionWorkspaceContext
+        };
       } catch (error) {
         throw new BadRequestException(
           `Invalid server_local working directory: ${error instanceof Error ? error.message : String(error)}`
@@ -275,30 +855,25 @@ export class SessionsService {
       }
     }
 
-    if (input.workspaceSnapshot) {
-      return {
-        workingDirectory: input.workingDirectory,
-        workspaceSnapshot: input.workspaceSnapshot
-      };
-    }
+    return {
+      workingDirectory: input.workingDirectory,
+      workspaceContext: undefined
+    };
+  }
 
-    const path = extractServerWorkspacePath(input.input);
-    if (!path) {
-      return {
-        workingDirectory: input.workingDirectory,
-        workspaceSnapshot: undefined
-      };
-    }
-
-    try {
-      return await scanServerWorkspace(path);
-    } catch (error) {
-      return {
-        workingDirectory: input.workingDirectory,
-        workspaceSnapshot: undefined,
-        scanError: error instanceof Error ? error.message : String(error)
-      };
-    }
+  private assertWorkspaceLeaseAvailable(workspaceId: string) {
+    const active = [...this.sessions.values()]
+      .filter((session) => session.workspaceId === workspaceId && !TERMINAL_SESSION_STATUSES.has(session.status))
+      .sort((left, right) => this.compareSessionRecency(left, right))[0];
+    if (!active) return;
+    workspaceMetrics.increment('workspace_active_session_conflict_total');
+    throw new ConflictException({
+      code: 'WORKSPACE_ACTIVE_SESSION_CONFLICT',
+      message: '同一工作区在 V1 中只能运行一个活动会话，请先返回或结束当前会话。',
+      workspaceId,
+      activeSessionId: active.id,
+      activeSessionStatus: active.status
+    });
   }
 
   private generateBriefInBackground(session: SessionDetail) {
@@ -343,39 +918,15 @@ export class SessionsService {
     void done;
   }
 
-  /**
-   * Re-drives brief generation after a process restart. The discussion phase
-   * runs on an in-memory promise (generateBriefInBackground), so a session
-   * that was AGENT_DISCUSSING when the process died has no driver anymore.
-   */
-  resumeBriefGeneration(sessionId: string) {
-    const session = this.get(sessionId);
-    if (session.status !== 'AGENT_DISCUSSING') {
-      return false;
-    }
-    this.events.create({
-      sessionId: session.id,
-      type: 'session_status_changed',
-      priority: 'high',
-      content: messages.discussionRecoveredAfterRestart,
-      metadata: createMetadata('system_notice', {
-        status: 'AGENT_DISCUSSING',
-        reason: 'brief_generation_recovered_on_boot'
-      })
-    });
-    this.generateBriefInBackground(session);
-    return true;
-  }
-
   async sendMessage(sessionId: string, content: string, mentionedAgentIds: string[] = []) {
     const session = this.get(sessionId);
-
-    // P2: WAIT_USER_CONFIRM 下带 @Agent 走持续探讨
-    if (session.status === 'WAIT_USER_CONFIRM' && mentionedAgentIds.length > 0 && session.currentTaskBriefId) {
-      return this.consultBrief(session, content, mentionedAgentIds);
+    let handlingPlan;
+    try {
+      handlingPlan = await this.orchestrator.recognizeFollowUpMessage(session, content, mentionedAgentIds);
+    } catch (error) {
+      this.logger.warn(`Receiver Runtime intent recognition failed for session ${session.id}: ${String(error)}`);
+      handlingPlan = this.intentRecognition.recognizeUserMessage(content, session.status);
     }
-
-    const handlingPlan = this.intentRecognition.recognizeUserMessage(content, session.status);
     const event = this.events.create({
       sessionId,
       type: 'user_message',
@@ -390,15 +941,20 @@ export class SessionsService {
     });
 
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    const deferred = this.hasActiveSessionWork(session);
     this.events.create({
       sessionId,
       type: 'agent_message',
       fromAgentId: coordinator.id,
       toAgentIds: mentionedAgentIds,
-      content: handlingPlan.coordinatorInstruction,
+      content: deferred
+        ? `接收者已完成意图识别。当前任务结束后再进行任务拆分与派发：${handlingPlan.coordinatorInstruction}`
+        : `接收者已完成意图识别，开始进行任务拆分与派发：${handlingPlan.coordinatorInstruction}`,
       metadata: createMetadata('chat_message', {
         messageKind: 'decision',
-        handlingPlan
+        handlingPlan,
+        deferred,
+        receiverResponsibilities: ['intent_recognition', 'task_decomposition']
       })
     });
 
@@ -427,94 +983,36 @@ export class SessionsService {
       });
     }
 
-    if (handlingPlan.intent === 'preference_input') {
-      this.touchSession(session);
-    } else if (session.status === 'FAILED' && this.isResumeCommand(content)) {
-      this.retryFailedSession(session, event.id);
-    } else if (handlingPlan.shouldPause) {
-      const relevantAgentIds = this.relevantAgentIds(session, content, handlingPlan.affectedAgentIds);
-      this.recordAgentRequirementContext(session, content, event.id, relevantAgentIds);
+    const followUp: SessionFollowUpMessage = {
+      id: crypto.randomUUID(),
+      sourceEventId: event.id,
+      content,
+      mentionedAgentIds: Array.from(new Set(mentionedAgentIds)),
+      handlingPlan,
+      status: 'queued',
+      queuedAt: nowIso()
+    };
+    session.pendingFollowUpMessages = [...(session.pendingFollowUpMessages ?? []), followUp];
+    this.touchSession(session);
 
-      // 创建插话任务并立即标记完成（插话内容已通过记忆分发给相关 agent）
-      const coordinator = this.pickSessionAgent(session, ['coordinator']);
-      const assignedAgentId = relevantAgentIds[0] || coordinator.id;
-      const interruptTask: AgentTask = {
-        id: crypto.randomUUID(),
-        sessionId: session.id,
-        title: '处理用户执行中插话',
-        description: content,
-        status: 'completed',
-        assignedBy: { type: 'agent', id: coordinator.id },
-        assignee: { type: 'agent', id: assignedAgentId },
-        routingMode: 'coordinator_controlled',
-        autoResolutionAttempted: false,
-        dependsOnTaskIds: [],
-        acceptanceCriteria: [],
-        resultSummary: '已将插话内容分发给相关 Agent 作为执行上下文。',
-        createdAt: nowIso(),
-        updatedAt: nowIso()
-      };
-      this.tasks.add(interruptTask);
-
+    if (deferred) {
       this.events.create({
-        sessionId: session.id,
-        type: 'task_created',
-        taskId: interruptTask.id,
-        fromAgentId: coordinator.id,
-        toAgentIds: relevantAgentIds,
-        content: `任务已创建：${interruptTask.title}`,
-        metadata: createMetadata('task_card', {
-          taskId: interruptTask.id,
-          title: interruptTask.title,
-          description: interruptTask.description,
-          status: interruptTask.status,
-          assignedBy: interruptTask.assignedBy,
-          assignee: interruptTask.assignee,
-          routingMode: interruptTask.routingMode,
-          autoResolutionAttempted: interruptTask.autoResolutionAttempted,
-          acceptanceCriteria: interruptTask.acceptanceCriteria
-        })
-      });
-
-      this.events.create({
-        sessionId: session.id,
-        type: 'agent_message',
-        taskId: interruptTask.id,
-        fromAgentId: coordinator.id,
-        toAgentIds: relevantAgentIds,
-        content: `Coordinator：收到用户执行中补充要求，已同步给相关 Agent，并会注入后续任务上下文。补充内容：${content}`,
-        metadata: createMetadata('chat_message', {
-          messageKind: 'handoff',
-          phase: 'user_message_routing',
-          relatedTaskIds: [interruptTask.id],
-          mentionedAgentIds: relevantAgentIds,
-          handlingPlan
-        })
-      });
-
-      this.events.create({
-        sessionId: session.id,
+        sessionId,
         type: 'session_status_changed',
-        priority: 'high',
-        content: `执行中收到用户插话，已创建任务 [${interruptTask.title}] 并分发给相关 Agent。`,
+        content: '后续需求已进入等待队列，将在当前任务结束后执行。',
         metadata: createMetadata('system_notice', {
           status: session.status,
-          reason: 'executing_user_interrupt_task_created',
+          reason: 'follow_up_deferred_until_current_task_finishes',
+          followUpMessageId: followUp.id,
           sourceEventId: event.id,
-          affectedAgentIds: relevantAgentIds,
-          taskId: interruptTask.id
+          mentionedAgentIds: followUp.mentionedAgentIds
         })
       });
-      this.restartExecutionWithUpdatedContext(session, event.id, relevantAgentIds, interruptTask.id);
-      this.touchSession(session);
-    } else if (this.shouldReopenRequirementLoop(session.status, handlingPlan.requiresBriefRevision)) {
-      this.reopenRequirementLoop(session, content, event, handlingPlan.affectedAgentIds, 'user_requirement_supplement');
     } else {
-      this.touchSession(session);
+      this.scheduleFollowUpPlanning(session.id);
     }
 
-
-    return { event, handlingPlan };
+    return { event, handlingPlan, deferred, followUpMessageId: followUp.id };
   }
 
   async confirmBrief(sessionId: string, briefId: string) {
@@ -716,6 +1214,11 @@ export class SessionsService {
   }
 
   async applyQueuedExecutionOutcome(sessionId: string, outcome: ExecutionOutcome) {
+    const session = this.sessions.get(sessionId);
+    if (session?.activeFollowUpMessageId) {
+      this.applyFollowUpOutcome(sessionId, session.activeFollowUpMessageId, outcome);
+      return;
+    }
     if (await this.workflowRuntime?.acceptExecutionOutcome(sessionId, outcome)) return;
     this.applyOutcome(sessionId, outcome);
   }
@@ -791,7 +1294,12 @@ export class SessionsService {
   reviseBrief(
     sessionId: string,
     briefId: string,
-    input: { reason?: string; userMessage?: string; confirmationId?: string; assignedAgentKeys?: string[] } = {}
+    input: {
+      reason?: string;
+      userMessage?: string;
+      confirmationId?: string;
+      assignedAgentKeys?: string[];
+    } = {}
   ) {
     const session = this.get(sessionId);
     if (session.currentTaskBriefId !== briefId) {
@@ -807,7 +1315,13 @@ export class SessionsService {
 
     // P1 分流:指定 Agent 定向修订 vs 全量重跑
     if (input.assignedAgentKeys && input.assignedAgentKeys.length > 0) {
-      return this.reviseBriefDirected(session, brief, content, input.confirmationId, input.assignedAgentKeys);
+      return this.reviseBriefDirected(
+        session,
+        brief,
+        content,
+        input.confirmationId,
+        input.assignedAgentKeys
+      );
     }
 
     const userEvent = this.events.create({
@@ -968,14 +1482,139 @@ export class SessionsService {
     return { event: userEvent };
   }
 
+  private hasActiveSessionWork(session: SessionDetail) {
+    return Boolean(
+      session.status === 'INTERRUPTED' ||
+      session.activeFollowUpMessageId ||
+      this.followUpPlanningRuns.has(session.id) ||
+      this.briefGenerationRuns.has(session.id) ||
+      this.execution.isRunning(session.id) ||
+      ACTIVE_INVOCATION_SESSION_STATUSES.has(session.status)
+    );
+  }
+
+  private scheduleFollowUpPlanning(sessionId: string) {
+    if (this.followUpPlanningRuns.has(sessionId) || this.shuttingDown) return;
+    const run = this.processNextFollowUp(sessionId)
+      .catch((error) => {
+        const session = this.sessions.get(sessionId);
+        if (!session || this.deletingSessionIds.has(sessionId)) return;
+        const active = session.pendingFollowUpMessages?.find(
+          (item) => item.id === session.activeFollowUpMessageId
+        );
+        if (active) active.status = 'queued';
+        session.activeFollowUpMessageId = undefined;
+        this.setStatus(session, 'FAILED');
+        this.events.create({
+          sessionId,
+          type: 'error_reported',
+          priority: 'high',
+          content: `接收者处理后续需求失败：${error instanceof Error ? error.message : String(error)}`,
+          metadata: createMetadata('error_card', {
+            phase: 'follow_up_task_decomposition',
+            followUpMessageId: active?.id,
+            runtimeError: extractRuntimeError(error)
+          })
+        });
+      })
+      .finally(() => {
+        if (this.followUpPlanningRuns.get(sessionId) === run) {
+          this.followUpPlanningRuns.delete(sessionId);
+        }
+      });
+    this.followUpPlanningRuns.set(sessionId, run);
+    void run;
+  }
+
+  private async processNextFollowUp(sessionId: string) {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.status === 'INTERRUPTED' || session.activeFollowUpMessageId) return;
+    if (
+      this.briefGenerationRuns.has(sessionId) ||
+      this.execution.isRunning(sessionId) ||
+      ACTIVE_INVOCATION_SESSION_STATUSES.has(session.status)
+    ) {
+      return;
+    }
+    const followUp = session.pendingFollowUpMessages?.find((item) => item.status === 'queued');
+    if (!followUp) return;
+
+    followUp.status = 'planning';
+    followUp.startedAt = nowIso();
+    session.activeFollowUpMessageId = followUp.id;
+    this.setStatus(session, 'AGENT_DISCUSSING');
+    this.events.create({
+      sessionId,
+      type: 'session_status_changed',
+      content: followUp.mentionedAgentIds.length > 1
+        ? '被 @ 的多个 Agent 开始讨论，随后由接收者拆分任务。'
+        : '接收者开始拆分后续需求并准备任务派发。',
+      metadata: createMetadata('system_notice', {
+        status: 'AGENT_DISCUSSING',
+        reason: followUp.mentionedAgentIds.length > 1
+          ? 'follow_up_multi_agent_discussion_started'
+          : 'follow_up_decomposition_started',
+        followUpMessageId: followUp.id,
+        mentionedAgentIds: followUp.mentionedAgentIds
+      })
+    });
+
+    const { brief, tasks } = await this.orchestrator.prepareFollowUpExecution(
+      session,
+      followUp.content,
+      followUp.sourceEventId,
+      followUp.mentionedAgentIds
+    );
+    session.currentTaskBriefId = brief.id;
+    followUp.status = 'executing';
+    this.setStatus(session, 'EXECUTING');
+    this.execution.start(session, brief, tasks, (outcome) => {
+      this.applyFollowUpOutcome(sessionId, followUp.id, outcome);
+    });
+  }
+
+  private applyFollowUpOutcome(sessionId: string, followUpMessageId: string, outcome: ExecutionOutcome) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.pendingFollowUpMessages = (session.pendingFollowUpMessages ?? []).filter(
+      (item) => item.id !== followUpMessageId
+    );
+    if (session.activeFollowUpMessageId === followUpMessageId) {
+      session.activeFollowUpMessageId = undefined;
+    }
+    this.touchSession(session);
+    this.events.create({
+      sessionId,
+      type: 'session_status_changed',
+      content: outcome.kind === 'delivered'
+        ? '本条后续需求已执行完成。'
+        : `本条后续需求执行结束：${'reason' in outcome ? outcome.reason : outcome.kind}`,
+      metadata: createMetadata('system_notice', {
+        status: session.status,
+        reason: 'follow_up_execution_finished',
+        followUpMessageId,
+        outcome: outcome.kind
+      })
+    });
+    this.applyOutcome(sessionId, outcome);
+  }
+
   /** Applied when the background execution pipeline finishes. */
   applyOutcome(sessionId: string, outcome: ExecutionOutcome) {
     const session = this.sessions.get(sessionId);
-    if (!session || session.status === 'CANCELLED' || session.status === 'COMPLETED') {
+    if (
+      !session ||
+      session.status === 'CANCELLED' ||
+      session.status === 'COMPLETED' ||
+      session.status === 'INTERRUPTED'
+    ) {
       return;
     }
     if (outcome.kind === 'workflow_step_completed') {
       this.pauseForWorkflowStepConfirmation(session, outcome.taskId, outcome.resultSummary);
+      return;
+    }
+    if (outcome.kind === 'failed' && this.pauseForLocalRuntimeConfirmation(session, outcome.error, 'task_execution')) {
       return;
     }
     if (outcome.kind === 'cancelled') {
@@ -990,6 +1629,7 @@ export class SessionsService {
       // 进入的 WAIT_USER_DECISION；其他非 ask_user 结果（rework/failed）继续被吞。
       return;
     }
+    const hasQueuedFollowUp = session.pendingFollowUpMessages?.some((item) => item.status === 'queued') ?? false;
     const nextStatus: SessionStatus =
       outcome.kind === 'delivered'
         ? 'COMPLETED'
@@ -1000,6 +1640,19 @@ export class SessionsService {
             : 'FAILED';
     this.setStatus(session, nextStatus);
     if (outcome.kind === 'delivered') {
+      this.scheduleFollowUpPlanning(sessionId);
+      if (!hasQueuedFollowUp) {
+        this.events.create({
+          sessionId,
+          type: 'session_status_changed',
+          content: messages.sessionStatusUpdated('COMPLETED'),
+          metadata: createMetadata('system_notice', {
+            status: 'COMPLETED',
+            outcome: outcome.kind,
+            reason: 'execution_delivered'
+          })
+        });
+      }
       return;
     }
     const reason = 'reason' in outcome ? outcome.reason : '';
@@ -1043,6 +1696,55 @@ export class SessionsService {
     if (outcome.kind === 'rework') {
       this.startRework(session, reason);
     }
+  }
+
+  async resolveLocalRuntimePermission(
+    sessionId: string,
+    input: { confirmationId: string; decision: 'approve_once' | 'cancel' }
+  ) {
+    const session = this.get(sessionId);
+    if (session.status !== 'WAIT_USER_DECISION') {
+      throw new BadRequestException(`Local Runtime permission confirmation is not active: ${session.status}`);
+    }
+    const request = this.assertPendingConfirmation(
+      sessionId,
+      input.confirmationId,
+      'approve_local_runtime_permission'
+    );
+    const payload = request.metadata.payload as {
+      workspaceId?: string;
+      permission?: LocalRuntimePermission;
+      phase?: string;
+    } | undefined;
+    if (!payload?.workspaceId || !payload.permission) {
+      throw new BadRequestException('Local Runtime permission confirmation payload is incomplete.');
+    }
+    if (input.decision === 'approve_once') {
+      if (!this.localRuntime) throw new ServiceUnavailableException('Local Runtime service is unavailable.');
+      await this.localRuntime.grantWorkspacePermissionOnce(payload.workspaceId, payload.permission);
+    }
+    const resolvedEvent = this.events.create({
+      sessionId,
+      type: 'user_confirmation_resolved',
+      priority: 'high',
+      content: input.decision === 'approve_once'
+        ? `用户已单次授权本机危险动作：${payload.permission}`
+        : `用户已取消本机危险动作：${payload.permission}`,
+      metadata: createMetadata('system_notice', {
+        confirmationId: input.confirmationId,
+        status: input.decision === 'approve_once' ? 'approved' : 'rejected',
+        selectedOptionKey: input.decision,
+        workspaceId: payload.workspaceId,
+        permission: payload.permission
+      })
+    });
+    if (input.decision === 'cancel') {
+      this.tasks.cancelUnfinished(sessionId, '用户拒绝本机危险动作授权。');
+      this.setStatus(session, 'CANCELLED');
+      return { session, resolvedEvent };
+    }
+    this.retryAfterLocalRuntimePermission(session, payload.phase, resolvedEvent.id);
+    return { session, resolvedEvent };
   }
 
   async resolvePostReviewAction(
@@ -1257,11 +1959,17 @@ export class SessionsService {
     if (nextStatus === 'WAIT_USER_DECISION' || nextStatus === 'CANCELLED') {
       this.execution.cancel(
         sessionId,
-        createExecutionTermination({ kind: 'user_cancelled', source: 'user', scope: 'session' })
+        createExecutionTermination({
+          kind: 'user_cancelled',
+          source: 'user',
+          scope: nextStatus === 'WAIT_USER_DECISION' ? 'invocation' : 'session'
+        })
       );
     }
     if (nextStatus === 'CANCELLED' && session.workflowRunId && this.workflowRuntime) {
-      void this.workflowRuntime.cancel(session.workflowRunId, reason ?? '用户已取消会话');
+      void this.workflowRuntime.cancel(session.workflowRunId, reason ?? '用户已取消会话').catch((error) => {
+        this.logger.error(`Failed to cancel workflow ${session.workflowRunId} for session ${session.id}: ${String(error)}`);
+      });
     }
     const event = this.events.create({
       sessionId,
@@ -1398,6 +2106,26 @@ export class SessionsService {
     this.persist();
   }
 
+  private requireFileRevisions() {
+    if (!this.fileRevisions) {
+      throw new ServiceUnavailableException('File revision processing is unavailable.');
+    }
+    return this.fileRevisions;
+  }
+
+  private validateFileRevisionAgents(session: SessionDetail, agentIds: string[]) {
+    const participantIds = new Set(session.participatingAgentIds);
+    const agents = [...new Set(agentIds)].map((agentId) => {
+      const agent = this.agents.getByIdOrKey(agentId);
+      if (!participantIds.has(agent.id)) throw new BadRequestException(`Agent is not part of this session: ${agentId}`);
+      if (agent.status !== 'active') throw new BadRequestException(`Agent is not active: ${agent.name}`);
+      if (agent.key === 'coordinator') throw new BadRequestException('The receiver cannot be selected as a processing Agent.');
+      return agent;
+    });
+    if (agents.length === 0) throw new BadRequestException('Select at least one processing Agent.');
+    return agents;
+  }
+
   private applyWorkflowRuntimeUpdate(update: WorkflowRuntimeUpdate) {
     const session = this.sessions.get(update.sessionId);
     if (!session) return;
@@ -1406,7 +2134,7 @@ export class SessionsService {
       this.applyOutcome(session.id, update.outcome);
       return;
     }
-    if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(session.status)) return;
+    if (['COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED'].includes(session.status)) return;
     if (update.status === 'waiting_human') {
       this.setStatus(session, 'WAIT_WORKFLOW_STEP_CONFIRM');
       return;
@@ -1429,8 +2157,100 @@ export class SessionsService {
     this.persist();
   }
 
+  private async interruptForWorkspaceDisconnect(interruption: {
+    sessionId: string;
+    invocationId?: string;
+    reason: 'local_runtime_disconnected';
+    occurredAt: string;
+  }) {
+    const { sessionId } = interruption;
+    const session = this.sessions.get(sessionId);
+    if (!session || !ACTIVE_INVOCATION_SESSION_STATUSES.has(session.status)) return false;
+    if (this.runtimeInterruptingSessions.has(sessionId)) return false;
+
+    this.runtimeInterruptingSessions.add(sessionId);
+    const termination = createExecutionTermination({
+      kind: 'runtime_disconnected',
+      source: 'runtime',
+      scope: 'session',
+      diagnosticRef: interruption.reason
+    });
+    const subject = 'Local Runtime';
+    try {
+      this.markSessionInterrupted(
+        session,
+        interruption,
+        termination,
+        `${subject} disconnected; waiting for a future user wake-up.`,
+        `${subject} 已断开，本次调用已中断且不会自动续跑。会话上下文已保留，可在后续唤醒功能中继续。`
+      );
+
+      const workflowCancellation = session.workflowRunId && this.workflowRuntime
+        ? this.workflowRuntime.cancel(
+          session.workflowRunId,
+          `${subject} disconnected; the invocation will not resume automatically.`
+        )
+        : Promise.resolve();
+      const runtimeCancellation = this.runtime?.cancelSessionAndWait(sessionId, termination) ??
+        Promise.resolve({ requested: 0, completed: 0, timedOut: false });
+      await Promise.all([
+        this.execution.cancelAndWait(sessionId, termination),
+        runtimeCancellation,
+        workflowCancellation
+      ]);
+      return true;
+    } finally {
+      this.runtimeInterruptingSessions.delete(sessionId);
+    }
+  }
+
+  private markSessionInterrupted(
+    session: SessionDetail,
+    interruption: {
+      reason:
+        | 'local_runtime_disconnected'
+        | 'service_shutdown';
+      invocationId?: string;
+      occurredAt: string;
+    },
+    termination: ReturnType<typeof createExecutionTermination>,
+    taskReason: string,
+    eventContent: string
+  ) {
+    session.interruption = {
+      reason: interruption.reason,
+      invocationId: interruption.invocationId,
+      occurredAt: interruption.occurredAt,
+      wakeable: true
+    };
+    // Persist metadata and status in the same Session snapshot.
+    this.setStatus(session, 'INTERRUPTED');
+    this.briefGenerationSeqBySession.set(
+      session.id,
+      (this.briefGenerationSeqBySession.get(session.id) ?? 0) + 1
+    );
+    const briefRun = this.briefGenerationRuns.get(session.id);
+    if (briefRun) abortWithTermination(briefRun.controller, termination);
+    this.tasks.interruptUnfinished(session.id, taskReason);
+    this.events.create({
+      sessionId: session.id,
+      type: 'session_status_changed',
+      priority: 'high',
+      content: eventContent,
+      metadata: createMetadata('system_notice', {
+        status: 'INTERRUPTED',
+        requestedStatus: 'INTERRUPTED',
+        reason: interruption.reason,
+        invocationId: interruption.invocationId,
+        wakeable: true,
+        termination
+      })
+    });
+  }
+
   private failSession(session: SessionDetail, error: unknown, phase: string) {
     const runtimeError = extractRuntimeError(error);
+    if (this.pauseForLocalRuntimeConfirmation(session, runtimeError, phase)) return;
     const message = runtimeError?.message ?? (error instanceof Error ? error.message : String(error));
     this.setStatus(session, 'FAILED');
     this.events.create({
@@ -1460,6 +2280,7 @@ export class SessionsService {
 
   private failSessionWithFullError(session: SessionDetail, error: unknown, phase: string) {
     const runtimeError = extractRuntimeError(error);
+    if (this.pauseForLocalRuntimeConfirmation(session, runtimeError, phase)) return;
     const message = runtimeError?.message ?? (error instanceof Error ? error.message : String(error));
     const runtimePhase = typeof runtimeError?.details?.phase === 'string'
       ? runtimeError.details.phase
@@ -1645,6 +2466,7 @@ export class SessionsService {
         (event.metadata.payload as { confirmationId?: string } | undefined)?.confirmationId === confirmationId
     );
     if (!request || resolved) throw new BadRequestException(`Confirmation is missing or already resolved: ${confirmationId}`);
+    return request;
   }
 
   private isEmptyWorkspace(session: SessionDetail) {
@@ -1784,6 +2606,83 @@ export class SessionsService {
     this.resumeExecution(session);
   }
 
+  private pauseForLocalRuntimeConfirmation(
+    session: SessionDetail,
+    runtimeError: RuntimeError | undefined,
+    fallbackPhase: string
+  ) {
+    if (runtimeError?.code !== 'CAPABILITY_BLOCKED' || runtimeError.details?.confirmationRequired !== true) {
+      return false;
+    }
+    const permission = runtimeError.details.permission as LocalRuntimePermission | undefined;
+    const workspaceId = typeof runtimeError.details.workspaceId === 'string'
+      ? runtimeError.details.workspaceId
+      : undefined;
+    if (!permission || !workspaceId) return false;
+    const phase = typeof runtimeError.details.phase === 'string'
+      ? runtimeError.details.phase
+      : fallbackPhase;
+    const confirmationId = crypto.randomUUID();
+    this.setStatus(session, 'WAIT_USER_DECISION');
+    this.events.create({
+      sessionId: session.id,
+      type: 'user_confirmation_requested',
+      priority: 'high',
+      content: `检测到需要用户确认的本机危险动作：${permission}`,
+      metadata: createMetadata('confirmation_card', {
+        confirmationId,
+        reason: 'approve_local_runtime_permission',
+        title: '确认本机危险动作',
+        description: `本次执行需要 ${permission} 权限。批准后仅对下一次本机调用生效，不会改成永久授权。`,
+        options: [
+          { key: 'approve_once', label: '仅本次允许', style: 'primary' },
+          { key: 'cancel', label: '取消任务', style: 'danger' }
+        ],
+        permission,
+        workspaceId,
+        phase
+      })
+    });
+    return true;
+  }
+
+  private retryAfterLocalRuntimePermission(session: SessionDetail, phase: string | undefined, sourceEventId: string) {
+    if (
+      !session.currentTaskBriefId ||
+      ['discussion', 'brief_generation', 'brief_revision', 'brief_consultation'].includes(phase ?? '')
+    ) {
+      this.setStatus(session, 'AGENT_DISCUSSING');
+      this.events.create({
+        sessionId: session.id,
+        type: 'session_status_changed',
+        priority: 'high',
+        content: '危险动作已获单次授权，正在重新生成任务契约。',
+        metadata: createMetadata('system_notice', {
+          status: 'AGENT_DISCUSSING',
+          reason: 'local_runtime_permission_approved',
+          sourceEventId,
+          phase
+        })
+      });
+      this.generateBriefInBackground(session);
+      return;
+    }
+    this.setStatus(session, 'EXECUTING');
+    this.events.create({
+      sessionId: session.id,
+      type: 'session_status_changed',
+      priority: 'high',
+      content: '危险动作已获单次授权，正在恢复任务执行。',
+      metadata: createMetadata('system_notice', {
+        status: 'EXECUTING',
+        reason: 'local_runtime_permission_approved',
+        sourceEventId,
+        phase
+      })
+    });
+    this.resumeExecution(session);
+  }
+
   private latestFailurePhase(sessionId: string) {
     const events = this.events.list(sessionId);
     for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -1840,6 +2739,10 @@ export class SessionsService {
       throw new Error(`CUTOVER_REQUIRED: persisted Session has no dataEpoch: ${session.id ?? 'unknown'}`);
     }
     assertCurrentDataEpoch(this.persistence.currentDataEpoch(), session.dataEpoch, `Session ${session.id}`);
+    const workingDirectoryKind = (session.workingDirectory as { kind?: string } | undefined)?.kind;
+    if (workingDirectoryKind === 'browser_local') {
+      throw new Error(`CUTOVER_REQUIRED: persisted Session uses retired browser_local workspace: ${session.id}`);
+    }
   }
   private restartExecutionWithUpdatedContext(
     session: SessionDetail,
@@ -1930,6 +2833,88 @@ export class SessionsService {
     return fallback;
   }
 
+  savePendingInvocation(sessionId: string, invocation: PendingInvocation) {
+    const session = this.get(sessionId);
+    if (!session.pendingInvocations) {
+      session.pendingInvocations = [];
+    }
+    session.pendingInvocations.push(invocation);
+    this.persist();
+    this.logger.log(
+      `[Session ${sessionId}] Saved pending invocation ${invocation.invocationId} ` +
+      `with ${invocation.pendingApprovals.length} approval(s) required`
+    );
+  }
+
+  async retryPendingApprovalTasks(sessionId: string, approvedCapabilityId: string) {
+    const session = this.get(sessionId);
+    if (!session.pendingInvocations || session.pendingInvocations.length === 0) {
+      return;
+    }
+
+    const toRetry = session.pendingInvocations.filter((inv) =>
+      inv.pendingApprovals.some((a) => a.toolId === approvedCapabilityId)
+    );
+
+    if (toRetry.length === 0) {
+      return;
+    }
+
+    this.logger.log(
+      `[Session ${sessionId}] Found ${toRetry.length} pending invocation(s) to retry after capability approval`
+    );
+
+    for (const inv of toRetry) {
+      // 重新检查所有待审批能力 - 可能需要多个审批
+      const stillPending = inv.pendingApprovals.filter((a) => {
+        try {
+          const check = this.capabilities.checkInvocation(a.toolId, {
+            sessionId: inv.sessionId,
+            agentId: inv.agentId
+          });
+          return !check.allowed;
+        } catch (err) {
+          this.logger.warn(
+            `[Session ${sessionId}] Failed to check capability ${a.toolId}: ${err}`
+          );
+          return true; // 保守起见,检查失败时认为仍需审批
+        }
+      });
+
+      if (stillPending.length > 0) {
+        // 仍有未授权的能力,更新状态但不重试
+        inv.pendingApprovals = stillPending;
+        this.persist();
+        this.logger.log(
+          `[Session ${sessionId}] Invocation ${inv.invocationId} still has ${stillPending.length} pending approval(s)`
+        );
+        continue;
+      }
+
+      // 所有审批完成,移除并触发重试
+      session.pendingInvocations = session.pendingInvocations.filter(
+        (i) => i.invocationId !== inv.invocationId
+      );
+      this.persist();
+
+      this.logger.log(
+        `[Session ${sessionId}] All approvals granted for invocation ${inv.invocationId}, triggering retry for task ${inv.taskId}`
+      );
+
+      // 异步重试,不阻塞当前响应
+      setImmediate(() => {
+        this.orchestrator
+          .retryPendingApprovalInvocation(session, inv)
+          .catch((err: unknown) => {
+            this.logger.error(
+              `[Session ${sessionId}] Failed to retry invocation ${inv.invocationId}:`,
+              err
+            );
+          });
+      });
+    }
+  }
+
   private persist() {
     this.persistence.setCollection('sessions', [...this.sessions.values()]);
   }
@@ -1948,4 +2933,3 @@ async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Prom
     if (timer) clearTimeout(timer);
   }
 }
-

@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createSmokeV2State } from './smoke-server.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const npmCli = process.env.npm_execpath;
@@ -80,13 +81,21 @@ const port = await findFreePort();
 const apiBase = `http://127.0.0.1:${port}/api`;
 const allowedOrigin = 'http://localhost:5173';
 const deniedOrigin = 'http://malicious.localhost:5173';
+mkdirSync(dirname(dataFile), { recursive: true });
+writeFileSync(dataFile, JSON.stringify(createSmokeV2State()), 'utf8');
 const server = spawn(process.execPath, ['apps/server/dist/apps/server/src/main.js'], {
   cwd: root,
   stdio: ['ignore', 'pipe', 'pipe'],
   env: {
     ...process.env,
     SERVER_PORT: port,
+    AGENT_CLUSTER_PERSISTENCE_BACKEND: 'file',
     AGENT_CLUSTER_DATA_FILE: dataFile,
+    AGENT_CLUSTER_SEED_DEFAULT_AGENTS: 'true',
+    LLM_DRY_RUN: 'true',
+    LLM_MOCK_FALLBACK: 'true',
+    MOCK_RUNTIME_ENABLED: 'true',
+    GLOBAL_DEFAULT_RUNTIME_TYPE: 'mock',
     CORS_ORIGIN: allowedOrigin
   }
 });
@@ -136,3 +145,5 @@ try {
   });
   rmSync(dataFile, { force: true });
 }
+
+process.exit(0);

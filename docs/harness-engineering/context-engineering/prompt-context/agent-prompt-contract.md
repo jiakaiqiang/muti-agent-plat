@@ -18,7 +18,7 @@ A prompt must include:
 - 所属阶段: the primary stage where the Agent should act.
 - Responsibilities: what the Agent may decide or produce.
 - 不负责: boundaries that require routing to another Agent or user confirmation.
-- Required input: relevant `ContextPack` fields and upstream artifacts.
+- Required input: relevant `ContextEnvelopeV2` layers, internal `ContextAssembly` evidence, and upstream artifacts.
 - Required output: the expected `RuntimeOutput.kind` and evidence fields.
 - Tool policy: allowed capabilities and high-risk confirmation requirements.
 - 越权与返工: how to stop, ask, revise, or request rework.
@@ -66,5 +66,5 @@ Examples:
 - The agent names its stage.
 - The agent names what it is not responsible for.
 - The agent references upstream artifacts.
-- The agent uses only the ContextPack fields needed for its phase.
+- The agent uses only the ContextEnvelopeV2 layers needed for its phase.
 - The agent routes overreach to rework, another Agent, or human intervention instead of continuing silently.

@@ -4,12 +4,13 @@ import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 import { useAgentStore } from '@/stores/agent'
 import { useEventStore } from '@/stores/event'
-import { useLocalWorkspaceStore } from '@/stores/localWorkspace'
-import type { ReviewableFileChange } from '@/stores/localWorkspace'
+import { useLocalRuntimeStore } from '@/stores/localRuntime'
 import { useSessionStore } from '@/stores/session'
 import { useRuntimeModelStore } from '@/stores/runtimeModel'
 import { useWorkspaceUiStore } from '@/stores/workspaceUi'
+import type { WorkspaceKind } from '@/stores/workspaceUi'
 import { apiBaseUrl, runtimeModeLabel } from '@/config/runtime'
+import { ApiRequestError } from '@/api/client'
 import {
   sessionStatusLabel,
   type BriefEventPayload,
@@ -17,8 +18,7 @@ import {
   type RuntimeType,
   type SessionStatus,
   type SessionWorkingDirectory,
-  type SessionViewMode,
-  type WorkspaceSnapshot
+  type SessionViewMode
 } from '@/types/contracts'
 import AgentStatusPanel from './AgentStatusPanel.vue'
 import AgentPortrait from './AgentPortrait.vue'
@@ -27,6 +27,7 @@ import CollaborationTaskBoard from './CollaborationTaskBoard.vue'
 import CollaborationGraphView from './CollaborationGraphView.vue'
 import CollaborationLogPanel from './CollaborationLogPanel.vue'
 import DebugRuntimeView from './DebugRuntimeView.vue'
+import FileRevisionCandidateEditor from './FileRevisionCandidateEditor.vue'
 import SessionSidebar from './SessionSidebar.vue'
 import TokenUsageIndicator from './TokenUsageIndicator.vue'
 import UiIcon from './UiIcon.vue'
@@ -38,13 +39,16 @@ import { resolveSessionWorkspacePostReviewAction } from './session-workspace-pos
 const sessionStore = useSessionStore()
 const eventStore = useEventStore()
 const agentStore = useAgentStore()
-const localWorkspaceStore = useLocalWorkspaceStore()
+const localRuntimeStore = useLocalRuntimeStore()
 const runtimeModelStore = useRuntimeModelStore()
 const workspaceUiStore = useWorkspaceUiStore()
 const route = useRoute()
 const router = useRouter()
 
 const { deletingSessionIds } = storeToRefs(sessionStore)
+const pendingDeleteSessionId = ref<string>()
+const deleteSessionError = ref('')
+const backendReachability = ref<'unknown' | 'reachable' | 'unreachable'>('unknown')
 const {
   isSendingMessage,
   showAgentPopover,
@@ -56,12 +60,12 @@ const {
   sessionCreateError,
   pendingCreateInput,
   uiMessage,
-  sessionScanStatus,
-  sessionScanSummary,
+  sessionBindingStatus,
   sessionRuntimeType,
   sessionModelId,
   sessionWorkspaceKind,
   sessionServerWorkspacePath,
+  sessionLocalRuntimeWorkspaceId,
   showBriefRevisionDialog,
   briefRevisionInput,
   briefRevisionError,
@@ -70,30 +74,48 @@ const {
   workflowStepRevisionInput,
   workflowStepRevisionError,
   isSubmittingWorkflowStepRevision,
-  showFileReviewDialog,
-  reviewChanges,
-  selectedChangePaths,
-  isReviewLoading,
-  isApplyingReview
+  showFileRevisionDialog,
+  fileRevisionPath,
+  selectedFileRevisionBaselineId,
+  selectedFileRevisionAgentIds,
+  fileRevisionInstruction,
+  fileRevisionError,
+  isSubmittingFileRevision
 } = storeToRefs(workspaceUiStore)
+const pendingDeleteSession = computed(() =>
+  sessionStore.sessions.find((session) => session.id === pendingDeleteSessionId.value)
+)
+const isPendingSessionDeleting = computed(() =>
+  Boolean(pendingDeleteSessionId.value && deletingSessionIds.value.includes(pendingDeleteSessionId.value))
+)
+const selectedLocalRuntimeWorkspace = computed(() =>
+  localRuntimeStore.workspaceById(sessionLocalRuntimeWorkspaceId.value)
+)
 const selectedWorkspaceProviderKind = computed(() =>
-  sessionWorkspaceKind.value === 'server_local' ? 'server_local' : 'browser_broker'
+  sessionWorkspaceKind.value === 'server_local' ? 'server_local' : 'local_bridge'
 )
 const hasSelectedWorkingDirectory = computed(() =>
   sessionWorkspaceKind.value === 'server_local'
     ? Boolean(sessionServerWorkspacePath.value.trim())
-    : Boolean(localWorkspaceStore.pendingDirectory)
+    : Boolean(selectedLocalRuntimeWorkspace.value)
 )
 const selectedWorkingDirectoryLabel = computed(() =>
   sessionWorkspaceKind.value === 'server_local'
     ? sessionServerWorkspacePath.value.trim()
-    : localWorkspaceStore.pendingDirectory?.name ?? ''
+    : selectedLocalRuntimeWorkspace.value?.displayName ?? ''
 )
 const workspaceDirectoryRequiredMessage = computed(() =>
   sessionWorkspaceKind.value === 'server_local'
     ? '请输入服务器本地工作目录'
-    : '请先选择本地工作目录'
+    : '请先选择已连接的本地 Runtime 工作区'
 )
+
+function isRuntimeAvailableForWorkspace(runtimeType: RuntimeType) {
+  if (sessionWorkspaceKind.value === 'local_bridge') {
+    return selectedLocalRuntimeWorkspace.value?.runtimeTypes?.includes(runtimeType) === true
+  }
+  return runtimeModelStore.isRuntimeAvailable(runtimeType)
+}
 
 const sessionRuntimeOptions: { value: RuntimeType | ''; label: string }[] = [
   { value: '', label: '跟随系统默认' },
@@ -108,33 +130,6 @@ const sessionFallbackRuntimeOptions = computed(() =>
       Boolean(option.value && option.value !== sessionRuntimeType.value)
   )
 )
-type FileReviewDiffRow = { kind: 'equal' | 'add' | 'remove'; text: string }
-
-function diffLines(before: string, after: string): FileReviewDiffRow[] {
-  const beforeLines = before.replace(/\r\n/g, '\n').split('\n')
-  const afterLines = after.replace(/\r\n/g, '\n').split('\n')
-  let prefix = 0
-  while (prefix < beforeLines.length && prefix < afterLines.length && beforeLines[prefix] === afterLines[prefix]) {
-    prefix += 1
-  }
-  let beforeSuffix = beforeLines.length - 1
-  let afterSuffix = afterLines.length - 1
-  while (
-    beforeSuffix >= prefix &&
-    afterSuffix >= prefix &&
-    beforeLines[beforeSuffix] === afterLines[afterSuffix]
-  ) {
-    beforeSuffix -= 1
-    afterSuffix -= 1
-  }
-  return [
-    ...beforeLines.slice(0, prefix).map((text) => ({ kind: 'equal' as const, text })),
-    ...beforeLines.slice(prefix, beforeSuffix + 1).map((text) => ({ kind: 'remove' as const, text })),
-    ...afterLines.slice(prefix, afterSuffix + 1).map((text) => ({ kind: 'add' as const, text })),
-    ...afterLines.slice(afterSuffix + 1).map((text) => ({ kind: 'equal' as const, text }))
-  ]
-}
-
 const viewModes: SessionViewMode[] = ['chat', 'workflow', 'collaboration_graph', 'debug']
 
 function isViewMode(value: string | null): value is SessionViewMode {
@@ -205,8 +200,9 @@ onMounted(async () => {
     return
   }
   if (sessionStore.currentSession) {
-    await eventStore.loadEvents(sessionStore.currentSession.id)
-    eventStore.connectSse(sessionStore.currentSession.id)
+    backendReachability.value = 'reachable'
+    await sessionStore.loadFileRevisions(sessionStore.currentSession.id)
+    await syncSessionEventConnection(sessionStore.currentSession.id, sessionStore.currentSession.status)
     if (!routeSessionId()) {
       await router.replace({
         name: 'workspace-session',
@@ -247,10 +243,40 @@ function showErrorMessage(error: unknown, fallback: string) {
 }
 
 const currentSessionId = computed(() => sessionStore.currentSession?.id ?? '')
-const backendDisconnected = computed(
-  () => Boolean(currentSessionId.value) && eventStore.sseConnectionState === 'disconnected'
-)
-const reconnectingBackend = ref(false)
+const backendDisconnected = computed(() => Boolean(currentSessionId.value) && (
+  sessionStore.currentSession?.status === 'INTERRUPTED' || backendReachability.value === 'unreachable'
+))
+const backendConnectionNotice = computed(() => {
+  if (!currentSessionId.value) return undefined
+  if (sessionStore.currentSession?.status === 'INTERRUPTED') {
+    return {
+      tone: 'failed',
+      title: '会话已中断',
+      detail: '系统不会自动重新连接或续跑；手动连接与会话唤醒将在后续计划中提供。'
+    }
+  }
+  if (eventStore.sseConnectionState === 'connecting') {
+    return { tone: 'progress', title: '正在建立实时连接', detail: '正在同步会话事件。' }
+  }
+  if (backendReachability.value === 'unreachable') {
+    return {
+      tone: 'failed',
+      title: '后端暂不可达',
+      detail: '当前操作无法送达服务端，实时连接会继续尝试恢复。'
+    }
+  }
+  if (eventStore.sseConnectionState === 'reconnecting') {
+    return { tone: 'progress', title: '实时连接正在恢复', detail: '后端任务不会因为连接中断而停止。' }
+  }
+  if (eventStore.sseConnectionState === 'degraded') {
+    return {
+      tone: 'warning',
+      title: '实时更新暂不可用',
+      detail: '后端任务可能仍在运行，系统将每 30 秒继续恢复连接。'
+    }
+  }
+  return undefined
+})
 const events = computed(() => eventStore.eventsForSession(currentSessionId.value))
 const messages = computed(() => eventStore.chatMessages(currentSessionId.value))
 const agents = computed(() =>
@@ -266,20 +292,44 @@ const participatingAgents = computed(() => {
   if (!session) return []
   return agentStore.agents.filter((agent) => session.participatingAgentIds.includes(agent.id))
 })
-const runtimeDisplay = computed(() => (runtimeModeLabel === 'mock' ? 'mock' : 'real'))
-const currentWorkingDirectory = computed(
-  () =>
-    localWorkspaceStore.directoryForSession(currentSessionId.value) ??
-    sessionStore.currentSession?.workingDirectory ??
-    localWorkspaceStore.pendingDirectory
+const fileRevisionAgents = computed(() =>
+  participatingAgents.value.filter((agent) => agent.status === 'active' && agent.key !== 'coordinator')
 )
-const pendingFileChanges = computed(() => localWorkspaceStore.pendingFileChangesForSession(currentSessionId.value))
-const pendingFileChangeCount = computed(() =>
-  pendingFileChanges.value.reduce((total, item) => total + item.fileChanges.length, 0)
+const fileRevisionBaselines = computed(() => sessionStore.fileRevisionState.baselines)
+const activeFileRevisionChain = computed(() =>
+  sessionStore.fileRevisionState.chains.find((chain) => !['applied', 'abandoned'].includes(chain.status))
 )
-const fileApplyResult = computed(() => localWorkspaceStore.applyResultForSession(currentSessionId.value))
-const terminalStatuses = new Set<SessionStatus>(['COMPLETED', 'FAILED', 'CANCELLED'])
+const activeFileRevisionRun = computed(() => {
+  const chain = activeFileRevisionChain.value
+  return chain
+    ? sessionStore.fileRevisionState.runs.find((run) => run.id === chain.latestRevisionId)
+    : undefined
+})
+const activeFileRevisionCandidate = computed(() => {
+  const run = activeFileRevisionRun.value
+  return run ? sessionStore.fileRevisionCandidateFor(currentSessionId.value, run.id) : undefined
+})
+const activeFileRevisionDraft = computed(() => {
+  const run = activeFileRevisionRun.value
+  return run ? sessionStore.fileRevisionDraftFor(currentSessionId.value, run.id) : undefined
+})
+const fileRevisionEditorBusyBySession = ref<Record<string, boolean>>({})
+const fileRevisionEditorErrorBySession = ref<Record<string, string>>({})
+const fileRevisionEditorBusy = computed(() => Boolean(fileRevisionEditorBusyBySession.value[currentSessionId.value]))
+const fileRevisionEditorError = computed(() => fileRevisionEditorErrorBySession.value[currentSessionId.value] ?? '')
 
+function setFileRevisionEditorBusy(sessionId: string, busy: boolean) {
+  fileRevisionEditorBusyBySession.value[sessionId] = busy
+}
+
+function setFileRevisionEditorError(sessionId: string, error: string) {
+  fileRevisionEditorErrorBySession.value[sessionId] = error
+}
+const selectedFileRevisionBaseline = computed(() =>
+  fileRevisionBaselines.value.find((baseline) => baseline.id === selectedFileRevisionBaselineId.value)
+)
+const runtimeDisplay = computed(() => (runtimeModeLabel === 'mock' ? 'mock' : 'real'))
+const currentWorkingDirectory = computed(() => sessionStore.currentSession?.workingDirectory)
 const activeBriefPayload = computed(() => {
   const briefId = activeConfirmation.value?.relatedBriefId
   if (!briefId) return undefined
@@ -287,12 +337,34 @@ const activeBriefPayload = computed(() => {
 })
 
 const latestBriefPayload = computed(() => findLatestBriefPayload(eventStore.eventsForSession(currentSessionId.value)))
+const terminalSessionStatuses = new Set<SessionStatus>(['INTERRUPTED', 'COMPLETED', 'FAILED', 'CANCELLED'])
 
 const derivedStatus = computed(() => {
   const statusEvent = [...eventStore.eventsForSession(currentSessionId.value)]
     .reverse()
-    .find((event) => event.type === 'session_status_changed')
+    .find((event) => (
+      event.type === 'session_status_changed' ||
+      (event.type === 'error_reported' && terminalSessionStatuses.has(event.metadata.payload?.status as SessionStatus))
+    ))
   return (statusEvent?.metadata.payload?.status as SessionStatus | undefined) ?? sessionStore.currentSession?.status
+})
+
+watch(
+  () => [eventStore.sseConnectionState, eventStore.lastSseErrorAt] as const,
+  ([state]) => {
+    if (state === 'connected') {
+      backendReachability.value = 'reachable'
+      return
+    }
+    if (state === 'reconnecting' || state === 'degraded') void probeBackendReachability()
+  }
+)
+
+watch(derivedStatus, (status, previousStatus) => {
+  const sessionId = currentSessionId.value
+  if (!sessionId || !status || status === previousStatus || !terminalSessionStatuses.has(status)) return
+  sessionStore.setCurrentStatus(sessionId, status)
+  void eventStore.finalizeSessionEvents(sessionId).catch(() => undefined)
 })
 
 const discussion = computed(() => eventStore.discussionProgress(currentSessionId.value))
@@ -305,8 +377,9 @@ const progressPercent = computed(() => {
 async function selectSession(sessionId: string, navigate = true) {
   try {
     await sessionStore.loadSession(sessionId)
-    await eventStore.loadEvents(sessionId)
-    eventStore.connectSse(sessionId)
+    await sessionStore.loadFileRevisions(sessionId)
+    backendReachability.value = 'reachable'
+    await syncSessionEventConnection(sessionId, sessionStore.currentSession?.status)
     if (navigate) {
       await router.push({
         name: 'workspace-session',
@@ -324,16 +397,89 @@ async function selectSession(sessionId: string, navigate = true) {
   }
 }
 
-async function deleteSession(sessionId: string) {
+async function syncActiveFileRevisionContent() {
+  if (fileRevisionEditorBusy.value) return
+  const sessionId = currentSessionId.value
+  const run = activeFileRevisionRun.value
+  if (!sessionId || !run?.candidateHash || !['awaiting_confirmation', 'stale', 'failed'].includes(run.status)) return
+  try {
+    await sessionStore.loadFileRevisionCandidate(sessionId, run.id)
+    const draft = sessionStore.fileRevisionState.drafts.find((item) => item.sourceRevisionId === run.id)
+    if (draft) await sessionStore.loadFileRevisionDraft(sessionId, run.id)
+  } catch (error) {
+    if (!(error instanceof ApiRequestError && error.status === 404)) {
+      setFileRevisionEditorError(sessionId, error instanceof Error ? error.message : '加载候选失败')
+    }
+  }
+}
+
+watch(
+  () => [currentSessionId.value, activeFileRevisionRun.value?.id, activeFileRevisionRun.value?.status] as const,
+  () => void syncActiveFileRevisionContent(),
+  { immediate: true }
+)
+
+watch(fileRevisionEditorBusy, (busy, wasBusy) => {
+  if (wasBusy && !busy) void syncActiveFileRevisionContent()
+})
+
+watch(
+  () => events.value.at(-1)?.id,
+  () => {
+    const latest = events.value.at(-1)
+    if (!latest || (!latest.type.startsWith('file_revision_') && latest.type !== 'user_confirmation_requested')) return
+    const sessionId = currentSessionId.value
+    if (!sessionId) return
+    void sessionStore.loadFileRevisions(sessionId).then(syncActiveFileRevisionContent).catch(() => undefined)
+  }
+)
+
+async function syncSessionEventConnection(sessionId: string, status?: SessionStatus) {
+  if (status && terminalSessionStatuses.has(status)) {
+    await eventStore.finalizeSessionEvents(sessionId)
+    return
+  }
+  await eventStore.ensureConnectedAndReconcile(sessionId)
+}
+
+async function reconcileSessionEvents(sessionId: string) {
+  const status = sessionStore.currentSession?.id === sessionId ? sessionStore.currentSession.status : undefined
+  await syncSessionEventConnection(sessionId, status)
+}
+
+async function probeBackendReachability() {
+  try {
+    await eventStore.probeBackendReachability()
+    backendReachability.value = 'reachable'
+  } catch {
+    backendReachability.value = 'unreachable'
+  }
+}
+
+function requestDeleteSession(sessionId: string) {
   if (deletingSessionIds.value.includes(sessionId)) return
+  deleteSessionError.value = ''
+  pendingDeleteSessionId.value = sessionId
+}
+
+function cancelDeleteSession() {
+  if (isPendingSessionDeleting.value) return
+  pendingDeleteSessionId.value = undefined
+  deleteSessionError.value = ''
+}
+
+async function confirmDeleteSession() {
+  const sessionId = pendingDeleteSessionId.value
+  if (!sessionId || deletingSessionIds.value.includes(sessionId)) return
   const deletingCurrent = sessionStore.currentSession?.id === sessionId
+  deleteSessionError.value = ''
   try {
     const deleted = await sessionStore.deleteSession(sessionId)
     if (!deleted) return
+    pendingDeleteSessionId.value = undefined
     if (deletingCurrent) {
       eventStore.disconnectSse()
     }
-    localWorkspaceStore.releaseSessionWorkspace(sessionId)
     if (deletingCurrent) {
       const nextSessionId = sessionStore.sessions[0]?.id
       if (nextSessionId) {
@@ -344,26 +490,8 @@ async function deleteSession(sessionId: string) {
     }
     showMessage('会话已删除', 'success')
   } catch (error) {
+    deleteSessionError.value = error instanceof Error ? error.message : '删除会话失败'
     showErrorMessage(error, '删除会话失败')
-  }
-}
-
-async function reconnectBackend() {
-  if (!currentSessionId.value || reconnectingBackend.value) return
-  reconnectingBackend.value = true
-  try {
-    await sessionStore.loadRuntimeHealth(true)
-    if (!sessionStore.backendCompatible) {
-      throw new Error(sessionStore.runtimeHealthError ?? '后端版本不兼容。')
-    }
-    await sessionStore.loadSession(currentSessionId.value)
-    await eventStore.loadEvents(currentSessionId.value, { append: true })
-    eventStore.connectSse(currentSessionId.value)
-    showMessage('后端已恢复连接，正在同步会话状态。', 'success')
-  } catch (error) {
-    showErrorMessage(error, '后端仍不可用，请检查 8099 服务。')
-  } finally {
-    reconnectingBackend.value = false
   }
 }
 
@@ -375,15 +503,7 @@ async function createSession(
   workingDirectoryOverride?: SessionWorkingDirectory,
   fallbackRuntimeTypes: RuntimeType[] = []
 ) {
-  const workingDirectory = workingDirectoryOverride ?? localWorkspaceStore.pendingDirectory
-  let workspaceSnapshot: WorkspaceSnapshot | undefined
-  if (workingDirectory?.kind === 'browser_local') {
-    sessionScanStatus.value = 'scanning'
-    sessionScanSummary.value = undefined
-    workspaceSnapshot = await localWorkspaceStore.scanPendingWorkspace()
-    sessionScanSummary.value = workspaceSnapshot
-    sessionScanStatus.value = 'completed'
-  }
+  const workingDirectory = workingDirectoryOverride
   const effectivePreferredRuntime = preferredRuntimeType || (preferredModelId ? 'generic_llm' : undefined)
   const allowedRuntimeTypes = effectivePreferredRuntime
     ? Array.from(new Set([effectivePreferredRuntime, ...fallbackRuntimeTypes]))
@@ -399,18 +519,13 @@ async function createSession(
     input,
     agentIds,
     workingDirectory,
-    workspaceSnapshot,
     ...(runtimePreference ? { runtimePreference } : {})
   })
-  if (workingDirectory?.kind === 'browser_local') {
-    localWorkspaceStore.bindPendingDirectoryToSession(session.id)
-  } else if (workingDirectory?.kind === 'server_local') {
-    sessionScanSummary.value = session.workspaceSnapshot
-    sessionScanStatus.value = 'completed'
+  if (workingDirectory) {
+    sessionBindingStatus.value = 'bound'
   }
-  await eventStore.loadEvents(session.id)
-  await eventStore.replayLocalFileChanges(session.id)
-  eventStore.connectSse(session.id)
+  backendReachability.value = 'reachable'
+  await syncSessionEventConnection(session.id, session.status)
   await router.replace({
     name: 'workspace-session',
     params: { sessionId: session.id },
@@ -420,19 +535,15 @@ async function createSession(
 
 function openCreateSessionDialog() {
   workspaceUiStore.openCreateSession()
-  localWorkspaceStore.clearPendingDirectory()
-  if (sessionStore.currentSession?.workingDirectory?.kind === 'browser_local') {
-    localWorkspaceStore.reusePendingDirectoryFromSession(sessionStore.currentSession.id)
-  }
   if (!runtimeModelStore.config) {
     void runtimeModelStore.loadConfig().catch(() => undefined)
   }
   void runtimeModelStore.loadAvailability().catch(() => undefined)
+  if (sessionWorkspaceKind.value === 'local_bridge') loadLocalRuntimeWorkspaces()
 }
 
 function closeCreateSessionDialog() {
   workspaceUiStore.closeCreateSession()
-  localWorkspaceStore.clearPendingDirectory()
 }
 
 function handleRuntimePreferenceChange() {
@@ -447,13 +558,40 @@ function handleRuntimePreferenceChange() {
   }
   sessionFallbackRuntimeTypes.value = (recommendedFallbacks[sessionRuntimeType.value as RuntimeType] ?? [])
     .filter((runtimeType) => {
+      if (sessionWorkspaceKind.value === 'local_bridge') {
+        return isRuntimeAvailableForWorkspace(runtimeType)
+      }
       const status = runtimeModelStore.availabilityFor(runtimeType)
       return Boolean(status?.available && status.supportedWorkspaceProviderKinds.includes(selectedWorkspaceProviderKind.value))
     })
 }
 
-function selectSessionWorkspaceKind(kind: 'browser_local' | 'server_local') {
+function selectSessionWorkspaceKind(kind: WorkspaceKind) {
   workspaceUiStore.setSessionWorkspaceKind(kind)
+  sessionCreateError.value = ''
+  sessionFallbackRuntimeTypes.value = []
+  if (kind === 'local_bridge') loadLocalRuntimeWorkspaces()
+}
+
+function loadLocalRuntimeWorkspaces() {
+  void localRuntimeStore.loadWorkspaces().then((workspaces) => {
+    if (!workspaces.some((workspace) => workspace.workspaceId === sessionLocalRuntimeWorkspaceId.value)) {
+      sessionLocalRuntimeWorkspaceId.value = workspaces[0]?.workspaceId ?? ''
+    }
+  }).catch((error) => {
+    sessionCreateError.value = error instanceof Error ? error.message : '读取本地 Runtime 工作区失败'
+  })
+}
+
+async function authorizeLocalRuntimeWorkspace() {
+  sessionCreateError.value = ''
+  try {
+    const workspace = await localRuntimeStore.authorizeWorkspace()
+    sessionLocalRuntimeWorkspaceId.value = workspace.workspaceId
+    handleRuntimePreferenceChange()
+  } catch (error) {
+    sessionCreateError.value = error instanceof Error ? error.message : '本机工作目录授权失败'
+  }
 }
 
 function serverWorkingDirectory(): SessionWorkingDirectory | undefined {
@@ -469,22 +607,20 @@ function serverWorkingDirectory(): SessionWorkingDirectory | undefined {
   }
 }
 
-function selectedWorkingDirectory() {
-  return sessionWorkspaceKind.value === 'server_local'
-    ? serverWorkingDirectory()
-    : localWorkspaceStore.pendingDirectory
+function localRuntimeWorkingDirectory(): SessionWorkingDirectory | undefined {
+  const workspace = selectedLocalRuntimeWorkspace.value
+  if (!workspace) return undefined
+  return {
+    kind: 'local_bridge',
+    id: workspace.workspaceId,
+    name: workspace.displayName,
+    selectedAt: new Date().toISOString()
+  }
 }
 
-async function chooseWorkingDirectory() {
-  sessionCreateError.value = ''
-  try {
-    await localWorkspaceStore.choosePendingDirectory()
-    sessionScanStatus.value = 'idle'
-    sessionScanSummary.value = undefined
-  } catch (error) {
-    sessionCreateError.value = error instanceof Error ? error.message : '选择工作目录失败'
-    showErrorMessage(error, '选择工作目录失败')
-  }
+function selectedWorkingDirectory() {
+  if (sessionWorkspaceKind.value === 'server_local') return serverWorkingDirectory()
+  return localRuntimeWorkingDirectory()
 }
 
 function toggleSessionAgent(agentId: string) {
@@ -508,9 +644,11 @@ async function createSessionFromDialog() {
     showMessage(sessionCreateError.value, 'warning')
     return
   }
-  if (sessionRuntimeType.value && !runtimeModelStore.isRuntimeAvailable(sessionRuntimeType.value)) {
+  if (sessionRuntimeType.value && !isRuntimeAvailableForWorkspace(sessionRuntimeType.value)) {
     const status = runtimeModelStore.availabilityFor(sessionRuntimeType.value)
-    sessionCreateError.value = status?.reason || `${sessionRuntimeType.value} Runtime 当前不可用`
+    sessionCreateError.value = sessionWorkspaceKind.value === 'local_bridge'
+      ? `${sessionRuntimeType.value} 未在所选本地 Runtime 设备上运行`
+      : status?.reason || `${sessionRuntimeType.value} Runtime 当前不可用`
     showMessage(sessionCreateError.value, 'warning')
     return
   }
@@ -518,6 +656,7 @@ async function createSessionFromDialog() {
     ? runtimeModelStore.availabilityFor(sessionRuntimeType.value)
     : undefined
   if (
+    sessionWorkspaceKind.value !== 'local_bridge' &&
     runtimeStatus &&
     !runtimeStatus.supportedWorkspaceProviderKinds.includes(selectedWorkspaceProviderKind.value)
   ) {
@@ -556,7 +695,17 @@ async function confirmCreateSessionFromDialog() {
     workspaceUiStore.closeCreateSession()
     showMessage('会话已保存并创建', 'success')
   } catch (error) {
-    sessionScanStatus.value = 'failed'
+    if (error instanceof ApiRequestError && error.code === 'WORKSPACE_ACTIVE_SESSION_CONFLICT') {
+      const activeSessionId = error.details?.activeSessionId
+      if (typeof activeSessionId === 'string' && activeSessionId) {
+        workspaceUiStore.closeCreateSession()
+        await sessionStore.loadSession(activeSessionId)
+        await router.replace({ name: 'workspace-session', params: { sessionId: activeSessionId }, query: route.query })
+        showMessage('该工作区已有活动会话，已返回该会话。', 'warning')
+        return
+      }
+    }
+    sessionBindingStatus.value = 'failed'
     sessionCreateError.value = error instanceof Error ? error.message : '创建会话失败'
     showErrorMessage(error, '创建会话失败')
   } finally {
@@ -582,13 +731,9 @@ async function sendUserMessage(content: string) {
         showMessage('请先添加 Agent', 'warning')
         return
       }
-      await createSession(content, activeAgentIds.value)
-      return
-    }
-
-    if (terminalStatuses.has(sessionStore.currentSession.status)) {
-      localWorkspaceStore.reusePendingDirectoryFromSession(sessionStore.currentSession.id)
-      await createSession(content, sessionStore.currentSession.participatingAgentIds)
+      openCreateSessionDialog()
+      newSessionInput.value = content
+      selectedSessionAgentIds.value = [...activeAgentIds.value]
       return
     }
 
@@ -596,7 +741,7 @@ async function sendUserMessage(content: string) {
     const mentionedAgentIds = resolveMentionedAgentIds(content)
     const result = await sessionStore.sendMessage(sessionId, content, mentionedAgentIds)
     eventStore.appendEvent(result.event)
-    await eventStore.loadEvents(sessionId, { append: true })
+    await reconcileSessionEvents(sessionId)
   } catch (error) {
     showErrorMessage(error, '发送失败')
   } finally {
@@ -604,17 +749,237 @@ async function sendUserMessage(content: string) {
   }
 }
 
+async function openFileRevisionDialog() {
+  const session = sessionStore.currentSession
+  if (!session) return
+  try {
+    await sessionStore.loadFileRevisions(session.id)
+    selectedFileRevisionBaselineId.value = fileRevisionBaselines.value[0]?.id ?? ''
+    selectedFileRevisionAgentIds.value = []
+    workspaceUiStore.openFileRevision()
+  } catch (error) {
+    showErrorMessage(error, '加载文件修订状态失败')
+  }
+}
+
+async function captureFileRevisionBaseline() {
+  const session = sessionStore.currentSession
+  if (!session || !fileRevisionPath.value.trim()) {
+    fileRevisionError.value = '请输入工作区内的文件路径。'
+    return
+  }
+  isSubmittingFileRevision.value = true
+  fileRevisionError.value = ''
+  try {
+    const baseline = await sessionStore.captureFileRevisionBaseline(session.id, fileRevisionPath.value.trim())
+    selectedFileRevisionBaselineId.value = baseline.id
+    showMessage('已记录修改前版本', 'success')
+  } catch (error) {
+    fileRevisionError.value = error instanceof Error ? error.message : '记录基线失败'
+  } finally {
+    isSubmittingFileRevision.value = false
+  }
+}
+
+async function submitFileRevision() {
+  const session = sessionStore.currentSession
+  if (!session || !selectedFileRevisionBaselineId.value) {
+    fileRevisionError.value = '请先选择修改前版本。'
+    return
+  }
+  if (!selectedFileRevisionAgentIds.value.length) {
+    fileRevisionError.value = '请至少选择一个处理 Agent。'
+    return
+  }
+  isSubmittingFileRevision.value = true
+  fileRevisionError.value = ''
+  try {
+    await sessionStore.startFileRevision(
+      session.id,
+      selectedFileRevisionBaselineId.value,
+      selectedFileRevisionAgentIds.value,
+      fileRevisionInstruction.value
+    )
+    workspaceUiStore.closeFileRevision()
+    await reconcileSessionEvents(session.id)
+    showMessage('文件修订已交给 Agent 处理', 'success')
+  } catch (error) {
+    fileRevisionError.value = error instanceof Error ? error.message : '启动文件修订失败'
+  } finally {
+    isSubmittingFileRevision.value = false
+  }
+}
+
+async function saveActiveFileRevisionDraft(content: string) {
+  const run = activeFileRevisionRun.value
+  const candidate = activeFileRevisionCandidate.value
+  const sessionId = currentSessionId.value
+  if (!run || !candidate || !sessionId) return undefined
+  setFileRevisionEditorBusy(sessionId, true)
+  setFileRevisionEditorError(sessionId, '')
+  try {
+    const draft = await sessionStore.saveFileRevisionDraft(
+      sessionId,
+      run.id,
+      candidate.candidateHash,
+      content
+    )
+    showMessage('草稿已保存', 'success')
+    return draft
+  } catch (error) {
+    setFileRevisionEditorError(sessionId, error instanceof Error ? error.message : '保存草稿失败')
+    return undefined
+  } finally {
+    setFileRevisionEditorBusy(sessionId, false)
+  }
+}
+
+async function submitActiveFileRevision(content: string) {
+  const run = activeFileRevisionRun.value
+  const chain = activeFileRevisionChain.value
+  const candidate = activeFileRevisionCandidate.value
+  const sessionId = currentSessionId.value
+  if (!run || !chain || !candidate || !sessionId) return
+  setFileRevisionEditorBusy(sessionId, true)
+  setFileRevisionEditorError(sessionId, '')
+  try {
+    const draft = await sessionStore.saveFileRevisionDraft(
+      sessionId,
+      run.id,
+      candidate.candidateHash,
+      content
+    )
+    await sessionStore.reprocessFileRevision(sessionId, run.id, {
+      draftHash: draft.contentHash,
+      expectedCandidateHash: candidate.candidateHash,
+      expectedStateVersion: chain.stateVersion
+    })
+    await reconcileSessionEvents(sessionId)
+    showMessage(`已提交第 ${run.iteration + 1} 轮处理`, 'success')
+  } catch (error) {
+    setFileRevisionEditorError(sessionId, error instanceof Error ? error.message : '提交修改失败')
+  } finally {
+    setFileRevisionEditorBusy(sessionId, false)
+  }
+}
+
+async function decideActiveFileRevision(decision: 'apply_candidate' | 'abandon_revision') {
+  const sessionId = currentSessionId.value
+  const run = activeFileRevisionRun.value
+  const chain = activeFileRevisionChain.value
+  const candidate = activeFileRevisionCandidate.value
+  const confirmation = activeConfirmation.value
+  if (
+    !sessionId ||
+    !run ||
+    !chain ||
+    !candidate ||
+    confirmation?.reason !== 'confirm_file_revision_apply' ||
+    confirmation.revisionId !== run.id
+  ) return
+  setFileRevisionEditorBusy(sessionId, true)
+  setFileRevisionEditorError(sessionId, '')
+  try {
+    const result = await sessionStore.decideFileRevision(sessionId, run.id, {
+      confirmationId: confirmation.confirmationId,
+      candidateHash: candidate.candidateHash,
+      expectedStateVersion: chain.stateVersion,
+      decision
+    }) as { applied?: boolean }
+    await reconcileSessionEvents(sessionId)
+    if (decision === 'apply_candidate') {
+      showMessage(result.applied ? '候选已写回文件' : '原文件已变化，候选未写回', result.applied ? 'success' : 'warning')
+    } else {
+      showMessage('本次修订已放弃', 'info')
+    }
+  } catch (error) {
+    setFileRevisionEditorError(sessionId, error instanceof Error ? error.message : '处理候选失败')
+  } finally {
+    await sessionStore.loadFileRevisions(sessionId).catch(() => undefined)
+    setFileRevisionEditorBusy(sessionId, false)
+  }
+}
+
+async function resolveActiveFileRevisionFailure(
+  decision: 'retry_agents' | 'continue_with_successful' | 'abandon_revision'
+) {
+  const sessionId = currentSessionId.value
+  const run = activeFileRevisionRun.value
+  const chain = activeFileRevisionChain.value
+  if (!sessionId || !run || !chain || run.errorCode !== 'REVISION_PARTIAL_AGENT_FAILURE') return
+  setFileRevisionEditorBusy(sessionId, true)
+  setFileRevisionEditorError(sessionId, '')
+  try {
+    await sessionStore.resolveFileRevisionFailure(sessionId, run.id, {
+      expectedStateVersion: chain.stateVersion,
+      decision
+    })
+    await reconcileSessionEvents(sessionId)
+    showMessage(
+      decision === 'retry_agents'
+        ? '已重新运行本轮 Agent'
+        : decision === 'continue_with_successful'
+          ? 'Receiver 将使用成功结果继续生成候选'
+          : '本次修订已放弃',
+      decision === 'abandon_revision' ? 'info' : 'success'
+    )
+  } catch (error) {
+    setFileRevisionEditorError(sessionId, error instanceof Error ? error.message : '处理部分失败决策失败')
+  } finally {
+    setFileRevisionEditorBusy(sessionId, false)
+  }
+}
+
+async function retryActiveInterruptedFileRevision() {
+  const sessionId = currentSessionId.value
+  const run = activeFileRevisionRun.value
+  const chain = activeFileRevisionChain.value
+  if (!sessionId || !run || !chain || run.status !== 'interrupted') return
+  setFileRevisionEditorBusy(sessionId, true)
+  setFileRevisionEditorError(sessionId, '')
+  try {
+    await sessionStore.retryInterruptedFileRevision(sessionId, run.id, {
+      expectedStateVersion: chain.stateVersion,
+      retryKey: crypto.randomUUID()
+    })
+    await reconcileSessionEvents(sessionId)
+    showMessage('已重新启动本轮文件修订', 'success')
+  } catch (error) {
+    setFileRevisionEditorError(sessionId, error instanceof Error ? error.message : '重试文件修订失败')
+  } finally {
+    setFileRevisionEditorBusy(sessionId, false)
+  }
+}
+
 async function resolveConfirmation(optionKey: string) {
   if (!sessionStore.currentSession || !activeConfirmation.value) return
   const sessionId = sessionStore.currentSession.id
+  if (
+    activeConfirmation.value.reason === 'confirm_file_revision_apply' &&
+    activeConfirmation.value.revisionId &&
+    (optionKey === 'apply_candidate' || optionKey === 'abandon_revision')
+  ) {
+    await decideActiveFileRevision(optionKey)
+    return
+  }
+  if (activeConfirmation.value.reason === 'approve_local_runtime_permission') {
+    if (optionKey === 'approve_once' || optionKey === 'cancel') {
+      await sessionStore.resolveLocalRuntimePermission(sessionId, {
+        confirmationId: activeConfirmation.value.confirmationId,
+        decision: optionKey
+      })
+      await reconcileSessionEvents(sessionId)
+      return
+    }
+  }
   if (activeConfirmation.value.reason === 'initialize_empty_workspace') {
     if (optionKey === 'reselect_workspace') {
       await sessionStore.resolveEmptyWorkspaceDecision(sessionId, {
         confirmationId: activeConfirmation.value.confirmationId,
         decision: 'reselect_workspace'
       })
-      localWorkspaceStore.reusePendingDirectoryFromSession(sessionId)
-      await eventStore.loadEvents(sessionId)
+      await reconcileSessionEvents(sessionId)
+      openCreateSessionDialog()
       return
     }
     if (optionKey === 'initialize_project' || optionKey === 'cancel') {
@@ -622,7 +987,7 @@ async function resolveConfirmation(optionKey: string) {
         confirmationId: activeConfirmation.value.confirmationId,
         decision: optionKey
       })
-      await eventStore.loadEvents(sessionId)
+      await reconcileSessionEvents(sessionId)
       return
     }
   }
@@ -643,11 +1008,11 @@ async function resolveConfirmation(optionKey: string) {
         })
       } catch (error) {
         eventStore.removeEvent(sessionId, optimisticEventId)
-        await eventStore.loadEvents(sessionId).catch(() => undefined)
+        await reconcileSessionEvents(sessionId).catch(() => undefined)
         showErrorMessage(error, '工作流选择失败')
         return
       }
-      await eventStore.loadEvents(sessionId).catch(() => undefined)
+      await reconcileSessionEvents(sessionId).catch(() => undefined)
       return
     }
   }
@@ -672,7 +1037,7 @@ async function resolveConfirmation(optionKey: string) {
           decision: optionKey
         }
       )
-      await eventStore.loadEvents(sessionId)
+      await reconcileSessionEvents(sessionId)
       return
     }
   }
@@ -683,7 +1048,7 @@ async function resolveConfirmation(optionKey: string) {
         confirmationId: activeConfirmation.value.confirmationId,
         decision: 'approve'
       })
-      await eventStore.loadEvents(sessionId)
+      await reconcileSessionEvents(sessionId)
       return
     }
     if (optionKey === 'revise') {
@@ -709,13 +1074,13 @@ async function resolveConfirmation(optionKey: string) {
       }
     )
     if (handled) {
-      await eventStore.loadEvents(sessionId)
+      await reconcileSessionEvents(sessionId)
       return
     }
   }
   if (optionKey === 'approve' && activeConfirmation.value.relatedBriefId) {
     await sessionStore.confirmBrief(sessionId, activeConfirmation.value.relatedBriefId)
-    await eventStore.loadEvents(sessionId)
+    await reconcileSessionEvents(sessionId)
     return
   }
 
@@ -730,7 +1095,7 @@ async function resolveConfirmation(optionKey: string) {
     } else if (optionKey === 'cancel') {
       await sessionStore.cancelSession(sessionId, activeConfirmation.value.confirmationId)
     }
-    await eventStore.loadEvents(sessionId)
+    await reconcileSessionEvents(sessionId)
     return
   }
 
@@ -742,7 +1107,7 @@ async function resolveConfirmation(optionKey: string) {
         sourceEventId: activeConfirmation.value.candidate.sourceEventId,
         confidence: activeConfirmation.value.candidate.confidence
       })
-      await eventStore.loadEvents(sessionId)
+      await reconcileSessionEvents(sessionId)
       return
     }
   }
@@ -754,7 +1119,7 @@ async function resolveConfirmation(optionKey: string) {
         notificationDraftArtifactId: activeConfirmation.value.relatedArtifactId,
         decision: optionKey
       })
-      await eventStore.loadEvents(sessionId)
+      await reconcileSessionEvents(sessionId)
       return
     }
   }
@@ -769,7 +1134,7 @@ async function resolveConfirmation(optionKey: string) {
         artifactId: activeConfirmation.value.relatedArtifactId,
         decision: optionKey
       })
-      await eventStore.loadEvents(sessionId)
+      await reconcileSessionEvents(sessionId)
       return
     }
   }
@@ -791,6 +1156,16 @@ async function resolveConfirmation(optionKey: string) {
     },
     createdAt: new Date().toISOString()
   })
+}
+
+async function approveCapability(sessionId: string, capabilityId: string) {
+  try {
+    await sessionStore.approveCapability(sessionId, capabilityId)
+    await reconcileSessionEvents(sessionId)
+    showMessage('能力已授权，任务将自动恢复执行', 'success')
+  } catch (error) {
+    showErrorMessage(error, '授权能力失败')
+  }
 }
 
 function appendOptimisticConfirmationResolution(sessionId: string, confirmationId: string, optionKey: string) {
@@ -870,7 +1245,7 @@ async function submitBriefRevision() {
       assignedAgentKeys: selectedRevisionAgentKeys.value.length > 0 ? selectedRevisionAgentKeys.value : undefined
     })
     workspaceUiStore.closeBriefRevision()
-    await eventStore.loadEvents(sessionId)
+    await reconcileSessionEvents(sessionId)
   } catch (error) {
     briefRevisionError.value = error instanceof Error ? error.message : '提交修改失败'
   } finally {
@@ -913,7 +1288,7 @@ async function submitWorkflowStepRevision() {
       })
     }
     workspaceUiStore.closeWorkflowStepRevision()
-    await eventStore.loadEvents(sessionId)
+    await reconcileSessionEvents(sessionId)
   } catch (error) {
     workflowStepRevisionError.value = error instanceof Error ? error.message : '提交修改要求失败'
   } finally {
@@ -921,60 +1296,6 @@ async function submitWorkflowStepRevision() {
   }
 }
 
-async function applyPendingFileChanges() {
-  if (!sessionStore.currentSession) return
-  isReviewLoading.value = true
-  try {
-    const changes = await localWorkspaceStore.reviewPendingFileChanges(sessionStore.currentSession.id)
-    workspaceUiStore.openFileReview(changes)
-  } finally {
-    isReviewLoading.value = false
-  }
-}
-
-function toggleReviewPath(path: string) {
-  workspaceUiStore.toggleReviewPath(path)
-}
-
-function selectAllReviewPaths() {
-  workspaceUiStore.selectAllReviewPaths()
-}
-
-function clearReviewSelection() {
-  workspaceUiStore.clearReviewSelection()
-}
-
-async function confirmFileReview() {
-  if (!sessionStore.currentSession || !selectedChangePaths.value.length) return
-  const sessionId = sessionStore.currentSession.id
-  const workspaceId = sessionStore.currentSession.workingDirectory?.id
-  isApplyingReview.value = true
-  try {
-    const result = await localWorkspaceStore.applySelectedFileChanges(sessionId, selectedChangePaths.value)
-    if (result?.applied && workspaceId) {
-      const workspaceSnapshot = await localWorkspaceStore.scanSessionWorkspace(sessionId)
-      if (workspaceSnapshot) {
-        await sessionStore.refreshWorkspaceSnapshot(sessionId, workspaceId, workspaceSnapshot)
-      }
-    }
-    if (result?.errors.length) throw new Error(result.errors.join('\n'))
-    workspaceUiStore.closeFileReview()
-    showMessage(`宸插啓鍏?${result?.applied ?? 0} 椤瑰彉鏇达紝宸ヤ綔鍖哄揩鐓у凡鍒锋柊`, 'success')
-  } catch (error) {
-    showErrorMessage(error, '鏂囦欢鍐欏洖澶辫触')
-  } finally {
-    isApplyingReview.value = false
-  }
-}
-
-function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
-  const before =
-    item.change.operation === 'create'
-      ? ''
-      : item.currentContent ?? item.change.previousContent ?? ''
-  const after = item.change.operation === 'delete' ? '' : item.change.content ?? ''
-  return diffLines(before, after)
-}
 </script>
 
 <template>
@@ -995,7 +1316,7 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
       :deleting-session-ids="deletingSessionIds"
       @select="selectSession"
       @create="openCreateSessionDialog"
-      @delete="deleteSession"
+      @delete="requestDeleteSession"
       @toggle-favorite="sessionStore.toggleFavoriteSession"
     />
 
@@ -1046,23 +1367,15 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
             {{ currentWorkingDirectory.name }}
           </span>
           <button
-            v-if="pendingFileChangeCount"
+            v-if="currentWorkingDirectory"
+            class="header-icon-button"
             type="button"
-            class="workspace-file-apply-button"
-            title="查看聊天中的文件变更预览后写入本地工作区"
-            @click="applyPendingFileChanges"
+            title="文件修订"
+            aria-label="文件修订"
+            @click="openFileRevisionDialog"
           >
-            <UiIcon name="check" :size="15" />
-            确认写入 {{ pendingFileChangeCount }} 项
+            <UiIcon name="folder" :size="17" />
           </button>
-          <span
-            v-if="fileApplyResult"
-            :class="['workspace-file-status', { failed: fileApplyResult.errors.length }]"
-            :title="fileApplyResult.errors.join('\n')"
-          >
-            <UiIcon :name="fileApplyResult.errors.length ? 'x' : 'check'" :size="15" />
-            写入 {{ fileApplyResult.applied }}/{{ fileApplyResult.applied + fileApplyResult.skipped }}
-          </span>
           <span v-if="currentMode !== 'chat'" class="progress-chip">
             整体进度
             <strong>{{ progressPercent }}%</strong>
@@ -1088,16 +1401,36 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
         </div>
       </header>
 
-      <div :class="['workspace-content', { 'has-backend-alert': backendDisconnected }]">
-        <div v-if="backendDisconnected" class="backend-offline-alert" role="alert" aria-live="assertive">
+      <div :class="['workspace-content', { 'has-backend-alert': backendConnectionNotice }]">
+        <div
+          v-if="backendConnectionNotice"
+          :class="['backend-offline-alert', `is-${backendConnectionNotice.tone}`]"
+          role="status"
+          aria-live="polite"
+        >
           <div>
-            <strong>后端连接已中断</strong>
-            <span>当前画面是最后一次同步结果，Agent 实际执行状态未知。请恢复 8099 服务后重新连接。</span>
+            <strong>{{ backendConnectionNotice.title }}</strong>
+            <span>{{ backendConnectionNotice.detail }}</span>
           </div>
-          <button type="button" :disabled="reconnectingBackend" @click="reconnectBackend">
-            {{ reconnectingBackend ? '正在重连…' : '重新连接' }}
-          </button>
         </div>
+        <FileRevisionCandidateEditor
+          v-if="currentMode === 'chat' && activeFileRevisionRun"
+          :file-path="activeFileRevisionRun.filePath"
+          :iteration="activeFileRevisionRun.iteration"
+          :status="activeFileRevisionRun.status"
+          :candidate="activeFileRevisionCandidate"
+          :draft="activeFileRevisionDraft"
+          :busy="fileRevisionEditorBusy"
+          :error="fileRevisionEditorError || activeFileRevisionRun.errorMessage"
+          :partial-failure="activeFileRevisionRun.errorCode === 'REVISION_PARTIAL_AGENT_FAILURE'"
+          :successful-agent-count="activeFileRevisionRun.agentResults.filter((result) => result.status === 'completed').length"
+          @save="saveActiveFileRevisionDraft"
+          @submit="submitActiveFileRevision"
+          @apply="decideActiveFileRevision('apply_candidate')"
+          @abandon="decideActiveFileRevision('abandon_revision')"
+          @failure-decision="resolveActiveFileRevisionFailure"
+          @retry-interrupted="retryActiveInterruptedFileRevision"
+        />
         <div v-if="currentMode === 'chat'" class="chat-pane">
           <CollaborationTaskBoard
             :brief="activeBriefPayload ?? latestBriefPayload"
@@ -1112,6 +1445,7 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
             :messages="messages"
             :workspace-snapshot="sessionStore.currentSession?.workspaceSnapshot"
             @resolve-confirmation="resolveConfirmation"
+            @approve-capability="approveCapability"
           />
           <UserInputBox
             :busy="isSendingMessage"
@@ -1163,71 +1497,6 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
       @resolve-confirmation="resolveConfirmation"
     />
 
-    <section v-if="showFileReviewDialog" class="modal-backdrop" aria-label="文件写回审阅">
-      <div class="modal-panel session-create-dialog">
-        <header>
-          <div>
-            <h2>审阅文件写回</h2>
-            <p>逐项查看 diff，勾选要写入本地工作区的文件。冲突项默认不勾选。</p>
-          </div>
-          <button type="button" class="modal-close-button" @click="workspaceUiStore.closeFileReview">
-            <UiIcon name="x" :size="18" />
-          </button>
-        </header>
-        <div class="dialog-field">
-          <span>已选 {{ selectedChangePaths.length }} / {{ reviewChanges.length }} 项</span>
-          <div style="display:flex; gap:8px;">
-            <button type="button" @click="selectAllReviewPaths">全选</button>
-            <button type="button" @click="clearReviewSelection">清空</button>
-          </div>
-        </div>
-        <div v-if="isReviewLoading">正在读取磁盘当前内容做冲突检测，稍候。</div>
-        <div v-else-if="!reviewChanges.length" class="empty-state">没有待写入的文件变更。</div>
-        <ul v-else style="list-style:none; padding:0; margin:0; max-height:60vh; overflow:auto;">
-          <li
-            v-for="item in reviewChanges"
-            :key="`${item.artifactId}::${item.change.path}`"
-            style="border:1px solid var(--border, #ddd); border-radius:6px; padding:10px; margin-bottom:10px;"
-          >
-            <label style="display:flex; align-items:flex-start; gap:8px; cursor:pointer;">
-              <input
-                type="checkbox"
-                :checked="selectedChangePaths.includes(item.change.path)"
-                :disabled="item.conflict"
-                @change="toggleReviewPath(item.change.path)"
-              />
-              <div style="flex:1; min-width:0;">
-                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                  <strong style="word-break:break-all;">{{ item.change.path }}</strong>
-                  <span class="tag">{{ item.change.operation }}</span>
-                  <span v-if="item.conflict" class="tag" style="color:#b00;">磁盘已变化（冲突）</span>
-                  <span v-if="item.artifactTitle" class="tag muted">{{ item.artifactTitle }}</span>
-                </div>
-                <pre
-                  style="margin:8px 0 0; padding:8px; background:#0b0b0b08; border-radius:4px; max-height:240px; overflow:auto; font-size:12px; white-space:pre-wrap;"
-                ><span
-                    v-for="(row, index) in reviewDiffRows(item)"
-                    :key="index"
-                    :style="{ display:'block', color: row.kind === 'add' ? '#0a7' : row.kind === 'remove' ? '#b00' : 'inherit' }"
-                  >{{ row.kind === 'add' ? '+ ' : row.kind === 'remove' ? '- ' : '  ' }}{{ row.text }}</span></pre>
-              </div>
-            </label>
-          </li>
-        </ul>
-        <footer class="form-actions">
-          <button type="button" @click="workspaceUiStore.closeFileReview">取消</button>
-          <button
-            type="button"
-            class="primary"
-            :disabled="!selectedChangePaths.length || isApplyingReview"
-            @click="confirmFileReview"
-          >
-            {{ isApplyingReview ? '写入中' : `写入 ${selectedChangePaths.length} 项` }}
-          </button>
-        </footer>
-      </div>
-    </section>
-
     <section v-if="showCreateSessionDialog" class="modal-backdrop" aria-label="新建会话">
       <form class="modal-panel session-create-dialog" @submit.prevent="createSessionFromDialog">
         <header>
@@ -1246,40 +1515,58 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
         <div class="workspace-mode-switch" aria-label="工作区模式">
           <button
             type="button"
-            :class="{ selected: sessionWorkspaceKind === 'browser_local' }"
-            @click="selectSessionWorkspaceKind('browser_local')"
+            :class="{ selected: sessionWorkspaceKind === 'local_bridge' }"
+            @click="selectSessionWorkspaceKind('local_bridge')"
           >
-            浏览器目录
+            本地
           </button>
           <button
             type="button"
             :class="{ selected: sessionWorkspaceKind === 'server_local' }"
             @click="selectSessionWorkspaceKind('server_local')"
           >
-            服务器路径
+            服务器
           </button>
         </div>
-        <div v-if="sessionWorkspaceKind === 'browser_local'" class="dialog-directory-picker">
-          <span>本地工作目录</span>
-          <button type="button" @click="chooseWorkingDirectory">
-            <UiIcon name="folder" :size="16" />
-            {{ localWorkspaceStore.pendingDirectory ? '更换目录' : '选择目录' }}
-          </button>
-          <strong v-if="localWorkspaceStore.pendingDirectory" :title="localWorkspaceStore.pendingDirectory.name">
-            {{ localWorkspaceStore.pendingDirectory.name }}
-          </strong>
-          <small v-else-if="!localWorkspaceStore.supportsDirectoryPicker">
-            当前浏览器不支持选择本地目录
-          </small>
-          <small v-else class="directory-required-message">
-            {{ workspaceDirectoryRequiredMessage }}
-          </small>
-        </div>
-        <label v-else class="dialog-field">
+        <label v-if="sessionWorkspaceKind === 'server_local'" class="dialog-field">
           <span>服务器本地工作目录</span>
           <input v-model="sessionServerWorkspacePath" type="text" placeholder="D:\\demo\\ai-langchain" />
-          <small>路径由后端扫描并直接提供给 Codex/Claude Code。</small>
+          <small>后端只校验并绑定该目录；元数据索引后台更新，文件内容按任务需要读取。</small>
         </label>
+        <div v-else class="dialog-field">
+          <span>本机工作目录</span>
+          <div class="local-runtime-workspace-picker">
+          <select
+            v-model="sessionLocalRuntimeWorkspaceId"
+            :disabled="localRuntimeStore.loading || localRuntimeStore.authorizing"
+          >
+            <option value="">
+              {{ localRuntimeStore.loading ? '正在读取本机 Runtime...' : '请选择已连接工作区' }}
+            </option>
+            <option
+              v-for="workspace in localRuntimeStore.workspaces"
+              :key="workspace.workspaceId"
+              :value="workspace.workspaceId"
+            >
+              {{ workspace.displayName }}（{{ (workspace.runtimeTypes ?? []).join(', ') || '无可用 Runtime' }}）
+            </option>
+          </select>
+          <button
+            type="button"
+            class="local-runtime-authorize-button"
+            :disabled="localRuntimeStore.loading || localRuntimeStore.authorizing"
+            @click="authorizeLocalRuntimeWorkspace"
+          >
+            {{ localRuntimeStore.authorizing ? '等待目录选择...' : '选择本机目录' }}
+          </button>
+          </div>
+          <small v-if="localRuntimeStore.workspaces.length">
+            目录授权由本机 Runtime 完成，平台只保存工作区 ID，不接收本地绝对路径。
+          </small>
+          <small v-else>
+            点击“选择本机目录”，本机 Runtime 将打开系统目录选择窗口。
+          </small>
+        </div>
         <label class="dialog-field">
           <span>Runtime 偏好</span>
           <select v-model="sessionRuntimeType" @change="handleRuntimePreferenceChange">
@@ -1287,13 +1574,13 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
               v-for="option in sessionRuntimeOptions"
               :key="option.value"
               :value="option.value"
-              :disabled="Boolean(option.value && !runtimeModelStore.isRuntimeAvailable(option.value))"
+              :disabled="Boolean(option.value && !isRuntimeAvailableForWorkspace(option.value))"
             >
-              {{ option.label }}{{ option.value && !runtimeModelStore.isRuntimeAvailable(option.value) ? '（不可用）' : '' }}
+              {{ option.label }}{{ option.value && !isRuntimeAvailableForWorkspace(option.value) ? '（不可用）' : '' }}
             </option>
           </select>
-          <small v-if="sessionRuntimeType === 'codex' || sessionRuntimeType === 'claude_code'">
-            浏览器目录通过隔离镜像执行，文件变更确认后写回；服务器路径直接作为 Runtime 工作目录。
+          <small>
+            本地模式由 Local Runtime CLI 在授权目录内执行；服务器模式在服务器 Runtime 中执行，Codex/Claude Code 使用独立 Worker。
           </small>
         </label>
         <fieldset v-if="sessionRuntimeType" class="dialog-field runtime-fallback-field">
@@ -1303,7 +1590,7 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
               v-model="sessionFallbackRuntimeTypes"
               type="checkbox"
               :value="option.value"
-              :disabled="!runtimeModelStore.isRuntimeAvailable(option.value)"
+              :disabled="!isRuntimeAvailableForWorkspace(option.value)"
             />
             <span>{{ option.label }}</span>
           </label>
@@ -1320,51 +1607,29 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
           <small>模型仅作为路由偏好，不绕过 Runtime 可用性、Tool Authority 或 Workspace 检查。</small>
         </label>
         <section
-          v-if="hasSelectedWorkingDirectory || sessionScanStatus !== 'idle'"
-          class="workspace-scan-summary"
+          v-if="hasSelectedWorkingDirectory || sessionBindingStatus !== 'idle'"
+          class="workspace-binding-summary"
         >
           <header>
-            <strong>工作区读取</strong>
-            <span :class="['status-pill', sessionScanStatus]">
+            <strong>工作区绑定</strong>
+            <span :class="['status-pill', sessionBindingStatus]">
               {{
-                sessionScanStatus === 'scanning'
-                  ? '扫描中'
-                  : sessionScanStatus === 'completed'
-                    ? '已完成'
-                    : sessionScanStatus === 'failed'
+                sessionBindingStatus === 'binding'
+                  ? '绑定中'
+                  : sessionBindingStatus === 'bound'
+                    ? '已绑定'
+                    : sessionBindingStatus === 'failed'
                       ? '失败'
-                      : '待创建时扫描'
+                      : '待绑定'
               }}
             </span>
           </header>
-          <p v-if="sessionScanStatus === 'idle'">
-            创建会话时会先读取目录结构、可读文本文件、技术栈信号和跳过原因，再下发给 Coordinator。
+          <p v-if="sessionBindingStatus === 'idle'">
+            创建会话只校验并绑定目录；元数据索引由 Runtime 在后台维护，文件内容按任务需要读取。
           </p>
-          <p v-else-if="sessionScanStatus === 'scanning'">正在读取工作区上下文，稍等一下。</p>
-          <dl v-if="sessionScanSummary">
-            <div>
-              <dt>工作区</dt>
-              <dd>{{ sessionScanSummary.rootName }}</dd>
-            </div>
-            <div>
-              <dt>扫描条目</dt>
-              <dd>{{ sessionScanSummary.fileCount }}</dd>
-            </div>
-            <div>
-              <dt>可读文件</dt>
-              <dd>{{ sessionScanSummary.files.length }}</dd>
-            </div>
-            <div>
-              <dt>跳过</dt>
-              <dd>{{ sessionScanSummary.skipped.length }}</dd>
-            </div>
-            <div>
-              <dt>技术栈</dt>
-              <dd>{{ sessionScanSummary.detectedStack?.join(', ') || '未识别' }}</dd>
-            </div>
-          </dl>
-          <p v-if="sessionScanSummary?.skipped.some((file) => file.reason === 'sensitive')" class="scan-warning">
-            已跳过 .env、密钥、证书等敏感文件。
+          <p v-else-if="sessionBindingStatus === 'binding'">正在绑定工作区，不等待后台索引完成。</p>
+          <p v-else-if="sessionWorkspaceKind === 'local_bridge'">
+            本地目录由 agent-runtime CLI 读取和修改，平台后端不会接收本地绝对路径。
           </p>
         </section>
         <div class="dialog-agent-picker">
@@ -1435,6 +1700,130 @@ function reviewDiffRows(item: ReviewableFileChange): FileReviewDiffRow[] {
           </button>
         </footer>
       </article>
+    </section>
+
+    <section
+      v-if="pendingDeleteSessionId"
+      class="modal-backdrop element-confirm-backdrop"
+      aria-label="确认删除会话"
+    >
+      <article
+        class="element-confirm-box session-delete-confirm-box"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="session-delete-title"
+      >
+        <header>
+          <span class="element-confirm-icon danger">
+            <UiIcon name="trash" :size="20" />
+          </span>
+          <div>
+            <h2 id="session-delete-title">确认删除会话？</h2>
+            <p>删除后无法恢复，会话消息、任务、事件和会话工作区缓存会一并清理。</p>
+          </div>
+        </header>
+        <dl v-if="pendingDeleteSession">
+          <div>
+            <dt>会话</dt>
+            <dd :title="pendingDeleteSession.title">{{ pendingDeleteSession.title }}</dd>
+          </div>
+          <div>
+            <dt>状态</dt>
+            <dd>{{ sessionStatusLabel[pendingDeleteSession.status] }}</dd>
+          </div>
+        </dl>
+        <p v-if="deleteSessionError" class="form-error" role="alert">{{ deleteSessionError }}</p>
+        <footer>
+          <button type="button" :disabled="isPendingSessionDeleting" @click="cancelDeleteSession">取消</button>
+          <button
+            type="button"
+            class="danger"
+            data-testid="session-confirm-delete"
+            :disabled="isPendingSessionDeleting"
+            @click="confirmDeleteSession"
+          >
+            {{ isPendingSessionDeleting ? '删除中…' : '确认删除' }}
+          </button>
+        </footer>
+      </article>
+    </section>
+
+    <section v-if="showFileRevisionDialog" class="modal-backdrop" aria-label="文件修订">
+      <form class="modal-panel brief-revision-dialog file-revision-dialog" @submit.prevent="submitFileRevision">
+        <header>
+          <div>
+            <h2>文件修订</h2>
+          </div>
+          <button type="button" class="modal-close-button" @click="workspaceUiStore.closeFileRevision">
+            <UiIcon name="x" :size="18" />
+          </button>
+        </header>
+        <label class="dialog-field">
+          <span>文件路径</span>
+          <div class="file-revision-path-row">
+            <input v-model="fileRevisionPath" type="text" placeholder="docs/result.md" />
+            <button
+              type="button"
+              :disabled="isSubmittingFileRevision || !fileRevisionPath.trim()"
+              @click="captureFileRevisionBaseline"
+            >
+              记录修改前版本
+            </button>
+          </div>
+        </label>
+        <label v-if="fileRevisionBaselines.length" class="dialog-field">
+          <span>修改前版本</span>
+          <select v-model="selectedFileRevisionBaselineId">
+            <option v-for="baseline in fileRevisionBaselines" :key="baseline.id" :value="baseline.id">
+              {{ baseline.filePath }} · {{ baseline.hash.value.slice(0, 10) }} · {{ new Date(baseline.capturedAt).toLocaleString() }}
+            </option>
+          </select>
+        </label>
+        <dl v-if="selectedFileRevisionBaseline" class="file-revision-baseline-summary">
+          <div>
+            <dt>文件</dt>
+            <dd>{{ selectedFileRevisionBaseline.filePath }}</dd>
+          </div>
+          <div>
+            <dt>SHA-256</dt>
+            <dd>{{ selectedFileRevisionBaseline.hash.value.slice(0, 16) }}</dd>
+          </div>
+        </dl>
+        <fieldset class="dialog-field">
+          <legend>处理 Agent</legend>
+          <div class="agent-selector">
+            <label v-for="agent in fileRevisionAgents" :key="agent.id" class="agent-checkbox">
+              <input
+                v-model="selectedFileRevisionAgentIds"
+                type="checkbox"
+                :value="agent.id"
+                @change="workspaceUiStore.fileRevisionError = ''"
+              />
+              <span>{{ agent.name }}</span>
+            </label>
+          </div>
+        </fieldset>
+        <label class="dialog-field">
+          <span>处理说明（可选）</span>
+          <textarea
+            v-model="fileRevisionInstruction"
+            rows="3"
+            maxlength="2000"
+            placeholder="例如：检查修订后的内容是否仍满足验收目标"
+          />
+        </label>
+        <p v-if="fileRevisionError" class="form-error">{{ fileRevisionError }}</p>
+        <footer class="form-actions">
+          <button type="button" @click="workspaceUiStore.closeFileRevision">取消</button>
+          <button
+            type="submit"
+            class="primary"
+            :disabled="isSubmittingFileRevision || !selectedFileRevisionBaselineId || !selectedFileRevisionAgentIds.length"
+          >
+            {{ isSubmittingFileRevision ? '处理中' : '确认已修改并处理' }}
+          </button>
+        </footer>
+      </form>
     </section>
 
     <section v-if="showBriefRevisionDialog" class="modal-backdrop" aria-label="修改任务契约">

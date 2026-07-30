@@ -1,15 +1,21 @@
 import { defineStore } from 'pinia'
-import { apiDelete, apiGet, apiPage, apiPost } from '@/api/client'
+import { apiDelete, apiGet, apiPage, apiPost, apiPut } from '@/api/client'
 import { expectedBackendCommit } from '@/config/runtime'
 import type {
   OpsHealth,
+  FileRevisionBaseline,
+  FileRevisionCandidate,
+  FileRevisionEditorDraft,
+  FileRevisionEditorDraftContent,
+  FileRevisionRun,
+  FileRevisionState,
+  FileHash,
   SessionDetail,
   RuntimePreference,
   SessionListItem,
   SessionStatus,
   SessionViewMode,
   SessionWorkingDirectory,
-  WorkspaceSnapshot,
   CollaborationEvent
 } from '@/types/contracts'
 import type { PostReviewAction } from '@/types/contracts'
@@ -21,11 +27,24 @@ type CreateSessionInput = {
   tokenBudget?: number
   knowledgeBaseIds?: string[]
   workingDirectory?: SessionWorkingDirectory
-  workspaceSnapshot?: WorkspaceSnapshot
   runtimePreference?: RuntimePreference
 }
 
 const favoriteStorageKey = 'agent-cluster.favorite-session-ids'
+export const BACKEND_HEALTH_REQUEST_TIMEOUT_MS = 5_000
+export const SESSION_DELETE_REQUEST_TIMEOUT_MS = 20_000
+
+function emptyFileRevisionState(): FileRevisionState {
+  return { baselines: [], chains: [], runs: [], drafts: [] }
+}
+
+function normalizeSessionDeleteError(error: unknown) {
+  if (!(error instanceof Error)) return new Error('删除会话失败，请稍后重试。')
+  if (/Failed to fetch|fetch failed|NetworkError|Load failed|ERR_CONNECTION_REFUSED/i.test(error.message)) {
+    return new Error('后端连接已中断，删除结果尚未确认；请恢复后端服务后重试。')
+  }
+  return error
+}
 
 function loadFavoriteSessionIds() {
   if (typeof window === 'undefined') return []
@@ -62,17 +81,33 @@ export const useSessionStore = defineStore('session', {
     deletingSessionIds: [] as string[],
     runtimeHealth: undefined as OpsHealth | undefined,
     runtimeHealthChecked: false,
-    runtimeHealthError: undefined as string | undefined
+    runtimeHealthError: undefined as string | undefined,
+    fileRevisionStatesBySession: {} as Record<string, FileRevisionState>,
+    fileRevisionCandidates: {} as Record<string, FileRevisionCandidate>,
+    fileRevisionDraftContents: {} as Record<string, FileRevisionEditorDraftContent>,
+    fileRevisionRequestGeneration: {} as Record<string, number>,
+    fileRevisionCandidateRequestGeneration: {} as Record<string, number>,
+    fileRevisionDraftRequestGeneration: {} as Record<string, number>,
+    fileRevisionLoadingBySession: {} as Record<string, boolean>
   }),
   getters: {
     isFavorite: (state) => (sessionId: string) => state.favoriteSessionIds.includes(sessionId),
-    backendCompatible: (state) => runtimeHealthCompatible(state.runtimeHealth, expectedBackendCommit)
+    backendCompatible: (state) => runtimeHealthCompatible(state.runtimeHealth, expectedBackendCommit),
+    fileRevisionState: (state) => state.currentSession
+      ? state.fileRevisionStatesBySession[state.currentSession.id] ?? emptyFileRevisionState()
+      : emptyFileRevisionState(),
+    fileRevisionLoading: (state) => Boolean(
+      state.currentSession && state.fileRevisionLoadingBySession[state.currentSession.id]
+    )
   },
   actions: {
     async loadRuntimeHealth(force = false) {
       if (this.runtimeHealthChecked && !force) return this.runtimeHealth
       try {
-        this.runtimeHealth = await apiGet<OpsHealth>('/health')
+        this.runtimeHealth = await apiGet<OpsHealth>('/health', {
+          timeoutMs: BACKEND_HEALTH_REQUEST_TIMEOUT_MS,
+          timeoutMessage: '后端健康检查超时，请确认后端服务已启动后重试。'
+        })
         this.runtimeHealthError = this.backendCompatible
           ? undefined
           : `BACKEND_VERSION_MISMATCH: expected pipeline=v2 schema=3${expectedBackendCommit ? ` commit=${expectedBackendCommit}` : ''}; received pipeline=${this.runtimeHealth.pipelineVersion} schema=${this.runtimeHealth.dataSchemaVersion} commit=${this.runtimeHealth.commit}.`
@@ -149,13 +184,188 @@ export const useSessionStore = defineStore('session', {
       await this.assertBackendCompatible()
       return apiPost<{ event: CollaborationEvent }>(`/sessions/${sessionId}/messages`, { content, mentionedAgentIds })
     },
-    async refreshWorkspaceSnapshot(sessionId: string, workspaceId: string, workspaceSnapshot: WorkspaceSnapshot) {
+    async loadFileRevisions(sessionId: string) {
+      await this.assertBackendCompatible()
+      const generation = (this.fileRevisionRequestGeneration[sessionId] ?? 0) + 1
+      this.fileRevisionRequestGeneration[sessionId] = generation
+      this.fileRevisionLoadingBySession[sessionId] = true
+      try {
+        const state = await apiGet<FileRevisionState>(
+          `/sessions/${sessionId}/file-revisions`
+        )
+        if (this.fileRevisionRequestGeneration[sessionId] === generation) {
+          this.fileRevisionStatesBySession[sessionId] = state
+        }
+        return state
+      } finally {
+        if (this.fileRevisionRequestGeneration[sessionId] === generation) {
+          this.fileRevisionLoadingBySession[sessionId] = false
+        }
+      }
+    },
+    async refreshCurrentSession(sessionId: string) {
+      await this.assertBackendCompatible()
+      if (this.currentSession?.id !== sessionId) return undefined
+      const refreshed = await apiGet<SessionDetail>(`/sessions/${sessionId}`)
+      if (this.currentSession?.id === sessionId) {
+        this.currentSession = refreshed
+      }
+      return refreshed
+    },
+    fileRevisionCandidateFor(sessionId: string, revisionId: string) {
+      return this.fileRevisionCandidates[`${sessionId}:${revisionId}`]
+    },
+    fileRevisionDraftFor(sessionId: string, revisionId: string) {
+      return this.fileRevisionDraftContents[`${sessionId}:${revisionId}`]
+    },
+    async loadFileRevisionCandidate(sessionId: string, revisionId: string) {
+      await this.assertBackendCompatible()
+      const key = `${sessionId}:${revisionId}`
+      const generation = (this.fileRevisionCandidateRequestGeneration[key] ?? 0) + 1
+      this.fileRevisionCandidateRequestGeneration[key] = generation
+      const candidate = await apiGet<FileRevisionCandidate>(
+        `/sessions/${sessionId}/file-revisions/${revisionId}/candidate`
+      )
+      if (
+        this.currentSession?.id === sessionId &&
+        this.fileRevisionCandidateRequestGeneration[key] === generation
+      ) {
+        this.fileRevisionCandidates[key] = candidate
+      }
+      return candidate
+    },
+    async loadFileRevisionDraft(sessionId: string, revisionId: string) {
+      await this.assertBackendCompatible()
+      const key = `${sessionId}:${revisionId}`
+      const generation = (this.fileRevisionDraftRequestGeneration[key] ?? 0) + 1
+      this.fileRevisionDraftRequestGeneration[key] = generation
+      const draft = await apiGet<FileRevisionEditorDraftContent | null>(
+        `/sessions/${sessionId}/file-revisions/${revisionId}/draft`
+      )
+      if (
+        this.currentSession?.id === sessionId &&
+        this.fileRevisionDraftRequestGeneration[key] === generation
+      ) {
+        if (draft) this.fileRevisionDraftContents[key] = draft
+        else delete this.fileRevisionDraftContents[key]
+      }
+      return draft
+    },
+    async saveFileRevisionDraft(
+      sessionId: string,
+      revisionId: string,
+      expectedCandidateHash: FileHash,
+      content: string
+    ) {
+      await this.assertBackendCompatible()
+      const key = `${sessionId}:${revisionId}`
+      this.fileRevisionDraftRequestGeneration[key] =
+        (this.fileRevisionDraftRequestGeneration[key] ?? 0) + 1
+      const draft = await apiPut<FileRevisionEditorDraft>(
+        `/sessions/${sessionId}/file-revisions/${revisionId}/draft`,
+        { expectedCandidateHash, content }
+      )
+      await this.loadFileRevisions(sessionId)
+      this.fileRevisionDraftRequestGeneration[key] =
+        (this.fileRevisionDraftRequestGeneration[key] ?? 0) + 1
+      this.fileRevisionDraftContents[key] = { ...draft, content }
+      return draft
+    },
+    async reprocessFileRevision(
+      sessionId: string,
+      revisionId: string,
+      input: {
+        draftHash: FileHash
+        expectedCandidateHash: FileHash
+        expectedStateVersion: number
+        targetAgentIds?: string[]
+        instruction?: string
+      }
+    ) {
+      await this.assertBackendCompatible()
+      const run = await apiPost<FileRevisionRun>(
+        `/sessions/${sessionId}/file-revisions/${revisionId}/reprocess`,
+        input
+      )
+      this.setCurrentStatus(sessionId, 'EXECUTING')
+      await this.loadFileRevisions(sessionId)
+      return run
+    },
+    async resolveFileRevisionFailure(
+      sessionId: string,
+      revisionId: string,
+      input: {
+        expectedStateVersion: number
+        decision: 'retry_agents' | 'continue_with_successful' | 'abandon_revision'
+        instruction?: string
+      }
+    ) {
       await this.assertBackendCompatible()
       const result = await apiPost<{
-        session: SessionDetail
-        updatedSessionIds: string[]
-      }>(`/sessions/${sessionId}/workspace/snapshot`, { workspaceId, workspaceSnapshot })
-      if (this.currentSession?.id === sessionId) this.currentSession = result.session
+        run: FileRevisionRun
+        chain: FileRevisionState['chains'][number]
+        decision: typeof input.decision
+      }>(`/sessions/${sessionId}/file-revisions/${revisionId}/failure-decision`, input)
+      this.setCurrentStatus(sessionId, input.decision === 'abandon_revision' ? 'COMPLETED' : 'EXECUTING')
+      await this.loadFileRevisions(sessionId)
+      return result
+    },
+    async retryInterruptedFileRevision(
+      sessionId: string,
+      revisionId: string,
+      input: { expectedStateVersion: number; retryKey: string }
+    ) {
+      await this.assertBackendCompatible()
+      const result = await apiPost<{
+        run: FileRevisionRun
+        chain: FileRevisionState['chains'][number]
+        mode: 'run_agents' | 'receiver_only' | 'apply_reconcile'
+      }>(`/sessions/${sessionId}/file-revisions/${revisionId}/retry`, input)
+      this.setCurrentStatus(sessionId, 'EXECUTING')
+      await this.loadFileRevisions(sessionId)
+      return result
+    },
+    async captureFileRevisionBaseline(sessionId: string, filePath: string) {
+      await this.assertBackendCompatible()
+      const baseline = await apiPost<FileRevisionBaseline>(`/sessions/${sessionId}/file-revisions/baselines`, {
+        filePath,
+        source: 'user_selected'
+      })
+      await this.loadFileRevisions(sessionId)
+      return baseline
+    },
+    async startFileRevision(
+      sessionId: string,
+      baselineId: string,
+      targetAgentIds: string[],
+      instruction?: string
+    ) {
+      await this.assertBackendCompatible()
+      const run = await apiPost<FileRevisionRun>(`/sessions/${sessionId}/file-revisions`, {
+        baselineId,
+        targetAgentIds,
+        ...(instruction?.trim() ? { instruction: instruction.trim() } : {})
+      })
+      this.setCurrentStatus(sessionId, 'EXECUTING')
+      await this.loadFileRevisions(sessionId)
+      return run
+    },
+    async decideFileRevision(
+      sessionId: string,
+      revisionId: string,
+      input: {
+        confirmationId: string
+        candidateHash: FileHash
+        expectedStateVersion: number
+        decision: 'apply_candidate' | 'abandon_revision'
+      }
+    ) {
+      await this.assertBackendCompatible()
+      const result = await apiPost(
+        `/sessions/${sessionId}/file-revisions/${revisionId}/decision`,
+        input
+      )
+      await Promise.all([this.refreshCurrentSession(sessionId), this.loadFileRevisions(sessionId)])
       return result
     },
     removeSessionFromState(sessionId: string) {
@@ -164,6 +374,21 @@ export const useSessionStore = defineStore('session', {
       persistFavoriteSessionIds(this.favoriteSessionIds)
       if (this.currentSession?.id === sessionId) {
         this.currentSession = undefined
+      }
+      delete this.fileRevisionStatesBySession[sessionId]
+      delete this.fileRevisionLoadingBySession[sessionId]
+      delete this.fileRevisionRequestGeneration[sessionId]
+      for (const key of Object.keys(this.fileRevisionCandidates)) {
+        if (key.startsWith(`${sessionId}:`)) delete this.fileRevisionCandidates[key]
+      }
+      for (const key of Object.keys(this.fileRevisionDraftContents)) {
+        if (key.startsWith(`${sessionId}:`)) delete this.fileRevisionDraftContents[key]
+      }
+      for (const key of Object.keys(this.fileRevisionCandidateRequestGeneration)) {
+        if (key.startsWith(`${sessionId}:`)) delete this.fileRevisionCandidateRequestGeneration[key]
+      }
+      for (const key of Object.keys(this.fileRevisionDraftRequestGeneration)) {
+        if (key.startsWith(`${sessionId}:`)) delete this.fileRevisionDraftRequestGeneration[key]
       }
     },
     async deleteSession(sessionId: string) {
@@ -175,13 +400,16 @@ export const useSessionStore = defineStore('session', {
       this.deletingSessionIds = [...this.deletingSessionIds, sessionId]
       let deleted = false
       try {
-        await apiDelete<{ deleted: boolean; sessionId: string }>(`/sessions/${sessionId}`)
+        await apiDelete<{ deleted: boolean; sessionId: string }>(`/sessions/${sessionId}`, {
+          timeoutMs: SESSION_DELETE_REQUEST_TIMEOUT_MS,
+          timeoutMessage: '删除会话请求超时：后端可能正在退出或已经断开，删除结果尚未确认；请恢复服务后重试。'
+        })
         deleted = true
       } catch (error) {
         if (error instanceof Error && error.message.includes('Session not found')) {
           deleted = true
         } else {
-          throw error
+          throw normalizeSessionDeleteError(error)
         }
       } finally {
         this.deletingSessionIds = this.deletingSessionIds.filter((id) => id !== sessionId)
@@ -235,6 +463,18 @@ export const useSessionStore = defineStore('session', {
       await this.assertBackendCompatible()
       await apiPost(`/sessions/${sessionId}/cancel`, confirmationId ? { confirmationId } : undefined)
       this.setCurrentStatus(sessionId, 'CANCELLED')
+    },
+    async resolveLocalRuntimePermission(
+      sessionId: string,
+      input: { confirmationId: string; decision: 'approve_once' | 'cancel' }
+    ) {
+      await this.assertBackendCompatible()
+      const result = await apiPost<{ session: SessionDetail }>(
+        `/sessions/${sessionId}/local-runtime/permissions/decision`,
+        input
+      )
+      await this.loadSession(sessionId)
+      return result
     },
     async resolvePostReviewAction(
       sessionId: string,
@@ -329,6 +569,14 @@ export const useSessionStore = defineStore('session', {
     ) {
       await this.assertBackendCompatible()
       return apiPost(`/sessions/${sessionId}/reports/local-save/decision`, input)
+    },
+    async approveCapability(
+      sessionId: string,
+      capabilityId: string,
+      input?: { agentId?: string; reason?: string }
+    ) {
+      await this.assertBackendCompatible()
+      return apiPost(`/capabilities/${capabilityId}/approve`, { sessionId, ...input })
     },
     switchViewMode(mode: SessionViewMode) {
       this.currentViewMode = mode

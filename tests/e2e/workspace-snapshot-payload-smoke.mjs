@@ -1,114 +1,47 @@
-import { api, buildServer, listEvents, startSmokeServer, stopSmokeServer, waitForEvent } from './smoke-server.mjs';
+import { api, buildServer, startSmokeServer, stopSmokeServer } from './smoke-server.mjs';
 
 await buildServer();
-
 let server;
 
 try {
   server = await startSmokeServer('workspace-snapshot-payload-smoke', {
-    GLOBAL_DEFAULT_RUNTIME_TYPE: 'mock',
-    MOCK_RUNTIME_ENABLED: 'true',
-    DISCUSSION_MAX_ROUNDS: '0'
+    DISCUSSION_MAX_ROUNDS: '0',
+    GLOBAL_DEFAULT_RUNTIME_TYPE: 'mock'
   });
 
-  const content = 'x'.repeat(220_000);
-  const files = Array.from({ length: 4 }, (_, index) => ({
-    path: `src/file-${index}.ts`,
-    size: content.length,
-    language: 'typescript',
-    content
-  }));
-
-  const created = await api(server.apiBase, '/sessions', {
-    method: 'POST',
-    body: JSON.stringify({
-      input: 'Workspace snapshot payload should not return server 500.',
-      agentIds: ['00000000-0000-0000-0000-000000000001'],
-      workingDirectory: {
-        kind: 'browser_local',
-        id: 'payload-smoke-workspace',
-        name: 'payload-smoke-workspace',
-        selectedAt: new Date().toISOString()
-      },
-      workspaceSnapshot: {
-        rootName: 'payload-smoke-workspace',
-        scannedAt: new Date().toISOString(),
-        fileCount: files.length,
-        totalBytes: files.reduce((total, file) => total + file.size, 0),
-        tree: files.map((file) => ({ path: file.path, kind: 'file' })),
-        files,
-        skipped: [],
-        detectedStack: ['typescript'],
-        entrypoints: ['src/file-0.ts']
-      }
-    })
+  await assertRejectsClientSnapshot(server.apiBase, {
+    rootName: 'client-supplied-workspace',
+    scannedAt: new Date().toISOString(),
+    fileCount: 1,
+    totalBytes: 17,
+    tree: [{ path: 'README.md', kind: 'file' }],
+    files: [{ path: 'README.md', size: 17, content: '# uploaded data\n' }],
+    skipped: []
   });
 
-  if (!created.data?.session?.id) {
-    throw new Error('Expected session creation to succeed for bounded workspace snapshot');
-  }
-
-  const manyFiles = Array.from({ length: 80 }, (_, index) => ({
-    path: index < 2 ? ['AGENTS.md', 'client/package.json'][index] : `src/file-${index}.ts`,
-    size: 6_000,
-    language: index === 0 ? 'markdown' : index === 1 ? 'json' : 'typescript',
-    content: `${index}: ${'workspace context '.repeat(300)}`
-  }));
-  const manyFilesSession = await api(server.apiBase, '/sessions', {
-    method: 'POST',
-    body: JSON.stringify({
-      input: 'Use the selected workspace to analyze the implementation request without exceeding token budget.',
-      agentIds: ['00000000-0000-0000-0000-000000000001'],
-      tokenBudget: 21_000,
-      workingDirectory: {
-        kind: 'browser_local',
-        id: 'payload-smoke-many-files',
-        name: 'payload-smoke-many-files',
-        selectedAt: new Date().toISOString()
-      },
-      workspaceSnapshot: {
-        rootName: 'payload-smoke-many-files',
-        scannedAt: new Date().toISOString(),
-        fileCount: 335,
-        totalBytes: manyFiles.reduce((total, file) => total + file.size, 0),
-        tree: manyFiles.map((file) => ({ path: file.path, kind: 'file' })),
-        files: manyFiles,
-        skipped: Array.from({ length: 153 }, (_, index) => ({ path: `node_modules/skipped-${index}`, reason: 'ignored_directory' })),
-        detectedStack: ['vue', 'vite'],
-        entrypoints: ['AGENTS.md', 'client/package.json']
-      }
-    })
-  });
-  const manyFilesSessionId = manyFilesSession.data.session.id;
-  await waitForEvent(server.apiBase, manyFilesSessionId, 'brief_created');
-  const manyFilesEvents = await listEvents(server.apiBase, manyFilesSessionId);
-  const tokenBudgetExceeded = manyFilesEvents.find(
-    (event) => event.type === 'error_reported' && event.metadata.payload?.code === 'TOKEN_BUDGET_EXCEEDED'
-  );
-  if (tokenBudgetExceeded) {
-    throw new Error(`Expected workspace context to be compacted before runtime: ${tokenBudgetExceeded.content}`);
-  }
-
-  const envelopes = await api(server.apiBase, `/sessions/${manyFilesSessionId}/debug/context-envelopes`);
-  const invocation = envelopes.data.items.find((item) => item.contextEnvelope?.L1.navigation && item.contextEnvelope?.L3.files);
-  if (!invocation) {
-    throw new Error(`Expected a runtime invocation with navigation and selected evidence: ${JSON.stringify(envelopes)}`);
-  }
-  const navigation = invocation.contextEnvelope.L1.navigation;
-  if (navigation.entries.length > 121) {
-    throw new Error(`L1 navigation should be compacted: ${JSON.stringify(navigation)}`);
-  }
-  const selectedEvidence = invocation.contextEnvelope.L3.files;
-  if (selectedEvidence.length > 8) {
-    throw new Error(`L3 evidence must be bounded: ${selectedEvidence.length}`);
-  }
-  if (selectedEvidence.some((item) => item.content && item.content.length > 4000)) {
-    throw new Error(`L3 evidence content must be trimmed: ${JSON.stringify(selectedEvidence)}`);
-  }
-
-  console.log('workspace snapshot payload smoke ok');
+  console.log('client workspace snapshot rejection smoke ok');
 } finally {
-  if (server) {
-    await stopSmokeServer(server);
+  if (server) await stopSmokeServer(server);
+}
+
+process.exit(0);
+
+async function assertRejectsClientSnapshot(apiBase, workspaceSnapshot) {
+  let rejected = false;
+  try {
+    await api(apiBase, '/sessions', {
+      method: 'POST',
+      body: JSON.stringify({
+        input: 'A client-provided workspace snapshot must be rejected.',
+        agentIds: ['00000000-0000-0000-0000-000000000001'],
+        workspaceSnapshot
+      })
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    rejected = /400/.test(message) && /Unsupported Session create fields/.test(message);
+  }
+  if (!rejected) {
+    throw new Error('POST /sessions accepted a client-provided workspaceSnapshot.');
   }
 }

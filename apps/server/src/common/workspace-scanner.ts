@@ -1,5 +1,5 @@
-import { readdir, readFile, stat } from 'node:fs/promises';
-import { basename, extname, isAbsolute, join, relative } from 'node:path';
+import { readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type {
   SessionWorkingDirectory,
   WorkspaceFileSnapshot,
@@ -32,6 +32,11 @@ export async function scanServerWorkspace(rootPath: string): Promise<{
   if (!rootStat.isDirectory()) {
     throw new Error(`工作区路径不是目录：${rootPath}`);
   }
+  const canonicalRoot = await realpath(rootPath);
+  const platformRoot = await realpath(process.env.AGENT_CLUSTER_PLATFORM_ROOT?.trim() || process.cwd());
+  if (isSameOrChild(canonicalRoot, platformRoot)) {
+    throw new Error('平台仓库及其源码目录不能作为 server_local 业务工作区。');
+  }
 
   const files: WorkspaceFileSnapshot[] = [];
   const readableCandidates: Array<{ path: string; absolutePath: string; size: number }> = [];
@@ -58,6 +63,11 @@ export async function scanServerWorkspace(rootPath: string): Promise<{
       }
       entryCount += 1;
 
+      if (entry.isSymbolicLink()) {
+        skipped.push({ path, reason: 'sensitive', detail: 'symbolic links are outside the workspace trust boundary' });
+        continue;
+      }
+
       if (entry.isDirectory()) {
         const node: WorkspaceTreeNode = { path, kind: 'directory', children: [] };
         target.push(node);
@@ -80,7 +90,7 @@ export async function scanServerWorkspace(rootPath: string): Promise<{
       try {
         const fileStat = await stat(absolutePath);
         totalBytes += fileStat.size;
-        if (!shouldReadTextFile(path)) {
+        if (!shouldReadWorkspaceTextFile(path)) {
           skipped.push({ path, reason: 'binary' });
           continue;
         }
@@ -111,7 +121,7 @@ export async function scanServerWorkspace(rootPath: string): Promise<{
       files.push({
         path: candidate.path,
         size: candidate.size,
-        language: languageForPath(candidate.path),
+        language: workspaceLanguageForPath(candidate.path),
         content
       });
     } catch (error) {
@@ -151,8 +161,8 @@ export async function scanServerWorkspace(rootPath: string): Promise<{
       tree,
       files,
       skipped,
-      detectedStack: detectStack(files),
-      entrypoints: detectEntrypoints(files),
+      detectedStack: detectWorkspaceStack(files),
+      entrypoints: detectWorkspaceEntrypoints(files),
       coverage
     }
   };
@@ -166,6 +176,17 @@ export function extractServerWorkspacePath(input: string) {
 
 function extensionOf(path: string) {
   return extname(path).toLowerCase();
+}
+
+function isSameOrChild(candidate: string, parent: string) {
+  const normalizedCandidate = resolve(candidate);
+  const normalizedParent = resolve(parent);
+  if (process.platform === 'win32') {
+    const left = normalizedCandidate.toLowerCase();
+    const right = normalizedParent.toLowerCase();
+    return left === right || left.startsWith(`${right}${sep}`);
+  }
+  return normalizedCandidate === normalizedParent || normalizedCandidate.startsWith(`${normalizedParent}${sep}`);
 }
 
 export function workspaceFileScanPriority(path: string) {
@@ -192,12 +213,12 @@ export function workspaceFileScanPriority(path: string) {
   return 50;
 }
 
-function shouldReadTextFile(path: string) {
+export function shouldReadWorkspaceTextFile(path: string) {
   const name = path.split('/').at(-1) ?? path;
   return configFileNames.has(name) || textExtensions.has(extensionOf(path));
 }
 
-function languageForPath(path: string) {
+export function workspaceLanguageForPath(path: string) {
   const extension = extensionOf(path);
   return (
     {
@@ -219,7 +240,7 @@ function languageForPath(path: string) {
   );
 }
 
-function detectStack(files: WorkspaceFileSnapshot[]) {
+export function detectWorkspaceStack(files: WorkspaceFileSnapshot[]) {
   const paths = new Set(files.map((file) => file.path));
   const packageJson = files.find((file) => file.path.endsWith('package.json'))?.content ?? '';
   return [
@@ -231,7 +252,7 @@ function detectStack(files: WorkspaceFileSnapshot[]) {
   ].filter((item): item is string => Boolean(item));
 }
 
-function detectEntrypoints(files: WorkspaceFileSnapshot[]) {
+export function detectWorkspaceEntrypoints(files: WorkspaceFileSnapshot[]) {
   const likely = [
     'package.json',
     'src/main.ts',

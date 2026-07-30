@@ -44,6 +44,7 @@
 | 意图识别、任务领域/意图、用户消息处理计划 | `apps/server/src/modules/intent-recognition/` | `docs/design/context-router-target-design-v1.md`, `apps/server/src/modules/intent-recognition/intent-recognition.service.spec.ts` |
 | 编排、brief、任务执行、review、delivery | `apps/server/src/modules/orchestrator/` | `docs/harness-engineering/alignment/`, `tests/e2e/run-main-chain.mjs` |
 | Runtime、模型切换、LLM、Codex、Claude Code、Watchdog | `apps/server/src/modules/runtimes/` | `docs/contracts/runtime-contract-v0.1.md`, `docs/devops/watchdog-baseline.md`, `tests/e2e/runtime-routing-smoke.mjs` |
+| Codex/Claude 隔离 worktree、真实 ChangeSet、Session 冲突隔离 | `apps/server/src/modules/worktree-execution/` | `docs/design/managed-worktree-execution-v1.md`, `apps/server/src/modules/worktree-execution/worktree-execution.service.spec.ts` |
 | Agent 管理、默认 Agent | `apps/server/src/modules/agents/`, `packages/shared/src/default-agents.ts` | `docs/harness-engineering/10-agent-working-protocol.md` |
 | Skill 管理、Agent 绑定、ContextPack 注入 | `apps/server/src/modules/skills/`, `apps/server/src/modules/agents/` | `docs/contracts/api-contract-v0.1.md`, `tests/e2e/skill-injection-smoke.mjs` |
 | 任务、依赖、状态 | `apps/server/src/modules/tasks/` | `tests/e2e/task-dependency-smoke.mjs` |
@@ -62,12 +63,15 @@
 
 - `apps/web/src/main.ts`
 - `apps/web/src/App.vue`
+- `apps/web/src/router/index.ts`
 
 常见区域：
 
 | 需求关键词 | 主要路径 | 相关文档/测试 |
 | --- | --- | --- |
+| 应用壳层、主导航、页面路由 | `apps/web/src/components/AppShell.vue`, `apps/web/src/router/index.ts` | `docs/design/ui-style-guide-v1.md` |
 | 工作台整体布局 | `apps/web/src/components/SessionWorkspace.vue` | `docs/design/ui-style-guide-v1.md` |
+| Agent、Skill、知识库、设置、模型、工具、通知管理路由 | `apps/web/src/views/AdminRouteView.vue` | `docs/design/ui-style-guide-v1.md` |
 | 会话侧栏 | `apps/web/src/components/SessionSidebar.vue` | `apps/web/src/stores/session.ts` |
 | 聊天时间线、事件展示 | `apps/web/src/components/ChatTimeline.vue` | `docs/contracts/event-contract-v0.1.md` |
 | 用户输入框 | `apps/web/src/components/UserInputBox.vue` | `tests/e2e/chinese-visible-copy-smoke.mjs` |
@@ -99,6 +103,7 @@
 | `docs/design/codex-style-agent-collaboration-architecture-v1.md` | 可切换 Engineering Runtime 的群聊协作架构与 token 预算防线 |
 | `docs/ai-agent-context/pluggable-engineering-runtime-memory.md` | 群聊 Agent、ContextPack、Engineering Runtime 与 token 预算的长期架构记忆 |
 | `docs/design/workspace-aware-chat-agent-design-v1.md` | 聊天室 Agent 借鉴 Codex/Claude 工作区感知模型的产品与系统设计 |
+| `docs/design/workspace-index-first-on-demand-context-system-design-v1.md` | V1 工作目录快速绑定、增量元数据索引、Context v2 按需取证和单活动 Session 的权威系统设计 |
 | `docs/design/ui-style-guide-v1.md` | 前端 UI 风格规范 |
 | `docs/implementation/agent-team-implementation-breakdown-v1.md` | Agent 团队实现拆解 |
 | `docs/analysis/feature-inventory-and-status-v1.md` | 功能清单与当前状态 |
@@ -154,13 +159,19 @@
 | “优化前端体验” | 前端地图、UI 风格文档、相关组件 |
 | “调整 API/事件/类型” | 合同文档、`packages/shared/src/contracts.ts`、前后端调用点 |
 | “改 Agent 协作/编排” | Orchestrator、sessions、tasks、events、runtime、Harness alignment 文档 |
-| “改群聊 Agent/ContextPack/token 预算/Engineering Runtime” | `docs/ai-agent-context/pluggable-engineering-runtime-memory.md`, `docs/design/codex-style-agent-collaboration-architecture-v1.md`, `docs/design/context-router-target-design-v1.md` |
+| “改 Agent/ContextEnvelope/token 预算/动态 Runtime” | `docs/product/context-pipeline-v2-only-session-requirements-v1.md`, `docs/design/context-pipeline-v2-only-agent-decoupling-system-design-v1.md`, `docs/implementation/context-pipeline-v2-only-agent-decoupling-development-v1.md` |
 | “改 Runtime/模型配置” | runtimes 模块、runtime contract、runtime e2e |
 | “改记忆/RAG/知识库” | memory、rag、delivery-memory 文档、相关 e2e |
 | “改 Codex/Claude 工作方式” | `AGENTS.md`, `.claude/CLAUDE.md`, `docs/ai-agent-context/` |
 | “只问概念/方案” | 只读相关文档，不编辑文件 |
 
 ## 永久记忆维护位置
+
+当前 v2-only 交付基线：
+
+- 产品目标：`docs/product/context-pipeline-v2-only-session-requirements-v1.md`
+- 系统设计：`docs/design/context-pipeline-v2-only-agent-decoupling-system-design-v1.md`
+- 开发实施：`docs/implementation/context-pipeline-v2-only-agent-decoupling-development-v1.md`
 
 | 记忆类型 | 维护位置 |
 | --- | --- |
@@ -176,3 +187,17 @@
 | 运维和本地开发 | `docs/devops/` |
 
 新增永久记忆前，先判断它属于哪一类。不要把所有记忆都堆到 `AGENTS.md` 或 `.claude/CLAUDE.md`。
+
+## Workspace-Aware Context v2 实现索引
+
+| 主题 | 权威设计 | 主要实现 |
+| --- | --- | --- |
+| v2 唯一主链路与历史非兼容边界 | `docs/design/workspace-aware-context-v2-integration-closure-v1.md` | `apps/server/src/modules/orchestrator/orchestrator.service.ts` |
+| v2 单轨、Agent/Skill/Tool/Runtime 解耦与零保留切换 | `docs/design/context-pipeline-v2-only-agent-decoupling-system-design-v1.md`, `docs/implementation/context-pipeline-v2-only-agent-decoupling-development-v1.md` | shared contracts、Agent Profile、Runtime Routing、Tool Authority、Persistence Maintenance |
+| L0-L6 Context Envelope | 同上 | `apps/server/src/modules/context-v2/`, `packages/shared/src/contracts.ts` |
+| 动态 Runtime 路由与 fail-closed | 同上 | `apps/server/src/modules/runtime-routing/` |
+| Local/Server Workspace Provider 与 Local Runtime | `docs/design/local-and-server-runtime-workspace-separation-discussion-result-v1.md` | `apps/server/src/modules/workspaces/`, `apps/server/src/modules/local-runtime/`, `apps/web/src/stores/localRuntime.ts` |
+| Workspace Index First、按需 Evidence 与 V1 单活动 Session | `docs/design/workspace-index-first-on-demand-context-system-design-v1.md` | `apps/server/src/modules/sessions/`, `apps/server/src/modules/workspaces/`, `apps/server/src/modules/context-v2/`, `apps/server/src/modules/orchestrator/`, `packages/local-runtime-cli/src/` |
+| Runtime 密钥持久化 | `docs/devops/local-development.md` | `apps/server/src/common/secret-cipher.ts` |
+
+系统只保留 v2 行为；`CONTEXT_PIPELINE_V2_ENABLED` 已失效，历史 Session 不保留旧 Runtime/Model 或 Agent override 执行语义。

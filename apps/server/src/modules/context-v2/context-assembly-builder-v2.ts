@@ -15,7 +15,12 @@ import { nowIso } from '../../common/time.js';
 import { allowedLayersForPhase, type ContextPhase } from './phase-context-policy.js';
 
 const EMPTY_L2: ContextL2ProjectMap = { source: 'generated', modules: [] };
-const EMPTY_L3: ContextL3SelectedEvidence = { files: [], totalByteLength: 0, truncated: false };
+const EMPTY_L3: ContextL3SelectedEvidence = {
+  files: [],
+  fileRevisions: [],
+  totalByteLength: 0,
+  truncated: false
+};
 const EMPTY_L4: ContextL4ToolResults = { calls: [] };
 const EMPTY_L5: ContextL5SummaryMemory = { bullets: [], turnCount: 0 };
 const EMPTY_L6: ContextL6DeliveryArtifacts = { changeSetIds: [], reportIds: [] };

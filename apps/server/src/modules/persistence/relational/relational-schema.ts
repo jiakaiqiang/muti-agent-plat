@@ -706,6 +706,61 @@ export const RELATIONAL_TABLES: RelationalTableDefinition[] = [
   ])
 ];
 
+export const RELATIONAL_SCHEMA_V2_TABLES: RelationalTableDefinition[] = [
+  table('local_runtime_devices', '保存本机 Runtime CLI 设备身份、兼容版本和轮换令牌摘要。', [
+    column('id', 'bigint generated always as identity primary key', '本机 Runtime 设备内部主键。'),
+    column('device_id', 'text not null unique', 'CLI 生成并长期保存的稳定设备标识。'),
+    column('owner_id', 'text not null', '拥有该设备授权的用户标识。'),
+    column('display_name', 'text not null', '设备在管理界面中的展示名称。'),
+    column('status', 'text not null', '设备当前状态，例如 active 或 revoked。'),
+    column('cli_version', 'text not null', '设备最近上报的 Runtime CLI 版本。'),
+    column('protocol_version', 'integer not null', '设备最近上报的本机 Runtime 协议版本。'),
+    column('runtimes', "jsonb not null default '{}'::jsonb", '设备可执行的 Runtime 类型及版本。'),
+    column('access_token_hash', 'text', '当前短期访问令牌的单向摘要。'),
+    column('access_token_expires_at', 'timestamptz', '当前短期访问令牌的过期时间。'),
+    column('refresh_token_hash', 'text', '当前刷新令牌的单向摘要。'),
+    column('refresh_token_expires_at', 'timestamptz', '当前刷新令牌的过期时间。'),
+    column('created_at', 'timestamptz not null', '设备首次授权时间。'),
+    column('last_seen_at', 'timestamptz', '设备最近一次通过鉴权或发送心跳的时间。'),
+    column('revoked_at', 'timestamptz', '设备授权被撤销的时间。'),
+    column('source_snapshot', "jsonb not null default '{}'::jsonb", '用于无损回读本机 Runtime 设备合同的兼容快照。'),
+    column('updated_at', 'timestamptz not null default now()', '设备记录最近更新时间。')
+  ], [], ['create index if not exists local_runtime_devices_owner_idx on agent_cluster.local_runtime_devices (owner_id, status)']),
+  table('local_runtime_operation_audits', '保存平台通过本机 Runtime 工作区执行操作时的脱敏审计记录。', [
+    column('id', 'bigint generated always as identity primary key', '本机 Runtime 操作审计内部主键。'),
+    column('request_id', 'text not null unique', '工作区操作请求的稳定标识。'),
+    column('invocation_id', 'text not null', '触发该操作的 Runtime 调用标识。'),
+    column('owner_id', 'text not null', '操作发生时的设备所有者标识。'),
+    column('workspace_id', 'text not null', '操作针对的授权工作区标识。'),
+    column('operation', 'text not null', '工作区操作类型。'),
+    column('revision_id', 'text not null', '操作绑定的工作区版本标识。'),
+    column('status', 'text not null', '操作审计状态，例如 pending、ok 或 error。'),
+    column('error_code', 'text', '操作失败时的稳定错误码。'),
+    column('requested_at', 'timestamptz not null', '操作请求创建时间。'),
+    column('completed_at', 'timestamptz', '操作完成时间。'),
+    column('source_snapshot', "jsonb not null default '{}'::jsonb", '用于无损回读操作审计合同的兼容快照。')
+  ], [], ['create index if not exists local_runtime_operation_audits_workspace_idx on agent_cluster.local_runtime_operation_audits (workspace_id, requested_at)'])
+];
+
+export const RELATIONAL_SCHEMA_V3_TABLES: RelationalTableDefinition[] = [
+  table('file_revision_records', '保存不可变文件基线以及用户修订后的多 Agent 处理运行记录。', [
+    column('id', 'bigint generated always as identity primary key', '文件修订记录内部主键。'),
+    column('external_id', 'text not null unique', '基线或修订运行的稳定业务标识。'),
+    column('session_id', 'bigint references agent_cluster.sessions(id) on delete cascade', '所属会话内部主键。'),
+    column('legacy_session_external_id', 'text', '父会话记录暂不可用时保留的会话业务标识。'),
+    column('record_type', 'text not null check (record_type in (\'baseline\', \'run\'))', '区分不可变基线记录与修订处理运行记录。'),
+    column('status', 'text', '修订运行当前状态；基线记录为空。'),
+    column('file_path', 'text not null', '工作区内相对源文件路径。'),
+    column('source_snapshot', "jsonb not null default '{}'::jsonb", '仅保存内容引用的无损领域快照。'),
+    column('created_at', 'timestamptz not null', '记录创建时间。'),
+    column('updated_at', 'timestamptz not null', '记录最近更新时间。'),
+    column('deleted_at', 'timestamptz', '记录软删除时间。')
+  ], [], [
+    'create index if not exists file_revision_records_session_idx on agent_cluster.file_revision_records (session_id, created_at)',
+    'create index if not exists file_revision_records_active_idx on agent_cluster.file_revision_records (record_type, status) where deleted_at is null'
+  ])
+];
+
 const CURRENT_VERSION_FOREIGN_KEYS = [
   'alter table agent_cluster.agents add constraint agents_current_version_fk foreign key (current_version_id) references agent_cluster.agent_versions(id)',
   'alter table agent_cluster.skills add constraint skills_current_version_fk foreign key (current_version_id) references agent_cluster.skill_versions(id)',
@@ -760,8 +815,16 @@ export const RELATIONAL_SCHEMA_V1_SQL = [
   )
 ].join('\n\n');
 
+export const RELATIONAL_SCHEMA_V2_SQL = renderTables(RELATIONAL_SCHEMA_V2_TABLES);
+export const RELATIONAL_SCHEMA_V3_SQL = renderTables(RELATIONAL_SCHEMA_V3_TABLES);
+
 export function expectedRelationalComments() {
-  return [SCHEMA_MIGRATIONS_TABLE, ...RELATIONAL_TABLES].flatMap((definition) => [
+  return [
+    SCHEMA_MIGRATIONS_TABLE,
+    ...RELATIONAL_TABLES,
+    ...RELATIONAL_SCHEMA_V2_TABLES,
+    ...RELATIONAL_SCHEMA_V3_TABLES
+  ].flatMap((definition) => [
     { table: definition.name, column: null, comment: definition.comment },
     ...definition.columns.map((item) => ({ table: definition.name, column: item.name, comment: item.comment }))
   ]);

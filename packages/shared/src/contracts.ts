@@ -7,6 +7,7 @@ import type {
 } from './runtime-contracts/artifact-contracts.js';
 import type {
   AgentMessageOutput as RegisteredAgentMessageOutput,
+  FileRevisionCandidateOutput as RegisteredFileRevisionCandidateOutput,
   FinalDeliveryOutput as RegisteredFinalDeliveryOutput,
   PostReviewAction as RegisteredPostReviewAction,
   PostReviewReportOutput as RegisteredPostReviewReportOutput,
@@ -21,6 +22,9 @@ import type {
 export type UUID = string;
 export type ISODateTime = string;
 
+/** Maximum complete UTF-8 file accepted by the revision iteration workflow. */
+export const FILE_REVISION_MAX_BYTES = 200_000;
+
 export type SessionStatus =
   | 'DRAFT_INPUT'
   | 'AGENT_DISCUSSING'
@@ -32,6 +36,7 @@ export type SessionStatus =
   | 'POST_REVIEW'
   | 'REWORKING'
   | 'WAIT_USER_DECISION'
+  | 'INTERRUPTED'
   | 'COMPLETED'
   | 'FAILED'
   | 'CANCELLED';
@@ -188,7 +193,6 @@ export type EvidenceSourceType =
 
 export const WORKSPACE_PROVIDER_KINDS = [
   'server_local',
-  'browser_broker',
   'local_bridge'
 ] as const;
 
@@ -203,6 +207,77 @@ export type WorkspaceCapabilities = Readonly<Record<WorkspaceCapabilityKey, bool
 export type WorkspaceRevision = {
   id: string;
   observedAt: ISODateTime;
+};
+
+export type WorkspaceBinding = {
+  workspaceId: UUID;
+  providerKind: WorkspaceProviderKind;
+  displayName: string;
+  capabilities: WorkspaceCapabilities;
+  boundRevision: WorkspaceRevision;
+  boundAt: ISODateTime;
+};
+
+export type WorkspaceIndexStatus = 'empty' | 'building' | 'ready' | 'stale' | 'failed';
+
+export type WorkspaceNavigationEntry = {
+  path: string;
+  kind: 'file' | 'directory';
+  size?: number;
+  modifiedAt?: ISODateTime;
+  language?: string;
+  generated: boolean;
+  sensitive: boolean;
+};
+
+export type WorkspaceIndexSnapshot = {
+  workspaceId: UUID;
+  revision: WorkspaceRevision;
+  generation: number;
+  status: WorkspaceIndexStatus;
+  complete: boolean;
+  entries: WorkspaceNavigationEntry[];
+  entrypoints: string[];
+  detectedStack: string[];
+  indexedEntries: number;
+  truncated: boolean;
+  updatedAt: ISODateTime;
+  errorCode?: string;
+};
+
+export type WorkspaceIndexSnapshotPage = Omit<WorkspaceIndexSnapshot, 'entries'> & {
+  entries: WorkspaceNavigationEntry[];
+  nextCursor?: string;
+};
+
+export type WorkspaceIndexSummary = Omit<WorkspaceIndexSnapshot, 'entries'>;
+
+export type WorkspaceIndexSnapshotInput = {
+  cursor?: string;
+  limit?: number;
+  generation?: number;
+};
+
+/** Bounded metadata-only lookup used to discover task-relevant workspace paths. */
+export type WorkspaceIndexQueryInput = {
+  query?: string;
+  pathHints?: string[];
+  symbols?: string[];
+  intent?: string;
+  limit?: number;
+  generation?: number;
+};
+
+export type WorkspaceIndexQueryResult = Omit<WorkspaceIndexSnapshot, 'entries'> & {
+  entries: WorkspaceNavigationEntry[];
+  matched: number;
+};
+
+export type SessionWorkspaceContext = {
+  binding: WorkspaceBinding;
+  indexGeneration?: number;
+  indexRevision?: WorkspaceRevision;
+  indexComplete: boolean;
 };
 
 export type FileHash = {
@@ -221,7 +296,8 @@ export type FileMetadata =
   | (FileMetadataBase & {
       kind: 'file';
       size: number;
-      hash: FileHash;
+      /** Present for stat/read evidence, omitted for metadata-only navigation. */
+      hash?: FileHash;
     })
   | (FileMetadataBase & {
       kind: 'directory';
@@ -235,6 +311,7 @@ export type ListDirectoryInput = {
   maxDepth?: number;
   cursor?: string;
   limit?: number;
+  deadlineMs?: number;
 };
 
 export type ListDirectoryResult = {
@@ -262,7 +339,12 @@ export type ReadFileResult = {
   byteLength: number;
   truncated: boolean;
   revision: WorkspaceRevision;
-  hash: FileHash;
+  /** Full-file hash. Present only when the complete file was intentionally read. */
+  hash?: FileHash;
+  /** Hash of the returned bytes for range/truncated evidence. */
+  rangeHash?: FileHash;
+  fileSize?: number;
+  modifiedAt?: ISODateTime;
   startLine?: number;
   endLine?: number;
 };
@@ -274,6 +356,7 @@ export type SearchTextInput = {
   exclude?: string[];
   caseSensitive?: boolean;
   maxResults?: number;
+  deadlineMs?: number;
 };
 
 export type SearchTextMatch = {
@@ -344,22 +427,14 @@ export type RuntimeArtifactSystemEvidence = {
 };
 
 export type RuntimeWorkspaceExecution =
-  | {
-      mode: 'git_worktree';
-      repositoryId: string;
-      baseRevision: WorkspaceRevision;
-      changeSet: WorkspaceChangeSet;
-      dirtyBaseline: boolean;
-      requiresUserConfirmation: true;
-    }
-  | {
-      mode: 'browser_mirror';
-      workspaceId: string;
-      baseRevision: WorkspaceRevision;
-      changeSet: WorkspaceChangeSet;
-      dirtyBaseline: false;
-      requiresUserConfirmation: true;
-    };
+  {
+    mode: 'git_worktree';
+    repositoryId: string;
+    baseRevision: WorkspaceRevision;
+    changeSet: WorkspaceChangeSet;
+    dirtyBaseline: boolean;
+    requiresUserConfirmation: true;
+  };
 
 export const WORKSPACE_BASE_HASH_MISMATCH = 'WORKSPACE_BASE_HASH_MISMATCH' as const;
 
@@ -383,6 +458,8 @@ export type ExecutionTargetSource =
   | 'smart_router'
   | 'global_default';
 
+export type RuntimeExecutionLocation = 'local' | 'server';
+
 export type ResolvedExecutionTarget = {
   runtimeType: RuntimeType;
   modelId?: string;
@@ -392,6 +469,7 @@ export type ResolvedExecutionTarget = {
   requiredToolIds: readonly UUID[];
   writeMode: RuntimeWriteMode;
   workspaceProviderKind: WorkspaceProviderKind;
+  executionLocation: RuntimeExecutionLocation;
 };
 
 export type WorkspaceLeaseMode = 'read' | 'read_write';
@@ -409,6 +487,8 @@ export type WorkspaceLease = {
 export type WorkspaceOperationKind =
   | 'capabilities'
   | 'getRevision'
+  | 'getIndexSnapshot'
+  | 'queryWorkspaceIndex'
   | 'listDirectory'
   | 'statFile'
   | 'readFile'
@@ -417,14 +497,21 @@ export type WorkspaceOperationKind =
 
 export type WorkspaceOperationStatus = 'pending' | 'ok' | 'error';
 
-export type WorkspaceOperationRequest =
-  | { requestId: UUID; workspaceId: string; operation: 'capabilities' }
-  | { requestId: UUID; workspaceId: string; operation: 'getRevision' }
-  | { requestId: UUID; workspaceId: string; operation: 'listDirectory'; input: ListDirectoryInput }
-  | { requestId: UUID; workspaceId: string; operation: 'statFile'; input: StatFileInput }
-  | { requestId: UUID; workspaceId: string; operation: 'readFile'; input: ReadFileInput }
-  | { requestId: UUID; workspaceId: string; operation: 'searchText'; input: SearchTextInput }
-  | { requestId: UUID; workspaceId: string; operation: 'applyChangeSet'; input: WorkspaceChangeSet };
+export type WorkspaceOperationRequest = {
+  requestId: UUID;
+  invocationId: UUID;
+  workspaceId: string;
+} & (
+  | { operation: 'capabilities' }
+  | { operation: 'getRevision' }
+  | { operation: 'getIndexSnapshot'; input: WorkspaceIndexSnapshotInput }
+  | { operation: 'queryWorkspaceIndex'; input: WorkspaceIndexQueryInput }
+  | { operation: 'listDirectory'; input: ListDirectoryInput }
+  | { operation: 'statFile'; input: StatFileInput }
+  | { operation: 'readFile'; input: ReadFileInput }
+  | { operation: 'searchText'; input: SearchTextInput }
+  | { operation: 'applyChangeSet'; input: WorkspaceChangeSet }
+);
 
 export type WorkspaceOperationErrorPayload = {
   code: string;
@@ -441,7 +528,7 @@ export type WorkspaceOperationResult<T = unknown> = {
   error?: WorkspaceOperationErrorPayload;
 };
 
-export type RuntimeWriteMode = 'none' | 'propose_changes' | 'direct_audited';
+export type RuntimeWriteMode = 'none' | 'propose_changes' | 'proposal_only' | 'direct_audited';
 
 export type ContextEnvelopeV2Layer = 'L0' | 'L1' | 'L2' | 'L3' | 'L4' | 'L5' | 'L6';
 
@@ -474,6 +561,10 @@ export type ContextL1NavigationManifest = {
   entries: ContextL1NavigationEntry[];
   truncated: boolean;
   nextCursor?: string;
+  indexGeneration?: number;
+  indexStatus?: WorkspaceIndexStatus;
+  indexComplete?: boolean;
+  indexRevision?: WorkspaceRevision;
 };
 
 export type ContextL1Task = {
@@ -517,10 +608,252 @@ export type ContextL3EvidenceFile = {
   startLine?: number;
   endLine?: number;
   hash?: FileHash;
+  revision?: WorkspaceRevision;
+};
+
+export type FileRevisionDiffLine = {
+  kind: 'context' | 'add' | 'remove';
+  content: string;
+};
+
+export type FileRevisionDiffHunk = {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: FileRevisionDiffLine[];
+};
+
+export type FileRevisionDiffSummary = {
+  addedLines: number;
+  removedLines: number;
+  unchangedLines: number;
+  hunkCount: number;
+};
+
+export type FileRevisionAgentResult = {
+  id: UUID;
+  taskId: UUID;
+  agentId: UUID;
+  status: 'completed' | 'failed';
+  artifactIds: UUID[];
+  summary: string;
+  proposedContentRef?: string;
+  /** Hydrated only inside an invocation envelope; persisted runs keep the contentRef. */
+  proposedContent?: string;
+  completedAt: ISODateTime;
+  error?: string;
+};
+
+/** Complete immutable evidence distributed to every Agent selected for one revision iteration. */
+export type FileRevisionEvidence = {
+  chainId: UUID;
+  revisionId: UUID;
+  iteration: number;
+  filePath: string;
+  baseKind: 'workspace_baseline' | 'previous_candidate';
+  base: {
+    hash: FileHash;
+    contentRef: string;
+    content: string;
+    byteLength: number;
+  };
+  userDraft: {
+    hash: FileHash;
+    contentRef: string;
+    content: string;
+    byteLength: number;
+  };
+  diff: {
+    hash: FileHash;
+    contentRef: string;
+    hunks: FileRevisionDiffHunk[];
+    summary: FileRevisionDiffSummary;
+  };
+  evidenceHash: string;
+  agentResults?: FileRevisionAgentResult[];
+  complete: true;
+  truncated: false;
+};
+
+export type FileRevisionBaseline = {
+  id: UUID;
+  dataEpoch: UUID;
+  sessionId: UUID;
+  workspaceId: string;
+  filePath: string;
+  workspaceRevision: WorkspaceRevision;
+  hash: FileHash;
+  contentRef: string;
+  sizeBytes: number;
+  source: 'system_output' | 'user_selected' | 'post_apply';
+  capturedAt: ISODateTime;
+};
+
+export type FileRevisionChainStatus =
+  | 'active'
+  | 'applying'
+  | 'applied'
+  | 'abandoned'
+  | 'stale'
+  | 'failed';
+
+export type FileRevisionChain = {
+  id: UUID;
+  dataEpoch: UUID;
+  sessionId: UUID;
+  workspaceId: string;
+  filePath: string;
+  rootBaselineId: UUID;
+  workspaceExpectedRevision: WorkspaceRevision;
+  workspaceExpectedHash: FileHash;
+  latestRevisionId: UUID;
+  latestIteration: number;
+  stateVersion: number;
+  status: FileRevisionChainStatus;
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+  completedAt?: ISODateTime;
+  postApplyBaselineStatus?: 'pending' | 'captured' | 'failed';
+  postApplyBaselineId?: UUID;
+  postApplyBaselineError?: string;
+};
+
+export type FileRevisionRunStatus =
+  | 'submitted'
+  | 'processing'
+  | 'synthesizing'
+  | 'awaiting_confirmation'
+  | 'superseded'
+  | 'applying'
+  | 'applied'
+  | 'abandoned'
+  | 'stale'
+  | 'failed'
+  | 'interrupted';
+
+export type FileRevisionRun = {
+  id: UUID;
+  chainId: UUID;
+  dataEpoch: UUID;
+  sessionId: UUID;
+  baselineId: UUID;
+  workspaceId: string;
+  filePath: string;
+  iteration: number;
+  parentRevisionId?: UUID;
+  /** Stable key used to collapse retries of the same next-iteration request. */
+  reprocessKey?: string;
+  /** Stable key used to collapse retries after a process restart. */
+  recoveryRetryKey?: string;
+  recoveryRetryMode?: 'run_agents' | 'receiver_only' | 'apply_reconcile';
+  status: FileRevisionRunStatus;
+  baseKind: 'workspace_baseline' | 'previous_candidate';
+  baseHash: FileHash;
+  baseContentRef: string;
+  baseSizeBytes: number;
+  userDraftHash: FileHash;
+  userDraftContentRef: string;
+  userDraftSizeBytes: number;
+  diffContentRef: string;
+  diffHash: FileHash;
+  diffSummary: FileRevisionDiffSummary;
+  targetAgentIds: UUID[];
+  instruction?: string;
+  contextSnapshotHash: string;
+  agentResults: FileRevisionAgentResult[];
+  synthesisTaskId?: UUID;
+  receiverInvocationId?: UUID;
+  candidateChangeSetId?: UUID;
+  candidateContentRef?: string;
+  candidateHash?: FileHash;
+  candidateSizeBytes?: number;
+  confirmationId?: UUID;
+  errorCode?: string;
+  errorMessage?: string;
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+  completedAt?: ISODateTime;
+};
+
+export type FileRevisionEditorDraft = {
+  chainId: UUID;
+  sourceRevisionId: UUID;
+  sourceCandidateHash: FileHash;
+  contentRef: string;
+  contentHash: FileHash;
+  sizeBytes: number;
+  updatedBy: ActorRef;
+  updatedAt: ISODateTime;
+};
+
+export type FileRevisionEditorDraftContent = FileRevisionEditorDraft & {
+  content: string;
+};
+
+export type FileRevisionState = {
+  baselines: FileRevisionBaseline[];
+  chains: FileRevisionChain[];
+  runs: FileRevisionRun[];
+  drafts: FileRevisionEditorDraft[];
+};
+
+export type FileRevisionCandidate = {
+  revisionId: UUID;
+  chainId: UUID;
+  iteration: number;
+  candidateHash: FileHash;
+  content: string;
+  sizeBytes: number;
+  status: FileRevisionRunStatus;
+  stateVersion: number;
+};
+
+export type CaptureFileRevisionBaselineInput = {
+  filePath: string;
+  source?: FileRevisionBaseline['source'];
+};
+
+export type CreateFileRevisionRunInput = {
+  baselineId: UUID;
+  targetAgentIds: UUID[];
+  instruction?: string;
+};
+
+export type SaveFileRevisionDraftInput = {
+  expectedCandidateHash: FileHash;
+  content: string;
+};
+
+export type ReprocessFileRevisionInput = {
+  draftHash: FileHash;
+  expectedCandidateHash: FileHash;
+  expectedStateVersion: number;
+  targetAgentIds?: UUID[];
+  instruction?: string;
+};
+
+export type ResolveFileRevisionFailureInput = {
+  expectedStateVersion: number;
+  decision: 'retry_agents' | 'continue_with_successful' | 'abandon_revision';
+  instruction?: string;
+};
+
+export type RetryInterruptedFileRevisionInput = {
+  expectedStateVersion: number;
+  retryKey: string;
+};
+
+export type DecideFileRevisionInput = {
+  confirmationId: UUID;
+  candidateHash: FileHash;
+  expectedStateVersion: number;
+  decision: 'apply_candidate' | 'abandon_revision';
 };
 
 export type ContextL3SelectedEvidence = {
   files: ContextL3EvidenceFile[];
+  fileRevisions?: FileRevisionEvidence[];
   totalByteLength: number;
   truncated: boolean;
 };
@@ -576,7 +909,8 @@ export type WorkspaceIndexEntry =
       path: string;
       kind: 'file';
       size: number;
-      hash: FileHash;
+      /** Content hashes are intentionally absent from the metadata index. */
+      hash?: FileHash;
       revision: WorkspaceRevision;
       generated: boolean;
       sensitive: boolean;
@@ -607,7 +941,7 @@ export type ApplyChangeSetResult =
     };
 
 export type SessionWorkingDirectory = {
-  kind: 'browser_local' | 'server_local';
+  kind: 'local_bridge' | 'server_local';
   id: UUID;
   name: string;
   path?: string;
@@ -634,6 +968,10 @@ export type WorkspaceFileSnapshot = {
   language?: string;
   content?: string;
   summary?: string;
+  hash?: FileHash;
+  revision?: WorkspaceRevision;
+  startLine?: number;
+  endLine?: number;
 };
 
 export type WorkspaceSkippedFile = {
@@ -727,6 +1065,8 @@ export type CollaborationEventType =
   | 'brief_rejected'
   | 'user_confirmation_requested'
   | 'user_confirmation_resolved'
+  | 'capability_approval_required'
+  | 'capability_approved'
   | 'task_created'
   | 'task_assigned'
   | 'task_accepted'
@@ -761,6 +1101,21 @@ export type CollaborationEventType =
   | 'workflow_run_completed'
   | 'workflow_run_failed'
   | 'workflow_run_cancelled'
+  | 'file_revision_baseline_captured'
+  | 'file_revision_chain_created'
+  | 'file_revision_iteration_submitted'
+  | 'file_revision_dispatched'
+  | 'file_revision_agent_completed'
+  | 'file_revision_synthesis_started'
+  | 'file_revision_candidate_generated'
+  | 'file_revision_draft_saved'
+  | 'file_revision_candidate_superseded'
+  | 'file_revision_failure_decision_requested'
+  | 'file_revision_failure_resolved'
+  | 'file_revision_apply_started'
+  | 'file_revision_applied'
+  | 'file_revision_stale'
+  | 'file_revision_failed'
   | 'error_reported';
 
 export type EventRenderType =
@@ -830,6 +1185,9 @@ export type SessionDetail = {
   currentTaskBriefId?: UUID;
   knowledgeBaseIds?: UUID[];
   workingDirectory?: SessionWorkingDirectory;
+  workspaceContext?: SessionWorkspaceContext;
+  /** Provider-owned metadata index projection; never contains file content. */
+  workspaceIndex?: WorkspaceIndexSnapshot;
   workspaceSnapshot?: WorkspaceSnapshot;
   workspaceMode?: WorkspaceMode;
   pendingBootstrapWorkflow?: PendingBootstrapWorkflow;
@@ -838,12 +1196,25 @@ export type SessionDetail = {
   workflowRun?: WorkflowRunState;
   supplementalContextRequests?: Array<{
     id: UUID;
-    taskId: UUID;
+    taskId?: UUID;
     agentId: UUID;
+    phase?: AgentRunPhase;
     requestedContext: RuntimeContextRequest;
     resolution: SupplementalContextResolution;
     createdAt: ISODateTime;
   }>;
+  /**
+   * Existing-session messages that have completed receiver intent recognition
+   * and are waiting for receiver decomposition/execution. The queue is
+   * persisted so an in-flight task can finish without losing later input.
+   */
+  pendingFollowUpMessages?: SessionFollowUpMessage[];
+  activeFollowUpMessageId?: UUID;
+  /**
+   * Invocations that are paused waiting for capability approval.
+   * After user approves, these are automatically retried.
+   */
+  pendingInvocations?: PendingInvocation[];
   tokenBudget?: number;
   tokenUsed: number;
   taskDomain?: TaskDomain;
@@ -852,6 +1223,15 @@ export type SessionDetail = {
   participatingAgentIds: UUID[];
   createdAt: ISODateTime;
   updatedAt: ISODateTime;
+  interruption?: {
+    reason:
+      | 'local_runtime_disconnected'
+      | 'frontend_disconnected'
+      | 'service_shutdown';
+    invocationId?: UUID;
+    occurredAt: ISODateTime;
+    wakeable: true;
+  };
 };
 
 export type SessionListItem = Pick<
@@ -1246,6 +1626,8 @@ export type AgentTask = {
   assignedBy?: ActorRef;
   /** 被指派方。 */
   assignee?: ActorRef;
+  /** Explicit receiver routing boundary, used by @Agent follow-up tasks. */
+  eligibleAgentIds?: UUID[];
   routingMode?: TaskRoutingMode;
   autoResolutionAttempted?: boolean;
   assignmentReason?: string;
@@ -1258,7 +1640,9 @@ export type AgentTask = {
   workflowNodeRunId?: UUID;
   workflowNodeType?: WorkflowNode['type'];
   workflowAttempt?: number;
-  executionPurpose?: 'agent_work' | 'workflow_review';
+  executionPurpose?: 'agent_work' | 'workflow_review' | 'file_revision' | 'revision_synthesis';
+  /** Links task execution to the immutable user-revision snapshot in L3. */
+  fileRevisionId?: UUID;
   dependsOnTaskIds: UUID[];
   acceptanceCriteria: string[];
   resultSummary?: string;
@@ -1369,13 +1753,25 @@ export type UserMessageHandlingPlan = {
   coordinatorInstruction: string;
 };
 
+export type SessionFollowUpMessage = {
+  id: UUID;
+  sourceEventId: UUID;
+  content: string;
+  mentionedAgentIds: UUID[];
+  handlingPlan: UserMessageHandlingPlan;
+  status: 'queued' | 'planning' | 'executing';
+  queuedAt: ISODateTime;
+  startedAt?: ISODateTime;
+};
+
 export type RuntimeInvocationStatus =
   | 'queued'
   | 'running'
   | 'completed'
   | 'failed'
   | 'cancelled'
-  | 'blocked';
+  | 'blocked'
+  | 'pending_approval';
 
 export type RuntimeUsage = {
   inputTokens: number;
@@ -1385,9 +1781,24 @@ export type RuntimeUsage = {
   model?: string;
 };
 
-export type RuntimeModelProvider = 'openai-compatible' | 'ollama';
+export type RuntimeModelProvider = 'openai-compatible' | 'anthropic-compatible' | 'ollama';
 export type RuntimeModelKind = 'local' | 'remote';
 export type RuntimeModelSource = 'env' | 'default' | 'local' | 'remote';
+export type RuntimeCredentialLocation = 'local' | 'server';
+
+export const RUNTIME_MODEL_PROVIDER_RUNTIMES = {
+  'openai-compatible': ['generic_llm', 'codex'],
+  'anthropic-compatible': ['claude_code'],
+  ollama: ['generic_llm']
+} as const satisfies Readonly<Record<RuntimeModelProvider, readonly RuntimeType[]>>;
+
+export function runtimeTypesForModelProvider(provider: RuntimeModelProvider): readonly RuntimeType[] {
+  return RUNTIME_MODEL_PROVIDER_RUNTIMES[provider];
+}
+
+export function modelProviderSupportsRuntime(provider: RuntimeModelProvider, runtimeType: RuntimeType): boolean {
+  return (RUNTIME_MODEL_PROVIDER_RUNTIMES[provider] as readonly RuntimeType[]).includes(runtimeType);
+}
 
 export type RuntimeModelOption = {
   id: string;
@@ -1395,6 +1806,9 @@ export type RuntimeModelOption = {
   provider: RuntimeModelProvider;
   source: RuntimeModelSource;
   kind: RuntimeModelKind;
+  credentialLocation: RuntimeCredentialLocation;
+  deviceId?: UUID;
+  compatibleRuntimeTypes: readonly RuntimeType[];
   model: string;
   baseUrl?: string;
   hasApiKey: boolean;
@@ -1419,11 +1833,16 @@ export type RuntimeModelConfig = {
 export type RuntimeModelCreateInput =
   | {
       kind: 'local';
+      provider?: 'ollama';
+      credentialLocation?: 'server';
       model: string;
       label?: string;
     }
   | {
       kind: 'remote';
+      provider?: Extract<RuntimeModelProvider, 'openai-compatible' | 'anthropic-compatible'>;
+      credentialLocation?: RuntimeCredentialLocation;
+      deviceId?: UUID;
       model: string;
       baseUrl: string;
       apiKey: string;
@@ -1434,6 +1853,9 @@ export type RuntimeModelUpdateInput = {
   label?: string;
   model?: string;
   baseUrl?: string;
+  provider?: Extract<RuntimeModelProvider, 'openai-compatible' | 'anthropic-compatible'>;
+  credentialLocation?: RuntimeCredentialLocation;
+  deviceId?: UUID;
   /** Omit to keep the stored key unchanged. */
   apiKey?: string;
 };
@@ -1656,9 +2078,15 @@ export type ContextAssembly = {
     contentLength?: number;
     truncated?: boolean;
     truncatedHint?: EvidenceTruncatedHint;
+    hash?: FileHash;
+    revision?: WorkspaceRevision;
+    startLine?: number;
+    endLine?: number;
     tokenEstimate?: number;
     selectionReason?: string;
   }>;
+  /** Frozen original/revised/diff evidence for file-revision tasks. */
+  fileRevisionEvidence?: FileRevisionEvidence[];
   projectMap?: ProjectMap;
   workspaceFocus?: {
     relevantFiles: string[];
@@ -1704,6 +2132,7 @@ export type AgentRunPhase =
   | 'brief_consultation'
   | 'task_acceptance'
   | 'task_execution'
+  | 'revision_synthesis'
   | 'post_review'
   | 'final_delivery'
   | 'user_message_routing';
@@ -1714,6 +2143,23 @@ export type SystemDataMetadata = {
   pipelineVersion: 'v2';
   cutoverAt: ISODateTime;
   cutoverAuditId: UUID;
+};
+
+export type PendingApprovalInfo = {
+  toolId: string;
+  toolKey: string;
+  approvalId: string;
+  reasons: string[];
+};
+
+export type PendingInvocation = {
+  invocationId: UUID;
+  sessionId: UUID;
+  taskId: UUID;
+  agentId: UUID;
+  phase: AgentRunPhase;
+  pendingApprovals: PendingApprovalInfo[];
+  createdAt: ISODateTime;
 };
 
 export type InvocationPlan = {
@@ -1729,6 +2175,7 @@ export type InvocationPlan = {
   budget: RuntimeBudget;
   attempt?: RuntimeAttemptTrace;
   resume?: RuntimeResumeRequest;
+  pendingApprovals?: PendingApprovalInfo[];
 };
 
 export type RuntimeAttemptTrace = {
@@ -1737,6 +2184,8 @@ export type RuntimeAttemptTrace = {
   retryOfInvocationId?: UUID;
   fallbackFromRuntimeType?: RuntimeType;
   fallbackReason?: string;
+  supplementalContextAttempt?: number;
+  supplementalContextDurationMs?: number;
 };
 
 export type RuntimeResumeRequest = {
@@ -1775,6 +2224,7 @@ export type ExpectedRuntimeOutput = {
 };
 
 export type RuntimeArtifactOutput = RegisteredRuntimeArtifactOutput;
+export type FileRevisionCandidateOutput = RegisteredFileRevisionCandidateOutput;
 export type RuntimeArtifactProposal = RegisteredRuntimeArtifactProposal;
 export type RuntimeArtifactMetadata = RegisteredRuntimeArtifactMetadata;
 
@@ -1782,6 +2232,16 @@ export type RuntimeContextRequest = {
   reason: string;
   requestedRefs: TaskEvidenceRef[];
   requestedPaths?: string[];
+  requestedDirectories?: Array<{
+    path: string;
+    depth?: number;
+  }>;
+  requestedSearches?: Array<{
+    query: string;
+    path?: string;
+    include?: string[];
+    exclude?: string[];
+  }>;
   requestedCommands?: string[];
   followUpInstruction?: string;
 };
@@ -1791,11 +2251,17 @@ export type SupplementalContextPathFailureCode =
   | 'PERMISSION_REQUIRED'
   | 'BROKER_OFFLINE'
   | 'READ_UNAVAILABLE'
+  | 'DEADLINE_EXCEEDED'
+  | 'WORKSPACE_REVISION_UNSTABLE'
   | 'READ_ERROR';
 
 export type SupplementalContextResolution = {
   requestedPaths: string[];
   hydratedPaths: string[];
+  /** Revision for each successfully materialized workspace evidence path. */
+  evidenceRevisions?: Record<string, WorkspaceRevision>;
+  listedDirectories?: string[];
+  completedSearches?: string[];
   failedPaths: Array<{
     path: string;
     code: SupplementalContextPathFailureCode;
@@ -1808,6 +2274,8 @@ export type SupplementalContextResolution = {
 
 export type ExecutionTerminationKind =
   | 'user_cancelled'
+  | 'frontend_disconnected'
+  | 'runtime_disconnected'
   | 'phase_timeout'
   | 'runtime_timeout'
   | 'service_shutdown'
@@ -1844,6 +2312,7 @@ export type RuntimeError = {
     | 'MODEL_ERROR'
     | 'RUNTIME_OUTPUT_CONTRACT_VIOLATION'
     | 'CAPABILITY_BLOCKED'
+    | 'HUMAN_APPROVAL_REQUIRED'
     | 'CONTEXT_INSUFFICIENT'
     | 'TOKEN_BUDGET_EXCEEDED'
     | 'UNKNOWN_ERROR';
@@ -1945,6 +2414,7 @@ export type UserMessageHandlingPlanOutput = RegisteredUserMessageHandlingPlanOut
 export type AgentRuntimeAdapter = {
   type: RuntimeType;
   metadata?: RuntimeAdapterMetadata;
+  maxStructuredOutputTokens?: (input: { modelId?: string }) => number | undefined;
   start(input: InvocationPlan, signal?: AbortSignal): AgentRuntimeRunHandle;
   checkAvailability?: () => Promise<RuntimeAvailability>;
   healthCheck?: () => Promise<RuntimeHealthStatus>;

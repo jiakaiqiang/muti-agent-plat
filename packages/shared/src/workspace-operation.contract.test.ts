@@ -17,6 +17,8 @@ type OperationKindsAreStable = Assert<
     WorkspaceOperationKind,
     | 'capabilities'
     | 'getRevision'
+    | 'getIndexSnapshot'
+    | 'queryWorkspaceIndex'
     | 'listDirectory'
     | 'statFile'
     | 'readFile'
@@ -31,6 +33,7 @@ type StatusesAreStable = Assert<
 
 const readRequest: WorkspaceOperationRequest = {
   requestId: '00000000-0000-4000-8000-000000000091',
+  invocationId: '00000000-0000-4000-8000-000000000191',
   workspaceId: 'ws-91',
   operation: 'readFile',
   input: { path: 'src/index.ts' }
@@ -38,6 +41,7 @@ const readRequest: WorkspaceOperationRequest = {
 
 const listRequest: WorkspaceOperationRequest = {
   requestId: '00000000-0000-4000-8000-000000000092',
+  invocationId: '00000000-0000-4000-8000-000000000192',
   workspaceId: 'ws-91',
   operation: 'listDirectory',
   input: { path: 'src', limit: 20 }

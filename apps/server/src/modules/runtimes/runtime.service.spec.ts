@@ -4,6 +4,7 @@ import type { AgentRunResult, AgentRuntimeAdapter, AgentRuntimeEvent, Invocation
 import { createAgentMessageOutput, createRuntimeArtifactSystemEvidence } from '@agent-cluster/shared';
 import { makeInvocationPlan } from './invocation-plan.fixture.js';
 import { RuntimeService } from './runtime.service.js';
+import { createExecutionTermination } from '../../common/execution-termination.js';
 
 function completed(plan: InvocationPlan, runtimeType: RuntimeType = plan.executionTarget.runtimeType): AgentRunResult {
   return {
@@ -34,7 +35,11 @@ function adapter(type: RuntimeType, run?: (plan: InvocationPlan) => Promise<Agen
 function createService(
   adapters: AgentRuntimeAdapter[],
   configuredAdapters: AgentRuntimeAdapter[] = adapters,
-  executions: { worktree?: unknown; browserMirror?: unknown } = {},
+  executions: {
+    worktree?: unknown;
+    serverWorker?: unknown | null;
+    workspaceBindings?: unknown;
+  } = {},
   initialInvocations?: Record<string, unknown[]>
 ) {
   const persisted = new Map<string, unknown>();
@@ -59,6 +64,18 @@ function createService(
     ...configuredAdapters,
     ...Array.from({ length: 6 }, () => adapter('human'))
   ].slice(0, 6);
+  const serverWorker = executions.serverWorker === null
+    ? undefined
+    : executions.serverWorker ?? {
+        start(plan: InvocationPlan) {
+          const selected = adapters.find((item) => item.type === plan.executionTarget.runtimeType);
+          if (!selected) throw new Error(`Test Worker has no adapter for ${plan.executionTarget.runtimeType}.`);
+          return selected.start(plan);
+        }
+      };
+  const workspaceBindings = executions.workspaceBindings ?? {
+    resolveServerRoot: () => 'C:/isolated-test-workspace'
+  };
   const service = new RuntimeService(
     persistence as never,
     registry as never,
@@ -69,7 +86,9 @@ function createService(
     placeholders[4] as never,
     placeholders[5] as never,
     executions.worktree as never,
-    executions.browserMirror as never
+    undefined,
+    serverWorker as never,
+    workspaceBindings as never
   );
   return { service, persisted };
 }
@@ -79,6 +98,40 @@ test('dispatches by InvocationPlan.executionTarget', async () => {
   const { service } = createService([codex]);
   const result = await service.run(makeInvocationPlan({ executionTarget: { runtimeType: 'codex' } }));
   assert.equal(result.runtimeType, 'codex');
+});
+
+test('cancels every active invocation belonging to a Session and waits for results', async () => {
+  const resolvers = new Map<string, (result: AgentRunResult) => void>();
+  let cancelCount = 0;
+  const pending: AgentRuntimeAdapter = {
+    type: 'codex',
+    start(plan) {
+      return {
+        events: (async function* () {})(),
+        result: new Promise<AgentRunResult>((resolve) => {
+          resolvers.set(plan.invocationId, resolve);
+        }),
+        async cancel() {
+          cancelCount += 1;
+          resolvers.get(plan.invocationId)?.(completed(plan, 'codex'));
+        }
+      };
+    }
+  };
+  const { service } = createService([pending]);
+  const first = service.start(makeInvocationPlan({ sessionId: 'delete-me', invocationId: 'inv-1', executionTarget: { runtimeType: 'codex' } }));
+  const second = service.start(makeInvocationPlan({ sessionId: 'delete-me', invocationId: 'inv-2', executionTarget: { runtimeType: 'codex' } }));
+  assert.equal(service.activeInvocationCount('delete-me'), 2);
+
+  const stopped = await service.cancelSessionAndWait(
+    'delete-me',
+    createExecutionTermination({ kind: 'frontend_disconnected', source: 'system', scope: 'session' })
+  );
+  await Promise.all([first.result, second.result]);
+
+  assert.equal(cancelCount, 2);
+  assert.deepEqual(stopped, { requested: 2, completed: 2, timedOut: false });
+  assert.equal(service.activeInvocationCount('delete-me'), 0);
 });
 
 test('module initialization waits for asynchronous Runtime registration', async () => {
@@ -136,50 +189,6 @@ test('passes the exact InvocationPlan object to the adapter', async () => {
   assert.equal(received, plan);
 });
 
-test('prepares and captures a browser mirror before dispatching Codex', async () => {
-  const calls: string[] = [];
-  let received: InvocationPlan | undefined;
-  const codex = adapter('codex', async (input) => {
-    received = input;
-    return completed(input, 'codex');
-  });
-  const browserMirror = {
-    shouldManage: () => true,
-    async prepare() {
-      calls.push('prepare');
-      return {
-        manifest: {
-          workspaceId: 'browser-workspace',
-          baseRevision: { id: 'revision-1', observedAt: '2026-07-14T00:00:00.000Z' },
-          skippedFiles: []
-        },
-        release() {
-          calls.push('release');
-        }
-      };
-    },
-    async capture(_lease: unknown, result: AgentRunResult) {
-      calls.push('capture');
-      return result;
-    }
-  };
-  const { service } = createService([codex], [codex], { browserMirror });
-  const handle = service.start(makeInvocationPlan({
-    executionTarget: { runtimeType: 'codex', workspaceProviderKind: 'browser_broker' },
-    resume: { cliSessionId: 'older-browser-mirror', workDir: 'C:/stale-mirror' }
-  }));
-  const events: AgentRuntimeEvent[] = [];
-  const consume = (async () => {
-    for await (const event of handle.events) events.push(event);
-  })();
-  const result = await handle.result;
-  await consume;
-  assert.equal(result.status, 'completed');
-  assert.equal(received?.resume, undefined);
-  assert.deepEqual(calls, ['prepare', 'capture', 'release']);
-  assert.equal(events.find((event) => event.metadata?.code === 'BROWSER_MIRROR_PREPARED')?.visibility, 'debug');
-});
-
 test('fails closed when the selected Runtime is not registered', async () => {
   const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'codex' } });
   const { service } = createService([]);
@@ -187,6 +196,14 @@ test('fails closed when the selected Runtime is not registered', async () => {
   assert.equal(result.status, 'failed');
   assert.equal(result.error?.code, 'CAPABILITY_BLOCKED');
   assert.match(result.error?.message ?? '', /Unsupported runtime/);
+});
+
+test('fails closed instead of running Codex in the Nest process when the Worker is unavailable', async () => {
+  const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'codex' } });
+  const { service } = createService([adapter('codex')], undefined, { serverWorker: null });
+  const result = await service.run(plan);
+  assert.equal(result.status, 'failed');
+  assert.match(result.error?.message ?? '', /Worker is unavailable; in-process execution is forbidden/i);
 });
 
 test('normalizes adapter promise rejection into a failed result', async () => {
@@ -220,13 +237,36 @@ test('persists the compiled Agent identity snapshot', async () => {
 });
 
 test('persists execution target, tool catalog, and ContextEnvelope together', async () => {
-  const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'mock', modelId: 'model-1' } });
+  const plan = makeInvocationPlan({
+    executionTarget: { runtimeType: 'mock', modelId: 'model-1' },
+    attempt: {
+      attemptGroupId: '00000000-0000-4000-8000-000000000904',
+      attempt: 2,
+      supplementalContextAttempt: 1,
+      supplementalContextDurationMs: 37
+    },
+    contextEnvelope: {
+      L1: { navigation: { indexGeneration: 4, indexStatus: 'building', indexComplete: false } },
+      L3: {
+        files: [{ path: 'src/main.ts', content: 'main', byteLength: 4 }],
+        totalByteLength: 4
+      }
+    }
+  });
   const { service } = createService([adapter('mock')]);
   await service.run(plan);
   const [log] = service.listInvocations(plan.sessionId);
   assert.equal(log.executionTarget, plan.executionTarget);
   assert.equal(log.toolCatalog, plan.toolCatalog);
   assert.equal(log.contextEnvelope, plan.contextEnvelope);
+  assert.equal(log.workspaceIndexGeneration, 4);
+  assert.equal(log.workspaceIndexStatus, 'building');
+  assert.equal(log.workspaceIndexComplete, false);
+  assert.equal(log.workspaceRevisionAtStart.id, 'revision-test');
+  assert.equal(log.supplementalContextAttempt, 1);
+  assert.equal(log.supplementalContextDurationMs, 37);
+  assert.equal(log.evidenceBytes, 4);
+  assert.deepEqual(log.evidencePaths, ['src/main.ts']);
 });
 
 test('persists Runtime usage and result status', async () => {

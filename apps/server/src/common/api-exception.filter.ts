@@ -13,10 +13,12 @@ export class ApiExceptionFilter implements ExceptionFilter {
     const response = host.switchToHttp().getResponse<JsonResponse>();
     const status = this.statusFor(exception);
     const message = this.messageFor(exception);
+    const structured = this.structuredResponse(exception);
     const error: ApiError = {
       error: {
-        code: this.codeFor(status, message),
-        message
+        code: structured?.code ?? this.codeFor(status, message),
+        message,
+        ...(structured?.details ? { details: structured.details } : {})
       },
       requestId: crypto.randomUUID()
     };
@@ -25,6 +27,18 @@ export class ApiExceptionFilter implements ExceptionFilter {
       this.logger.error(message, exception instanceof Error ? exception.stack : undefined);
     }
     response.status(status).json(error);
+  }
+
+  private structuredResponse(exception: unknown): { code?: string; details?: Record<string, unknown> } | undefined {
+    if (!(exception instanceof HttpException)) return undefined;
+    const response = exception.getResponse();
+    if (typeof response !== 'object' || response === null || Array.isArray(response)) return undefined;
+    const record = response as Record<string, unknown>;
+    const code = typeof record.code === 'string' ? record.code : undefined;
+    const details = Object.fromEntries(
+      Object.entries(record).filter(([key]) => !['code', 'message', 'statusCode', 'error'].includes(key))
+    );
+    return { ...(code ? { code } : {}), ...(Object.keys(details).length ? { details } : {}) };
   }
 
   private statusFor(exception: unknown) {

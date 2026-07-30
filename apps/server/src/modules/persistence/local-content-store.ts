@@ -116,6 +116,17 @@ export class LocalContentStore {
     return existsSync(resolve(this.rootDir, this.storagePathForHash(sha256)));
   }
 
+  remove(contentRef: string): boolean {
+    const sha256 = this.hashFromRef(contentRef);
+    const path = resolve(this.rootDir, this.storagePathForHash(sha256));
+    if (!this.isWithinRoot(path)) {
+      throw new Error('CONTENT_PATH_INVALID: content reference escapes LocalContentStore.');
+    }
+    if (!existsSync(path)) return false;
+    unlinkSync(path);
+    return true;
+  }
+
   private verifyHash(sha256: string): void {
     const path = resolve(this.rootDir, this.storagePathForHash(sha256));
     if (!existsSync(path)) throw new Error(`CONTENT_WRITE_FAILED: content object missing after write: ${sha256}`);

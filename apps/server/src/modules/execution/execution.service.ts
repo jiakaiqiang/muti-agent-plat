@@ -34,7 +34,16 @@ export class ExecutionService implements BeforeApplicationShutdown {
     onOutcome: (outcome: ExecutionOutcome) => void
   ) {
     if (this.shuttingDown) {
-      onOutcome({ kind: 'cancelled', reason: 'Service is shutting down; execution will recover after restart.' });
+      onOutcome({
+        kind: 'cancelled',
+        reason: 'Service is shutting down; execution requires a future user wake-up.',
+        termination: createExecutionTermination({
+          kind: 'service_shutdown',
+          source: 'system',
+          scope: 'service',
+          graceful: true
+        })
+      });
       return;
     }
     if (bullMqEnabled()) {

@@ -1,7 +1,7 @@
 # Multica 对标改造剩余事项需求文档 v1
 
 > 日期：2026-07-10
-> 状态：P0 仅受外部 Codex 上游阻塞（三次真实调用均不可用；Claude 与 PR-02～PR-04 已完成验收）；P1 的 PR-06 已完成，PR-05 工程实现完成；剩余真实验收已纳入计划但暂不启动；P2 冻结
+> 状态：Codex 本地 CLI/Runtime 可用，P0 仅受其外部模型上游验收阻塞；Claude 与 PR-02～PR-04 已完成验收；P1 的 PR-06 已完成，PR-05 工程实现完成；剩余真实验收已纳入计划但暂不启动；P2 冻结
 > 需求类型：P0/P1 统一闭环交付与 P2 后续版本规划
 > 上游需求：[`../analysis/multica-actionable-refactor-plan-v1.md`](../analysis/multica-actionable-refactor-plan-v1.md)
 > 已完成实现：[`../roadmap/multica-refactor-completion-execution-plan-v1.md`](../roadmap/multica-refactor-completion-execution-plan-v1.md)
@@ -44,7 +44,7 @@ v0.3 兼容清理、跨 Session Resume 和真实 Runtime Autopilot 统一归入 
 
 | 编号 | 需求 | 优先级 | 发布阻断 | 当前状态 |
 | --- | --- | --- | --- | --- |
-| PR-01 | 真实 Codex/Claude CLI 验收 | P0 | 是 | 部分通过/暂停：Claude 已完整通过；Codex 三次 `upstream_400`，补验任务已纳入计划但暂不启动 |
+| PR-01 | 真实 Codex/Claude CLI 验收 | P0 | 是 | Codex 本地 CLI/Runtime 可用、生产验收暂停：Claude 已完整通过；Codex 历史三次 `upstream_400`，2026-07-12 三次补验返回 502 |
 | PR-02 | PostgreSQL ActorRef 回填演练 | P0 | 是 | 已完成：隔离 PostgreSQL dry-run/apply/幂等/备份/回滚通过 |
 | PR-03 | Redis/BullMQ Autopilot 调度验收 | P0 | 是 | 已完成：真实 Redis 调度/去重/停用/重启恢复/队列指标通过 |
 | PR-04 | Workdir Brief 生产安全演练 | P0 | 是 | 已完成：Windows 字节恢复/崩溃恢复/lease/失败留证/TTL 通过 |

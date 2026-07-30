@@ -208,14 +208,12 @@ collect -> filter -> bind_to_stage -> use -> verify -> retain / drop / stale
 - `supplementalContextRequests` 入库前必须 dedupe：相同 `(refKind+ref/label)`、相同 `requestedPaths`、相同 `requestedCommands` 不重复落库，整轮全是重复的请求直接拒绝重试，并在 `session.events` 落 `agent_message{phase:'context_supplement', rejectionReason:'duplicate_request'}`。
 - runtime 收到 `requestedContext` 后只能补充新条目；不允许把已经被 supply 过的 ref/path/command 重新打包。
 
-### Token preflight：`navigation_only` 终极兜底
+### Token preflight：v2 fail-closed 证据门禁
 
-裁剪阶段链：`initial → focused → compact → minimal → ultra-minimal → emergency → navigation_only`。
-
-- 上下文协议要求 emergency 仍越 `budget.maxInputTokens` 时必须降级到 `navigation_only`，禁止直接抛 `TOKEN_BUDGET_EXCEEDED`。
-- `navigation_only` 产出：`workspaceManifest` 仅保 `rootName + entrypoints + detectedStack`，`workspaceFocus` 仅保 `relevantFiles + possibleEntryPoints + validationCommands`，`selectedEvidenceContents / projectMap / relevantEvents / relevantMemories / ragSnippets / artifacts` 全清空，`taskContext / currentTask / taskBrief / agentProfile / summaryMemory` 压扁到 id/title/status 级别。
-- `systemRules` 末尾必须追加 `contextDegraded=true: ...`，告知 runtime 必须通过 CONTEXT_INSUFFICIENT.requestedPaths 主动取回需要的文件，禁止凭空推断。
-- diagnostics 新增 `stagesTried[]` / `finalStage` / `droppedSections[]`，供 Governance 与 debug 接口追踪降级路径。
+- v2 在 Envelope 构造期做分层预算和 Evidence 选择，不对完整 Context 做 `minimal / ultra-minimal / navigation_only` 事后裁剪。
+- 代码实现和架构分析阶段缺少可读 L3 正文时必须 fail closed，返回 `CONTEXT_INSUFFICIENT`，不得仅凭目录、文档声明或路径名称形成结论。
+- 补读只把实际读取成功的路径加入下一轮上下文；失败、延期和未执行 command 必须可观测且可重试项不得被提前 dedupe。
+- 架构分析把 AGENTS、README 和设计文档视为导航声明，并用当前入口文件和模块源码交叉核验数据流。
 
 ### selectedEvidenceContents 智能截断 hint
 

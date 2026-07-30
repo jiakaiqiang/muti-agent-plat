@@ -73,11 +73,12 @@ discussion, task execution, post-review, and final delivery happen in the
 background; clients should follow `/api/sessions/:sessionId/events/stream` or
 poll `/api/sessions/:sessionId/events` for progress.
 
-When `ENABLE_BULLMQ=false`, `ExecutionService` runs the pipeline in-process and
-`RecoveryService` can re-drive interrupted `EXECUTING` sessions on boot
-(`AGENT_CLUSTER_RECOVER_ON_BOOT=true`). When `ENABLE_BULLMQ=true`, confirmed
-briefs enqueue `agent-task-queue` jobs and the in-process BullMQ worker consumes
-them with `QUEUE_ATTEMPTS` and `QUEUE_CONCURRENCY`.
+When `ENABLE_BULLMQ=false`, `ExecutionService` runs the pipeline in-process.
+On backend restart, `RecoveryService` reconciles in-flight Sessions to a
+wakeable `INTERRUPTED` state (`AGENT_CLUSTER_RECOVER_ON_BOOT=true`) and never
+re-drives Runtime invocations automatically. When `ENABLE_BULLMQ=true`,
+confirmed briefs enqueue `agent-task-queue` jobs and the in-process BullMQ
+worker consumes them with `QUEUE_ATTEMPTS` and `QUEUE_CONCURRENCY`.
 
 Runtime dispatch uses an explicit registry. `mock` and `generic_llm` execute
 when configured; reserved or unsupported runtime types such as `codex`,

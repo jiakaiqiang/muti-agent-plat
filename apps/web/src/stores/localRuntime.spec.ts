@@ -49,6 +49,11 @@ describe('localRuntimeErrorMessage', () => {
   })
 })
 
+it('identifies a Vite proxy reset during directory authorization as a retryable restart', () => {
+  expect(localRuntimeErrorMessage(new Error('POST /local-runtime/workspaces/authorize failed: 500')))
+    .toContain('服务刚刚重启')
+})
+
 describe('browser-triggered Local Runtime workspace authorization', () => {
   beforeEach(() => {
     setActivePinia(createPinia())

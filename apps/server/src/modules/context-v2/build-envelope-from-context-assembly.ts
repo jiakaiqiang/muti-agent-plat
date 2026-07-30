@@ -6,17 +6,23 @@ import type {
   ContextL3EvidenceFile,
   ContextL3SelectedEvidence,
   ContextAssembly,
+  FileRevisionEvidence,
   SessionDetail,
+  WorkspaceIndexEntry,
   WorkspaceRevision
 } from '@agent-cluster/shared';
 import { buildIndexFromSnapshot } from '../workspaces/workspace-index/build-index-from-snapshot.js';
 import { deriveWorkspaceEntrypoints } from '../workspaces/workspace-index/derive-workspace-entrypoints.js';
+import { isGeneratedWorkspacePath } from '../workspaces/workspace-index/is-generated-workspace-path.js';
+import { isSensitiveWorkspacePath } from '../workspaces/workspace-index/is-sensitive-workspace-path.js';
 import { buildNavigationManifest } from './build-navigation-manifest.js';
 import { buildProjectMap } from './build-project-map.js';
 import { buildContextEnvelopeV2 } from './context-assembly-builder-v2.js';
 import type { ContextPhase } from './phase-context-policy.js';
 import { selectEvidenceWithinBudget } from './select-evidence-within-budget.js';
 import type { ScoredEvidenceCandidate } from './score-evidence-candidates.js';
+import { workspaceProviderKindForDirectory } from '../workspaces/workspace-provider.js';
+import { workspaceMetrics } from '../../common/workspace-metrics.js';
 
 const DEFAULT_INPUT_TOKENS = 32_000;
 
@@ -30,9 +36,22 @@ export function buildEnvelopeFromContextAssembly(args: {
 }): ContextEnvelopeV2 {
   const { session, contextAssembly } = args;
   const snapshot = session.workspaceSnapshot;
-  const revision = snapshot?.revision ?? snapshotRevision(snapshot?.scannedAt, snapshot?.rootName ?? session.workspaceId);
-  const index = snapshot ? buildIndexFromSnapshot(snapshot, revision) : [];
-  const entrypoints = snapshot ? deriveWorkspaceEntrypoints(snapshot, index) : [];
+  const providerIndex = session.workspaceIndex;
+  const revision = providerIndex?.revision ?? session.workspaceContext?.indexRevision ?? snapshot?.revision ?? snapshotRevision(snapshot?.scannedAt, snapshot?.rootName ?? session.workspaceId);
+  const sourceIndex = providerIndex
+    ? providerIndex.entries.map((entry): WorkspaceIndexEntry => entry.kind === 'file'
+      ? { ...entry, kind: 'file', size: entry.size ?? 0, revision }
+      : { ...entry, kind: 'directory', revision })
+    : snapshot
+      ? buildIndexFromSnapshot(snapshot, revision)
+      : [];
+  const revisionEntries = contextAssembly.fileRevisionEvidence ?? [];
+  const index = includeFileRevisionNavigationEntries(sourceIndex, revisionEntries, revision);
+  const sourceEntrypoints = providerIndex?.entrypoints ?? (snapshot ? deriveWorkspaceEntrypoints(snapshot, index) : []);
+  const entrypoints = [...new Set([
+    ...sourceEntrypoints,
+    ...revisionEntries.map((item) => item.filePath)
+  ])];
   const inputTokens = contextAssembly.budget.maxInputTokens ?? session.tokenBudget ?? DEFAULT_INPUT_TOKENS;
   const evidenceTokens = Math.floor(inputTokens * 0.4);
   const allowedEvidencePaths = new Set(
@@ -40,7 +59,29 @@ export function buildEnvelopeFromContextAssembly(args: {
       .filter((entry) => entry.kind === 'file' && !entry.generated && !entry.sensitive)
       .map((entry) => entry.path)
   );
-  const evidence = selectedEvidence(contextAssembly, evidenceTokens, allowedEvidencePaths);
+  const hydratedSupplementalPaths = new Set(
+    (session.supplementalContextRequests ?? []).flatMap((request) =>
+      request.resolution.hydratedPaths.filter((path) =>
+        !providerIndex || request.resolution.evidenceRevisions?.[path]?.id === revision.id
+      )
+    )
+  );
+  for (const item of contextAssembly.selectedEvidenceContents ?? []) {
+    const path = item.ref?.trim() || item.label.trim();
+    if (item.source === 'workspace_file' && item.content && hydratedSupplementalPaths.has(path)) {
+      allowedEvidencePaths.add(path);
+    }
+  }
+  const hasFileRevisionEvidence = Boolean(contextAssembly.fileRevisionEvidence?.length);
+  const workspaceEvidenceTokens = hasFileRevisionEvidence ? Math.floor(evidenceTokens * 0.2) : evidenceTokens;
+  const evidence = selectedEvidence(
+    contextAssembly,
+    workspaceEvidenceTokens,
+    allowedEvidencePaths,
+    providerIndex ? revision : undefined
+  );
+  const fileRevisionBudgetBytes = Math.max(0, (evidenceTokens - workspaceEvidenceTokens) * 4);
+  const revisionEvidence = selectedFileRevisionEvidence(contextAssembly, fileRevisionBudgetBytes);
 
   return buildContextEnvelopeV2({
     phase: toContextPhase(args.phase),
@@ -54,7 +95,7 @@ export function buildEnvelopeFromContextAssembly(args: {
       workspace: {
         workspaceId: session.workingDirectory?.id ?? session.workspaceId,
         rootName: snapshot?.rootName ?? session.workingDirectory?.name ?? 'workspace',
-        providerKind: session.workingDirectory?.kind === 'browser_local' ? 'browser_broker' : 'server_local',
+        providerKind: workspaceProviderKindForDirectory(session.workingDirectory?.kind),
         revision
       }
     },
@@ -74,14 +115,33 @@ export function buildEnvelopeFromContextAssembly(args: {
             }
           }
         : {}),
-      navigation: buildNavigationManifest({ entries: index, entrypoints })
+      navigation: {
+        ...buildNavigationManifest({ entries: index, entrypoints }),
+        ...(providerIndex
+          ? {
+              indexGeneration: providerIndex.generation,
+              indexStatus: providerIndex.status,
+              indexComplete: providerIndex.complete,
+              indexRevision: providerIndex.revision
+            }
+          : {})
+      }
     },
-    l2: buildProjectMap({ entries: index, entrypoints, detectedStack: snapshot?.detectedStack }),
+    l2: buildProjectMap({
+      entries: index,
+      entrypoints,
+      detectedStack: Array.from(new Set([
+        ...(providerIndex?.detectedStack ?? []),
+        ...(snapshot?.detectedStack ?? [])
+      ]))
+    }),
     l3: {
       files: evidence.files,
-      totalByteLength: evidence.totalByteLength,
+      fileRevisions: revisionEvidence.items,
+      totalByteLength: evidence.totalByteLength + revisionEvidence.totalByteLength,
       truncated:
         evidence.truncated ||
+        revisionEvidence.truncated ||
         (contextAssembly.selectedEvidenceContents?.some((item) => item.truncated === true) ?? false)
     },
     l5: {
@@ -101,21 +161,75 @@ export function buildEnvelopeFromContextAssembly(args: {
   });
 }
 
+function includeFileRevisionNavigationEntries(
+  source: WorkspaceIndexEntry[],
+  revisions: FileRevisionEvidence[],
+  revision: WorkspaceRevision
+): WorkspaceIndexEntry[] {
+  if (revisions.length === 0) return source;
+  const entries = [...source];
+  const existingPaths = new Set(entries.map((entry) => entry.path));
+  for (const evidence of revisions) {
+    const path = evidence.filePath;
+    if (!path || existingPaths.has(path)) continue;
+    entries.push({
+      path,
+      kind: 'file',
+      size: evidence.userDraft.byteLength,
+      revision,
+      generated: isGeneratedWorkspacePath(path),
+      sensitive: isSensitiveWorkspacePath(path)
+    });
+    existingPaths.add(path);
+  }
+  return entries;
+}
+
+function selectedFileRevisionEvidence(
+  contextAssembly: ContextAssembly,
+  budgetBytes: number
+): { items: FileRevisionEvidence[]; totalByteLength: number; truncated: boolean } {
+  const source = contextAssembly.fileRevisionEvidence ?? [];
+  if (source.length === 0) return { items: [], totalByteLength: 0, truncated: false };
+  if (source.some((item) => item.complete !== true || item.truncated !== false)) {
+    workspaceMetrics.increment('file_revision_context_incomplete_total', 1, { phase: 'context_compile' });
+    throw new Error('REVISION_CONTEXT_INCOMPLETE: revision evidence must never be truncated.');
+  }
+  const totalByteLength = Buffer.byteLength(JSON.stringify(source), 'utf8');
+  if (totalByteLength > budgetBytes) {
+    workspaceMetrics.increment('file_revision_model_capacity_rejected_total', 1, { phase: 'context_compile' });
+    throw new Error(
+      `REVISION_MODEL_CAPACITY_INSUFFICIENT: complete revision evidence needs ${totalByteLength} bytes, budget is ${budgetBytes}.`
+    );
+  }
+  return { items: source, totalByteLength, truncated: false };
+}
+
 function selectedEvidence(
   contextAssembly: ContextAssembly,
   evidenceTokenBudget: number,
-  allowedPaths: ReadonlySet<string>
+  allowedPaths: ReadonlySet<string>,
+  requiredRevision?: WorkspaceRevision
 ): ContextL3SelectedEvidence {
   const files = new Map<string, ContextL3EvidenceFile>();
   const candidates: ScoredEvidenceCandidate[] = [];
   for (const [index, item] of (contextAssembly.selectedEvidenceContents ?? []).entries()) {
     if (item.source !== 'workspace_file' || !item.content) continue;
     const path = item.ref?.trim() || item.label.trim();
-    if (!path || files.has(path) || !allowedPaths.has(path)) continue;
+    if (
+      !path ||
+      files.has(path) ||
+      !allowedPaths.has(path) ||
+      (requiredRevision && item.revision?.id !== requiredRevision.id)
+    ) continue;
     files.set(path, {
       path,
       content: item.content,
-      byteLength: Buffer.byteLength(item.content, 'utf8')
+      byteLength: Buffer.byteLength(item.content, 'utf8'),
+      ...(item.hash ? { hash: item.hash } : {}),
+      ...(item.revision ? { revision: item.revision } : {}),
+      ...(item.startLine ? { startLine: item.startLine } : {}),
+      ...(item.endLine ? { endLine: item.endLine } : {})
     });
     candidates.push({
       path,
@@ -187,7 +301,7 @@ function snapshotRevision(scannedAt: string | undefined, identity: string): Work
 }
 
 function toContextPhase(phase: AgentRunPhase): ContextPhase {
-  if (phase === 'task_acceptance' || phase === 'task_execution') return 'execution';
+  if (phase === 'task_acceptance' || phase === 'task_execution' || phase === 'revision_synthesis') return 'execution';
   if (phase === 'post_review') return 'post_review';
   if (phase === 'final_delivery') return 'delivery';
   return 'discussion';

@@ -47,6 +47,22 @@ describe('Debug runtime v2-only boundary', () => {
     }
   })
 
+  it('renders workspace index and supplemental evidence diagnostics', () => {
+    for (const field of [
+      'workspaceIndexGeneration',
+      'workspaceIndexStatus',
+      'workspaceIndexComplete',
+      'workspaceRevisionAtStart',
+      'supplementalContextAttempt',
+      'supplementalContextDurationMs',
+      'evidencePaths',
+      'file.hash?.value',
+      'file.revision?.id'
+    ]) {
+      expect(debugBoundary).toContain(field)
+    }
+  })
+
   it('loads the canonical v2 invocation audit endpoint', () => {
     expect(debugStore).toMatch(/debug\/runtime-invocations/)
     expect(debugBoundary).not.toMatch(/debug\/context-envelopes/)

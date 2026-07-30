@@ -12,8 +12,7 @@ export const RUNTIME_DIAGNOSTIC_EVENT_CODES = [
   'STREAM_TEXT',
   'STREAM_SYSTEM',
   'STREAM_STDERR',
-  'WORKTREE_PREPARED',
-  'BROWSER_MIRROR_PREPARED'
+  'WORKTREE_PREPARED'
 ] as const;
 
 export type RuntimeDiagnosticEventCode = (typeof RUNTIME_DIAGNOSTIC_EVENT_CODES)[number];

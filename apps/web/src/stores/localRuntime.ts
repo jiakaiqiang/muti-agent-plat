@@ -40,6 +40,9 @@ export function normalizeLocalRuntimeWorkspaces(
 
 export function localRuntimeErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : '读取本地 Runtime 工作区失败'
+  if (/POST \/local-runtime\/workspaces\/authorize failed: 500/i.test(message)) {
+    return 'Local Runtime 服务刚刚重启，目录选择请求已中断。请等待几秒后重新选择目录。'
+  }
   if (/administrator credential is not configured/i.test(message)) {
     return '本机 Runtime 管理尚未配置。'
   }

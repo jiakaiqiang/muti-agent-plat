@@ -3,7 +3,9 @@ import type { Pool, PoolClient } from 'pg';
 import {
   RELATIONAL_SCHEMA_BOOTSTRAP_SQL,
   RELATIONAL_SCHEMA_NAME,
-  RELATIONAL_SCHEMA_V1_SQL
+  RELATIONAL_SCHEMA_V1_SQL,
+  RELATIONAL_SCHEMA_V2_SQL,
+  RELATIONAL_SCHEMA_V3_SQL
 } from './relational-schema.js';
 
 type Migration = {
@@ -17,6 +19,16 @@ const MIGRATIONS: Migration[] = [
     version: 1,
     name: 'relational_persistence_v2_baseline',
     sql: RELATIONAL_SCHEMA_V1_SQL
+  },
+  {
+    version: 2,
+    name: 'local_runtime_devices_and_audits',
+    sql: RELATIONAL_SCHEMA_V2_SQL
+  },
+  {
+    version: 3,
+    name: 'file_revision_records',
+    sql: RELATIONAL_SCHEMA_V3_SQL
   }
 ];
 

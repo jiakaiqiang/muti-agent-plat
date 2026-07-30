@@ -117,8 +117,7 @@ test('debug visibility and raw system diagnostics never enter collaboration even
 test('workspace preparation diagnostics stay out of collaboration events even when misclassified as user-visible', async () => {
   const events = makeEventsSpy();
   await consumeRuntimeEvents(frames([
-    event({ metadata: { code: 'WORKTREE_PREPARED' } }),
-    event({ metadata: { code: 'BROWSER_MIRROR_PREPARED' } })
+    event({ metadata: { code: 'WORKTREE_PREPARED' } })
   ]), plan() as never, { events: events as never, createMetadata: makeMetadata });
   assert.deepEqual(events.created, []);
 });

@@ -1,7 +1,14 @@
 import { createHash } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
+import { computePersistenceRevision } from '../postgres-cutover-transaction.js';
 import { ContentReferenceCodec } from '../content-reference-codec.js';
 import type { StoredContent } from '../local-content-store.js';
+import {
+  RELATIONAL_SCHEMA_NAME,
+  RELATIONAL_SCHEMA_V2_TABLES,
+  RELATIONAL_SCHEMA_V3_TABLES,
+  RELATIONAL_TABLES
+} from './relational-schema.js';
 
 export type PersistedState = Record<string, unknown>;
 export type ToolInvocationAuditRecord = {
@@ -59,6 +66,7 @@ const KNOWN_COLLECTIONS = new Set([
   'workflowCatalog',
   'workflows',
   'sessions',
+  'fileRevisions',
   'eventsBySession',
   'briefsBySession',
   'suggestedTasksByBriefId',
@@ -71,8 +79,25 @@ const KNOWN_COLLECTIONS = new Set([
   'workflowRuntime',
   'autopilots',
   'autopilotRuns',
+  'localRuntimeDevices',
+  'localRuntimeOperationAudits',
   'cutoverAudits'
 ]);
+
+const RETAINED_OPERATIONAL_TABLES = new Set(['migration_runs', 'migration_errors']);
+const REPLACEABLE_RELATIONAL_TABLES = [
+  ...RELATIONAL_TABLES,
+  ...RELATIONAL_SCHEMA_V2_TABLES,
+  ...RELATIONAL_SCHEMA_V3_TABLES
+]
+  .map((definition) => definition.name)
+  .filter((name) => !RETAINED_OPERATIONAL_TABLES.has(name))
+  .map((name) => {
+    if (!/^[a-z_][a-z0-9_]*$/.test(name)) throw new Error(`Unsafe relational table name: ${name}`);
+    return `${RELATIONAL_SCHEMA_NAME}.${name}`;
+  });
+const REPLACE_RELATIONAL_STATE_SQL =
+  `truncate table ${REPLACEABLE_RELATIONAL_TABLES.join(', ')} restart identity cascade`;
 
 export function assertRelationalCollectionsMapped(state: PersistedState): void {
   const unknown = Object.keys(state).filter((key) => !KNOWN_COLLECTIONS.has(key));
@@ -137,6 +162,30 @@ export class RelationalStateStore {
     }
   }
 
+  async compareAndSetCollection(key: string, expected: unknown, value: unknown): Promise<void> {
+    if (key !== 'fileRevisions') {
+      throw new Error(`RELATIONAL_COLLECTION_CAS_UNSUPPORTED: ${key}`);
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      await client.query('select pg_advisory_xact_lock(hashtext($1))', ['agent_cluster:file-revisions']);
+      const current = await this.loadFileRevisionsWithClient(client);
+      if (collectionRevision(current) !== collectionRevision(expected)) {
+        throw new Error('REVISION_PERSISTENCE_CONFLICT: PostgreSQL file revision state changed in another process.');
+      }
+      const externalized = this.codec.externalize(value);
+      await this.registerContents(client, externalized.contents);
+      await this.writeFileRevisions(client, record(externalized.value));
+      await client.query('commit');
+    } catch (error) {
+      await client.query('rollback').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async replaceState(
     state: PersistedState,
     verify?: (loaded: PersistedState) => void | Promise<void>
@@ -146,6 +195,7 @@ export class RelationalStateStore {
     try {
       await client.query('begin');
       const externalized = this.codec.externalize(state);
+      await client.query(REPLACE_RELATIONAL_STATE_SQL);
       await this.registerContents(client, externalized.contents);
       for (const key of collectionWriteOrder(externalized.value)) {
         await this.writeCollectionWithClient(client, key, externalized.value[key]);
@@ -365,6 +415,7 @@ export class RelationalStateStore {
       case 'workflowCatalog': return this.writeWorkflowCatalog(client, record(value));
       case 'workflows': return this.writeWorkflowDrafts(client, array(value));
       case 'sessions': return this.writeSessions(client, array(value));
+      case 'fileRevisions': return this.writeFileRevisions(client, record(value));
       case 'eventsBySession': return this.writeEvents(client, record(value));
       case 'briefsBySession': return this.writeBriefs(client, record(value));
       case 'suggestedTasksByBriefId': return this.writeSuggestedTasks(client, record(value));
@@ -377,6 +428,8 @@ export class RelationalStateStore {
       case 'workflowRuntime': return this.writeWorkflowRuntime(client, record(value));
       case 'autopilots': return this.writeAutopilots(client, array(value));
       case 'autopilotRuns': return this.writeAutopilotRuns(client, array(value));
+      case 'localRuntimeDevices': return this.writeLocalRuntimeDevices(client, array(value));
+      case 'localRuntimeOperationAudits': return this.writeLocalRuntimeOperationAudits(client, array(value));
       case 'cutoverAudits': return this.writeCutoverAudits(client, array(value));
       default: throw new Error(`RELATIONAL_COLLECTION_UNMAPPED: ${key}`);
     }
@@ -947,6 +1000,50 @@ export class RelationalStateStore {
     }
   }
 
+  private async writeFileRevisions(client: PoolClient, value: Record<string, unknown>) {
+    const active = new Set<string>();
+    const chains = array(value.chains).map(record);
+    const chainById = new Map(chains.map((item) => [text(item.id), item]));
+    const records = [
+      ...array(value.baselines).map((item) => ({ type: 'baseline' as const, externalId: text(record(item).id), item: record(item) })),
+      ...chains.map((item) => ({ type: 'chain' as const, externalId: text(item.id), item })),
+      ...array(value.runs).map((item) => ({ type: 'run' as const, externalId: text(record(item).id), item: record(item) })),
+      ...array(value.drafts).map((item) => ({
+        type: 'draft' as const,
+        externalId: `draft:${text(record(item).chainId)}`,
+        item: record(item)
+      }))
+    ];
+    for (const { type, externalId, item } of records) {
+      active.add(externalId);
+      const chain = type === 'draft' ? chainById.get(text(item.chainId)) : undefined;
+      const sessionExternalId = text(item.sessionId ?? chain?.sessionId);
+      const createdAt = date(item.capturedAt ?? item.createdAt ?? item.updatedAt);
+      const updatedAt = date(item.updatedAt ?? item.capturedAt ?? item.createdAt);
+      await client.query(
+        `insert into agent_cluster.file_revision_records
+         (external_id,session_id,legacy_session_external_id,record_type,status,file_path,source_snapshot,created_at,updated_at,deleted_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,null)
+         on conflict (external_id) do update set session_id=excluded.session_id,
+           legacy_session_external_id=excluded.legacy_session_external_id,record_type=excluded.record_type,
+           status=excluded.status,file_path=excluded.file_path,source_snapshot=excluded.source_snapshot,
+           updated_at=excluded.updated_at,deleted_at=null`,
+        [
+          externalId,
+          await idByExternal(client, 'sessions', sessionExternalId),
+          sessionExternalId,
+          type === 'baseline' ? 'baseline' : 'run',
+          type === 'baseline' || type === 'draft' ? null : nullableText(item.status),
+          text(item.filePath ?? chain?.filePath),
+          json({ sourceRecord: item, projectionKind: type }),
+          createdAt,
+          updatedAt
+        ]
+      );
+    }
+    await softDeleteMissing(client, 'file_revision_records', active);
+  }
+
   private async writeRuntimeModelConfig(client: PoolClient, value: Record<string, unknown>) {
     if (!Object.keys(value).length) return;
     const externalId = text(value.id, 'runtime-model:default');
@@ -956,6 +1053,66 @@ export class RelationalStateStore {
       secret_ref: nullableText(value.secretRef ?? value.apiKeyEncrypted), configuration: json({ sourceRecord: value }),
       status: text(value.status, 'enabled'), updated_at: date(value.updatedAt), deleted_at: null
     });
+  }
+
+  private async writeLocalRuntimeDevices(client: PoolClient, values: unknown[]) {
+    const deviceIds: string[] = [];
+    for (const rawValue of values) {
+      const item = record(rawValue);
+      const deviceId = text(item.deviceId);
+      deviceIds.push(deviceId);
+      await client.query(
+        `insert into agent_cluster.local_runtime_devices
+         (device_id,owner_id,display_name,status,cli_version,protocol_version,runtimes,
+          access_token_hash,access_token_expires_at,refresh_token_hash,refresh_token_expires_at,
+          created_at,last_seen_at,revoked_at,source_snapshot,updated_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
+         on conflict (device_id) do update set owner_id=excluded.owner_id,display_name=excluded.display_name,
+           status=excluded.status,cli_version=excluded.cli_version,protocol_version=excluded.protocol_version,
+           runtimes=excluded.runtimes,access_token_hash=excluded.access_token_hash,
+           access_token_expires_at=excluded.access_token_expires_at,refresh_token_hash=excluded.refresh_token_hash,
+           refresh_token_expires_at=excluded.refresh_token_expires_at,last_seen_at=excluded.last_seen_at,
+           revoked_at=excluded.revoked_at,source_snapshot=excluded.source_snapshot,updated_at=now()`,
+        [deviceId, text(item.ownerId), text(item.displayName), text(item.status), text(item.cliVersion),
+          integer(item.protocolVersion), json(item.runtimes), nullableText(item.accessTokenHash),
+          nullableDate(item.accessTokenExpiresAt), nullableText(item.refreshTokenHash),
+          nullableDate(item.refreshTokenExpiresAt), date(item.createdAt), nullableDate(item.lastSeenAt),
+          nullableDate(item.revokedAt), json({ sourceRecord: item })]
+      );
+    }
+    if (deviceIds.length) {
+      await client.query('delete from agent_cluster.local_runtime_devices where not (device_id = any($1::text[]))', [deviceIds]);
+    } else {
+      await client.query('delete from agent_cluster.local_runtime_devices');
+    }
+  }
+
+  private async writeLocalRuntimeOperationAudits(client: PoolClient, values: unknown[]) {
+    const requestIds: string[] = [];
+    for (const rawValue of values) {
+      const item = record(rawValue);
+      const requestId = text(item.requestId);
+      requestIds.push(requestId);
+      await client.query(
+        `insert into agent_cluster.local_runtime_operation_audits
+         (request_id,invocation_id,owner_id,workspace_id,operation,revision_id,status,error_code,
+          requested_at,completed_at,source_snapshot)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         on conflict (request_id) do update set status=excluded.status,error_code=excluded.error_code,
+           completed_at=excluded.completed_at,source_snapshot=excluded.source_snapshot`,
+        [requestId, text(item.invocationId), text(item.ownerId), text(item.workspaceId), text(item.operation),
+          text(item.revisionId), text(item.status), nullableText(item.errorCode), date(item.requestedAt),
+          nullableDate(item.completedAt), json({ sourceRecord: item })]
+      );
+    }
+    if (requestIds.length) {
+      await client.query(
+        'delete from agent_cluster.local_runtime_operation_audits where not (request_id = any($1::text[]))',
+        [requestIds]
+      );
+    } else {
+      await client.query('delete from agent_cluster.local_runtime_operation_audits');
+    }
   }
 
   private async writeRuntimeInvocations(client: PoolClient, value: Record<string, unknown>) {
@@ -1139,6 +1296,24 @@ export class RelationalStateStore {
     state.suggestedTasksByBriefId = await groupedSources(client, `select coalesce(b.external_id,t.legacy_brief_external_id) group_id,t.source_snapshot->'sourceRecord' value from agent_cluster.suggested_tasks t left join agent_cluster.briefs b on b.id=t.brief_id order by coalesce(b.external_id,t.legacy_brief_external_id),t.id`);
     state.tasksBySession = await groupedSources(client, `select s.external_id group_id,t.source_snapshot->'sourceRecord' value from agent_cluster.tasks t join agent_cluster.sessions s on s.id=t.session_id where s.deleted_at is null and t.deleted_at is null order by s.id,t.created_at`);
     state.memoriesBySession = await groupedSources(client, `select s.external_id group_id,m.metadata->'sourceRecord' value from agent_cluster.memories m join agent_cluster.sessions s on s.id=m.session_id where s.deleted_at is null and m.deleted_at is null order by s.id,m.created_at`);
+    state.fileRevisions = await this.loadFileRevisionsWithClient(client);
+  }
+
+  private async loadFileRevisionsWithClient(client: PoolClient) {
+    const revisionRows = await client.query<{ record_type: string; projection_kind: string | null; value: unknown }>(
+      `select record_type,source_snapshot->>'projectionKind' projection_kind,source_snapshot->'sourceRecord' value
+         from agent_cluster.file_revision_records
+        where deleted_at is null
+        order by created_at,id`
+    );
+    const value = {
+      schemaVersion: 2,
+      baselines: revisionRows.rows.filter((row) => row.record_type === 'baseline').map((row) => row.value),
+      chains: revisionRows.rows.filter((row) => row.projection_kind === 'chain').map((row) => row.value),
+      runs: revisionRows.rows.filter((row) => row.record_type === 'run' && (!row.projection_kind || row.projection_kind === 'run')).map((row) => row.value),
+      drafts: revisionRows.rows.filter((row) => row.projection_kind === 'draft').map((row) => row.value)
+    };
+    return record(this.codec.hydrate(value));
   }
 
   private async loadKnowledgeAndArtifacts(client: PoolClient, state: PersistedState) {
@@ -1154,6 +1329,8 @@ export class RelationalStateStore {
     state.runtimeInvocationsBySession = await groupedSources(client, `select coalesce(s.external_id,r.legacy_session_external_id) group_id,r.profile_snapshot->'sourceRecord' value from agent_cluster.runtime_invocations r left join agent_cluster.sessions s on s.id=r.session_id order by r.started_at`);
     const model = await client.query<{ value: unknown }>(`select configuration->'sourceRecord' value from agent_cluster.runtime_model_configs where deleted_at is null order by id limit 1`);
     state.runtimeModelConfig = model.rows[0]?.value ?? {};
+    state.localRuntimeDevices = await sourceRecords(client, `select source_snapshot->'sourceRecord' value from agent_cluster.local_runtime_devices order by id`);
+    state.localRuntimeOperationAudits = await sourceRecords(client, `select source_snapshot->'sourceRecord' value from agent_cluster.local_runtime_operation_audits order by requested_at,id`);
   }
 
   private async loadWorkflowRuntime(client: PoolClient, state: PersistedState) {
@@ -1180,7 +1357,7 @@ export class RelationalStateStore {
 }
 
 function collectionWriteOrder(state: PersistedState): string[] {
-  const order = ['systemDataMetadata','agents','skills','capabilities','workflowCatalog','workflows','sessions','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','cutoverAudits'];
+  const order = ['systemDataMetadata','agents','skills','capabilities','workflowCatalog','workflows','sessions','fileRevisions','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','localRuntimeDevices','localRuntimeOperationAudits','cutoverAudits'];
   return order.filter((key) => Object.prototype.hasOwnProperty.call(state, key));
 }
 
@@ -1288,6 +1465,27 @@ function sessionProgress(status: string): { phase: string; percent: number } {
   return { phase: 'intake', percent: 10 };
 }
 function hash(value: unknown): string { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
+function collectionRevision(value: unknown): string {
+  return computePersistenceRevision({ value: normalizeFileRevisionCollection(value) });
+}
+function normalizeFileRevisionCollection(value: unknown): Record<string, unknown> {
+  const source = record(value);
+  const byIdentity = (items: unknown[], kind: 'baseline' | 'chain' | 'run' | 'draft') => [...items].sort((left, right) => {
+    const leftRecord = record(left);
+    const rightRecord = record(right);
+    const identity = (item: Record<string, unknown>) => kind === 'draft'
+      ? `${text(item.chainId)}:${text(item.sourceRevisionId)}`
+      : text(item.id);
+    return identity(leftRecord).localeCompare(identity(rightRecord));
+  });
+  return {
+    schemaVersion: 2,
+    baselines: byIdentity(array(source.baselines), 'baseline'),
+    chains: byIdentity(array(source.chains), 'chain'),
+    runs: byIdentity(array(source.runs), 'run'),
+    drafts: byIdentity(array(source.drafts), 'draft')
+  };
+}
 function iso(value: unknown): unknown { return value instanceof Date?value.toISOString():value; }
 function duration(startedAt:string,completedAt?:string):number|null { if(!completedAt)return null; const value=Date.parse(completedAt)-Date.parse(startedAt); return Number.isFinite(value)&&value>=0?value:null; }
 async function sourceRecords(client:PoolClient,sql:string):Promise<unknown[]>{const r=await client.query<{value:unknown}>(sql);return r.rows.map(x=>x.value).filter(v=>v!==null);}

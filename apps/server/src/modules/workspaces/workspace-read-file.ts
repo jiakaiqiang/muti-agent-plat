@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { open, stat } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
 import type { FileHash, ReadFileInput, ReadFileResult, WorkspaceRevision } from '@agent-cluster/shared';
 import { isSensitivePath } from '../../common/path-safety.js';
 import { resolveWorkspacePath } from './workspace-path.js';
@@ -24,52 +26,98 @@ export async function readServerLocalFile(args: ReadServerLocalFileArgs): Promis
 
   await assertWorkspacePathWithinRoot(rootPath, relative);
 
-  const buffer = await readFile(absolute);
-  if (looksBinary(buffer)) {
+  const metadata = await stat(absolute);
+  if (!metadata.isFile()) throw new Error(`workspace read rejected non-file path: ${relative}`);
+  const handle = await open(absolute, 'r');
+  let probe: Buffer;
+  try {
+    probe = Buffer.alloc(Math.min(BINARY_PROBE_BYTES, metadata.size));
+    const result = await handle.read(probe, 0, probe.byteLength, 0);
+    probe = probe.subarray(0, result.bytesRead);
+  } finally {
+    await handle.close();
+  }
+  if (looksBinary(probe)) {
     throw new Error(`workspace read rejected binary file: ${relative}`);
   }
 
   const maxBytes = Math.max(1, input.maxBytes ?? DEFAULT_MAX_BYTES);
-  const fullText = buffer.toString('utf8');
-  const fullHash = hashBuffer(buffer);
-
-  const sliced = maybeSliceByLines(fullText, input.startLine, input.endLine);
-  if (sliced) {
-    return {
-      path: relative,
-      content: sliced.content,
-      encoding: 'utf-8',
-      byteLength: Buffer.byteLength(sliced.content, 'utf8'),
-      truncated: false,
-      revision,
-      hash: fullHash,
-      startLine: sliced.startLine,
-      endLine: sliced.endLine
-    };
-  }
-
-  if (buffer.byteLength > maxBytes) {
-    const capped = buffer.subarray(0, maxBytes).toString('utf8');
-    return {
-      path: relative,
-      content: capped,
-      encoding: 'utf-8',
-      byteLength: Buffer.byteLength(capped, 'utf8'),
-      truncated: true,
-      revision,
-      hash: fullHash
-    };
-  }
-
-  return {
+  const selected = await readBoundedText(absolute, metadata.size, maxBytes, input.startLine, input.endLine);
+  const returnedBuffer = Buffer.from(selected.content, 'utf8');
+  const fullRead = selected.complete && !selected.lineRange;
+  const result: ReadFileResult = {
     path: relative,
-    content: fullText,
+    content: selected.content,
     encoding: 'utf-8',
-    byteLength: buffer.byteLength,
-    truncated: false,
+    byteLength: returnedBuffer.byteLength,
+    truncated: selected.truncated,
     revision,
-    hash: fullHash
+    rangeHash: hashBuffer(returnedBuffer),
+    fileSize: metadata.size,
+    modifiedAt: metadata.mtime.toISOString(),
+    ...(selected.startLine !== undefined ? { startLine: selected.startLine } : {}),
+    ...(selected.endLine !== undefined ? { endLine: selected.endLine } : {})
   };
+  if (fullRead) result.hash = hashBuffer(returnedBuffer);
+  return result;
+}
+
+async function readBoundedText(
+  absolute: string,
+  fileSize: number,
+  maxBytes: number,
+  startLine?: number,
+  endLine?: number
+): Promise<{ content: string; truncated: boolean; complete: boolean; lineRange: boolean; startLine?: number; endLine?: number }> {
+  const lineRange = startLine !== undefined || endLine !== undefined;
+  const handle = await open(absolute, 'r');
+  try {
+    if (!lineRange) {
+      const target = Math.min(fileSize, maxBytes + 1);
+      const buffer = Buffer.alloc(target);
+      const result = await handle.read(buffer, 0, target, 0);
+      const read = buffer.subarray(0, result.bytesRead);
+      const truncated = read.byteLength > maxBytes;
+      const content = read.subarray(0, maxBytes).toString('utf8');
+      return { content, truncated, complete: !truncated && read.byteLength === fileSize, lineRange: false };
+    }
+
+    const targetStart = Math.max(1, startLine ?? 1);
+    const targetEnd = Math.max(targetStart, endLine ?? Number.MAX_SAFE_INTEGER);
+    const stream = createReadStream(absolute, { encoding: 'utf8', highWaterMark: 64 * 1024 });
+    const reader = createInterface({ input: stream, crlfDelay: Infinity });
+    const selected: string[] = [];
+    let currentLine = 0;
+    let selectedEnd = targetStart - 1;
+    let truncated = false;
+    try {
+      for await (const line of reader) {
+        currentLine += 1;
+        if (currentLine < targetStart) continue;
+        if (currentLine > targetEnd) break;
+        selected.push(line);
+        selectedEnd = currentLine;
+        if (Buffer.byteLength(selected.join('\n'), 'utf8') > maxBytes) {
+          truncated = true;
+          break;
+        }
+      }
+    } finally {
+      reader.close();
+      stream.destroy();
+    }
+    const contentBuffer = Buffer.from(selected.join('\n'), 'utf8');
+    return {
+      content: contentBuffer.subarray(0, maxBytes).toString('utf8'),
+      truncated,
+      complete: currentLine >= targetEnd || currentLine === 0 || currentLine < targetStart,
+      lineRange: true,
+      startLine: targetStart,
+      endLine: Math.max(targetStart, selectedEnd)
+    };
+  } finally {
+    await handle.close();
+  }
 }
 
 function hashBuffer(buffer: Buffer): FileHash {
@@ -82,20 +130,4 @@ function looksBinary(buffer: Buffer): boolean {
     if (buffer[i] === 0) return true;
   }
   return false;
-}
-
-function maybeSliceByLines(
-  content: string,
-  startLine?: number,
-  endLine?: number
-): { content: string; startLine: number; endLine: number } | null {
-  if (startLine === undefined && endLine === undefined) return null;
-  const lines = content.split('\n');
-  const start = Math.max(1, startLine ?? 1);
-  const end = Math.min(lines.length, endLine ?? lines.length);
-  if (start > end) {
-    return { content: '', startLine: start, endLine: end };
-  }
-  const chunk = lines.slice(start - 1, end).join('\n');
-  return { content: chunk, startLine: start, endLine: end };
 }

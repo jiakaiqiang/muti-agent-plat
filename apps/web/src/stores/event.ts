@@ -1,8 +1,7 @@
 import { defineStore } from 'pinia'
-import { apiPage, eventStreamUrl, parseSseEvent } from '@/api/client'
+import { apiGet, apiPage, eventStreamUrl, parseSseEvent } from '@/api/client'
 import { useAgentStore } from '@/stores/agent'
 import { useKnowledgeStore } from '@/stores/knowledge'
-import { useLocalWorkspaceStore } from '@/stores/localWorkspace'
 import { actorAgentId, eventAgentId } from '@/composables/useActor'
 import { applicableArtifactFileChanges } from '@/components/artifactFileChangeModel'
 import { shouldPublishRuntimeEventToCollaboration } from '@agent-cluster/shared'
@@ -37,6 +36,8 @@ const eventTypeToMessageType: Partial<Record<CollaborationEvent['type'], ChatMes
   task_rejected: 'task',
   task_reworked: 'task',
   user_confirmation_requested: 'confirmation',
+  capability_approval_required: 'confirmation',
+  capability_approved: 'text',
   runtime_started: 'task',
   runtime_progress: 'task',
   runtime_completed: 'task',
@@ -116,6 +117,7 @@ export function shouldRenderInTimeline(event: CollaborationEvent) {
       typeof payload.checkpointId === 'string' && typeof payload.memoryId === 'string')
   ) return false
   const unsafeVisibility = (event as unknown as { visibility?: unknown }).visibility
+  if (payload.phase === 'user_message_routing' && event.type.startsWith('runtime_')) return false
   if (!shouldPublishRuntimeEventToCollaboration({
     type: event.type,
     visibility: unsafeVisibility ?? payload.visibility,
@@ -189,7 +191,82 @@ function confirmationStatuses(events: CollaborationEvent[]) {
 }
 
 const streams = new Map<string, EventSource>()
-export type SseConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnected'
+export type SseConnectionState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'degraded'
+
+const FAST_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const
+const DEGRADED_AFTER_MS = 30_000
+const DEGRADED_RETRY_DELAY_MS = 30_000
+const SSE_FRAME_TIMEOUT_MS = 45_000
+
+type ConnectionCoordinator = {
+  generation: number
+  attempt: number
+  retryIndex: number
+  firstFailureAt?: number
+  retryTimer?: ReturnType<typeof setTimeout>
+  degradedTimer?: ReturnType<typeof setTimeout>
+  frameTimer?: ReturnType<typeof setTimeout>
+  backfillAbort?: AbortController
+  backfillPromise?: Promise<void>
+  recovering: boolean
+  bufferedEvents: CollaborationEvent[]
+  onlineHandler?: () => void
+  visibilityHandler?: () => void
+}
+
+const coordinator: ConnectionCoordinator = {
+  generation: 0,
+  attempt: 0,
+  retryIndex: 0,
+  recovering: false,
+  bufferedEvents: []
+}
+
+export function sseRetryDelayMs(retryIndex: number, degraded: boolean, random = Math.random) {
+  const base = degraded
+    ? DEGRADED_RETRY_DELAY_MS
+    : FAST_RETRY_DELAYS_MS[Math.min(retryIndex, FAST_RETRY_DELAYS_MS.length - 1)]
+  const jitter = 0.85 + Math.min(1, Math.max(0, random())) * 0.3
+  return Math.round(base * jitter)
+}
+
+function isOptimisticEvent(event: CollaborationEvent) {
+  return event.id.startsWith('evt-local-')
+}
+
+function eventPayload(event: CollaborationEvent) {
+  return event.metadata?.payload as Record<string, unknown> | undefined
+}
+
+function optimisticEventMatches(optimistic: CollaborationEvent, committed: CollaborationEvent) {
+  if (optimistic.type !== committed.type) return false
+  const optimisticPayload = eventPayload(optimistic)
+  const committedPayload = eventPayload(committed)
+  const optimisticConfirmationId = optimisticPayload?.confirmationId
+  return typeof optimisticConfirmationId === 'string' && optimisticConfirmationId === committedPayload?.confirmationId
+}
+
+function mergeUniqueEvents(...groups: CollaborationEvent[][]) {
+  const seen = new Set<string>()
+  const merged: CollaborationEvent[] = []
+  for (const group of groups) {
+    for (const rawEvent of group) {
+      const event = normalizeCollaborationEvent(rawEvent)
+      if (seen.has(event.id)) continue
+      seen.add(event.id)
+      merged.push(event)
+    }
+  }
+  return merged
+}
+
+function visibleEvents(
+  serverEvents: Record<string, CollaborationEvent[]>,
+  optimisticEvents: Record<string, CollaborationEvent[]>,
+  sessionId: string
+) {
+  return [...(serverEvents[sessionId] ?? []), ...(optimisticEvents[sessionId] ?? [])]
+}
 
 const agentStatusStrength: Partial<Record<AgentCardState['status'], number>> = {
   idle: 0,
@@ -250,11 +327,13 @@ function shouldApplyDerivedStatus(current: AgentCardState, nextStatus: AgentCard
 export const useEventStore = defineStore('event', {
   state: () => ({
     eventsBySessionId: {} as Record<string, CollaborationEvent[]>,
+    serverEventsBySessionId: {} as Record<string, CollaborationEvent[]>,
+    optimisticEventsBySessionId: {} as Record<string, CollaborationEvent[]>,
     connectedSessionId: undefined as string | undefined,
     sseConnected: false,
     sseConnectionState: 'idle' as SseConnectionState,
     lastSseErrorAt: undefined as string | undefined,
-    lastEventIdBySessionId: {} as Record<string, string>
+    lastCommittedServerEventIdBySessionId: {} as Record<string, string>
   }),
   getters: {
     eventsForSession: (state) => (sessionId: string) => state.eventsBySessionId[sessionId] ?? [],
@@ -462,6 +541,13 @@ export const useEventStore = defineStore('event', {
             relatedCapabilityId: payload.relatedCapabilityId as string | undefined,
             relatedArtifactId: payload.relatedArtifactId as string | undefined,
             targetPath: payload.targetPath as string | undefined,
+            revisionId: payload.revisionId as string | undefined,
+            filePath: payload.filePath as string | undefined,
+            candidateChangeSetId: payload.candidateChangeSetId as string | undefined,
+            candidateHash: payload.candidateHash as ConfirmationCardState['candidateHash'],
+            chainId: payload.chainId as string | undefined,
+            iteration: payload.iteration as number | undefined,
+            stateVersion: payload.stateVersion as number | undefined,
             workflowId: payload.workflowId as string | undefined,
             workflowName: payload.workflowName as string | undefined,
             workflowRunId: payload.workflowRunId as string | undefined,
@@ -491,81 +577,270 @@ export const useEventStore = defineStore('event', {
     }
   },
   actions: {
+    refreshVisibleEvents(sessionId: string) {
+      this.eventsBySessionId[sessionId] = visibleEvents(
+        this.serverEventsBySessionId,
+        this.optimisticEventsBySessionId,
+        sessionId
+      )
+    },
+    commitServerEvents(sessionId: string, events: CollaborationEvent[], replace = false) {
+      const normalized = events.map(normalizeCollaborationEvent).filter((event) => !isOptimisticEvent(event))
+      const nextServerEvents = replace
+        ? mergeUniqueEvents(normalized)
+        : mergeUniqueEvents(this.serverEventsBySessionId[sessionId] ?? [], normalized)
+      this.serverEventsBySessionId[sessionId] = nextServerEvents
+      this.lastCommittedServerEventIdBySessionId[sessionId] = nextServerEvents.at(-1)?.id ?? ''
+
+      const optimistic = this.optimisticEventsBySessionId[sessionId] ?? []
+      this.optimisticEventsBySessionId[sessionId] = optimistic.filter(
+        (candidate) => !normalized.some((committed) => optimisticEventMatches(candidate, committed))
+      )
+      this.refreshVisibleEvents(sessionId)
+    },
     removeEvent(sessionId: string, eventId: string) {
-      const events = this.eventsBySessionId[sessionId]
-      if (!events) return
-      this.eventsBySessionId[sessionId] = events.filter((event) => event.id !== eventId)
-      if (this.lastEventIdBySessionId[sessionId] === eventId) {
-        this.lastEventIdBySessionId[sessionId] = this.eventsBySessionId[sessionId].at(-1)?.id ?? ''
+      if (eventId.startsWith('evt-local-')) {
+        this.optimisticEventsBySessionId[sessionId] = (this.optimisticEventsBySessionId[sessionId] ?? []).filter(
+          (event) => event.id !== eventId
+        )
+      } else {
+        this.serverEventsBySessionId[sessionId] = (this.serverEventsBySessionId[sessionId] ?? []).filter(
+          (event) => event.id !== eventId
+        )
+        this.lastCommittedServerEventIdBySessionId[sessionId] =
+          this.serverEventsBySessionId[sessionId].at(-1)?.id ?? ''
       }
+      this.refreshVisibleEvents(sessionId)
     },
     async loadEvents(sessionId: string, options: { append?: boolean; afterEventId?: string } = {}) {
-      const afterEventId = options.afterEventId ?? (options.append ? this.lastEventIdBySessionId[sessionId] : undefined)
+      const afterEventId = options.afterEventId ?? (
+        options.append ? this.lastCommittedServerEventIdBySessionId[sessionId] : undefined
+      )
       const suffix = afterEventId ? `?afterEventId=${encodeURIComponent(afterEventId)}` : ''
       const page = await apiPage<CollaborationEvent>(`/sessions/${sessionId}/events${suffix}`)
-      const normalizedItems = page.items.map(normalizeCollaborationEvent)
-      if (options.append) {
-        normalizedItems.forEach((event) => this.appendEvent(event))
-      } else {
-        this.eventsBySessionId[sessionId] = normalizedItems
-        this.lastEventIdBySessionId[sessionId] = normalizedItems.at(-1)?.id ?? ''
-        normalizedItems.forEach((event) => {
-          void this.applyLocalFileChanges(event)
-        })
-      }
+      this.commitServerEvents(sessionId, page.items, !options.append)
     },
     appendEvent(event: CollaborationEvent) {
       const normalizedEvent = normalizeCollaborationEvent(event)
-      const events = this.eventsBySessionId[normalizedEvent.sessionId] ?? []
-      if (events.some((item) => item.id === normalizedEvent.id)) return
-      this.eventsBySessionId[normalizedEvent.sessionId] = [...events, normalizedEvent]
-      this.lastEventIdBySessionId[normalizedEvent.sessionId] = normalizedEvent.id
-      void this.applyLocalFileChanges(normalizedEvent)
+      if (isOptimisticEvent(normalizedEvent)) {
+        const optimistic = this.optimisticEventsBySessionId[normalizedEvent.sessionId] ?? []
+        if (optimistic.some((item) => item.id === normalizedEvent.id)) return
+        this.optimisticEventsBySessionId[normalizedEvent.sessionId] = [...optimistic, normalizedEvent]
+        this.refreshVisibleEvents(normalizedEvent.sessionId)
+        return
+      }
+      this.commitServerEvents(normalizedEvent.sessionId, [normalizedEvent])
     },
-    async applyLocalFileChanges(event: CollaborationEvent) {
-      const payload = artifactPayload(event)
-      if (!payload) return
-      const fileChanges = applicableArtifactFileChanges(payload)
-      if (!fileChanges.length) return
-      const localWorkspaceStore = useLocalWorkspaceStore()
-      localWorkspaceStore.enqueueArtifactFileChanges(
-        event.sessionId,
-        payload.artifactId,
-        fileChanges,
-        payload.title
-      )
-    },
-    async replayLocalFileChanges(sessionId: string) {
-      for (const event of this.eventsBySessionId[sessionId] ?? []) {
-        await this.applyLocalFileChanges(event)
+    async reconcileServerEvents(sessionId: string, generation: number, attempt: number) {
+      if (coordinator.backfillPromise) return coordinator.backfillPromise
+      coordinator.recovering = true
+      coordinator.bufferedEvents = []
+      const abort = new AbortController()
+      coordinator.backfillAbort = abort
+      const baseCursor = this.lastCommittedServerEventIdBySessionId[sessionId]
+      const suffix = baseCursor ? `?afterEventId=${encodeURIComponent(baseCursor)}` : ''
+      const recovery = (async () => {
+        const page = await apiPage<CollaborationEvent>(`/sessions/${sessionId}/events${suffix}`, {
+          signal: abort.signal
+        })
+        if (generation !== coordinator.generation || attempt !== coordinator.attempt || abort.signal.aborted) return
+        const buffered = coordinator.bufferedEvents
+        coordinator.bufferedEvents = []
+        this.commitServerEvents(sessionId, [...page.items, ...buffered])
+        coordinator.recovering = false
+        coordinator.backfillAbort = undefined
+      })()
+      coordinator.backfillPromise = recovery
+      try {
+        await recovery
+      } catch (error) {
+        if (!abort.signal.aborted && generation === coordinator.generation && attempt === coordinator.attempt) {
+          throw error
+        }
+      } finally {
+        if (coordinator.backfillPromise === recovery) {
+          coordinator.backfillPromise = undefined
+          coordinator.recovering = false
+          coordinator.backfillAbort = undefined
+        }
       }
     },
-    connectSse(sessionId: string) {
+    scheduleReconnect(sessionId: string, generation: number) {
+      if (generation !== coordinator.generation || this.connectedSessionId !== sessionId) return
+      const now = Date.now()
+      coordinator.firstFailureAt ??= now
+      const degraded = now - coordinator.firstFailureAt >= DEGRADED_AFTER_MS
+      this.sseConnectionState = degraded ? 'degraded' : 'reconnecting'
+
+      if (!degraded && !coordinator.degradedTimer) {
+        const remaining = Math.max(0, DEGRADED_AFTER_MS - (now - coordinator.firstFailureAt))
+        coordinator.degradedTimer = setTimeout(() => {
+          coordinator.degradedTimer = undefined
+          if (
+            generation === coordinator.generation &&
+            this.connectedSessionId === sessionId &&
+            !this.sseConnected
+          ) {
+            this.sseConnectionState = 'degraded'
+          }
+        }, remaining)
+      }
+
+      if (coordinator.retryTimer) clearTimeout(coordinator.retryTimer)
+      const delay = sseRetryDelayMs(coordinator.retryIndex, degraded)
+      if (!degraded) coordinator.retryIndex += 1
+      coordinator.retryTimer = setTimeout(() => {
+        coordinator.retryTimer = undefined
+        if (generation === coordinator.generation && this.connectedSessionId === sessionId) {
+          this.openSseAttempt(sessionId, generation)
+        }
+      }, delay)
+    },
+    openSseAttempt(sessionId: string, generation: number) {
+      if (generation !== coordinator.generation || this.connectedSessionId !== sessionId) return
+      streams.get(sessionId)?.close()
+      coordinator.backfillAbort?.abort()
+      coordinator.backfillAbort = undefined
+      coordinator.recovering = true
+      coordinator.bufferedEvents = []
+      const attempt = ++coordinator.attempt
+      const stream = new EventSource(eventStreamUrl(sessionId))
+      streams.set(sessionId, stream)
+
+      const isCurrent = () => (
+        generation === coordinator.generation &&
+        attempt === coordinator.attempt &&
+        this.connectedSessionId === sessionId &&
+        streams.get(sessionId) === stream
+      )
+      const failAttempt = () => {
+        if (!isCurrent()) return
+        stream.close()
+        streams.delete(sessionId)
+        if (coordinator.frameTimer) clearTimeout(coordinator.frameTimer)
+        coordinator.frameTimer = undefined
+        coordinator.backfillAbort?.abort()
+        coordinator.backfillAbort = undefined
+        coordinator.backfillPromise = undefined
+        coordinator.recovering = false
+        coordinator.bufferedEvents = []
+        this.sseConnected = false
+        this.lastSseErrorAt = new Date().toISOString()
+        this.scheduleReconnect(sessionId, generation)
+      }
+
+      const markFrameReceived = () => {
+        if (!isCurrent()) return
+        if (coordinator.frameTimer) clearTimeout(coordinator.frameTimer)
+        coordinator.frameTimer = setTimeout(failAttempt, SSE_FRAME_TIMEOUT_MS)
+      }
+
+      stream.addEventListener('collaboration-event', (message) => {
+        if (!isCurrent()) return
+        markFrameReceived()
+        const event = parseSseEvent(message as MessageEvent)
+        if (coordinator.recovering) coordinator.bufferedEvents.push(event)
+        else this.commitServerEvents(sessionId, [event])
+      })
+      stream.addEventListener('heartbeat', markFrameReceived)
+      stream.onopen = () => {
+        if (!isCurrent()) return
+        markFrameReceived()
+        void this.reconcileServerEvents(sessionId, generation, attempt)
+          .then(() => {
+            if (!isCurrent()) return
+            this.sseConnected = true
+            this.sseConnectionState = 'connected'
+            this.lastSseErrorAt = undefined
+            coordinator.firstFailureAt = undefined
+            coordinator.retryIndex = 0
+            if (coordinator.degradedTimer) clearTimeout(coordinator.degradedTimer)
+            coordinator.degradedTimer = undefined
+          })
+          .catch(failAttempt)
+      }
+      stream.onerror = failAttempt
+      markFrameReceived()
+    },
+    ensureConnected(sessionId: string) {
+      if (
+        this.connectedSessionId === sessionId &&
+        (streams.has(sessionId) || coordinator.retryTimer) &&
+        this.sseConnectionState !== 'idle'
+      ) return
       this.disconnectSse()
       this.connectedSessionId = sessionId
       this.sseConnectionState = 'connecting'
-      const stream = new EventSource(eventStreamUrl(sessionId))
-      streams.set(sessionId, stream)
-      stream.onopen = () => {
-        this.sseConnected = true
-        this.sseConnectionState = 'connected'
-        this.lastSseErrorAt = undefined
-        void this.loadEvents(sessionId, { append: true })
+      const generation = coordinator.generation
+
+      if (typeof window !== 'undefined') {
+        coordinator.onlineHandler = () => this.retrySseNow()
+        coordinator.visibilityHandler = () => {
+          if (document.visibilityState === 'visible') this.retrySseNow()
+        }
+        window.addEventListener('online', coordinator.onlineHandler)
+        document.addEventListener('visibilitychange', coordinator.visibilityHandler)
       }
-      stream.onerror = () => {
-        this.sseConnected = false
-        this.sseConnectionState = 'disconnected'
-        this.lastSseErrorAt = new Date().toISOString()
+      this.openSseAttempt(sessionId, generation)
+    },
+    connectSse(sessionId: string) {
+      this.ensureConnected(sessionId)
+    },
+    async ensureConnectedAndReconcile(sessionId: string) {
+      this.ensureConnected(sessionId)
+      await this.reconcileServerEvents(sessionId, coordinator.generation, coordinator.attempt)
+    },
+    retrySseNow() {
+      const sessionId = this.connectedSessionId
+      if (!sessionId || this.sseConnectionState === 'connected' || this.sseConnectionState === 'connecting') return
+      if (coordinator.retryTimer) clearTimeout(coordinator.retryTimer)
+      coordinator.retryTimer = undefined
+      this.openSseAttempt(sessionId, coordinator.generation)
+    },
+    async finalizeSessionEvents(sessionId: string) {
+      try {
+        const stream = streams.get(sessionId)
+        if (
+          this.connectedSessionId === sessionId &&
+          this.sseConnectionState === 'connected' &&
+          stream
+        ) {
+          await this.reconcileServerEvents(sessionId, coordinator.generation, coordinator.attempt)
+        } else {
+          await this.loadEvents(sessionId, { append: true })
+        }
+      } finally {
+        if (this.connectedSessionId === sessionId) this.disconnectSse()
       }
-      stream.addEventListener('collaboration-event', (message) => {
-        this.appendEvent(parseSseEvent(message as MessageEvent))
-      })
+    },
+    async probeBackendReachability() {
+      await apiGet('/health', { timeoutMs: 5_000, timeoutMessage: 'Backend reachability probe timed out' })
+      return true
     },
     disconnectSse() {
-      if (this.connectedSessionId) {
-        streams.get(this.connectedSessionId)?.close()
-        streams.delete(this.connectedSessionId)
+      coordinator.generation += 1
+      coordinator.attempt += 1
+      for (const stream of streams.values()) stream.close()
+      streams.clear()
+      if (coordinator.retryTimer) clearTimeout(coordinator.retryTimer)
+      if (coordinator.degradedTimer) clearTimeout(coordinator.degradedTimer)
+      if (coordinator.frameTimer) clearTimeout(coordinator.frameTimer)
+      coordinator.retryTimer = undefined
+      coordinator.degradedTimer = undefined
+      coordinator.frameTimer = undefined
+      coordinator.backfillAbort?.abort()
+      coordinator.backfillAbort = undefined
+      coordinator.backfillPromise = undefined
+      coordinator.recovering = false
+      coordinator.bufferedEvents = []
+      coordinator.firstFailureAt = undefined
+      coordinator.retryIndex = 0
+      if (typeof window !== 'undefined') {
+        if (coordinator.onlineHandler) window.removeEventListener('online', coordinator.onlineHandler)
+        if (coordinator.visibilityHandler) document.removeEventListener('visibilitychange', coordinator.visibilityHandler)
       }
+      coordinator.onlineHandler = undefined
+      coordinator.visibilityHandler = undefined
       this.connectedSessionId = undefined
       this.sseConnected = false
       this.sseConnectionState = 'idle'

@@ -107,6 +107,45 @@ test('architecture analysis routing prioritizes entrypoint, config, service, and
   assert.ok(selectedRefs.has('src/contracts/user.ts'));
 });
 
+test('architecture routing selects file candidates from the Provider index without a Snapshot', () => {
+  const indexedSession: SessionDetail = {
+    ...session(),
+    workspaceSnapshot: undefined,
+    workspaceIndex: {
+      workspaceId: 'workspace-1',
+      revision: { id: 'revision-3', observedAt: '2026-07-28T00:00:00.000Z' },
+      generation: 3,
+      status: 'building',
+      complete: false,
+      entries: [
+        { path: 'package.json', kind: 'file', size: 100, generated: false, sensitive: false },
+        { path: 'src/main.ts', kind: 'file', size: 100, generated: false, sensitive: false },
+        { path: 'src/services/user.service.ts', kind: 'file', size: 100, generated: false, sensitive: false }
+      ],
+      entrypoints: ['src/main.ts'],
+      detectedStack: ['node'],
+      indexedEntries: 3,
+      truncated: false,
+      updatedAt: '2026-07-28T00:00:00.000Z'
+    }
+  };
+  const taskContext = new ContextRouterService().route({
+    session: indexedSession,
+    phase: 'task_execution',
+    relevantMemories: [], ragSnippets: [], artifacts: [], events: [],
+    participatingAgentKeys: ['architect'],
+    workspaceFocus: {
+      relevantFiles: ['src/services/user.service.ts'], impactedFiles: [], testFiles: [],
+      configFiles: ['package.json'], possibleEntryPoints: ['src/main.ts'], detectedStack: ['node'],
+      validationCommands: [], rationale: 'metadata index'
+    }
+  });
+
+  const refs = new Set(taskContext.evidenceRefs.map((ref) => ref.ref));
+  assert.equal(refs.has('src/main.ts'), true);
+  assert.equal(refs.has('src/services/user.service.ts'), true);
+});
+
 test('non_coding session preserves artifact type instead of remapping to document_fragment', () => {
   const router = new ContextRouterService();
   const baseSession = session();
@@ -162,15 +201,15 @@ test('runtime infrastructure diagnostics are excluded from Agent context evidenc
     participatingAgentKeys: ['architect'],
     events: [
       {
-        id: 'event-browser-mirror',
+        id: 'event-worktree-prepared',
         sessionId: session().id,
         type: 'runtime_progress',
-        content: 'Prepared an isolated browser workspace mirror for this Runtime.',
+        content: 'Prepared an isolated Git worktree for this Runtime.',
         toAgentIds: [],
         metadata: {
           schemaVersion: '0.1',
           renderAs: 'system_notice',
-          payload: { code: 'BROWSER_MIRROR_PREPARED' }
+          payload: { code: 'WORKTREE_PREPARED' }
         },
         createdAt: '2026-07-16T01:52:23.000Z'
       },
@@ -187,7 +226,7 @@ test('runtime infrastructure diagnostics are excluded from Agent context evidenc
   });
 
   const refs = taskContext.evidenceRefs.map((ref) => ref.ref);
-  assert.equal(refs.includes('event-browser-mirror'), false);
+  assert.equal(refs.includes('event-worktree-prepared'), false);
   assert.equal(refs.includes('event-user-message'), true);
 });
 

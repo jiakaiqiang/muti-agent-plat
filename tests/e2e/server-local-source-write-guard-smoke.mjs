@@ -43,7 +43,7 @@ try {
     CODEX_RUNTIME_SHELL: 'false',
     CODEX_RUNTIME_TEST_COMMAND: 'npm test',
     RUNTIME_STREAMING: 'codex',
-    STUB_EDIT_FILES: 'codex',
+    CODEX_RUNTIME_STUB_EDIT_FILES: 'codex',
     AGENT_CLUSTER_WORKTREE_ROOT: worktreeRoot
   });
 
@@ -134,3 +134,5 @@ try {
     await rm(worktreeRoot, { recursive: true, force: true });
   }
 }
+
+process.exit(0);

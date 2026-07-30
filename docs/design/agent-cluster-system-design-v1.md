@@ -275,12 +275,12 @@ final_delivery_created
 
 职责：
 
-- 识别用户消息意图。
-- 判断消息优先级。
-- 判断是否影响当前任务契约。
-- 判断是否需要暂停任务。
-- 找到受影响任务和 Agent。
-- 生成 Coordinator 指令。
+- 所有已有会话消息先由接收者 Runtime 识别意图、优先级、约束和风险。
+- 接收者只承担意图识别与任务拆分，不执行专业任务。
+- 当前有任务执行时仅完成识别并持久化排队，不暂停或重启当前任务。
+- 当前无任务执行时立即进入任务拆分与派发。
+- 多个 `@Agent` 先讨论，再由接收者依据讨论结果拆分任务；拆分结果只能派发给被提及 Agent。
+- Agent 拒绝时由接收者改派或重新拆分，接收者自身不接管专业执行。
 
 输入：
 
@@ -316,6 +316,8 @@ type UserMessageHandlingPlan = {
   coordinatorInstruction: string
 }
 ```
+
+在已有会话的后续消息链路中，`shouldPause` 固定归一为 `false`；是否后置执行由 Session 的持久化 FIFO 后续消息队列决定，而不是通过取消当前 invocation 实现。
 
 ### 5.5 Orchestrator Module
 

@@ -1,6 +1,7 @@
-import { Controller, Get, Param, Query, Res, Sse } from '@nestjs/common';
-import { filter, map } from 'rxjs';
+import { Controller, Get, NotFoundException, Param, Query, Sse } from '@nestjs/common';
+import { filter, map, merge, timer } from 'rxjs';
 import { ok } from '../../common/api-response.js';
+import { SkipPersistenceCommit } from '../persistence/skip-persistence-commit.js';
 import { EventsService } from './events.service.js';
 import { shouldExposeCollaborationEvent } from './public-event-filter.js';
 
@@ -17,15 +18,32 @@ export class EventsController {
   }
 
   @Sse('stream')
-  stream(@Param('sessionId') sessionId: string, @Res({ passthrough: true }) response: { setHeader: (key: string, value: string) => void }) {
-    response.setHeader('Cache-Control', 'no-cache');
-    return this.events.stream(sessionId).pipe(
-      filter(shouldExposeCollaborationEvent),
-      map((event) => ({
-        id: event.id,
-        type: 'collaboration-event',
-        data: event
-      }))
+  @SkipPersistenceCommit()
+  stream(@Param('sessionId') sessionId: string) {
+    if (!this.events.hasSession(sessionId)) {
+      throw new NotFoundException(`Session not found: ${sessionId}`);
+    }
+    const heartbeatMs = sseHeartbeatIntervalMs();
+    return merge(
+      this.events.stream(sessionId).pipe(
+        filter(shouldExposeCollaborationEvent),
+        map((event) => ({
+          id: event.id,
+          type: 'collaboration-event',
+          data: event
+        }))
+      ),
+      timer(heartbeatMs, heartbeatMs).pipe(
+        map(() => ({
+          type: 'heartbeat',
+          data: { time: new Date().toISOString() }
+        }))
+      )
     );
   }
+}
+
+export function sseHeartbeatIntervalMs() {
+  const configured = Number(process.env.AGENT_CLUSTER_SSE_HEARTBEAT_INTERVAL_MS ?? 15_000);
+  return Number.isFinite(configured) && configured >= 1_000 ? Math.floor(configured) : 15_000;
 }

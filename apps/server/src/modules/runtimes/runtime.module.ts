@@ -26,12 +26,14 @@ import { WorkdirBriefService } from './streaming/workdir-brief.service.js';
 import { WorktreeExecutionModule } from '../worktree-execution/worktree-execution.module.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { CAPABILITY_TOOL_MAPPING } from '../tools/capability-tool-mapping.js';
+import { ServerRuntimeWorkerService } from './server-runtime-worker.service.js';
 
 @Module({
   imports: [AgentsModule, AgentProfileModule, CapabilitiesModule, WorktreeExecutionModule],
   controllers: [RuntimeController],
   providers: [
     RuntimeService,
+    ServerRuntimeWorkerService,
     RuntimeRegistryService,
     RuntimeSmartRouterService,
     TestRunnerRuntimeAdapterService,
@@ -54,6 +56,7 @@ import { CAPABILITY_TOOL_MAPPING } from '../tools/capability-tool-mapping.js';
   ],
   exports: [
     RuntimeService,
+    ServerRuntimeWorkerService,
     WorktreeExecutionModule,
     RuntimeRegistryService,
     RuntimeSmartRouterService,

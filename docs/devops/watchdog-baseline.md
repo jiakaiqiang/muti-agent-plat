@@ -27,6 +27,7 @@ CLAUDE_CODE_ABSOLUTE_TIMEOUT_MS=
 - first-frame 和 idle 必须是 1～2,147,483,647 ms 范围内的整数；非法值回退到代码默认值。
 - absolute 为空、未设置、`0` 或负数时关闭。
 - absolute 只有在成本或合规上限得到明确批准后才允许启用。
+- Provider 的 debug/system 通知只用于证明传输已启动并保留诊断，不会续期 idle；只有模型输出、工具调用、usage 或终态等有效活动才能刷新 idle。这样持续的限流、错误或启动状态噪声不会让卡死调用无限存活。
 - 参数仅作用于 `ENGINEERING_RUNTIME_STREAMING=codex|all` 的流式路径；`off` 继续使用 legacy 路径。
 
 ## 2. 可观测性合同
@@ -123,3 +124,12 @@ PR-05 只有在以下条件全部满足后才可标记完成：
 - first-frame、idle 和 absolute 故障能够被区分，并包含规定的脱敏诊断字段。
 
 当前仅第一项已完成，因此 PR-05 状态仍是“实施完成、真实数据验收待执行”。
+
+## 8. 2026-07-12 Provisional 预检记录
+
+- Claude Code `2.1.207` 单次真实 probe 成功，记录 first-frame 5,419 ms、最大帧间隔 7,383 ms、总时长 20,415 ms 和 49,762 tokens。
+- 2026-07-10 的历史真实验收报告没有持久化 `streamMetrics`，不能作为当前分析器的正式输入；当前有效样本数为 1。
+- 使用 `WATCHDOG_MIN_SAMPLES=1` 生成 provisional 报告，候选为 first-frame 30,000 ms、idle 60,000 ms、absolute 关闭。
+- provisional 文件为 `.cache/agent-cluster/watchdog-claude-provisional.json` 与 `.cache/agent-cluster/watchdog-claude-provisional.md`。
+- 该结果不得写入生产配置：正式基线仍要求至少 20 个 completed 样本、慢任务/故障注入复核、负责人批准和回滚演练。
+- 当前 20 元费用上限无法安全覆盖约 995,240 tokens 的 20 次同量级采样，因此批量任务保持暂停。

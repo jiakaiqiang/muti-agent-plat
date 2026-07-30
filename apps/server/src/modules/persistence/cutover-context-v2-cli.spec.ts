@@ -3,9 +3,17 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { parseCutoverCliArgs, runCutoverCommand } from './cutover-context-v2.cli.js';
+import { buildV2SeedState, parseCutoverCliArgs, runCutoverCommand } from './cutover-context-v2.cli.js';
 import { initializeV2Persistence } from './persistence.module.js';
 import { PersistenceService } from './persistence.service.js';
+import { relationalCollectionKeys } from './relational/relational-state-store.js';
+
+test('v2 seed explicitly resets every active relational collection', () => {
+  const expectedKeys = relationalCollectionKeys()
+    .filter((key) => key !== 'systemDataMetadata' && key !== 'cutoverAudits')
+    .sort();
+  assert.deepEqual(Object.keys(buildV2SeedState()).sort(), expectedKeys);
+});
 
 test('CLI defaults to dry-run when no mode flag is provided', () => {
   assert.deepEqual(parseCutoverCliArgs([], { APP_ENV: 'local' }), {

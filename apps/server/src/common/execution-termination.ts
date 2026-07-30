@@ -26,11 +26,13 @@ export type CreateExecutionTerminationInput = {
 
 const safeMessages: Record<ExecutionTerminationKind, string> = {
   user_cancelled: '执行已由用户取消。',
+  frontend_disconnected: '前端连接已断开，会话执行已停止。',
+  runtime_disconnected: 'Runtime 连接已断开，本次调用已中断且不会自动续跑。',
   phase_timeout: '当前阶段执行超时，已停止本次调用。',
   runtime_timeout: '运行时执行超时，已停止本次调用。',
-  service_shutdown: '服务正在关闭，本次执行已中断，重启后将自动恢复。',
+  service_shutdown: '服务正在关闭，本次执行已中断且不会自动续跑。',
   superseded: '本次执行已被更新的需求或计划替代。',
-  maintenance: '系统进入维护，本次执行已暂停，维护完成后将恢复。'
+  maintenance: '系统进入维护，本次执行已中断且不会自动续跑。'
 };
 
 export function createExecutionTermination(input: CreateExecutionTerminationInput): ExecutionTermination {
@@ -57,7 +59,7 @@ export function isExecutionTermination(value: unknown): value is ExecutionTermin
     candidate.schemaVersion === '1.0' &&
     typeof candidate.terminationId === 'string' &&
     typeof candidate.occurredAt === 'string' &&
-    ['user_cancelled', 'phase_timeout', 'runtime_timeout', 'service_shutdown', 'superseded', 'maintenance'].includes(
+    ['user_cancelled', 'frontend_disconnected', 'runtime_disconnected', 'phase_timeout', 'runtime_timeout', 'service_shutdown', 'superseded', 'maintenance'].includes(
       candidate.kind ?? ''
     ) &&
     ['user', 'orchestrator', 'runtime', 'system', 'operator'].includes(candidate.source ?? '') &&
@@ -91,9 +93,14 @@ export function safeTerminationMessage(termination: ExecutionTermination): strin
 }
 
 export function terminationDisposition(termination: ExecutionTermination): ExecutionTerminationDisposition {
-  if (termination.kind === 'user_cancelled') return 'stop';
+  if (
+    termination.kind === 'user_cancelled' ||
+    termination.kind === 'frontend_disconnected' ||
+    termination.kind === 'runtime_disconnected' ||
+    termination.kind === 'service_shutdown' ||
+    termination.kind === 'maintenance'
+  ) return 'stop';
   if (termination.kind === 'superseded') return 'replace';
-  if (termination.kind === 'service_shutdown' || termination.kind === 'maintenance') return 'recover';
   return 'retry';
 }
 

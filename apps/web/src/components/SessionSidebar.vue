@@ -19,6 +19,7 @@ const sessionStatusPresentation: Record<SessionStatus, { label: string; tone: Se
   POST_REVIEW: { label: '复盘中', tone: 'running' },
   REWORKING: { label: '返工中', tone: 'running' },
   WAIT_USER_DECISION: { label: '待决策', tone: 'waiting' },
+  INTERRUPTED: { label: '已中断', tone: 'waiting' },
   COMPLETED: { label: '已完成', tone: 'completed' },
   FAILED: { label: '失败', tone: 'failed' },
   CANCELLED: { label: '已取消', tone: 'cancelled' }

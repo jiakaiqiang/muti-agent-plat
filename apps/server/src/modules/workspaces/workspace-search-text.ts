@@ -30,6 +30,7 @@ export async function searchServerLocalText(args: SearchServerLocalTextArgs): Pr
   const maxResults = Math.max(1, input.maxResults ?? DEFAULT_MAX_RESULTS);
   const caseSensitive = input.caseSensitive === true;
   const needle = caseSensitive ? input.query : input.query.toLowerCase();
+  const deadlineAt = input.deadlineMs ? Date.now() + Math.max(1, input.deadlineMs) : Number.POSITIVE_INFINITY;
   if (needle.length === 0) {
     return { matches: [], truncated: false, revision };
   }
@@ -42,11 +43,13 @@ export async function searchServerLocalText(args: SearchServerLocalTextArgs): Pr
   ];
 
   while (stack.length > 0 && !truncated) {
+    if (Date.now() >= deadlineAt) { truncated = true; break; }
     const current = stack.pop();
     if (!current) break;
     const dirents = await readdir(current.absolute, { withFileTypes: true });
     dirents.sort((a, b) => a.name.localeCompare(b.name));
     for (const dirent of dirents) {
+      if (Date.now() >= deadlineAt) { truncated = true; break; }
       const childRelative = current.relative ? `${current.relative}/${dirent.name}` : dirent.name;
       const childAbsolute = join(current.absolute, dirent.name);
       if (dirent.isDirectory()) {
@@ -57,6 +60,7 @@ export async function searchServerLocalText(args: SearchServerLocalTextArgs): Pr
       }
       if (!dirent.isFile()) continue;
       if (isSensitivePath(childRelative)) continue;
+      if (!matchesGlob(childRelative, input.include, input.exclude)) continue;
       const stats = await stat(childAbsolute);
       if (stats.size > MAX_FILE_BYTES) continue;
 
@@ -65,6 +69,7 @@ export async function searchServerLocalText(args: SearchServerLocalTextArgs): Pr
       const content = buffer.toString('utf8');
       const found = findLineMatches(content, needle, caseSensitive, childRelative);
       for (const match of found) {
+        if (Date.now() >= deadlineAt) { truncated = true; break; }
         if (matches.length >= maxResults) {
           truncated = true;
           break;
@@ -76,6 +81,14 @@ export async function searchServerLocalText(args: SearchServerLocalTextArgs): Pr
   }
 
   return { matches, truncated, revision };
+}
+
+function matchesGlob(path: string, include?: string[], exclude?: string[]) {
+  const matches = (pattern: string) => {
+    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*').replace(/\?/g, '.');
+    return new RegExp(`^${escaped}$`, 'i').test(path);
+  };
+  return (!include?.length || include.some(matches)) && !exclude?.some(matches);
 }
 
 function looksBinary(buffer: Buffer): boolean {

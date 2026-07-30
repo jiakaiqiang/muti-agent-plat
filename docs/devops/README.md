@@ -13,6 +13,8 @@
 - `docs/devops/watchdog-baseline.md`：Codex/Claude 流式 Watchdog 指标、20 次真实采样、参数分析和回滚手册。
 - `GET /api/health`：服务健康检查。
 - `GET /api/ops/queues`：BullMQ 队列观测入口；启用 `ENABLE_BULLMQ=true` 时从 Redis/BullMQ 读取真实 job counts，未启用时返回 disabled 状态。
+- `GET /api/ops/workspace-metrics`：返回 Workspace 与文件修订的进程内计数、Gauge 和有界耗时聚合；文件修订覆盖 chain/iteration、iteration/synthesis duration、stale、context/capacity rejection、persistence failure 和 recovery，不包含用户正文或候选内容。
+- 文件修订正文以 Session 生命周期为保留边界；删除 Session 会在修订状态持久化删除后回收不再被其他 Session 或模块引用的 ContentStore 对象。
 - `GET /api/sessions/:sessionId/debug/*`：开发态调试入口，覆盖 Context Pack、Runtime invocation、RAG retrieval 和 token usage。
 - 后端启动默认按 `CORS_ORIGIN` 收敛跨域白名单，并为 API 响应写入基础安全响应头。
 - `LOG_FORMAT=json`：启用服务端 JSON 结构化日志。

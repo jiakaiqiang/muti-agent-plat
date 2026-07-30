@@ -1,14 +1,13 @@
-import { createHash } from 'node:crypto';
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type {
-  FileHash,
   FileMetadata,
   ListDirectoryInput,
   ListDirectoryResult,
   WorkspaceRevision
 } from '@agent-cluster/shared';
 import { isGeneratedWorkspaceDirectory } from '@agent-cluster/shared';
+import { isSensitivePath } from '../../common/path-safety.js';
 import { resolveWorkspacePath } from './workspace-path.js';
 
 const DEFAULT_LIMIT = 200;
@@ -24,57 +23,46 @@ export async function listServerLocalDirectory(
 ): Promise<ListDirectoryResult> {
   const { rootPath, revision, input } = args;
   const { relative: relativePath, absolute } = resolveWorkspacePath(rootPath, input.path ?? '');
-  const rawEntries = await readdir(absolute, { withFileTypes: true });
-  const visible = rawEntries
-    .filter((entry) => !(entry.isDirectory() && isGeneratedWorkspaceDirectory(entry.name)))
-    .sort((a, b) => a.name.localeCompare(b.name));
-
-  const cursorIndex = decodeCursor(input.cursor, visible.length);
+  const cursorIndex = decodeCursor(input.cursor, Number.MAX_SAFE_INTEGER);
   const limit = Math.max(1, input.limit ?? DEFAULT_LIMIT);
-  const slice = visible.slice(cursorIndex, cursorIndex + limit);
-
+  const targetCount = cursorIndex + limit + 1;
+  const deadlineAt = input.deadlineMs ? Date.now() + Math.max(1, input.deadlineMs) : Number.POSITIVE_INFINITY;
+  let deadlineReached = false;
   const entries: FileMetadata[] = [];
-  for (const dirent of slice) {
-    const entryRelative = relativePath ? `${relativePath}/${dirent.name}` : dirent.name;
-    const entryAbsolute = join(absolute, dirent.name);
-    if (dirent.isDirectory()) {
-      entries.push({
-        path: entryRelative,
-        kind: 'directory',
-        revision
-      });
-      continue;
+  const maxDepth = Math.min(8, Math.max(0, input.maxDepth ?? (input.recursive ? 1 : 0)));
+  const visit = async (directory: string, directoryRelative: string, depth: number): Promise<void> => {
+    const children = await readdir(directory, { withFileTypes: true });
+    children.sort((left, right) => left.name.localeCompare(right.name));
+    for (const dirent of children) {
+      if (Date.now() >= deadlineAt) { deadlineReached = true; return; }
+      if (entries.length >= targetCount) return;
+      const entryRelative = directoryRelative ? `${directoryRelative}/${dirent.name}` : dirent.name;
+      if (isSensitivePath(entryRelative)) continue;
+      if (dirent.isDirectory() && isGeneratedWorkspaceDirectory(dirent.name)) continue;
+      const entryAbsolute = join(directory, dirent.name);
+      if (dirent.isDirectory()) {
+        const stats = await stat(entryAbsolute);
+        entries.push({ path: entryRelative, kind: 'directory', revision, modifiedAt: stats.mtime.toISOString() });
+        if (input.recursive && depth < maxDepth) await visit(entryAbsolute, entryRelative, depth + 1);
+        continue;
+      }
+      if (!dirent.isFile()) continue;
+      const stats = await stat(entryAbsolute);
+      entries.push({ path: entryRelative, kind: 'file', size: stats.size, revision, modifiedAt: stats.mtime.toISOString() });
     }
-    if (!dirent.isFile()) {
-      continue;
-    }
-    const stats = await stat(entryAbsolute);
-    const hash = await hashFile(entryAbsolute);
-    entries.push({
-      path: entryRelative,
-      kind: 'file',
-      size: stats.size,
-      hash,
-      revision,
-      modifiedAt: stats.mtime.toISOString()
-    });
-  }
+  };
+  await visit(absolute, relativePath, 0);
 
-  const nextIndex = cursorIndex + slice.length;
-  const nextCursor = nextIndex < visible.length ? encodeCursor(nextIndex) : undefined;
+  const page = entries.slice(cursorIndex, cursorIndex + limit);
+  const nextIndex = cursorIndex + page.length;
+  const nextCursor = entries.length > nextIndex || deadlineReached ? encodeCursor(nextIndex) : undefined;
 
   return {
     path: relativePath,
-    entries,
+    entries: page,
     revision,
     ...(nextCursor ? { nextCursor } : {})
   };
-}
-
-async function hashFile(filePath: string): Promise<FileHash> {
-  const content = await readFile(filePath);
-  const digest = createHash('sha256').update(content).digest('hex');
-  return { algorithm: 'sha256', value: digest };
 }
 
 function encodeCursor(index: number): string {

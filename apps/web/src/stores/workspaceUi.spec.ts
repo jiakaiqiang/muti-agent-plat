@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import type { ReviewableFileChange } from './localWorkspace'
 import { useWorkspaceUiStore } from './workspaceUi'
 
 describe('workspace UI store', () => {
@@ -26,35 +25,12 @@ describe('workspace UI store', () => {
     expect(store.selectedSessionAgentIds).toEqual([])
     expect(store.sessionCreateError).toBe('')
     expect(store.sessionRuntimeType).toBe('')
+    expect(store.sessionWorkspaceKind).toBe('local_bridge')
 
     store.toggleSessionAgent('agent-1')
     store.toggleSessionAgent('agent-2')
     store.toggleSessionAgent('agent-1')
     expect(store.selectedSessionAgentIds).toEqual(['agent-2'])
-  })
-
-  it('keeps file-review selection transitions in one store', () => {
-    const store = useWorkspaceUiStore()
-    const changes = [
-      { change: { path: 'safe.ts' }, conflict: false },
-      { change: { path: 'conflict.ts' }, conflict: true }
-    ] as ReviewableFileChange[]
-
-    store.openFileReview(changes)
-    expect(store.showFileReviewDialog).toBe(true)
-    expect(store.selectedChangePaths).toEqual(['safe.ts'])
-
-    store.toggleReviewPath('conflict.ts')
-    expect(store.selectedChangePaths).toEqual(['safe.ts'])
-
-    store.clearReviewSelection()
-    expect(store.selectedChangePaths).toEqual([])
-    store.selectAllReviewPaths()
-    expect(store.selectedChangePaths).toEqual(['safe.ts'])
-
-    store.closeFileReview()
-    expect(store.showFileReviewDialog).toBe(false)
-    expect(store.reviewChanges).toEqual([])
   })
 
   it('shares timed notifications without exposing timer handles as state', () => {

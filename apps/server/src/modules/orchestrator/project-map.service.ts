@@ -5,7 +5,7 @@ import { nowIso } from '../../common/time.js';
 @Injectable()
 export class ProjectMapService {
   buildProjectMap(session: SessionDetail, workspaceFocus?: ContextAssembly['workspaceFocus']): ProjectMap | undefined {
-    const snapshot = session.workspaceSnapshot;
+    const snapshot = this.navigationSnapshot(session);
     if (!snapshot) return undefined;
 
     const focus = workspaceFocus ?? this.workspaceFocus(session);
@@ -36,7 +36,7 @@ export class ProjectMapService {
   }
 
   workspaceFocus(session: SessionDetail): ContextAssembly['workspaceFocus'] {
-    const snapshot = session.workspaceSnapshot;
+    const snapshot = this.navigationSnapshot(session);
     if (!snapshot) return undefined;
     const relevantFiles = snapshot.files
       .map((file) => ({
@@ -290,5 +290,36 @@ export class ProjectMapService {
       if (unique.length >= limit) break;
     }
     return unique;
+  }
+
+  private navigationSnapshot(session: SessionDetail): WorkspaceSnapshot | undefined {
+    if (!session.workspaceIndex) return session.workspaceSnapshot;
+    const hydratedByPath = new Map((session.workspaceSnapshot?.files ?? []).map((file) => [file.path, file]));
+    const files = session.workspaceIndex.entries
+      .filter((entry) => entry.kind === 'file' && !entry.generated && !entry.sensitive)
+      .map((entry) => {
+        const hydrated = hydratedByPath.get(entry.path);
+        return {
+          ...hydrated,
+          path: entry.path,
+          size: hydrated?.size ?? entry.size ?? 0,
+          ...(hydrated?.language ?? entry.language ? { language: hydrated?.language ?? entry.language } : {})
+        };
+      });
+    return {
+      rootName: session.workingDirectory?.name ?? 'workspace',
+      scannedAt: session.workspaceIndex.updatedAt,
+      revision: session.workspaceIndex.revision,
+      fileCount: session.workspaceIndex.indexedEntries,
+      totalBytes: files.reduce((total, file) => total + file.size, 0),
+      tree: [],
+      files,
+      skipped: [],
+      detectedStack: this.uniqueFirstStrings([
+        ...session.workspaceIndex.detectedStack,
+        ...(session.workspaceSnapshot?.detectedStack ?? [])
+      ], 16),
+      entrypoints: session.workspaceIndex.entrypoints
+    };
   }
 }

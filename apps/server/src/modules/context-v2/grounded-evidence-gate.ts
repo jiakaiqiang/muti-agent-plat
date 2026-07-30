@@ -22,18 +22,25 @@ export function evaluateGroundedEvidenceGate(
 ): GroundedEvidenceGateDecision {
   if (!input.requiresEvidence) return { ok: true };
   const files = input.envelope.L3.files;
-  if (files.length === 0) return { ok: false, reason: 'evidence-empty' };
+  const fileRevisions = (input.envelope.L3.fileRevisions ?? []).filter(
+    (revision) => revision.complete === true && revision.truncated === false
+  );
+  const evidencePaths = [
+    ...files.map((file) => file.path),
+    ...fileRevisions.map((revision) => revision.filePath)
+  ];
+  if (evidencePaths.length === 0) return { ok: false, reason: 'evidence-empty' };
 
   const manifestByPath = new Map(input.envelope.L1.navigation.entries.map((entry) => [entry.path, entry]));
-  const usableFiles = files.filter((file) => {
-    const manifestEntry = manifestByPath.get(file.path);
+  const usablePaths = evidencePaths.filter((path) => {
+    const manifestEntry = manifestByPath.get(path);
     if (!manifestEntry) return false;
     return !manifestEntry.generated && !manifestEntry.sensitive;
   });
 
-  if (usableFiles.length === 0) {
-    const anyGenerated = files.some((file) => manifestByPath.get(file.path)?.generated === true);
-    const anyNavigable = files.some((file) => manifestByPath.has(file.path));
+  if (usablePaths.length === 0) {
+    const anyGenerated = evidencePaths.some((path) => manifestByPath.get(path)?.generated === true);
+    const anyNavigable = evidencePaths.some((path) => manifestByPath.has(path));
     return {
       ok: false,
       reason: !anyNavigable

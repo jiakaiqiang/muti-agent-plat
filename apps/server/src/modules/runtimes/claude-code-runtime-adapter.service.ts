@@ -89,6 +89,12 @@ export function pickClaudeRunMode(): ClaudeRunMode {
   return runtimeStreamingMode() === 'all' ? 'streaming' : 'buffered';
 }
 
+export function claudeBufferedTimeoutMs() {
+  const absoluteTimeoutMs = positiveRuntimeTimeoutMs('CLAUDE_CODE_ABSOLUTE_TIMEOUT_MS', 30 * 60_000);
+  const bufferedTimeoutMs = optionalRuntimeTimeoutMs('CLAUDE_CODE_TIMEOUT_MS') ?? absoluteTimeoutMs;
+  return Math.min(bufferedTimeoutMs, absoluteTimeoutMs);
+}
+
 export function buildClaudeBufferedArgs(params: {
   outputSchema: Record<string, unknown>;
   permissionMode: string;
@@ -177,7 +183,7 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
     provider: 'anthropic',
     capabilityIds: ['cap-file-read', 'cap-code-search', 'cap-file-write', 'cap-command-run', 'cap-test-report'] as const,
     supportedWorkspaceCapabilities: ['read', 'write', 'command', 'test'] as const,
-    supportedWorkspaceProviderKinds: ['server_local', 'browser_broker'] as const,
+    supportedWorkspaceProviderKinds: ['server_local'] as const,
     supportedToolNames: ['read_file', 'search_code', 'write_file', 'run_test'] as const
   };
 
@@ -216,7 +222,7 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
     }
     const rootPath = this.workspaceBindings.resolveServerRoot(input);
     if (!rootPath) {
-      return withStructuredTermination(settledHandle(this.blockedResult(input, 'Claude Code runtime requires a server_local or materialized browser working directory.')), input, signal);
+      return withStructuredTermination(settledHandle(this.blockedResult(input, 'Claude Code runtime requires a server_local working directory.')), input, signal);
     }
     if (input.resume?.workDir && resolve(input.resume.workDir) !== resolve(rootPath)) {
       return withStructuredTermination(settledHandle(this.failedResult(input, new Error('Resume workDir does not match the current workspace binding.'))), input, signal);
@@ -244,7 +250,7 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
 
     const rootPath = this.workspaceBindings.resolveServerRoot(input);
     if (!rootPath) {
-      return this.blockedResult(input, 'Claude Code runtime requires a server_local or materialized browser working directory.');
+      return this.blockedResult(input, 'Claude Code runtime requires a server_local working directory.');
     }
     if (input.resume?.workDir && resolve(input.resume.workDir) !== resolve(rootPath)) {
       return this.failedResult(input, new Error('Resume workDir does not match the current workspace binding.'));
@@ -254,7 +260,7 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
       return this.runStreaming(input, signal);
     }
 
-    const timeout = optionalRuntimeTimeoutMs('CLAUDE_CODE_TIMEOUT_MS') ?? 0;
+    const timeout = claudeBufferedTimeoutMs();
     let promptFilePath: string | undefined;
     let briefLease: WorkdirBriefLease | undefined;
     let beforeFiles: Map<string, string> | undefined;
@@ -775,7 +781,7 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
         baseEnv: this.runtimeEnv(input),
         firstFrameTimeoutMs: positiveRuntimeTimeoutMs('CLAUDE_CODE_FIRST_FRAME_TIMEOUT_MS', 30_000),
         idleTimeoutMs: positiveRuntimeTimeoutMs('CLAUDE_CODE_IDLE_TIMEOUT_MS', 600_000),
-        absoluteTimeoutMs: optionalRuntimeTimeoutMs('CLAUDE_CODE_ABSOLUTE_TIMEOUT_MS'),
+        absoluteTimeoutMs: positiveRuntimeTimeoutMs('CLAUDE_CODE_ABSOLUTE_TIMEOUT_MS', 30 * 60_000),
         workDir: this.workspaceBindings.resolveServerRoot(input),
         resumeCliSessionId: input.resume?.cliSessionId
       }),

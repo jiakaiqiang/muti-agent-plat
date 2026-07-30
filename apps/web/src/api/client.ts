@@ -12,33 +12,98 @@ type PageResponse<T> = {
   nextCursor?: string
 }
 
-async function request<T>(path: string, init?: RequestInit) {
-  const response = await fetch(`${apiBaseUrl}${path}`, {
+type ApiRequestInit = RequestInit & {
+  timeoutMs?: number
+  timeoutMessage?: string
+}
+
+export class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    readonly details?: Record<string, unknown>
+  ) {
+    super(message)
+    this.name = 'ApiRequestError'
+  }
+}
+
+async function request<T>(path: string, init?: ApiRequestInit) {
+  const { timeoutMs, timeoutMessage, ...requestInit } = init ?? {}
+  const resolvedTimeoutMs = timeoutMs && timeoutMs > 0 ? timeoutMs : undefined
+  const timeoutController = resolvedTimeoutMs ? new AbortController() : undefined
+  const upstreamSignal = requestInit.signal
+  const forwardAbort = () => timeoutController?.abort(upstreamSignal?.reason)
+  if (timeoutController && upstreamSignal) {
+    if (upstreamSignal.aborted) forwardAbort()
+    else upstreamSignal.addEventListener('abort', forwardAbort, { once: true })
+  }
+
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+  const responsePromise = fetch(`${apiBaseUrl}${path}`, {
+    ...requestInit,
+    signal: timeoutController?.signal ?? upstreamSignal,
     headers: {
       'content-type': 'application/json; charset=utf-8',
-      ...(init?.headers ?? {})
-    },
-    ...init
+      ...(requestInit.headers ?? {})
+    }
   })
+
+  let response: Response
+  try {
+    response = timeoutController
+      ? await Promise.race([
+          responsePromise,
+          new Promise<Response>((_, reject) => {
+            timeoutHandle = setTimeout(() => {
+              timeoutController.abort()
+              reject(
+                new Error(
+                  timeoutMessage ??
+                    `${requestInit.method ?? 'GET'} ${path} timed out after ${timeoutMs}ms`
+                )
+              )
+            }, resolvedTimeoutMs)
+          })
+        ])
+      : await responsePromise
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle)
+    upstreamSignal?.removeEventListener('abort', forwardAbort)
+  }
 
   if (!response.ok) {
     const body = await response.json().catch(() => undefined)
-    const message = body?.error?.message ?? `${init?.method ?? 'GET'} ${path} failed: ${response.status}`
-    throw new Error(message)
+    const message = body?.error?.message ?? `${requestInit.method ?? 'GET'} ${path} failed: ${response.status}`
+    throw new ApiRequestError(message, response.status, body?.error?.code, body?.error?.details)
   }
 
   return (await response.json()) as ApiResponse<T>
 }
 
-export async function apiGet<T>(path: string) {
-  return (await request<T>(path)).data
+export async function apiGet<T>(path: string, init?: ApiRequestInit) {
+  return (await request<T>(path, init)).data
 }
 
-export async function apiPost<T>(path: string, body?: unknown) {
+export async function apiPost<T>(path: string, body?: unknown, init?: ApiRequestInit) {
   return (
     await request<T>(path, {
+      ...init,
       method: 'POST',
-      body: body === undefined ? undefined : JSON.stringify(body)
+      body: body === undefined ? undefined : JSON.stringify(body),
+      headers: init?.headers
+    })
+  ).data
+}
+
+export async function apiPut<T>(path: string, body?: unknown, init?: ApiRequestInit) {
+  return (
+    await request<T>(path, {
+      ...init,
+      method: 'PUT',
+      body: body === undefined ? undefined : JSON.stringify(body),
+      headers: init?.headers
     })
   ).data
 }
@@ -52,16 +117,17 @@ export async function apiPatch<T>(path: string, body?: unknown) {
   ).data
 }
 
-export async function apiDelete<T>(path: string) {
+export async function apiDelete<T>(path: string, init?: ApiRequestInit) {
   return (
     await request<T>(path, {
+      ...init,
       method: 'DELETE'
     })
   ).data
 }
 
-export async function apiPage<T>(path: string) {
-  return apiGet<PageResponse<T>>(path)
+export async function apiPage<T>(path: string, init?: ApiRequestInit) {
+  return apiGet<PageResponse<T>>(path, init)
 }
 
 export function eventStreamUrl(sessionId: string) {

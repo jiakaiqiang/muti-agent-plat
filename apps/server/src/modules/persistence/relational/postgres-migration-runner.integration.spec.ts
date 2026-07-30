@@ -55,6 +55,7 @@ test('PostgreSQL migration creates a fully commented relational schema and is id
 
 test('relational projections preserve catalog versions, bindings, session progress, context requests, and outbox', { skip: !databaseUrl }, async () => {
   const pool = new Pool({ connectionString: databaseUrl });
+  const competingPool = new Pool({ connectionString: databaseUrl });
   const contentRoot = mkdtempSync(join(tmpdir(), 'agent-cluster-relational-'));
   const suffix = `${process.pid}-${Date.now()}`;
   const agentId = `agent-${suffix}`;
@@ -71,6 +72,10 @@ test('relational projections preserve catalog versions, bindings, session progre
     await runPostgresMigrations(pool);
     const store = new RelationalStateStore(
       pool,
+      new ContentReferenceCodec(new LocalContentStore({ rootDir: contentRoot }))
+    );
+    const competingStore = new RelationalStateStore(
+      competingPool,
       new ContentReferenceCodec(new LocalContentStore({ rootDir: contentRoot }))
     );
     await store.writeCollection('agents', [{
@@ -110,6 +115,82 @@ test('relational projections preserve catalog versions, bindings, session progre
       }]
     };
     await store.writeCollection('sessions', [session]);
+    const revisionBaseline = {
+      id: `baseline-${suffix}`,
+      dataEpoch: `epoch-${suffix}`,
+      sessionId,
+      workspaceId: `workspace-${suffix}`,
+      filePath: 'result.md',
+      workspaceRevision: { id: `workspace-revision-${suffix}`, observedAt: now },
+      contentRef: 'sha256:baseline-content',
+      hash: { algorithm: 'sha256', value: 'baseline-hash' },
+      sizeBytes: 12,
+      source: 'user_selected',
+      capturedAt: now
+    };
+    const revisionChain = {
+      id: `chain-${suffix}`,
+      dataEpoch: revisionBaseline.dataEpoch,
+      sessionId,
+      workspaceId: revisionBaseline.workspaceId,
+      filePath: revisionBaseline.filePath,
+      rootBaselineId: revisionBaseline.id,
+      workspaceExpectedRevision: revisionBaseline.workspaceRevision,
+      workspaceExpectedHash: { algorithm: 'sha256', value: 'revised-hash' },
+      latestRevisionId: `revision-${suffix}`,
+      latestIteration: 1,
+      stateVersion: 2,
+      status: 'active',
+      createdAt: now,
+      updatedAt: now
+    };
+    const revisionRun = {
+      id: revisionChain.latestRevisionId,
+      chainId: revisionChain.id,
+      dataEpoch: revisionBaseline.dataEpoch,
+      sessionId,
+      baselineId: revisionBaseline.id,
+      workspaceId: revisionBaseline.workspaceId,
+      filePath: 'result.md',
+      iteration: 1,
+      status: 'awaiting_confirmation',
+      baseKind: 'workspace_baseline',
+      baseHash: revisionBaseline.hash,
+      baseContentRef: revisionBaseline.contentRef,
+      baseSizeBytes: revisionBaseline.sizeBytes,
+      userDraftHash: revisionChain.workspaceExpectedHash,
+      userDraftContentRef: 'sha256:revised-content',
+      userDraftSizeBytes: 18,
+      diffContentRef: 'sha256:revision-diff',
+      diffHash: { algorithm: 'sha256', value: 'diff-hash' },
+      diffSummary: { addedLines: 1, removedLines: 1, unchangedLines: 1, hunkCount: 1 },
+      targetAgentIds: [agentId],
+      contextSnapshotHash: `evidence-${suffix}`,
+      agentResults: [],
+      candidateContentRef: 'sha256:candidate-content',
+      candidateHash: { algorithm: 'sha256', value: 'candidate-hash' },
+      candidateSizeBytes: 20,
+      confirmationId: `confirmation-${suffix}`,
+      createdAt: now,
+      updatedAt: now
+    };
+    const revisionDraft = {
+      chainId: revisionChain.id,
+      sourceRevisionId: revisionRun.id,
+      sourceCandidateHash: revisionRun.candidateHash,
+      contentRef: 'sha256:editor-draft',
+      contentHash: { algorithm: 'sha256', value: 'draft-hash' },
+      sizeBytes: 22,
+      updatedBy: { type: 'user', id: 'local-user' },
+      updatedAt: now
+    };
+    await store.writeCollection('fileRevisions', {
+      schemaVersion: 2,
+      baselines: [revisionBaseline],
+      chains: [revisionChain],
+      runs: [revisionRun],
+      drafts: [revisionDraft]
+    });
     await store.writeCollection('tasksBySession', {
       [sessionId]: [{ id: taskId, title: 'Projection Task', status: 'completed', assigneeId: agentId, createdAt: now, updatedAt: now }]
     });
@@ -122,6 +203,7 @@ test('relational projections preserve catalog versions, bindings, session progre
     const projections = await pool.query<{
       skill_bindings: number; tool_bindings: number; knowledge_bindings: number;
       context_requests: number; status_history: number; progress: number; outbox_published: number; tool_versions: number;
+      file_revision_records: number;
     }>(`
       select
         (select count(*)::int from agent_cluster.agent_skill_bindings b join agent_cluster.agent_versions av on av.id=b.agent_version_id join agent_cluster.agents a on a.id=av.agent_id where a.external_id=$1) skill_bindings,
@@ -131,7 +213,8 @@ test('relational projections preserve catalog versions, bindings, session progre
         (select count(*)::int from agent_cluster.session_status_history h join agent_cluster.sessions s on s.id=h.session_id where s.external_id=$3) status_history,
         (select count(*)::int from agent_cluster.session_progress p join agent_cluster.sessions s on s.id=p.session_id where s.external_id=$3) progress,
         (select count(*)::int from agent_cluster.event_outbox where external_id=$4 and status='published') outbox_published,
-        (select count(*)::int from agent_cluster.tool_versions tv join agent_cluster.tools t on t.id=tv.tool_id where t.tool_key=$5) tool_versions
+        (select count(*)::int from agent_cluster.tool_versions tv join agent_cluster.tools t on t.id=tv.tool_id where t.tool_key=$5) tool_versions,
+        (select count(*)::int from agent_cluster.file_revision_records f join agent_cluster.sessions s on s.id=f.session_id where s.external_id=$3 and f.deleted_at is null) file_revision_records
     `, [agentId, contextRequestId, sessionId, `outbox:${eventId}`, toolName]);
     assert.equal(projections.rows[0].skill_bindings, 1);
     assert.ok(projections.rows[0].tool_bindings >= 1);
@@ -141,7 +224,50 @@ test('relational projections preserve catalog versions, bindings, session progre
     assert.equal(projections.rows[0].progress, 1);
     assert.equal(projections.rows[0].outbox_published, 1);
     assert.equal(projections.rows[0].tool_versions, 2);
+    assert.equal(projections.rows[0].file_revision_records, 4);
+
+    const loaded = await store.loadState();
+    const loadedFileRevisions = loaded.fileRevisions as {
+      schemaVersion: number;
+      baselines: typeof revisionBaseline[];
+      chains: typeof revisionChain[];
+      runs: typeof revisionRun[];
+      drafts: typeof revisionDraft[];
+    };
+    assert.equal(loadedFileRevisions.schemaVersion, 2);
+    assert.equal(loadedFileRevisions.baselines.find((item) => item.id === revisionBaseline.id)?.contentRef, revisionBaseline.contentRef);
+    assert.equal(loadedFileRevisions.chains.find((item) => item.id === revisionChain.id)?.stateVersion, 2);
+    assert.equal(loadedFileRevisions.runs.find((item) => item.id === revisionRun.id)?.status, 'awaiting_confirmation');
+    assert.equal(loadedFileRevisions.drafts.find((item) => item.chainId === revisionChain.id)?.contentRef, revisionDraft.contentRef);
+
+    const applyingState = structuredClone(loadedFileRevisions);
+    applyingState.chains[0] = { ...applyingState.chains[0], status: 'applying', stateVersion: 3 };
+    applyingState.runs[0] = { ...applyingState.runs[0], status: 'applying' };
+    const abandonedState = structuredClone(loadedFileRevisions);
+    abandonedState.chains[0] = { ...abandonedState.chains[0], status: 'abandoned', stateVersion: 3 };
+    abandonedState.runs[0] = { ...abandonedState.runs[0], status: 'abandoned' };
+    const competingWrites = await Promise.allSettled([
+      store.compareAndSetCollection('fileRevisions', loadedFileRevisions, applyingState),
+      competingStore.compareAndSetCollection('fileRevisions', loadedFileRevisions, abandonedState)
+    ]);
+    assert.equal(competingWrites.filter((result) => result.status === 'fulfilled').length, 1);
+    assert.equal(competingWrites.filter((result) => result.status === 'rejected').length, 1);
+    const afterCas = (await store.loadState()).fileRevisions as typeof loadedFileRevisions;
+    assert.equal(afterCas.chains[0]?.stateVersion, 3);
+    assert.ok(['applying', 'abandoned'].includes(afterCas.chains[0]?.status ?? ''));
+
+    const unavailablePool = new Pool({ connectionString: databaseUrl });
+    const unavailableStore = new RelationalStateStore(
+      unavailablePool,
+      new ContentReferenceCodec(new LocalContentStore({ rootDir: contentRoot }))
+    );
+    await unavailablePool.end();
+    await assert.rejects(
+      unavailableStore.compareAndSetCollection('fileRevisions', afterCas, loadedFileRevisions),
+      /ended|closed|connect/i
+    );
   } finally {
+    await competingPool.end();
     await pool.end();
     rmSync(contentRoot, { recursive: true, force: true });
   }

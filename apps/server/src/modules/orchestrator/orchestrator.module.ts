@@ -12,6 +12,7 @@ import { SkillsModule } from '../skills/skills.module.js';
 import { ContextRouterService } from './context-router.service.js';
 import { OrchestratorService } from './orchestrator.service.js';
 import { ProjectMapService } from './project-map.service.js';
+import { FileRevisionsModule } from '../file-revisions/file-revisions.module.js';
 
 @Module({
   imports: [
@@ -24,7 +25,8 @@ import { ProjectMapService } from './project-map.service.js';
     MemoryModule,
     ArtifactsModule,
     CapabilitiesModule,
-    SkillsModule
+    SkillsModule,
+    FileRevisionsModule
   ],
   providers: [ContextRouterService, ProjectMapService, OrchestratorService],
   exports: [ContextRouterService, ProjectMapService, OrchestratorService]

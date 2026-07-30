@@ -27,6 +27,10 @@ import { LocalContentStore } from './local-content-store.js';
 
 type PersistedState = Record<string, unknown>;
 export type PersistenceBackend = 'file' | 'postgres';
+export type CollectionCompareAndSetResult =
+  | { status: 'applied' }
+  | { status: 'conflict' }
+  | { status: 'failed'; error: Error };
 
 export type PersistenceServiceOptions = {
   enabled?: boolean;
@@ -129,6 +133,53 @@ export class PersistenceService implements OnModuleDestroy {
       this.writeFileState();
       return Promise.resolve(true);
     }
+  }
+
+  async compareAndSetCollection<T>(key: string, expected: T, value: T): Promise<CollectionCompareAndSetResult> {
+    if (!this.enabled || this.backend !== 'postgres') {
+      return (await this.setCollection(key, value))
+        ? { status: 'applied' }
+        : { status: 'failed', error: new Error('REVISION_PERSISTENCE_FAILED: state was not durably stored.') };
+    }
+    this.assertWritable();
+    if (!this.relationalStore) {
+      const error = new Error('RELATIONAL_PERSISTENCE_UNAVAILABLE: relational state store is not initialized.');
+      this.pendingPostgresWriteError ??= error;
+      return { status: 'failed', error };
+    }
+    const next = this.clone(value);
+    const write = this.pendingPostgresWrites.then(() =>
+      this.relationalStore!.compareAndSetCollection(key, expected, next)
+    );
+    const result: Promise<CollectionCompareAndSetResult> = write.then(
+      (): CollectionCompareAndSetResult => ({ status: 'applied' }),
+      async (cause: unknown): Promise<CollectionCompareAndSetResult> => {
+        if (String(cause).includes('REVISION_PERSISTENCE_CONFLICT')) {
+          try {
+            const fresh = await this.relationalStore!.loadState();
+            if (fresh[key] === undefined) delete this.state[key];
+            else this.state[key] = this.clone(fresh[key]);
+            return { status: 'conflict' };
+          } catch (refreshCause) {
+            const error = new Error(
+              `POSTGRES_PERSISTENCE_REFRESH_FAILED: compare-and-set:${key}: ${String(refreshCause)}`,
+              { cause: refreshCause }
+            );
+            this.logger.error(error.message);
+            this.pendingPostgresWriteError ??= error;
+            return { status: 'failed', error };
+          }
+        }
+        const error = new Error(`POSTGRES_PERSISTENCE_WRITE_FAILED: compare-and-set:${key}: ${String(cause)}`, { cause });
+        this.logger.error(error.message);
+        this.pendingPostgresWriteError ??= error;
+        return { status: 'failed', error };
+      }
+    );
+    this.pendingPostgresWrites = result.then(() => undefined);
+    const settled = await result;
+    if (settled.status === 'applied') this.state[key] = next;
+    return settled;
   }
 
   async flush(): Promise<void> {
@@ -280,7 +331,7 @@ export class PersistenceService implements OnModuleDestroy {
       } finally {
         closeSync(descriptor);
       }
-      renameSync(tmpPath, this.filePath);
+      replaceFileWithRetry(tmpPath, this.filePath);
       renamed = true;
     } finally {
       if (!renamed && existsSync(tmpPath)) {
@@ -404,4 +455,32 @@ export class PersistenceService implements OnModuleDestroy {
     return this.relationalStore ? !(await this.relationalStore.hasBusinessData()) : false;
   }
 
+}
+
+const retryableFileReplaceCodes = new Set(['EACCES', 'EBUSY', 'EPERM']);
+
+export function replaceFileWithRetry(
+  source: string,
+  destination: string,
+  rename: (source: string, destination: string) => void = renameSync,
+  maximumAttempts = 12
+) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+    try {
+      rename(source, destination);
+      return;
+    } catch (error) {
+      lastError = error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (!code || !retryableFileReplaceCodes.has(code) || attempt === maximumAttempts) throw error;
+      synchronousDelay(Math.min(100, attempt * 10));
+    }
+  }
+  throw lastError;
+}
+
+function synchronousDelay(milliseconds: number) {
+  const signal = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+  Atomics.wait(signal, 0, 0, milliseconds);
 }

@@ -8,7 +8,7 @@
 
 ## 工程化 positioning
 
-This directory turns Context Protocol and Agent Role Protocol into prompt and runtime context constraints. It documents system message, user message, ContextPack, and profileMarkdown expectations without changing application code.
+This directory turns Context Protocol and Agent Role Protocol into prompt and runtime context constraints. It documents system message, user message, internal ContextAssembly, Runtime-facing ContextEnvelopeV2, and profileMarkdown expectations without changing application code.
 
 - agent-prompt-contract.md
 - runtime-context-contract.md

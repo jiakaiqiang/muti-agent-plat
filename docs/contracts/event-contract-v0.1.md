@@ -200,8 +200,8 @@ type TaskEventPayload = {
   title: string
   description?: string
   status: AgentTaskStatus
-  assignedByAgentId?: string
-  assigneeAgentId?: string
+  assignedBy?: ActorRef
+  assignee?: ActorRef
   routingMode?: 'coordinator_controlled' | 'agent_suggested' | 'agent_delegated'
   autoResolutionAttempted?: boolean
   assignmentReason?: string
@@ -223,9 +223,9 @@ type TaskEventPayload = {
 }
 ```
 
-Coordinator 中心流转兼容规则：
+Coordinator 中心流转规则：
 
-- v1 目标语义中，`task_assigned` 表示 Coordinator 已将任务分配给 `assigneeAgentId`。
+- `task_assigned` 表示 Coordinator 已将任务分配给 `assignee` 指向的 Actor。
 - v1 目标语义中，`task_accepted` 表示子 Agent 已接受被分配任务。
 - 现有 `task_claimed` 保留兼容，但必须解释为“已接受”，不得解释为子 Agent 自由竞争接活。
 - `task_blocked` 表示子 Agent 无法继续，等待 Coordinator 补上下文、改派或请求用户决策。
@@ -265,6 +265,31 @@ type RuntimeEventPayload = {
   requestedContext?: RuntimeContextRequest
 }
 ```
+
+Runtime adapter 内部事件额外带有产品可见性：
+
+```ts
+type AgentRuntimeEvent = {
+  invocationId: string
+  type: 'runtime_progress' | 'tool_called' | 'tool_completed' | /* terminal events */ string
+  content: string
+  visibility: 'user' | 'debug'
+  metadata?: Record<string, unknown>
+  createdAt: string
+}
+```
+
+Provider 原始通知必须先分类，再决定是否生成协作事件：
+
+| 分类 | 例子 | 处理 |
+| --- | --- | --- |
+| Provider 输出增量 | `item/agentMessage/delta` | 标记为 `debug`，不得生成协作事件或进入用户时间线 |
+| 工具事件 | `item/started`、`item/completed` | 生成 `tool_called/tool_completed` |
+| 最终结果/usage | `turn/completed`、`thread/tokenUsage/updated` | 结果解析或 usage 聚合，不显示 method 名 |
+| Debug only | `thread/started`、Remote Control、成功的 MCP 启动、未知 method | 仅写入 invocation diagnostics |
+| Runtime error | MCP 启动失败、已确认的 Provider/CLI 失败 | 生成结构化 `RuntimeError` |
+
+`visibility` 是必填字段。默认分类是 Debug only；只有明确分类为用户业务语义的事件才能使用 `user`。后端不得把 `visibility='debug'`、`metadata.code='STREAM_TEXT'`、`STREAM_SYSTEM` 或 `STREAM_STDERR` 持久化为聊天事件；Web 时间线必须再次过滤这些值。原始通知与未知通知计数仍可通过 Debug Runtime 视图追踪。
 
 When `error.code='CONTEXT_INSUFFICIENT'`, `runtime_failed` should render as a visible waiting/blocking card and include the same `requestedContext` on the payload for debug and retry planning.
 
@@ -306,7 +331,23 @@ type RagMatchedChunk = {
 }
 ```
 
-### 6.10 final_delivery_created
+### 6.10 artifact_created
+
+```ts
+type ArtifactEventPayload = {
+  artifactId: string
+  type: ArtifactType
+  title: string
+  contentSummary?: string
+  runtimeProposals?: RuntimeArtifactProposal[]
+  platformProjections?: RuntimeFileChange[]
+  systemEvidence?: RuntimeArtifactSystemEvidence | null
+}
+```
+
+事件 payload 不再使用顶层 `fileChanges`。`platformProjections` 表示平台生成、待写入的文件；只有 `systemEvidence.workspaceChangeSet` 能标记为平台观测变更并进入 diff 证据。
+
+### 6.11 final_delivery_created
 
 ```ts
 type FinalDeliveryPayload = {
@@ -318,10 +359,44 @@ type FinalDeliveryPayload = {
   testResults: string[]
   risks: string[]
   artifactIds: string[]
+  report?: {
+    artifactId: string
+    title: string
+    format: 'markdown'
+    content: string
+    suggestedPath: string
+    requiresUserConfirmation: true
+  }
 }
 ```
 
-## 7. SSE 推送格式
+架构分析交付存在 `report` 时：
+
+- 群聊必须展示完整 `content`，不能只显示 `summary`。
+- 后端必须发出 `reason=confirm_local_report_save` 的确认卡。
+- `save_local` 之前不得写入 `suggestedPath`。
+- 同一时刻只保留该保存确认，不再并行创建飞书发送确认。
+
+## 7. 工作流运行事件
+
+工作流运行时新增以下事实事件，所有事件的 `metadata.payload` 至少携带可用的 `workflowId`、`workflowVersion`、`workflowRunId`；节点事件还携带 `workflowNodeId` 和 `workflowNodeRunId`：
+
+```text
+workflow_published
+workflow_run_started
+workflow_node_started
+workflow_node_completed
+workflow_gate_requested
+workflow_gate_decided
+workflow_node_revision_requested
+workflow_run_completed
+workflow_run_failed
+workflow_run_cancelled
+```
+
+人工确认继续使用通用 `user_confirmation_requested/resolved`，其中 `reason=confirm_workflow_human_gate`。请求载荷必须包含 `confirmationId`、`workflowRunId`、`workflowNodeRunId` 和 `expectedRunRevision`；机器人确认的决策、原因和证据引用写入 `workflow_gate_decided`，不暴露隐藏推理过程。
+
+## 8. SSE 推送格式
 
 ```text
 event: collaboration-event
@@ -336,12 +411,16 @@ event: heartbeat
 data: {"time":"2026-05-27T00:00:00.000Z"}
 ```
 
+心跳是传输层帧，没有 `id`，不写入事件存储，不推进客户端服务端游标，并跳过请求级持久化提交。默认每 15 秒发送；客户端连续 45 秒未收到任何业务事件或心跳时，应主动关闭半开连接并进入重连。
+
 重连规则：
 
-- 前端保存最后一个 `event.id`。
-- 重连时请求 `GET /api/sessions/:sessionId/events?afterEventId=<id>` 补齐缺失事件。
+- 前端只保存最后一个已提交的服务端 `event.id`，`evt-local-*` 等乐观事件不得成为游标。
+- 重连时先记录该游标并打开 SSE，将新到业务事件暂存到缓冲区；随后请求 `GET /api/sessions/:sessionId/events?afterEventId=<id>` 补齐缺失事件。
+- 补偿成功后按 REST 返回顺序追加缓冲区到达顺序，以服务端事件 `id` 去重后原子提交；补偿失败时连接仍处于 `reconnecting` 或 `degraded`，不得宣告 `connected`。
+- SSE 断开和恢复不得触发 Session 中断，也不得自动重放任何 REST 写操作。
 
-## 8. 前端渲染规则
+## 9. 前端渲染规则
 
 - `user_message` 渲染为用户气泡。
 - `agent_message` 渲染为 Agent 气泡。
@@ -352,8 +431,9 @@ data: {"time":"2026-05-27T00:00:00.000Z"}
 - `rag_retrieved` 默认折叠展示，Agent 卡片展示摘要。
 - `tool_*` 渲染为工具调用卡片。
 - `final_delivery_created` 渲染为最终交付卡片。
+- `phase=user_message_routing` 的 `runtime_*` 仅用于 Receiver Runtime 的 Debug/Audit，不进入协作事件 REST/SSE，也不渲染到聊天时间线。
 
-## 9. 校验规则
+## 10. 校验规则
 
 - 所有事件必须有 `id`、`sessionId`、`type`、`content`、`metadata.schemaVersion`、`createdAt`。
 - Agent 发出的事件必须有 `fromAgentId`。
@@ -362,11 +442,11 @@ data: {"time":"2026-05-27T00:00:00.000Z"}
 - 高风险工具事件必须包含 `requiresUserConfirmation`。
 - `createdAt` 使用 ISO 8601。
 
-## 10. v0.2 迁移说明（双写期）
+## 11. ActorRef 合约
 
-v0.2 引入统一的 `ActorRef` 表达"事件/任务是谁发起、谁负责、谁分配"，同时保留 v0.1 的旧字段作为双写降级。发布时间点：M3 阶段随 event 序列化改造合入，v0.3 起旧字段将被移除。
+`ActorRef` 是事件与任务中表达“谁发起、谁负责、谁分配”的权威结构。任务分配字段已经硬切，不双写、不回填，也不读取旧的 Agent id 字段。
 
-### 10.1 新增类型
+### 11.1 类型
 
 ```ts
 type ActorType = 'user' | 'agent' | 'system'
@@ -378,31 +458,30 @@ type ActorRef = {
 }
 ```
 
-### 10.2 事件结构新增字段
+### 11.2 事件结构
 
 ```ts
 type CollaborationEvent = {
-  // ...v0.1 已有字段
-  actor?: ActorRef            // v0.2 新增；未来主字段
-  fromAgentId?: string        // v0.2 保留；v0.3 移除（deprecated）
+  // ...其他字段
+  actor?: ActorRef
 }
 ```
 
-### 10.3 任务结构新增字段
+事件展示只消费 `actor`；缺失时按系统事件处理，不从旧字段恢复 Agent 身份。
+
+### 11.3 任务结构
 
 ```ts
 type AgentTask = {
-  // ...v0.1 已有字段
-  assignee?: ActorRef         // v0.2 新增
-  assignedBy?: ActorRef       // v0.2 新增
-  assigneeAgentId?: string    // v0.2 保留；v0.3 移除（deprecated）
-  assignedByAgentId?: string  // v0.2 保留；v0.3 移除（deprecated）
+  // ...其他字段
+  assignee?: ActorRef
+  assignedBy?: ActorRef
 }
 ```
 
-### 10.4 双写与推导规则
+### 11.4 推导规则
 
-M3-04 `events.create` 内部依据下列规则推导 `actor`，写入事件时 `actor` 与旧字段同时落盘（双写）：
+`events.create` 内部依据下列规则推导并落盘 `actor`：
 
 | 事件场景 | actor.type | actor.id 来源 |
 | --- | --- | --- |
@@ -413,41 +492,25 @@ M3-04 `events.create` 内部依据下列规则推导 `actor`，写入事件时 `
 | Runtime 侧事件（有 `fromAgentId`） | `agent` | 关联 agent id |
 | Runtime 侧事件（无 `fromAgentId`） | `system` | 固定 `system` |
 
-任务的 `assignee` / `assignedBy` 由 orchestrator 在分派/接受路径上填入，`AgentTask` 落库同时保留 `assigneeAgentId` / `assignedByAgentId` 直至 v0.3。
+任务的 `assignee` / `assignedBy` 由 Orchestrator 在分派/接受路径上填入。持久化和 API 只接受 `ActorRef` 字段。
 
-### 10.5 前端契约
+### 11.5 前端契约
 
-- 前端时间线组件必须**优先读 `actor`**（M3-06 落地）；`actor` 缺失回退到旧字段：
-  - 事件：`actor.id` → `fromAgentId`
-  - 任务：`assignee.id` → `assigneeAgentId`；`assignedBy.id` → `assignedByAgentId`
+- 前端时间线组件只读取 `actor`。
+- 任务视图只读取 `assignee` 和 `assignedBy`。
 - 展示名优先取 `actor.displayName`，否则由前端根据 `actor.type` + id 查会话 agent 名字兜底。
 
-### 10.6 弃用字段清单
+### 11.6 硬切约束
 
-以下字段在 v0.2 保留双写，v0.3 移除：
+- 旧任务 Agent id 字段是非法输入，不能通过 Mapper、默认值或数据回填恢复。
+- 新 data epoch 不加载旧任务数据。
+- Harness 必须阻止旧任务字段重新进入 Shared、Server、Web、E2E 和活动合同文档。
 
-- `CollaborationEvent.fromAgentId`
-- `TaskEventPayload.assigneeAgentId`（v0.2 仍写入以兼容 v0.1 UI）
-- `TaskEventPayload.assignedByAgentId`（同上）
-- `AgentTask.assigneeAgentId`
-- `AgentTask.assignedByAgentId`
+### 11.7 变更日志
 
-### 10.7 迁移清单
+- 2026-07-16：任务 Actor 合约硬切为 `assignee` / `assignedBy`，删除旧字段双写、回填和前端回退规范。
 
-- M3-02：`ActorType` / `ActorRef` 加入 `packages/shared/src/contracts.ts`，事件类型追加 `actor?`。
-- M3-03：`AgentTask` 追加 `assignee?` / `assignedBy?`；数据层同步。
-- M3-04：`events.create` 推导 `actor` 并双写。
-- M3-05：历史事件/任务回填脚本，为已有数据补 `actor` / `assignee` / `assignedBy`。
-- M3-06：前端时间线读 `actor` 优先，回退旧字段。
-- M3-07：v0.2 合同测试回归。
-
-### 10.8 变更日志
-
-- v0.2（2026-07-09，M3-01 起草）：引入 `actor` / `assignee` / `assignedBy` 统一 actor 契约，旧字段进入双写弃用期；v0.3 计划移除。
-- v0.2（2026-07-09，M3-07 回归）：`events.service.create` 单点推导 actor（M3-04）、backfill 脚本落地（M3-05）、前端 timeline 走 `useActor` 双数据源渲染（M3-06）。
-- v0.2（2026-07-10，R3 完成）：任务创建/更新/改派路径完成 `assignee/assignedBy` 与旧字段双写；file/PostgreSQL collection 回填支持 dry-run、备份和 apply；Actor/Task/backfill 单测及 Web build 通过。
-
-### 10.9 Runtime 恢复审计事件
+### 11.8 Runtime 恢复审计事件
 
 CLI Resume 失败或 session id 不一致并触发单次 fresh-session fallback 时，必须写入：
 
@@ -463,3 +526,32 @@ CLI Resume 失败或 session id 不一致并触发单次 fresh-session fallback 
 ```
 
 该事件只表达恢复路径切换，不等于运行失败；最终状态仍由后续 `runtime_completed/runtime_failed` 决定。
+
+## 12. 用户原文件修订事件
+
+```ts
+type FileRevisionEventType =
+  | 'file_revision_baseline_captured'
+  | 'file_revision_chain_created'
+  | 'file_revision_iteration_submitted'
+  | 'file_revision_dispatched'
+  | 'file_revision_agent_completed'
+  | 'file_revision_synthesis_started'
+  | 'file_revision_candidate_generated'
+  | 'file_revision_draft_saved'
+  | 'file_revision_candidate_superseded'
+  | 'file_revision_failure_decision_requested'
+  | 'file_revision_failure_resolved'
+  | 'file_revision_apply_started'
+  | 'file_revision_applied'
+  | 'file_revision_stale'
+  | 'file_revision_failed'
+```
+
+事件 payload 只允许保存 `baselineId/chainId/revisionId/parentRevisionId/iteration/filePath`、Hash、Agent/Task/Invocation ID、状态和统计；不得内联基线、用户稿、草稿、完整 Diff、Agent 提案或 Receiver 候选正文，也不得公开 Content Reference。文件修订 Agent 的通用 `artifact_created` 事件只发布 Artifact 身份、类型和标题，不发布 `contentSummary`，也不得附带 `runtimeProposals/systemEvidence/workspaceExecution`；任务、Runtime 和失败事件不得发布内部 Prompt、验收条件、模型摘要、风险、handoff 或 Provider 原始错误。非文件修订事件维持原合同。`file_revision_candidate_generated` 之后发出 `reason='confirm_file_revision_apply'` 的确认卡，payload 必须携带 `confirmationId/revisionId/chainId/iteration/candidateHash/stateVersion`。只有这些字段与当前链头全部匹配的用户决策可以应用或放弃候选。
+
+草稿保存只产生 `file_revision_draft_saved`，不产生任务派发事件。提交下一轮时先产生 `file_revision_candidate_superseded` 和 `file_revision_iteration_submitted`；SSE 重连只补读这些事实，客户端不得据此重放 mutation。
+
+当部分 Agent 失败时，服务端在保存全部 Agent 终态后产生 `file_revision_failure_decision_requested`，payload 只包含成功/失败数量、允许的决策和版本标识。用户选择 `retry_agents/continue_with_successful/abandon_revision` 后产生一次 `file_revision_failure_resolved`；前两种决策分别重新派发目标 Agent 或仅派发 Receiver，放弃决策不再派发。SSE 回补这些事件不得自动重放决策。
+
+进程重启产生的 `interrupted` 状态不会自动派发。用户调用显式重试接口后以 `retryKey` 去重产生一次 `file_revision_dispatched`，metadata 中的 `retryMode` 明确区分 `run_agents/receiver_only/apply_reconcile`；`apply_reconcile` 只发布对账结果，不得伪装成 Agent 重新处理。

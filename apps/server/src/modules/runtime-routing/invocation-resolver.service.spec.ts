@@ -117,11 +117,13 @@ function setup(options?: {
   blockedCatalog?: boolean;
   blockedReasons?: string[];
   runtimeCandidates?: InvocationRuntimeCandidate[];
+  localRuntimeCandidates?: InvocationRuntimeCandidate[];
   compiledIdentity?: CompiledAgentIdentity;
 }) {
   const calls: Array<{
     runtimeSupportedToolNames: readonly string[];
     workspaceCapabilities: WorkspaceCapabilities;
+    allowedToolNames?: readonly string[];
   }> = [];
   const profileCompiler = {
     compileIdentity: () => options?.compiledIdentity ?? compiledIdentity
@@ -130,6 +132,7 @@ function setup(options?: {
     resolve: (input: {
       runtimeSupportedToolNames: readonly string[];
       workspaceCapabilities: WorkspaceCapabilities;
+      allowedToolNames?: readonly string[];
     }) => {
       calls.push(input);
       return options?.blockedCatalog
@@ -147,6 +150,7 @@ function setup(options?: {
     }
   };
   const runtimeCandidates = options?.runtimeCandidates ?? [candidate('codex'), candidate('generic_llm')];
+  const localRuntimeCandidateCalls: string[] = [];
   const registry = {
     listAll: () => runtimeCandidates.map((item) => ({
       type: item.runtimeType,
@@ -162,9 +166,21 @@ function setup(options?: {
       }
     }))
   };
+  const localRuntime = {
+    listRuntimeCandidates: (workspaceId: string) => {
+      localRuntimeCandidateCalls.push(workspaceId);
+      return options?.localRuntimeCandidates ?? [];
+    }
+  };
   return {
-    resolver: new InvocationResolverService(profileCompiler as never, toolAuthority as never, registry as never),
-    calls
+    resolver: new InvocationResolverService(
+      profileCompiler as never,
+      toolAuthority as never,
+      registry as never,
+      localRuntime as never
+    ),
+    calls,
+    localRuntimeCandidateCalls
   };
 }
 
@@ -199,6 +215,29 @@ test('compiles an immutable Agent identity before producing the InvocationPlan',
   const plan = resolve(resolver);
   assert.equal(plan.agent, compiledIdentity);
   assert.equal('runtimeType' in plan.agent, false);
+});
+
+test('proposal_only removes write, command, and test requirements before Runtime selection', () => {
+  const proposalAgent = {
+    ...agent,
+    capabilityIds: ['cap-file-write', 'cap-command-run']
+  };
+  const proposalIdentity = {
+    ...compiledIdentity,
+    requestedToolIds: ['cap-file-write', 'cap-command-run'],
+    requestedToolKeys: ['tool.file_write', 'tool.command_run'],
+    capabilityIds: ['cap-file-write', 'cap-command-run']
+  };
+  const { resolver, calls } = setup({ compiledIdentity: proposalIdentity });
+  const plan = resolve(resolver, {
+    agent: proposalAgent,
+    taskRequiresCodeChanges: true,
+    writeModeOverride: 'proposal_only'
+  });
+
+  assert.equal(plan.executionTarget.writeMode, 'proposal_only');
+  assert.deepEqual(plan.executionTarget.requiredCapabilities, ['read']);
+  assert.deepEqual(calls[0]?.allowedToolNames, ['read_file', 'search_code']);
 });
 
 test('eligible task override has the highest routing priority', () => {
@@ -267,93 +306,6 @@ test('Agent fields cannot supply a Runtime preference', () => {
   assert.equal(plan.executionTarget.modelId, undefined);
 });
 
-test('browser broker code changes require read/write but not a local command capability', () => {
-  const { resolver } = setup({
-    runtimeCandidates: [candidate('mock', { supportedWorkspaceCapabilities: ['read', 'write'] })]
-  });
-  const plan = resolve(resolver, {
-    taskRequiresCodeChanges: true,
-    workspace: {
-      workspaceId: 'browser-workspace',
-      providerKind: 'browser_broker',
-      capabilities: { read: true, write: true, command: false, test: false }
-    }
-  });
-  assert.equal(plan.executionTarget.workspaceProviderKind, 'browser_broker');
-  assert.deepEqual(plan.executionTarget.requiredCapabilities, ['read', 'write']);
-  assert.equal(plan.executionTarget.writeMode, 'propose_changes');
-});
-
-test('browser broker code changes fail closed when read capability is unavailable', () => {
-  const { resolver } = setup({ runtimeCandidates: [candidate('mock')] });
-  assert.throws(
-    () => resolve(resolver, {
-      taskRequiresCodeChanges: true,
-      workspace: {
-        workspaceId: 'browser-workspace',
-        providerKind: 'browser_broker',
-        capabilities: { read: false, write: true, command: false, test: false }
-      }
-    }),
-    (error: unknown) => error instanceof InvocationResolutionError && error.code === 'NO_ELIGIBLE_RUNTIME'
-  );
-});
-
-test('browser broker code changes fail closed when write capability is unavailable', () => {
-  const { resolver } = setup({ runtimeCandidates: [candidate('mock')] });
-  assert.throws(
-    () => resolve(resolver, {
-      taskRequiresCodeChanges: true,
-      workspace: {
-        workspaceId: 'browser-workspace',
-        providerKind: 'browser_broker',
-        capabilities: { read: true, write: false, command: false, test: false }
-      }
-    }),
-    (error: unknown) => error instanceof InvocationResolutionError && error.code === 'NO_ELIGIBLE_RUNTIME'
-  );
-});
-
-test('browser broker rejects a Runtime that cannot propose writable changes', () => {
-  const { resolver } = setup({
-    runtimeCandidates: [candidate('mock', { supportedWorkspaceCapabilities: ['read'] })]
-  });
-  assert.throws(
-    () => resolve(resolver, {
-      taskRequiresCodeChanges: true,
-      workspace: {
-        workspaceId: 'browser-workspace',
-        providerKind: 'browser_broker',
-        capabilities: { read: true, write: true, command: false, test: false }
-      }
-    }),
-    (error: unknown) => error instanceof InvocationResolutionError && error.code === 'NO_ELIGIBLE_RUNTIME'
-  );
-});
-
-test('browser broker rejects a Runtime that only supports server-local workspaces', () => {
-  const { resolver } = setup({
-    runtimeCandidates: [candidate('codex', {
-      supportedWorkspaceCapabilities: [],
-      supportedWorkspaceProviderKinds: ['server_local']
-    })],
-    compiledIdentity: toolFreeIdentity
-  });
-  assert.throws(
-    () => resolve(resolver, {
-      phase: 'discussion',
-      taskRequiresCodeChanges: false,
-      sessionPreference: { preferredRuntimeType: 'codex', allowedRuntimeTypes: ['codex'] },
-      workspace: {
-        workspaceId: 'browser-workspace',
-        providerKind: 'browser_broker',
-        capabilities: { read: true, write: true, command: false, test: false }
-      }
-    }),
-    (error: unknown) => error instanceof InvocationResolutionError && error.code === 'NO_ELIGIBLE_RUNTIME'
-  );
-});
-
 test('strict session Runtime allowlist prevents fallback to another registered Runtime', () => {
   const { resolver } = setup({ runtimeCandidates: [candidate('generic_llm')] });
   assert.throws(
@@ -419,7 +371,84 @@ test('local bridge code changes continue to require command capability', () => {
   );
 });
 
-test('browser broker non-code phases remain runnable without live workspace capabilities', () => {
+test('local bridge discussion selects candidates advertised by the connected Local Runtime', () => {
+  const { resolver, localRuntimeCandidateCalls } = setup({
+    runtimeCandidates: [candidate('codex', { supportedWorkspaceProviderKinds: ['server_local'] })],
+    localRuntimeCandidates: [candidate('claude_code', {
+      supportedWorkspaceCapabilities: [],
+      supportedWorkspaceProviderKinds: ['local_bridge'],
+      supportedToolNames: []
+    })],
+    compiledIdentity: toolFreeIdentity
+  });
+
+  const plan = resolve(resolver, {
+    phase: 'discussion',
+    taskRequiresCodeChanges: true,
+    sessionPreference: {
+      preferredRuntimeType: 'claude_code',
+      allowedRuntimeTypes: ['claude_code', 'codex']
+    },
+    workspace: {
+      workspaceId: 'local-workspace',
+      providerKind: 'local_bridge',
+      capabilities: { read: true, write: true, command: true, test: true }
+    }
+  });
+
+  assert.equal(plan.executionTarget.runtimeType, 'claude_code');
+  assert.equal(plan.executionTarget.executionLocation, 'local');
+  assert.deepEqual(localRuntimeCandidateCalls, ['local-workspace']);
+});
+
+test('local bridge never falls back to a server Runtime when the Local Runtime has no candidate', () => {
+  const { resolver } = setup({
+    runtimeCandidates: [candidate('codex', { supportedWorkspaceProviderKinds: ['server_local'] })],
+    localRuntimeCandidates: [],
+    compiledIdentity: toolFreeIdentity
+  });
+
+  assert.throws(
+    () => resolve(resolver, {
+      phase: 'discussion',
+      sessionPreference: { preferredRuntimeType: 'codex', allowedRuntimeTypes: ['codex'] },
+      workspace: {
+        workspaceId: 'offline-local-workspace',
+        providerKind: 'local_bridge',
+        capabilities: { read: true, write: true, command: true, test: true }
+      }
+    }),
+    (error: unknown) =>
+      error instanceof InvocationResolutionError &&
+      error.code === 'NO_ELIGIBLE_RUNTIME' &&
+      error.message.includes('providerKind=local_bridge') &&
+      error.message.includes('requiredTools=none')
+  );
+});
+
+test('server workspace ignores Local Runtime candidates', () => {
+  const { resolver, localRuntimeCandidateCalls } = setup({
+    runtimeCandidates: [candidate('generic_llm', { supportedWorkspaceProviderKinds: ['server_local'] })],
+    localRuntimeCandidates: [candidate('codex', { supportedWorkspaceProviderKinds: ['local_bridge'] })],
+    compiledIdentity: toolFreeIdentity
+  });
+
+  const plan = resolve(resolver, {
+    phase: 'discussion',
+    smartRouterPick: 'codex',
+    workspace: {
+      workspaceId: 'server-workspace',
+      providerKind: 'server_local',
+      capabilities: { read: true, write: true, command: true, test: true }
+    }
+  });
+
+  assert.equal(plan.executionTarget.runtimeType, 'generic_llm');
+  assert.equal(plan.executionTarget.executionLocation, 'server');
+  assert.deepEqual(localRuntimeCandidateCalls, []);
+});
+
+test('server non-code phases remain runnable without workspace capabilities', () => {
   const { resolver } = setup({
     runtimeCandidates: [candidate('mock', { supportedWorkspaceCapabilities: [] })],
     compiledIdentity: toolFreeIdentity
@@ -428,15 +457,15 @@ test('browser broker non-code phases remain runnable without live workspace capa
     phase: 'task_execution',
     taskRequiresCodeChanges: false,
     workspace: {
-      workspaceId: 'browser-workspace',
-      providerKind: 'browser_broker',
+      workspaceId: 'server-workspace',
+      providerKind: 'server_local',
       capabilities: { read: false, write: false, command: false, test: false }
     }
   });
   assert.deepEqual(plan.executionTarget.requiredCapabilities, []);
 });
 
-test('browser broker still requires command/test when an Agent explicitly requests run_test', () => {
+test('server workspaces require command/test when an Agent explicitly requests run_test', () => {
   const commandIdentity: CompiledAgentIdentity = {
     ...toolFreeIdentity,
     requestedToolIds: ['cap-command-run'],
@@ -448,8 +477,8 @@ test('browser broker still requires command/test when an Agent explicitly reques
     () => resolve(resolver, {
       taskRequiresCodeChanges: false,
       workspace: {
-        workspaceId: 'browser-workspace',
-        providerKind: 'browser_broker',
+        workspaceId: 'server-workspace',
+        providerKind: 'server_local',
         capabilities: { read: true, write: true, command: false, test: false }
       }
     }),
@@ -457,7 +486,7 @@ test('browser broker still requires command/test when an Agent explicitly reques
   );
 });
 
-test('browser mirror grants Runtime-local command/test capabilities only to an explicitly compatible adapter', () => {
+test('Runtime metadata cannot synthesize missing workspace command/test capabilities', () => {
   const commandIdentity: CompiledAgentIdentity = {
     ...toolFreeIdentity,
     requestedToolIds: ['cap-command-run'],
@@ -466,22 +495,22 @@ test('browser mirror grants Runtime-local command/test capabilities only to an e
   };
   const { resolver, calls } = setup({
     runtimeCandidates: [candidate('codex', {
-      supportedWorkspaceProviderKinds: ['server_local', 'browser_broker']
+      supportedWorkspaceProviderKinds: ['server_local']
     })],
     compiledIdentity: commandIdentity
   });
-  const plan = resolve(resolver, {
-    sessionPreference: { preferredRuntimeType: 'codex', allowedRuntimeTypes: ['codex'] },
-    workspace: {
-      workspaceId: 'browser-workspace',
-      providerKind: 'browser_broker',
-      capabilities: { read: true, write: true, command: false, test: false }
-    }
-  });
-  assert.equal(plan.executionTarget.runtimeType, 'codex');
-  assert.deepEqual(plan.executionTarget.requiredCapabilities, ['command', 'test']);
-  assert.equal(calls[0]?.workspaceCapabilities.command, true);
-  assert.equal(calls[0]?.workspaceCapabilities.test, true);
+  assert.throws(
+    () => resolve(resolver, {
+      sessionPreference: { preferredRuntimeType: 'codex', allowedRuntimeTypes: ['codex'] },
+      workspace: {
+        workspaceId: 'server-workspace',
+        providerKind: 'server_local',
+        capabilities: { read: true, write: true, command: false, test: false }
+      }
+    }),
+    (error: unknown) => error instanceof InvocationResolutionError && error.code === 'NO_ELIGIBLE_RUNTIME'
+  );
+  assert.equal(calls.length, 0);
 });
 
 test('does not return an InvocationPlan when Tool Authority blocks a requested Tool', () => {

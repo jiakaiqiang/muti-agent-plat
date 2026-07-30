@@ -22,6 +22,13 @@ export type CapabilityUpsertInput = {
   status?: CapabilityDefinition['status'];
 };
 
+/** 审批后触发上层动作的回调（例如：唤醒等待该能力的 Session 任务）。 */
+export type CapabilityApprovalListener = (context: {
+  sessionId: string;
+  capabilityId: string;
+  agentId?: string;
+}) => Promise<void> | void;
+
 /** 内置能力中可作为 Tool 插入的 key 集合，其余内置能力视为 internal。 */
 const defaultToolKeys = new Set(['tool.file_write', 'tool.command_run']);
 const defaultCapabilityIds = new Set(defaultCapabilities.map((capability) => capability.id));
@@ -31,6 +38,7 @@ export class CapabilitiesService {
   private readonly capabilities = new Map<string, RuntimeCapabilityDefinition>();
   private readonly definitionExtensions = new Map<string, Partial<CapabilityDefinition>>();
   private readonly approvals = new Set<string>();
+  private readonly approvalListeners = new Set<CapabilityApprovalListener>();
 
   constructor(
     private readonly persistence: PersistenceService,
@@ -216,11 +224,33 @@ export class CapabilitiesService {
     return capability;
   }
 
-  approve(capabilityId: string, input: CapabilityInvocationCheck) {
+  /** 注册审批完成后的回调（例如 SessionsService 恢复 pending 任务）。 */
+  registerApprovalListener(listener: CapabilityApprovalListener) {
+    this.approvalListeners.add(listener);
+    return () => this.approvalListeners.delete(listener);
+  }
+
+  async approve(capabilityId: string, input: CapabilityInvocationCheck) {
     const capability = this.get(capabilityId);
     const approvalKey = this.approvalKey(capability.id, input.sessionId, input.agentId);
     this.approvals.add(approvalKey);
     this.persist();
+
+    if (input.sessionId) {
+      for (const listener of this.approvalListeners) {
+        try {
+          await listener({
+            sessionId: input.sessionId,
+            capabilityId: capability.id,
+            ...(input.agentId ? { agentId: input.agentId } : {})
+          });
+        } catch (error) {
+          // 单个监听器失败不影响审批结果本身；日志由监听器自行处理。
+          console.error('[CapabilitiesService] approval listener failed', error);
+        }
+      }
+    }
+
     return {
       capability,
       approved: true,

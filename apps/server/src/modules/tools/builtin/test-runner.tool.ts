@@ -250,8 +250,15 @@ export class TestRunnerTool implements Tool {
       };
     }
 
+    if (process.platform === 'win32') {
+      return {
+        command: process.env.ComSpec ?? 'cmd.exe',
+        args: ['/d', '/s', '/c', `npm.cmd run --silent ${script}`]
+      };
+    }
+
     return {
-      command: process.platform === 'win32' ? 'npm.cmd' : 'npm',
+      command: 'npm',
       args: ['run', '--silent', script]
     };
   }

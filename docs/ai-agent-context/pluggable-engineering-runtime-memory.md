@@ -83,9 +83,9 @@ Agent override
 - `relevantEvents`、`relevantMemories`、`artifacts` 只传相关摘要切片；
 - debug payload 与 runtime payload 分离；
 - `CONTEXT_INSUFFICIENT` 重试只补充 requested refs，不能升级成 whole workspace 注入；单会话重试预算受 `AGENT_CLUSTER_CONTEXT_INSUFFICIENT_MAX_RETRIES`（默认 3）控制；入库前必须 dedupe，整轮全重复的请求直接拒绝重试并在 session.events 留 `rejectionReason='duplicate_request'`；
-- 正常 trim 失败后必须支持 navigation_only 兜底（emergency 之后的最终阶段），并在 systemRules 追加 `contextDegraded=true` 让 runtime 主动通过 CONTEXT_INSUFFICIENT 拉回缺失内容。
+- v2 不做会清空证据正文的事后多阶段裁剪；代码实现和架构分析缺少 L3 源码正文时 fail closed，并通过 CONTEXT_INSUFFICIENT 精确补读。
 
-> 上述 coverage / retry / 智能截断 / navigation_only 的实现与契约详见
+> 上述 coverage / retry / 智能截断 / v2 证据门禁的实现与契约详见
 > `docs/roadmap/context-engineering-remediation-v1.md`（任务追踪 `.tasks.json`）、
 > `docs/harness-engineering/context-engineering/02-context-protocol.md`、
 > `docs/harness-engineering/context-engineering/prompt-context/runtime-context-contract.md`。

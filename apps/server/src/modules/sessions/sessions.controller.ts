@@ -1,10 +1,16 @@
-import { BadRequestException, Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Header, Param, Post, Put } from '@nestjs/common';
 import { ok } from '../../common/api-response.js';
 import type {
+  CaptureFileRevisionBaselineInput,
+  CreateFileRevisionRunInput,
+  DecideFileRevisionInput,
+  ReprocessFileRevisionInput,
+  ResolveFileRevisionFailureInput,
+  RetryInterruptedFileRevisionInput,
+  SaveFileRevisionDraftInput,
   PostReviewAction,
   RuntimePreference,
-  SessionWorkingDirectory,
-  WorkspaceSnapshot
+  SessionWorkingDirectory
 } from '@agent-cluster/shared';
 import { SessionsService } from './sessions.service.js';
 
@@ -30,7 +36,6 @@ export class SessionsController {
       tokenBudget?: number;
       knowledgeBaseIds?: string[];
       workingDirectory?: SessionWorkingDirectory;
-      workspaceSnapshot?: WorkspaceSnapshot;
       runtimePreference?: RuntimePreference;
     }
   ) {
@@ -43,15 +48,95 @@ export class SessionsController {
     return ok(this.sessions.get(sessionId));
   }
 
-  @Post('sessions/:sessionId/workspace/snapshot')
-  refreshWorkspaceSnapshot(
+  @Get('sessions/:sessionId/file-revisions')
+  fileRevisions(@Param('sessionId') sessionId: string) {
+    return ok(this.sessions.fileRevisionState(sessionId));
+  }
+
+  @Post('sessions/:sessionId/file-revisions/baselines')
+  async captureFileRevisionBaseline(
     @Param('sessionId') sessionId: string,
-    @Body() body: { workspaceId: string; workspaceSnapshot: WorkspaceSnapshot }
+    @Body() body: CaptureFileRevisionBaselineInput
   ) {
-    if (!body?.workspaceId || !body.workspaceSnapshot) {
-      throw new BadRequestException('workspaceId and workspaceSnapshot are required.');
-    }
-    return ok(this.sessions.refreshBrowserWorkspaceSnapshot(sessionId, body.workspaceId, body.workspaceSnapshot));
+    assertCaptureFileRevisionBaselineInput(body);
+    return ok(await this.sessions.captureFileRevisionBaseline(sessionId, body));
+  }
+
+  @Post('sessions/:sessionId/file-revisions')
+  async startFileRevision(
+    @Param('sessionId') sessionId: string,
+    @Body() body: CreateFileRevisionRunInput
+  ) {
+    assertCreateFileRevisionRunInput(body);
+    return ok(await this.sessions.startFileRevision(sessionId, body));
+  }
+
+  @Get('sessions/:sessionId/file-revisions/:revisionId/candidate')
+  @Header('Cache-Control', 'no-store')
+  fileRevisionCandidate(
+    @Param('sessionId') sessionId: string,
+    @Param('revisionId') revisionId: string
+  ) {
+    return ok(this.sessions.fileRevisionCandidate(sessionId, revisionId));
+  }
+
+  @Get('sessions/:sessionId/file-revisions/:revisionId/draft')
+  @Header('Cache-Control', 'no-store')
+  fileRevisionDraft(
+    @Param('sessionId') sessionId: string,
+    @Param('revisionId') revisionId: string
+  ) {
+    return ok(this.sessions.fileRevisionDraft(sessionId, revisionId));
+  }
+
+  @Put('sessions/:sessionId/file-revisions/:revisionId/draft')
+  async saveFileRevisionDraft(
+    @Param('sessionId') sessionId: string,
+    @Param('revisionId') revisionId: string,
+    @Body() body: SaveFileRevisionDraftInput
+  ) {
+    assertSaveFileRevisionDraftInput(body);
+    return ok(await this.sessions.saveFileRevisionDraft(sessionId, revisionId, body));
+  }
+
+  @Post('sessions/:sessionId/file-revisions/:revisionId/reprocess')
+  async reprocessFileRevision(
+    @Param('sessionId') sessionId: string,
+    @Param('revisionId') revisionId: string,
+    @Body() body: ReprocessFileRevisionInput
+  ) {
+    assertReprocessFileRevisionInput(body);
+    return ok(await this.sessions.reprocessFileRevision(sessionId, revisionId, body));
+  }
+
+  @Post('sessions/:sessionId/file-revisions/:revisionId/failure-decision')
+  async resolveFileRevisionFailure(
+    @Param('sessionId') sessionId: string,
+    @Param('revisionId') revisionId: string,
+    @Body() body: ResolveFileRevisionFailureInput
+  ) {
+    assertResolveFileRevisionFailureInput(body);
+    return ok(await this.sessions.resolveFileRevisionFailure(sessionId, revisionId, body));
+  }
+
+  @Post('sessions/:sessionId/file-revisions/:revisionId/retry')
+  async retryInterruptedFileRevision(
+    @Param('sessionId') sessionId: string,
+    @Param('revisionId') revisionId: string,
+    @Body() body: RetryInterruptedFileRevisionInput
+  ) {
+    assertRetryInterruptedFileRevisionInput(body);
+    return ok(await this.sessions.retryInterruptedFileRevision(sessionId, revisionId, body));
+  }
+
+  @Post('sessions/:sessionId/file-revisions/:revisionId/decision')
+  async decideFileRevision(
+    @Param('sessionId') sessionId: string,
+    @Param('revisionId') revisionId: string,
+    @Body() body: DecideFileRevisionInput
+  ) {
+    assertDecideFileRevisionInput(body);
+    return ok(await this.sessions.decideFileRevision(sessionId, revisionId, body));
   }
 
   @Delete('sessions/:sessionId')
@@ -88,6 +173,14 @@ export class SessionsController {
   @Post('sessions/:sessionId/cancel')
   cancel(@Param('sessionId') sessionId: string, @Body() body: { reason?: string; confirmationId?: string }) {
     return ok(this.sessions.control(sessionId, 'CANCELLED', body?.reason ?? '用户已取消会话', body?.confirmationId));
+  }
+
+  @Post('sessions/:sessionId/local-runtime/permissions/decision')
+  async resolveLocalRuntimePermission(
+    @Param('sessionId') sessionId: string,
+    @Body() body: { confirmationId: string; decision: 'approve_once' | 'cancel' }
+  ) {
+    return ok(await this.sessions.resolveLocalRuntimePermission(sessionId, body));
   }
 
   @Post('sessions/:sessionId/post-review/actions')
@@ -140,7 +233,12 @@ export class SessionsController {
   rejectBrief(
     @Param('sessionId') sessionId: string,
     @Param('briefId') briefId: string,
-    @Body() body: { reason?: string; userMessage?: string; confirmationId?: string; assignedAgentKeys?: string[] }
+    @Body() body: {
+      reason?: string;
+      userMessage?: string;
+      confirmationId?: string;
+      assignedAgentKeys?: string[];
+    }
   ) {
     return ok(this.sessions.reviseBrief(sessionId, briefId, body));
   }
@@ -182,7 +280,6 @@ const SESSION_CREATE_FIELDS = new Set([
   'tokenBudget',
   'knowledgeBaseIds',
   'workingDirectory',
-  'workspaceSnapshot',
   'runtimePreference'
 ]);
 
@@ -196,4 +293,110 @@ export function assertSessionCreateContract(body: unknown): asserts body is Reco
       `Unsupported Session create fields: ${unsupportedFields.sort().join(', ')}. Use the v2 runtimePreference contract.`
     );
   }
+}
+
+function assertCaptureFileRevisionBaselineInput(value: unknown): asserts value is CaptureFileRevisionBaselineInput {
+  const body = objectBody(value, ['filePath', 'source']);
+  if (typeof body.filePath !== 'string' || !body.filePath.trim()) invalidRevisionBody('filePath is required.');
+  if (body.source !== undefined && !['system_output', 'user_selected', 'post_apply'].includes(String(body.source))) {
+    invalidRevisionBody('source is invalid.');
+  }
+}
+
+function assertCreateFileRevisionRunInput(value: unknown): asserts value is CreateFileRevisionRunInput {
+  const body = objectBody(value, ['baselineId', 'targetAgentIds', 'instruction']);
+  if (typeof body.baselineId !== 'string' || !body.baselineId) invalidRevisionBody('baselineId is required.');
+  assertStringArray(body.targetAgentIds, 'targetAgentIds', true);
+  if (body.instruction !== undefined && typeof body.instruction !== 'string') invalidRevisionBody('instruction must be a string.');
+}
+
+function assertSaveFileRevisionDraftInput(value: unknown): asserts value is SaveFileRevisionDraftInput {
+  const body = objectBody(value, ['expectedCandidateHash', 'content']);
+  assertFileHash(body.expectedCandidateHash, 'expectedCandidateHash');
+  if (typeof body.content !== 'string') invalidRevisionBody('content must be a string.');
+}
+
+function assertReprocessFileRevisionInput(value: unknown): asserts value is ReprocessFileRevisionInput {
+  const body = objectBody(value, [
+    'draftHash',
+    'expectedCandidateHash',
+    'expectedStateVersion',
+    'targetAgentIds',
+    'instruction'
+  ]);
+  assertFileHash(body.draftHash, 'draftHash');
+  assertFileHash(body.expectedCandidateHash, 'expectedCandidateHash');
+  if (!Number.isInteger(body.expectedStateVersion) || Number(body.expectedStateVersion) < 1) {
+    invalidRevisionBody('expectedStateVersion must be a positive integer.');
+  }
+  if (body.targetAgentIds !== undefined) assertStringArray(body.targetAgentIds, 'targetAgentIds', true);
+  if (body.instruction !== undefined && typeof body.instruction !== 'string') invalidRevisionBody('instruction must be a string.');
+}
+
+export function assertResolveFileRevisionFailureInput(
+  value: unknown
+): asserts value is ResolveFileRevisionFailureInput {
+  const body = objectBody(value, ['expectedStateVersion', 'decision', 'instruction']);
+  if (!Number.isInteger(body.expectedStateVersion) || Number(body.expectedStateVersion) < 1) {
+    invalidRevisionBody('expectedStateVersion must be a positive integer.');
+  }
+  if (!['retry_agents', 'continue_with_successful', 'abandon_revision'].includes(String(body.decision))) {
+    throw new BadRequestException('INVALID_FILE_REVISION_DECISION: decision is not allowed.');
+  }
+  if (body.instruction !== undefined && typeof body.instruction !== 'string') {
+    invalidRevisionBody('instruction must be a string.');
+  }
+}
+
+export function assertRetryInterruptedFileRevisionInput(
+  value: unknown
+): asserts value is RetryInterruptedFileRevisionInput {
+  const body = objectBody(value, ['expectedStateVersion', 'retryKey']);
+  if (!Number.isInteger(body.expectedStateVersion) || Number(body.expectedStateVersion) < 1) {
+    invalidRevisionBody('expectedStateVersion must be a positive integer.');
+  }
+  if (typeof body.retryKey !== 'string' || !body.retryKey.trim() || body.retryKey.length > 200) {
+    invalidRevisionBody('retryKey must be a non-empty string no longer than 200 characters.');
+  }
+}
+
+export function assertDecideFileRevisionInput(value: unknown): asserts value is DecideFileRevisionInput {
+  const body = objectBody(value, ['confirmationId', 'candidateHash', 'expectedStateVersion', 'decision']);
+  if (typeof body.confirmationId !== 'string' || !body.confirmationId) invalidRevisionBody('confirmationId is required.');
+  assertFileHash(body.candidateHash, 'candidateHash');
+  if (!Number.isInteger(body.expectedStateVersion) || Number(body.expectedStateVersion) < 1) {
+    invalidRevisionBody('expectedStateVersion must be a positive integer.');
+  }
+  if (body.decision !== 'apply_candidate' && body.decision !== 'abandon_revision') {
+    throw new BadRequestException('INVALID_FILE_REVISION_DECISION: decision is not allowed.');
+  }
+}
+
+function objectBody(value: unknown, fields: string[]) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) invalidRevisionBody('request body must be an object.');
+  const body = value as Record<string, unknown>;
+  const allowed = new Set(fields);
+  const unsupported = Object.keys(body).filter((key) => !allowed.has(key));
+  if (unsupported.length) invalidRevisionBody(`unsupported fields: ${unsupported.sort().join(', ')}.`);
+  return body;
+}
+
+function assertFileHash(value: unknown, field: string) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) invalidRevisionBody(`${field} must be a SHA-256 hash.`);
+  const hash = value as Record<string, unknown>;
+  if (hash.algorithm !== 'sha256' || typeof hash.value !== 'string' || !/^[a-f0-9]{64}$/.test(hash.value)) {
+    invalidRevisionBody(`${field} must be a SHA-256 hash.`);
+  }
+  if (Object.keys(hash).some((key) => key !== 'algorithm' && key !== 'value')) invalidRevisionBody(`${field} has unsupported fields.`);
+}
+
+function assertStringArray(value: unknown, field: string, nonEmpty: boolean) {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || !item)) {
+    invalidRevisionBody(`${field} must be an array of non-empty strings.`);
+  }
+  if (nonEmpty && value.length === 0) invalidRevisionBody(`${field} must not be empty.`);
+}
+
+function invalidRevisionBody(message: string): never {
+  throw new BadRequestException(`INVALID_FILE_REVISION_REQUEST: ${message}`);
 }

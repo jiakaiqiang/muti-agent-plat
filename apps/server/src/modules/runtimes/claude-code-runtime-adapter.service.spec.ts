@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   buildClaudeBufferedArgs,
+  claudeBufferedTimeoutMs,
   ClaudeCodeRuntimeAdapterService,
   parseClaudeBufferedOutput,
   pickClaudeRunMode
@@ -187,20 +188,23 @@ test('Claude buffered command preserves process output and exit code on non-zero
   );
 });
 
-test('Claude buffered timeout is unlimited by default and honors an explicit positive limit', async () => {
+test('Claude buffered timeout uses and cannot exceed the independent absolute deadline', async () => {
   const workspace = mkdtempSync(join(tmpdir(), 'claude-buffered-timeout-'));
   const previousEnabled = process.env.CLAUDE_CODE_ENABLED;
   const previousStreaming = process.env.RUNTIME_STREAMING;
   const previousTimeout = process.env.CLAUDE_CODE_TIMEOUT_MS;
+  const previousAbsoluteTimeout = process.env.CLAUDE_CODE_ABSOLUTE_TIMEOUT_MS;
   const previousCommand = process.env.CLAUDE_CODE_COMMAND;
   process.env.CLAUDE_CODE_ENABLED = 'true';
   process.env.RUNTIME_STREAMING = 'off';
   process.env.CLAUDE_CODE_COMMAND = process.execPath;
+  process.env.CLAUDE_CODE_ABSOLUTE_TIMEOUT_MS = '1800000';
   try {
     for (const [configuredTimeout, expectedTimeout] of [
-      [undefined, 0],
-      ['0', 0],
-      ['250000', 250_000]
+      [undefined, 1_800_000],
+      ['0', 1_800_000],
+      ['250000', 250_000],
+      ['2500000', 1_800_000]
     ] as const) {
       if (configuredTimeout === undefined) delete process.env.CLAUDE_CODE_TIMEOUT_MS;
       else process.env.CLAUDE_CODE_TIMEOUT_MS = configuredTimeout;
@@ -244,9 +248,26 @@ test('Claude buffered timeout is unlimited by default and honors an explicit pos
     else process.env.RUNTIME_STREAMING = previousStreaming;
     if (previousTimeout === undefined) delete process.env.CLAUDE_CODE_TIMEOUT_MS;
     else process.env.CLAUDE_CODE_TIMEOUT_MS = previousTimeout;
+    if (previousAbsoluteTimeout === undefined) delete process.env.CLAUDE_CODE_ABSOLUTE_TIMEOUT_MS;
+    else process.env.CLAUDE_CODE_ABSOLUTE_TIMEOUT_MS = previousAbsoluteTimeout;
     if (previousCommand === undefined) delete process.env.CLAUDE_CODE_COMMAND;
     else process.env.CLAUDE_CODE_COMMAND = previousCommand;
     rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('Claude buffered timeout helper defaults to the absolute deadline', () => {
+  const previousTimeout = process.env.CLAUDE_CODE_TIMEOUT_MS;
+  const previousAbsoluteTimeout = process.env.CLAUDE_CODE_ABSOLUTE_TIMEOUT_MS;
+  try {
+    delete process.env.CLAUDE_CODE_TIMEOUT_MS;
+    process.env.CLAUDE_CODE_ABSOLUTE_TIMEOUT_MS = '1800000';
+    assert.equal(claudeBufferedTimeoutMs(), 1_800_000);
+  } finally {
+    if (previousTimeout === undefined) delete process.env.CLAUDE_CODE_TIMEOUT_MS;
+    else process.env.CLAUDE_CODE_TIMEOUT_MS = previousTimeout;
+    if (previousAbsoluteTimeout === undefined) delete process.env.CLAUDE_CODE_ABSOLUTE_TIMEOUT_MS;
+    else process.env.CLAUDE_CODE_ABSOLUTE_TIMEOUT_MS = previousAbsoluteTimeout;
   }
 });
 

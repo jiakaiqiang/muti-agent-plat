@@ -18,6 +18,7 @@ import type {
 } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
 import ConfirmationCard from './ConfirmationCard.vue'
+import CapabilityApprovalCard from './CapabilityApprovalCard.vue'
 import { observedArtifactFileChanges, platformArtifactProjections } from './artifactFileChangeModel'
 
 const props = defineProps<{
@@ -27,6 +28,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   resolveConfirmation: [optionKey: string]
+  approveCapability: [sessionId: string, capabilityId: string]
 }>()
 
 const agentStore = useAgentStore()
@@ -149,6 +151,17 @@ function confirmationFromMessage(message: ChatMessage): ConfirmationCardState | 
     workflowNodeId: payload.workflowNodeId as string | undefined,
     workflowNodeRunId: payload.workflowNodeRunId as string | undefined,
     expectedRunRevision: payload.expectedRunRevision as number | undefined
+  }
+}
+
+function capabilityApprovalFromMessage(message: ChatMessage) {
+  if (message.messageType !== 'confirmation') return undefined
+  const payload = message.payload as (ConfirmationRequestedPayload & Record<string, unknown>) | undefined
+  if (!payload || payload.reason !== 'approve_capability') return undefined
+  if (!Array.isArray(payload.pendingApprovals) || !payload.pendingApprovals.length) return undefined
+  return {
+    sessionId: message.sessionId,
+    pendingApprovals: payload.pendingApprovals
   }
 }
 
@@ -724,6 +737,14 @@ function yesNo(value?: boolean) {
           @resolve="emit('resolveConfirmation', $event)"
         />
 
+        <CapabilityApprovalCard
+          v-else-if="capabilityApprovalFromMessage(message)"
+          :session-id="capabilityApprovalFromMessage(message)!.sessionId"
+          :pending-approvals="capabilityApprovalFromMessage(message)!.pendingApprovals"
+          compact
+          @approve="emit('approveCapability', message.sessionId, capabilityApprovalFromMessage(message)!.pendingApprovals[0].toolId)"
+        />
+
         <template v-else>
           <div v-if="discussionRound(message)" class="discussion-message-meta">
             第 {{ discussionRound(message) }} 轮 · {{ messageKindLabel(message) ?? 'Agent 讨论' }}
@@ -760,15 +781,15 @@ function yesNo(value?: boolean) {
                 <dd>{{ workspaceAnalysisPayload(message)?.rootName }}</dd>
               </div>
               <div>
-                <dt>扫描条目</dt>
+                <dt>索引条目</dt>
                 <dd>{{ workspaceNumber(workspaceAnalysisPayload(message), 'fileCount') }}</dd>
               </div>
               <div>
-                <dt>可读文件</dt>
+                <dt>本次按需读取</dt>
                 <dd>{{ workspaceNumber(workspaceAnalysisPayload(message), 'readableFileCount') }}</dd>
               </div>
               <div>
-                <dt>跳过</dt>
+                <dt>过滤</dt>
                 <dd>{{ workspaceNumber(workspaceAnalysisPayload(message), 'skippedFileCount') }}</dd>
               </div>
               <div>

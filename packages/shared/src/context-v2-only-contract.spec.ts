@@ -77,6 +77,7 @@ test('ResolvedExecutionTarget records required tools and workspace provider kind
   const block = typeBlock('ResolvedExecutionTarget');
   assert.match(block, /requiredToolIds: readonly UUID\[\]/);
   assert.match(block, /workspaceProviderKind: WorkspaceProviderKind/);
+  assert.match(block, /executionLocation: RuntimeExecutionLocation/);
 });
 
 test('InvocationPlan requires identity, target, catalog, and ContextEnvelopeV2', () => {

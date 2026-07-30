@@ -10,6 +10,8 @@ import type {
   Artifact,
   CollaborationEvent,
   ContextAssembly,
+  FileRevisionCandidateOutput,
+  FileRevisionRun,
   InvocationPlan,
   PostReviewReportOutput,
   RuntimeArtifactOutput,
@@ -30,7 +32,14 @@ import {
   emptyRuntimeArtifactProposalMetadata,
   runtimeOutputExamples
 } from '@agent-cluster/shared';
-import { OrchestratorService, usableAgentMessageOutput } from './orchestrator.service.js';
+import { createExecutionTermination } from '../../common/execution-termination.js';
+import { workspaceMetrics } from '../../common/workspace-metrics.js';
+import {
+  artifactCreatedEventPayload,
+  effectiveStructuredOutputLimit,
+  OrchestratorService,
+  usableAgentMessageOutput
+} from './orchestrator.service.js';
 import { makeInvocationPlan } from '../runtimes/invocation-plan.fixture.js';
 
 function agent(key: string): Agent {
@@ -68,14 +77,21 @@ function suggestedTask(
 
 type ServiceRecorder = {
   events: CollaborationEvent[];
+  createdTasks?: AgentTask[];
   taskUpdates: Array<Partial<AgentTask>>;
   runtimeCalls: number;
   availabilityRefreshes?: number;
 };
 
-function makeService(createdArtifacts: Artifact[] = [], recorder?: ServiceRecorder) {
+function makeService(
+  createdArtifacts: Artifact[] = [],
+  recorder?: ServiceRecorder,
+  fileRevisions?: unknown,
+  workspaceProviders?: unknown,
+  agentKeys = ['coordinator', 'requirements', 'architect', 'product-manager', 'backend', 'test', 'review']
+) {
   const agents = new Map(
-    ['coordinator', 'requirements', 'architect', 'product-manager', 'backend', 'test', 'review'].map((key) => [
+    agentKeys.map((key) => [
       key,
       agent(key)
     ])
@@ -144,6 +160,10 @@ function makeService(createdArtifacts: Artifact[] = [], recorder?: ServiceRecord
       }
     } as never,
     {
+      add(task: AgentTask) {
+        recorder?.createdTasks?.push(task);
+        return task;
+      },
       update(task: AgentTask, changes: Partial<AgentTask>) {
         recorder?.taskUpdates.push(changes);
         Object.assign(task, changes);
@@ -192,7 +212,11 @@ function makeService(createdArtifacts: Artifact[] = [], recorder?: ServiceRecord
       compileIdentity({ agent: definition }: { agent: Agent }) {
         return makeInvocationPlan({ agent: { ...definition, agentId: definition.id } }).agent;
       }
-    } as never
+    } as never,
+    workspaceProviders as never,
+    undefined,
+    undefined,
+    fileRevisions as never
   );
 }
 
@@ -218,6 +242,386 @@ test('discussion output guard rejects missing or blank agent message content', (
   assert.equal(usableAgentMessageOutput({ kind: 'agent_message', messageKind: 'summary' }), false);
   assert.equal(usableAgentMessageOutput({ kind: 'agent_message', messageKind: 'summary', content: '   ' }), false);
   assert.equal(usableAgentMessageOutput({ kind: 'agent_message', messageKind: 'summary', content: 'done' }), true);
+});
+
+test('file revision artifact events never inline proposal or system evidence content', () => {
+  const payload = artifactCreatedEventPayload({
+    id: 'artifact-revision-secret',
+    type: 'code_change',
+    title: 'Revision proposal',
+    contentSummary: 'Proposal generated.',
+    runtimeProposals: [{
+      kind: 'artifact',
+      title: 'Secret proposal',
+      content: 'USER_DRAFT_SECRET',
+      format: 'markdown',
+      metadata: { fileChanges: [] }
+    }],
+    platformProjections: [],
+    systemEvidence: {
+      source: 'platform',
+      invocationId: 'invocation-secret',
+      workspaceChangeSet: {
+        id: 'change-secret',
+        changes: [{ operation: 'update', path: 'result.md', content: 'CANDIDATE_SECRET' }]
+      }
+    }
+  } as unknown as Artifact, undefined, true);
+
+  const serialized = JSON.stringify(payload);
+  assert.equal('proposalOnly' in payload && payload.proposalOnly, true);
+  assert.equal('runtimeProposals' in payload, false);
+  assert.equal('systemEvidence' in payload, false);
+  assert.doesNotMatch(serialized, /USER_DRAFT_SECRET|CANDIDATE_SECRET/);
+});
+
+test('file revision output preflight uses the lower of Session budget and Runtime capacity', () => {
+  assert.equal(effectiveStructuredOutputLimit(40_000, 4_096), 4_096);
+  assert.equal(effectiveStructuredOutputLimit(2_000, 4_096), 2_000);
+  assert.equal(effectiveStructuredOutputLimit(undefined, 1_024), 1_024);
+});
+
+test('file revision processing fails closed when the system default Receiver is unavailable', async () => {
+  const service = makeService(
+    [],
+    { events: [], taskUpdates: [], runtimeCalls: 0 },
+    { markProcessing: async () => { throw new Error('markProcessing must not run without Receiver'); } },
+    undefined,
+    ['backend', 'test']
+  ) as unknown as {
+    processFileRevision(session: SessionDetail, revisionId: string): Promise<FileRevisionRun>;
+  };
+
+  await assert.rejects(
+    service.processFileRevision(session(), 'revision-without-receiver'),
+    /REVISION_RECEIVER_UNAVAILABLE/
+  );
+});
+
+test('file revision processing uses one Receiver for single/multi Agent and fails closed on partial Agent failure', async () => {
+  workspaceMetrics.resetForTests();
+  for (const scenario of [
+    { targetAgentIds: ['backend', 'test'], failedAgentId: undefined },
+    { targetAgentIds: ['backend'], failedAgentId: undefined },
+    { targetAgentIds: ['backend', 'test'], failedAgentId: 'test' }
+  ]) {
+  const createdTasks: AgentTask[] = [];
+  const recorder: ServiceRecorder = { events: [], createdTasks, taskUpdates: [], runtimeCalls: 0 };
+  const run = {
+    id: 'revision-1',
+    chainId: 'chain-1',
+    iteration: 1,
+    sessionId: 'session-1',
+    filePath: 'result.md',
+    status: 'submitted',
+    userDraftHash: { algorithm: 'sha256', value: 'draft-hash' },
+    contextSnapshotHash: 'evidence-hash',
+    targetAgentIds: scenario.targetAgentIds,
+    instruction: 'Preserve the user-approved terminology.',
+    agentResults: [],
+    diffSummary: { addedLines: 1, removedLines: 1, unchangedLines: 2, hunkCount: 1 }
+  } as unknown as FileRevisionRun;
+  let maxConcurrentAgents = 0;
+  let concurrentAgents = 0;
+  const fileRevisions = {
+    getRun() {
+      return run;
+    },
+    async markProcessing() {
+      run.status = 'processing';
+      return run;
+    },
+    async recordAgentResult(_sessionId: string, _revisionId: string, result: FileRevisionRun['agentResults'][number]) {
+      run.agentResults.push(result);
+      return run;
+    },
+    storeProposedContent(_content: string, filePath: string) {
+      return `content:${filePath}:${run.agentResults.length}`;
+    },
+    async markSynthesizing() {
+      run.status = 'synthesizing';
+      return run;
+    },
+    async markAwaitingConfirmation(
+      _sessionId: string,
+      _revisionId: string,
+      input: { confirmationId: string; synthesisTaskId: string }
+    ) {
+      run.status = 'awaiting_confirmation';
+      run.confirmationId = input.confirmationId;
+      run.synthesisTaskId = input.synthesisTaskId;
+      run.candidateChangeSetId = 'candidate-1';
+      run.candidateHash = { algorithm: 'sha256', value: 'candidate-hash' };
+      return run;
+    },
+    getChain() {
+      return { id: 'chain-1', stateVersion: 2 };
+    },
+    evidence() {
+      return { complete: true, truncated: false };
+    }
+  };
+  const service = makeService([], recorder, fileRevisions) as unknown as {
+    processFileRevision(session: SessionDetail, revisionId: string): Promise<FileRevisionRun>;
+    continueFileRevisionAfterPartialFailure(session: SessionDetail, revisionId: string): Promise<FileRevisionRun>;
+    runOneTask(session: SessionDetail, brief: TaskBrief, task: AgentTask): Promise<{ ok: true }>;
+    fileRevisionCandidateContent(sessionId: string, taskId: string, filePath: string): string;
+    runFileRevisionSynthesis(
+      session: SessionDetail,
+      brief: TaskBrief,
+      run: FileRevisionRun,
+      receiver: Agent,
+      task: AgentTask
+    ): Promise<{ invocationId: string; output: FileRevisionCandidateOutput }>;
+  };
+  service.runOneTask = async (_session, _brief, task) => {
+    if (task.executionPurpose === 'file_revision') {
+      concurrentAgents += 1;
+      maxConcurrentAgents = Math.max(maxConcurrentAgents, concurrentAgents);
+      await new Promise((resolve) => setImmediate(resolve));
+      concurrentAgents -= 1;
+      if (task.assignee?.id === scenario.failedAgentId) throw new Error('selected Agent failed');
+    }
+    task.resultSummary = `${task.executionPurpose} completed`;
+    return { ok: true };
+  };
+  service.fileRevisionCandidateContent = (_sessionId, taskId) => `complete proposal from ${taskId}`;
+  service.runFileRevisionSynthesis = async (_session, _brief, currentRun) => ({
+    invocationId: 'receiver-invocation',
+    output: {
+      schemaVersion: '1.0',
+      kind: 'file_revision_candidate',
+      revisionId: currentRun.id,
+      chainId: currentRun.chainId,
+      iteration: currentRun.iteration,
+      sourceDraftHash: currentRun.userDraftHash,
+      evidenceHash: currentRun.contextSnapshotHash,
+      content: 'Receiver complete candidate',
+      summary: 'Receiver synthesis completed.',
+      incorporatedAgentResultIds: currentRun.agentResults
+        .filter((item) => item.status === 'completed')
+        .map((item) => item.id),
+      unresolvedConflicts: []
+    }
+  });
+
+  if (scenario.failedAgentId) {
+    await assert.rejects(
+      service.processFileRevision(session(), run.id),
+      /REVISION_PARTIAL_AGENT_FAILURE/
+    );
+    assert.equal(run.agentResults.length, scenario.targetAgentIds.length);
+    assert.equal(run.agentResults.filter((item) => item.status === 'failed').length, 1);
+    assert.equal(createdTasks.filter((task) => task.executionPurpose === 'revision_synthesis').length, 0);
+    assert.equal(recorder.events.some((event) => event.type === 'file_revision_candidate_generated'), false);
+    const continued = await service.continueFileRevisionAfterPartialFailure(session(), run.id);
+    assert.equal(continued.status, 'awaiting_confirmation');
+    assert.equal(createdTasks.filter((task) => task.executionPurpose === 'revision_synthesis').length, 1);
+    assert.equal(recorder.events.some((event) => event.type === 'file_revision_candidate_generated'), true);
+    continue;
+  }
+
+  const result = await service.processFileRevision(session(), run.id);
+
+  assert.equal(maxConcurrentAgents, scenario.targetAgentIds.length);
+  assert.equal(result.status, 'awaiting_confirmation');
+  assert.equal(result.agentResults.length, scenario.targetAgentIds.length);
+  assert.equal(createdTasks.filter((task) => task.executionPurpose === 'file_revision').length, scenario.targetAgentIds.length);
+  assert.equal(createdTasks.filter((task) => task.executionPurpose === 'revision_synthesis').length, 1);
+  assert.equal(
+    createdTasks.find((task) => task.executionPurpose === 'revision_synthesis')?.assignee?.id,
+    'coordinator'
+  );
+    assert.ok(createdTasks.every((task) => task.description.includes('Preserve the user-approved terminology.')));
+    assert.ok(recorder.events.some((event) => event.type === 'file_revision_candidate_generated'));
+    assert.ok(recorder.events.some((event) => event.type === 'user_confirmation_requested'));
+    assert.doesNotMatch(
+      JSON.stringify(recorder.events),
+      /deterministic diff|changedArtifacts metadata\.fileChanges|Preserve the user-approved terminology/
+    );
+  }
+  assert.equal(
+    workspaceMetrics.snapshot().series.find((item) => item.name === 'file_revision_synthesis_duration_ms')?.count,
+    3
+  );
+});
+
+test('receiver Runtime recognizes every follow-up intent without requesting interruption', async () => {
+  const service = makeService() as unknown as {
+    recognizeFollowUpMessage(
+      session: SessionDetail,
+      content: string,
+      mentionedAgentIds: string[]
+    ): Promise<{ intent: string; shouldPause: boolean; coordinatorInstruction: string }>;
+    createContextAssembly(): ContextAssembly;
+    runRuntime(
+      session: SessionDetail,
+      input: { phase: string; contextAssembly: ContextAssembly }
+    ): Promise<AgentRunResult>;
+  };
+  let invocationPhase = '';
+  let routedContext: ContextAssembly | undefined;
+  service.createContextAssembly = () => ({
+    systemRules: [],
+    constraints: [],
+    relevantEvents: [],
+    budget: {}
+  } as unknown as ContextAssembly);
+  service.runRuntime = async (_session, input) => {
+    invocationPhase = input.phase;
+    routedContext = input.contextAssembly;
+    return {
+      invocationId: 'intent-run',
+      runtimeType: 'mock',
+      status: 'completed',
+      output: {
+        schemaVersion: '1.0',
+        kind: 'user_message_handling_plan',
+        intent: 'command',
+        priority: 'normal',
+        shouldPause: true,
+        affectedTaskIds: [],
+        affectedAgentIds: ['backend'],
+        requiresBriefRevision: false,
+        requiresUserConfirmation: false,
+        coordinatorInstruction: 'decompose later'
+      },
+      events: [],
+      artifacts: [],
+      systemEvidence: createRuntimeArtifactSystemEvidence('intent-run'),
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, model: 'mock' }
+    };
+  };
+
+  const plan = await service.recognizeFollowUpMessage(session(), '完成后增加缓存', ['backend']);
+
+  assert.equal(invocationPhase, 'user_message_routing');
+  assert.equal(plan.intent, 'command');
+  assert.equal(plan.shouldPause, false);
+  assert.equal(plan.coordinatorInstruction, 'decompose later');
+  assert.ok(routedContext?.constraints.includes('Current user message: 完成后增加缓存'));
+});
+
+test('multiple mentioned agents discuss first and receiver decomposition stays within that agent set', async () => {
+  const service = makeService() as unknown as {
+    prepareFollowUpExecution(
+      session: SessionDetail,
+      content: string,
+      sourceEventId: string,
+      mentionedAgentIds: string[]
+    ): Promise<{ brief: TaskBrief; tasks: AgentTask[] }>;
+    getBrief(sessionId: string, briefId: string): TaskBrief | undefined;
+    memories: { create(input: unknown): unknown };
+    createContextAssembly(): ContextAssembly;
+    runFollowUpDiscussion(
+      session: SessionDetail,
+      coordinator: Agent,
+      participants: Agent[],
+      content: string
+    ): Promise<void>;
+    runRuntime(): Promise<AgentRunResult>;
+    selectSuggestedTasks(
+      session: SessionDetail,
+      tasks: TaskBriefOutput['suggestedTasks']
+    ): TaskBriefOutput['suggestedTasks'];
+    prepareExecution(session: SessionDetail, briefId: string): { brief: TaskBrief; tasks: AgentTask[] };
+    suggestedTasksByBriefId: Map<string, TaskBriefOutput['suggestedTasks']>;
+  };
+  let discussedKeys: string[] = [];
+  service.memories = { create() { return {}; } };
+  service.createContextAssembly = () => ({
+    systemRules: [],
+    constraints: [],
+    relevantEvents: [],
+    budget: {}
+  } as unknown as ContextAssembly);
+  service.runFollowUpDiscussion = async (_session, _coordinator, participants) => {
+    discussedKeys = participants.map((participant) => participant.key);
+  };
+  const runtimeTasks = [
+    suggestedTask({ title: 'Implement', description: 'Implement change', suggestedAgentKey: 'coordinator', acceptanceCriteria: [] }),
+    suggestedTask({ title: 'Verify', description: 'Verify change', suggestedAgentKey: null, acceptanceCriteria: [] }),
+    suggestedTask({ title: 'Document', description: 'Document change', suggestedAgentKey: 'requirements', acceptanceCriteria: [] })
+  ];
+  service.runRuntime = async () => ({
+    invocationId: 'decomposition-run',
+    runtimeType: 'mock',
+    status: 'completed',
+    output: {
+      schemaVersion: '1.0',
+      kind: 'task_brief',
+      goal: 'Implement follow-up',
+      scope: [],
+      outOfScope: [],
+      constraints: [],
+      acceptanceCriteria: [],
+      risks: [],
+      openQuestions: [],
+      suggestedTasks: runtimeTasks
+    },
+    events: [],
+    artifacts: [],
+    systemEvidence: createRuntimeArtifactSystemEvidence('decomposition-run'),
+    usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, model: 'mock' }
+  });
+  service.selectSuggestedTasks = (_session, tasks) => tasks;
+  service.prepareExecution = (inputSession, briefId) => ({
+    brief: service.getBrief(inputSession.id, briefId)!,
+    tasks: []
+  });
+
+  const inputSession = session();
+  await service.prepareFollowUpExecution(inputSession, '实现并验证新需求', 'event-follow-up', ['backend', 'test']);
+  const latestBrief = service.getBrief(inputSession.id, inputSession.currentTaskBriefId ?? '') ??
+    (service as unknown as { briefsBySession: Map<string, TaskBrief[]> }).briefsBySession.get(inputSession.id)?.at(-1);
+  assert.deepEqual(discussedKeys, ['backend', 'test']);
+  assert.ok(latestBrief);
+  assert.deepEqual(
+    service.suggestedTasksByBriefId.get(latestBrief!.id)?.map((task) => task.suggestedAgentKey),
+    ['backend', 'test', 'backend']
+  );
+});
+
+test('receiver rejection fallback cannot escape an explicit mentioned-agent boundary', () => {
+  const service = makeService() as unknown as {
+    findAlternativeClaimAgent(
+      session: SessionDetail,
+      task: AgentTask,
+      decision: TaskAcceptanceDecisionOutput,
+      attemptedAgentIds: Set<string>
+    ): Agent | undefined;
+  };
+  const inputSession = session();
+  const task: AgentTask = {
+    id: 'task-mentioned-boundary',
+    sessionId: inputSession.id,
+    title: 'Implement cache',
+    description: 'Implement and verify cache behavior',
+    status: 'blocked',
+    assignee: { type: 'agent', id: 'backend' },
+    eligibleAgentIds: ['backend', 'test'],
+    dependsOnTaskIds: [],
+    acceptanceCriteria: [],
+    createdAt: '2026-07-03T00:00:00.000Z',
+    updatedAt: '2026-07-03T00:00:00.000Z'
+  };
+  const decision: TaskAcceptanceDecisionOutput = {
+    schemaVersion: '1.0',
+    kind: 'task_acceptance_decision',
+    status: 'rejected',
+    reason: 'backend cannot verify this change',
+    missingContext: [],
+    requestedContext: null,
+    handoffSuggestion: null,
+    confidence: 0.8,
+    alternativeAgentKeys: ['requirements'],
+    alternativeAgentIds: [],
+    agentMessages: []
+  };
+
+  const alternative = service.findAlternativeClaimAgent(inputSession, task, decision, new Set(['backend']));
+
+  assert.equal(alternative?.key, 'test');
 });
 
 test('retryable provider failures retry once and then fall back inside the session allowlist', async () => {
@@ -791,8 +1195,118 @@ test('architecture claim fallback does not reassign to requirements after archit
   assert.equal(alternative, undefined);
 });
 
-test('supplemental hydration processes eight existing files and defers the remainder', async () => {
+test('runtime index refresh requests a bounded task-relevant projection instead of a full snapshot', async () => {
+  const revision = { id: 'revision-query', observedAt: '2026-07-28T00:00:00.000Z' };
+  let queryInput: { query?: string; pathHints?: string[]; limit?: number } | undefined;
+  const workspaceProviders = {
+    resolve() {
+      return {
+        capabilities: () => ({ read: true, write: false, command: false, test: false }),
+        queryWorkspaceIndex: async (input: typeof queryInput) => {
+          queryInput = input;
+          return {
+            workspaceId: 'workspace-1', revision, generation: 2, status: 'ready', complete: true,
+            entries: [{ path: 'src/main.ts', kind: 'file', size: 20, generated: false, sensitive: false }],
+            matched: 1, entrypoints: ['src/main.ts'], detectedStack: ['TypeScript'],
+            indexedEntries: 100_000, truncated: false, updatedAt: revision.observedAt
+          };
+        },
+        getIndexSnapshot: async () => { throw new Error('full index snapshot must not be requested'); }
+      };
+    }
+  };
+  const service = makeService([], undefined, undefined, workspaceProviders) as unknown as {
+    refreshWorkspaceIndex(session: SessionDetail, input: unknown): Promise<void>;
+  };
+  const activeSession = architectureSession();
+
+  await service.refreshWorkspaceIndex(activeSession, {
+    contextAssembly: {
+      sessionGoal: 'Analyze the application entrypoint',
+      taskContext: {
+        intent: 'architecture_analysis',
+        evidenceRefs: [{ type: 'workspace_file', label: 'main', ref: 'src/main.ts' }],
+        taskMap: { items: [] }
+      }
+    }
+  });
+
+  assert.equal(queryInput?.limit, 50);
+  assert.deepEqual(queryInput?.pathHints, ['src/main.ts']);
+  assert.equal(activeSession.workspaceIndex?.entries.length, 1);
+  assert.equal(activeSession.workspaceIndex?.indexedEntries, 100_000);
+});
+
+test('architecture preload is strictly bounded and continues when the Provider read fails', async () => {
+  const revision = { id: 'revision-preload', observedAt: '2026-07-28T00:00:00.000Z' };
+  const activeSession: SessionDetail = {
+    ...architectureSession(),
+    workspaceIndex: {
+      workspaceId: 'workspace-1',
+      revision,
+      generation: 2,
+      status: 'ready',
+      complete: true,
+      entries: [
+        'package.json',
+        'README.md',
+        'tsconfig.json',
+        'vite.config.ts',
+        'src/main.ts',
+        'src/App.vue',
+        'src/router.ts',
+        'src/store.ts',
+        'src/services/api.ts',
+        'src/components/Panel.vue'
+      ].map((path) => ({ path, kind: 'file' as const, size: 20, generated: false, sensitive: false })),
+      entrypoints: ['package.json', 'src/main.ts'],
+      detectedStack: ['TypeScript'],
+      indexedEntries: 10,
+      truncated: false,
+      updatedAt: revision.observedAt
+    }
+  };
+  let capturedRequest: RuntimeContextRequest | undefined;
+  let capturedOptions: { deadlineMs?: number; maxOperations?: number; maxContentBytes?: number } | undefined;
   const service = makeService() as unknown as {
+    preloadArchitectureTaskContext(session: SessionDetail, task: AgentTask, agentId: string): Promise<void>;
+    hydrateSupplementalContext(
+      session: SessionDetail,
+      request: RuntimeContextRequest,
+      options?: { deadlineMs?: number; maxOperations?: number; maxContentBytes?: number }
+    ): Promise<SupplementalContextResolution>;
+  };
+  service.hydrateSupplementalContext = async (_session, request, options) => {
+    capturedRequest = request;
+    capturedOptions = options;
+    throw new Error('Provider deadline reached');
+  };
+
+  await assert.doesNotReject(
+    service.preloadArchitectureTaskContext(activeSession, architectureTask(), 'architect')
+  );
+
+  assert.equal(capturedRequest?.requestedPaths?.length, 8);
+  assert.equal(capturedRequest?.requestedPaths?.includes('package.json'), true);
+  assert.deepEqual(capturedOptions, {
+    deadlineMs: 1_500,
+    maxOperations: 8,
+    maxContentBytes: 256 * 1024
+  });
+});
+
+test('supplemental hydration processes eight existing files and defers the remainder', async () => {
+  const revision = { id: 'revision-cache', observedAt: '2026-07-28T00:00:00.000Z' };
+  const workspaceProviders = {
+    resolve() {
+      return {
+        capabilities: () => ({ read: true, write: false, command: false, test: false }),
+        getRevision: async () => revision,
+        readFile: async () => { throw new Error('same-revision cached evidence must not be re-read'); }
+      };
+    }
+  };
+  const service = makeService([], undefined, undefined, workspaceProviders) as unknown as {
     hydrateSupplementalContext(
       session: SessionDetail,
       request: RuntimeContextRequest
@@ -807,8 +1321,14 @@ test('supplemental hydration processes eight existing files and defers the remai
       fileCount: paths.length,
       totalBytes: paths.length * 20,
       tree: paths.map((path) => ({ path, kind: 'file' as const })),
-      files: paths.map((path) => ({ path, size: 20, content: `export const source = '${path}';` })),
+      files: paths.map((path) => ({ path, size: 20, content: `export const source = '${path}';`, revision })),
       skipped: []
+    },
+    workspaceIndex: {
+      workspaceId: 'workspace-1', revision, generation: 1, status: 'ready', complete: true,
+      entries: paths.map((path) => ({ path, kind: 'file' as const, size: 20, generated: false, sensitive: false })),
+      entrypoints: [], detectedStack: [], indexedEntries: paths.length, truncated: false,
+      updatedAt: revision.observedAt
     }
   };
 
@@ -824,7 +1344,7 @@ test('supplemental hydration processes eight existing files and defers the remai
   assert.ok(resolution.contentBytes > 0);
 });
 
-test('supplemental hydration reports unavailable browser reads instead of swallowing them', async () => {
+test('supplemental hydration reports unavailable Local Runtime reads instead of swallowing them', async () => {
   const service = makeService() as unknown as {
     hydrateSupplementalContext(
       session: SessionDetail,
@@ -834,8 +1354,8 @@ test('supplemental hydration reports unavailable browser reads instead of swallo
   const activeSession: SessionDetail = {
     ...architectureSession(),
     workingDirectory: {
-      kind: 'browser_local',
-      id: 'browser-workspace',
+      kind: 'local_bridge',
+      id: 'local-runtime-workspace',
       name: 'fixture',
       selectedAt: '2026-07-13T00:00:00.000Z'
     },
@@ -849,11 +1369,11 @@ test('supplemental hydration reports unavailable browser reads instead of swallo
   });
 
   assert.deepEqual(resolution.hydratedPaths, []);
-  assert.equal(resolution.failedPaths[0]?.code, 'BROKER_OFFLINE');
+  assert.equal(resolution.failedPaths[0]?.code, 'READ_UNAVAILABLE');
   assert.equal(resolution.failedPaths[0]?.retryable, true);
 });
 
-test('supplemental hydration advances past a failed batch instead of starving later paths', async () => {
+test('supplemental hydration enforces the eight-operation bound and defers later paths', async () => {
   const service = makeService() as unknown as {
     hydrateSupplementalContext(
       session: SessionDetail,
@@ -884,9 +1404,267 @@ test('supplemental hydration advances past a failed batch instead of starving la
     requestedPaths: paths
   });
 
-  assert.deepEqual(resolution.hydratedPaths, [paths[8]]);
+  assert.deepEqual(resolution.hydratedPaths, []);
   assert.equal(resolution.failedPaths.length, 8);
-  assert.deepEqual(resolution.deferredPaths, [paths[9]]);
+  assert.deepEqual(resolution.deferredPaths, paths.slice(8));
+});
+
+test('supplemental hydration supports bounded directory listing and text search evidence', async () => {
+  const revision = { id: 'revision-1', observedAt: '2026-07-28T00:00:00.000Z' };
+  const workspaceProviders = {
+    resolve() {
+      return {
+        capabilities: () => ({ read: true, write: false, command: false, test: false }),
+        getRevision: async () => revision,
+        listDirectory: async () => ({
+          path: 'src',
+          revision,
+          entries: [{ path: 'src/main.ts', kind: 'file', size: 20, revision }]
+        }),
+        searchText: async () => ({
+          revision,
+          truncated: false,
+          matches: [{ path: 'src/main.ts', line: 1, column: 14, preview: 'export const main = true;' }]
+        })
+      };
+    }
+  };
+  const service = makeService([], undefined, undefined, workspaceProviders) as unknown as {
+    hydrateSupplementalContext(
+      session: SessionDetail,
+      request: RuntimeContextRequest
+    ): Promise<SupplementalContextResolution>;
+  };
+  const activeSession = architectureSession();
+  const resolution = await service.hydrateSupplementalContext(activeSession, {
+    reason: 'Need navigation and symbol evidence',
+    requestedRefs: [],
+    requestedDirectories: [{ path: 'src', depth: 1 }],
+    requestedSearches: [{ query: 'main', path: 'src', include: ['**/*.ts'] }]
+  });
+
+  assert.deepEqual(resolution.listedDirectories, ['src']);
+  assert.deepEqual(resolution.completedSearches, [JSON.stringify(['main', 'src', ['**/*.ts'], []])]);
+  assert.deepEqual(resolution.hydratedPaths, ['src/', 'search:main']);
+  assert.equal(resolution.evidenceRevisions?.['src/']?.id, revision.id);
+  assert.equal(resolution.evidenceRevisions?.['search:main']?.id, revision.id);
+  assert.equal(activeSession.workspaceSnapshot?.files.some((file) => file.path === 'src/'), true);
+  assert.equal(activeSession.workspaceSnapshot?.files.some((file) => file.path === 'search:main'), true);
+});
+
+test('supplemental file evidence retries once when the workspace revision changes', async () => {
+  let reads = 0;
+  const revision = (id: string) => ({ id, observedAt: '2026-07-28T00:00:00.000Z' });
+  const workspaceProviders = {
+    resolve() {
+      return {
+        capabilities: () => ({ read: true, write: false, command: false, test: false }),
+        readFile: async ({ path }: { path: string }) => {
+          reads += 1;
+          const current = revision(reads === 1 ? 'revision-1' : 'revision-2');
+          return {
+            path,
+            content: `content-${reads}`,
+            encoding: 'utf-8',
+            byteLength: 9,
+            truncated: false,
+            revision: current,
+            hash: { algorithm: 'sha256', value: `hash-${reads}` }
+          };
+        },
+        getRevision: async () => revision('revision-2')
+      };
+    }
+  };
+  const service = makeService([], undefined, undefined, workspaceProviders) as unknown as {
+    hydrateSupplementalContext(session: SessionDetail, request: RuntimeContextRequest): Promise<SupplementalContextResolution>;
+  };
+  const activeSession = architectureSession();
+  const resolution = await service.hydrateSupplementalContext(activeSession, {
+    reason: 'Need stable source evidence',
+    requestedRefs: [],
+    requestedPaths: ['src/main.ts']
+  });
+
+  assert.equal(reads, 2);
+  assert.deepEqual(resolution.hydratedPaths, ['src/main.ts']);
+  assert.equal(activeSession.workspaceSnapshot?.files[0]?.revision?.id, 'revision-2');
+  assert.equal(activeSession.workspaceSnapshot?.files[0]?.hash?.value, 'hash-2');
+});
+
+test('supplemental hydration re-reads cached file content from an older revision', async () => {
+  const currentRevision = { id: 'revision-2', observedAt: '2026-07-28T00:00:00.000Z' };
+  let reads = 0;
+  const workspaceProviders = {
+    resolve() {
+      return {
+        capabilities: () => ({ read: true, write: false, command: false, test: false }),
+        getRevision: async () => currentRevision,
+        readFile: async ({ path }: { path: string }) => {
+          reads += 1;
+          return {
+            path, content: 'current body', encoding: 'utf-8', byteLength: 12, truncated: false,
+            revision: currentRevision, hash: { algorithm: 'sha256', value: 'current-hash' }
+          };
+        }
+      };
+    }
+  };
+  const service = makeService([], undefined, undefined, workspaceProviders) as unknown as {
+    hydrateSupplementalContext(session: SessionDetail, request: RuntimeContextRequest): Promise<SupplementalContextResolution>;
+  };
+  const activeSession: SessionDetail = {
+    ...architectureSession(),
+    workspaceSnapshot: {
+      rootName: 'fixture', scannedAt: '2026-07-27T00:00:00.000Z', fileCount: 1, totalBytes: 10,
+      tree: [{ path: 'src/main.ts', kind: 'file' }],
+      files: [{
+        path: 'src/main.ts', size: 10, content: 'stale body',
+        revision: { id: 'revision-1', observedAt: '2026-07-27T00:00:00.000Z' }
+      }],
+      skipped: []
+    }
+  };
+
+  const resolution = await service.hydrateSupplementalContext(activeSession, {
+    reason: 'Need current source', requestedRefs: [], requestedPaths: ['src/main.ts']
+  });
+
+  assert.equal(reads, 1);
+  assert.equal(activeSession.workspaceSnapshot?.files[0]?.content, 'current body');
+  assert.equal(resolution.evidenceRevisions?.['src/main.ts']?.id, currentRevision.id);
+});
+
+test('supplemental hydration caps materialized evidence at 512KB and defers remaining operations', async () => {
+  const revision = { id: 'revision-budget', observedAt: '2026-07-28T00:00:00.000Z' };
+  const content = 'x'.repeat(100 * 1024);
+  const workspaceProviders = {
+    resolve() {
+      return {
+        capabilities: () => ({ read: true, write: false, command: false, test: false }),
+        getRevision: async () => revision,
+        readFile: async ({ path }: { path: string }) => ({
+          path, content, encoding: 'utf-8', byteLength: content.length, truncated: false, revision,
+          hash: { algorithm: 'sha256', value: `hash-${path}` }
+        })
+      };
+    }
+  };
+  const service = makeService([], undefined, undefined, workspaceProviders) as unknown as {
+    hydrateSupplementalContext(session: SessionDetail, request: RuntimeContextRequest): Promise<SupplementalContextResolution>;
+  };
+  const paths = Array.from({ length: 8 }, (_, index) => `src/large-${index}.txt`);
+
+  const resolution = await service.hydrateSupplementalContext(architectureSession(), {
+    reason: 'Need bounded bodies', requestedRefs: [], requestedPaths: paths
+  });
+
+  assert.equal(resolution.contentBytes, 512 * 1024);
+  assert.equal(resolution.hydratedPaths.length, 6);
+  assert.deepEqual(resolution.deferredPaths, paths.slice(6));
+});
+
+test('supplemental evidence cache remains bounded across repeated hydration rounds', async () => {
+  const revision = { id: 'revision-bounded-cache', observedAt: '2026-07-28T00:00:00.000Z' };
+  const content = 'x'.repeat(64 * 1024);
+  const workspaceProviders = {
+    resolve() {
+      return {
+        capabilities: () => ({ read: true, write: false, command: false, test: false }),
+        getRevision: async () => revision,
+        readFile: async ({ path }: { path: string }) => ({
+          path,
+          content,
+          encoding: 'utf-8',
+          byteLength: content.length,
+          truncated: false,
+          revision,
+          rangeHash: { algorithm: 'sha256', value: `range-${path}` }
+        })
+      };
+    }
+  };
+  const service = makeService([], undefined, undefined, workspaceProviders) as unknown as {
+    hydrateSupplementalContext(session: SessionDetail, request: RuntimeContextRequest): Promise<SupplementalContextResolution>;
+  };
+  const activeSession = architectureSession();
+
+  for (let round = 0; round < 5; round += 1) {
+    await service.hydrateSupplementalContext(activeSession, {
+      reason: 'Need bounded evidence',
+      requestedRefs: [],
+      requestedPaths: Array.from({ length: 8 }, (_, index) => `src/round-${round}-${index}.ts`)
+    });
+  }
+
+  const cached = activeSession.workspaceSnapshot?.files ?? [];
+  const cachedBytes = cached.reduce((total, file) => total + Buffer.byteLength(file.content ?? '', 'utf8'), 0);
+  assert.ok(cached.length <= 32);
+  assert.ok(cachedBytes <= 512 * 1024);
+  assert.equal(cached.some((file) => file.hash?.value.startsWith('range-')), true);
+});
+
+test('supplemental hydration returns a structured deadline failure instead of waiting indefinitely', async () => {
+  const previous = process.env.AGENT_CLUSTER_SUPPLEMENTAL_CONTEXT_DEADLINE_MS;
+  process.env.AGENT_CLUSTER_SUPPLEMENTAL_CONTEXT_DEADLINE_MS = '5';
+  try {
+    const workspaceProviders = {
+      resolve() {
+        return {
+          capabilities: () => ({ read: true, write: false, command: false, test: false }),
+          getRevision: async () => await new Promise<never>(() => {}),
+          readFile: async () => await new Promise<never>(() => {})
+        };
+      }
+    };
+    const service = makeService([], undefined, undefined, workspaceProviders) as unknown as {
+      hydrateSupplementalContext(session: SessionDetail, request: RuntimeContextRequest): Promise<SupplementalContextResolution>;
+    };
+
+    const resolution = await service.hydrateSupplementalContext(architectureSession(), {
+      reason: 'Bound the wait', requestedRefs: [], requestedPaths: ['src/main.ts']
+    });
+
+    assert.equal(resolution.failedPaths[0]?.code, 'DEADLINE_EXCEEDED');
+    assert.equal(resolution.failedPaths[0]?.retryable, false);
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_CLUSTER_SUPPLEMENTAL_CONTEXT_DEADLINE_MS;
+    else process.env.AGENT_CLUSTER_SUPPLEMENTAL_CONTEXT_DEADLINE_MS = previous;
+  }
+});
+
+test('supplemental file evidence fails explicitly after two unstable revisions', async () => {
+  let revisionCounter = 0;
+  const nextRevision = () => ({ id: `revision-${++revisionCounter}`, observedAt: '2026-07-28T00:00:00.000Z' });
+  const workspaceProviders = {
+    resolve() {
+      return {
+        capabilities: () => ({ read: true, write: false, command: false, test: false }),
+        readFile: async ({ path }: { path: string }) => ({
+          path,
+          content: 'unstable',
+          encoding: 'utf-8',
+          byteLength: 8,
+          truncated: false,
+          revision: nextRevision(),
+          hash: { algorithm: 'sha256', value: 'hash' }
+        }),
+        getRevision: async () => nextRevision()
+      };
+    }
+  };
+  const service = makeService([], undefined, undefined, workspaceProviders) as unknown as {
+    hydrateSupplementalContext(session: SessionDetail, request: RuntimeContextRequest): Promise<SupplementalContextResolution>;
+  };
+  const resolution = await service.hydrateSupplementalContext(architectureSession(), {
+    reason: 'Need stable source evidence',
+    requestedRefs: [],
+    requestedPaths: ['src/main.ts']
+  });
+
+  assert.deepEqual(resolution.hydratedPaths, []);
+  assert.equal(resolution.failedPaths[0]?.code, 'WORKSPACE_REVISION_UNSTABLE');
+  assert.equal(resolution.failedPaths[0]?.retryable, false);
 });
 
 test('architecture task waits for an architect instead of reassigning to requirements', async () => {
@@ -949,6 +1727,186 @@ test('evidence-insufficient blocked execution waits and never emits task_complet
   assert.equal(task.status, 'waiting');
   assert.equal(recorder.events.some((event) => event.type === 'task_waiting'), true);
   assert.equal(recorder.events.some((event) => event.type === 'task_completed'), false);
+});
+
+test('file revision task events omit model summaries, prompt details, risks, and handoff content', async () => {
+  const secret = 'FILE_REVISION_MODEL_OUTPUT_SECRET';
+  const { recorder, service, activeSession, task, brief } = taskExecutionHarness({
+    schemaVersion: '1.0',
+    kind: 'task_execution_result',
+    status: 'completed',
+    summary: `${secret}: summary`,
+    completedItems: [`${secret}: completed item`],
+    changedArtifacts: [],
+    requestedContext: null,
+    agentMessages: [],
+    nextSuggestedActions: [`${secret}: next action`],
+    risks: [`${secret}: risk`]
+  });
+  task.executionPurpose = 'file_revision';
+  task.fileRevisionId = 'revision-secret';
+  task.description = `${secret}: internal deterministic diff prompt`;
+  task.contextRequirements = [`${secret}: frozen evidence`];
+  task.acceptanceCriteria = [`${secret}: internal output contract`];
+
+  const outcome = await service.runOneTask(activeSession, brief, task);
+
+  assert.equal(outcome.ok, true);
+  const serializedEvents = JSON.stringify(recorder.events);
+  assert.doesNotMatch(serializedEvents, new RegExp(secret));
+  assert.doesNotMatch(serializedEvents, /deterministic diff|frozen evidence|internal output contract/);
+  const artifactEvent = recorder.events.find((event) => event.type === 'artifact_created');
+  assert.equal('contentSummary' in (artifactEvent?.metadata.payload as Record<string, unknown>), false);
+});
+
+test('file revision accepted task hides acceptance reason, messages, requested context, and handoff', async () => {
+  const secret = 'FILE_REVISION_ACCEPTANCE_SECRET';
+  const executionOutput = runtimeOutputExamples.task_execution_result;
+  const { recorder, service, activeSession, task, brief } = taskExecutionHarness(executionOutput);
+  task.executionPurpose = 'file_revision';
+  task.fileRevisionId = 'revision-acceptance-secret';
+  service.runRuntime = async (_session, input) => ({
+    invocationId: input.invocationId,
+    runtimeType: 'mock',
+    status: 'completed',
+    output: input.phase === 'task_acceptance'
+      ? {
+          ...runtimeOutputExamples.task_acceptance_decision,
+          reason: `${secret}: accepted reason`,
+          requestedContext: {
+            reason: `${secret}: requested context`,
+            requestedRefs: [],
+            requestedPaths: [`${secret}.md`],
+            requestedDirectories: null,
+            requestedSearches: null,
+            requestedCommands: [],
+            followUpInstruction: null
+          },
+          handoffSuggestion: {
+            targetAgentKey: 'test',
+            targetAgentId: null,
+            reason: `${secret}: handoff`,
+            missingContext: [secret],
+            riskLevel: 'high'
+          },
+          agentMessages: [createAgentMessageOutput({
+            messageKind: 'handoff',
+            content: `${secret}: agent message`
+          })]
+        }
+      : executionOutput,
+    events: [],
+    artifacts: [],
+    systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+    usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, model: 'mock' }
+  });
+
+  const outcome = await service.runOneTask(activeSession, brief, task);
+
+  assert.equal(outcome.ok, true);
+  assert.doesNotMatch(JSON.stringify({ events: recorder.events, updates: recorder.taskUpdates }), new RegExp(secret));
+  assert.equal(
+    recorder.events.some((event) =>
+      event.type === 'agent_message' &&
+      (event.metadata.payload as { phase?: string } | undefined)?.phase?.startsWith('task_acceptance')
+    ),
+    false
+  );
+});
+
+test('file revision blocked or rejected acceptance stores only stable public state', async () => {
+  for (const status of ['blocked', 'rejected'] as const) {
+    const secret = `FILE_REVISION_${status.toUpperCase()}_SECRET`;
+    const { recorder, service, activeSession, task, brief } = taskExecutionHarness(
+      runtimeOutputExamples.task_execution_result
+    );
+    task.executionPurpose = 'file_revision';
+    task.fileRevisionId = `revision-${status}-secret`;
+    service.runRuntime = async (_session, input) => ({
+      invocationId: input.invocationId,
+      runtimeType: 'mock',
+      status: 'completed',
+      output: {
+        ...runtimeOutputExamples.task_acceptance_decision,
+        status,
+        reason: `${secret}: decision reason`,
+        missingContext: [`${secret}: missing context`],
+        requestedContext: {
+          reason: `${secret}: requested context`,
+          requestedRefs: [],
+          requestedPaths: [`${secret}.md`],
+          requestedDirectories: null,
+          requestedSearches: null,
+          requestedCommands: [],
+          followUpInstruction: null
+        },
+        handoffSuggestion: {
+          targetAgentKey: 'test',
+          targetAgentId: null,
+          reason: `${secret}: handoff`,
+          missingContext: [secret],
+          riskLevel: 'high'
+        },
+        agentMessages: [createAgentMessageOutput({
+          messageKind: 'risk',
+          content: `${secret}: agent message`
+        })]
+      },
+      events: [],
+      artifacts: [],
+      systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, model: 'mock' }
+    });
+
+    const outcome = await service.runOneTask(activeSession, brief, task);
+
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.message, 'File revision task acceptance was blocked.');
+    assert.doesNotMatch(JSON.stringify({ events: recorder.events, updates: recorder.taskUpdates }), new RegExp(secret));
+    const blockedEvent = recorder.events.find((event) => event.type === 'task_blocked');
+    assert.equal(
+      (blockedEvent?.metadata.payload as { resultSummary?: string } | undefined)?.resultSummary,
+      'File revision task acceptance was blocked.'
+    );
+  }
+});
+
+test('file revision task acceptance Runtime failure omits raw error context and details', async () => {
+  const secret = 'FILE_REVISION_ACCEPTANCE_FAILURE_SECRET';
+  const { recorder, service, activeSession, task, brief } = taskExecutionHarness(
+    runtimeOutputExamples.task_execution_result
+  );
+  task.executionPurpose = 'file_revision';
+  task.fileRevisionId = 'revision-acceptance-failure-secret';
+  service.runRuntime = async (_session, input) => ({
+    invocationId: input.invocationId,
+    runtimeType: 'mock',
+    status: 'failed',
+    output: runtimeOutputExamples.task_execution_result,
+    events: [],
+    artifacts: [],
+    systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+    usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, model: 'mock' },
+    error: {
+      code: 'CONTEXT_INSUFFICIENT',
+      message: `${secret}: provider message`,
+      retryable: true,
+      requestedContext: {
+        reason: `${secret}: requested context`,
+        requestedRefs: [],
+        requestedPaths: [`${secret}.md`]
+      },
+      details: { secret }
+    }
+  });
+
+  const outcome = await service.runOneTask(activeSession, brief, task);
+
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.error?.message, 'File revision task acceptance failed.');
+  assert.equal(outcome.error?.requestedContext, undefined);
+  assert.equal(outcome.error?.details, undefined);
+  assert.doesNotMatch(JSON.stringify({ events: recorder.events, updates: recorder.taskUpdates }), new RegExp(secret));
 });
 
 test('task acceptance Runtime failure preserves the structured contract error', async () => {
@@ -1101,6 +2059,38 @@ test('Post Review evidence gap remains traceable on the ask_user execution outco
 
   assert.equal(outcome.kind, 'ask_user');
   assert.deepEqual(outcome.actions, actions);
+});
+
+test('cancelled pipeline preserves the structured termination from its AbortSignal', async () => {
+  const service = makeService();
+  const controller = new AbortController();
+  const termination = createExecutionTermination({
+    kind: 'user_cancelled',
+    source: 'user',
+    scope: 'invocation'
+  });
+  controller.abort(termination);
+  const activeSession = { ...session(), status: 'EXECUTING' as const };
+  const brief: TaskBrief = {
+    id: 'brief-paused',
+    sessionId: activeSession.id,
+    version: 1,
+    goal: 'Preserve pause termination semantics.',
+    scope: [],
+    outOfScope: [],
+    constraints: [],
+    acceptanceCriteria: [],
+    risks: [],
+    openQuestions: [],
+    confirmedByUser: true,
+    createdAt: '2026-07-03T00:00:00.000Z'
+  };
+
+  const outcome = await service.runPipeline(activeSession, brief, [], controller.signal);
+
+  assert.equal(outcome.kind, 'cancelled');
+  if (outcome.kind !== 'cancelled') return;
+  assert.deepEqual(outcome.termination, termination);
 });
 
 test('deliver_with_limitations skips repeated Post Review and enters final delivery', async () => {

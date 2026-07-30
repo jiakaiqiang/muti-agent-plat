@@ -79,12 +79,17 @@
 | `autopilot_runs` | Autopilot 触发的会话和运行结果 |
 | `event_outbox` | 事务提交后的可靠事件发布队列 |
 | `cutover_audits` | 数据切换申请、确认和执行结果 |
+| `local_runtime_devices` | 本机 Runtime CLI 设备、协议版本和令牌摘要 |
+| `local_runtime_operation_audits` | 本机工作区操作的脱敏审计记录 |
+| `file_revision_records` | 文件修订基线、版本链、每轮运行和编辑草稿投影；正文只保存 Content Reference |
+
+文件修订以 Session 生命周期作为正文保留边界。Session 删除通过 `fileRevisions` CAS 先提交记录删除，再回收不再出现在当前持久状态中的本地内容对象；相同 SHA-256 仍被其他 Session 或模块引用时不得物理删除。
 
 每张表和每个字段都由 schema manifest 生成中文数据库注释；迁移启动时会检查注释完整性，缺失即失败。
 
 ## 3. JSON 迁移策略
 
-`state.v3.json` 的 20 个顶层 collection 均有明确关系映射，迁移前执行 `assertRelationalCollectionsMapped`，未知 collection 直接失败。每个实体保留 `source_snapshot` 或兼容字段，保证旧 DTO 可无损回读；这不是把整个 JSON 作为一列保存。
+`state.v3.json` 的顶层 collection 均有明确关系映射，迁移前执行 `assertRelationalCollectionsMapped`，未知 collection 直接失败。每个实体保留 `source_snapshot` 或兼容字段，保证旧 DTO 可无损回读；这不是把整个 JSON 作为一列保存。Local Runtime 设备和操作审计由增量迁移 V2 建表；`fileRevisions` 由增量迁移 V3 的 `file_revision_records` 映射，`source_snapshot.projectionKind` 区分 `baseline/chain/run/draft`，读取时重建 `{ schemaVersion:2, baselines, chains, runs, drafts }`，不会改写已应用迁移的校验和。
 
 迁移命令：
 
@@ -115,3 +120,9 @@ npm run migrate:relational -- apply --source .cache/agent-cluster/state.v3.json 
 ```
 
 该命令会在写入前导出目标状态，并在同一数据库事务中重建、读取和校验全部 collection；校验失败会回滚。迁移使用 PostgreSQL advisory lock、迁移 checksum、事务和 `migration_runs` 审计；应用启动时会在关系库为空且发现旧 `agent_cluster_collections` 数据时自动导入一次，之后旧表只读、不再作为新写入目标。生产切换顺序是：备份文件和数据库、`dry-run`、空库 `apply --confirm`（或非空库带回滚快照）、`verify`、启动应用、观察恢复和事件发布。
+
+## 4. 文件修订并发写合同
+
+PostgreSQL 模式写入 `fileRevisions` collection 时必须调用 compare-and-set：事务先取得 `pg_advisory_xact_lock(hashtext('agent_cluster:file-revisions'))`，再读取并规范化当前 `{ schemaVersion:2, baselines, chains, runs, drafts }` 投影，将其 SHA-256 revision 与调用方的已持久化快照比较。只有 revision 相同才允许写入四类 `file_revision_records` 并提交；不一致返回冲突、不得应用本次 mutation，并必须从数据库刷新冲突进程的本地快照，避免后续请求继续基于陈旧状态。
+
+该 CAS 是数据库范围的串行化边界，进程内 keyed mutex 只负责减少同一进程竞争，不能替代数据库事务。PostgreSQL 集成测试必须覆盖 V2 四类投影往返恢复、两个独立 Pool/连接从同一 expected snapshot 并发写入时恰好一个成功一个冲突，以及连接不可用时写入明确失败而不发布内存状态。

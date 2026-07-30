@@ -1,10 +1,9 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { ReviewableFileChange } from './localWorkspace'
-import type { RuntimeType, WorkspaceSnapshot } from '@/types/contracts'
+import type { RuntimeType } from '@/types/contracts'
 
-export type WorkspaceKind = 'browser_local' | 'server_local'
-export type WorkspaceScanStatus = 'idle' | 'scanning' | 'completed' | 'failed'
+export type WorkspaceKind = 'local_bridge' | 'server_local'
+export type WorkspaceBindingStatus = 'idle' | 'binding' | 'bound' | 'failed'
 export type UiMessageType = 'success' | 'warning' | 'error' | 'info'
 export type SessionListTab = 'all' | 'mine' | 'favorites'
 export type WorkflowStageKey = 'intake' | 'brief' | 'dispatch' | 'execution' | 'review'
@@ -38,12 +37,12 @@ export const useWorkspaceUiStore = defineStore('workspaceUi', () => {
   const selectedSessionAgentIds = ref<string[]>([])
   const sessionCreateError = ref('')
   const pendingCreateInput = ref('')
-  const sessionScanStatus = ref<WorkspaceScanStatus>('idle')
-  const sessionScanSummary = ref<WorkspaceSnapshot>()
+  const sessionBindingStatus = ref<WorkspaceBindingStatus>('idle')
   const sessionRuntimeType = ref<RuntimeType | ''>('')
   const sessionModelId = ref('')
-  const sessionWorkspaceKind = ref<WorkspaceKind>('browser_local')
+  const sessionWorkspaceKind = ref<WorkspaceKind>('local_bridge')
   const sessionServerWorkspacePath = ref(defaultServerWorkspacePath)
+  const sessionLocalRuntimeWorkspaceId = ref('')
 
   const showBriefRevisionDialog = ref(false)
   const briefRevisionInput = ref('')
@@ -55,11 +54,13 @@ export const useWorkspaceUiStore = defineStore('workspaceUi', () => {
   const workflowStepRevisionError = ref('')
   const isSubmittingWorkflowStepRevision = ref(false)
 
-  const showFileReviewDialog = ref(false)
-  const reviewChanges = ref<ReviewableFileChange[]>([])
-  const selectedChangePaths = ref<string[]>([])
-  const isReviewLoading = ref(false)
-  const isApplyingReview = ref(false)
+  const showFileRevisionDialog = ref(false)
+  const fileRevisionPath = ref('')
+  const selectedFileRevisionBaselineId = ref('')
+  const selectedFileRevisionAgentIds = ref<string[]>([])
+  const fileRevisionInstruction = ref('')
+  const fileRevisionError = ref('')
+  const isSubmittingFileRevision = ref(false)
 
   const uiMessage = ref<WorkspaceUiMessage>()
   let uiMessageTimer: ReturnType<typeof setTimeout> | undefined
@@ -91,11 +92,11 @@ export const useWorkspaceUiStore = defineStore('workspaceUi', () => {
     selectedSessionAgentIds.value = []
     sessionCreateError.value = ''
     pendingCreateInput.value = ''
-    sessionScanStatus.value = 'idle'
-    sessionScanSummary.value = undefined
+    sessionBindingStatus.value = 'idle'
     sessionRuntimeType.value = ''
     sessionModelId.value = ''
-    sessionWorkspaceKind.value = 'browser_local'
+    sessionWorkspaceKind.value = 'local_bridge'
+    sessionLocalRuntimeWorkspaceId.value = ''
   }
 
   function openCreateSession() {
@@ -142,33 +143,21 @@ export const useWorkspaceUiStore = defineStore('workspaceUi', () => {
     workflowStepRevisionError.value = ''
   }
 
-  function openFileReview(changes: ReviewableFileChange[]) {
-    reviewChanges.value = changes
-    selectedChangePaths.value = changes.filter((item) => !item.conflict).map((item) => item.change.path)
-    showFileReviewDialog.value = true
+  function openFileRevision() {
+    fileRevisionError.value = ''
+    fileRevisionInstruction.value = ''
+    showFileRevisionDialog.value = true
   }
 
-  function toggleReviewPath(path: string) {
-    if (reviewChanges.value.some((item) => item.change.path === path && item.conflict)) return
-    selectedChangePaths.value = selectedChangePaths.value.includes(path)
-      ? selectedChangePaths.value.filter((item) => item !== path)
-      : [...selectedChangePaths.value, path]
+  function closeFileRevision() {
+    showFileRevisionDialog.value = false
+    fileRevisionError.value = ''
   }
 
-  function selectAllReviewPaths() {
-    selectedChangePaths.value = reviewChanges.value
-      .filter((item) => !item.conflict)
-      .map((item) => item.change.path)
-  }
-
-  function clearReviewSelection() {
-    selectedChangePaths.value = []
-  }
-
-  function closeFileReview() {
-    showFileReviewDialog.value = false
-    reviewChanges.value = []
-    selectedChangePaths.value = []
+  function toggleFileRevisionAgent(agentId: string) {
+    selectedFileRevisionAgentIds.value = selectedFileRevisionAgentIds.value.includes(agentId)
+      ? selectedFileRevisionAgentIds.value.filter((id) => id !== agentId)
+      : [...selectedFileRevisionAgentIds.value, agentId]
   }
 
   return {
@@ -185,12 +174,12 @@ export const useWorkspaceUiStore = defineStore('workspaceUi', () => {
     selectedSessionAgentIds,
     sessionCreateError,
     pendingCreateInput,
-    sessionScanStatus,
-    sessionScanSummary,
+    sessionBindingStatus,
     sessionRuntimeType,
     sessionModelId,
     sessionWorkspaceKind,
     sessionServerWorkspacePath,
+    sessionLocalRuntimeWorkspaceId,
     showBriefRevisionDialog,
     briefRevisionInput,
     briefRevisionError,
@@ -199,11 +188,13 @@ export const useWorkspaceUiStore = defineStore('workspaceUi', () => {
     workflowStepRevisionInput,
     workflowStepRevisionError,
     isSubmittingWorkflowStepRevision,
-    showFileReviewDialog,
-    reviewChanges,
-    selectedChangePaths,
-    isReviewLoading,
-    isApplyingReview,
+    showFileRevisionDialog,
+    fileRevisionPath,
+    selectedFileRevisionBaselineId,
+    selectedFileRevisionAgentIds,
+    fileRevisionInstruction,
+    fileRevisionError,
+    isSubmittingFileRevision,
     uiMessage,
     showMessage,
     clearMessage,
@@ -216,10 +207,8 @@ export const useWorkspaceUiStore = defineStore('workspaceUi', () => {
     closeBriefRevision,
     openWorkflowStepRevision,
     closeWorkflowStepRevision,
-    openFileReview,
-    toggleReviewPath,
-    selectAllReviewPaths,
-    clearReviewSelection,
-    closeFileReview
+    openFileRevision,
+    closeFileRevision,
+    toggleFileRevisionAgent
   }
 })

@@ -38,11 +38,14 @@ describe('Session Runtime preference v2 boundary', () => {
     expect(component).not.toMatch(/engineeringRuntimeType/)
   })
 
-  it('Session UI keeps browser-local and server-local workspace choices available for Codex/Claude', () => {
+  it('Session UI exposes only local and server workspace modes', () => {
     expect(component).toMatch(/sessionWorkspaceKind/)
     expect(component).toMatch(/sessionServerWorkspacePath/)
     expect(component).toMatch(/isRuntimeAvailable/)
-    expect(component).toMatch(/浏览器目录通过隔离镜像执行/)
+    expect(component).toMatch(/本地模式由 Local Runtime CLI 在授权目录内执行/)
+    expect(component).toMatch(/kind: 'local_bridge'/)
+    expect(component).toMatch(/kind: 'server_local'/)
+    expect(component).not.toMatch(/browser_local|浏览器兼容|浏览器目录通过隔离镜像执行/)
     expect(component).not.toMatch(/sessionWorkspaceKind\.value\s*=\s*['"]server_local['"]/)
     expect(component).not.toMatch(/:disabled="sessionRuntimeType === 'codex'/)
     expect(component).not.toMatch(/Runtime 需要服务器本地工作区/)
@@ -53,7 +56,7 @@ describe('Session Runtime preference v2 boundary', () => {
     expect(component).toMatch(/function handleRuntimePreferenceChange\(\)[\s\S]*?sessionCreateError\.value = ''/)
     expect(component).toMatch(/function selectSessionWorkspaceKind[\s\S]*?sessionCreateError\.value = ''/)
     expect(component).toMatch(/请输入服务器本地工作目录/)
-    expect(component).toMatch(/function closeCreateSessionDialog[\s\S]*?clearPendingDirectory\(\)/)
+    expect(component).not.toMatch(/clearPendingDirectory|chooseWorkingDirectory/)
   })
 
   it('Session UI describes Runtime and model choices as preferences', () => {

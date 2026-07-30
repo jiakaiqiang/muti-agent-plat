@@ -11,7 +11,7 @@
 | ID | Status | Gap |
 | --- | --- | --- |
 | P1 | 部分 | profileMarkdown needs a reusable role protocol. |
-| P2 | 部分 | createContextPack needs a documented injection matrix. |
+| P2 | 部分 | createContextAssembly and ContextEnvelopeV2 need a documented injection matrix. |
 | P3 | 部分 | relevantEvents needs filtering rules. |
 | P4 | 缺失 | Prompt Rubric is not yet a shared contract. |
 | P5 | 部分 | capabilities context needs Phase 4 binding. |

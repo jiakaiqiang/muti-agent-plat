@@ -1,12 +1,13 @@
 import {
   api,
   buildServer,
+  createPublishedAgentWorkflow,
   createSessionAndWaitForBrief,
   listEvents,
+  selectPublishedWorkflow,
   startSmokeServer,
   stopSmokeServer,
   waitForEvent,
-  waitForMatchingEvent,
   waitForStatus
 } from './smoke-server.mjs';
 
@@ -21,16 +22,11 @@ try {
     GLOBAL_DEFAULT_RUNTIME_TYPE: 'mock'
   });
 
-  const agents = (await api(server.apiBase, '/agents')).data;
-  const taskAgent = agents.find((agent) => agent.key === 'requirements') ?? agents[0];
-  if (!taskAgent) throw new Error('Cancel smoke requires at least one Agent.');
-  const workflow = (await api(server.apiBase, '/workflows', {
-    method: 'POST',
-    body: JSON.stringify({
-      name: 'Cancel smoke workflow',
-      nodes: [{ id: 'cancel-smoke-node', type: 'agent', agentId: taskAgent.id, order: 0 }]
-    })
-  })).data;
+  const workflow = await createPublishedAgentWorkflow(
+    server.apiBase,
+    'Cancel smoke workflow',
+    ['requirements']
+  );
 
   const { sessionId, briefId } = await createSessionAndWaitForBrief(
     server.apiBase,
@@ -38,20 +34,7 @@ try {
     { runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] } }
   );
   await api(server.apiBase, `/sessions/${sessionId}/briefs/${briefId}/confirm`, { method: 'POST' });
-  await waitForStatus(server.apiBase, sessionId, 'WAIT_WORKFLOW_SELECT');
-  const workflowSelection = await waitForMatchingEvent(
-    server.apiBase,
-    sessionId,
-    'user_confirmation_requested',
-    (event) => event.metadata.payload.reason === 'select_workflow'
-  );
-  const selected = (await api(server.apiBase, `/sessions/${sessionId}/workflow/select`, {
-    method: 'POST',
-    body: JSON.stringify({
-      workflowId: workflow.id,
-      confirmationId: workflowSelection.metadata.payload.confirmationId
-    })
-  })).data;
+  const selected = await selectPublishedWorkflow(server.apiBase, sessionId, workflow);
   const workflowTask = selected.createdTasks[0];
   if (!workflowTask) throw new Error('Cancel smoke workflow did not create a task.');
   await waitForEvent(server.apiBase, sessionId, 'task_started');
@@ -98,22 +81,6 @@ try {
     method: 'POST',
     body: JSON.stringify({ reason: '用户确认继续执行' })
   });
-  await waitForStatus(server.apiBase, sessionId, 'WAIT_WORKFLOW_STEP_CONFIRM', 90_000);
-  const stepConfirmation = await waitForMatchingEvent(
-    server.apiBase,
-    sessionId,
-    'user_confirmation_requested',
-    (event) =>
-      event.metadata.payload.reason === 'confirm_workflow_step' &&
-      event.metadata.payload.relatedTaskId === workflowTask.id
-  );
-  await api(server.apiBase, `/sessions/${sessionId}/workflow/steps/${workflowTask.id}/decision`, {
-    method: 'POST',
-    body: JSON.stringify({
-      confirmationId: stepConfirmation.metadata.payload.confirmationId,
-      decision: 'approve'
-    })
-  });
   await waitForStatus(server.apiBase, sessionId, 'COMPLETED', 90_000);
 
   const finalEvents = await listEvents(server.apiBase, sessionId);
@@ -128,3 +95,5 @@ try {
     await stopSmokeServer(server);
   }
 }
+
+process.exit(0);

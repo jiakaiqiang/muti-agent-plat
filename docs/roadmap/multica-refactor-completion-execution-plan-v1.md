@@ -1,7 +1,7 @@
 # Multica 对标改造补全执行计划 v1
 
 > 日期：2026-07-10  
-> 状态：R1～R7 已实现；P0 的 Claude/PostgreSQL/Redis/Workdir 已通过、Codex 受外部 `upstream_400` 阻塞；P1 的 Skill 前端已完成，Watchdog 工程实现完成但 20 次真实采样待执行  
+> 状态：R1～R7 已实现；Codex 本地 CLI/Runtime 标记为可用，但生产模型上游在 2026-07-12 三次补验中均返回 502；P0 的 Claude/PostgreSQL/Redis/Workdir 已通过；P1 的 Skill 前端已完成，Watchdog 工程实现完成但 20 次真实采样受 20 元费用上限阻断
 > 上游分析：[`../analysis/multica-actionable-refactor-plan-v1.md`](../analysis/multica-actionable-refactor-plan-v1.md)  
 > 相关设计：[`../design/multica-refactor-development-design-v1.md`](../design/multica-refactor-development-design-v1.md)  
 > 交接记录：[`../task-trans/HANDOFF-2026-07-10.md`](../task-trans/HANDOFF-2026-07-10.md)
@@ -36,7 +36,7 @@
 
 | 项目 | 当前状态 | 已有实现 | 未闭环部分 |
 | --- | --- | --- | --- |
-| R1 CLI 原生流式协议 | 完成（Claude 真实验收通过） | 统一 RunHandle；Codex app-server JSONL 生命周期；Claude stream-json；结构化结果、usage、cancel、stub e2e；Claude 真实 Resume/fallback/cancel 通过 | Codex 真实调用仍受外部上游 `upstream_400` 阻塞 |
+| R1 CLI 原生流式协议 | 完成（Codex 本地可用、Claude 真实验收通过） | Codex CLI 已安装登录并可启动 app-server；统一 RunHandle；Codex app-server JSONL 生命周期；Claude stream-json；结构化结果、usage、cancel、stub e2e；Claude 真实 Resume/fallback/cancel 通过 | Codex 生产真实调用仍受外部模型上游阻塞 |
 | R2 活性看门狗 | 功能完成，生产基线待验收 | first-frame、idle、absolute watchdog；streaming 真实事件刷新；legacy 合成 heartbeat；首帧/帧间隔/总时长指标；完整 timeout 诊断；20 次采样与分位数分析工具 | 每个目标 Runtime 仍需至少 20 次真实 completed 样本、最终参数批准和回滚演练 |
 | R3 Actor 一等公民 | 完成（v0.2 双写） | Event/Task 新旧字段双写；前端 ActorRef 优先；file/PostgreSQL collection 回填、备份与 dry-run；隔离 PostgreSQL apply/回滚验收 | v0.3 才删除旧 agentId 字段 |
 | R4 Session Resumption | 完成 | `runtimeSession` 显式回传；同 runtime/workdir 校验；Codex/Claude resume；单次 fallback 与审计事件 | 不支持跨 session 恢复；真实 CLI session 需外部环境验收 |
@@ -59,11 +59,11 @@
 
 | 编号 | 状态 | 当前证据 | 剩余动作 |
 | --- | --- | --- | --- |
-| PR-01 | 部分通过/外部阻塞 | Claude 真实 primary/resume/fallback/cancel/legacy 通过；Codex 三次首轮 `upstream_400` | 上游恢复或切换有效配置后补跑 Codex |
+| PR-01 | 部分通过/外部阻塞 | Claude 真实 primary/resume/fallback/cancel/legacy 通过；Codex 历史三次 `upstream_400`，2026-07-12 三次新 probe 均返回 502 且零 token | 上游恢复或切换有效配置后补跑 Codex |
 | PR-02 | 完成 | 隔离 PostgreSQL dry-run/apply/幂等/备份/回滚通过 | 无 |
 | PR-03 | 完成 | 隔离 Redis/BullMQ 调度/去重/停用/重启恢复/指标通过 | 无 |
 | PR-04 | 完成 | Windows 字节恢复/崩溃恢复/lease/失败留证/TTL 通过 | 无 |
-| PR-05 | 实现完成、验收待采样 | 服务端测试 338/338；基线分析器测试 2/2；真实采样入口具备成本门控 | 每个目标 Runtime 至少 20 次真实采样、批准参数和回滚演练 |
+| PR-05 | 实现完成、验收待采样 | 基线分析器测试 2/2；Claude 单次 probe 成功，49,762 tokens；真实采样入口具备成本门控 | 提高当前 20 元费用上限或提供可审计的订阅额度后，每个目标 Runtime至少 20 次真实采样、批准参数和回滚演练 |
 | PR-06 | 完成 | Web 组件测试 2/2、Skill 管理浏览器 e2e、Web build 和本轮全量回归通过 | 无 |
 
 因此当前不能把 P0/P1 标记为统一闭环，P2 继续冻结。

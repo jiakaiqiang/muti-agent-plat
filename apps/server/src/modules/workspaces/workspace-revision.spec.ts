@@ -90,7 +90,7 @@ test('stat after apply reflects the fresh hash and new revision', async () => {
     });
     assert.equal(stats.kind, 'file');
     if (stats.kind !== 'file') return;
-    assert.equal(stats.hash.value, sha256('const after = 2;\n').value);
+    assert.equal(stats.hash!.value, sha256('const after = 2;\n').value);
     assert.equal(stats.revision.id, result.revision.id);
   });
 });

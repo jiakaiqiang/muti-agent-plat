@@ -25,6 +25,23 @@ afterEach(() => {
 })
 
 describe('ConfirmationCard', () => {
+  it('does not duplicate the file revision candidate confirmation', () => {
+    const wrapper = mount(ConfirmationCard, {
+      props: {
+        confirmation: {
+          confirmationId: 'revision-confirmation',
+          reason: 'confirm_file_revision_apply',
+          title: '确认文件修订处理结果',
+          description: '候选由统一产物编辑器承载。',
+          status: 'pending',
+          options: [{ key: 'apply_candidate', label: '确认并写回' }]
+        }
+      },
+      global: { plugins: [createPinia()] }
+    })
+    expect(wrapper.find('.confirmation-card').exists()).toBe(false)
+  })
+
   it('renders structured post-review actions', async () => {
     const wrapper = mount(ConfirmationCard, { props: { confirmation: postReviewConfirmation() }, global: { plugins: [createPinia()] } })
     expect(wrapper.text()).toContain('补读工作区')

@@ -21,11 +21,14 @@ export function classifyClaudeProviderFailure(
     const httpStatus = Number(match[1]);
     if (!Number.isInteger(httpStatus)) continue;
     const payload = providerPayload(text, match.index + match[0].length);
-    const retryable = providerRetryable(httpStatus, payload);
+    const formatMismatch = isProviderFormatMismatch(text, httpStatus);
+    const retryable = formatMismatch ? false : providerRetryable(httpStatus, payload);
     const retryAfterMs = retryAfterMilliseconds(payload);
     return {
       code: isTimeoutStatus(httpStatus) ? 'RUNTIME_TIMEOUT' : 'MODEL_ERROR',
-      message: providerSafeMessage(httpStatus),
+      message: formatMismatch
+        ? 'Claude Code provider is incompatible: it rejected Claude Chat requests and only accepts OpenAI request formats. Configure an Anthropic-compatible endpoint or disable Claude Code Runtime.'
+        : providerSafeMessage(httpStatus),
       retryable,
       details: {
         provider: 'claude_code',
@@ -35,6 +38,11 @@ export function classifyClaudeProviderFailure(
         httpStatus,
         exitCode: numericExitCode(failure),
         signal: typeof failure.signal === 'string' ? failure.signal : null,
+        ...(formatMismatch ? {
+          failureKind: 'provider_format_mismatch',
+          requestedFormat: 'claude_chat',
+          acceptedFormats: ['openai_chat', 'openai_responses']
+        } : {}),
         ...(typeof payload?.error_name === 'string' ? { errorName: payload.error_name } : {}),
         ...(typeof payload?.error_category === 'string' ? { errorCategory: payload.error_category } : {}),
         ...(typeof payload?.zone === 'string' ? { gatewayZone: payload.zone } : {}),
@@ -44,6 +52,13 @@ export function classifyClaudeProviderFailure(
     };
   }
   return undefined;
+}
+
+function isProviderFormatMismatch(text: string, httpStatus: number) {
+  return httpStatus === 400
+    && /Format mismatch/i.test(text)
+    && /\bclaude_chat\b/i.test(text)
+    && /\bopenai_(?:chat|responses)\b/i.test(text);
 }
 
 function providerErrorTexts(failure: ClaudeProcessFailure) {

@@ -124,4 +124,10 @@ export class TasksService {
     return title.trim().toLocaleLowerCase();
   }
 
+  interruptUnfinished(sessionId: string, reason?: string) {
+    for (const task of this.unfinished(sessionId)) {
+      this.update(task, { status: 'waiting', resultSummary: reason });
+    }
+  }
+
 }

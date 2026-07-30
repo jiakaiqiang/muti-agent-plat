@@ -6,7 +6,7 @@
 
 ## 1. 修复闭环结论
 
-v1 修复方案的核心目标已经完成：执行不再绑定单个 HTTP 请求，Generic LLM 具备超时/重试/取消，复盘建议会影响状态机，服务重启可恢复执行，BullMQ 可承载后台执行，PostgreSQL 持久化不再依赖子进程全量写，Runtime 不再静默回退 mock，多 Agent 讨论和任务依赖已接入，长期记忆、token 预算和中文文案治理均已落地。
+v1 修复方案的核心目标已经完成：执行不再绑定单个 HTTP 请求，Generic LLM 具备超时/重试/取消，复盘建议会影响状态机，服务重启会保留可唤醒中断状态且不会自动重复执行，BullMQ 可承载后台执行，PostgreSQL 持久化不再依赖子进程全量写，Runtime 不再静默回退 mock，多 Agent 讨论和任务依赖已接入，长期记忆、token 预算和中文文案治理均已落地。
 
 当前路线图应从“补齐 v1 可靠性”切换为“v2 真实执行生产化”。
 
@@ -17,7 +17,7 @@ v1 修复方案的核心目标已经完成：执行不再绑定单个 HTTP 请�
 | P0-1 | 执行绑定 HTTP 同步 | 已修复 | `ExecutionService` 后台执行；`confirmBrief` 返回 accepted；进度走 SSE。 |
 | P0-2 | LLM 无超时/重试 | 已修复 | `GenericLlmRuntimeService` 使用 `AbortController`、`LLM_TIMEOUT_MS`、`LLM_MAX_RETRIES` 和退避重试。 |
 | P0-3 | 状态机收尾/复盘结论被忽略 | 已修复 | `ExecutionOutcome` + `applyOutcome`；支持 `rework/ask_user/failed/cancelled`。 |
-| P0-4 | 重启不恢复执行 | 已修复 | `RecoveryService` 在非 BullMQ 模式启动恢复未完成会话。 |
+| P0-4 | 重启丢失执行状态或重复执行 | 已修复 | `RecoveryService` 将未完成 invocation 对账为可唤醒 `INTERRUPTED`，不自动续跑。 |
 | P1-5 | BullMQ 未承载执行 | 已修复 | `ExecutionQueue`/`ExecutionWorker` 使用 `agent-task-queue`。 |
 | P1-6 | Postgres 子进程全量写 | 已修复核心 | `pg.Pool` 常驻连接、单 key upsert；事件 200ms 批量 flush。细粒度表仍属 v2。 |
 | P1-7 | 多 Agent 协作脚本化 | 已修复核心 | `runDiscussion` 多 Agent/多轮可配置；任务依赖解析和 ready task 执行。 |
@@ -93,6 +93,53 @@ v1 修复方案的核心目标已经完成：执行不再绑定单个 HTTP 请�
 - 支持逐文件 apply/skip。
 - 冲突或文件已变化时提示重新生成或手动处理。
 - 写回结果产生审计事件。
+
+### 4.5 能力审批优化
+
+**当前问题**：任务执行时因能力审批（`CAPABILITY_BLOCKED`）被阻断，用户授权后任务从头重新执行，而非从中断处恢复。
+
+#### P1：预检查机制（短期方案，立即实施）
+
+**目标**：在任务开始前预检查所需能力，避免执行到一半被打断。
+
+**实现要点**：
+- Orchestrator 启动任务前，根据 Agent Profile 的 `capabilityIds` 检查所有能力审批状态。
+- 未授权能力提前批量展示给用户，一次性完成审批。
+- 审批完成后任务才进入执行阶段，避免中途阻断。
+- 前端增加批量审批 UI，清晰展示能力名称、风险等级和使用原因。
+
+**交付物**：
+- `OrchestratorService` 增加 `preCheckCapabilities()` 方法
+- 前端 `CapabilityApprovalCard` 组件支持批量审批
+- e2e 测试：`capability-precheck-smoke.mjs`
+
+**验收标准**：
+- 需要高风险能力的任务在执行前展示审批卡片
+- 用户批量授权后任务直接执行，不再中断
+- 拒绝授权时任务进入 `WAIT_USER_DECISION` 状态
+
+#### P2：中断恢复机制（长期方案，后续版本）
+
+**目标**：支持任务执行中途遇到审批阻断时保存上下文，授权后从断点恢复。
+
+**实现要点**：
+- `SessionDetail` 增加 `pendingInvocations` 字段，持久化中断的 `InvocationPlan` 和 `RunAgentInput`。
+- Orchestrator 遇到审批阻断时，保存完整执行上下文，发送 `capability_approval_required` 事件。
+- Capabilities Controller 审批后触发 `Sessions.retryPendingApprovalTasks()`，复用原始 input 重新执行。
+- 前端监听 `capability_approved` 事件，自动刷新任务状态。
+
+**交付物**：
+- `PendingInvocation` 类型定义和持久化逻辑
+- `Sessions.savePendingInvocation()` 和 `retryPendingApprovalTasks()` 方法
+- Runtime 状态机支持 `pending_approval` → `running` 转换
+- e2e 测试：`capability-approval-resume-smoke.mjs`
+
+**验收标准**：
+- 任务执行中遇到未授权能力时保存上下文并暂停
+- 用户授权后任务自动从断点恢复，不重复已完成的工作
+- 多能力审批支持：部分授权后更新待审批列表，全部授权后恢复执行
+
+**设计文档**：`docs/design/capability-approval-resume-design.md`（已存在）
 
 ## 5. 验证策略
 

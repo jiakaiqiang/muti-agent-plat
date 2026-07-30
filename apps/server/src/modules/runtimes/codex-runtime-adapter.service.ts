@@ -19,7 +19,6 @@ import type {
 import { createAgentMessageOutput } from '@agent-cluster/shared';
 import {
   runtimeStreamingMode,
-  optionalRuntimeTimeoutMs,
   positiveRuntimeTimeoutMs
 } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
@@ -89,6 +88,12 @@ const execFileAsync = promisify(execFile);
 export function pickCodexRunMode(): CodexRunMode {
   const mode = runtimeStreamingMode();
   return mode === 'off' ? 'buffered' : 'streaming';
+}
+
+export function codexBufferedTimeoutMs() {
+  const absoluteTimeoutMs = positiveRuntimeTimeoutMs('CODEX_RUNTIME_ABSOLUTE_TIMEOUT_MS', 30 * 60_000);
+  const bufferedTimeoutMs = positiveRuntimeTimeoutMs('CODEX_RUNTIME_TIMEOUT_MS', 120_000);
+  return Math.min(bufferedTimeoutMs, absoluteTimeoutMs);
 }
 
 export function buildCodexExecArgs(input: InvocationPlan, configuredArgs?: string) {
@@ -188,7 +193,7 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
     provider: 'openai',
     capabilityIds: ['cap-file-read', 'cap-code-search', 'cap-file-write', 'cap-command-run', 'cap-test-report'] as const,
     supportedWorkspaceCapabilities: ['read', 'write', 'command', 'test'] as const,
-    supportedWorkspaceProviderKinds: ['server_local', 'browser_broker'] as const,
+    supportedWorkspaceProviderKinds: ['server_local'] as const,
     supportedToolNames: ['read_file', 'search_code', 'write_file', 'run_test'] as const
   };
 
@@ -212,7 +217,7 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
     }
     const rootPath = this.workspaceBindings.resolveServerRoot(input);
     if (!rootPath) {
-      return withStructuredTermination(settledHandle(this.blockedResult(input, 'Codex runtime requires a server_local or materialized browser working directory.')), input, signal);
+      return withStructuredTermination(settledHandle(this.blockedResult(input, 'Codex runtime requires a server_local working directory.')), input, signal);
     }
     if (input.resume?.workDir && resolve(input.resume.workDir) !== resolve(rootPath)) {
       return withStructuredTermination(settledHandle(this.failedResult(input, new Error('Resume workDir does not match the current workspace binding.'))), input, signal);
@@ -240,7 +245,7 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
 
     const rootPath = this.workspaceBindings.resolveServerRoot(input);
     if (!rootPath) {
-      return this.blockedResult(input, 'Codex runtime requires a server_local or materialized browser working directory.');
+      return this.blockedResult(input, 'Codex runtime requires a server_local working directory.');
     }
     if (input.resume?.workDir && resolve(input.resume.workDir) !== resolve(rootPath)) {
       return this.failedResult(input, new Error('Resume workDir does not match the current workspace binding.'));
@@ -251,7 +256,7 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
     }
 
     const command = process.env.CODEX_RUNTIME_COMMAND ?? 'codex';
-    const timeout = Number(process.env.CODEX_RUNTIME_TIMEOUT_MS ?? 120_000);
+    const timeout = codexBufferedTimeoutMs();
     let promptFilePath: string | undefined;
     let briefLease: WorkdirBriefLease | undefined;
 
@@ -627,7 +632,7 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
         baseEnv: this.runtimeEnv(input),
         firstFrameTimeoutMs: positiveRuntimeTimeoutMs('CODEX_RUNTIME_FIRST_FRAME_TIMEOUT_MS', 30_000),
         idleTimeoutMs: positiveRuntimeTimeoutMs('CODEX_RUNTIME_IDLE_TIMEOUT_MS', 600_000),
-        absoluteTimeoutMs: optionalRuntimeTimeoutMs('CODEX_RUNTIME_ABSOLUTE_TIMEOUT_MS'),
+        absoluteTimeoutMs: positiveRuntimeTimeoutMs('CODEX_RUNTIME_ABSOLUTE_TIMEOUT_MS', 30 * 60_000),
         workDir: this.workspaceBindings.resolveServerRoot(input),
         shell: this.useShell()
       }),

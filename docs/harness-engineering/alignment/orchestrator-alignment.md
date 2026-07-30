@@ -15,8 +15,10 @@
 | discussion | requirement / design | 讨论摘要、风险、待解决问题。 |
 | brief_generation | requirement | intent contract 或 task brief。 |
 | brief_revision | requirement | 带变更理由的修订版 brief。 |
+| brief_consultation | requirement / human_intervention | 围绕现有 brief 的定向咨询结果，不绕过用户确认闸口。 |
 | task_acceptance | planning / implementation 交接 | 任务领取决定（接受或拒绝）及理由。 |
 | task_execution | implementation | 实现摘要与产出的产物。 |
+| revision_synthesis | delivery / human_intervention | Receiver 基于冻结修订证据和 Agent 结果生成完整候选；候选仍需用户确认且不得直接写 Workspace。 |
 | post_review | review | 带明确决策的评审报告。 |
 | final_delivery | delivery | 最终交付与记忆候选。 |
 | user_message_routing | human_intervention / feedback | 路由、优先级、暂停决定、目标阶段。 |

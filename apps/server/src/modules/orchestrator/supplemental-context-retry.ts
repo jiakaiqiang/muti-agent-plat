@@ -1,6 +1,6 @@
 import type { RuntimeContextRequest, RuntimeError } from '@agent-cluster/shared';
 
-const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_MAX_RETRIES = 2;
 const ENV_VAR = 'AGENT_CLUSTER_CONTEXT_INSUFFICIENT_MAX_RETRIES';
 
 export function resolveContextInsufficientMaxRetries(): number {
@@ -19,7 +19,7 @@ export function canRetryWithSupplementalContext(
 ): boolean {
   if (code !== 'CONTEXT_INSUFFICIENT') return false;
   if (!requestedContext) return false;
-  if (!(requestedContext.requestedRefs.length || requestedContext.requestedPaths?.length)) return false;
+  if (!(requestedContext.requestedRefs.length || requestedContext.requestedPaths?.length || requestedContext.requestedDirectories?.length || requestedContext.requestedSearches?.length)) return false;
   if (!Number.isFinite(maxRetries) || maxRetries <= 0) return false;
   return retryCount < maxRetries;
 }

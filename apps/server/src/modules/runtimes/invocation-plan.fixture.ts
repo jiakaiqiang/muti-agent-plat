@@ -53,6 +53,7 @@ export function makeInvocationPlan(overrides: PlanOverrides = {}): InvocationPla
     requiredToolIds: [],
     writeMode: 'none',
     workspaceProviderKind: 'server_local',
+    executionLocation: 'server',
     ...overrides.executionTarget
   };
   const toolCatalog: ResolvedToolCatalog = {

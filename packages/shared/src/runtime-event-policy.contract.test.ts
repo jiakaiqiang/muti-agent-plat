@@ -8,7 +8,6 @@ import {
 
 test('workspace preparation events are diagnostic-only contract codes', () => {
   assert.equal(isRuntimeDiagnosticEventCode('WORKTREE_PREPARED'), true);
-  assert.equal(isRuntimeDiagnosticEventCode('BROWSER_MIRROR_PREPARED'), true);
   assert.equal(isRuntimeDiagnosticEventCode('STREAM_TEXT'), true);
 });
 
@@ -21,7 +20,7 @@ test('runtime event publication fails closed for debug visibility and diagnostic
   assert.equal(shouldPublishRuntimeEventToCollaboration({
     type: 'runtime_progress',
     visibility: 'user',
-    code: 'BROWSER_MIRROR_PREPARED'
+    code: 'WORKTREE_PREPARED'
   }), false);
   assert.equal(shouldPublishRuntimeEventToCollaboration({
     type: 'runtime_progress',
@@ -31,7 +30,7 @@ test('runtime event publication fails closed for debug visibility and diagnostic
   assert.equal(shouldPublishRuntimeEventToCollaboration({
     type: 'tool_completed',
     visibility: 'user',
-    code: 'BROWSER_MIRROR_PREPARED'
+    code: 'WORKTREE_PREPARED'
   }), true);
 });
 

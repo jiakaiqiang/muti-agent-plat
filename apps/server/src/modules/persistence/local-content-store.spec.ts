@@ -23,3 +23,13 @@ test('LocalContentStore rejects missing and invalid references explicitly', () =
   assert.throws(() => store.read('content:not-a-hash'), /CONTENT_REF_INVALID/);
   assert.throws(() => store.read(`content:${'a'.repeat(64)}`), /CONTENT_UNAVAILABLE/);
 });
+
+test('LocalContentStore removes a content object idempotently', () => {
+  const store = new LocalContentStore({ rootDir: mkdtempSync(join(tmpdir(), 'agent-cluster-content-')) });
+  const stored = store.put('retained until its last reference is removed');
+
+  assert.equal(store.remove(stored.contentRef), true);
+  assert.equal(store.exists(stored.contentRef), false);
+  assert.equal(store.remove(stored.contentRef), false);
+  assert.throws(() => store.remove('content:not-a-hash'), /CONTENT_REF_INVALID/);
+});

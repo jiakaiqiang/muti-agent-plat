@@ -38,7 +38,17 @@ export type RuntimeInvocationItem = {
     retryOfInvocationId?: string
     fallbackFromRuntimeType?: string
     fallbackReason?: string
+    supplementalContextAttempt?: number
+    supplementalContextDurationMs?: number
   }
+  workspaceIndexGeneration?: number
+  workspaceIndexStatus?: 'empty' | 'building' | 'ready' | 'stale' | 'failed'
+  workspaceIndexComplete?: boolean
+  workspaceRevisionAtStart: { id: string; observedAt: string }
+  supplementalContextAttempt: number
+  supplementalContextDurationMs: number
+  evidenceBytes: number
+  evidencePaths: string[]
   usage?: RuntimeUsage
   runtimeDiagnostics?: {
     providerNotifications: Array<{ method: string; disposition: string; payload: unknown }>
@@ -76,6 +86,13 @@ export type RuntimeInvocationItem = {
     navigationCount: number
     evidenceCount: number
     evidenceBytes: number
+    evidencePaths: string[]
+    workspaceIndexGeneration?: number
+    workspaceIndexStatus?: 'empty' | 'building' | 'ready' | 'stale' | 'failed'
+    workspaceIndexComplete?: boolean
+    workspaceRevisionAtStart: { id: string; observedAt: string }
+    supplementalContextAttempt: number
+    supplementalContextDurationMs: number
     projectModuleCount: number
     toolCount: number
     blockedToolCount: number

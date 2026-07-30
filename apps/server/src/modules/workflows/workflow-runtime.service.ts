@@ -244,16 +244,18 @@ export class WorkflowRuntimeService {
     return this.serialize(runId, async () => {
       const run = this.get(runId);
       if (this.isTerminal(run.status)) return run;
-      const context = this.context(run.id);
+      const context = this.contexts.get(run.id);
       this.execution.cancel(
         run.sessionId,
         createExecutionTermination({ kind: 'user_cancelled', source: 'user', scope: 'session', diagnosticRef: reason })
       );
       this.tasks.cancelUnfinished(run.sessionId, reason);
       await this.finishRun(run, 'cancelled');
-      context.session.workflowRun = context.session.workflowRun
-        ? { ...context.session.workflowRun, status: 'cancelled', updatedAt: nowIso() }
-        : undefined;
+      if (context) {
+        context.session.workflowRun = context.session.workflowRun
+          ? { ...context.session.workflowRun, status: 'cancelled', updatedAt: nowIso() }
+          : undefined;
+      }
       return run;
     });
   }
@@ -569,6 +571,9 @@ export class WorkflowRuntimeService {
         }
         this.tasks.update(task, { status: 'pending', resultSummary: undefined });
         await this.scheduleTaskExecution(run, nodeRun, task, true);
+        return;
+      }
+      if (outcome.termination?.kind === 'user_cancelled' && outcome.termination.scope === 'invocation') {
         return;
       }
       await this.finishRun(run, 'cancelled', { code: 'WORKFLOW_EXECUTION_CANCELLED', message: outcome.reason, nodeId: nodeRun.nodeId });

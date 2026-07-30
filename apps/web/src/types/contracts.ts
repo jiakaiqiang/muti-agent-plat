@@ -13,6 +13,15 @@ import type {
   ContextPipelineVersion,
   EventPriority,
   ExecutionTermination,
+  FileRevisionBaseline,
+  FileRevisionCandidate,
+  FileRevisionChain,
+  FileRevisionEditorDraft,
+  FileRevisionEditorDraftContent,
+  FileRevisionRun,
+  FileRevisionRunStatus,
+  FileRevisionState,
+  FileHash,
   KnowledgeBase,
   KnowledgeDocument,
   OpsHealth,
@@ -72,6 +81,15 @@ export type {
   EventMetadata,
   EventPriority,
   ExecutionTermination,
+  FileRevisionBaseline,
+  FileRevisionCandidate,
+  FileRevisionChain,
+  FileRevisionEditorDraft,
+  FileRevisionEditorDraftContent,
+  FileRevisionRun,
+  FileRevisionRunStatus,
+  FileRevisionState,
+  FileHash,
   EventRenderType,
   KnowledgeBase,
   KnowledgeDocument,
@@ -136,10 +154,13 @@ export type ConfirmationReason =
   | 'confirm_workflow_step'
   | 'confirm_workflow_human_gate'
   | 'approve_high_risk_capability'
+  | 'approve_capability'
+  | 'approve_local_runtime_permission'
   | 'resolve_contract_conflict'
   | 'confirm_memory_write'
   | 'confirm_local_report_save'
   | 'confirm_feishu_notification'
+  | 'confirm_file_revision_apply'
   | 'continue_after_budget_warning'
 
 export type ConfirmationOption = {
@@ -192,6 +213,13 @@ export type ConfirmationRequestedPayload = {
   relatedCapabilityId?: string
   relatedArtifactId?: string
   targetPath?: string
+  revisionId?: string
+  filePath?: string
+  candidateChangeSetId?: string
+  candidateHash?: FileHash
+  chainId?: string
+  iteration?: number
+  stateVersion?: number
   workflowId?: string
   workflowName?: string
   workflowRunId?: string
@@ -216,6 +244,12 @@ export type ConfirmationRequestedPayload = {
     sourceEventId?: string
     confidence?: number
   }
+  pendingApprovals?: Array<{
+    toolId: string
+    toolKey: string
+    approvalId: string
+    reasons: string[]
+  }>
 }
 
 export type TaskEventPayload = {
@@ -428,6 +462,13 @@ export type ConfirmationCardState = {
   relatedCapabilityId?: string
   relatedArtifactId?: string
   targetPath?: string
+  revisionId?: string
+  filePath?: string
+  candidateChangeSetId?: string
+  candidateHash?: FileHash
+  chainId?: string
+  iteration?: number
+  stateVersion?: number
   workflowId?: string
   workflowName?: string
   workflowRunId?: string
@@ -479,6 +520,7 @@ export const sessionStatusLabel: Record<SessionStatus, string> = {
   POST_REVIEW: '复盘中',
   REWORKING: '返工中',
   WAIT_USER_DECISION: '等待用户决策',
+  INTERRUPTED: '已中断',
   COMPLETED: '已完成',
   FAILED: '失败',
   CANCELLED: '已取消'

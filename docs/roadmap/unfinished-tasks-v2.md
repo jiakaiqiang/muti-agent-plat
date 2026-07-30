@@ -1,6 +1,6 @@
 # Agent Cluster 未完成任务清单 v2
 
-> 更新时间：2026-06-15
+> 更新时间：2026-07-28
 > 目的：把本轮没有完成的后续任务单独列出，供后续继续实现。
 
 ## 已进入当前工作树的基础
@@ -25,6 +25,7 @@
 
 | 任务 | 当前状态 | 下一步验收 |
 | --- | --- | --- |
+| 同一工作区多会话隔离 | V1 只验收单活动会话；会话、任务和事件等逻辑数据已按 `sessionId` 区分，但同一 `workspaceId` 的会话仍共享物理目录，已有会话的 `workspaceSnapshot` 也不会因其他会话写入自动刷新 | Invocation 启动前比较实时 workspace revision 与 Session snapshot revision；不一致时重建受限索引和 `ContextEnvelope`；为本地执行明确会话级 sandbox/worktree 或工作区互斥策略；覆盖双会话并发读写、冲突、取消和恢复测试 |
 | Project default runtime 持久化 | 当前支持 session/project 字段和 env project default，没有项目配置表 | 增加项目级 runtime 配置 API，并让 session 创建自动继承 project default |
 | Runtime 选择 UI | 后端 API 可接收 override，前端还没有会话级选择控件 | 会话创建弹窗支持选择 session engineering runtime，Debug 显示 effective/configured runtime |
 | Role-specific Context Pack 强化 | Context Router 有职责分工和最小证据选择，但 agent role slice 仍较粗 | 按 coordinator/backend/frontend/test/review 生成不同 context slice，并增加隔离 smoke |
@@ -49,4 +50,3 @@
 3. diff 审阅与逐文件写回。
 4. Codex / Claude Code 真实 CLI 生产化验证矩阵。
 5. pgvector RAG 与持久化 schema 化。
-

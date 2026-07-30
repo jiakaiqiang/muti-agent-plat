@@ -3,7 +3,7 @@
 > 文档定位：解决"群聊向大目录预灌内容、Agent 看不见真实项目"的根因
 > 范围：仅"任务执行阶段"切到按需读取；讨论阶段保持现有 Push 流程不变
 > 兼容：与现有 ContextPack / ContextRouter / EngineeringRuntime 合同正交，不重写
-> 状态：DRAFT
+> 状态：SUPERSEDED；目标行为以 [`workspace-index-first-on-demand-context-system-design-v1.md`](workspace-index-first-on-demand-context-system-design-v1.md) 为准
 > 生成时间：2026-06-18
 
 ## 1. 背景与问题

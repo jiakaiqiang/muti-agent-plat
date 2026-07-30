@@ -28,6 +28,16 @@ const RuntimeContextRequestSchema = strictObject({
   reason: NonEmptyString,
   requestedRefs: Type.Array(RuntimeTaskEvidenceRefSchema),
   requestedPaths: StringArray,
+  requestedDirectories: Type.Union([Type.Array(strictObject({
+    path: NonEmptyString,
+    depth: Type.Union([Type.Number({ minimum: 0, maximum: 4 }), Type.Null()])
+  })), Type.Null()]),
+  requestedSearches: Type.Union([Type.Array(strictObject({
+    query: NonEmptyString,
+    path: NullableString,
+    include: Type.Union([StringArray, Type.Null()]),
+    exclude: Type.Union([StringArray, Type.Null()])
+  })), Type.Null()]),
   requestedCommands: StringArray,
   followUpInstruction: NullableString
 });
@@ -95,6 +105,28 @@ export const TaskExecutionResultOutputSchema = strictObject({
   agentMessages: Type.Array(AgentMessageOutputSchema),
   nextSuggestedActions: StringArray,
   risks: StringArray
+});
+
+const FileHashSchema = strictObject({
+  algorithm: Type.Literal('sha256'),
+  value: Type.String({ pattern: '^[a-f0-9]{64}$' })
+});
+
+export const FileRevisionCandidateOutputSchema = strictObject({
+  ...RuntimeOutputHeader,
+  kind: Type.Literal('file_revision_candidate'),
+  revisionId: NonEmptyString,
+  chainId: NonEmptyString,
+  iteration: Type.Integer({ minimum: 1 }),
+  sourceDraftHash: FileHashSchema,
+  evidenceHash: Type.String({ pattern: '^[a-f0-9]{64}$' }),
+  content: Type.String(),
+  summary: NonEmptyString,
+  incorporatedAgentResultIds: Type.Array(NonEmptyString, { minItems: 1, uniqueItems: true }),
+  unresolvedConflicts: Type.Array(strictObject({
+    agentResultIds: StringArray,
+    description: NonEmptyString
+  }))
 });
 
 const PostReviewActionSchema = Type.Union([
@@ -166,6 +198,7 @@ export const runtimeOutputSchemas = {
   task_acceptance_decision: TaskAcceptanceDecisionOutputSchema,
   task_brief: TaskBriefOutputSchema,
   task_execution_result: TaskExecutionResultOutputSchema,
+  file_revision_candidate: FileRevisionCandidateOutputSchema,
   post_review_report: PostReviewReportOutputSchema,
   final_delivery: FinalDeliveryOutputSchema,
   user_message_handling_plan: UserMessageHandlingPlanOutputSchema
@@ -178,6 +211,7 @@ export type SuggestedAgentTask = Static<typeof SuggestedAgentTaskSchema>;
 export type TaskAcceptanceDecisionOutput = Static<typeof TaskAcceptanceDecisionOutputSchema>;
 export type TaskBriefOutput = Static<typeof TaskBriefOutputSchema>;
 export type TaskExecutionResultOutput = Static<typeof TaskExecutionResultOutputSchema>;
+export type FileRevisionCandidateOutput = Static<typeof FileRevisionCandidateOutputSchema>;
 export type PostReviewAction = Static<typeof PostReviewActionSchema>;
 export type PostReviewReportOutput = Static<typeof PostReviewReportOutputSchema>;
 export type FinalDeliveryOutput = Static<typeof FinalDeliveryOutputSchema>;
@@ -188,6 +222,7 @@ export type RuntimeOutput =
   | TaskAcceptanceDecisionOutput
   | TaskBriefOutput
   | TaskExecutionResultOutput
+  | FileRevisionCandidateOutput
   | PostReviewReportOutput
   | FinalDeliveryOutput
   | UserMessageHandlingPlanOutput;
@@ -257,6 +292,19 @@ export const runtimeOutputExamples = {
     agentMessages: [],
     nextSuggestedActions: [],
     risks: []
+  },
+  file_revision_candidate: {
+    schemaVersion: '1.0',
+    kind: 'file_revision_candidate',
+    revisionId: 'revision-id',
+    chainId: 'chain-id',
+    iteration: 1,
+    sourceDraftHash: { algorithm: 'sha256', value: '0'.repeat(64) },
+    evidenceHash: '1'.repeat(64),
+    content: 'Complete candidate file content.',
+    summary: 'Synthesized the selected Agent results while preserving the user draft.',
+    incorporatedAgentResultIds: ['agent-result-id'],
+    unresolvedConflicts: []
   },
   post_review_report: {
     schemaVersion: '1.0',

@@ -158,7 +158,7 @@ test('apply rejects a stale dry-run revision', async () => {
   }
 });
 
-test('file apply atomically migrates old state with schema-v3 metadata and explicit seeds', async () => {
+test('file apply atomically replaces old state with schema-v3 seeds and audit metadata', async () => {
   const fixture = setup();
   try {
     await fixture.initialize();
@@ -172,12 +172,12 @@ test('file apply atomically migrates old state with schema-v3 metadata and expli
     assert.equal(result.status, 'applied');
     assert.deepEqual(
       Object.keys(persisted).sort(),
-      ['agents', 'artifacts', 'cutoverAudits', 'eventsBySession', 'sessions', CUTOVER_METADATA_COLLECTION].sort()
+      ['agents', 'cutoverAudits', CUTOVER_METADATA_COLLECTION].sort()
     );
     assert.deepEqual(persisted.agents, [{ id: 'agent-v2' }]);
-    assert.equal((persisted.sessions as Array<{ id: string; dataEpoch: string }>)[0].id, 'session-old');
-    assert.equal((persisted.sessions as Array<{ dataEpoch: string }>)[0].dataEpoch, result.metadata.dataEpoch);
-    assert.deepEqual(persisted.eventsBySession, { 'session-old': [{ id: 'event-old' }] });
+    assert.equal(persisted.sessions, undefined);
+    assert.equal(persisted.eventsBySession, undefined);
+    assert.equal(persisted.artifacts, undefined);
     assert.deepEqual(persisted[CUTOVER_METADATA_COLLECTION], result.metadata);
     assert.ok(result.archive);
     assert.match(result.archive.manifest.encryptedSha256, /^[a-f0-9]{64}$/);

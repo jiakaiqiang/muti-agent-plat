@@ -51,12 +51,6 @@ describe('timeline runtime diagnostics boundary', () => {
     expect(shouldRenderInTimeline({
       ...base,
       type: 'runtime_progress',
-      content: 'Prepared an isolated browser workspace mirror for this Runtime.',
-      metadata: { ...base.metadata, payload: { code: 'BROWSER_MIRROR_PREPARED' } }
-    })).toBe(false)
-    expect(shouldRenderInTimeline({
-      ...base,
-      type: 'runtime_progress',
       content: 'Prepared an isolated Git worktree for this task.',
       metadata: { ...base.metadata, payload: { code: 'WORKTREE_PREPARED' } }
     })).toBe(false)

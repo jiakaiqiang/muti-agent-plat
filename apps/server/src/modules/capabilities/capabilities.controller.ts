@@ -2,12 +2,14 @@ import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/commo
 import { ok } from '../../common/api-response.js';
 import { CapabilityAuditService } from './capability-audit.service.js';
 import { CapabilitiesService, type CapabilityUpsertInput } from './capabilities.service.js';
+import { EventsService } from '../events/events.service.js';
 
 @Controller('capabilities')
 export class CapabilitiesController {
   constructor(
     private readonly capabilities: CapabilitiesService,
-    private readonly audit: CapabilityAuditService
+    private readonly audit: CapabilityAuditService,
+    private readonly events: EventsService
   ) {}
 
   @Get()
@@ -52,13 +54,34 @@ export class CapabilitiesController {
   }
 
   @Post(':capabilityId/approve')
-  approve(
+  async approve(
     @Param('capabilityId') capabilityId: string,
     @Body() body: { sessionId?: string; agentId?: string; reason?: string }
   ) {
     const input = body ?? {};
-    const result = this.capabilities.approve(capabilityId, input);
+    const result = await this.capabilities.approve(capabilityId, input);
     this.audit.recordApproval(input, result);
+
+    // 发送审批完成事件
+    if (input.sessionId) {
+      this.events.create({
+        sessionId: input.sessionId,
+        type: 'capability_approved',
+        ...(input.agentId ? { fromAgentId: input.agentId } : {}),
+        toAgentIds: [],
+        content: `能力 ${result.capability.name} 已授权`,
+        metadata: {
+          schemaVersion: '0.1',
+          renderAs: 'system_notice',
+          payload: {
+            capabilityId,
+            capabilityKey: result.capability.key,
+            approvalKey: result.approvalKey
+          }
+        }
+      });
+    }
+
     return ok(result);
   }
 }

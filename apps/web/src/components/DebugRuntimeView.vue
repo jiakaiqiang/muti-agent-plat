@@ -143,6 +143,20 @@ watch(() => props.sessionId, loadDebugData, { immediate: true })
                 retry of {{ selectedInvocation.attempt.retryOfInvocationId }}
               </small>
             </article>
+            <article>
+              <h4>Workspace Evidence</h4>
+              <p>
+                Index g{{ selectedInvocation.workspaceIndexGeneration ?? 0 }}
+                · {{ selectedInvocation.workspaceIndexStatus ?? 'empty' }}
+                · {{ selectedInvocation.workspaceIndexComplete ? 'complete' : 'partial' }}
+              </p>
+              <small>
+                revision {{ selectedInvocation.workspaceRevisionAtStart.id }}
+                · supplement {{ selectedInvocation.supplementalContextAttempt }}
+                · {{ selectedInvocation.supplementalContextDurationMs }} ms
+              </small>
+              <small>{{ selectedInvocation.evidencePaths.join(', ') || 'no L3 evidence' }}</small>
+            </article>
           </div>
         </section>
 
@@ -186,6 +200,15 @@ watch(() => props.sessionId, loadDebugData, { immediate: true })
               <h4>L3 Evidence</h4>
               <p>{{ selectedInvocation.contextEnvelope.L3.files.length }} files</p>
               <small>{{ selectedInvocation.contextEnvelope.L3.totalByteLength }} bytes</small>
+              <ul class="debug-list">
+                <li v-for="file in selectedInvocation.contextEnvelope.L3.files" :key="file.path">
+                  <strong>{{ file.path }}</strong>
+                  <small>
+                    {{ file.hash?.value ?? 'no hash' }}
+                    · revision {{ file.revision?.id ?? 'unknown' }}
+                  </small>
+                </li>
+              </ul>
             </article>
             <article>
               <h4>L4 Tool Results</h4>

@@ -2,10 +2,12 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRuntimeModelStore } from '@/stores/runtimeModel'
-import type { RuntimeModelKind, RuntimeModelOption, RuntimeModelUpdateInput } from '@/types/contracts'
+import { useLocalRuntimeStore } from '@/stores/localRuntime'
+import type { RuntimeModelKind, RuntimeModelOption, RuntimeModelProvider, RuntimeModelUpdateInput } from '@/types/contracts'
 import UiIcon from './UiIcon.vue'
 
 const modelStore = useRuntimeModelStore()
+const localRuntimeStore = useLocalRuntimeStore()
 const {
   selectedModelId,
   addMode,
@@ -24,6 +26,10 @@ const {
 } = storeToRefs(modelStore)
 
 const modelOptions = computed(() => modelStore.availableModels)
+const remoteProvider = ref<Extract<RuntimeModelProvider, 'openai-compatible' | 'anthropic-compatible'>>('openai-compatible')
+const remoteCredentialLocation = ref<'server' | 'local'>('server')
+const remoteDeviceId = ref('')
+const localDevices = computed(() => localRuntimeStore.devices.filter((device) => device.connected))
 const selectedModel = computed(() => modelOptions.value.find((model) => model.id === selectedModelId.value))
 const canAddLocal = computed(() => Boolean(localModelName.value.trim()) && !modelStore.saving)
 const canAddRemote = computed(
@@ -31,6 +37,7 @@ const canAddRemote = computed(
     Boolean(remoteModelName.value.trim()) &&
     Boolean(remoteBaseUrl.value.trim()) &&
     Boolean(remoteApiKey.value.trim()) &&
+    (remoteCredentialLocation.value === 'server' || Boolean(remoteDeviceId.value)) &&
     !modelStore.saving
 )
 
@@ -84,13 +91,17 @@ async function addRemoteModel() {
     label: remoteLabel.value.trim() || undefined,
     model,
     baseUrl,
-    apiKey
+    apiKey,
+    provider: remoteProvider.value,
+    credentialLocation: remoteCredentialLocation.value,
+    ...(remoteCredentialLocation.value === 'local' ? { deviceId: remoteDeviceId.value } : {})
   })
   selectedModelId.value = modelStore.currentModelId
   remoteLabel.value = ''
   remoteModelName.value = ''
   remoteBaseUrl.value = ''
   remoteApiKey.value = ''
+  remoteDeviceId.value = ''
   saveMessage.value = '远端模型已添加到模型列表。'
 }
 
@@ -162,6 +173,7 @@ onMounted(async () => {
   if (!modelStore.config) {
     await modelStore.loadConfig()
   }
+  await localRuntimeStore.loadDevices().catch(() => undefined)
 })
 </script>
 
@@ -206,6 +218,29 @@ onMounted(async () => {
             <span>模型名称</span>
             <input v-model="remoteModelName" type="text" placeholder="例如 gpt-4.1-mini" />
           </label>
+          <label class="model-select-field">
+            <span>接口协议</span>
+            <select v-model="remoteProvider">
+              <option value="openai-compatible">OpenAI compatible (Codex)</option>
+              <option value="anthropic-compatible">Anthropic compatible (Claude Code)</option>
+            </select>
+          </label>
+          <label class="model-select-field">
+            <span>凭据位置</span>
+            <select v-model="remoteCredentialLocation">
+              <option value="server">服务器</option>
+              <option value="local">本机 Local Runtime</option>
+            </select>
+          </label>
+          <label v-if="remoteCredentialLocation === 'local'" class="model-select-field span-2">
+            <span>本机设备</span>
+            <select v-model="remoteDeviceId">
+              <option value="">选择已连接设备</option>
+              <option v-for="device in localDevices" :key="device.deviceId" :value="device.deviceId">
+                {{ device.displayName }}
+              </option>
+            </select>
+          </label>
           <label class="model-select-field span-2">
             <span>接口地址</span>
             <input v-model="remoteBaseUrl" type="text" placeholder="例如 https://api.openai.com/v1" />
@@ -242,6 +277,14 @@ onMounted(async () => {
           <div>
             <dt>Key</dt>
             <dd>{{ keyLabel(model) }}</dd>
+          </div>
+          <div>
+            <dt>协议</dt>
+            <dd>{{ model.provider }}</dd>
+          </div>
+          <div>
+            <dt>凭据</dt>
+            <dd>{{ model.credentialLocation === 'local' ? '本机设备' : '服务器' }}</dd>
           </div>
           <div>
             <dt>状态</dt>

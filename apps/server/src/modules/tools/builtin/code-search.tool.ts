@@ -1,7 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import type { WorkspaceSkippedReason } from '@agent-cluster/shared';
-import { scanServerWorkspace } from '../../../common/workspace-scanner.js';
+import { isGeneratedWorkspaceDirectory } from '@agent-cluster/shared';
+import { readdir, readFile, stat } from 'node:fs/promises';
+import { join } from 'node:path';
+import { isSensitivePath } from '../../../common/path-safety.js';
+import { validateServerLocalWorkspace } from '../../workspaces/validate-server-local-workspace.js';
 import type { Tool, ToolExecutionContext, ToolResult } from '../tool.interface.js';
+
+const SEARCH_DEADLINE_MS = 10_000;
+const MAX_FILE_BYTES = 512 * 1024;
+const BINARY_PROBE_BYTES = 4_000;
 
 export type CodeSearchMatch = {
   file: string;
@@ -68,37 +76,83 @@ export class CodeSearchTool implements Tool {
     }
 
     try {
-      const { workspaceSnapshot } = await scanServerWorkspace(context.workingDirectory);
-      const files = workspaceSnapshot.files.filter((file) => this.matchesFilePattern(file.path, input.filePattern));
+      const workingDirectory = await validateServerLocalWorkspace({
+        kind: 'server_local',
+        id: 'search-code',
+        name: 'search-code',
+        path: context.workingDirectory,
+        selectedAt: new Date().toISOString()
+      });
+      const root = workingDirectory.path!;
       const maxResults = this.maxResults(input.maxResults);
       const results: CodeSearchMatch[] = [];
+      const skipped: CodeSearchOutput['skipped'] = [];
+      const pending = [{ absolute: root, relative: '' }];
+      const deadlineAt = Date.now() + SEARCH_DEADLINE_MS;
+      let totalFiles = 0;
       let limited = false;
 
-      for (const file of files) {
-        if (results.length >= maxResults) {
+      while (pending.length && !limited) {
+        if (context.signal?.aborted || Date.now() >= deadlineAt) {
           limited = true;
           break;
         }
-
-        if (typeof file.content !== 'string') {
-          continue;
-        }
-
-        const lines = file.content.split(/\r?\n/);
-        for (const [index, line] of lines.entries()) {
-          regex.lastIndex = 0;
-          for (const match of line.matchAll(regex)) {
-            results.push({
-              file: file.path,
-              line: index + 1,
-              content: line.trim(),
-              match: match[0]
-            });
-
-            if (results.length >= maxResults) {
-              limited = true;
-              break;
+        const directory = pending.shift()!;
+        const entries = await readdir(directory.absolute, { withFileTypes: true });
+        entries.sort((left, right) => left.name.localeCompare(right.name));
+        for (const entry of entries) {
+          const path = directory.relative ? `${directory.relative}/${entry.name}` : entry.name;
+          const absolute = join(directory.absolute, entry.name);
+          if (context.signal?.aborted || Date.now() >= deadlineAt) {
+            limited = true;
+            break;
+          }
+          if (entry.isSymbolicLink()) {
+            skipped.push({ path, reason: 'sensitive', detail: 'symbolic links are outside the workspace trust boundary' });
+            continue;
+          }
+          if (entry.isDirectory()) {
+            if (isGeneratedWorkspaceDirectory(entry.name)) {
+              skipped.push({ path, reason: 'ignored_directory' });
+            } else if (isSensitivePath(path)) {
+              skipped.push({ path, reason: 'sensitive' });
+            } else {
+              pending.push({ absolute, relative: path });
             }
+            continue;
+          }
+          if (!entry.isFile()) continue;
+          if (isSensitivePath(path)) {
+            skipped.push({ path, reason: 'sensitive' });
+            continue;
+          }
+          if (!this.matchesFilePattern(path, input.filePattern)) continue;
+          try {
+            const metadata = await stat(absolute);
+            if (metadata.size > MAX_FILE_BYTES) {
+              skipped.push({ path, reason: 'too_large' });
+              continue;
+            }
+            const buffer = await readFile(absolute);
+            if (this.looksBinary(buffer)) {
+              skipped.push({ path, reason: 'binary' });
+              continue;
+            }
+            totalFiles += 1;
+            const lines = buffer.toString('utf8').split(/\r?\n/);
+            for (const [index, line] of lines.entries()) {
+              regex.lastIndex = 0;
+              for (const match of line.matchAll(regex)) {
+                results.push({ file: path, line: index + 1, content: line.trim(), match: match[0] });
+                if (results.length >= maxResults) {
+                  limited = true;
+                  break;
+                }
+              }
+              if (limited) break;
+            }
+          } catch (error) {
+            skipped.push({ path, reason: 'read_error', detail: error instanceof Error ? error.message : String(error) });
           }
           if (limited) break;
         }
@@ -106,10 +160,10 @@ export class CodeSearchTool implements Tool {
 
       const output: CodeSearchOutput = {
         totalMatches: results.length,
-        totalFiles: files.length,
+        totalFiles,
         limited,
         results,
-        skipped: workspaceSnapshot.skipped
+        skipped
       };
 
       return {
@@ -152,7 +206,7 @@ export class CodeSearchTool implements Tool {
     if (value === undefined || !Number.isFinite(value)) {
       return 100;
     }
-    return Math.max(1, Math.floor(value));
+    return Math.min(100, Math.max(1, Math.floor(value)));
   }
 
   private matchesFilePattern(path: string, pattern: string | undefined) {
@@ -175,6 +229,14 @@ export class CodeSearchTool implements Tool {
 
   private escapeRegex(value: string) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  private looksBinary(buffer: Buffer) {
+    const length = Math.min(buffer.byteLength, BINARY_PROBE_BYTES);
+    for (let index = 0; index < length; index += 1) {
+      if (buffer[index] === 0) return true;
+    }
+    return false;
   }
 
   private failure(error: unknown): ToolResult {

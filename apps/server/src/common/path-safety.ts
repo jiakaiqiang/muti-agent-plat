@@ -1,50 +1,10 @@
 import { lstat, realpath } from 'node:fs/promises';
 import { join, normalize, resolve, sep } from 'node:path';
-
-/**
- * Sensitive file/directory patterns that must never be exposed via tools or
- * scanned for content. The list is intentionally conservative — false positives
- * (a harmless file named `secret-config.md`) are preferable to leaking real
- * credentials.
- */
-const sensitiveDirectoryNames = new Set([
-  '.git',
-  '.ssh',
-  '.aws',
-  '.docker',
-  '.kube',
-  '.gnupg',
-  '.config'
-]);
-
-const sensitiveFileNames = new Set([
-  '.env',
-  '.npmrc',
-  '.gitconfig',
-  '.netrc',
-  '.pypirc',
-  'credentials',
-  'id_rsa',
-  'id_dsa',
-  'id_ecdsa',
-  'id_ed25519'
-]);
-
-const sensitiveExtensions = new Set([
-  '.pem',
-  '.key',
-  '.p12',
-  '.pfx',
-  '.crt',
-  '.cer',
-  '.der'
-]);
-
-const sensitiveSubstrings = ['secret', 'private-key', 'private_key', 'apikey', 'api-key', 'api_key', 'token'];
+import { isSensitiveWorkspacePath, normalizeWorkspaceRelativePath } from '@agent-cluster/shared';
 
 /** Normalize a path for cross-platform comparison: forward slashes, no trailing separator. */
 export function normalizeRelativePath(input: string) {
-  return input.replace(/\\/g, '/').replace(/\/+$/g, '');
+  return normalizeWorkspaceRelativePath(input);
 }
 
 /**
@@ -113,19 +73,5 @@ export async function assertWithinRootRealpath(rootPath: string, absolutePath: s
  * and `home/.ssh/id_rsa` both trigger.
  */
 export function isSensitivePath(path: string) {
-  const normalized = normalizeRelativePath(path).toLowerCase();
-  if (!normalized) return false;
-  const segments = normalized.split('/').filter(Boolean);
-  for (const segment of segments) {
-    if (sensitiveDirectoryNames.has(segment)) return true;
-    if (sensitiveFileNames.has(segment)) return true;
-    if (segment.startsWith('.env')) return true;
-    for (const ext of sensitiveExtensions) {
-      if (segment.endsWith(ext)) return true;
-    }
-    for (const needle of sensitiveSubstrings) {
-      if (segment.includes(needle)) return true;
-    }
-  }
-  return false;
+  return isSensitiveWorkspacePath(path);
 }

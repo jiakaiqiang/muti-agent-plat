@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable, Optional } from '@nestjs/common';
+import crypto from 'node:crypto';
+import { BadRequestException, ConflictException, Injectable, Optional } from '@nestjs/common';
 import type {
   ActorRef,
   AgentDefinition as Agent,
@@ -11,6 +12,8 @@ import type {
   ContextAssembly,
   ExpectedRuntimeOutput,
   InvocationPlan,
+  PendingApprovalInfo,
+  PendingInvocation,
   SummaryMemory,
   SummaryMemoryCheckpoint,
   TaskContext,
@@ -25,7 +28,11 @@ import type {
   RuntimeOutput,
   RuntimeOutputKind,
   RuntimeType,
+  RuntimeWriteMode,
   ExecutionTermination,
+  FileRevisionAgentResult,
+  FileRevisionCandidateOutput,
+  FileRevisionRun,
   SessionDetail,
   SupplementalContextPathFailureCode,
   SupplementalContextResolution,
@@ -34,7 +41,10 @@ import type {
   TaskBrief,
   TaskBriefOutput,
   TaskExecutionResultOutput,
+  UserMessageHandlingPlan,
+  UserMessageHandlingPlanOutput,
   ValidationEvidenceReport,
+  WorkspaceRevision,
   WorkspaceSnapshot
 } from '@agent-cluster/shared';
 import {
@@ -45,12 +55,14 @@ import {
   validateRuntimeOutput
 } from '@agent-cluster/shared';
 import { applyServerLocalFileChanges } from '../../common/server-file-changes.js';
+import { detectWorkspaceStack } from '../../common/workspace-scanner.js';
 import { messages } from '../../common/messages.js';
 import {
   abortWithTermination,
   createExecutionTermination,
   isExecutionTermination,
-  normalizeTerminatedResult
+  normalizeTerminatedResult,
+  terminationFromSignal
 } from '../../common/execution-termination.js';
 import {
   globalDefaultRuntimeType,
@@ -60,6 +72,7 @@ import {
 } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
 import { buildBudget, estimateTokens } from '../../common/token.js';
+import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import { AgentsService } from '../agents/agents.service.js';
 import { ArtifactsService } from '../artifacts/artifacts.service.js';
 import { CapabilitiesService } from '../capabilities/capabilities.service.js';
@@ -91,19 +104,31 @@ import {
 } from './supplemental-context-dedupe.js';
 import { truncateContentForEvidence } from '../../common/evidence-truncation.js';
 import { WorkspaceProviderResolver } from '../workspaces/workspace-provider-resolver.js';
+import { workspaceProviderKindForDirectory } from '../workspaces/workspace-provider.js';
 import {
   InvocationResolutionError,
   InvocationResolverService
 } from '../runtime-routing/invocation-resolver.service.js';
 import { InvocationWorkspaceBindingsService } from '../runtimes/invocation-workspace-bindings.service.js';
+import { FileRevisionsService } from '../file-revisions/file-revisions.service.js';
+import { applyRuntimeWriteModeOverride } from './runtime-write-mode-policy.js';
 
 export type ExecutionOutcome =
   | { kind: 'delivered' }
   | { kind: 'rework'; reason: string }
   | { kind: 'ask_user'; reason: string; actions?: PostReviewAction[] }
   | { kind: 'workflow_step_completed'; taskId: string; resultSummary: string }
-  | { kind: 'cancelled'; reason: string }
+  | { kind: 'cancelled'; reason: string; termination?: ExecutionTermination }
   | { kind: 'failed'; reason: string; error?: RuntimeError };
+
+function cancelledExecutionOutcome(signal?: AbortSignal): ExecutionOutcome {
+  const termination = terminationFromSignal(signal);
+  return {
+    kind: 'cancelled',
+    reason: messages.cancelled,
+    ...(termination ? { termination } : {})
+  };
+}
 
 type TaskRunOutcome =
   | { ok: true }
@@ -126,7 +151,11 @@ type RuntimeInvocationDraft = {
   budget: RuntimeBudget;
   excludedRuntimeTypes?: RuntimeType[];
   runtimeCandidateOverride?: RuntimeType;
+  writeModeOverride?: RuntimeWriteMode;
+  minimumOutputTokens?: number;
   attempt?: InvocationPlan['attempt'];
+  supplementalContextAttempt?: number;
+  supplementalContextDurationMs?: number;
 };
 
 type SuggestedAgentTaskDraft = Pick<SuggestedAgentTask, 'title' | 'description' | 'acceptanceCriteria'> &
@@ -149,6 +178,34 @@ export function usableAgentMessageOutput(value: unknown): value is AgentMessageO
   );
 }
 
+export function artifactCreatedEventPayload(
+  artifact: Artifact,
+  workspaceExecution: AgentRunResult['workspaceExecution'],
+  proposalOnly: boolean
+) {
+  return {
+    artifactId: artifact.id,
+    type: artifact.type,
+    title: artifact.title,
+    ...(proposalOnly
+      ? { proposalOnly: true }
+      : {
+          contentSummary: artifact.contentSummary,
+          runtimeProposals: artifact.runtimeProposals,
+          systemEvidence: artifact.systemEvidence,
+          workspaceExecution
+        })
+  };
+}
+
+export function effectiveStructuredOutputLimit(
+  budgetLimit: number | undefined,
+  runtimeLimit: number | undefined
+) {
+  const limits = [budgetLimit, runtimeLimit].filter((value): value is number => value !== undefined);
+  return limits.length > 0 ? Math.min(...limits) : undefined;
+}
+
 // 慢模型（如本地 Ollama）单次调用可达数分钟，心跳让时间线可见"仍在生成"，
 // 与"卡死"可区分。心跳事件不回流进 relevantEvents（见 createContextAssembly）。
 const RUNTIME_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -157,6 +214,7 @@ export class OrchestratorService {
   private readonly briefsBySession = new Map<string, TaskBrief[]>();
   private readonly suggestedTasksByBriefId = new Map<string, SuggestedAgentTask[]>();
   private readonly runtimeProviderCircuits = new Map<RuntimeType, number>();
+  private savePendingInvocationCallback?: (sessionId: string, invocation: PendingInvocation) => void;
 
   constructor(
     private readonly agents: AgentsService,
@@ -173,7 +231,8 @@ export class OrchestratorService {
     private readonly profileCompiler: AgentProfileCompilerService,
     @Optional() private readonly workspaceProviders?: WorkspaceProviderResolver,
     @Optional() private readonly invocationResolver?: InvocationResolverService,
-    @Optional() private readonly workspaceBindings?: InvocationWorkspaceBindingsService
+    @Optional() private readonly workspaceBindings?: InvocationWorkspaceBindingsService,
+    @Optional() private readonly fileRevisions?: FileRevisionsService
   ) {
     const persistedBriefs = this.persistence.getCollection<Record<string, TaskBrief[]>>('briefsBySession', {});
     for (const [sessionId, briefs] of Object.entries(persistedBriefs)) {
@@ -187,6 +246,39 @@ export class OrchestratorService {
     for (const [briefId, suggestedTasks] of Object.entries(persistedSuggestedTasks)) {
       this.suggestedTasksByBriefId.set(briefId, suggestedTasks);
     }
+  }
+
+  registerSavePendingInvocationCallback(callback: (sessionId: string, invocation: PendingInvocation) => void) {
+    this.savePendingInvocationCallback = callback;
+  }
+
+  async retryPendingApprovalInvocation(
+    session: SessionDetail,
+    inv: PendingInvocation
+  ): Promise<AgentRunResult> {
+    const taskAgent = await this.agents.findByIdOrKey(inv.agentId);
+    if (!taskAgent) {
+      throw new Error(`Agent ${inv.agentId} not found for retry`);
+    }
+
+    const task = inv.taskId ? this.tasks.find(inv.sessionId, inv.taskId) : undefined;
+    const brief = this.briefsBySession.get(inv.sessionId)?.[0];
+
+    // createContextAssembly internally calls createContinuationState which needs taskContext.agentResponsibilities
+    // We must NOT call contextRouter.route before createContextAssembly because createContextAssembly does it internally
+    // So just call createContextAssembly and let it build everything
+    const contextAssembly = this.createContextAssembly(session, taskAgent, brief, task, inv.phase);
+
+    return this.runRuntime(session, {
+      invocationId: crypto.randomUUID(),
+      sessionId: inv.sessionId,
+      taskId: inv.taskId,
+      phase: inv.phase,
+      agent: taskAgent,
+      contextAssembly,
+      expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' },
+      budget: contextAssembly.budget
+    });
   }
 
   async discussAndCreateBrief(session: SessionDetail, signal?: AbortSignal) {
@@ -228,6 +320,7 @@ export class OrchestratorService {
       expectedOutput: { kind: 'task_brief', schemaVersion: '1.0' },
       budget: buildBudget(session)
     }, signal);
+    await this.emitWorkspaceAnalyzedEvent(session, coordinator);
     throwIfAborted(signal);
     const output = this.completedOutput<TaskBriefOutput>(result, 'task_brief');
     const suggestedTasks = this.selectSuggestedTasks(session, output.suggestedTasks);
@@ -329,6 +422,182 @@ export class OrchestratorService {
     this.createSummaryMemoryCheckpoint(session, coordinator, 'brief_generation', brief);
 
     return brief;
+  }
+
+  async recognizeFollowUpMessage(
+    session: SessionDetail,
+    content: string,
+    mentionedAgentIds: string[],
+    signal?: AbortSignal
+  ): Promise<UserMessageHandlingPlan> {
+    const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    const contextAssembly = this.createContextAssembly(
+      session,
+      coordinator,
+      undefined,
+      undefined,
+      'user_message_routing'
+    );
+    contextAssembly.systemRules = [
+      ...contextAssembly.systemRules,
+      'You are the receiver. For every existing-session message, first identify intent. Do not execute professional work.',
+      'Your only responsibilities in this phase are intent recognition and preparing instructions for later task decomposition.',
+      'A currently running task must not be interrupted. Set shouldPause=false; execution deferral is controlled by the session queue.'
+    ];
+    contextAssembly.constraints = [
+      ...contextAssembly.constraints,
+      `Current user message: ${content}`,
+      `Explicitly mentioned agent ids: ${mentionedAgentIds.join(', ') || '(none)'}`
+    ];
+    contextAssembly.relevantEvents = [
+      ...contextAssembly.relevantEvents,
+      {
+        eventId: `pending-user-message:${crypto.randomUUID()}`,
+        type: 'user_message' as const,
+        summary: content,
+        createdAt: nowIso()
+      }
+    ].slice(-12);
+
+    const result = await this.runRuntime(
+      session,
+      {
+        invocationId: crypto.randomUUID(),
+        sessionId: session.id,
+        phase: 'user_message_routing',
+        agent: coordinator,
+        contextAssembly,
+        expectedOutput: { kind: 'user_message_handling_plan', schemaVersion: '1.0' },
+        budget: contextAssembly.budget
+      },
+      signal
+    );
+    const output = this.completedOutput<UserMessageHandlingPlanOutput>(result, 'user_message_handling_plan');
+    return {
+      intent: output.intent,
+      priority: output.priority,
+      shouldPause: false,
+      affectedTaskIds: output.affectedTaskIds,
+      affectedAgentIds: output.affectedAgentIds,
+      requiresBriefRevision: output.requiresBriefRevision,
+      requiresUserConfirmation: output.requiresUserConfirmation,
+      coordinatorInstruction: output.coordinatorInstruction
+    };
+  }
+
+  async prepareFollowUpExecution(
+    session: SessionDetail,
+    content: string,
+    sourceEventId: string,
+    mentionedAgentIds: string[],
+    signal?: AbortSignal
+  ): Promise<{ brief: TaskBrief; tasks: AgentTask[] }> {
+    const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    const mentionedAgents = this.participatingAgents(session).filter(
+      (agent) => agent.id !== coordinator.id && mentionedAgentIds.includes(agent.id)
+    );
+
+    this.memories.create({
+      sessionId: session.id,
+      scope: 'session',
+      content: `Receiver-recognized follow-up requirement (authoritative for this follow-up):\n${content}`,
+      sourceEventId,
+      confidence: 1
+    });
+
+    if (mentionedAgents.length > 1) {
+      await this.runFollowUpDiscussion(session, coordinator, mentionedAgents, content, signal);
+    }
+
+    const contextAssembly = this.createContextAssembly(
+      session,
+      coordinator,
+      undefined,
+      undefined,
+      'brief_generation'
+    );
+    contextAssembly.systemRules = [
+      ...contextAssembly.systemRules,
+      'You are the receiver. Decompose this follow-up into executable tasks; do not execute those tasks yourself.',
+      'When agents were explicitly mentioned, assign every suggested task only to one of those mentioned agents.',
+      'If a task is rejected later, the receiver remains responsible for re-routing or re-decomposing it, never for professional execution.'
+    ];
+    contextAssembly.constraints = [
+      ...contextAssembly.constraints,
+      `Follow-up requirement: ${content}`,
+      `Allowed mentioned agent keys: ${mentionedAgents.map((agent) => agent.key).join(', ') || '(receiver may route among participating agents)'}`
+    ];
+    const result = await this.runRuntime(
+      session,
+      {
+        invocationId: crypto.randomUUID(),
+        sessionId: session.id,
+        phase: 'brief_generation',
+        agent: coordinator,
+        contextAssembly,
+        expectedOutput: { kind: 'task_brief', schemaVersion: '1.0' },
+        budget: contextAssembly.budget
+      },
+      signal
+    );
+    const output = this.completedOutput<TaskBriefOutput>(result, 'task_brief');
+    let suggestedTasks = this.selectSuggestedTasks(session, output.suggestedTasks);
+    if (mentionedAgents.length) {
+      suggestedTasks = suggestedTasks.map((task, index) => {
+        const agent = mentionedAgents[index % mentionedAgents.length];
+        return {
+          ...task,
+          suggestedAgentKey: agent.key,
+          assignmentReason: task.assignmentReason ?? `User explicitly mentioned ${agent.name} for this follow-up.`
+        };
+      });
+    }
+
+    const brief: TaskBrief = {
+      id: crypto.randomUUID(),
+      sessionId: session.id,
+      version: (this.briefsBySession.get(session.id)?.length ?? 0) + 1,
+      goal: output.goal,
+      scope: output.scope,
+      outOfScope: output.outOfScope,
+      constraints: output.constraints,
+      acceptanceCriteria: output.acceptanceCriteria,
+      risks: output.risks,
+      openQuestions: output.openQuestions,
+      confirmedByUser: false,
+      createdAt: nowIso()
+    };
+    this.briefsBySession.set(session.id, [...(this.briefsBySession.get(session.id) ?? []), brief]);
+    this.suggestedTasksByBriefId.set(brief.id, suggestedTasks);
+    session.latestContractGoal = brief.goal;
+    this.persistBriefs();
+
+    this.events.create({
+      sessionId: session.id,
+      type: 'brief_created',
+      fromAgentId: coordinator.id,
+      toAgentIds: mentionedAgents.map((agent) => agent.id),
+      content: '接收者已完成后续需求的任务拆分。',
+      metadata: createMetadata('brief_card', {
+        briefId: brief.id,
+        version: brief.version,
+        goal: brief.goal,
+        scope: brief.scope,
+        outOfScope: brief.outOfScope,
+        constraints: brief.constraints,
+        acceptanceCriteria: brief.acceptanceCriteria,
+        risks: brief.risks,
+        openQuestions: brief.openQuestions,
+        suggestedTasks,
+        requiresUserConfirmation: false,
+        sourceEventId,
+        followUp: true
+      })
+    });
+
+    return this.prepareExecution(session, brief.id, {
+      eligibleAgentIds: mentionedAgents.length ? mentionedAgents.map((agent) => agent.id) : undefined
+    });
   }
 
   async runDirectedBriefRevision(
@@ -444,6 +713,8 @@ export class OrchestratorService {
       })
     });
 
+    const contextAssembly = this.createContextAssembly(session, coordinator, oldBrief, undefined, 'brief_generation');
+
     const result = await this.runRuntime(
       session,
       {
@@ -451,7 +722,7 @@ export class OrchestratorService {
         sessionId: session.id,
         phase: 'brief_generation',
         agent: coordinator,
-        contextAssembly: this.createContextAssembly(session, coordinator, oldBrief, undefined, 'brief_generation'),
+        contextAssembly,
         expectedOutput: { kind: 'task_brief', schemaVersion: '1.0' },
         budget: buildBudget(session)
       },
@@ -681,6 +952,9 @@ export class OrchestratorService {
   }
 
   private async emitWorkspaceAnalyzedEvent(session: SessionDetail, coordinator: Agent) {
+    if (this.artifacts.listBySession(session.id).some((artifact) => artifact.metadata?.phase === 'workspace_analysis')) {
+      return;
+    }
     const snapshot = session.workspaceSnapshot;
     if (!snapshot) return;
     const focus = this.projectMap.workspaceFocus(session);
@@ -744,7 +1018,11 @@ export class OrchestratorService {
     this.persistBriefs();
   }
 
-  prepareExecution(session: SessionDetail, briefId: string): { brief: TaskBrief; tasks: AgentTask[] } {
+  prepareExecution(
+    session: SessionDetail,
+    briefId: string,
+    options: { eligibleAgentIds?: string[] } = {}
+  ): { brief: TaskBrief; tasks: AgentTask[] } {
     const brief = this.confirmBrief(session, briefId);
 
     const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
@@ -754,6 +1032,12 @@ export class OrchestratorService {
       assignedBy: { type: 'agent', id: coordinator.id },
       routingMode: 'coordinator_controlled'
     });
+    if (options.eligibleAgentIds?.length) {
+      const eligibleAgentIds = Array.from(new Set(options.eligibleAgentIds));
+      for (const task of tasks) {
+        this.tasks.update(task, { eligibleAgentIds });
+      }
+    }
 
     for (const task of tasks) {
       this.events.create({
@@ -768,6 +1052,7 @@ export class OrchestratorService {
           status: task.status,
           assignedBy: task.assignedBy,
           assignee: task.assignee,
+          eligibleAgentIds: task.eligibleAgentIds,
           routingMode: task.routingMode,
           autoResolutionAttempted: task.autoResolutionAttempted,
           assignmentReason: task.assignmentReason,
@@ -792,6 +1077,7 @@ export class OrchestratorService {
           status: 'assigned',
           assignedBy: { type: 'agent', id: coordinator.id },
           assignee: task.assignee,
+          eligibleAgentIds: task.eligibleAgentIds,
           routingMode: task.routingMode,
           autoResolutionAttempted: task.autoResolutionAttempted,
           assignmentReason: task.assignmentReason,
@@ -827,6 +1113,487 @@ export class OrchestratorService {
     return brief;
   }
 
+  async processFileRevision(session: SessionDetail, revisionId: string): Promise<FileRevisionRun> {
+    const revisions = this.requireFileRevisions();
+    const coordinator = this.requireDefaultFileRevisionReceiver();
+    let run: FileRevisionRun = await revisions.markProcessing(session.id, revisionId);
+    const brief = this.fileRevisionBrief(session, run);
+
+    this.events.create({
+      sessionId: session.id,
+      type: 'file_revision_dispatched',
+      fromAgentId: coordinator.id,
+      toAgentIds: run.targetAgentIds,
+      content: `已将用户确认的文件修订分发给 ${run.targetAgentIds.length} 个 Agent。`,
+      metadata: createMetadata('system_notice', {
+        revisionId: run.id,
+        filePath: run.filePath,
+        targetAgentIds: run.targetAgentIds,
+        diffSummary: run.diffSummary
+      })
+    });
+
+    const revisionTasks = run.targetAgentIds.map((agentId) => {
+      const agent = this.agents.getByIdOrKey(agentId);
+      if (agent.key === 'coordinator') {
+        throw new BadRequestException('The receiver cannot perform professional file-revision processing.');
+      }
+      return this.createFileRevisionTask(session, run, brief, coordinator, agent);
+    });
+
+    const outcomes = await Promise.allSettled(
+      revisionTasks.map(async (task) => ({ task, outcome: await this.runOneTask(session, brief, task) }))
+    );
+    const candidates: Array<{ task: AgentTask; content: string }> = [];
+    for (let index = 0; index < outcomes.length; index += 1) {
+      const settled = outcomes[index]!;
+      const task = revisionTasks[index]!;
+      const outcome = settled.status === 'fulfilled'
+        ? settled.value.outcome
+        : { ok: false as const, message: settled.reason instanceof Error ? settled.reason.message : String(settled.reason) };
+      const artifactIds = this.artifacts.listBySession(session.id)
+        .filter((artifact) => artifact.taskId === task.id)
+        .map((artifact) => artifact.id);
+      const candidateContent = outcome.ok ? this.fileRevisionCandidateContent(session.id, task.id, run.filePath) : undefined;
+      const result: FileRevisionAgentResult = {
+        id: crypto.randomUUID(),
+        taskId: task.id,
+        agentId: agentIdFromActor(task.assignee) ?? run.targetAgentIds[0]!,
+        status: outcome.ok && candidateContent !== undefined ? 'completed' : 'failed',
+        artifactIds,
+        summary: outcome.ok && candidateContent !== undefined
+          ? 'Agent completed a valid file revision proposal.'
+          : 'Agent did not return a valid complete file revision proposal.',
+        ...(candidateContent !== undefined
+          ? { proposedContentRef: revisions.storeProposedContent(candidateContent, run.filePath) }
+          : {}),
+        completedAt: nowIso(),
+        ...(!(outcome.ok && candidateContent !== undefined)
+          ? { error: 'REVISION_AGENT_PROCESSING_FAILED' }
+          : {})
+      };
+      await revisions.recordAgentResult(session.id, run.id, result);
+      this.events.create({
+        sessionId: session.id,
+        type: 'file_revision_agent_completed',
+        taskId: task.id,
+        fromAgentId: result.agentId,
+        toAgentIds: [coordinator.id],
+        content: result.status === 'completed'
+          ? 'Agent completed a file revision proposal.'
+          : 'Agent file revision processing failed.',
+        metadata: createMetadata('system_notice', {
+          revisionId: run.id,
+          taskId: task.id,
+          agentId: result.agentId,
+          status: result.status,
+          artifactIds
+        })
+      });
+      if (candidateContent !== undefined) candidates.push({ task, content: candidateContent });
+    }
+
+    if (candidates.length !== revisionTasks.length) {
+      throw new Error(
+        `REVISION_PARTIAL_AGENT_FAILURE: ${candidates.length}/${revisionTasks.length} selected Agents returned valid complete proposals.`
+      );
+    }
+
+    return this.synthesizeFileRevisionCandidate(
+      session,
+      brief,
+      coordinator,
+      run,
+      revisionTasks.map((task) => task.id),
+      candidates.length,
+      revisionTasks.length
+    );
+  }
+
+  async continueFileRevisionAfterPartialFailure(
+    session: SessionDetail,
+    revisionId: string
+  ): Promise<FileRevisionRun> {
+    const revisions = this.requireFileRevisions();
+    const run = revisions.getRun(session.id, revisionId);
+    if (run.status !== 'processing') {
+      throw new ConflictException(
+        `REVISION_STATE_CONFLICT: cannot continue Receiver synthesis while ${run.status}.`
+      );
+    }
+    const completedResults = run.agentResults.filter((result) => result.status === 'completed');
+    const failedResults = run.agentResults.filter((result) => result.status === 'failed');
+    if (completedResults.length === 0 || failedResults.length === 0) {
+      throw new ConflictException(
+        'REVISION_STATE_CONFLICT: continuation requires both successful and failed Agent results.'
+      );
+    }
+    const coordinator = this.requireDefaultFileRevisionReceiver();
+    return this.synthesizeFileRevisionCandidate(
+      session,
+      this.fileRevisionBrief(session, run),
+      coordinator,
+      run,
+      completedResults.map((result) => result.taskId),
+      completedResults.length,
+      run.targetAgentIds.length
+    );
+  }
+
+  private async synthesizeFileRevisionCandidate(
+    session: SessionDetail,
+    brief: TaskBrief,
+    coordinator: Agent,
+    sourceRun: FileRevisionRun,
+    dependsOnTaskIds: string[],
+    completedAgentCount: number,
+    requestedAgentCount: number
+  ): Promise<FileRevisionRun> {
+    const revisions = this.requireFileRevisions();
+    let run: FileRevisionRun = await revisions.markSynthesizing(session.id, sourceRun.id);
+    const synthesisTask = this.createFileRevisionSynthesisTask(
+      session,
+      run,
+      coordinator,
+      dependsOnTaskIds
+    );
+    this.events.create({
+      sessionId: session.id,
+      type: 'file_revision_synthesis_started',
+      taskId: synthesisTask.id,
+      fromAgentId: coordinator.id,
+      content: 'Receiver is synthesizing the complete file revision candidate.',
+      metadata: createMetadata('system_notice', {
+        chainId: run.chainId,
+        revisionId: run.id,
+        iteration: run.iteration,
+        receiverAgentId: coordinator.id,
+        agentResultCount: completedAgentCount,
+        failedAgentCount: run.agentResults.filter((result) => result.status === 'failed').length
+      })
+    });
+    const synthesisStartedAt = Date.now();
+    let synthesized: { invocationId: string; output: FileRevisionCandidateOutput };
+    try {
+      synthesized = await this.runFileRevisionSynthesis(session, brief, run, coordinator, synthesisTask);
+    } finally {
+      workspaceMetrics.observe(
+        'file_revision_synthesis_duration_ms',
+        Date.now() - synthesisStartedAt
+      );
+    }
+
+    const confirmationId = crypto.randomUUID();
+    run = await revisions.markAwaitingConfirmation(session.id, run.id, {
+      candidateContent: synthesized.output.content,
+      confirmationId,
+      receiverInvocationId: synthesized.invocationId,
+      synthesisTaskId: synthesisTask.id
+    });
+    const chain = revisions.getChain(session.id, run.chainId);
+    this.events.create({
+      sessionId: session.id,
+      type: 'file_revision_candidate_generated',
+      fromAgentId: coordinator.id,
+      toAgentIds: run.targetAgentIds,
+      content: '接收者已完成证据校验和候选结果封装，等待用户决定是否写回。',
+      metadata: createMetadata('system_notice', {
+        chainId: run.chainId,
+        revisionId: run.id,
+        iteration: run.iteration,
+        filePath: run.filePath,
+        candidateChangeSetId: run.candidateChangeSetId,
+        candidateHash: run.candidateHash,
+        synthesisTaskId: synthesisTask.id,
+        receiverInvocationId: synthesized.invocationId,
+        completedAgentCount,
+        requestedAgentCount
+      })
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'user_confirmation_requested',
+      fromAgentId: coordinator.id,
+      content: 'Agent 已处理用户修订，是否将候选结果写回原文件？',
+      metadata: createMetadata('confirmation_card', {
+        confirmationId,
+        reason: 'confirm_file_revision_apply',
+        title: '确认文件修订处理结果',
+        description: `候选结果将使用修订快照哈希校验后写回 ${run.filePath}。`,
+        revisionId: run.id,
+        chainId: run.chainId,
+        iteration: run.iteration,
+        filePath: run.filePath,
+        candidateChangeSetId: run.candidateChangeSetId,
+        candidateHash: run.candidateHash,
+        stateVersion: chain.stateVersion,
+        options: [
+          { key: 'apply_candidate', label: '确认并写回', style: 'primary' },
+          { key: 'abandon_revision', label: '放弃本次修订', style: 'danger' }
+        ]
+      })
+    });
+    return run;
+  }
+
+  private fileRevisionBrief(session: SessionDetail, run: FileRevisionRun): TaskBrief {
+    return this.listBriefs(session.id).filter((item) => item.confirmedByUser).at(-1) ?? {
+      id: crypto.randomUUID(),
+      sessionId: session.id,
+      version: 1,
+      goal: `Process the confirmed user revision of ${run.filePath}.`,
+      scope: [run.filePath],
+      outOfScope: [],
+      constraints: ['Treat the revised snapshot as authoritative user input.', 'Do not write the source file directly.'],
+      acceptanceCriteria: [`Return one complete update proposal for ${run.filePath}.`],
+      risks: ['The live file may become stale before final application.'],
+      openQuestions: [],
+      confirmedByUser: true,
+      confirmedAt: nowIso(),
+      createdAt: nowIso()
+    } satisfies TaskBrief;
+  }
+
+  private createFileRevisionTask(
+    session: SessionDetail,
+    run: FileRevisionRun,
+    _brief: TaskBrief,
+    coordinator: Agent,
+    agent: Agent
+  ) {
+    const timestamp = nowIso();
+    const task: AgentTask = {
+      id: crypto.randomUUID(),
+      sessionId: session.id,
+      title: `处理用户对 ${run.filePath} 的修订`,
+      description: [
+        `Process file revision ${run.id}.`,
+        'The current userDraft is authoritative. Use the base and deterministic diff only to understand intent.',
+        ...(run.instruction ? [`User processing instruction: ${run.instruction}`] : []),
+        `Return a task_execution_result containing one changedArtifacts metadata.fileChanges update for exactly ${run.filePath}.`,
+        'The proposal content must be the complete final UTF-8 file. Do not write the live source file directly.'
+      ].join(' '),
+      status: 'assigned',
+      assignedBy: { type: 'agent', id: coordinator.id },
+      assignee: { type: 'agent', id: agent.id },
+      eligibleAgentIds: [agent.id],
+      routingMode: 'coordinator_controlled',
+      autoResolutionAttempted: false,
+      assignmentReason: 'User explicitly selected this Agent for the confirmed file revision.',
+      contextRequirements: ['Frozen base content', 'Frozen authoritative user draft', 'Deterministic line diff'],
+      verificationPlan: [`Verify the proposal updates exactly ${run.filePath}.`],
+      riskNotes: ['The proposal must not overwrite a newer live-file revision.'],
+      requiresUserConfirmation: false,
+      executionPurpose: 'file_revision',
+      fileRevisionId: run.id,
+      dependsOnTaskIds: [],
+      acceptanceCriteria: [
+        'Use the current user draft as the authoritative content.',
+        `Return one complete update proposal for ${run.filePath}.`,
+        'Do not perform a direct source write.'
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp
+    };
+    this.tasks.add(task);
+    this.emitFileRevisionTaskCreated(session, task, coordinator, agent);
+    return task;
+  }
+
+  private requireFileRevisions() {
+    if (!this.fileRevisions) throw new Error('FILE_REVISIONS_UNAVAILABLE: file revision service is not configured.');
+    return this.fileRevisions;
+  }
+
+  private createFileRevisionSynthesisTask(
+    session: SessionDetail,
+    run: FileRevisionRun,
+    coordinator: Agent,
+    dependsOnTaskIds: string[]
+  ) {
+    const timestamp = nowIso();
+    const task: AgentTask = {
+      id: crypto.randomUUID(),
+      sessionId: session.id,
+      title: `汇总 ${run.filePath} 的多 Agent 修订结果`,
+      description: [
+        `Synthesize the completed Agent proposals for file revision ${run.id}.`,
+        'Preserve the user revised snapshot as authority, reconcile only compatible improvements, and do not invent requirements.',
+        ...(run.instruction ? [`User processing instruction: ${run.instruction}`] : []),
+        'Return exactly one file_revision_candidate output bound to this revision, iteration, source draft hash, and evidence hash.',
+        'Do not write the live source file directly.'
+      ].join(' '),
+      status: 'assigned',
+      assignedBy: { type: 'agent', id: coordinator.id },
+      assignee: { type: 'agent', id: coordinator.id },
+      eligibleAgentIds: [coordinator.id],
+      routingMode: 'coordinator_controlled',
+      autoResolutionAttempted: false,
+      assignmentReason: 'The default Receiver is the only Agent allowed to synthesize the final revision candidate.',
+      contextRequirements: ['Frozen revision evidence', 'All successful Agent proposals'],
+      verificationPlan: [`Verify the synthesized proposal updates exactly ${run.filePath}.`],
+      riskNotes: ['Do not silently discard explicit user changes.'],
+      requiresUserConfirmation: false,
+      executionPurpose: 'revision_synthesis',
+      fileRevisionId: run.id,
+      dependsOnTaskIds,
+      acceptanceCriteria: [
+        'Preserve every explicit user revision unless a documented conflict requires otherwise.',
+        `Return one complete update proposal for ${run.filePath}.`
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp
+    };
+    this.tasks.add(task);
+    this.emitFileRevisionTaskCreated(session, task, coordinator, coordinator);
+    return task;
+  }
+
+  private async runFileRevisionSynthesis(
+    session: SessionDetail,
+    brief: TaskBrief,
+    run: FileRevisionRun,
+    receiver: Agent,
+    task: AgentTask
+  ): Promise<{ invocationId: string; output: FileRevisionCandidateOutput }> {
+    this.tasks.update(task, { status: 'running' });
+    const invocationId = crypto.randomUUID();
+    const contextAssembly = this.createContextAssembly(session, receiver, brief, task, 'revision_synthesis');
+    const evidence = this.requireFileRevisions().evidence(session.id, run.id);
+    const minimumOutputTokens = estimateTokens({
+      schemaVersion: '1.0',
+      kind: 'file_revision_candidate',
+      revisionId: run.id,
+      chainId: run.chainId,
+      iteration: run.iteration,
+      sourceDraftHash: run.userDraftHash,
+      evidenceHash: run.contextSnapshotHash,
+      content: evidence.userDraft.content,
+      summary: 'Complete candidate synthesis.',
+      incorporatedAgentResultIds: run.agentResults.filter((item) => item.status === 'completed').map((item) => item.id),
+      unresolvedConflicts: []
+    }) + 256;
+    if (
+      contextAssembly.budget.maxOutputTokens !== undefined &&
+      minimumOutputTokens > contextAssembly.budget.maxOutputTokens
+    ) {
+      workspaceMetrics.increment('file_revision_model_capacity_rejected_total', 1, { phase: 'revision_synthesis' });
+      throw new Error(
+        `REVISION_MODEL_CAPACITY_INSUFFICIENT: candidate requires at least ${minimumOutputTokens} output tokens, ` +
+        `but the Receiver budget allows ${contextAssembly.budget.maxOutputTokens}.`
+      );
+    }
+    const result = await this.runRuntime(session, {
+      invocationId,
+      sessionId: session.id,
+      taskId: task.id,
+      phase: 'revision_synthesis',
+      agent: receiver,
+      contextAssembly,
+      expectedOutput: { kind: 'file_revision_candidate', schemaVersion: '1.0' },
+      budget: contextAssembly.budget,
+      writeModeOverride: 'proposal_only',
+      minimumOutputTokens
+    });
+    if (result.status !== 'completed') {
+      const message = result.error?.message ?? result.status;
+      if (message.startsWith('REVISION_MODEL_CAPACITY_INSUFFICIENT:')) throw new Error(message);
+      throw new Error(`REVISION_SYNTHESIS_FAILED: ${message}`);
+    }
+    const output = this.completedOutput<FileRevisionCandidateOutput>(result, 'file_revision_candidate');
+    if (
+      output.revisionId !== run.id ||
+      output.chainId !== run.chainId ||
+      output.iteration !== run.iteration ||
+      output.sourceDraftHash.value !== run.userDraftHash.value ||
+      output.sourceDraftHash.algorithm !== run.userDraftHash.algorithm ||
+      output.evidenceHash !== run.contextSnapshotHash
+    ) {
+      throw new Error('REVISION_SYNTHESIS_FAILED: Receiver output is not bound to the frozen revision evidence.');
+    }
+    const resultIds = new Set(run.agentResults.filter((item) => item.status === 'completed').map((item) => item.id));
+    const incorporatedIds = new Set(output.incorporatedAgentResultIds);
+    if (
+      incorporatedIds.size !== resultIds.size ||
+      [...incorporatedIds].some((id) => !resultIds.has(id))
+    ) {
+      throw new Error('REVISION_SYNTHESIS_FAILED: Receiver must incorporate every completed Agent result from this revision.');
+    }
+    if (output.unresolvedConflicts.length > 0) {
+      throw new Error('REVISION_SYNTHESIS_FAILED: Receiver reported unresolved conflicts.');
+    }
+    if (!evidence.complete || evidence.truncated) {
+      workspaceMetrics.increment('file_revision_context_incomplete_total', 1, { phase: 'revision_synthesis' });
+      throw new Error('REVISION_CONTEXT_INCOMPLETE: Receiver used incomplete revision evidence.');
+    }
+    this.tasks.update(task, {
+      status: 'completed',
+      resultSummary: 'Receiver completed the file revision candidate synthesis.'
+    });
+    return { invocationId, output };
+  }
+
+  private emitFileRevisionTaskCreated(session: SessionDetail, task: AgentTask, coordinator: Agent, agent: Agent) {
+    this.events.create({
+      sessionId: session.id,
+      type: 'task_created',
+      taskId: task.id,
+      fromAgentId: coordinator.id,
+      toAgentIds: [agent.id],
+      content: messages.taskCreated(task.title),
+      metadata: createMetadata('task_card', {
+        taskId: task.id,
+        title: task.title,
+        status: task.status,
+        assignedBy: task.assignedBy,
+        assignee: task.assignee,
+        eligibleAgentIds: task.eligibleAgentIds,
+        executionPurpose: task.executionPurpose,
+        fileRevisionId: task.fileRevisionId
+      })
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'task_assigned',
+      taskId: task.id,
+      fromAgentId: coordinator.id,
+      toAgentIds: [agent.id],
+      content: `接收者已分配文件修订任务：${task.title}`,
+      metadata: createMetadata('task_card', {
+        taskId: task.id,
+        title: task.title,
+        status: 'assigned',
+        assignedBy: task.assignedBy,
+        assignee: task.assignee,
+        eligibleAgentIds: task.eligibleAgentIds,
+        executionPurpose: task.executionPurpose,
+        fileRevisionId: task.fileRevisionId
+      })
+    });
+  }
+
+  private fileRevisionCandidateContent(sessionId: string, taskId: string, filePath: string) {
+    const normalizedTarget = filePath.replace(/\\/g, '/').replace(/^\.\//, '');
+    const artifacts = this.artifacts.listBySession(sessionId).filter((artifact) => artifact.taskId === taskId);
+    for (const artifact of [...artifacts].reverse()) {
+      for (const proposal of [...artifact.runtimeProposals].reverse()) {
+        for (const change of [...(proposal.metadata?.fileChanges ?? [])].reverse()) {
+          const normalizedPath = change.path.replace(/\\/g, '/').replace(/^\.\//, '');
+          if (normalizedPath === normalizedTarget && change.operation === 'update' && typeof change.content === 'string') {
+            return change.content;
+          }
+        }
+      }
+      for (const change of [...(artifact.systemEvidence?.workspaceChangeSet?.changes ?? [])].reverse()) {
+        const normalizedPath = 'path' in change ? change.path.replace(/\\/g, '/').replace(/^\.\//, '') : '';
+        if (normalizedPath === normalizedTarget && change.operation === 'update' && typeof change.content === 'string') {
+          return change.content;
+        }
+      }
+    }
+    return undefined;
+  }
+
   async runPipeline(
     session: SessionDetail,
     brief: TaskBrief,
@@ -835,7 +1602,7 @@ export class OrchestratorService {
   ): Promise<ExecutionOutcome> {
     while (true) {
       if (signal?.aborted) {
-        return { kind: 'cancelled', reason: messages.cancelled };
+        return cancelledExecutionOutcome(signal);
       }
 
       const allTasks = this.tasks.list(session.id);
@@ -851,7 +1618,7 @@ export class OrchestratorService {
         // interrupt that just called execution.cancel + execution.start would
         // race with this branch and trap the session at WAIT_USER_DECISION.
         if (signal?.aborted) {
-          return { kind: 'cancelled', reason: messages.cancelled };
+          return cancelledExecutionOutcome(signal);
         }
         return {
           kind: 'ask_user',
@@ -866,7 +1633,7 @@ export class OrchestratorService {
         }))
       );
       if (signal?.aborted) {
-        return { kind: 'cancelled', reason: messages.cancelled };
+        return cancelledExecutionOutcome(signal);
       }
       const failedTask = taskResults.find((item) => !item.result.ok);
       if (failedTask && !failedTask.result.ok) {
@@ -896,7 +1663,7 @@ export class OrchestratorService {
     }
 
     if (signal?.aborted) {
-      return { kind: 'cancelled', reason: messages.cancelled };
+      return cancelledExecutionOutcome(signal);
     }
 
     const limitedDelivery = this.latestLimitedDeliveryAction(session.id);
@@ -906,7 +1673,7 @@ export class OrchestratorService {
         review = await this.runPostReview(session, brief, signal);
       } catch (error) {
         if (signal?.aborted) {
-          return { kind: 'cancelled', reason: messages.cancelled };
+          return cancelledExecutionOutcome(signal);
         }
         throw error;
       }
@@ -922,13 +1689,17 @@ export class OrchestratorService {
       }
     }
 
-    const alreadyDelivered = this.events.list(session.id).some((event) => event.type === 'final_delivery_created');
+    const alreadyDelivered = this.events.list(session.id).some((event) => {
+      if (event.type !== 'final_delivery_created') return false;
+      const payload = event.metadata.payload as { relatedBriefId?: string } | undefined;
+      return payload?.relatedBriefId === brief.id;
+    });
     if (!alreadyDelivered) {
       try {
         await this.runFinalDelivery(session, brief, signal, limitedDelivery?.limitations);
       } catch (error) {
         if (signal?.aborted) {
-          return { kind: 'cancelled', reason: messages.cancelled };
+          return cancelledExecutionOutcome(signal);
         }
         throw error;
       }
@@ -945,8 +1716,11 @@ export class OrchestratorService {
     contextRetryCount = 0,
     runtimeRetryCount = 0
   ): Promise<TaskRunOutcome> {
+    const isFileRevisionTask = task.executionPurpose === 'file_revision' || task.executionPurpose === 'revision_synthesis';
     const backend = this.pickSessionAgent(session, ['backend'], 0);
-    const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
+    const coordinator = isFileRevisionTask
+      ? this.requireDefaultFileRevisionReceiver()
+      : this.pickSessionAgent(session, ['coordinator'], 0);
     if (!agentIdFromActor(task.assignee) && this.isArchitectureAnalysisTask(session, task, brief)) {
       const message = '当前架构分析任务需要架构师执行，但本会话未选择架构师。请添加或选择架构师后继续。';
       this.tasks.update(task, { status: 'waiting', resultSummary: message });
@@ -1004,15 +1778,19 @@ export class OrchestratorService {
         status: 'accepted',
         assignedBy: task.assignedBy,
         assignee: { type: 'agent', id: taskAgent.id },
-        routingMode: task.routingMode,
-        autoResolutionAttempted: task.autoResolutionAttempted,
-        assignmentReason: task.assignmentReason,
-        contextRequirements: task.contextRequirements,
-        verificationPlan: task.verificationPlan,
-        riskNotes: task.riskNotes,
-        requiresUserConfirmation: task.requiresUserConfirmation,
-        dependsOnTaskIds: task.dependsOnTaskIds,
-        acceptanceCriteria: task.acceptanceCriteria
+        ...(isFileRevisionTask
+          ? { executionPurpose: task.executionPurpose, fileRevisionId: task.fileRevisionId }
+          : {
+              routingMode: task.routingMode,
+              autoResolutionAttempted: task.autoResolutionAttempted,
+              assignmentReason: task.assignmentReason,
+              contextRequirements: task.contextRequirements,
+              verificationPlan: task.verificationPlan,
+              riskNotes: task.riskNotes,
+              requiresUserConfirmation: task.requiresUserConfirmation,
+              dependsOnTaskIds: task.dependsOnTaskIds,
+              acceptanceCriteria: task.acceptanceCriteria
+            })
       })
     });
     this.events.create({
@@ -1028,18 +1806,22 @@ export class OrchestratorService {
         status: 'claimed',
         assignedBy: task.assignedBy,
         assignee: { type: 'agent', id: taskAgent.id },
-        routingMode: task.routingMode,
-        autoResolutionAttempted: task.autoResolutionAttempted,
-        assignmentReason: task.assignmentReason,
-        contextRequirements: task.contextRequirements,
-        verificationPlan: task.verificationPlan,
-        riskNotes: task.riskNotes,
-        requiresUserConfirmation: task.requiresUserConfirmation,
-        dependsOnTaskIds: task.dependsOnTaskIds,
-        acceptanceCriteria: task.acceptanceCriteria
+        ...(isFileRevisionTask
+          ? { executionPurpose: task.executionPurpose, fileRevisionId: task.fileRevisionId }
+          : {
+              routingMode: task.routingMode,
+              autoResolutionAttempted: task.autoResolutionAttempted,
+              assignmentReason: task.assignmentReason,
+              contextRequirements: task.contextRequirements,
+              verificationPlan: task.verificationPlan,
+              riskNotes: task.riskNotes,
+              requiresUserConfirmation: task.requiresUserConfirmation,
+              dependsOnTaskIds: task.dependsOnTaskIds,
+              acceptanceCriteria: task.acceptanceCriteria
+            })
       })
     });
-    this.events.create({
+    if (!isFileRevisionTask) this.events.create({
       sessionId: session.id,
       type: 'agent_message',
       taskId: task.id,
@@ -1071,8 +1853,13 @@ export class OrchestratorService {
     });
 
     const invocationId = crypto.randomUUID();
+    if (this.isArchitectureAnalysisTask(session, task, brief)) {
+      await this.preloadArchitectureTaskContext(session, task, taskAgent.id);
+    }
     const contextAssembly = this.createContextAssembly(session, taskAgent, brief, task, 'task_execution');
-    this.emitMemoryUsedEvent(session.id, task.id, taskAgent.id, contextAssembly);
+    if (!isFileRevisionTask) {
+      this.emitMemoryUsedEvent(session.id, task.id, taskAgent.id, contextAssembly);
+    }
 
     const result = await this.runRuntime(session, {
       invocationId: invocationId,
@@ -1082,7 +1869,8 @@ export class OrchestratorService {
       agent: taskAgent,
       contextAssembly,
       expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' },
-      budget: contextAssembly.budget
+      budget: contextAssembly.budget,
+      ...(isFileRevisionTask ? { writeModeOverride: 'proposal_only' as const } : {})
     }, signal);
     const executionRuntimeType = result.runtimeType;
 
@@ -1096,9 +1884,12 @@ export class OrchestratorService {
       const message = result.error?.message ?? result.status;
       const requestedContext = result.error?.requestedContext;
       const code = result.error?.code;
+      const publicMessage = isFileRevisionTask
+        ? this.fileRevisionRuntimeFailureMessage(code)
+        : message;
       if (this.canRetryRuntimeTimeout(result.error, runtimeRetryCount)) {
-        this.recordRuntimeTimeoutRetry(session, task, taskAgent.id, invocationId, message, runtimeRetryCount + 1);
-        this.tasks.update(task, { status: 'pending', resultSummary: `Retrying after runtime timeout: ${message}` });
+        this.recordRuntimeTimeoutRetry(session, task, taskAgent.id, invocationId, publicMessage, runtimeRetryCount + 1);
+        this.tasks.update(task, { status: 'pending', resultSummary: `Retrying after runtime timeout: ${publicMessage}` });
         await this.backoffRuntimeRetry(runtimeRetryCount, signal);
         return this.runOneTask(
           session,
@@ -1115,14 +1906,14 @@ export class OrchestratorService {
         task,
         taskAgent.id,
         invocationId,
-        message,
+        publicMessage,
         executionRuntimeType,
         code,
-        requestedContext,
-        result.error?.details,
+        isFileRevisionTask ? undefined : requestedContext,
+        isFileRevisionTask ? undefined : result.error?.details,
         result.error?.retryable ?? false
       );
-      if (this.canRetryWithSupplementalContext(code, requestedContext, contextRetryCount)) {
+      if (!isFileRevisionTask && this.canRetryWithSupplementalContext(code, requestedContext, contextRetryCount)) {
         const novelContext = this.resolveRetryRequest(session, code, requestedContext, contextRetryCount);
         if (novelContext) {
           const resolution = await this.hydrateSupplementalContext(session, novelContext);
@@ -1140,7 +1931,7 @@ export class OrchestratorService {
 
     const output = this.completedOutput<TaskExecutionResultOutput>(result, 'task_execution_result');
     const knowledgeQuery = this.taskKnowledgeQuery(session, brief, task);
-    this.events.create({
+    if (!isFileRevisionTask) this.events.create({
       sessionId: session.id,
       type: 'rag_retrieved',
       taskId: task.id,
@@ -1160,17 +1951,20 @@ export class OrchestratorService {
     if (output.status !== 'completed' && !needsReview) {
       const code = output.status === 'blocked' ? 'CONTEXT_INSUFFICIENT' : 'MODEL_ERROR';
       const requestedContext = this.runtimeOutputContextRequest(output.requestedContext);
+      const publicMessage = isFileRevisionTask
+        ? this.fileRevisionRuntimeFailureMessage(code)
+        : output.summary;
       this.markTaskFailed(
         session.id,
         task,
         taskAgent.id,
         invocationId,
-        output.summary,
+        publicMessage,
         executionRuntimeType,
         code,
-        requestedContext
+        isFileRevisionTask ? undefined : requestedContext
       );
-      if (this.canRetryWithSupplementalContext(code, requestedContext, contextRetryCount)) {
+      if (!isFileRevisionTask && this.canRetryWithSupplementalContext(code, requestedContext, contextRetryCount)) {
         const novelContext = this.resolveRetryRequest(session, code, requestedContext, contextRetryCount);
         if (novelContext) {
           const resolution = await this.hydrateSupplementalContext(session, novelContext);
@@ -1186,8 +1980,11 @@ export class OrchestratorService {
       return { ok: false, message: output.summary, code, retryable: false };
     }
 
-    this.tasks.update(task, { status: 'completed', resultSummary: output.summary });
-    const allowGeneratedFileWrites = this.shouldWriteGeneratedFiles(session, brief);
+    const publicResultSummary = isFileRevisionTask
+      ? 'Agent completed a proposal for the file revision.'
+      : output.summary;
+    this.tasks.update(task, { status: 'completed', resultSummary: publicResultSummary });
+    const allowGeneratedFileWrites = isFileRevisionTask || this.shouldWriteGeneratedFiles(session, brief);
     const executionArtifact = this.createExecutionArtifact(
       session.id,
       task,
@@ -1204,17 +2001,14 @@ export class OrchestratorService {
       taskId: task.id,
       fromAgentId: taskAgent.id,
       content: messages.artifactCreated(executionArtifact.title),
-      metadata: createMetadata('artifact_card', {
-        artifactId: executionArtifact.id,
-        type: executionArtifact.type,
-        title: executionArtifact.title,
-        contentSummary: executionArtifact.contentSummary,
-        runtimeProposals: executionArtifact.runtimeProposals,
-        systemEvidence: executionArtifact.systemEvidence,
-        workspaceExecution: result.workspaceExecution
-      })
+      metadata: createMetadata(
+        'artifact_card',
+        artifactCreatedEventPayload(executionArtifact, result.workspaceExecution, isFileRevisionTask)
+      )
     });
-    this.emitRuntimeAgentMessages(session, task, taskAgent, output.agentMessages ?? [], invocationId);
+    if (!isFileRevisionTask) {
+      this.emitRuntimeAgentMessages(session, task, taskAgent, output.agentMessages ?? [], invocationId);
+    }
     this.events.create({
       sessionId: session.id,
       type: 'runtime_completed',
@@ -1233,18 +2027,26 @@ export class OrchestratorService {
       type: 'task_completed',
       taskId: task.id,
       fromAgentId: taskAgent.id,
-      content: needsReview ? messages.taskCompletedNeedsReview(task.title) : messages.taskCompleted(task.title),
+      content: isFileRevisionTask
+        ? messages.taskCompleted(task.title)
+        : needsReview
+          ? messages.taskCompletedNeedsReview(task.title)
+          : messages.taskCompleted(task.title),
       metadata: createMetadata('task_card', {
         taskId: task.id,
         title: task.title,
         status: 'completed',
-        needsReview,
-        resultSummary: output.summary,
-        completedItems: output.completedItems,
-        risks: output.risks
+        needsReview: isFileRevisionTask ? false : needsReview,
+        ...(isFileRevisionTask
+          ? { executionPurpose: task.executionPurpose, fileRevisionId: task.fileRevisionId }
+          : {
+              resultSummary: output.summary,
+              completedItems: output.completedItems,
+              risks: output.risks
+            })
       })
     });
-    if (needsReview) {
+    if (needsReview && !isFileRevisionTask) {
       const reviewer = this.pickSessionAgent(session, ['review', 'test'], 1);
       const reviewNoticeTargets = [...new Set([reviewer.id, coordinator.id])];
       this.events.create({
@@ -1264,14 +2066,18 @@ export class OrchestratorService {
         })
       });
     }
-    this.emitTaskHandoff(session, task, taskAgent, output.summary);
-    this.createSummaryMemoryCheckpoint(session, taskAgent, 'task_execution', brief, task);
-    await this.applyServerLocalArtifactChanges(session, fileChanges, {
-      allowSourceFileChanges:
-        !result.workspaceExecution &&
-        allowGeneratedFileWrites &&
-        this.canApplySourceFileChanges(taskAgent, executionRuntimeType)
-    });
+    if (!isFileRevisionTask) {
+      this.emitTaskHandoff(session, task, taskAgent, output.summary);
+      this.createSummaryMemoryCheckpoint(session, taskAgent, 'task_execution', brief, task);
+    }
+    if (!isFileRevisionTask) {
+      await this.applyServerLocalArtifactChanges(session, fileChanges, {
+        allowSourceFileChanges:
+          !result.workspaceExecution &&
+          allowGeneratedFileWrites &&
+          this.canApplySourceFileChanges(taskAgent, executionRuntimeType)
+      });
+    }
     return { ok: true };
   }
 
@@ -1299,6 +2105,7 @@ export class OrchestratorService {
     }
     const invocationId = crypto.randomUUID();
     const contextAssembly = this.createContextAssembly(session, candidate, brief, task, 'task_acceptance');
+    const isFileRevisionTask = task.executionPurpose === 'file_revision' || task.executionPurpose === 'revision_synthesis';
     const result = await this.runRuntime(
       session,
       {
@@ -1309,7 +2116,8 @@ export class OrchestratorService {
         agent: candidate,
         contextAssembly,
         expectedOutput: { kind: 'task_acceptance_decision', schemaVersion: '1.0' },
-        budget: contextAssembly.budget
+        budget: contextAssembly.budget,
+        ...(isFileRevisionTask ? { writeModeOverride: 'proposal_only' as const } : {})
       },
       signal
     );
@@ -1324,22 +2132,32 @@ export class OrchestratorService {
         retryable: false,
         details: { phase: 'task_acceptance', status: result.status }
       };
+      const publicMessage = isFileRevisionTask
+        ? 'File revision task acceptance failed.'
+        : message;
+      const publicError: RuntimeError = isFileRevisionTask
+        ? {
+            code: runtimeError.code,
+            message: publicMessage,
+            retryable: runtimeError.retryable
+          }
+        : runtimeError;
       this.markTaskFailed(
         session.id,
         task,
         candidate.id,
         invocationId,
-        message,
+        publicMessage,
         result.runtimeType,
         runtimeError.code,
-        runtimeError.requestedContext,
-        runtimeError.details,
+        isFileRevisionTask ? undefined : runtimeError.requestedContext,
+        isFileRevisionTask ? undefined : runtimeError.details,
         runtimeError.retryable
       );
       return {
         ok: false,
-        message,
-        error: runtimeError
+        message: publicMessage,
+        error: publicError
       };
     }
     const decision = this.completedOutput<TaskAcceptanceDecisionOutput>(
@@ -1347,8 +2165,10 @@ export class OrchestratorService {
       'task_acceptance_decision'
     );
 
-    this.emitTaskAcceptanceDecisionEvent(session, task, candidate, coordinator, decision, invocationId, result.runtimeType);
-    this.emitRuntimeAgentMessages(session, task, candidate, decision.agentMessages, invocationId);
+    if (!isFileRevisionTask) {
+      this.emitTaskAcceptanceDecisionEvent(session, task, candidate, coordinator, decision, invocationId, result.runtimeType);
+      this.emitRuntimeAgentMessages(session, task, candidate, decision.agentMessages, invocationId);
+    }
 
     if (decision.status === 'accepted') {
       return { ok: true, agent: candidate, decision, invocationId };
@@ -1384,23 +2204,26 @@ export class OrchestratorService {
       }
     }
 
-    const canAutoResolve = task.autoResolutionAttempted !== true && session.workspaceMode !== 'bootstrap';
+    const canAutoResolve = !isFileRevisionTask && task.autoResolutionAttempted !== true && session.workspaceMode !== 'bootstrap';
     const alternative = canAutoResolve ? this.findAlternativeClaimAgent(session, task, decision, attemptedAgentIds) : undefined;
+    const blockedSummary = isFileRevisionTask
+      ? 'File revision task acceptance was blocked.'
+      : decision.reason;
     this.tasks.update(task, {
       status: 'blocked',
       autoResolutionAttempted: canAutoResolve ? true : task.autoResolutionAttempted,
-      resultSummary: decision.reason
+      resultSummary: blockedSummary
     });
     this.emitTaskBlockedEvent(session, task, candidate, coordinator, decision);
 
     if (!alternative) {
-      return { ok: false, message: decision.reason };
+      return { ok: false, message: blockedSummary };
     }
 
     this.tasks.update(task, {
       status: 'assigned',
       assignee: { type: 'agent', id: alternative.id },
-      resultSummary: `${candidate.name} cannot accept; Coordinator reassigned to ${alternative.name}. ${decision.reason}`
+      resultSummary: `${candidate.name} cannot accept; receiver reassigned to ${alternative.name}. ${decision.reason}`
     });
     this.events.create({
       sessionId: session.id,
@@ -1408,13 +2231,14 @@ export class OrchestratorService {
       taskId: task.id,
       fromAgentId: coordinator.id,
       toAgentIds: [alternative.id, coordinator.id],
-      content: `Coordinator 自动改派任务：${task.title} -> ${alternative.name}`,
+      content: `接收者自动改派任务：${task.title} -> ${alternative.name}`,
       metadata: createMetadata('task_card', {
         taskId: task.id,
         title: task.title,
         status: 'assigned',
         assignedBy: { type: 'agent', id: coordinator.id },
         assignee: { type: 'agent', id: alternative.id },
+        eligibleAgentIds: task.eligibleAgentIds,
         routingMode: task.routingMode,
         autoResolutionAttempted: task.autoResolutionAttempted,
         assignmentReason: task.assignmentReason,
@@ -1433,23 +2257,28 @@ export class OrchestratorService {
       taskId: task.id,
       fromAgentId: coordinator.id,
       toAgentIds: [alternative.id],
-      content: `Coordinator 已分配任务：${task.title}`,
+      content: `接收者已分配任务：${task.title}`,
       metadata: createMetadata('task_card', {
         taskId: task.id,
         title: task.title,
-        description: task.description,
         status: 'assigned',
         assignedBy: { type: 'agent', id: coordinator.id },
         assignee: { type: 'agent', id: alternative.id },
-        routingMode: task.routingMode,
-        autoResolutionAttempted: task.autoResolutionAttempted,
-        assignmentReason: task.assignmentReason,
-        contextRequirements: task.contextRequirements,
-        verificationPlan: task.verificationPlan,
-        riskNotes: task.riskNotes,
-        requiresUserConfirmation: task.requiresUserConfirmation,
-        dependsOnTaskIds: task.dependsOnTaskIds,
-        acceptanceCriteria: task.acceptanceCriteria
+        ...(isFileRevisionTask
+          ? { executionPurpose: task.executionPurpose, fileRevisionId: task.fileRevisionId }
+          : {
+              description: task.description,
+              eligibleAgentIds: task.eligibleAgentIds,
+              routingMode: task.routingMode,
+              autoResolutionAttempted: task.autoResolutionAttempted,
+              assignmentReason: task.assignmentReason,
+              contextRequirements: task.contextRequirements,
+              verificationPlan: task.verificationPlan,
+              riskNotes: task.riskNotes,
+              requiresUserConfirmation: task.requiresUserConfirmation,
+              dependsOnTaskIds: task.dependsOnTaskIds,
+              acceptanceCriteria: task.acceptanceCriteria
+            })
       })
     });
     return { ok: true, agent: alternative, decision, invocationId };
@@ -1464,6 +2293,9 @@ export class OrchestratorService {
     invocationId: string,
     runtimeType: RuntimeType
   ) {
+    if (task.executionPurpose === 'file_revision' || task.executionPurpose === 'revision_synthesis') {
+      return;
+    }
     const alternativeAgentIds = this.acceptanceDecisionAlternativeIds(session, decision);
     this.events.create({
       sessionId: session.id,
@@ -1492,6 +2324,7 @@ export class OrchestratorService {
     coordinator: Agent,
     decision: TaskAcceptanceDecisionOutput
   ) {
+    const isFileRevisionTask = task.executionPurpose === 'file_revision' || task.executionPurpose === 'revision_synthesis';
     this.events.create({
       sessionId: session.id,
       type: 'task_blocked',
@@ -1502,21 +2335,29 @@ export class OrchestratorService {
       metadata: createMetadata('task_card', {
         taskId: task.id,
         title: task.title,
-        description: task.description,
         status: 'blocked',
         assignedBy: task.assignedBy,
         assignee: { type: 'agent', id: candidate.id },
-        routingMode: task.routingMode,
-        autoResolutionAttempted: task.autoResolutionAttempted,
-        assignmentReason: task.assignmentReason,
-        contextRequirements: task.contextRequirements,
-        verificationPlan: task.verificationPlan,
-        riskNotes: task.riskNotes,
-        requiresUserConfirmation: task.requiresUserConfirmation,
-        resultSummary: decision.reason,
-        missingContext: decision.missingContext,
-        requestedContext: decision.requestedContext,
-        handoffSuggestion: decision.handoffSuggestion
+        ...(isFileRevisionTask
+          ? {
+              executionPurpose: task.executionPurpose,
+              fileRevisionId: task.fileRevisionId,
+              resultSummary: 'File revision task acceptance was blocked.'
+            }
+          : {
+              description: task.description,
+              routingMode: task.routingMode,
+              autoResolutionAttempted: task.autoResolutionAttempted,
+              assignmentReason: task.assignmentReason,
+              contextRequirements: task.contextRequirements,
+              verificationPlan: task.verificationPlan,
+              riskNotes: task.riskNotes,
+              requiresUserConfirmation: task.requiresUserConfirmation,
+              resultSummary: decision.reason,
+              missingContext: decision.missingContext,
+              requestedContext: decision.requestedContext,
+              handoffSuggestion: decision.handoffSuggestion
+            })
       })
     });
   }
@@ -1560,15 +2401,24 @@ export class OrchestratorService {
         ...(ref.omissionReason === null ? {} : { omissionReason: ref.omissionReason })
       })),
       requestedPaths: value.requestedPaths,
+      requestedDirectories: value.requestedDirectories?.map((item) => ({
+        path: item.path,
+        ...(item.depth === null ? {} : { depth: item.depth })
+      })),
+      requestedSearches: value.requestedSearches?.map((item) => ({
+        query: item.query,
+        ...(item.path === null ? {} : { path: item.path }),
+        ...(item.include === null ? {} : { include: item.include }),
+        ...(item.exclude === null ? {} : { exclude: item.exclude })
+      })),
       requestedCommands: value.requestedCommands,
       ...(value.followUpInstruction === null ? {} : { followUpInstruction: value.followUpInstruction })
     };
   }
 
   private architectureSupplementalContextPaths(session: SessionDetail, missingContext: string[]) {
-    const snapshot = session.workspaceSnapshot;
-    if (!snapshot) return [];
-    const availablePaths = new Set(snapshot.files.map((file) => file.path));
+    const availablePaths = new Set(this.workspaceNavigationFilePaths(session));
+    if (!availablePaths.size) return [];
     const mentionedPaths = missingContext
       .flatMap((item) => item.match(/[A-Za-z0-9_.@/-]+\.(?:ts|tsx|js|jsx|mjs|cjs|vue|json|md|yml|yaml|toml|css|scss)/g) ?? [])
       .map((path) => path.replace(/\\/g, '/'))
@@ -1577,14 +2427,55 @@ export class OrchestratorService {
   }
 
   private defaultArchitectureContextPaths(session: SessionDetail) {
-    const snapshot = session.workspaceSnapshot;
-    if (!snapshot) return [];
-    return snapshot.files
-      .map((file) => ({ path: file.path, score: this.architectureContextPathScore(file.path) }))
+    return this.workspaceNavigationFilePaths(session)
+      .map((path) => ({ path, score: this.architectureContextPathScore(path) }))
       .filter((item) => item.score > 0)
       .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
       .map((item) => item.path)
       .slice(0, 16);
+  }
+
+  private async preloadArchitectureTaskContext(session: SessionDetail, task: AgentTask, agentId: string) {
+    const revisionId = session.workspaceIndex?.revision.id ?? session.workspaceContext?.indexRevision?.id;
+    const hydrated = new Set(
+      (session.workspaceSnapshot?.files ?? [])
+        .filter((file) => file.content !== undefined && (!revisionId || file.revision?.id === revisionId))
+        .map((file) => file.path)
+    );
+    const requestedPaths = this.defaultArchitectureContextPaths(session)
+      .filter((path) => !hydrated.has(path))
+      .slice(0, 8);
+    if (!requestedPaths.length) return;
+
+    const requestedContext: RuntimeContextRequest = {
+      reason: 'Load the bounded entrypoint and configuration evidence required by the architecture task.',
+      requestedRefs: requestedPaths.map((path) => ({
+        type: 'workspace_file',
+        label: path,
+        ref: path
+      })),
+      requestedPaths,
+      followUpInstruction: 'Continue with partial evidence if the bounded preload deadline is reached.'
+    };
+    try {
+      const resolution = await this.hydrateSupplementalContext(session, requestedContext, {
+        deadlineMs: 1_500,
+        maxOperations: 8,
+        maxContentBytes: 256 * 1024
+      });
+      this.recordSupplementalContextRequest(session, task, agentId, requestedContext, resolution);
+    } catch {
+      // Architecture execution remains available with the partial index when the Provider is slow or offline.
+    }
+  }
+
+  private workspaceNavigationFilePaths(session: SessionDetail): string[] {
+    if (session.workspaceIndex) {
+      return session.workspaceIndex.entries
+        .filter((entry) => entry.kind === 'file' && !entry.generated && !entry.sensitive)
+        .map((entry) => entry.path);
+    }
+    return session.workspaceSnapshot?.files.map((file) => file.path) ?? [];
   }
 
   private architectureContextPathScore(path: string) {
@@ -1621,7 +2512,10 @@ export class OrchestratorService {
     decision: TaskAcceptanceDecisionOutput,
     attemptedAgentIds: Set<string>
   ) {
-    const participants = this.participatingAgents(session);
+    const eligibleAgentIds = task.eligibleAgentIds?.length ? new Set(task.eligibleAgentIds) : undefined;
+    const participants = this.participatingAgents(session).filter(
+      (agent) => !eligibleAgentIds || eligibleAgentIds.has(agent.id)
+    );
     if (this.isArchitectureAnalysisTask(session, task)) {
       const architect = participants.find((candidate) => candidate.key === 'architect');
       return architect && !attemptedAgentIds.has(architect.id) ? architect : undefined;
@@ -1654,7 +2548,7 @@ export class OrchestratorService {
       return undefined;
     }
 
-    const domain = session.taskDomain ?? (session.workspaceSnapshot ? 'mixed' : 'non_coding');
+    const domain = session.taskDomain ?? (session.workingDirectory ? 'mixed' : 'non_coding');
     const isPlanningTask = /plan|planning|requirement|analysis|scope|需求|计划|规划|分析|范围/i.test(taskText);
     const preferredKeys =
       domain === 'non_coding' || isPlanningTask
@@ -1939,6 +2833,7 @@ export class OrchestratorService {
       content: messages.finalDeliveryCreated,
       metadata: createMetadata('delivery_card', {
         ...finalOutput,
+        relatedBriefId: brief.id,
         limitations,
         artifactRefs,
         ...(notificationDraft ? { notificationDraftArtifactId: notificationDraft.id } : {}),
@@ -2040,6 +2935,63 @@ export class OrchestratorService {
         taskId,
         memoryIds: contextAssembly.relevantMemories.map((memory) => memory.id),
         memories: contextAssembly.relevantMemories
+      })
+    });
+  }
+
+  private async runFollowUpDiscussion(
+    session: SessionDetail,
+    coordinator: Agent,
+    participants: Agent[],
+    content: string,
+    signal?: AbortSignal
+  ) {
+    await this.runtime.refreshRuntimeAvailability?.();
+    for (const agent of participants) {
+      throwIfAborted(signal);
+      const invocationId = crypto.randomUUID();
+      const contextAssembly = this.createContextAssembly(session, agent, undefined, undefined, 'discussion');
+      contextAssembly.systemRules = [
+        ...contextAssembly.systemRules,
+        'Discuss only the explicitly supplied follow-up requirement. Return your recommendation to the receiver.',
+        'Do not execute the task in the discussion phase.'
+      ];
+      contextAssembly.constraints = [...contextAssembly.constraints, `Follow-up requirement: ${content}`];
+      const result = await this.runDiscussionRuntime(session, agent, invocationId, contextAssembly, signal);
+      throwIfAborted(signal);
+      const output =
+        result.status === 'completed' && usableAgentMessageOutput(result.output)
+          ? result.output
+          : createAgentMessageOutput({
+              messageKind: 'risk',
+              content: `${agent.name} 未能完成本轮讨论：${result.error?.message ?? result.status}`
+            });
+      this.events.create({
+        sessionId: session.id,
+        type: 'agent_message',
+        fromAgentId: agent.id,
+        toAgentIds: [coordinator.id],
+        content: output.content,
+        metadata: createMetadata('chat_message', {
+          messageKind: output.messageKind,
+          mentionedAgentIds: participants.map((participant) => participant.id),
+          relatedTaskIds: [],
+          runtimeInvocationId: invocationId,
+          phase: 'follow_up_discussion',
+          runtimeError: result.error
+        })
+      });
+    }
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      fromAgentId: coordinator.id,
+      toAgentIds: participants.map((agent) => agent.id),
+      content: '接收者已汇总被 @Agent 的讨论结果，开始进行任务拆分。',
+      metadata: createMetadata('chat_message', {
+        messageKind: 'summary',
+        phase: 'follow_up_discussion_completed',
+        mentionedAgentIds: participants.map((agent) => agent.id)
       })
     });
   }
@@ -2253,7 +3205,11 @@ export class OrchestratorService {
   ) {
     const needsMoreContext = code === 'CONTEXT_INSUFFICIENT';
     const taskStatus: AgentTask['status'] = needsMoreContext ? 'waiting' : 'failed';
-    this.tasks.update(task, { status: taskStatus, resultSummary: message });
+    const isFileRevisionTask = task.executionPurpose === 'file_revision' || task.executionPurpose === 'revision_synthesis';
+    const publicMessage = isFileRevisionTask ? 'File revision Runtime failed.' : message;
+    const publicRequestedContext = isFileRevisionTask ? undefined : requestedContext;
+    const publicDetails = isFileRevisionTask ? undefined : details;
+    this.tasks.update(task, { status: taskStatus, resultSummary: publicMessage });
     this.events.create({
       sessionId,
       type: 'runtime_failed',
@@ -2267,15 +3223,15 @@ export class OrchestratorService {
         title: task.title,
         status: needsMoreContext ? 'blocked' : 'failed',
         code,
-        message,
-        requestedContext,
-        details,
+        message: publicMessage,
+        requestedContext: publicRequestedContext,
+        details: publicDetails,
         runtimeError: {
           code,
-          message,
+          message: publicMessage,
           retryable,
-          ...(requestedContext ? { requestedContext } : {}),
-          ...(details ? { details } : {})
+          ...(publicRequestedContext ? { requestedContext: publicRequestedContext } : {}),
+          ...(publicDetails ? { details: publicDetails } : {})
         } satisfies RuntimeError
       })
     });
@@ -2289,8 +3245,8 @@ export class OrchestratorService {
         taskId: task.id,
         title: task.title,
         status: taskStatus,
-        resultSummary: message,
-        requestedContext
+        resultSummary: publicMessage,
+        requestedContext: publicRequestedContext
       })
     });
   }
@@ -2417,7 +3373,8 @@ export class OrchestratorService {
     contextRetryCount: number
   ): RuntimeContextRequest | undefined {
     if (!requestedContext) return undefined;
-    const seen = collectSeenContextSignatures(session.supplementalContextRequests);
+    const currentRevisionId = session.workspaceIndex?.revision.id ?? session.workspaceContext?.indexRevision?.id;
+    const seen = collectSeenContextSignatures(session.supplementalContextRequests, currentRevisionId);
     const novelContext = trimToNovelContext(requestedContext, seen);
     if (!novelContext) return undefined;
     if (!this.canRetryWithSupplementalContext(code, novelContext, contextRetryCount)) {
@@ -2428,18 +3385,20 @@ export class OrchestratorService {
 
   private recordSupplementalContextRequest(
     session: SessionDetail,
-    task: AgentTask,
+    task: AgentTask | undefined,
     agentId: string,
     requestedContext: RuntimeContextRequest | undefined,
-    resolution: SupplementalContextResolution
+    resolution: SupplementalContextResolution,
+    phase: AgentRunPhase = 'task_execution'
   ) {
     if (!requestedContext) return;
     session.supplementalContextRequests = [
       ...(session.supplementalContextRequests ?? []),
       {
         id: crypto.randomUUID(),
-        taskId: task.id,
+        ...(task ? { taskId: task.id } : {}),
         agentId,
+        phase,
         requestedContext,
         resolution,
         createdAt: nowIso()
@@ -2452,7 +3411,9 @@ export class OrchestratorService {
     const requestedPaths = requestedContext.requestedPaths?.join(', ') || 'none';
     const requestedCommands = requestedContext.requestedCommands?.join(', ') || 'none';
     const content = [
-      `Supplemental context request for task "${task.title}".`,
+      task
+        ? `Supplemental context request for task "${task.title}".`
+        : `Supplemental context request for phase "${phase}".`,
       `Reason: ${requestedContext.reason}`,
       `Requested refs: ${requestedRefs || 'none'}`,
       `Requested paths: ${requestedPaths}`,
@@ -2479,13 +3440,14 @@ export class OrchestratorService {
     this.events.create({
       sessionId: session.id,
       type: 'agent_message',
-      taskId: task.id,
+      ...(task ? { taskId: task.id } : {}),
       fromAgentId: agentId,
       content: eventContent,
       metadata: createMetadata('chat_message', {
         messageKind: 'progress',
         phase: 'context_supplement',
-        relatedTaskIds: [task.id],
+        relatedTaskIds: task ? [task.id] : [],
+        runtimePhase: phase,
         memoryId: memory.id,
         requestedContext,
         resolution
@@ -2705,7 +3667,7 @@ export class OrchestratorService {
     const importantFiles = this.workspaceImportantFiles(snapshot, relevantFiles, entrypoints);
     const impactedFiles = this.workspaceImpactedFiles(snapshot, relevantFiles, entrypoints);
     const modificationPlan = this.workspaceModificationPlan(impactedFiles, session.originalInput);
-    const summary = `已分析 ${snapshot.rootName}：扫描 ${snapshot.fileCount} 个条目，识别 ${readableFiles.length} 个可读文本文件。`;
+    const summary = `已分析 ${snapshot.rootName}：索引包含 ${snapshot.fileCount} 个条目，本次按需读取 ${readableFiles.length} 个文本文件。`;
     const payload = {
       rootName: snapshot.rootName,
       fileCount: snapshot.fileCount,
@@ -2720,14 +3682,14 @@ export class OrchestratorService {
       impactedFiles,
       modificationPlan,
       skippedByReason,
-      rationale: focus?.rationale ?? '基于工作区快照、入口文件和用户需求关键词完成初步架构分析，并形成多文件影响面。'
+      rationale: focus?.rationale ?? '基于工作区元数据索引、按需读取的文件证据和用户需求关键词完成初步架构分析，并形成多文件影响面。'
     };
     const markdown = [
       '# 工作区架构分析',
       '',
       `会话需求：${session.originalInput}`,
       `工作区：${snapshot.rootName}`,
-      `扫描时间：${snapshot.scannedAt}`,
+      `索引与取证时间：${snapshot.scannedAt}`,
       '',
       '## 分析结论',
       summary,
@@ -2739,13 +3701,13 @@ export class OrchestratorService {
       this.markdownList('与需求相关的文件', relevantFiles),
       this.markdownList('预计影响文件', impactedFiles),
       this.markdownList('多文件修改计划', modificationPlan),
-      '## 扫描统计',
-      `- 扫描条目：${snapshot.fileCount}`,
-      `- 可读文本文件：${readableFiles.length}`,
-      `- 跳过条目：${snapshot.skipped.length}`,
-      `- 总字节数：${snapshot.totalBytes}`,
+      '## 索引与取证统计',
+      `- 索引条目：${snapshot.fileCount}`,
+      `- 本次按需读取文件：${readableFiles.length}`,
+      `- 过滤条目：${snapshot.skipped.length}`,
+      `- 本次证据字节数：${snapshot.totalBytes}`,
       '',
-      '## 跳过原因',
+      '## 过滤原因',
       ...(
         Object.keys(skippedByReason).length
           ? Object.entries(skippedByReason).map(([reason, count]) => `- ${reason}：${count}`)
@@ -2765,7 +3727,7 @@ export class OrchestratorService {
         [
           `${agentName} 已完成会话工作区架构分析，并生成阶段产物。`,
           `工作区：${snapshot.rootName}`,
-          `扫描条目：${snapshot.fileCount}，可读文本文件：${readableFiles.length}，跳过：${snapshot.skipped.length}`,
+          `索引条目：${snapshot.fileCount}，本次按需读取：${readableFiles.length}，过滤：${snapshot.skipped.length}`,
           `技术栈：${detectedStack.join('、') || '未识别'}`,
           `预计影响文件：${impactedFiles.slice(0, 6).join('、') || '暂无'}`,
           `产物文件：agent-output/workspace-analysis.md`
@@ -3397,88 +4359,225 @@ export class OrchestratorService {
       constraints: brief?.constraints ?? [],
       budget: buildBudget(session)
     };
+    if (task?.fileRevisionId) {
+      const fileRevisions = this.requireFileRevisions();
+      const revisionRun = fileRevisions.getRun(session.id, task.fileRevisionId);
+      const revisionEvidence = fileRevisions.evidence(session.id, task.fileRevisionId);
+      contextAssembly.fileRevisionEvidence = [revisionEvidence];
+      contextAssembly.systemRules = [
+        ...contextAssembly.systemRules,
+        'For a file-revision task, ContextEnvelopeV2.L3.fileRevisions is the authoritative immutable evidence.',
+        'Treat userDraft.content as the current user-authoritative input; base.content and diff.hunks are comparison evidence only.',
+        'Do not write the live source file. Return a complete Runtime file-change proposal for the exact revision filePath.',
+        ...(task.executionPurpose === 'revision_synthesis'
+          ? ['Semantically synthesize the hydrated agentResults proposals without weakening explicit user revisions.']
+          : [])
+      ];
+      contextAssembly.constraints = [
+        ...contextAssembly.constraints,
+        `File revision id: ${revisionEvidence.revisionId}`,
+        `Exact target path: ${revisionEvidence.filePath}`,
+        `Expected user-draft SHA-256: ${revisionEvidence.userDraft.hash.value}`,
+        `Revision chain id: ${revisionEvidence.chainId}`,
+        `Revision iteration: ${revisionEvidence.iteration}`,
+        `Frozen evidence hash: ${revisionEvidence.evidenceHash}`,
+        ...(revisionRun.instruction
+          ? [`User processing instruction: ${revisionRun.instruction}`]
+          : [])
+      ];
+    }
     return contextAssembly;
   }
 
   async hydrateSupplementalContext(
     session: SessionDetail,
-    requestedContext: RuntimeContextRequest
+    requestedContext: RuntimeContextRequest,
+    options: { deadlineMs?: number; maxOperations?: number; maxContentBytes?: number } = {}
   ): Promise<SupplementalContextResolution> {
     const requestedPaths = this.uniqueFirstStrings(requestedContext.requestedPaths ?? [], 32);
+    const requestedDirectories = Array.from(
+      new Map((requestedContext.requestedDirectories ?? []).map((item) => [`${item.path}:${item.depth ?? 1}`, item])).values()
+    ).slice(0, 8);
+    const requestedSearches = Array.from(
+      new Map((requestedContext.requestedSearches ?? []).map((item) => [JSON.stringify(item), item])).values()
+    ).slice(0, 8);
     const hydratedPaths: string[] = [];
+    const listedDirectories: string[] = [];
+    const completedSearches: string[] = [];
+    const evidenceRevisions: NonNullable<SupplementalContextResolution['evidenceRevisions']> = {};
     const failedPaths: SupplementalContextResolution['failedPaths'] = [];
     let contentBytes = 0;
-    if (!requestedPaths.length) {
-      return { requestedPaths, hydratedPaths, failedPaths, deferredPaths: [], contentBytes };
-    }
     const provider = this.workspaceProviders?.resolve(session);
     const files = [...(session.workspaceSnapshot?.files ?? [])];
+    const maxOperations = Math.min(8, Math.max(1, Math.floor(options.maxOperations ?? 8)));
+    const maxContentBytes = Math.min(512 * 1024, Math.max(1, Math.floor(options.maxContentBytes ?? 512 * 1024)));
+    const deadlineMs = Math.min(
+      this.supplementalContextDeadlineMs(),
+      Math.max(1, Math.floor(options.deadlineMs ?? this.supplementalContextDeadlineMs()))
+    );
+    const deadlineAt = Date.now() + deadlineMs;
+    const currentRevision = provider?.capabilities().read
+      ? await this.withSupplementalDeadline(provider.getRevision(), deadlineAt).catch(() => undefined)
+      : undefined;
+    const operations = [
+      ...requestedPaths.map((path) => ({ kind: 'file' as const, path })),
+      ...requestedDirectories.map((directory) => ({ kind: 'directory' as const, directory })),
+      ...requestedSearches.map((search) => ({ kind: 'search' as const, search }))
+    ];
     let attemptedCount = 0;
-    while (attemptedCount < requestedPaths.length && hydratedPaths.length === 0) {
-      const batchStart = attemptedCount;
-      const paths = requestedPaths.slice(attemptedCount, attemptedCount + 8);
-      let processedInBatch = 0;
-      for (const path of paths) {
-        processedInBatch += 1;
-        const existing = files.find((file) => file.path === path && Boolean(file.content));
+    const storeEvidence = (
+      path: string,
+      content: string,
+      summary: string,
+      revision?: WorkspaceRevision
+    ): boolean => {
+      const remaining = maxContentBytes - contentBytes;
+      if (remaining <= 0) return false;
+      const raw = Buffer.from(content, 'utf8');
+      const selected = raw.byteLength > remaining ? raw.subarray(0, remaining).toString('utf8') : content;
+      const size = Buffer.byteLength(selected, 'utf8');
+      const existingIndex = files.findIndex((file) => file.path === path);
+      const next = {
+        path,
+        size,
+        content: selected,
+        summary: raw.byteLength > remaining ? `${summary} (truncated).` : summary,
+        ...(revision ? { revision } : {})
+      };
+      if (existingIndex >= 0) files[existingIndex] = { ...files[existingIndex], ...next };
+      else files.push(next);
+      if (revision) evidenceRevisions[path] = revision;
+      contentBytes += size;
+      return size > 0;
+    };
+    for (const operation of operations.slice(0, maxOperations)) {
+      if (Date.now() >= deadlineAt) {
+        attemptedCount += 1;
+        const path = operation.kind === 'file'
+          ? operation.path
+          : operation.kind === 'directory'
+            ? operation.directory.path
+            : `search:${operation.search.query}`;
+        failedPaths.push({
+          path,
+          code: 'DEADLINE_EXCEEDED',
+          retryable: false,
+          message: 'Supplemental workspace context deadline exceeded.'
+        });
+        break;
+      }
+      if (contentBytes >= maxContentBytes) break;
+      attemptedCount += 1;
+      if (operation.kind === 'file') {
+        const existing = files.find((file) =>
+          file.path === operation.path &&
+          Boolean(file.content) &&
+          Boolean(currentRevision && file.revision?.id === currentRevision.id)
+        );
         if (existing?.content) {
-          hydratedPaths.push(path);
-          contentBytes += Buffer.byteLength(existing.content, 'utf8');
-          if (batchStart > 0) break;
+          hydratedPaths.push(operation.path);
+          evidenceRevisions[operation.path] = existing.revision!;
+          contentBytes = Math.min(maxContentBytes, contentBytes + Buffer.byteLength(existing.content, 'utf8'));
           continue;
         }
-        if (!provider || !provider.capabilities().read) {
-          failedPaths.push({
+      }
+      if (!provider || !provider.capabilities().read) {
+        const path = operation.kind === 'file'
+          ? operation.path
+          : operation.kind === 'directory'
+            ? operation.directory.path
+            : `search:${operation.search.query}`;
+        failedPaths.push({ path, code: 'READ_UNAVAILABLE', retryable: true, message: 'Workspace provider is unavailable or does not grant read access.' });
+        continue;
+      }
+      try {
+        if (operation.kind === 'file') {
+          const path = operation.path;
+          const read = await this.readStableWorkspaceEvidence(
+            provider,
             path,
-            code: session.workingDirectory?.kind === 'browser_local' ? 'BROKER_OFFLINE' : 'READ_UNAVAILABLE',
-            retryable: true,
-            message: 'Workspace provider is unavailable or does not grant read access.'
-          });
-          continue;
-        }
-        try {
-          if (path.endsWith('/')) {
-            const listed = await provider.listDirectory({ path: path.replace(/\/+$/, ''), limit: 200 });
-            const content = JSON.stringify(
-              listed.entries.map((entry) => ({ path: entry.path, kind: entry.kind })),
-              null,
-              2
-            );
-            files.push({
-              path,
-              size: Buffer.byteLength(content, 'utf8'),
-              content,
-              summary: 'Supplemental workspace directory listing.'
-            });
-            hydratedPaths.push(path);
-            contentBytes += Buffer.byteLength(content, 'utf8');
-            if (batchStart > 0) break;
-            continue;
-          }
-          const read = await provider.readFile({ path, maxBytes: 64 * 1024 });
+            Math.min(64 * 1024, maxContentBytes - contentBytes),
+            deadlineAt
+          );
           if (!read.content) {
             failedPaths.push({ path, code: 'READ_ERROR', retryable: false, message: 'Workspace file is empty.' });
             continue;
           }
-          const existingIndex = files.findIndex((file) => file.path === read.path);
-          const next = {
-            path: read.path,
-            size: read.byteLength,
-            content: read.content,
-            summary: read.truncated ? 'Supplemental workspace read (truncated).' : 'Supplemental workspace read.'
-          };
-          if (existingIndex >= 0) files[existingIndex] = { ...files[existingIndex], ...next };
-          else files.push(next);
-          hydratedPaths.push(read.path);
-          contentBytes += read.byteLength;
-          if (batchStart > 0) break;
-        } catch (error) {
-          failedPaths.push(this.supplementalPathFailure(path, error));
+          if (storeEvidence(
+            read.path,
+            read.content,
+            read.truncated ? 'Supplemental workspace read (truncated).' : 'Supplemental workspace read.',
+            read.revision
+          )) {
+            const stored = files.find((file) => file.path === read.path);
+            if (stored) Object.assign(stored, {
+              hash: read.hash ?? read.rangeHash,
+              revision: read.revision,
+              ...(read.startLine ? { startLine: read.startLine } : {}),
+              ...(read.endLine ? { endLine: read.endLine } : {})
+            });
+            hydratedPaths.push(read.path);
+          }
+          continue;
         }
+        if (operation.kind === 'directory') {
+          const { path, depth = 1 } = operation.directory;
+          const listed = await this.withSupplementalDeadline(provider.listDirectory({
+            path,
+            recursive: depth > 0,
+            maxDepth: Math.min(4, Math.max(0, depth)),
+            limit: 500,
+            deadlineMs: Math.max(1, deadlineAt - Date.now())
+          }), deadlineAt);
+          const content = JSON.stringify(listed.entries.map((entry) => ({
+            path: entry.path,
+            kind: entry.kind,
+            ...(entry.kind === 'file' ? { size: entry.size, language: entry.language } : {})
+          })), null, 2);
+          const evidencePath = `${path.replace(/\/+$/, '') || '.'}/`;
+          if (storeEvidence(evidencePath, content, 'Supplemental workspace directory listing.', listed.revision)) {
+            const normalized = path.replace(/\/+$/, '') || '.';
+            listedDirectories.push(path);
+            hydratedPaths.push(evidencePath);
+          }
+          continue;
+        }
+        const signature = JSON.stringify([
+          operation.search.query,
+          operation.search.path ?? '.',
+          operation.search.include ?? [],
+          operation.search.exclude ?? []
+        ]);
+        const searched = await this.withSupplementalDeadline(provider.searchText({
+          ...operation.search,
+          maxResults: 100,
+          deadlineMs: Math.max(1, deadlineAt - Date.now())
+        }), deadlineAt);
+        const evidencePath = `search:${operation.search.query}`;
+        const content = JSON.stringify(searched.matches, null, 2);
+        if (storeEvidence(
+          evidencePath,
+          content || '[]',
+          searched.truncated ? 'Supplemental workspace search (truncated).' : 'Supplemental workspace search.',
+          searched.revision
+        )) {
+          completedSearches.push(signature);
+          hydratedPaths.push(evidencePath);
+        }
+      } catch (error) {
+        const path = operation.kind === 'file'
+          ? operation.path
+          : operation.kind === 'directory'
+            ? operation.directory.path
+            : `search:${operation.search.query}`;
+        failedPaths.push(this.supplementalPathFailure(path, error));
       }
-      attemptedCount += processedInBatch;
     }
-    const deferredPaths = requestedPaths.slice(attemptedCount);
+    const deferredPaths = operations.slice(attemptedCount).map((operation) => operation.kind === 'file'
+      ? operation.path
+      : operation.kind === 'directory'
+        ? `${operation.directory.path}/`
+        : `search:${operation.search.query}`);
     const snapshot = session.workspaceSnapshot ?? {
       rootName: session.workingDirectory?.name ?? 'workspace',
       scannedAt: nowIso(),
@@ -3488,12 +4587,102 @@ export class OrchestratorService {
       files: [],
       skipped: []
     };
+    const boundedFiles = this.boundWorkspaceEvidenceCache(
+      files,
+      hydratedPaths,
+      currentRevision,
+      32,
+      maxContentBytes
+    );
     session.workspaceSnapshot = {
       ...snapshot,
-      files,
-      fileCount: Math.max(snapshot.fileCount, files.length)
+      files: boundedFiles,
+      fileCount: Math.max(snapshot.fileCount, boundedFiles.length),
+      entrypoints: session.workspaceIndex?.entrypoints ?? snapshot.entrypoints,
+      detectedStack: this.uniqueFirstStrings([
+        ...(session.workspaceIndex?.detectedStack ?? []),
+        ...detectWorkspaceStack(boundedFiles)
+      ], 16)
     };
-    return { requestedPaths, hydratedPaths, failedPaths, deferredPaths, contentBytes };
+    return {
+      requestedPaths,
+      hydratedPaths,
+      evidenceRevisions,
+      listedDirectories,
+      completedSearches,
+      failedPaths,
+      deferredPaths,
+      contentBytes
+    };
+  }
+
+  private boundWorkspaceEvidenceCache(
+    files: NonNullable<SessionDetail['workspaceSnapshot']>['files'],
+    preferredPaths: string[],
+    currentRevision: WorkspaceRevision | undefined,
+    maxFiles: number,
+    maxContentBytes: number
+  ) {
+    const preferred = new Set(preferredPaths);
+    const ordered = [...files].sort((left, right) => Number(preferred.has(right.path)) - Number(preferred.has(left.path)));
+    const bounded: typeof files = [];
+    const seen = new Set<string>();
+    let contentBytes = 0;
+    for (const file of ordered) {
+      if (bounded.length >= maxFiles || seen.has(file.path)) continue;
+      seen.add(file.path);
+      const stale = Boolean(file.content && currentRevision && file.revision?.id !== currentRevision.id);
+      const { content: originalContent, ...metadata } = file;
+      if (!originalContent || stale || contentBytes >= maxContentBytes) {
+        bounded.push({
+          ...metadata,
+          ...(stale ? { summary: 'Cached content omitted because the workspace revision changed.' } : {})
+        });
+        continue;
+      }
+      const remaining = maxContentBytes - contentBytes;
+      const raw = Buffer.from(originalContent, 'utf8');
+      const selected = raw.subarray(0, remaining).toString('utf8');
+      contentBytes += Buffer.byteLength(selected, 'utf8');
+      bounded.push({
+        ...metadata,
+        content: selected,
+        ...(raw.byteLength > remaining ? { summary: `${file.summary ?? 'Cached workspace evidence'} (truncated).` } : {})
+      });
+    }
+    return bounded;
+  }
+
+  private supplementalContextDeadlineMs(): number {
+    const configured = Number(process.env.AGENT_CLUSTER_SUPPLEMENTAL_CONTEXT_DEADLINE_MS ?? 10_000);
+    return Number.isFinite(configured) ? Math.max(1, Math.min(10_000, Math.floor(configured))) : 10_000;
+  }
+
+  private async withSupplementalDeadline<T>(operation: Promise<T>, deadlineAt: number): Promise<T> {
+    const remainingMs = Math.max(1, deadlineAt - Date.now());
+    return await new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('WORKSPACE_CONTEXT_DEADLINE_EXCEEDED')), remainingMs);
+      operation.then(
+        (value) => { clearTimeout(timer); resolve(value); },
+        (error) => { clearTimeout(timer); reject(error); }
+      );
+    });
+  }
+
+  private async readStableWorkspaceEvidence(
+    provider: NonNullable<ReturnType<WorkspaceProviderResolver['resolve']>>,
+    path: string,
+    maxBytes: number,
+    deadlineAt: number
+  ) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const read = await this.withSupplementalDeadline(provider.readFile({ path, maxBytes }), deadlineAt);
+      const currentRevision = await this.withSupplementalDeadline(provider.getRevision(), deadlineAt);
+      if (read.revision.id === currentRevision.id) return read;
+    }
+    const error = new Error('Workspace revision changed repeatedly while reading evidence.');
+    Object.assign(error, { code: 'WORKSPACE_REVISION_UNSTABLE' });
+    throw error;
   }
 
   private hasUsableSupplementalContext(
@@ -3536,6 +4725,12 @@ export class OrchestratorService {
       signal.includes('SECURITYERROR')
     ) {
       code = 'PERMISSION_REQUIRED';
+    } else if (signal.includes('WORKSPACE_REVISION_UNSTABLE')) {
+      code = 'WORKSPACE_REVISION_UNSTABLE';
+      retryable = false;
+    } else if (signal.includes('DEADLINE_EXCEEDED') || signal.includes('LOOKUP_TIMEOUT')) {
+      code = 'DEADLINE_EXCEEDED';
+      retryable = false;
     } else if (signal.includes('BROKER') || signal.includes('TIMEOUT') || signal.includes('DISCONNECT')) {
       code = 'BROKER_OFFLINE';
     }
@@ -3586,9 +4781,11 @@ export class OrchestratorService {
     if (evidence.type === 'workspace_snapshot') {
       return {
         source: 'workspace_manifest',
-        summary: session.workspaceSnapshot
-          ? `${session.workspaceSnapshot.rootName}: ${session.workspaceSnapshot.files.length} readable files, ${session.workspaceSnapshot.skipped.length} skipped.`
-          : undefined
+        summary: session.workspaceIndex
+          ? `${session.workingDirectory?.name ?? 'workspace'}: metadata index generation ${session.workspaceIndex.generation}, ${session.workspaceIndex.indexedEntries} indexed entries, status ${session.workspaceIndex.status}.`
+          : session.workspaceSnapshot
+            ? `${session.workspaceSnapshot.rootName}: ${session.workspaceSnapshot.files.length} readable files, ${session.workspaceSnapshot.skipped.length} skipped.`
+            : undefined
       };
     }
     if ((evidence.type === 'workspace_file' || evidence.type === 'test' || evidence.type === 'workspace_symbol') && ref) {
@@ -3669,6 +4866,10 @@ export class OrchestratorService {
       summary: file.summary,
       contentLength: content.length,
       truncated: truncation.truncated,
+      ...(file.hash ? { hash: file.hash } : {}),
+      ...(file.revision ? { revision: file.revision } : {}),
+      ...(file.startLine ? { startLine: file.startLine } : {}),
+      ...(file.endLine ? { endLine: file.endLine } : {}),
       ...(truncation.truncatedHint ? { truncatedHint: truncation.truncatedHint } : {})
     };
   }
@@ -3685,7 +4886,7 @@ export class OrchestratorService {
     relevantMemories: ContextAssembly['relevantMemories'],
     ragSnippets: ContextAssembly['ragSnippets']
   ): TaskContext {
-    const domain = session.taskDomain ?? (session.workspaceSnapshot ? 'mixed' : 'non_coding');
+    const domain = session.taskDomain ?? (session.workingDirectory ? 'mixed' : 'non_coding');
     const intent = session.taskIntent ?? (brief ? 'implementation' : 'analysis');
     const artifacts = this.artifacts.listBySession(session.id);
     const sessionEvents = this.events.list(session.id);
@@ -3705,15 +4906,15 @@ export class OrchestratorService {
     const validationRules = this.createValidationRules(domain, intent);
     const candidateEvidenceRefs: TaskContext['evidenceRefs'] = [
       { type: 'user_input', label: 'session.originalInput' },
-      ...(session.workspaceSnapshot
-        ? [{ type: 'workspace_snapshot' as const, label: session.workspaceSnapshot.rootName, ref: session.workingDirectory?.name }]
+      ...(session.workspaceSnapshot || session.workspaceIndex
+        ? [{ type: 'workspace_snapshot' as const, label: session.workingDirectory?.name ?? session.workspaceSnapshot?.rootName ?? 'workspace', ref: session.workingDirectory?.name }]
         : []),
       ...workspaceEvidenceFiles.map((path) => ({
         type: 'workspace_file' as const,
         label: path,
         ref: path
       })),
-      ...(workspaceFocus?.possibleEntryPoints ?? session.workspaceSnapshot?.entrypoints ?? []).slice(0, 6).map((entrypoint) => ({
+      ...(workspaceFocus?.possibleEntryPoints ?? session.workspaceIndex?.entrypoints ?? session.workspaceSnapshot?.entrypoints ?? []).slice(0, 6).map((entrypoint) => ({
         type: 'workspace_symbol' as const,
         label: entrypoint,
         ref: entrypoint
@@ -3913,6 +5114,7 @@ export class OrchestratorService {
           }
         ];
       case 'task_execution':
+      case 'revision_synthesis':
         return [
           {
             action: 'do',
@@ -4515,8 +5717,14 @@ export class OrchestratorService {
       `Session status: ${session.status}`,
       `Current stage: ${phase}`,
       ...(brief ? [`Brief v${brief.version}: ${brief.goal}`] : []),
-      ...(session.workspaceSnapshot ? [`Workspace snapshot: ${session.workspaceSnapshot.rootName}`] : []),
-      ...(session.workspaceSnapshot?.detectedStack?.length ? [`Detected stack: ${session.workspaceSnapshot.detectedStack.join(', ')}`] : [])
+      ...(session.workspaceIndex
+        ? [`Workspace index: generation ${session.workspaceIndex.generation} (${session.workspaceIndex.status})`]
+        : session.workspaceSnapshot
+          ? [`Workspace snapshot: ${session.workspaceSnapshot.rootName}`]
+          : []),
+      ...((session.workspaceIndex?.detectedStack ?? session.workspaceSnapshot?.detectedStack)?.length
+        ? [`Detected stack: ${(session.workspaceIndex?.detectedStack ?? session.workspaceSnapshot?.detectedStack ?? []).join(', ')}`]
+        : [])
     ];
     const decisions = this.events
       .list(session.id)
@@ -4691,36 +5899,7 @@ export class OrchestratorService {
   }
 
   private workspaceFocus(session: SessionDetail) {
-    const snapshot = session.workspaceSnapshot;
-    if (!snapshot) return undefined;
-    const relevantFiles = snapshot.files
-      .map((file) => ({
-        path: file.path,
-        score: this.workspaceFileRelevanceScore(file.path, session.originalInput)
-      }))
-      .filter((item) => item.score > 0)
-      .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
-      .map((item) => item.path)
-      .slice(0, 12);
-    const fallbackFiles = snapshot.files.map((file) => file.path).slice(0, 8);
-    const selectedRelevantFiles = relevantFiles.length ? relevantFiles : fallbackFiles;
-    const entrypoints = snapshot.entrypoints ?? [];
-    const configFiles = this.workspaceConfigFiles(snapshot);
-    const testFiles = this.workspaceTestFiles(snapshot, selectedRelevantFiles);
-    const impactedFiles = this.workspaceImpactedFiles(snapshot, selectedRelevantFiles, entrypoints);
-    const validationCommands = this.workspaceValidationCommands(snapshot);
-    return {
-      relevantFiles: selectedRelevantFiles,
-      impactedFiles,
-      testFiles,
-      configFiles,
-      possibleEntryPoints: entrypoints,
-      detectedStack: snapshot.detectedStack ?? [],
-      validationCommands,
-      rationale: relevantFiles.length
-        ? 'Matched workspace file paths against user requirement keywords, then added impacted files, tests, configs, entrypoints, and validation scripts.'
-        : 'No strong keyword match was found, so the first readable workspace files are used with detected tests, configs, entrypoints, and validation scripts.'
-    };
+    return this.projectMap.workspaceFocus(session);
   }
 
   private workspaceConfigFiles(snapshot: WorkspaceSnapshot) {
@@ -4831,12 +6010,94 @@ export class OrchestratorService {
     }
     return {
       workspaceId: session.workspaceId,
-      providerKind: session.workingDirectory?.kind === 'browser_local' ? 'browser_broker' as const : 'server_local' as const,
+      providerKind: workspaceProviderKindForDirectory(session.workingDirectory?.kind),
       capabilities: { read: false, write: false, command: false, test: false }
     };
   }
 
   private async runRuntime(inputSession: SessionDetail, input: RuntimeInvocationDraft, signal?: AbortSignal) {
+    let contextRetryCount = 0;
+    let supplementalContextDurationMs = 0;
+    let draft = input;
+    while (true) {
+      const result = await this.runRuntimeProviderAttempts(inputSession, draft, signal);
+      if (result.status === 'completed' || result.status === 'cancelled' || signal?.aborted) return result;
+      const requestedContext = result.error?.requestedContext;
+      const novelContext = this.resolveRetryRequest(
+        inputSession,
+        result.error?.code,
+        requestedContext,
+        contextRetryCount
+      );
+      if (!novelContext) {
+        if (result.error?.code === 'CONTEXT_INSUFFICIENT') {
+          workspaceMetrics.increment('context_insufficient_terminal_total', 1, { phase: draft.phase });
+        }
+        return result;
+      }
+
+      const supplementalStartedAt = Date.now();
+      const resolution = await this.hydrateSupplementalContext(inputSession, novelContext);
+      const supplementalDurationMs = Date.now() - supplementalStartedAt;
+      supplementalContextDurationMs += supplementalDurationMs;
+      workspaceMetrics.observe('supplemental_context_duration_ms', supplementalDurationMs, { phase: draft.phase });
+      workspaceMetrics.increment('supplemental_context_bytes_total', resolution.contentBytes, { phase: draft.phase });
+      const unstableCount = resolution.failedPaths.filter((item) => item.code === 'WORKSPACE_REVISION_UNSTABLE').length;
+      if (unstableCount) workspaceMetrics.increment('workspace_revision_unstable_total', unstableCount, { phase: draft.phase });
+      const task = draft.taskId ? this.tasks.find(inputSession.id, draft.taskId) : undefined;
+      this.recordSupplementalContextRequest(
+        inputSession,
+        task,
+        draft.agent.id,
+        novelContext,
+        resolution,
+        draft.phase
+      );
+      if (!this.hasUsableSupplementalContext(inputSession, novelContext, resolution)) {
+        workspaceMetrics.increment('context_insufficient_terminal_total', 1, { phase: draft.phase });
+        return result;
+      }
+
+      contextRetryCount += 1;
+      workspaceMetrics.increment('supplemental_context_retry_total', 1, { phase: draft.phase });
+      const selectedEvidenceContents = this.createSelectedEvidenceContents(
+        inputSession,
+        draft.contextAssembly.taskContext
+      ) ?? [];
+      const selectedPaths = new Set(
+        selectedEvidenceContents.map((item) => item.ref?.trim() || item.label.trim())
+      );
+      for (const path of resolution.hydratedPaths) {
+        if (selectedPaths.has(path)) continue;
+        const file = inputSession.workspaceSnapshot?.files.find((item) => item.path === path && item.content);
+        if (!file) continue;
+        const evidence = this.workspaceEvidenceContent(file);
+        selectedEvidenceContents.push({
+          ...evidence,
+          type: 'workspace_file',
+          label: path,
+          ref: path,
+          tokenEstimate: Math.max(1, Math.ceil(JSON.stringify(evidence).length / 4)),
+          selectionReason: `Requested by runtime during ${draft.phase}`
+        });
+        selectedPaths.add(path);
+      }
+      draft = {
+        ...draft,
+        invocationId: crypto.randomUUID(),
+        supplementalContextAttempt: contextRetryCount,
+        supplementalContextDurationMs,
+        contextAssembly: {
+          ...draft.contextAssembly,
+          workspaceSnapshot: this.runtimeWorkspaceSnapshot(inputSession.workspaceSnapshot),
+          workspaceManifest: buildWorkspaceManifest(inputSession.workspaceSnapshot),
+          selectedEvidenceContents
+        }
+      };
+    }
+  }
+
+  private async runRuntimeProviderAttempts(inputSession: SessionDetail, input: RuntimeInvocationDraft, signal?: AbortSignal) {
     const attemptGroupId = input.invocationId;
     const excludedRuntimeTypes = new Set<RuntimeType>([
       ...(input.excludedRuntimeTypes ?? []),
@@ -4867,7 +6128,13 @@ export class OrchestratorService {
           attempt,
           ...(retryOfInvocationId ? { retryOfInvocationId } : {}),
           ...(fallbackFromRuntimeType ? { fallbackFromRuntimeType } : {}),
-          ...(fallbackReason ? { fallbackReason } : {})
+          ...(fallbackReason ? { fallbackReason } : {}),
+          ...(input.supplementalContextAttempt
+            ? { supplementalContextAttempt: input.supplementalContextAttempt }
+            : {}),
+          ...(input.supplementalContextDurationMs !== undefined
+            ? { supplementalContextDurationMs: input.supplementalContextDurationMs }
+            : {})
         }
       }, signal);
       lastResult = result;
@@ -4904,6 +6171,7 @@ export class OrchestratorService {
       throw new Error('InvocationResolverService is unavailable.');
     }
     this.workspaceBindings?.bindSession(inputSession);
+    await this.refreshWorkspaceIndex(inputSession, input);
 
     let resolvedPlan: InvocationPlan;
     try {
@@ -4933,9 +6201,13 @@ export class OrchestratorService {
             toolCatalogHash: toolCatalog.catalogHash
           }),
         expectedOutput: input.expectedOutput,
-        budget: input.budget
+        budget: input.budget,
+        writeModeOverride: input.writeModeOverride
       });
       resolvedPlan = { ...resolvedPlan, attempt: input.attempt };
+      if (input.writeModeOverride) {
+        resolvedPlan = applyRuntimeWriteModeOverride(resolvedPlan, input.writeModeOverride);
+      }
     } catch (error) {
       if (error instanceof InvocationResolutionError) {
         return this.runtimeRoutingBlockedResult(inputSession, input, error.message);
@@ -4954,6 +6226,11 @@ export class OrchestratorService {
     const plan: InvocationPlan = priorRuntimeSession
       ? { ...resolvedPlan, resume: priorRuntimeSession }
       : resolvedPlan;
+
+    // === 检查是否有待审批的能力 ===
+    if (plan.pendingApprovals && plan.pendingApprovals.length > 0) {
+      return this.pendingApprovalResult(plan, plan.pendingApprovals, input);
+    }
 
     const requiresGroundedEvidence = requiresGroundedRuntimeEvidence(
       input.phase,
@@ -4977,6 +6254,17 @@ export class OrchestratorService {
     if (plan.budget.maxInputTokens && estimatedInputTokens > plan.budget.maxInputTokens) {
       return this.tokenBudgetExceededResult(plan, estimatedInputTokens, plan.budget.maxInputTokens);
     }
+    if (input.minimumOutputTokens !== undefined) {
+      const runtimeLimit = this.runtime.maxStructuredOutputTokens(plan);
+      const effectiveLimit = effectiveStructuredOutputLimit(plan.budget.maxOutputTokens, runtimeLimit);
+      if (effectiveLimit !== undefined && input.minimumOutputTokens > effectiveLimit) {
+        workspaceMetrics.increment('file_revision_model_capacity_rejected_total', 1, {
+          phase: plan.phase,
+          runtimeType: plan.executionTarget.runtimeType
+        });
+        return this.modelCapacityInsufficientResult(plan, input.minimumOutputTokens, effectiveLimit);
+      }
+    }
 
     this.events.create({
       sessionId: plan.sessionId,
@@ -4987,6 +6275,7 @@ export class OrchestratorService {
       metadata: createMetadata('system_notice', {
         runtimeInvocationId: plan.invocationId,
         runtimeType: plan.executionTarget.runtimeType,
+        phase: plan.phase,
         executionTarget: plan.executionTarget,
         toolCatalogHash: plan.toolCatalog.catalogHash,
         status: 'running'
@@ -5048,6 +6337,7 @@ export class OrchestratorService {
             ),
             metadata: createMetadata('system_notice', {
               runtimeInvocationId: plan.invocationId,
+              phase: plan.phase,
               code: 'RUNTIME_HEARTBEAT',
               elapsedMs: now - heartbeatStartedAt
             })
@@ -5077,6 +6367,51 @@ export class OrchestratorService {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       if (phaseTimer) clearTimeout(phaseTimer);
       if (signal && onParentAbort) signal.removeEventListener('abort', onParentAbort);
+    }
+  }
+
+  private async refreshWorkspaceIndex(session: SessionDetail, input: RuntimeInvocationDraft): Promise<void> {
+    const provider = this.workspaceProviders?.resolve(session);
+    if (!provider?.capabilities().read) return;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const refs = [
+        ...input.contextAssembly.taskContext.evidenceRefs,
+        ...input.contextAssembly.taskContext.taskMap.items
+      ]
+        .map((item) => item.ref)
+        .filter((ref): ref is string => Boolean(ref && ref.includes('/')))
+        .slice(0, 24);
+      const queryInput = {
+        query: input.contextAssembly.sessionGoal,
+        intent: input.contextAssembly.taskContext.intent,
+        pathHints: refs,
+        limit: 50
+      } as const;
+      const snapshot = await Promise.race([
+        provider.queryWorkspaceIndex
+          ? provider.queryWorkspaceIndex(queryInput)
+          : provider.getIndexSnapshot
+            ? provider.getIndexSnapshot({ limit: 50 })
+            : Promise.reject(new Error('WORKSPACE_INDEX_UNAVAILABLE')),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('WORKSPACE_INDEX_LOOKUP_TIMEOUT')), 500);
+          timer.unref?.();
+        })
+      ]);
+      session.workspaceIndex = snapshot;
+      if (session.workspaceContext) {
+        session.workspaceContext = {
+          ...session.workspaceContext,
+          indexGeneration: snapshot.generation,
+          indexRevision: snapshot.revision,
+          indexComplete: snapshot.complete
+        };
+      }
+    } catch {
+      // A stale or empty index is valid input; background indexing never blocks an invocation.
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
   private activeRuntimeProviderCircuits() {
@@ -5208,6 +6543,7 @@ export class OrchestratorService {
           runtimeType: result.runtimeType,
           agentId: input.agent.agentId,
           taskId: input.taskId,
+          phase: input.phase,
           status: result.status,
           code: result.error?.code,
           message: result.error?.message,
@@ -5281,6 +6617,37 @@ export class OrchestratorService {
     };
   }
 
+  private modelCapacityInsufficientResult(
+    input: InvocationPlan,
+    requiredTokens: number,
+    availableTokens: number
+  ): AgentRunResult {
+    const message =
+      `REVISION_MODEL_CAPACITY_INSUFFICIENT: candidate requires at least ${requiredTokens} output tokens, ` +
+      `but the selected Runtime allows ${availableTokens}.`;
+    return {
+      invocationId: input.invocationId,
+      runtimeType: input.executionTarget.runtimeType,
+      status: 'failed',
+      output: createAgentMessageOutput({ messageKind: 'risk', content: message }),
+      events: [],
+      artifacts: [],
+      systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        model: input.executionTarget.modelId ?? input.executionTarget.runtimeType
+      },
+      error: {
+        code: 'MODEL_ERROR',
+        message,
+        retryable: false,
+        details: { requiredTokens, availableTokens, phase: input.phase }
+      }
+    };
+  }
+
   private groundedEvidenceMissingResult(
     input: InvocationPlan,
     reason: 'evidence-empty' | 'evidence-only-generated' | 'evidence-only-sensitive' | 'evidence-not-navigable'
@@ -5346,6 +6713,73 @@ export class OrchestratorService {
     };
   }
 
+  private pendingApprovalResult(
+    plan: InvocationPlan,
+    pendingApprovals: NonNullable<InvocationPlan['pendingApprovals']>,
+    inputDraft: RuntimeInvocationDraft
+  ): AgentRunResult {
+    const approvalMessage = `需要用户授权以下能力:\n${pendingApprovals.map(a => `- ${a.toolKey} (原因: ${a.reasons.join(', ')})`).join('\n')}`;
+
+    // 保存待审批调用到 session
+    const pendingInvocation: PendingInvocation = {
+      invocationId: plan.invocationId,
+      sessionId: plan.sessionId,
+      taskId: plan.taskId!,
+      agentId: plan.agent.agentId,
+      phase: plan.phase,
+      pendingApprovals,
+      createdAt: new Date().toISOString()
+    };
+
+    // 通过回调保存，避免循环依赖
+    if (this.savePendingInvocationCallback) {
+      this.savePendingInvocationCallback(plan.sessionId, pendingInvocation);
+    }
+
+    // 发送审批请求事件
+    this.events.create({
+      sessionId: plan.sessionId,
+      type: 'capability_approval_required',
+      ...(plan.taskId ? { taskId: plan.taskId } : {}),
+      fromAgentId: plan.agent.agentId,
+      toAgentIds: [],
+      content: approvalMessage,
+      metadata: {
+        schemaVersion: '0.1',
+        renderAs: 'confirmation_card',
+        payload: { pendingApprovals }
+      }
+    });
+
+    return {
+      invocationId: plan.invocationId,
+      runtimeType: plan.executionTarget.runtimeType,
+      status: 'pending_approval',
+      output: createAgentMessageOutput({
+        messageKind: 'progress',
+        content: approvalMessage
+      }),
+      events: [],
+      artifacts: [],
+      systemEvidence: createRuntimeArtifactSystemEvidence(plan.invocationId),
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: plan.executionTarget.runtimeType },
+      error: {
+        code: 'HUMAN_APPROVAL_REQUIRED',
+        message: approvalMessage,
+        retryable: true,
+        details: {
+          contextPipelineVersion: 'v2',
+          phase: plan.phase,
+          pendingApprovals: pendingApprovals.map(a => ({
+            toolId: a.toolId,
+            toolKey: a.toolKey,
+            approvalId: a.approvalId
+          }))
+        }
+      }
+    };
+  }
+
   private compileAgentIdentity(agent: Agent) {
     // 编译 Markdown Profile：展开 ${skill:key}/${tool:key}，作为所有 Runtime 的统一 systemPrompt。
     // 编译器缺席（部分测试环境）时回退到原始 Markdown。
@@ -5356,6 +6790,21 @@ export class OrchestratorService {
     return session.participatingAgentIds
       .map((agentId) => this.agents.findByIdOrKey(agentId))
       .filter((agent): agent is Agent => Boolean(agent));
+  }
+
+  private requireDefaultFileRevisionReceiver() {
+    const receiver = this.agents.findByIdOrKey('coordinator');
+    if (!receiver || receiver.status !== 'active') {
+      throw new BadRequestException(
+        'REVISION_RECEIVER_UNAVAILABLE: the active system default Receiver is required for file revision processing.'
+      );
+    }
+    return receiver;
+  }
+
+  private fileRevisionRuntimeFailureMessage(code?: string) {
+    const stableCode = code && /^[A-Z][A-Z0-9_]+$/.test(code) ? code : 'REVISION_RUNTIME_FAILED';
+    return `File revision Agent processing failed (${stableCode}).`;
   }
 
   private pickSessionAgent(session: SessionDetail, preferredKeys: string[], fallbackIndex = 0) {

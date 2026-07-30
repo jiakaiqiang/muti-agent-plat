@@ -33,6 +33,31 @@ test('classifies authentication errors as permanent provider failures', () => {
   assert.equal(result?.details?.httpStatus, 401);
 });
 
+test('classifies Claude-to-OpenAI format mismatch as a permanent configuration failure', () => {
+  const result = classifyClaudeProviderFailure({
+    stdout: JSON.stringify({
+      type: 'assistant',
+      is_api_error_message: true,
+      message: {
+        content: [{
+          type: 'text',
+          text: "API Error: 400 Format mismatch: Request appears to be in format ['claude_chat'], but only [['openai_chat', 'openai_responses']] is allowed. (request id: private-request-id)"
+        }]
+      }
+    }),
+    exitCode: 1
+  }, 'invocation-format');
+
+  assert.equal(result?.code, 'MODEL_ERROR');
+  assert.equal(result?.retryable, false);
+  assert.equal(result?.details?.providerFailure, true);
+  assert.equal(result?.details?.httpStatus, 400);
+  assert.equal(result?.details?.failureKind, 'provider_format_mismatch');
+  assert.equal(result?.details?.requestedFormat, 'claude_chat');
+  assert.deepEqual(result?.details?.acceptedFormats, ['openai_chat', 'openai_responses']);
+  assert.doesNotMatch(JSON.stringify(result), /private-request-id/);
+});
+
 test('ignores unrelated process output', () => {
   assert.equal(classifyClaudeProviderFailure({ stderr: 'update_apply_exe_locked', code: 1 }, 'invocation'), undefined);
 });

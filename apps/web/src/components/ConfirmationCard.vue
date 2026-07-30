@@ -79,7 +79,7 @@ function actionStyle(action: PostReviewAction) {
 </script>
 
 <template>
-  <section class="confirmation-card" :class="{ compact }">
+  <section v-if="confirmation.reason !== 'confirm_file_revision_apply'" class="confirmation-card" :class="{ compact }">
     <div class="confirmation-card__heading"><span class="status-dot" :class="confirmation.status"></span><div><h3>{{ confirmation.title }}</h3><p>{{ confirmation.description }}</p></div></div>
     <div class="confirmation-card__meta"><span>{{ confirmation.reason }}</span><span>{{ confirmation.status }}</span></div>
 

@@ -60,7 +60,7 @@ test('WorkspaceProviderRegistry resolves a registered provider by kind', () => {
 
 test('WorkspaceProviderRegistry throws when resolving an unregistered kind', () => {
   const registry = new WorkspaceProviderRegistry();
-  assert.throws(() => registry.resolve('browser_broker'), /browser_broker/);
+  assert.throws(() => registry.resolve('local_bridge'), /local_bridge/);
 });
 
 test('WorkspaceProviderRegistry rejects duplicate registrations for the same kind', () => {

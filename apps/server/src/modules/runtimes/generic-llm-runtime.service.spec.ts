@@ -46,6 +46,17 @@ test('Generic LLM preflight accepts a complete selected model configuration', as
   }
 });
 
+test('Generic LLM reports the configured hard structured-output limit', () => {
+  const previous = process.env.LLM_REMOTE_MAX_OUTPUT_TOKENS;
+  process.env.LLM_REMOTE_MAX_OUTPUT_TOKENS = '3072';
+  try {
+    assert.equal(makeServiceWithCurrentFetch().maxStructuredOutputTokens({ modelId: 'remote:test-model' }), 3_072);
+  } finally {
+    if (previous === undefined) delete process.env.LLM_REMOTE_MAX_OUTPUT_TOKENS;
+    else process.env.LLM_REMOTE_MAX_OUTPUT_TOKENS = previous;
+  }
+});
+
 test('Generic LLM preflight rejects an incomplete selected model configuration', async () => {
   const service = new GenericLlmRuntimeService(
     {} as never,
@@ -60,6 +71,40 @@ test('Generic LLM preflight rejects an incomplete selected model configuration',
   const result = await service.checkAvailability();
   assert.equal(result.available, false);
   assert.match(result.reason ?? '', /model|baseUrl|apiKey/i);
+});
+
+test('Generic LLM rejects an Anthropic-compatible connection before any outbound request', async () => {
+  let requested = false;
+  globalThis.fetch = (async () => {
+    requested = true;
+    return new Response('', { status: 200 });
+  }) as typeof fetch;
+  try {
+    const service = new GenericLlmRuntimeService(
+      {} as never,
+      {
+        connectionForModelId() {
+          return {
+            id: 'anthropic:test',
+            model: 'claude-model',
+            baseUrl: 'https://anthropic.test',
+            apiKey: 'test-key',
+            kind: 'remote',
+            provider: 'anthropic-compatible',
+            credentialLocation: 'server'
+          };
+        }
+      } as never,
+      {} as never,
+      { resolveServerRoot: () => undefined } as never
+    );
+    const result = await service.checkAvailability();
+    assert.equal(result.available, false);
+    assert.match(result.reason ?? '', /incompatible/i);
+    assert.equal(requested, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('Generic LLM preflight rejects provider rate limiting before Agent fan-out', async () => {

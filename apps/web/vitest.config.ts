@@ -12,8 +12,10 @@ export default mergeConfig(
         'src/router/**/*.spec.ts',
         'src/stores/event-connection.spec.ts',
         'src/stores/event-normalization.spec.ts',
+        'src/stores/localRuntime.spec.ts',
+        'src/stores/session-delete.spec.ts',
+        'src/stores/session-file-revision.spec.ts',
         'src/stores/session-version-gate.spec.ts',
-        'src/stores/workspaceBrokerReconnect.spec.ts',
         'src/stores/workspaceUi.spec.ts'
       ]
     }

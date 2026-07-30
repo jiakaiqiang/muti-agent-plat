@@ -38,9 +38,19 @@ npm run test:watchdog-baseline                 2/2 PASS
 - Runtime invocation 的 stream metrics 持久化。
 - 环境变量非法值回退和 absolute 默认关闭。
 
-### 2.3 尚未通过
+### 2.3 2026-07-12 真实采样预检
 
-- 尚未获得本轮至少 20 次真实 CLI 调用的成本批准，因此未执行真实采样。
+- Claude Code `2.1.207` 的单次真实 probe 成功，产生 14 个流式帧、首帧 5,419 ms、最大帧间隔 7,383 ms、总时长 20,415 ms，并返回 CLI session id。
+- 单次 probe 使用 49,762 tokens；按相同量级估算，20 次约 995,240 tokens。
+- 本轮费用上限为 20 元，但 OAuth CLI 没有提供可审计的人民币费用字段，无法证明 20 次调用不会越过硬上限，因此未启动批量采样。
+- probe 属于环境和脚本预检，不计作 `REAL_CLI_PHASE=sample` 的 20 个正式 completed 样本。
+- Codex 三次 probe 均被 custom provider 的 Responses API 以 502 拒绝，Codex 样本采集继续依赖 PR-01 先解除阻塞。
+- 已使用该单样本验证基线报告链路，生成 `.cache/agent-cluster/watchdog-claude-provisional.json` 和 `.md`；预览候选为 first-frame 30,000 ms、idle 60,000 ms、absolute 关闭。
+- provisional 报告显式使用 `WATCHDOG_MIN_SAMPLES=1`，只证明分析器链路可运行，不是生产参数批准证据，不修改当前环境变量默认值。
+
+### 2.4 尚未通过
+
+- 已获得真实调用授权，但当前 20 元费用上限不足以安全批准约 100 万 tokens 的整批采样，正式 20 次采样未执行。
 - 尚未根据真实样本生成并批准生产参数表。
 - 尚未用最终候选值执行 staging 慢任务、无首帧、idle 卡死和回滚演练。
 

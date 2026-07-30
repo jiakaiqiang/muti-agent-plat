@@ -8,13 +8,13 @@ import {
   listRuntimeOutputContracts
 } from './runtime-contracts/index.js';
 
-test('registers exactly the seven version 1.0 runtime output contracts', () => {
+test('registers every declared version 1.0 runtime output contract', () => {
   const contracts = listRuntimeOutputContracts();
   assert.deepEqual(
     contracts.map((contract) => contract.kind),
     [...RUNTIME_OUTPUT_KINDS]
   );
-  assert.equal(new Set(contracts.map((contract) => contract.contractId)).size, 7);
+  assert.equal(new Set(contracts.map((contract) => contract.contractId)).size, RUNTIME_OUTPUT_KINDS.length);
   assert.ok(contracts.every((contract) => contract.version === '1.0'));
   assert.ok(contracts.every((contract) => /^fnv1a32:[0-9a-f]{8}$/.test(contract.schemaHash)));
   assert.doesNotThrow(() => assertRuntimeContractsReady());
@@ -28,7 +28,7 @@ test('every registered example passes its own validator', () => {
   }
 });
 
-test('all seven contracts reject missing fields, old versions, wrong kinds, and extra properties', () => {
+test('all declared contracts reject missing fields, old versions, wrong kinds, and extra properties', () => {
   for (const kind of RUNTIME_OUTPUT_KINDS) {
     const contract = getRuntimeOutputContract(kind);
     const valid = structuredClone(contract.example) as Record<string, unknown>;

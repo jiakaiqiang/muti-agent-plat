@@ -166,7 +166,10 @@ async function runScenario(threadId, turnId) {
     }
   });
 
-  if (activeOutputKind === 'task_execution_result' && process.env.STUB_EDIT_FILES === 'codex') {
+  if (
+    activeOutputKind === 'task_execution_result' &&
+    (process.env.CODEX_RUNTIME_STUB_EDIT_FILES ?? process.env.STUB_EDIT_FILES) === 'codex'
+  ) {
     mkdirSync('src', { recursive: true });
     writeFileSync('src/feature.txt', 'after from codex stub\n');
     writeFileSync('src/generated-by-codex.txt', 'created by codex stub\n');

@@ -99,6 +99,10 @@ export class EventsService implements OnModuleDestroy {
     return this.subjectFor(sessionId).asObservable();
   }
 
+  hasSession(sessionId: string) {
+    return this.eventsBySession.has(sessionId);
+  }
+
   deleteSession(sessionId: string) {
     this.eventsBySession.delete(sessionId);
     const subject = this.subjectsBySession.get(sessionId);
@@ -118,6 +122,8 @@ export class EventsService implements OnModuleDestroy {
   }
 
   onModuleDestroy() {
+    for (const subject of this.subjectsBySession.values()) subject.complete();
+    this.subjectsBySession.clear();
     return this.persistence.flush();
   }
 

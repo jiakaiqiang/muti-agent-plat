@@ -6,18 +6,21 @@ import { promisify } from 'node:util';
 import {
   api,
   buildServer,
-  createSessionAndWaitForBrief,
   listEvents,
-  startSmokeServer,
-  stopSmokeServer,
   waitForMatchingEvent,
   waitForStatus
 } from './smoke-server.mjs';
+import {
+  startBrowserPage,
+  startBrowserSmokeServer,
+  stopBrowserCollaborationSmoke
+} from './browser-smoke-utils.mjs';
 
 await buildServer();
 const execFile = promisify(execFileCallback);
 
 let server;
+let handle;
 let workspaceRoot;
 let worktreeRoot;
 
@@ -81,7 +84,7 @@ try {
   await execFile('git', ['add', '.'], { cwd: workspaceRoot });
   await execFile('git', ['commit', '-m', 'initial fixture'], { cwd: workspaceRoot });
 
-  server = await startSmokeServer('codex-runtime-stub-smoke', {
+  handle = await startBrowserSmokeServer('codex-runtime-stub-smoke', {
     DISCUSSION_MAX_ROUNDS: '0',
     REQUIRE_USER_CONFIRMATION: 'false',
     CODEX_RUNTIME_ENABLED: 'true',
@@ -90,9 +93,17 @@ try {
     CODEX_RUNTIME_SHELL: 'false',
     CODEX_RUNTIME_TEST_COMMAND: 'npm test',
     RUNTIME_STREAMING: 'codex',
-    STUB_EDIT_FILES: 'codex',
+    CODEX_RUNTIME_STUB_EDIT_FILES: 'codex',
     AGENT_CLUSTER_WORKTREE_ROOT: worktreeRoot
   });
+  server = handle.server;
+
+  const controlPlaneBefore = await api(server.apiBase, '/health');
+  const runtimeAvailability = (await api(server.apiBase, '/runtimes/availability')).data.items;
+  const codexAvailability = runtimeAvailability.find((item) => item.runtimeType === 'codex');
+  if (!codexAvailability?.available) {
+    throw new Error(`Codex Runtime is unavailable before browser creation: ${JSON.stringify(codexAvailability)}`);
+  }
 
   await api(server.apiBase, '/agents/backend', {
     method: 'PATCH',
@@ -122,20 +133,65 @@ try {
     body: JSON.stringify({ expectedDraftRevision: draft.draftRevision })
   })).data;
 
-  const { sessionId, briefId } = await createSessionAndWaitForBrief(
-    server.apiBase,
-    `Use Codex to update files in ${workspaceRoot}`,
-    {
-      workingDirectory: {
-        kind: 'server_local',
-        id: workspaceRoot,
-        name: 'codex-stub-workspace',
-        path: workspaceRoot,
-        selectedAt: new Date().toISOString()
-      },
-      runtimePreference: { preferredRuntimeType: 'codex', allowedRuntimeTypes: ['codex'] }
-    }
+  Object.assign(handle, await startBrowserPage(server.apiBase, handle.webPort));
+  const { page, web } = handle;
+  const browserErrors = [];
+  page.on('pageerror', (error) => browserErrors.push(error.message));
+  await page.goto(`${web.webBase}/?view=chat`, { waitUntil: 'networkidle' });
+  await page.getByRole('button', { name: '新建会话' }).click();
+  const dialog = page.getByRole('region', { name: '新建会话' });
+  await dialog.getByRole('button', { name: '服务器', exact: true }).click();
+  await dialog.getByLabel('服务器本地工作目录').fill(workspaceRoot);
+  const codexOption = dialog.getByLabel('Runtime 偏好').locator('option[value="codex"]');
+  await codexOption.waitFor({ state: 'attached' });
+  const availabilityDeadline = Date.now() + 20_000;
+  while (await codexOption.isDisabled()) {
+    if (Date.now() >= availabilityDeadline) throw new Error('Codex did not become available in the server-mode dialog.');
+    await page.waitForTimeout(100);
+  }
+  await dialog.getByLabel('Runtime 偏好').selectOption('codex');
+  await dialog.getByLabel('任务').fill('Use the server Runtime worker to update the selected server directory.');
+  await dialog.locator('.dialog-agent-picker button').filter({ hasText: backend.name }).click();
+  await dialog.getByRole('button', { name: '保存', exact: true }).click();
+  const confirmation = page.getByRole('region', { name: '确认保存会话' });
+  const dialogOutcome = await Promise.race([
+    confirmation.waitFor({ state: 'visible', timeout: 30_000 }).then(() => ({ confirmed: true })),
+    dialog.locator('.form-error').waitFor({ state: 'visible', timeout: 30_000 }).then(async () => ({
+      confirmed: false,
+      error: await dialog.locator('.form-error').innerText()
+    }))
+  ]);
+  if (!dialogOutcome.confirmed) {
+    throw new Error(`Browser server Session dialog validation failed: ${dialogOutcome.error}`);
+  }
+  const createResponsePromise = page.waitForResponse((response) =>
+    response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/sessions'
+  ).then(
+    (response) => ({ response }),
+    (error) => ({ error })
   );
+  await confirmation.getByRole('button', { name: '确认保存' }).click();
+  const createOutcome = await createResponsePromise;
+  if ('error' in createOutcome) {
+    const formError = await dialog.locator('.form-error').textContent().catch(() => undefined);
+    const confirmationVisible = await confirmation.isVisible().catch(() => false);
+    throw new Error(
+      `Browser server Session create did not issue POST /sessions: ${JSON.stringify({ formError, confirmationVisible, browserErrors })}`,
+      { cause: createOutcome.error }
+    );
+  }
+  const createResponse = createOutcome.response;
+  if (!createResponse.ok()) {
+    throw new Error(`Browser server Session create failed: ${createResponse.status()} ${await createResponse.text()}`);
+  }
+  const createdSession = (await createResponse.json()).data.session;
+  const sessionId = createdSession.id;
+  if (createdSession.workingDirectory?.kind !== 'server_local' || createdSession.workingDirectory.path !== workspaceRoot) {
+    throw new Error(`Browser server Session did not preserve server_local selection: ${JSON.stringify(createdSession.workingDirectory)}`);
+  }
+  const waitingForBrief = await waitForStatus(server.apiBase, sessionId, 'WAIT_USER_CONFIRM', 60_000);
+  const briefId = waitingForBrief.currentTaskBriefId;
+  if (!briefId) throw new Error('Browser-created server Session did not produce a Task Brief.');
   await api(server.apiBase, `/sessions/${sessionId}/briefs/${briefId}/confirm`, { method: 'POST' });
   await waitForStatus(server.apiBase, sessionId, 'WAIT_WORKFLOW_SELECT');
   const workflowSelection = await waitForMatchingEvent(
@@ -153,6 +209,18 @@ try {
     })
   });
   await waitForStatus(server.apiBase, sessionId, 'COMPLETED', 60_000);
+  const controlPlaneAfter = await api(server.apiBase, '/health');
+  if (
+    controlPlaneAfter.data.processId !== controlPlaneBefore.data.processId ||
+    controlPlaneAfter.data.startedAt !== controlPlaneBefore.data.startedAt
+  ) {
+    throw new Error(
+      `Nest control-plane process changed during the server Worker invocation: ${JSON.stringify({
+        before: controlPlaneBefore.data,
+        after: controlPlaneAfter.data
+      })}`
+    );
+  }
 
   const events = await listEvents(server.apiBase, sessionId);
   const codexRuntimeCompleted = events.find(
@@ -227,10 +295,10 @@ try {
     throw new Error('Expected create fileChange for src/generated-by-codex.txt.');
   }
 
-  console.log('codex runtime stub smoke ok');
+  console.log('browser -> server directory -> Server Runtime Worker -> file changes smoke ok');
 } finally {
-  if (server) {
-    await stopSmokeServer(server);
+  if (handle) {
+    await stopBrowserCollaborationSmoke(handle);
   }
   if (workspaceRoot) {
     await rm(workspaceRoot, { recursive: true, force: true });
@@ -239,3 +307,5 @@ try {
     await rm(worktreeRoot, { recursive: true, force: true });
   }
 }
+
+process.exit(0);

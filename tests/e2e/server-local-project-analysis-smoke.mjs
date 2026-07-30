@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   api,
@@ -6,7 +7,6 @@ import {
   confirmBriefAndSelectWorkflow,
   createPublishedAgentWorkflow,
   listEvents,
-  root,
   startSmokeServer,
   stopSmokeServer,
   waitForEvent,
@@ -17,7 +17,7 @@ await buildServer();
 
 let server;
 let analysisWorkflow;
-const fixtureRoot = join(root, '.cache', 'fixtures', 'server-local-project-analysis');
+const fixtureRoot = join(tmpdir(), `agent-cluster-server-local-project-analysis-${process.pid}`);
 
 try {
   resetFixture();
@@ -52,7 +52,7 @@ async function runReadOnlyProjectAnalysis() {
   if (detail.data.status !== 'COMPLETED') {
     throw new Error(`Expected explicit write analysis to complete: ${JSON.stringify(detail.data)}`);
   }
-  assertWorkspaceSnapshot(detail);
+  assertWorkspaceIndex(detail);
 
   const events = await listEvents(server.apiBase, sessionId);
   await assertArchitectLeadsProjectAnalysis(sessionId, events);
@@ -108,7 +108,7 @@ async function runExplicitWriteProjectAnalysis() {
   const sessionId = await runConfirmedSession(requirement);
 
   const detail = await api(server.apiBase, `/sessions/${sessionId}`);
-  assertWorkspaceSnapshot(detail);
+  assertWorkspaceIndex(detail);
 
   const events = await listEvents(server.apiBase, sessionId);
   await assertArchitectLeadsProjectAnalysis(sessionId, events);
@@ -125,7 +125,9 @@ async function runExplicitWriteProjectAnalysis() {
       change.content?.includes('vite')
   );
   if (!analysisFile) {
-    throw new Error('Expected explicit write request to expose a concrete Chinese project architecture analysis fileChange');
+    throw new Error(
+      `Expected explicit write request to expose a concrete Chinese project architecture analysis fileChange: ${JSON.stringify(fileChanges)}`
+    );
   }
 
   const generatedPath = join(fixtureRoot, 'agent-output', 'project-architecture-analysis.md');
@@ -174,11 +176,29 @@ async function runConfirmedSession(requirement) {
     body: JSON.stringify({
       input: requirement,
       agentIds: ['coordinator', 'architect', 'requirements', 'review'],
+      workingDirectory: {
+        kind: 'server_local',
+        id: 'client-placeholder',
+        name: 'server-local-project-analysis',
+        path: fixtureRoot,
+        selectedAt: new Date().toISOString()
+      },
       runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] }
     })
   });
   const sessionId = created.data.session.id;
-  await waitForEvent(server.apiBase, sessionId, 'brief_created');
+  try {
+    await waitForEvent(server.apiBase, sessionId, 'brief_created');
+  } catch (error) {
+    const [detail, events] = await Promise.all([
+      api(server.apiBase, `/sessions/${sessionId}`),
+      listEvents(server.apiBase, sessionId)
+    ]);
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)}; ` +
+      `session=${JSON.stringify(detail.data)}; events=${JSON.stringify(events.slice(-12))}`
+    );
+  }
   await confirmBriefAndSelectWorkflow(
     server.apiBase,
     sessionId,
@@ -253,12 +273,15 @@ async function assertArchitectLeadsProjectAnalysis(sessionId, events) {
   }
 }
 
-function assertWorkspaceSnapshot(detail) {
+function assertWorkspaceIndex(detail) {
   if (detail.data.workingDirectory?.kind !== 'server_local') {
     throw new Error(`Expected server_local working directory: ${JSON.stringify(detail.data.workingDirectory)}`);
   }
-  if (detail.data.workspaceSnapshot?.rootName !== 'server-local-project-analysis') {
-    throw new Error(`Expected workspace snapshot from server local path: ${JSON.stringify(detail.data.workspaceSnapshot)}`);
+  if (
+    detail.data.workspaceIndex?.workspaceId !== detail.data.workspaceId ||
+    !detail.data.workspaceIndex.entries?.some((entry) => entry.path === 'src/main.ts')
+  ) {
+    throw new Error(`Expected Provider metadata index from server local path: ${JSON.stringify(detail.data.workspaceIndex)}`);
   }
 }
 

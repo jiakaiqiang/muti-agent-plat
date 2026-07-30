@@ -5,6 +5,7 @@ import type {
   AgentRuntimeAdapter,
   AgentRuntimeRunHandle,
   FinalDeliveryOutput,
+  FileRevisionCandidateOutput,
   InvocationPlan,
   PostReviewReportOutput,
   RuntimeArtifactOutput,
@@ -113,6 +114,8 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
         return this.acceptance(input, taskTitle);
       case 'task_execution_result':
         return this.execution(input, goal, taskTitle);
+      case 'file_revision_candidate':
+        return this.fileRevisionCandidate(input);
       case 'post_review_report':
         return this.postReview();
       case 'final_delivery':
@@ -175,6 +178,28 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
     };
   }
 
+  private fileRevisionCandidate(input: InvocationPlan): FileRevisionCandidateOutput {
+    const evidence = input.contextEnvelope.L3.fileRevisions?.[0];
+    if (!evidence || !evidence.complete || evidence.truncated) {
+      throw new Error('REVISION_CONTEXT_INCOMPLETE: Mock Runtime requires complete revision evidence.');
+    }
+    return {
+      schemaVersion: '1.0',
+      kind: 'file_revision_candidate',
+      revisionId: evidence.revisionId,
+      chainId: evidence.chainId,
+      iteration: evidence.iteration,
+      sourceDraftHash: evidence.userDraft.hash,
+      evidenceHash: evidence.evidenceHash,
+      content: evidence.userDraft.content,
+      summary: 'Receiver preserved the complete authoritative user draft.',
+      incorporatedAgentResultIds: (evidence.agentResults ?? [])
+        .filter((result) => result.status === 'completed')
+        .map((result) => result.id),
+      unresolvedConflicts: []
+    };
+  }
+
   private acceptance(input: InvocationPlan, taskTitle: string): TaskAcceptanceDecisionOutput {
     const rejected = new Set(
       (process.env.MOCK_REJECT_ACCEPTANCE_AGENT_KEYS ?? '').split(',').map((item) => item.trim()).filter(Boolean)
@@ -226,6 +251,32 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
   }
 
   private executionArtifact(input: InvocationPlan, goal: string, taskTitle: string): RuntimeArtifactOutput {
+    const revisionEvidence = input.contextEnvelope.L3.fileRevisions?.[0];
+    if (revisionEvidence) {
+      if (!revisionEvidence.complete || revisionEvidence.truncated) {
+        throw new Error('REVISION_CONTEXT_INCOMPLETE: Mock Runtime requires complete revision evidence.');
+      }
+      const content = revisionEvidence.userDraft.content;
+      return createRuntimeArtifactOutput({
+        type: 'markdown',
+        title: `${taskTitle} file revision proposal`,
+        content,
+        summary: `Proposed an update to ${revisionEvidence.filePath}`,
+        metadata: {
+          ...emptyRuntimeArtifactProposalMetadata(),
+          fileChanges: [
+            {
+              path: revisionEvidence.filePath,
+              operation: 'update',
+              content,
+              previousContent: revisionEvidence.base.content,
+              encoding: 'utf-8',
+              source: 'runtime_proposed_change'
+            }
+          ]
+        }
+      });
+    }
     if (this.isArchitectureAgent(input)) {
       return this.architectureArtifact(input, goal);
     }

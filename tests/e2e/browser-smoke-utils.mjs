@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { join } from 'node:path';
 import { chromium } from 'playwright';
 import { findFreePort, root, startSmokeServer, stopSmokeServer } from './smoke-server.mjs';
 
@@ -54,9 +55,9 @@ export async function startWebPreview(apiBase, port) {
 
   const preview = spawn(
     process.execPath,
-    [npmCli, 'run', 'preview', '-w', '@project/web', '--', '--host', '127.0.0.1', '--port', port],
+    [join(root, 'node_modules', 'vite', 'bin', 'vite.js'), 'preview', '--host', '127.0.0.1', '--port', port],
     {
-      cwd: root,
+      cwd: join(root, 'apps', 'web'),
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
@@ -72,7 +73,12 @@ export async function startWebPreview(apiBase, port) {
 
 export async function stopWebPreview(handle) {
   if (handle.preview.pid && process.platform === 'win32') {
-    spawn('taskkill', ['/pid', String(handle.preview.pid), '/T', '/F'], { stdio: 'ignore' });
+    await new Promise((resolve) => {
+      const killer = spawn('taskkill', ['/pid', String(handle.preview.pid), '/T', '/F'], { stdio: 'ignore' });
+      const timer = setTimeout(resolve, 5_000);
+      killer.once('exit', () => { clearTimeout(timer); resolve(); });
+      killer.once('error', () => { clearTimeout(timer); resolve(); });
+    });
   } else if (!handle.preview.killed) {
     handle.preview.kill();
   }
@@ -83,6 +89,8 @@ export async function stopWebPreview(handle) {
       resolve();
     });
   });
+  handle.preview.stdout?.destroy();
+  handle.preview.stderr?.destroy();
 }
 
 export async function startBrowserCollaborationSmoke(name, serverEnv = {}) {
@@ -118,8 +126,17 @@ export async function startBrowserPage(apiBase, webPort) {
 }
 
 export async function stopBrowserCollaborationSmoke(handle) {
+  if (handle.page && !handle.page.isClosed()) {
+    await Promise.race([
+      handle.page.close(),
+      new Promise((resolve) => setTimeout(resolve, 5_000))
+    ]);
+  }
   if (handle.browser) {
-    await handle.browser.close();
+    await Promise.race([
+      handle.browser.close(),
+      new Promise((resolve) => setTimeout(resolve, 5_000))
+    ]);
   }
   if (handle.web) {
     await stopWebPreview(handle.web);

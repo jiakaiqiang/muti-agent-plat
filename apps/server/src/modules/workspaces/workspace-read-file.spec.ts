@@ -35,6 +35,7 @@ test('readServerLocalFile returns text content, byte length, hash and revision',
     assert.equal(result.byteLength, Buffer.byteLength(content));
     assert.equal(result.truncated, false);
     assert.equal(result.revision.id, revision.id);
+    assert.ok(result.hash);
     assert.equal(result.hash.algorithm, 'sha256');
     assert.ok(result.hash.value.length > 0);
   });
@@ -52,6 +53,9 @@ test('readServerLocalFile marks truncated=true when maxBytes exceeded', async ()
     assert.equal(result.truncated, true);
     assert.equal(result.byteLength, 100);
     assert.equal(result.content.length, 100);
+    assert.equal(result.hash, undefined);
+    assert.ok(result.rangeHash);
+    assert.equal(result.fileSize, 1000);
   });
 });
 

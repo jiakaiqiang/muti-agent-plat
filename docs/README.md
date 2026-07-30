@@ -40,3 +40,4 @@
 - 修复方案和执行计划统一归入 `roadmap/`。
 - 功能清单与项目分析统一归入 `analysis/`，作为“现状与问题”入口。
 - 系统设计、工作区感知设计和 UI 风格统一归入 `design/`。
+- Workspace Index First 当前补齐任务统一从 `implementation/workspace-index-first-on-demand-context-remediation-development-v1.md` 执行；原实施说明和验收报告中的“已完成”状态须以该文档退出规则复核。

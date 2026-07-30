@@ -14,6 +14,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { Queue, type ConnectionOptions } from 'bullmq';
 import { ok } from '../../common/api-response.js';
 import { resolveBuildCommit } from '../../common/build-metadata.js';
+import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import { bullMqEnabled, bullMqPrefix, redisConnectionOptions } from '../../common/redis.js';
 import { MaintenanceCoordinatorService } from '../persistence/maintenance-coordinator.service.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
@@ -105,6 +106,11 @@ export class OpsController {
       prefix,
       queues: await this.readBullMqQueues(prefix)
     });
+  }
+
+  @Get('ops/workspace-metrics')
+  workspaceMetrics() {
+    return ok(workspaceMetrics.snapshot());
   }
 
   private async readBullMqQueues(prefix: string) {

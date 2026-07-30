@@ -3,6 +3,8 @@ import type { RuntimeContextRequest, SessionDetail, TaskEvidenceRef } from '@age
 export type SeenContextSignatures = {
   refs: Set<string>;
   paths: Set<string>;
+  directories: Set<string>;
+  searches: Set<string>;
   commands: Set<string>;
 };
 
@@ -12,13 +14,20 @@ export function refSignature(ref: TaskEvidenceRef): string {
 }
 
 export function collectSeenContextSignatures(
-  prior: SessionDetail['supplementalContextRequests']
+  prior: SessionDetail['supplementalContextRequests'],
+  currentRevisionId?: string
 ): SeenContextSignatures {
   const refs = new Set<string>();
   const paths = new Set<string>();
+  const directories = new Set<string>();
+  const searches = new Set<string>();
   const commands = new Set<string>();
   for (const entry of prior ?? []) {
-    const hydratedPaths = entry.resolution ? new Set(entry.resolution.hydratedPaths) : undefined;
+    const revisionMatches = (path: string) =>
+      !currentRevisionId || entry.resolution?.evidenceRevisions?.[path]?.id === currentRevisionId;
+    const hydratedPaths = entry.resolution
+      ? new Set(entry.resolution.hydratedPaths.filter(revisionMatches))
+      : undefined;
     for (const ref of entry.requestedContext.requestedRefs ?? []) {
       if (
         hydratedPaths &&
@@ -29,22 +38,38 @@ export function collectSeenContextSignatures(
       }
       refs.add(refSignature(ref));
     }
-    const providedPaths = entry.resolution?.hydratedPaths ?? entry.requestedContext.requestedPaths ?? [];
+    const providedPaths = entry.resolution
+      ? entry.resolution.hydratedPaths.filter(revisionMatches)
+      : entry.requestedContext.requestedPaths ?? [];
     for (const path of providedPaths) {
       if (path) paths.add(path);
+    }
+    for (const directory of entry.requestedContext.requestedDirectories ?? []) {
+      const evidencePath = `${directory.path.replace(/\/+$/, '') || '.'}/`;
+      if (entry.resolution?.listedDirectories?.includes(directory.path) && revisionMatches(evidencePath)) {
+        directories.add(directorySignature(directory));
+      }
+    }
+    for (const search of entry.requestedContext.requestedSearches ?? []) {
+      const evidencePath = `search:${search.query}`;
+      if (entry.resolution?.completedSearches?.includes(searchSignature(search)) && revisionMatches(evidencePath)) {
+        searches.add(searchSignature(search));
+      }
     }
     const providedCommands = entry.resolution ? [] : entry.requestedContext.requestedCommands ?? [];
     for (const command of providedCommands) {
       if (command) commands.add(command);
     }
   }
-  return { refs, paths, commands };
+  return { refs, paths, directories, searches, commands };
 }
 
 export type RequestedContextDiff = {
   novelRefs: TaskEvidenceRef[];
   novelPaths: string[];
   novelCommands: string[];
+  novelDirectories: NonNullable<RuntimeContextRequest['requestedDirectories']>;
+  novelSearches: NonNullable<RuntimeContextRequest['requestedSearches']>;
   hasNovelEntries: boolean;
 };
 
@@ -62,9 +87,15 @@ export function diffRequestedContext(
   const novelCommands = (candidate.requestedCommands ?? []).filter(
     (command) => command && !seen.commands.has(command)
   );
+  const novelDirectories = (candidate.requestedDirectories ?? []).filter(
+    (directory) => !seen.directories.has(directorySignature(directory))
+  );
+  const novelSearches = (candidate.requestedSearches ?? []).filter(
+    (search) => !seen.searches.has(searchSignature(search))
+  );
   const hasNovelEntries =
-    novelRefs.length > 0 || novelPaths.length > 0 || novelCommands.length > 0;
-  return { novelRefs, novelPaths, novelCommands, hasNovelEntries };
+    novelRefs.length > 0 || novelPaths.length > 0 || novelDirectories.length > 0 || novelSearches.length > 0 || novelCommands.length > 0;
+  return { novelRefs, novelPaths, novelDirectories, novelSearches, novelCommands, hasNovelEntries };
 }
 
 export function trimToNovelContext(
@@ -77,7 +108,17 @@ export function trimToNovelContext(
     reason: candidate.reason,
     requestedRefs: diff.novelRefs,
     requestedPaths: diff.novelPaths.length ? diff.novelPaths : undefined,
+    requestedDirectories: diff.novelDirectories.length ? diff.novelDirectories : undefined,
+    requestedSearches: diff.novelSearches.length ? diff.novelSearches : undefined,
     requestedCommands: diff.novelCommands.length ? diff.novelCommands : undefined,
     followUpInstruction: candidate.followUpInstruction
   };
+}
+
+function directorySignature(directory: NonNullable<RuntimeContextRequest['requestedDirectories']>[number]): string {
+  return `${directory.path}:${directory.depth ?? 1}`;
+}
+
+function searchSignature(search: NonNullable<RuntimeContextRequest['requestedSearches']>[number]): string {
+  return JSON.stringify([search.query, search.path ?? '.', search.include ?? [], search.exclude ?? []]);
 }

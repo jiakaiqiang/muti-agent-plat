@@ -5,9 +5,11 @@ import type {
   RuntimeModelKind,
   RuntimeModelOption,
   RuntimeModelProvider,
+  RuntimeCredentialLocation,
   RuntimeModelSource,
   RuntimeModelUpdateInput
 } from '@agent-cluster/shared';
+import { runtimeTypesForModelProvider } from '@agent-cluster/shared';
 import {
   genericLlmMockFallbackEnabled,
   llmApiKey,
@@ -25,9 +27,12 @@ type PersistedRuntimeModelOption = {
   provider: RuntimeModelProvider;
   source: RuntimeModelSource;
   kind: RuntimeModelKind;
+  credentialLocation?: RuntimeCredentialLocation;
+  deviceId?: string;
   model: string;
   baseUrl?: string;
   apiKey?: string;
+  hasApiKey?: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -51,6 +56,9 @@ export type RuntimeModelConnection = {
   baseUrl?: string;
   apiKey?: string;
   kind: RuntimeModelKind;
+  provider: RuntimeModelProvider;
+  credentialLocation: RuntimeCredentialLocation;
+  deviceId?: string;
 };
 
 const collectionKey = 'runtimeModelConfig';
@@ -92,7 +100,7 @@ export class RuntimeModelConfigService {
     const currentModelOption = selectedModelOption;
 
     return {
-      provider,
+      provider: currentModelOption.provider,
       baseUrl: this.resolveBaseUrl(currentModelOption),
       currentModelId: currentModelOption.id,
       currentModel: currentModelOption.model,
@@ -122,8 +130,13 @@ export class RuntimeModelConfigService {
       id: option.id,
       model: option.model,
       baseUrl: persisted?.baseUrl ?? this.resolveBaseUrl(option),
-      apiKey: persisted?.apiKey ?? this.resolveApiKey(option),
-      kind: option.kind
+      apiKey: (persisted?.credentialLocation ?? option.credentialLocation) === 'local'
+        ? undefined
+        : persisted?.apiKey ?? this.resolveApiKey(option),
+      kind: option.kind,
+      provider: option.provider,
+      credentialLocation: option.credentialLocation,
+      ...(option.deviceId ? { deviceId: option.deviceId } : {})
     };
   }
 
@@ -160,24 +173,34 @@ export class RuntimeModelConfigService {
     if (input.kind === 'remote') {
       const baseUrl = this.normalizeBaseUrl(input.baseUrl);
       const apiKey = input.apiKey?.trim();
+      const provider = input.provider ?? 'openai-compatible';
+      const credentialLocation = input.credentialLocation ?? 'server';
       if (!baseUrl) {
         throw new BadRequestException('Remote model base URL is required.');
       }
       if (!apiKey) {
         throw new BadRequestException('Remote model API key is required.');
       }
+      if (credentialLocation === 'local' && !input.deviceId?.trim()) {
+        throw new BadRequestException('A local credential requires a Local Runtime device id.');
+      }
       this.upsertModel({
         kind: 'remote',
         source: 'remote',
+        provider,
+        credentialLocation,
+        deviceId: input.deviceId?.trim(),
         model,
         label: input.label?.trim() || model,
         baseUrl,
-        apiKey
+        ...(credentialLocation === 'server' ? { apiKey } : { hasApiKey: true })
       });
     } else {
       this.upsertModel({
         kind: 'local',
         source: 'local',
+        provider: 'ollama',
+        credentialLocation: 'server',
         model,
         label: input.label?.trim() || model,
         baseUrl: this.localBaseUrl()
@@ -199,6 +222,12 @@ export class RuntimeModelConfigService {
       throw new BadRequestException('Model name is required.');
     }
     const label = input.label !== undefined ? input.label.trim() || model : existing.label;
+    const provider = input.provider ?? existing.provider ?? (existing.kind === 'local' ? 'ollama' : 'openai-compatible');
+    const credentialLocation = input.credentialLocation ?? existing.credentialLocation ?? 'server';
+    const deviceId = input.deviceId !== undefined ? input.deviceId.trim() || undefined : existing.deviceId;
+    if (existing.kind === 'remote' && credentialLocation === 'local' && !deviceId) {
+      throw new BadRequestException('A local credential requires a Local Runtime device id.');
+    }
 
     let baseUrl = existing.baseUrl;
     let apiKey = existing.apiKey;
@@ -207,24 +236,28 @@ export class RuntimeModelConfigService {
       if (!baseUrl) {
         throw new BadRequestException('Remote model base URL is required.');
       }
-      if (input.apiKey !== undefined && input.apiKey.trim()) {
+      if (credentialLocation === 'server' && input.apiKey !== undefined && input.apiKey.trim()) {
         apiKey = input.apiKey.trim();
       }
-      if (!apiKey) {
+      if (credentialLocation === 'server' && !apiKey) {
         throw new BadRequestException('Remote model API key is required.');
       }
     }
 
     const now = nowIso();
     // model/baseUrl 参与 id 生成,编辑它们会产生新 id,需要同步迁移 currentModelId
-    const nextId = this.modelId(existing.kind, model, existing.kind === 'remote' ? baseUrl : existing.baseUrl);
+    const nextId = this.modelId(existing.kind, model, existing.kind === 'remote' ? baseUrl : existing.baseUrl, provider, credentialLocation, deviceId);
     const next: PersistedRuntimeModelOption = {
       ...existing,
       id: nextId,
       model,
       label,
+      provider,
+      credentialLocation,
+      deviceId,
       baseUrl,
-      apiKey,
+      apiKey: credentialLocation === 'server' ? apiKey : undefined,
+      hasApiKey: credentialLocation === 'local' ? (input.apiKey?.trim() ? true : existing.hasApiKey) : undefined,
       updatedAt: now
     };
     this.config = {
@@ -281,24 +314,31 @@ export class RuntimeModelConfigService {
   private upsertModel(input: {
     kind: RuntimeModelKind;
     source: Extract<RuntimeModelSource, 'local' | 'remote'>;
+    provider: RuntimeModelProvider;
+    credentialLocation: RuntimeCredentialLocation;
+    deviceId?: string;
     model: string;
     label: string;
     baseUrl?: string;
     apiKey?: string;
+    hasApiKey?: boolean;
   }) {
     const now = nowIso();
     const existingModels = this.config.models ?? [];
-    const id = this.modelId(input.kind, input.model, input.baseUrl);
+    const id = this.modelId(input.kind, input.model, input.baseUrl, input.provider, input.credentialLocation, input.deviceId);
     const existing = existingModels.find((model) => model.id === id);
     const next: PersistedRuntimeModelOption = {
       id,
-      provider: input.kind === 'local' ? 'ollama' : 'openai-compatible',
+      provider: input.provider,
+      credentialLocation: input.credentialLocation,
+      deviceId: input.deviceId,
       source: input.source,
       kind: input.kind,
       model: input.model,
       label: input.label,
       baseUrl: input.baseUrl,
-      apiKey: input.apiKey,
+      apiKey: input.credentialLocation === 'server' ? input.apiKey : undefined,
+      hasApiKey: input.hasApiKey,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now
     };
@@ -325,6 +365,7 @@ export class RuntimeModelConfigService {
       provider,
       source,
       kind,
+      credentialLocation: 'server',
       model,
       baseUrl: provider === 'ollama' ? this.localBaseUrl() : llmBaseUrl(),
       createdAt: now,
@@ -340,6 +381,7 @@ export class RuntimeModelConfigService {
       provider: 'ollama',
       source: 'local',
       kind: 'local',
+      credentialLocation: 'server',
       model,
       baseUrl: this.localBaseUrl(),
       createdAt: now,
@@ -354,9 +396,14 @@ export class RuntimeModelConfigService {
       provider: model.provider,
       source: model.source,
       kind: model.kind,
+      credentialLocation: model.credentialLocation ?? 'server',
+      ...(model.deviceId ? { deviceId: model.deviceId } : {}),
+      compatibleRuntimeTypes: runtimeTypesForModelProvider(model.provider ?? (model.kind === 'local' ? 'ollama' : 'openai-compatible')),
       model: model.model,
       baseUrl: model.baseUrl,
-      hasApiKey: model.kind === 'remote' ? Boolean(model.apiKey ?? llmApiKey()) : false,
+      hasApiKey: model.kind === 'remote'
+        ? Boolean(model.hasApiKey ?? model.apiKey ?? (model.credentialLocation === 'local' ? false : llmApiKey()))
+        : false,
       persisted: (this.config.models ?? []).some((item) => item.id === model.id),
       createdAt: model.createdAt,
       updatedAt: model.updatedAt
@@ -376,14 +423,21 @@ export class RuntimeModelConfigService {
     }
   }
 
-  private modelId(kind: RuntimeModelKind, model: string, baseUrl?: string) {
+  private modelId(
+    kind: RuntimeModelKind,
+    model: string,
+    baseUrl?: string,
+    provider: RuntimeModelProvider = kind === 'local' ? 'ollama' : 'openai-compatible',
+    credentialLocation: RuntimeCredentialLocation = 'server',
+    deviceId?: string
+  ) {
     const endpoint = kind === 'remote' ? this.normalizeBaseUrl(baseUrl) ?? 'remote' : 'local';
-    return `${kind}:${this.slug(endpoint)}:${this.slug(model)}`;
+    return `${kind}:${provider}:${credentialLocation}:${this.slug(deviceId ?? endpoint)}:${this.slug(model)}`;
   }
 
   private defaultModelId(model: string) {
     const provider = llmProvider();
-    return this.modelId(provider === 'ollama' ? 'local' : 'remote', model, provider === 'ollama' ? this.localBaseUrl() : llmBaseUrl());
+    return this.modelId(provider === 'ollama' ? 'local' : 'remote', model, provider === 'ollama' ? this.localBaseUrl() : llmBaseUrl(), provider);
   }
 
   private normalizeModelId(value?: string) {

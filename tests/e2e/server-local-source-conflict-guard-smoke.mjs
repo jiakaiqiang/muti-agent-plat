@@ -63,3 +63,5 @@ try {
     await rm(workspaceRoot, { recursive: true, force: true });
   }
 }
+
+process.exit(0);

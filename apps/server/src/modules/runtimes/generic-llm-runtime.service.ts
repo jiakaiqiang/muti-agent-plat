@@ -17,6 +17,7 @@ import type {
   UserMessageHandlingPlanOutput
 } from '@agent-cluster/shared';
 import { createAgentMessageOutput, createRuntimeArtifactSystemEvidence } from '@agent-cluster/shared';
+import { modelProviderSupportsRuntime } from '@agent-cluster/shared';
 import {
   genericLlmMockFallbackEnabled,
   llmDiagnosticPreviewChars,
@@ -130,7 +131,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     provider: 'openai-compatible',
     capabilityIds: ['cap-file-read', 'cap-code-search'] as const,
     supportedWorkspaceCapabilities: ['read'] as const,
-    supportedWorkspaceProviderKinds: ['server_local', 'browser_broker', 'local_bridge'] as const,
+    supportedWorkspaceProviderKinds: ['server_local'] as const,
     supportedToolNames: ['read_file', 'search_code'] as const
   };
   private readonly structuredOutputCapabilities = new Map<string, ActiveStructuredOutputMode>();
@@ -143,9 +144,16 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     @Optional() private readonly toolAudit?: ToolInvocationAuditService
   ) {}
 
+  maxStructuredOutputTokens(input: { modelId?: string }) {
+    const connection = this.modelConfig.connectionForModelId(input.modelId);
+    return connection.kind === 'remote' ? llmRemoteMaxOutputTokens() : llmLocalMaxOutputTokens();
+  }
+
   async checkAvailability() {
     if (genericLlmMockFallbackEnabled()) return { available: true };
     const connection = this.modelConfig.connectionForModelId(undefined);
+    const compatibilityError = this.connectionCompatibilityError(connection);
+    if (compatibilityError) return { available: false, reason: compatibilityError };
     const missing = this.missingConfig(connection);
     if (missing.length) {
       return { available: false, reason: `Generic LLM configuration is missing: ${missing.join(', ')}` };
@@ -200,6 +208,11 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       return this.runFallback(input, selectedConnection.model, signal);
     }
 
+    const compatibilityError = this.connectionCompatibilityError(selectedConnection);
+    if (compatibilityError) {
+      return this.failedResult(input, startedAt, selectedConnection.model, compatibilityError, 'CAPABILITY_BLOCKED');
+    }
+
     const missingConfig = this.missingConfig(selectedConnection);
     if (missingConfig.length) {
       return this.withTokenEstimationDiagnostic(input, this.failedResult(
@@ -221,6 +234,18 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
 
   private withTokenEstimationDiagnostic(input: InvocationPlan, result: AgentRunResult): AgentRunResult {
     return result;
+  }
+
+  private connectionCompatibilityError(connection: RuntimeModelConnection): string | undefined {
+    const provider = connection.provider ?? 'openai-compatible';
+    const credentialLocation = connection.credentialLocation ?? 'server';
+    if (!modelProviderSupportsRuntime(provider, 'generic_llm')) {
+      return `Model protocol ${provider} is incompatible with Generic LLM. Use an OpenAI-compatible or Ollama connection.`;
+    }
+    if (credentialLocation !== 'server') {
+      return 'A locally stored credential can only be used by a Local Runtime invocation.';
+    }
+    return undefined;
   }
 
   private async runFallback(input: InvocationPlan, selectedModel: string, signal?: AbortSignal): Promise<AgentRunResult> {
@@ -1015,7 +1040,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       'Do not call tools, modify files, or perform external side effects.',
       'Use ContextEnvelopeV2 L1 for the task and navigation, L2 for the project map, and L3 for grounded evidence.',
       'Treat taskContext.evidenceSelection.omittedRefs as intentionally excluded context; ask for more evidence instead of inventing details when selected evidence is insufficient.',
-      'When selected evidence is insufficient for the expected output, return the expected JSON kind with status "blocked" when supported, summary explaining the gap, and requestedContext containing reason, requestedRefs, requestedPaths, requestedCommands, and followUpInstruction. Do not fabricate file contents, APIs, test results, or logs.',
+      'When selected evidence is insufficient for the expected output, return the expected JSON kind with status "blocked" when supported, summary explaining the gap, and requestedContext containing reason, requestedRefs, requestedPaths, optional requestedDirectories, optional requestedSearches, requestedCommands, and followUpInstruction. Do not fabricate file contents, APIs, test results, or logs.',
       'For non-coding tasks, validate fact consistency, scope consistency, traceability, and delivery completeness instead of inventing implementation evidence.',
       input.expectedOutput.kind === 'task_brief'
         ? 'When the user asks to analyze, understand, or become familiar with a project/repository architecture, assign exactly one architect task. The architect scenario is only: analyze the current project structure and main execution/collaboration path from an architecture viewpoint, then provide architecture ideas, risks, and suggestions grounded in workspaceManifest/projectMap/selectedEvidenceContents. Do not add a separate review/test task unless the user explicitly asks for validation.'
@@ -1028,7 +1053,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         ? 'For agent_message, the "content" field must be one plain-text string (never an object or array). Write a detailed Chinese response with 3-6 concise paragraphs or bullets covering understanding, concerns, and recommendations.'
         : '',
       input.expectedOutput.kind === 'task_acceptance_decision'
-        ? 'For task_acceptance_decision, decide whether this assigned agent can execute the currentTask. Return status accepted, blocked, or rejected; reason; optional missingContext; optional requestedContext { reason, requestedRefs, requestedPaths, requestedCommands, followUpInstruction } when evidence is insufficient; optional handoffSuggestion { targetAgentKey or targetAgentId, reason, riskLevel }; optional confidence; optional alternativeAgentKeys/alternativeAgentIds; and optional agentMessages. Do not reassign the task yourself.'
+        ? 'For task_acceptance_decision, decide whether this assigned agent can execute the currentTask. Return status accepted, blocked, or rejected; reason; optional missingContext; optional requestedContext { reason, requestedRefs, requestedPaths, requestedDirectories, requestedSearches, requestedCommands, followUpInstruction } when evidence is insufficient; optional handoffSuggestion { targetAgentKey or targetAgentId, reason, riskLevel }; optional confidence; optional alternativeAgentKeys/alternativeAgentIds; and optional agentMessages. Do not reassign the task yourself.'
         : '',
       input.expectedOutput.kind === 'task_execution_result'
         ? 'For task_execution_result, include changedArtifacts. If this is a validation task or the agent is the Validation Agent, include a test_report artifact with metadata.validationEvidence mapping each taskContext.validationRules item to verdicts and taskContext.evidenceRefs, plus validatorAgentKey, validatorAgentId, and independentFromAgentKeys from taskContext.agentResponsibilities. If workspaceManifest is present, analyze the impact surface from manifest paths, but ground content-specific changes only in selectedEvidenceContents. Do not collapse a multi-file requirement into one file. Use agent-output only for auxiliary summaries. Include optional agentMessages when progress, risks, questions, or handoffs should be sent to other agents; target them with targetAgentKeys such as coordinator, frontend, backend, test, review.'

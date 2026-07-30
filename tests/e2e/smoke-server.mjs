@@ -46,11 +46,25 @@ export function createSmokeV2State() {
   };
 }
 
-export function findFreePort() {
+export async function findFreePort() {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    // Windows can return ports from system-excluded dynamic ranges for listen(0),
+    // then deny a second process binding the same port. Stay below that range for
+    // multi-process browser smokes while still probing the exact candidate.
+    const candidate = process.platform === 'win32'
+      ? 20_000 + Math.floor(Math.random() * 25_000)
+      : 0;
+    const port = await probeFreePort(candidate).catch(() => undefined);
+    if (port) return port;
+  }
+  throw new Error('Could not allocate a free port after 50 attempts');
+}
+
+function probeFreePort(port) {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(port, '127.0.0.1', () => {
       const address = server.address();
       server.close(() => {
         if (typeof address === 'object' && address?.port) {
@@ -142,8 +156,17 @@ export async function startSmokeServer(name, env = {}) {
 }
 
 export async function stopSmokeServer(handle) {
-  if (!handle.server.killed) {
-    handle.server.kill();
+  let terminated = false;
+  if (handle.server.pid && process.platform === 'win32') {
+    terminated = await new Promise((resolve) => {
+      const killer = spawn('taskkill', ['/pid', String(handle.server.pid), '/T', '/F'], { stdio: 'ignore' });
+      const timer = setTimeout(() => resolve(false), 5_000);
+      killer.once('exit', (code) => { clearTimeout(timer); resolve(code === 0); });
+      killer.once('error', () => { clearTimeout(timer); resolve(false); });
+    });
+  }
+  if (!terminated && !handle.server.killed) {
+    terminated = handle.server.kill();
   }
   await new Promise((resolve) => {
     const timer = setTimeout(resolve, 2_000);
@@ -152,6 +175,8 @@ export async function stopSmokeServer(handle) {
       resolve();
     });
   });
+  handle.server.stdout?.destroy();
+  handle.server.stderr?.destroy();
   rmSync(handle.dataFile, { force: true });
 }
 

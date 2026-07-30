@@ -3,13 +3,14 @@ import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module.js';
-import { WorkspaceBrokerTransport } from './modules/workspaces/browser-broker/workspace-broker-transport.js';
+import { LocalRuntimeConnectionService } from './modules/local-runtime/local-runtime-connection.service.js';
 import { loadLocalEnv } from './common/env.js';
 import { ApiExceptionFilter } from './common/api-exception.filter.js';
 import { JsonLogger } from './common/json-logger.js';
 import { bullMqEnabled, bullMqPrefix } from './common/redis.js';
 import { PersistenceService } from './modules/persistence/persistence.service.js';
 import { installProcessLifecycleLogging } from './common/process-lifecycle.js';
+import { assertLocalRuntimeAdminConfiguration } from './modules/local-runtime/local-runtime-admin.guard.js';
 
 loadLocalEnv();
 
@@ -46,6 +47,7 @@ function runtimeMode() {
 
 async function bootstrap() {
   const logger = bootstrapLogger;
+  assertLocalRuntimeAdminConfiguration();
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false, logger });
   app.enableShutdownHooks();
   const requestBodyLimit = process.env.HTTP_JSON_BODY_LIMIT ?? '2mb';
@@ -68,7 +70,7 @@ async function bootstrap() {
   app.use(applySecurityHeaders);
   app.setGlobalPrefix('api');
   app.useGlobalFilters(new ApiExceptionFilter());
-  app.get(WorkspaceBrokerTransport).attach(app.getHttpServer(), allowedOrigins);
+  app.get(LocalRuntimeConnectionService).attach(app.getHttpServer());
   await app.listen(port);
   const persistence = app.get(PersistenceService);
   logger.log(`Agent Cluster server listening on http://localhost:${port}/api`);
@@ -78,7 +80,7 @@ async function bootstrap() {
       `Persistence: ${persistence.backendName()}`,
       `Data: ${persistence.locationSummary()}`,
       `BullMQ: ${bullMqEnabled() ? `enabled (${bullMqPrefix()})` : 'disabled'}`,
-      `Recovery on boot: ${(process.env.AGENT_CLUSTER_RECOVER_ON_BOOT ?? 'true').toLowerCase()}`
+      `Startup interruption reconciliation: ${(process.env.AGENT_CLUSTER_RECOVER_ON_BOOT ?? 'true').toLowerCase()}`
     ].join(' | ')
   );
 }

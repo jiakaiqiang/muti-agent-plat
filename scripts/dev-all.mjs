@@ -54,12 +54,30 @@ export function npmWorkspaceInvocation(workspace, extraArgs = [], npmExecPath = 
   };
 }
 
+export function devWebEnv(env, serverUrl) {
+  const configuredApiBase = env.VITE_API_BASE_URL?.trim().replace(/\/$/, '');
+  const localApiBases = new Set([
+    `${serverUrl}/api`,
+    `${serverUrl.replace('127.0.0.1', 'localhost')}/api`
+  ]);
+  if (configuredApiBase && !localApiBases.has(configuredApiBase)) return {};
+
+  const configuredSseBase = env.VITE_SSE_BASE_URL?.trim().replace(/\/$/, '');
+  return {
+    VITE_API_BASE_URL: '/api',
+    ...(!configuredSseBase || localApiBases.has(configuredSseBase) ? { VITE_SSE_BASE_URL: '/api' } : {}),
+    AGENT_CLUSTER_DEV_API_PROXY_TARGET: serverUrl
+  };
+}
+
 export async function runDevSupervisor(options = {}) {
   const envFile = readRootEnv();
   const env = { ...envFile, ...process.env };
   const serverPort = positivePort(env.SERVER_PORT, DEFAULT_SERVER_PORT);
   const webPort = positivePort(env.WEB_PORT, DEFAULT_WEB_PORT);
+  env.PUBLIC_WEB_URL ||= `http://127.0.0.1:${webPort}`;
   const healthUrl = `http://127.0.0.1:${serverPort}/api/health`;
+  const serverUrl = `http://127.0.0.1:${serverPort}`;
   const spawnProcess = options.spawnProcess ?? spawn;
   const fetchHealth = options.fetchHealth ?? defaultFetchHealth;
   const children = new Map();
@@ -72,23 +90,30 @@ export async function runDevSupervisor(options = {}) {
     resolveRun = resolveCompleted;
   });
 
-  function startWorkspace(workspace, extraArgs = []) {
+  function startWorkspace(workspace, extraArgs = [], envOverrides = {}) {
     const invocation = npmWorkspaceInvocation(workspace, extraArgs, options.npmExecPath);
     return spawnProcess(invocation.command, invocation.args, {
       cwd: workspaceRoot,
-      env,
+      env: { ...env, ...envOverrides },
       stdio: 'inherit',
       windowsHide: true
     });
   }
 
   const server = startWorkspace('@agent-cluster/server');
-  const web = startWorkspace('@project/web', ['--', '--port', String(webPort), '--strictPort']);
+  const web = startWorkspace(
+    '@project/web',
+    ['--', '--port', String(webPort), '--strictPort'],
+    devWebEnv(env, serverUrl)
+  );
+  const localRuntime = startWorkspace('@agent-cluster/local-runtime-cli', ['--', '--server', serverUrl]);
   children.set('server', server);
   children.set('web', web);
+  children.set('local-runtime', localRuntime);
 
   console.log(`[dev-supervisor] server health: ${healthUrl}`);
   console.log(`[dev-supervisor] web: http://127.0.0.1:${webPort}`);
+  console.log(`[dev-supervisor] local Runtime: ${serverUrl}`);
 
   function fail(message) {
     console.error(`[dev-supervisor] ${message}`);

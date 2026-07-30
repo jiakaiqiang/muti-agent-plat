@@ -30,7 +30,7 @@ export type ContextRouteInput = {
 export class ContextRouterService {
   route(input: ContextRouteInput): TaskContext {
     const { session, brief, task, phase, projectMap, workspaceFocus, relevantMemories, ragSnippets, artifacts, events } = input;
-    const domain = session.taskDomain ?? (session.workspaceSnapshot ? 'mixed' : 'non_coding');
+    const domain = session.taskDomain ?? (session.workingDirectory ? 'mixed' : 'non_coding');
     const intent = session.taskIntent ?? (brief ? 'implementation' : 'analysis');
     const isArchitectureAnalysis = this.isArchitectureAnalysis(session, task);
     const contextEvents = events.filter((event) => {
@@ -66,12 +66,12 @@ export class ContextRouterService {
             {
               type: 'project_map' as const,
               label: `${projectMap.source} project map`,
-              ref: projectMap.sourceRefs[0] ?? session.workspaceSnapshot?.rootName
+              ref: projectMap.sourceRefs[0] ?? session.workingDirectory?.name
             }
           ]
         : []),
-      ...(session.workspaceSnapshot
-        ? [{ type: 'workspace_snapshot' as const, label: session.workspaceSnapshot.rootName, ref: session.workingDirectory?.name }]
+      ...(session.workspaceSnapshot || session.workspaceIndex
+        ? [{ type: 'workspace_snapshot' as const, label: session.workingDirectory?.name ?? session.workspaceSnapshot?.rootName ?? 'workspace', ref: session.workingDirectory?.name }]
         : []),
       ...architectureEvidenceRefs,
       ...workspaceEvidenceFiles.map((path) => ({
@@ -79,7 +79,7 @@ export class ContextRouterService {
         label: path,
         ref: path
       })),
-      ...(workspaceFocus?.possibleEntryPoints ?? session.workspaceSnapshot?.entrypoints ?? []).slice(0, 6).map((entrypoint) => ({
+      ...(workspaceFocus?.possibleEntryPoints ?? session.workspaceIndex?.entrypoints ?? session.workspaceSnapshot?.entrypoints ?? []).slice(0, 6).map((entrypoint) => ({
         type: 'workspace_symbol' as const,
         label: entrypoint,
         ref: entrypoint
@@ -287,6 +287,7 @@ export class ContextRouterService {
           }
         ];
       case 'task_execution':
+      case 'revision_synthesis':
         return [
           {
             action: 'do',
@@ -353,8 +354,10 @@ export class ContextRouterService {
     workspaceFocus: ContextAssembly['workspaceFocus'],
     projectMap: ProjectMap | undefined
   ): TaskContext['evidenceRefs'] {
-    const snapshot = session.workspaceSnapshot;
-    if (!snapshot) return [];
+    const paths = session.workspaceIndex
+      ? session.workspaceIndex.entries.filter((entry) => entry.kind === 'file').map((entry) => entry.path)
+      : session.workspaceSnapshot?.files.map((file) => file.path) ?? [];
+    if (!paths.length) return [];
     const projectMapPaths = [
       ...(projectMap?.sourceRefs ?? []),
       ...(projectMap?.modules.flatMap((module) => [
@@ -369,11 +372,15 @@ export class ContextRouterService {
       ...(workspaceFocus?.relevantFiles ?? []),
       ...(workspaceFocus?.impactedFiles ?? [])
     ];
-    const hintedPaths = new Set([...projectMapPaths, ...focusPaths, ...(snapshot.entrypoints ?? [])]);
-    return snapshot.files
-      .map((file) => ({
-        path: file.path,
-        score: this.architectureEvidencePathScore(file.path) + (hintedPaths.has(file.path) ? 42 : 0)
+    const hintedPaths = new Set([
+      ...projectMapPaths,
+      ...focusPaths,
+      ...(session.workspaceIndex?.entrypoints ?? session.workspaceSnapshot?.entrypoints ?? [])
+    ]);
+    return paths
+      .map((path) => ({
+        path,
+        score: this.architectureEvidencePathScore(path) + (hintedPaths.has(path) ? 42 : 0)
       }))
       .filter((item) => item.score > 0)
       .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))

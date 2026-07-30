@@ -66,8 +66,11 @@ export function buildV2SeedState(): Record<string, unknown> {
       approvals: [],
       definitionExtensions: {}
     },
+    workflowCatalog: {},
+    workflows: [],
     skills: [],
     sessions: [],
+    fileRevisions: {},
     eventsBySession: {},
     tasksBySession: {},
     briefsBySession: {},
@@ -76,8 +79,12 @@ export function buildV2SeedState(): Record<string, unknown> {
     runtimeInvocationsBySession: {},
     artifacts: { artifactsById: {}, artifactIdsBySession: {} },
     knowledge: { knowledgeBases: {}, documentsByBase: {}, chunksByBase: {} },
+    runtimeModelConfig: {},
+    workflowRuntime: {},
     autopilots: [],
-    autopilotRuns: []
+    autopilotRuns: [],
+    localRuntimeDevices: [],
+    localRuntimeOperationAudits: []
   };
 }
 

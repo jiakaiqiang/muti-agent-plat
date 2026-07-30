@@ -5,6 +5,8 @@
 > 修改的 Agent：Claude
 > 状态：方案已确认 / 已按 TDD 实施后端合同+编译器+模型解绑与前端编辑器（待完整验证矩阵）
 
+> **覆盖说明（2026-07-12）**：本文关于 Session 固化 Runtime/Model、旧 Agent/Session 兼容、迁移和 Tool 仅提示注入的设计已被 [`context-pipeline-v2-only-agent-decoupling-system-design-v1.md`](context-pipeline-v2-only-agent-decoupling-system-design-v1.md) 覆盖。Profile 引用语法和编译器既有实现仍作为参考，冲突时以新设计为准。
+
 ## 1. 文档目标
 
 本文档定义 Agent Cluster 当前阶段的 Agent 能力编辑、Skill/Tool 编排和模型解耦方案。
@@ -672,15 +674,16 @@ npm run test:e2e:main-chain
 npm run build
 ```
 
-## 16. 后续可视化工作流计划
+## 16. 可视化工作流现状与后续计划
 
-当前阶段不实现 Scenario、Agent 间调用和按 Agent 单独选模型，统一进入后续可视化工作流。
+线性工作流 v1 已实现 `WorkflowDefinition`、Agent 节点、线性连线、版本、CRUD、拖拽画布、会话选择和逐节点用户确认。当前工作流只表达确定的 Agent 顺序，不等同于通用工作流引擎。
 
 后续目标：
 
-- 新增 `WorkflowDefinition`、节点、连线、版本和发布状态。
 - Scenario 作为面向用户的可复用工作流模板。
 - Agent 节点通过 `agentId` 引用 Agent 管理中的统一资产。
+- 增加基于 Capability、Skill、Tool、Knowledge、Runtime eligibility 和历史信号的 Agent 能力画像。
+- 工作流节点支持 `fixed_agent` 和 `capability_slot`，能力槽位必须输出候选、评分和选择原因。
 - 每个 Agent/工作流节点可单独选择 Runtime/模型。
 - Agent A 调用 Agent B 通过工作流节点和连线表达。
 - 支持条件、并行、汇聚、人工确认和 Tool/MCP 节点。
@@ -715,9 +718,9 @@ type AgentWorkflowNode = {
 - Scenario/Workflow 版本固定。
 - Autopilot 与发布工作流的正式绑定。
 
-## 17. 非目标
+## 17. 当前工作流 v1 非目标
 
-- 本方案不创建 Scenario 表、API 或页面。
+- 当前只创建 Workflow 定义 API 和线性编辑页面，不创建 Scenario 表、模板市场或通用节点注册表。
 - 本方案不修改 Autopilot 现有调度语义。
 - 本方案不在 Markdown 中支持 `${agent:key}`。
 - 本方案不实现通用工作流引擎。
@@ -736,4 +739,3 @@ type AgentWorkflowNode = {
 - `docs/analysis/feature-inventory-and-status-v1.md`
 - `docs/ai-agent-context/pluggable-engineering-runtime-memory.md`
 - `docs/harness-engineering/00-boundary-and-principles.md`
-

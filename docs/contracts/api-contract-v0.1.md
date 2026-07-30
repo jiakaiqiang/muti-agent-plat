@@ -50,7 +50,47 @@ type PageResponse<T> = {
 }
 ```
 
+### 2.1 Health 与版本闸门
+
+```text
+GET /api/health
+```
+
+```ts
+type OpsHealth = {
+  status: 'ok'
+  service: string
+  version: string
+  buildTime: string
+  commit: string
+  processId: number
+  startedAt: string
+  pipelineVersion: 'v2'
+  dataSchemaVersion: 3
+  dataEpoch: string
+  persistenceBackend: 'file' | 'postgres'
+  persistenceLocation: string
+  maintenanceMode: boolean
+  timestamp: string
+}
+```
+
+`persistenceLocation` 不包含 PostgreSQL 凭据。pipeline/schema 不匹配，或前端配置的预期 commit 不匹配时，客户端不得继续列出、加载、创建或 resume Session。
+
+运维维护接口：
+
+```text
+GET  /api/ops/maintenance
+POST /api/ops/maintenance/enter
+```
+
+`POST` 必须携带 `x-maintenance-token`，body 必须提供 `reason` 与 `requestedBy`。响应包含进程内执行取消数量、超时 Session ID、暂停队列和已注册工作区失效统计，不返回 token。该接口只约束当前副本；跨副本 cutover 仍需由操作者 drain 并停止所有写入者。
+
 ## 3. Sessions API
+
+会话列表、详情、创建和 resume 仅对当前 `dataEpoch` 的 v2 数据开放。Web 在调用这些接口前必须通过下方 Health 版本闸门。
+
+`POST /api/sessions` 只接受 `input / agentIds / projectId / tokenBudget / knowledgeBaseIds / workingDirectory / runtimePreference`。创建请求只建立 Workspace Binding，不递归扫描目录、不批量读取正文，也不等待 Provider Index 完成。`workspaceSnapshot` 禁止客户端上传；`runtimeType / modelId / executionTarget / contextAssembly / pipelineVersion` 等旧字段或其他未知字段返回 400，不会被静默忽略。
 
 ### 3.1 获取会话列表
 
@@ -90,16 +130,39 @@ type CreateSessionRequest = {
   projectId?: string
   tokenBudget?: number
   knowledgeBaseIds?: string[]
-  engineeringRuntimeType?: RuntimeType
-  engineeringRuntime?: {
-    sessionDefaultRuntimeType?: RuntimeType
-    projectDefaultRuntimeType?: RuntimeType
-    agentRuntimeOverrides?: Record<string, RuntimeType>
+  workingDirectory?: {
+    kind: 'local_bridge' | 'server_local'
+    id: string
+    name: string
+    path?: string
+    selectedAt: string
+  }
+  runtimePreference?: {
+    preferredRuntimeType?: RuntimeType
+    preferredModelId?: string
+    allowedRuntimeTypes?: RuntimeType[]
   }
 }
 ```
 
-`engineeringRuntimeType` 是 `engineeringRuntime.sessionDefaultRuntimeType` 的便捷写法。运行时选择优先级为 Agent override > Session override > Project default > Global default；最终选择会写入 Runtime Debug 的 `runtimeSelection`。
+`local_bridge` 不得携带服务器可访问的绝对路径；`server_local` 必须携带通过平台边界校验的绝对路径。响应只保证 Binding 和首条用户事件已建立，不保证 `workspaceSnapshot` 或完整索引存在。后台索引状态不会阻塞 Session 进入讨论。
+
+同一 `workspaceId` 已存在非终态 Session 时返回 `409`：
+
+```ts
+type WorkspaceActiveSessionConflict = {
+  error: {
+    code: 'WORKSPACE_ACTIVE_SESSION_CONFLICT'
+    message: string
+    details: {
+      workspaceId: string
+      activeSessionId: string
+      activeSessionStatus: SessionStatus
+    }
+  }
+  requestId: string
+}
+```
 
 响应：
 
@@ -130,6 +193,17 @@ type SessionDetail = {
   origin?: 'user' | 'autopilot'
   autopilotRunId?: string
   currentTaskBriefId?: string
+  pendingFollowUpMessages?: Array<{
+    id: string
+    sourceEventId: string
+    content: string
+    mentionedAgentIds: string[]
+    handlingPlan: UserMessageHandlingPlan
+    status: 'queued' | 'planning' | 'executing'
+    queuedAt: string
+    startedAt?: string
+  }>
+  activeFollowUpMessageId?: string
   engineeringRuntime?: {
     sessionDefaultRuntimeType?: RuntimeType
     projectDefaultRuntimeType?: RuntimeType
@@ -140,6 +214,23 @@ type SessionDetail = {
   participatingAgentIds: string[]
   createdAt: string
   updatedAt: string
+}
+```
+
+### 3.3.1 删除会话
+
+```text
+DELETE /api/sessions/:sessionId
+```
+
+删除是会话级终止边界。服务端必须先终止并等待该会话的 Brief 生成、工作流、执行队列以及全部 Agent Runtime invocation；Runtime 终止必须同时覆盖 Codex、Claude Code、Generic LLM 和内部工具收到的 `AbortSignal`。只有关联调用在宽限期内结束后，服务端才清理会话、任务、事件、记忆和隔离工作目录。若终止超时，接口返回 `409 Conflict`，会话数据保持不删除。
+
+响应：
+
+```ts
+type DeleteSessionResponse = {
+  deleted: true
+  sessionId: string
 }
 ```
 
@@ -164,9 +255,13 @@ type SendUserMessageRequest = {
 ```ts
 type SendUserMessageResponse = {
   event: CollaborationEvent
-  handlingPlan?: UserMessageHandlingPlan
+  handlingPlan: UserMessageHandlingPlan
+  deferred: boolean
+  followUpMessageId: string
 }
 ```
+
+已有会话中的每条消息都必须先经过“接收者”的意图识别，再进入任务拆分。若会话当前有执行中的任务，消息只入持久化后续队列，不中断、不取消、不重调度当前任务；当前任务交付后按 FIFO 顺序处理。没有执行中任务时立即拆分并派发。单个 `@Agent` 将拆分任务限定给该 Agent；多个 `@Agent` 先由被提及 Agent 讨论，再由接收者汇总讨论结果、拆分任务并限定派发到被提及 Agent。接收者只负责意图识别和任务拆分，Agent 拒绝任务时由接收者改派或重新拆分，不由接收者执行专业任务。
 
 ### 3.5 暂停、恢复、取消
 
@@ -418,8 +513,9 @@ type AgentTask = {
   title: string
   description: string
   status: AgentTaskStatus
-  assignedByAgentId?: string
-  assigneeAgentId?: string
+  assignedBy?: ActorRef
+  assignee?: ActorRef
+  eligibleAgentIds?: string[]
   routingMode?: 'coordinator_controlled' | 'agent_suggested' | 'agent_delegated'
   autoResolutionAttempted?: boolean
   assignmentReason?: string
@@ -552,6 +648,7 @@ GET /api/artifacts/:artifactId
 ```ts
 type Artifact = {
   id: string
+  dataEpoch: string
   sessionId: string
   taskId?: string
   agentId?: string
@@ -559,10 +656,38 @@ type Artifact = {
   title: string
   uri?: string
   contentSummary?: string
-  metadata: Record<string, unknown>
+  metadata: ArtifactMetadata
+  runtimeProposals: RuntimeArtifactProposal[]
+  platformProjections: RuntimeFileChange[]
+  systemEvidence: RuntimeArtifactSystemEvidence | null
   createdAt: string
 }
 ```
+
+`ArtifactMetadata` 是共享合约定义的封闭白名单，不包含 `output`、`fileChanges` 或 `validationEvidence`，API 消费方不得追加任意键。模型提议只存在于 `runtimeProposals`；平台阶段生成、尚待写入或确认的文件只存在于 `platformProjections`；平台观测的工作区变更和真实测试只存在于 `systemEvidence`。三者不得互相冒充。
+
+### 9.1 确认保存最终报告
+
+系统架构分析等 Markdown 报告必须先在群聊展示完整正文，再由用户确认是否写入会话绑定的
+`server_local` 工作区。客户端不得提交目标路径或正文，后端必须从已确认的 Artifact 中读取，
+防止路径或内容被请求篡改。
+
+```text
+POST /api/sessions/:sessionId/reports/local-save/decision
+```
+
+请求：
+
+```ts
+type LocalReportSaveDecisionRequest = {
+  confirmationId: string
+  artifactId: string
+  decision: 'save_local' | 'keep_in_session'
+}
+```
+
+`save_local` 成功后必须写入 Artifact 指定的 `suggestedPath` 并产生
+`user_confirmation_resolved`；`keep_in_session` 不得产生工作区写入。
 
 ## 10. Memory API
 
@@ -611,7 +736,7 @@ type CreateMemoryRequest = {
 Debug API 仅用于开发态和验收态，生产环境可以通过网关或权限策略限制访问。
 
 ```text
-GET /api/sessions/:sessionId/debug/context-packs
+GET /api/sessions/:sessionId/debug/context-envelopes
 GET /api/sessions/:sessionId/debug/runtime-invocations
 GET /api/sessions/:sessionId/debug/rag-retrievals
 GET /api/sessions/:sessionId/debug/token-usage
@@ -620,8 +745,8 @@ GET /api/sessions/:sessionId/debug/summary-memory
 
 规则：
 
-- `context-packs` 返回每次 Runtime 调用的完整 Context Pack 快照。
-- `runtime-invocations` 返回调用状态、阶段、Agent、usage 和 Context Pack 摘要。
+- `context-envelopes` 返回每次 Runtime 调用的权威 `ContextEnvelopeV2` 快照。
+- `runtime-invocations` 分栏返回调用状态、`invocationId`、编译后身份快照、执行目标、Tool Catalog、usage、错误和 Envelope 摘要。
 - `rag-retrievals` 从 `rag_retrieved` 事件派生可追溯检索记录。
 - `token-usage` 汇总 Runtime invocation 的 token usage。
 - `summary-memory` 返回关键阶段沉淀的 `summary_memory_checkpoint` artifact，用于长链路续跑和裁剪后追溯。
@@ -707,7 +832,134 @@ type TriggerAutopilotRequest = {
 - 同一 Autopilot 已有 queued/running run 时，trigger 返回现有 run 和 `duplicate=true`，不重复创建 session。
 - `AUTOPILOT_ENABLED=true` 且 `ENABLE_BULLMQ=true` 时启用 BullMQ Job Scheduler；否则不启动定时调度。
 
-## 15. 错误码
+## 15. Workflows API
+
+```text
+GET    /api/workflows
+GET    /api/workflows/:workflowId
+GET    /api/workflows/:workflowId/versions
+GET    /api/workflows/:workflowId/versions/:version
+POST   /api/workflows
+PATCH  /api/workflows/:workflowId
+PATCH  /api/workflows/:workflowId/draft
+POST   /api/workflows/:workflowId/publish
+POST   /api/workflows/:workflowId/archive
+DELETE /api/workflows/:workflowId
+
+POST /api/sessions/:sessionId/workflow/select
+GET  /api/workflow-runs/:runId
+GET  /api/workflow-runs/:runId/nodes
+POST /api/workflow-runs/:runId/nodes/:nodeRunId/decision
+POST /api/workflow-runs/:runId/cancel
+```
+
+```ts
+type WorkflowInput = {
+  name: string
+  description?: string
+  status?: 'draft' | 'published' | 'archived'
+  expectedDraftRevision?: number
+  nodes?: WorkflowNode[]
+  edges?: WorkflowEdge[]
+}
+
+type SelectWorkflowInput = {
+  workflowId: string
+  workflowVersion: number
+  confirmationId: string
+}
+
+type WorkflowHumanDecisionInput = {
+  confirmationId: string
+  expectedRunRevision?: number
+  decision: 'approve' | 'revise' | 'cancel'
+  instruction?: string
+}
+```
+
+约束：
+
+- 工作流名称大小写不敏感唯一，最多 100 字符；描述最多 500 字符；节点最多 50 个。
+- V1 支持 `agent`、`human_approval`、`robot_approval` 三类线性节点；服务端按 `order` 规范化并重建连线。
+- 草稿通过 `draftRevision` 做乐观并发控制；发布产生不可变 `WorkflowVersion`，运行必须绑定精确版本快照。
+- Agent 和机器人评审节点必须引用真实且启用的 Agent；确认节点之前必须存在可返工的 Agent 节点。
+- 归档工作流、未发布工作流、空工作流不能用于会话执行；已产生发布版本的工作流只能归档，不能物理删除。
+- Task Brief 确认后进入 `WAIT_WORKFLOW_SELECT`；选择弹窗不默认选中，只展示已发布工作流。
+- Agent 节点完成后自动推进；只有显式 `human_approval` 才进入 `WAIT_WORKFLOW_STEP_CONFIRM`。
+- 机器人确认严格消费 JSON 决策；格式错误、执行异常或超过返工上限时转人工确认。
+- 人工决策必须携带 `runId`、`nodeRunId`、`confirmationId` 和可选 `expectedRunRevision`，重复或过期命令必须幂等拒绝。
+
+## 15.1 用户原文件修订 API
+
+```text
+GET  /api/sessions/:sessionId/file-revisions
+POST /api/sessions/:sessionId/file-revisions/baselines
+POST /api/sessions/:sessionId/file-revisions
+GET  /api/sessions/:sessionId/file-revisions/:revisionId/candidate
+GET  /api/sessions/:sessionId/file-revisions/:revisionId/draft
+PUT  /api/sessions/:sessionId/file-revisions/:revisionId/draft
+POST /api/sessions/:sessionId/file-revisions/:revisionId/reprocess
+POST /api/sessions/:sessionId/file-revisions/:revisionId/failure-decision
+POST /api/sessions/:sessionId/file-revisions/:revisionId/retry
+POST /api/sessions/:sessionId/file-revisions/:revisionId/decision
+```
+
+```ts
+type CaptureFileRevisionBaselineInput = {
+  filePath: string
+}
+
+type CreateFileRevisionRunInput = {
+  baselineId: string
+  targetAgentIds: string[]
+  instruction?: string
+}
+
+type SaveFileRevisionDraftInput = {
+  expectedCandidateHash: FileHash
+  content: string
+}
+
+type ReprocessFileRevisionInput = {
+  draftHash: FileHash
+  expectedCandidateHash: FileHash
+  expectedStateVersion: number
+  targetAgentIds?: string[]
+  instruction?: string
+}
+
+type ResolveFileRevisionFailureInput = {
+  expectedStateVersion: number
+  decision: 'retry_agents' | 'continue_with_successful' | 'abandon_revision'
+  instruction?: string
+}
+
+type RetryInterruptedFileRevisionInput = {
+  expectedStateVersion: number
+  retryKey: string
+}
+
+type DecideFileRevisionInput = {
+  confirmationId: string
+  candidateHash: FileHash
+  expectedStateVersion: number
+  decision: 'apply_candidate' | 'abandon_revision'
+}
+```
+
+- 基线必须在用户编辑前捕获；第一轮使用 `Diff(W0,U1)`，后续轮使用 `Diff(G(n-1),Un)`。
+- `targetAgentIds` 只能包含当前 Session 中启用的非 Receiver Agent，且至少一个。
+- 同一版本链只有一个活动链头；重复的同参数 `reprocess` 请求返回同一个子 revision，并且后台编排只派发一次。跨服务实例发生持久化 CAS 竞争时，失败方必须刷新持久快照并返回已提交的获胜子 revision，而不是把同一幂等请求暴露为 `409`。
+- 保存草稿只持久化编辑内容，不启动 Agent；只有 `reprocess` 创建下一轮。
+- 单 Agent 和多 Agent 都由系统级、启用状态的默认 `coordinator` Receiver 基于本轮完整证据生成唯一候选；Receiver 不可用时必须在创建 Run 前 fail closed，不得回退到目标 Agent 或其他参与者。专业 Agent 和 Receiver 均为 `proposal_only`，确认前不得写 Workspace。
+- 部分 Agent 失败时当前轮进入 `REVISION_PARTIAL_AGENT_FAILURE`，不得自动汇总；用户只能显式选择重新执行全部 Agent、使用已成功结果继续交给 Receiver，或放弃版本链。使用成功结果继续时，失败清单仍进入 Receiver 证据。
+- `interrupted` Run 只能通过 `/retry` 显式恢复。`retryKey` 是幂等键；Agent 结果不完整时重新执行全部目标 Agent，结果完整时只重新执行 Receiver；若中断原因是写回结果未知，只执行 Workspace Hash 对账，不派发 Agent。
+- Candidate/Draft GET 返回完整正文并设置 `Cache-Control: no-store`；revision 存在但没有当前草稿时 Draft GET 返回 `200 + null`，避免提交下一轮删除草稿与并发读取之间产生预期 404；revision 本身不存在仍返回 404。正文不得进入事件 payload 或日志。
+- `apply_candidate` 同时校验 `confirmationId/revisionId/candidateHash/expectedStateVersion/workspaceExpectedHash`；Workspace 不一致返回 stale 且不覆盖文件。
+- `abandon_revision` 关闭当前版本链，不写入候选。
+- Hash 必须是 64 位小写 SHA-256；未知字段或未知 decision 返回 `INVALID_FILE_REVISION_REQUEST` 或 `INVALID_FILE_REVISION_DECISION`。
+
+## 16. 错误码
 
 ```text
 SESSION_NOT_FOUND
@@ -720,6 +972,6 @@ KNOWLEDGE_BASE_NOT_FOUND
 KNOWLEDGE_DOCUMENT_INDEXING
 CAPABILITY_REQUIRES_CONFIRMATION
 TOKEN_BUDGET_EXCEEDED
-RUNTIME_INVOCATION_FAILED
+RUNTIME_INVOCATION_ERROR
 VALIDATION_ERROR
 ```

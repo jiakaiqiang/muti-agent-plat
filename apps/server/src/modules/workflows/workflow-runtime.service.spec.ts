@@ -57,6 +57,7 @@ function fixture(nodes: WorkflowVersion['nodes']) {
   const callbacks: Array<(outcome: any) => void> = [];
   const cancelCalls: any[][] = [];
   const updates: any[] = [];
+  let executionRunning = false;
   const runtime = new WorkflowRuntimeService(
     {
       get: () => ({ id: 'workflow-1', status: 'published' }),
@@ -91,12 +92,16 @@ function fixture(nodes: WorkflowVersion['nodes']) {
     } as never,
     {
       start(_session: SessionDetail, _brief: TaskBrief, _tasks: AgentTask[], callback: (outcome: any) => void) {
-        callbacks.push(callback);
+        executionRunning = true;
+        callbacks.push((outcome) => {
+          executionRunning = false;
+          callback(outcome);
+        });
       },
       cancel(...args: any[]) {
         cancelCalls.push(args);
       },
-      isRunning: () => true
+      isRunning: () => executionRunning
     } as never,
     {
       getCollection: (_key: string, fallback: unknown) => fallback,
@@ -232,4 +237,85 @@ test('WorkflowRuntimeService reschedules a superseded current node without cance
   });
   await settle();
   assert.equal(setup.runtime.get(run.id).status, 'completed');
+});
+
+test('WorkflowRuntimeService keeps an invocation-level user pause resumable', async () => {
+  const setup = fixture([{ id: 'requirements-node', type: 'agent', agentId: 'requirements', order: 0 }]);
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-pause'
+  });
+  const nodeRun = setup.runtime.listNodeRuns(run.id)[0];
+  setup.taskItems[0].status = 'waiting';
+
+  setup.callbacks[0]({
+    kind: 'cancelled',
+    reason: '用户暂停当前执行。',
+    termination: {
+      schemaVersion: '1.0',
+      terminationId: 'termination-pause',
+      kind: 'user_cancelled',
+      source: 'user',
+      scope: 'invocation',
+      occurredAt: now
+    }
+  });
+  await settle();
+
+  assert.equal(setup.runtime.get(run.id).status, 'running');
+  assert.equal(nodeRun.status, 'running');
+  assert.equal(setup.taskItems[0].status, 'waiting');
+  assert.equal(await setup.runtime.resumeCurrentExecution(run.id), true);
+  assert.equal(setup.taskItems[0].status, 'pending');
+  assert.equal(setup.callbacks.length, 2);
+});
+
+test('WorkflowRuntimeService treats a session-level user cancellation as terminal', async () => {
+  const setup = fixture([{ id: 'requirements-node', type: 'agent', agentId: 'requirements', order: 0 }]);
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-cancel'
+  });
+
+  setup.callbacks[0]({
+    kind: 'cancelled',
+    reason: '用户取消会话。',
+    termination: {
+      schemaVersion: '1.0',
+      terminationId: 'termination-cancel',
+      kind: 'user_cancelled',
+      source: 'user',
+      scope: 'session',
+      occurredAt: now
+    }
+  });
+  await settle();
+
+  assert.equal(setup.runtime.get(run.id).status, 'cancelled');
+  assert.equal(await setup.runtime.resumeCurrentExecution(run.id), false);
+});
+
+test('WorkflowRuntimeService cancels a persisted run without ephemeral runtime context', async () => {
+  const setup = fixture([{ id: 'requirements-node', type: 'agent', agentId: 'requirements', order: 0 }]);
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-restored-cancel'
+  });
+
+  (setup.runtime as unknown as { contexts: Map<string, unknown> }).contexts.clear();
+
+  const cancelled = await setup.runtime.cancel(run.id, 'Cancel after process recovery.');
+
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(setup.cancelCalls.length, 1);
+  assert.equal(setup.cancelCalls[0][1].scope, 'session');
 });

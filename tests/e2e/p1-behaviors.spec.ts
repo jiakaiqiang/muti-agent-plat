@@ -200,7 +200,11 @@ function parseSseBlock(block: string) {
   return JSON.parse(dataLines.join("\n")) as Json;
 }
 
-async function observeNextStreamEvent(sessionId: string, trigger: () => Promise<unknown>) {
+async function observeStreamEvent(
+  sessionId: string,
+  trigger: () => Promise<unknown>,
+  matches: (event: Json) => boolean
+) {
   const controller = new AbortController();
   const response = await fetch(`${API_BASE}/sessions/${sessionId}/events/stream`, {
     signal: controller.signal
@@ -222,7 +226,7 @@ async function observeNextStreamEvent(sessionId: string, trigger: () => Promise<
       buffer = blocks.pop() ?? "";
       for (const block of blocks) {
         const event = parseSseBlock(block);
-        if (event) return event;
+        if (event && matches(event)) return event;
       }
     }
     throw new Error("Timed out waiting for SSE event");
@@ -253,21 +257,25 @@ async function runP1Behaviors() {
   // Brief generation now runs in the background; let it flush so the next
   // streamed event is the message we trigger, not a brief-gen event.
   await waitForStatus(sseSessionId, "WAIT_USER_CONFIRM");
-  const firstStreamEvent = await observeNextStreamEvent(sseSessionId, () =>
+  const firstMessage = "第一条 SSE 重连验证消息";
+  const firstStreamEvent = await observeStreamEvent(sseSessionId, () =>
     api(`/sessions/${sseSessionId}/messages`, {
       method: "POST",
-      body: JSON.stringify({ content: "第一条 SSE 重连验证消息" })
-    })
+      body: JSON.stringify({ content: firstMessage })
+    }),
+    (event) => event.type === "user_message" && event.content === firstMessage
   );
   if (firstStreamEvent.type !== "user_message") {
     throw new Error(`Expected first streamed user_message, got ${String(firstStreamEvent.type)}`);
   }
 
-  const secondStreamEvent = await observeNextStreamEvent(sseSessionId, () =>
+  const secondMessage = "第二条 SSE 重连验证消息";
+  const secondStreamEvent = await observeStreamEvent(sseSessionId, () =>
     api(`/sessions/${sseSessionId}/messages`, {
       method: "POST",
-      body: JSON.stringify({ content: "第二条 SSE 重连验证消息" })
-    })
+      body: JSON.stringify({ content: secondMessage })
+    }),
+    (event) => event.type === "user_message" && event.content === secondMessage
   );
   if (secondStreamEvent.type !== "user_message") {
     throw new Error(`Expected second streamed user_message, got ${String(secondStreamEvent.type)}`);

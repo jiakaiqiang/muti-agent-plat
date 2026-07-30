@@ -51,3 +51,62 @@ test('happy_path smoke scenario remains completed', async () => {
 test('an unrelated ContextEnvelope bullet does not force failure', async () => {
   assert.equal((await runScenario('ordinary_execution')).status, 'completed');
 });
+
+test('file revision execution proposes the complete user draft for the revised source path', async () => {
+  const previous = process.env.MOCK_RUNTIME_ENABLED;
+  process.env.MOCK_RUNTIME_ENABLED = 'true';
+  try {
+    const plan = makeInvocationPlan({
+      invocationId: 'invocation-file-revision',
+      expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' },
+      contextEnvelope: {
+        L3: {
+          fileRevisions: [{
+            chainId: 'chain-revision',
+            revisionId: 'revision-1',
+            iteration: 1,
+            filePath: 'docs/result.md',
+            baseKind: 'workspace_baseline',
+            base: {
+              hash: { algorithm: 'sha256', value: 'a'.repeat(64) },
+              contentRef: 'content:base',
+              content: 'W0\n',
+              byteLength: 3
+            },
+            userDraft: {
+              hash: { algorithm: 'sha256', value: 'b'.repeat(64) },
+              contentRef: 'content:draft',
+              content: 'U1 complete\n',
+              byteLength: 12
+            },
+            diff: {
+              hash: { algorithm: 'sha256', value: 'c'.repeat(64) },
+              contentRef: 'content:diff',
+              hunks: [],
+              summary: { addedLines: 1, removedLines: 1, unchangedLines: 0, hunkCount: 1 }
+            },
+            evidenceHash: 'evidence-revision-1',
+            complete: true,
+            truncated: false
+          }],
+          totalByteLength: 15
+        }
+      }
+    });
+
+    const result = await new MockRuntimeService().start(plan).result;
+    assert.equal(result.status, 'completed');
+    const change = result.artifacts[0]?.metadata.fileChanges?.[0];
+    assert.deepEqual(change, {
+      path: 'docs/result.md',
+      operation: 'update',
+      content: 'U1 complete\n',
+      previousContent: 'W0\n',
+      encoding: 'utf-8',
+      source: 'runtime_proposed_change'
+    });
+  } finally {
+    if (previous === undefined) delete process.env.MOCK_RUNTIME_ENABLED;
+    else process.env.MOCK_RUNTIME_ENABLED = previous;
+  }
+});

@@ -9,7 +9,7 @@ function setup(emptyWorkspace = false) {
     status: 'WAIT_WORKFLOW_SELECT', ownerId: 'local-user', workspaceId: 'workspace', tokenUsed: 0,
     currentTaskBriefId: 'brief-1', participatingAgentIds: ['coordinator'],
     ...(emptyWorkspace ? {
-      workingDirectory: { kind: 'browser_local' as const, id: 'workspace', name: 'empty-project', selectedAt: '2026-07-13T00:00:00.000Z' },
+      workingDirectory: { kind: 'local_bridge' as const, id: 'workspace', name: 'empty-project', selectedAt: '2026-07-13T00:00:00.000Z' },
       workspaceSnapshot: {
         rootName: 'empty-project', scannedAt: '2026-07-13T00:00:00.000Z',
         fileCount: 0, totalBytes: 0, tree: [], files: [], skipped: []
@@ -53,11 +53,14 @@ function setup(emptyWorkspace = false) {
     {} as never,
     {
       getBrief: () => ({ id: 'brief-1', sessionId: session.id, acceptanceCriteria: ['Each stage is reviewable.'] }),
-      ensureArchitectureReportSaveConfirmation() {}, deleteSession() {}
+      ensureArchitectureReportSaveConfirmation() {},
+      registerSavePendingInvocationCallback() {},
+      deleteSession() {}
     } as never,
     { cancel() {} } as never,
     { list: () => [] } as never,
     { getCollection: () => [session], currentDataEpoch: () => 'epoch-test', setCollection() {} } as never,
+    { registerApprovalListener() {} } as never,
     {
       get: () => ({ id: 'workflow-1', name: version.name, status: 'published', draftRevision: 3, version: 3, currentPublishedVersion: 2, nodes: version.nodes, edges: [], createdAt: session.createdAt, updatedAt: session.updatedAt }),
       getVersion: (_id: string, requestedVersion?: number) => {

@@ -238,7 +238,7 @@ export class PersistenceCutoverService {
     });
     audit.archiveSha256 = archive.manifest.encryptedSha256;
     audit.archiveByteLength = archive.manifest.encryptedByteLength;
-    const migratedState = migrateStateToV2(currentState, seedState, metadata.dataEpoch);
+    const migratedState = buildActiveV2State(seedState);
     await this.persistence.replaceStateForCutover(
       {
         ...migratedState,
@@ -378,35 +378,6 @@ export class PersistenceCutoverService {
   }
 }
 
-function migrateStateToV2(
-  currentState: Record<string, unknown>,
-  seedState: Record<string, unknown>,
-  dataEpoch: string
-): Record<string, unknown> {
-  const state = { ...seedState, ...currentState };
-  const sessions = Array.isArray(currentState.sessions) ? currentState.sessions : [];
-  state.sessions = sessions
-    .filter((session): session is Record<string, unknown> => Boolean(session && typeof session === 'object'))
-    .map((session) => ({
-      ...session,
-      /*
-      dataEpoch,
-      title: typeof session.title === 'string' && session.title.trim() ? session.title : '未命名会话',
-      */
-      dataEpoch,
-      title: typeof session.title === 'string' && session.title.trim() ? session.title : 'Untitled session',
-      originalInput: typeof session.originalInput === 'string' ? session.originalInput : '',
-      ownerId: typeof session.ownerId === 'string' && session.ownerId ? session.ownerId : 'local-user',
-      workspaceId: typeof session.workspaceId === 'string' && session.workspaceId ? session.workspaceId : 'default-workspace',
-      origin: session.origin === 'autopilot' ? 'autopilot' : 'user',
-      knowledgeBaseIds: Array.isArray(session.knowledgeBaseIds) ? session.knowledgeBaseIds : [],
-      tokenUsed: typeof session.tokenUsed === 'number' ? session.tokenUsed : 0,
-      taskDomain: typeof session.taskDomain === 'string' ? session.taskDomain : 'mixed',
-      taskIntent: typeof session.taskIntent === 'string' ? session.taskIntent : 'analysis',
-      requiresCodeChanges: typeof session.requiresCodeChanges === 'boolean' ? session.requiresCodeChanges : false,
-      participatingAgentIds: Array.isArray(session.participatingAgentIds) ? session.participatingAgentIds : [],
-      createdAt: typeof session.createdAt === 'string' ? session.createdAt : new Date(0).toISOString(),
-      updatedAt: typeof session.updatedAt === 'string' ? session.updatedAt : session.createdAt
-    }));
-  return state;
+function buildActiveV2State(seedState: Record<string, unknown>): Record<string, unknown> {
+  return { ...seedState };
 }

@@ -84,6 +84,16 @@ test('collectSeenContextSignatures handles undefined prior history', () => {
   assert.equal(seen.commands.size, 0);
 });
 
+test('dedupe applies only to evidence captured at the current workspace revision', () => {
+  const prior = record([], ['src/a.ts']);
+  prior.resolution.evidenceRevisions = {
+    'src/a.ts': { id: 'revision-1', observedAt: '2026-07-28T00:00:00.000Z' }
+  };
+
+  assert.equal(collectSeenContextSignatures([prior], 'revision-1').paths.has('src/a.ts'), true);
+  assert.equal(collectSeenContextSignatures([prior], 'revision-2').paths.has('src/a.ts'), false);
+});
+
 test('diffRequestedContext flags all-duplicate candidate as hasNovelEntries=false', () => {
   const seen = collectSeenContextSignatures([
     record([ref('workspace_file', 'a.ts', 'src/a.ts')], ['docs/a.md'])

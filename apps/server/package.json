@@ -8,7 +8,9 @@
     "start": "node dist/apps/server/src/main.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node scripts/run-unit-tests.mjs && node --test scripts/dev-server-guard.spec.mjs"
+    "test": "node scripts/run-unit-tests.mjs && node --test scripts/dev-build-cache.spec.mjs scripts/dev-server-guard.spec.mjs scripts/dev-watch-scope.spec.mjs",
+    "test:workspace-index-first": "tsx --test --tsconfig tsconfig.json src/common/api-exception.filter.spec.ts src/common/workspace-metrics.spec.ts src/modules/sessions/sessions.service.spec.ts src/modules/context-v2/build-envelope-from-context-assembly.spec.ts src/modules/orchestrator/context-router.service.spec.ts src/modules/orchestrator/orchestrator.service.spec.ts src/modules/orchestrator/project-map.service.spec.ts src/modules/orchestrator/supplemental-context-dedupe.spec.ts src/modules/orchestrator/supplemental-context-retry.spec.ts src/modules/runtimes/runtime.service.spec.ts src/modules/tools/builtin/code-search.tool.spec.ts src/modules/workspaces/server-local-workspace-index.spec.ts src/modules/workspaces/workspace-list-directory.spec.ts src/modules/workspaces/workspace-search-text.spec.ts src/modules/workspaces/workspace-read-file.spec.ts src/modules/workspaces/workspace-path.spec.ts src/modules/workspaces/workspace-sensitive-guard.spec.ts src/modules/workspaces/workspace-symlink-guard.spec.ts",
+    "test:perf:workspace-session-create": "tsx --tsconfig tsconfig.json scripts/workspace-session-create.performance.ts"
   },
   "dependencies": {
     "@agent-cluster/shared": "0.1.0",

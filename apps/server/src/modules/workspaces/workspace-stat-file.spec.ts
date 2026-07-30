@@ -39,8 +39,8 @@ test('statServerLocalFile returns size, hash, mtime and revision for a file', as
     if (result.kind !== 'file') return;
     assert.equal(result.size, Buffer.byteLength(content, 'utf8'));
     const expected = createHash('sha256').update(content).digest('hex');
-    assert.equal(result.hash.value, expected);
-    assert.equal(result.hash.algorithm, 'sha256');
+    assert.equal(result.hash!.value, expected);
+    assert.equal(result.hash!.algorithm, 'sha256');
     assert.ok(result.modifiedAt, 'expected modifiedAt to be populated');
     assert.equal(result.revision.id, revision.id);
   });

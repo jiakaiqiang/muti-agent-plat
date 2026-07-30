@@ -17,7 +17,12 @@ import type {
 import { createAgentMessageOutput } from '@agent-cluster/shared';
 import { runtimeStreamingEnabledFor } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
-import { ensureStructuredTermination } from '../../common/execution-termination.js';
+import {
+  abortWithTermination,
+  createExecutionTermination,
+  ensureStructuredTermination,
+  terminationFromSignal
+} from '../../common/execution-termination.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { ClaudeCodeRuntimeAdapterService } from './claude-code-runtime-adapter.service.js';
 import { CodeReaderRuntimeAdapterService } from './code-reader-runtime-adapter.service.js';
@@ -28,9 +33,11 @@ import { RuntimeRegistryService } from './runtime-registry.service.js';
 import { normalizeRuntimeResultContext } from './runtime-result-context-normalizer.js';
 import { TestRunnerRuntimeAdapterService } from './test-runner-runtime-adapter.service.js';
 import { WorktreeExecutionService } from '../worktree-execution/worktree-execution.service.js';
-import { BrowserWorkspaceMirrorService } from '../worktree-execution/browser-workspace-mirror.service.js';
 import { runtimeOutputContractAudit } from './runtime-output-schema.js';
 import { emptyRuntimeSystemEvidence } from './runtime-system-evidence.js';
+import { LocalRuntimeConnectionService } from '../local-runtime/local-runtime-connection.service.js';
+import { ServerRuntimeWorkerService } from './server-runtime-worker.service.js';
+import { InvocationWorkspaceBindingsService } from './invocation-workspace-bindings.service.js';
 
 export type RuntimeInvocationLog = {
   id: string;
@@ -61,6 +68,14 @@ export type RuntimeInvocationLog = {
   workDir?: string;
   workspaceExecution?: AgentRunResult['workspaceExecution'];
   attempt?: RuntimeAttemptTrace;
+  workspaceIndexGeneration?: number;
+  workspaceIndexStatus?: InvocationPlan['contextEnvelope']['L1']['navigation']['indexStatus'];
+  workspaceIndexComplete?: boolean;
+  workspaceRevisionAtStart: InvocationPlan['contextEnvelope']['L0']['workspace']['revision'];
+  supplementalContextAttempt: number;
+  supplementalContextDurationMs: number;
+  evidenceBytes: number;
+  evidencePaths: string[];
   startedAt: string;
   completedAt: string;
 };
@@ -72,6 +87,10 @@ export type RuntimeExecutionHandle = AgentRuntimeRunHandle & {
 @Injectable()
 export class RuntimeService implements OnModuleInit {
   private readonly invocationsBySession = new Map<string, RuntimeInvocationLog[]>();
+  private readonly activeInvocationsBySession = new Map<
+    string,
+    Map<string, { handle: AgentRuntimeRunHandle; done: Promise<unknown> }>
+  >();
   private readonly registrationReady: Promise<void>;
 
   constructor(
@@ -84,7 +103,9 @@ export class RuntimeService implements OnModuleInit {
     private readonly codeReaderRuntime: CodeReaderRuntimeAdapterService,
     private readonly testRunnerRuntime: TestRunnerRuntimeAdapterService,
     @Optional() private readonly worktreeExecution?: WorktreeExecutionService,
-    @Optional() private readonly browserWorkspaceMirror?: BrowserWorkspaceMirrorService
+    @Optional() private readonly localRuntime?: LocalRuntimeConnectionService,
+    @Optional() private readonly serverRuntimeWorker?: ServerRuntimeWorkerService,
+    @Optional() private readonly workspaceBindings?: InvocationWorkspaceBindingsService
   ) {
     const persisted = this.persistence.getCollection<Record<string, RuntimeInvocationLog[]>>(
       'runtimeInvocationsBySession',
@@ -134,6 +155,15 @@ export class RuntimeService implements OnModuleInit {
     return this.registry.getAdapter(type);
   }
 
+  maxStructuredOutputTokens(input: InvocationPlan) {
+    if (input.executionTarget.executionLocation === 'local') {
+      return input.budget.maxOutputTokens;
+    }
+    return this.registry.getAdapter(input.executionTarget.runtimeType)?.maxStructuredOutputTokens?.({
+      modelId: input.executionTarget.modelId
+    });
+  }
+
   listAvailableRuntimeTypes(): RuntimeType[] {
     return this.registry.listAll().map((adapter) => adapter.type);
   }
@@ -158,7 +188,7 @@ export class RuntimeService implements OnModuleInit {
         registered,
         ...(preflight.reason ? { reason: preflight.reason } : {}),
         supportedWorkspaceProviderKinds:
-          adapter.metadata?.supportedWorkspaceProviderKinds ?? ['server_local', 'browser_broker', 'local_bridge']
+          adapter.metadata?.supportedWorkspaceProviderKinds ?? ['server_local']
       };
     }));
   }
@@ -181,7 +211,7 @@ export class RuntimeService implements OnModuleInit {
         registered: Boolean(this.registry.getAdapter(adapter.type)),
         ...(preflight.reason ? { reason: preflight.reason } : {}),
         supportedWorkspaceProviderKinds:
-          adapter.metadata?.supportedWorkspaceProviderKinds ?? ['server_local', 'browser_broker', 'local_bridge']
+          adapter.metadata?.supportedWorkspaceProviderKinds ?? ['server_local']
       };
     }));
   }
@@ -200,19 +230,35 @@ export class RuntimeService implements OnModuleInit {
   start(input: InvocationPlan, signal?: AbortSignal): RuntimeExecutionHandle {
     const startedAt = nowIso();
     const runtimeType = input.executionTarget.runtimeType;
-    const adapter = this.registry.getAdapter(runtimeType);
+    const isLocalExecution = input.executionTarget.executionLocation === 'local';
+    const adapter = isLocalExecution ? undefined : this.registry.getAdapter(runtimeType);
+    const invocationController = new AbortController();
+    const forwardParentAbort = () => {
+      if (!invocationController.signal.aborted) {
+        invocationController.abort(signal?.reason);
+      }
+    };
+    if (signal?.aborted) forwardParentAbort();
+    else signal?.addEventListener('abort', forwardParentAbort, { once: true });
+    const invocationSignal = invocationController.signal;
     let handle: AgentRuntimeRunHandle;
 
-    if (!adapter) {
+    if (
+      (isLocalExecution && input.executionTarget.workspaceProviderKind !== 'local_bridge') ||
+      (!isLocalExecution && input.executionTarget.workspaceProviderKind !== 'server_local')
+    ) {
+      handle = settledHandle(this.unsupportedResult(input, 'Runtime execution location does not match Workspace Provider'));
+    } else if (isLocalExecution) {
+      handle = this.localRuntime
+        ? this.localRuntime.startInvocation(input)
+        : settledHandle(this.unsupportedResult(input, 'Local Runtime CLI transport is unavailable'));
+    } else if (!adapter) {
       handle = settledHandle(this.unsupportedResult(input, `Unsupported runtime: ${runtimeType}`));
-    } else if (this.browserWorkspaceMirror?.shouldManage(input)) {
-      handle = this.startInBrowserMirror(adapter, input, signal);
     } else if (this.worktreeExecution?.shouldManage(input)) {
-      handle = this.startInManagedWorktree(adapter, input, signal);
+      handle = this.startInManagedWorktree(adapter, input, invocationSignal);
     } else {
       try {
-        const firstHandle = startAdapter(adapter, input, signal);
-        handle = withResumeFallback(adapter, input, firstHandle, signal);
+        handle = this.startServerExecution(adapter, input, invocationSignal);
       } catch (error) {
         handle = settledHandle(this.unsupportedResult(input, errorMessage(error)));
       }
@@ -223,7 +269,7 @@ export class RuntimeService implements OnModuleInit {
       .then((resolved) => {
         const terminated = ensureStructuredTermination(normalizeRuntimeResultContext(resolved), {
           phase: input.phase,
-          signal
+          signal: invocationSignal
         });
         const normalized = terminated.error
           ? {
@@ -237,21 +283,90 @@ export class RuntimeService implements OnModuleInit {
         this.recordInvocation(input, normalized, startedAt);
         return normalized;
       });
-    return {
+    const activeHandle = {
       events: handle.events,
       result,
-      cancel: handle.cancel,
+      cancel: async (termination) => {
+        const resolvedTermination = termination ?? createExecutionTermination({
+          kind: 'user_cancelled',
+          source: 'user',
+          scope: 'invocation',
+          phase: input.phase
+        });
+        abortWithTermination(invocationController, resolvedTermination);
+        await handle.cancel(resolvedTermination);
+      },
       hasStreamingEvents:
-        Boolean(adapter?.start) && runtimeStreamingEnabledFor(input.executionTarget.runtimeType)
-    };
+        isLocalExecution || (Boolean(adapter?.start) && runtimeStreamingEnabledFor(input.executionTarget.runtimeType))
+    } satisfies RuntimeExecutionHandle;
+    const sessionInvocations = this.activeInvocationsBySession.get(input.sessionId) ?? new Map();
+    sessionInvocations.set(input.invocationId, {
+      handle: activeHandle,
+      done: result.then(
+        () => {
+          signal?.removeEventListener('abort', forwardParentAbort);
+          this.releaseActiveInvocation(input.sessionId, input.invocationId);
+        },
+        () => {
+          signal?.removeEventListener('abort', forwardParentAbort);
+          this.releaseActiveInvocation(input.sessionId, input.invocationId);
+        }
+      )
+    });
+    this.activeInvocationsBySession.set(input.sessionId, sessionInvocations);
+    return activeHandle;
   }
 
   async run(input: InvocationPlan, signal?: AbortSignal) {
     return this.start(input, signal).result;
   }
 
+  async cancelSessionAndWait(
+    sessionId: string,
+    termination: Parameters<AgentRuntimeRunHandle['cancel']>[0],
+    timeoutMs = 10_000
+  ) {
+    const active = [...(this.activeInvocationsBySession.get(sessionId)?.values() ?? [])];
+    if (!active.length) {
+      return { requested: 0, completed: 0, timedOut: false };
+    }
+
+    // The result promise is authoritative. Adapter cancellation is best-effort
+    // because a provider may fail while it is already shutting down.
+    for (const invocation of active) {
+      void invocation.handle.cancel(termination).catch(() => undefined);
+    }
+
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      Promise.allSettled(active.map((invocation) => invocation.done)),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, Math.max(0, timeoutMs));
+      })
+    ]);
+    if (timer) clearTimeout(timer);
+
+    const remaining = this.activeInvocationsBySession.get(sessionId)?.size ?? 0;
+    return {
+      requested: active.length,
+      completed: active.length - remaining,
+      timedOut: remaining > 0
+    };
+  }
+
+  activeInvocationCount(sessionId: string) {
+    return this.activeInvocationsBySession.get(sessionId)?.size ?? 0;
+  }
+
   listInvocations(sessionId: string) {
     return this.invocationsBySession.get(sessionId) ?? [];
+  }
+
+  private releaseActiveInvocation(sessionId: string, invocationId: string) {
+    const sessionInvocations = this.activeInvocationsBySession.get(sessionId);
+    if (!sessionInvocations) return;
+    sessionInvocations.delete(invocationId);
+    if (!sessionInvocations.size) this.activeInvocationsBySession.delete(sessionId);
   }
 
   private recordInvocation(input: InvocationPlan, result: AgentRunResult, startedAt: string) {
@@ -284,6 +399,14 @@ export class RuntimeService implements OnModuleInit {
       workDir: result.runtimeSession?.workDir,
       workspaceExecution: result.workspaceExecution,
       attempt: input.attempt,
+      workspaceIndexGeneration: input.contextEnvelope.L1.navigation.indexGeneration,
+      workspaceIndexStatus: input.contextEnvelope.L1.navigation.indexStatus,
+      workspaceIndexComplete: input.contextEnvelope.L1.navigation.indexComplete,
+      workspaceRevisionAtStart: input.contextEnvelope.L0.workspace.revision,
+      supplementalContextAttempt: input.attempt?.supplementalContextAttempt ?? 0,
+      supplementalContextDurationMs: input.attempt?.supplementalContextDurationMs ?? 0,
+      evidenceBytes: input.contextEnvelope.L3.totalByteLength,
+      evidencePaths: input.contextEnvelope.L3.files.map((file) => file.path),
       startedAt,
       completedAt: nowIso()
     };
@@ -373,9 +496,14 @@ export class RuntimeService implements OnModuleInit {
           },
           createdAt: nowIso()
         });
-        // A browser mirror is freshly materialized for every invocation, so a
-        // CLI session tied to an older mirror must not be resumed.
-        activeHandle = startAdapter(adapter, withoutResume(input), signal);
+        // Each managed worktree invocation gets an isolated execution directory,
+        // so a CLI session tied to an older directory must not be resumed.
+        activeHandle = this.startServerExecution(
+          adapter,
+          withoutResume(input),
+          signal,
+          lease.manifest.executionWorkDir
+        );
         const pump = pumpEvents(activeHandle.events, queue);
         const runtimeResult = await activeHandle.result;
         await pump;
@@ -398,71 +526,12 @@ export class RuntimeService implements OnModuleInit {
     };
   }
 
-  private startInBrowserMirror(
-    adapter: AgentRuntimeAdapter,
-    input: InvocationPlan,
-    signal?: AbortSignal
-  ): AgentRuntimeRunHandle {
-    const queue = new RuntimeEventQueue();
-    let activeHandle: AgentRuntimeRunHandle | undefined;
-    let cancelled = false;
-
-    const result = (async () => {
-      let lease: Awaited<ReturnType<BrowserWorkspaceMirrorService['prepare']>> | undefined;
-      try {
-        lease = await withBrowserMirrorPrepareTimeout(this.browserWorkspaceMirror!.prepare(input));
-        if (cancelled || signal?.aborted) {
-          return this.workspaceExecutionFailure(input, 'Browser workspace mirror execution was cancelled.', true, 'browser_mirror');
-        }
-        queue.push({
-          invocationId: input.invocationId,
-          type: 'runtime_progress',
-          visibility: 'debug',
-          content: 'Prepared an isolated browser workspace mirror for this Runtime.',
-          metadata: {
-            code: 'BROWSER_MIRROR_PREPARED',
-            workspaceId: lease.manifest.workspaceId,
-            baseRevision: lease.manifest.baseRevision,
-            skippedFileCount: lease.manifest.skippedFiles.length
-          },
-          createdAt: nowIso()
-        });
-        const firstHandle = startAdapter(adapter, input, signal);
-        activeHandle = withResumeFallback(adapter, input, firstHandle, signal);
-        const pump = pumpEvents(activeHandle.events, queue);
-        const runtimeResult = await activeHandle.result;
-        await pump;
-        return await this.browserWorkspaceMirror!.capture(lease, runtimeResult);
-      } catch (error) {
-        return this.workspaceExecutionFailure(
-          input,
-          errorMessage(error),
-          cancelled || signal?.aborted === true,
-          'browser_mirror'
-        );
-      } finally {
-        lease?.release();
-        queue.close();
-      }
-    })();
-
-    return {
-      events: queue,
-      result,
-      cancel: async () => {
-        cancelled = true;
-        await activeHandle?.cancel();
-      }
-    };
-  }
-
   private workspaceExecutionFailure(
     input: InvocationPlan,
     message: string,
-    cancelled = false,
-    mode: 'worktree' | 'browser_mirror' = 'worktree'
+    cancelled = false
   ): AgentRunResult {
-    const label = mode === 'browser_mirror' ? 'Browser workspace mirror' : 'Isolated worktree';
+    const label = 'Isolated worktree';
     return {
       invocationId: input.invocationId,
       runtimeType: input.executionTarget.runtimeType,
@@ -475,7 +544,7 @@ export class RuntimeService implements OnModuleInit {
           visibility: 'user',
           content: cancelled ? `${label} execution was cancelled.` : `${label} execution failed.`,
           metadata: {
-            code: cancelled ? 'RUNTIME_CANCELLED' : mode === 'browser_mirror' ? 'BROWSER_MIRROR_EXECUTION_FAILED' : 'WORKTREE_EXECUTION_FAILED',
+            code: cancelled ? 'RUNTIME_CANCELLED' : 'WORKTREE_EXECUTION_FAILED',
             message
           },
           createdAt: nowIso()
@@ -493,9 +562,44 @@ export class RuntimeService implements OnModuleInit {
         code: cancelled ? 'RUNTIME_CANCELLED' : 'UNKNOWN_ERROR',
         message,
         retryable: false,
-        details: { phase: mode === 'browser_mirror' ? 'browser_mirror_execution' : 'worktree_execution' }
+        details: { phase: 'worktree_execution' }
       }
     };
+  }
+
+  private startServerExecution(
+    adapter: AgentRuntimeAdapter,
+    input: InvocationPlan,
+    signal?: AbortSignal,
+    workDir?: string
+  ): AgentRuntimeRunHandle {
+    if (['codex', 'claude_code'].includes(input.executionTarget.runtimeType)) {
+      if (!this.serverRuntimeWorker) {
+        return settledHandle(this.unsupportedResult(input, 'Server Runtime Worker is unavailable; in-process execution is forbidden'));
+      }
+      const executionWorkDir = workDir ?? this.workspaceBindings?.resolveServerRoot(input);
+      if (!executionWorkDir) {
+        return settledHandle(this.unsupportedResult(input, 'Server Runtime Worker could not resolve an isolated execution directory'));
+      }
+      const startWorker = (plan: InvocationPlan, invocationSignal?: AbortSignal) => {
+        const workerHandle = this.serverRuntimeWorker!.start(plan, executionWorkDir);
+        let cancellation: Promise<void> | undefined;
+        const cancelOnce: AgentRuntimeRunHandle['cancel'] = (termination) => {
+          cancellation ??= Promise.resolve(workerHandle.cancel(termination));
+          return cancellation;
+        };
+        const guardedHandle: AgentRuntimeRunHandle = { ...workerHandle, cancel: cancelOnce };
+        if (invocationSignal?.aborted) void guardedHandle.cancel(terminationFromSignal(invocationSignal));
+        else invocationSignal?.addEventListener('abort', () => {
+          void guardedHandle.cancel(terminationFromSignal(invocationSignal));
+        }, { once: true });
+        return guardedHandle;
+      };
+      const firstHandle = startWorker(input, signal);
+      return withResumeFallback(startWorker, input, firstHandle, signal);
+    }
+    const firstHandle = startAdapter(adapter, input, signal);
+    return withResumeFallback(startAdapter.bind(undefined, adapter), input, firstHandle, signal);
   }
 
   findPriorInvocation(
@@ -521,37 +625,6 @@ export class RuntimeService implements OnModuleInit {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
-}
-
-function browserMirrorPrepareTimeoutMs() {
-  const parsed = Number(process.env.BROWSER_MIRROR_PREPARE_TIMEOUT_MS ?? 300_000);
-  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 300_000;
-}
-
-// Overall watchdog for browser-mirror preparation. Lower layers (broker requests,
-// git commands) each have their own timeout, but this guards against any future
-// hang point so a stalled prepare turns into a failed outcome instead of a
-// permanently `running` workflow node. If prepare eventually resolves after the
-// timeout, its lease is released to avoid leaking the invocation binding.
-async function withBrowserMirrorPrepareTimeout<T extends { release(): void }>(
-  prepare: Promise<T>
-): Promise<T> {
-  const timeoutMs = browserMirrorPrepareTimeoutMs();
-  if (timeoutMs <= 0) return prepare;
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      prepare,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          prepare.then((lease) => lease.release()).catch(() => {});
-          reject(new Error(`Browser workspace mirror preparation timed out after ${timeoutMs}ms.`));
-        }, timeoutMs);
-      })
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
 
 function startAdapter(
@@ -592,7 +665,7 @@ function fallbackEvent(input: InvocationPlan, reason: string): AgentRuntimeEvent
 }
 
 function withResumeFallback(
-  adapter: AgentRuntimeAdapter,
+  start: (input: InvocationPlan, signal?: AbortSignal) => AgentRuntimeRunHandle,
   input: InvocationPlan,
   firstHandle: AgentRuntimeRunHandle,
   signal?: AbortSignal
@@ -615,7 +688,7 @@ function withResumeFallback(
           : firstResult.error?.message ?? `Resume attempt ended with ${firstResult.status}.`;
       queue.push(fallbackEvent(input, reason));
 
-      activeHandle = startAdapter(adapter, withoutResume(input), signal);
+      activeHandle = start(withoutResume(input), signal);
       const fallbackPump = pumpEvents(activeHandle.events, queue);
       const fallbackResult = await activeHandle.result;
       await fallbackPump;

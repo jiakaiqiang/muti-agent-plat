@@ -2,11 +2,19 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { fileURLToPath, URL } from 'node:url'
 
+const devApiProxyTarget = process.env.AGENT_CLUSTER_DEV_API_PROXY_TARGET?.trim() || 'http://127.0.0.1:8099'
+
 export default defineConfig({
   envDir: fileURLToPath(new URL('../..', import.meta.url)),
   server: {
     port: 8089,
-    strictPort: true
+    strictPort: true,
+    proxy: {
+      '/api': {
+        target: devApiProxyTarget,
+        changeOrigin: true
+      }
+    }
   },
   plugins: [vue()],
   resolve: {

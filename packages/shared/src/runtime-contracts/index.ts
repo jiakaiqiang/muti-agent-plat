@@ -19,6 +19,7 @@ export {
   TaskAcceptanceDecisionOutputSchema,
   TaskBriefOutputSchema,
   TaskExecutionResultOutputSchema,
+  FileRevisionCandidateOutputSchema,
   PostReviewReportOutputSchema,
   FinalDeliveryOutputSchema,
   UserMessageHandlingPlanOutputSchema,
