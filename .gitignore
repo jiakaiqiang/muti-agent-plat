@@ -38,6 +38,11 @@ artifacts/
 *.seed
 dump.sql
 *.dump
+*.backup.sql
+agent_cluster_backup.sql
+
+# AgentRoom runtime state (sessions/worktrees/probes) — never commit
+.agentroom/
 
 # IDE and OS
 .DS_Store
@@ -49,3 +54,6 @@ Thumbs.db
 playwright-report/
 test-results/
 junit.xml
+
+# Stray local scratch files
+.tmpdir.txt
