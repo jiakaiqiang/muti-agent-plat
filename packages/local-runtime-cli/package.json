@@ -1,0 +1,26 @@
+{
+  "name": "@agent-cluster/local-runtime-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agent-runtime": "dist/local-runtime-cli/src/cli.js"
+  },
+  "scripts": {
+    "dev": "node scripts/dev-entry.mjs",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node ../../node_modules/tsx/dist/cli.mjs --test src/directory-picker.spec.ts src/transport.spec.ts src/workspace.spec.ts src/runtime.spec.ts",
+    "test:perf:workspace-registration": "tsx --tsconfig tsconfig.json src/workspace-registration.performance.ts"
+  },
+  "dependencies": {
+    "@agent-cluster/shared": "0.1.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
