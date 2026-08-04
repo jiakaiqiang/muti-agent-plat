@@ -69,6 +69,19 @@ export class ClaudeCodeLocalRuntimeAdapter implements LocalRuntimeAdapter {
           }
         });
       }
+      if (isToolCallParseFailure(processFailure)) {
+        throw localRuntimeError({
+          code: 'MODEL_ERROR',
+          message: 'Claude Code could not parse a model tool call after retry.',
+          retryable: true,
+          details: {
+            provider: 'claude_code',
+            providerFailure: true,
+            stage: 'provider_response',
+            failureKind: 'tool_call_parse'
+          }
+        });
+      }
       throw new Error(processFailure);
     }
     const result = parseClaudeOutput(stdout, plan.expectedOutput.kind);
@@ -96,6 +109,11 @@ function isProviderFormatMismatch(message: string) {
     && /Format mismatch/i.test(message)
     && /\bclaude_chat\b/i.test(message)
     && /\bopenai_(?:chat|responses)\b/i.test(message);
+}
+
+function isToolCallParseFailure(message: string) {
+  return /model['’]s tool call could not be parsed/i.test(message)
+    && /retry also failed/i.test(message);
 }
 
 export function buildClaudeArgs(plan: InvocationPlan, permissions: LocalRuntimePermissionPolicy) {

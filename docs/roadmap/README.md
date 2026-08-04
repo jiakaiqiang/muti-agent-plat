@@ -10,5 +10,6 @@
 - `context-v2-session-evidence-remediation-plan-v1.md`：旧会话来源、v2 Evidence 补读、只读归档、版本闸门和真实发布的开发计划。
 - `workflow-builder-and-agent-capability-plan-v1.md`：线性工作流当前边界、三栏低代码创建器、人工/机器人确认节点，以及 Agent 能力画像和可解释匹配路线。
 - `local-runtime-cli-foundation-plan-v1.md`：Local Runtime CLI 单用户方案、当前整改计划、生产验收门禁，以及签名分发、Local Claude 和会话唤醒后续计划。
+- `production-basic-runtime-usage-plan-v1.md`：生产环境的浏览器/服务器双执行模式、Local Runtime 安装唤醒、设备绑定、WSS 通讯和验收门槛。
 
 阅读时建议先看方案，再看执行计划；继续做 v2 增强时，从未完成任务清单选择下一项。

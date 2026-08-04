@@ -84,7 +84,9 @@ export function buildV2SeedState(): Record<string, unknown> {
     autopilots: [],
     autopilotRuns: [],
     localRuntimeDevices: [],
-    localRuntimeOperationAudits: []
+    localRuntimeOperationAudits: [],
+    workspaceSessionLeases: {},
+    workspaceWritebacks: []
   };
 }
 

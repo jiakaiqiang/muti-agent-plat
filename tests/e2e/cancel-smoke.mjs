@@ -44,7 +44,7 @@ try {
     method: 'POST',
     body: JSON.stringify({ reason: '用户要求暂停执行' })
   });
-  await waitForStatus(server.apiBase, sessionId, 'WAIT_USER_DECISION', 15_000);
+  await waitForStatus(server.apiBase, sessionId, 'PAUSED', 15_000);
 
   // 取消传播需要一个任务边界；等它落定后统计进展类事件
   await new Promise((resolve) => setTimeout(resolve, 2_500));
@@ -62,15 +62,15 @@ try {
   }
 
   const detail = await api(server.apiBase, `/sessions/${sessionId}`);
-  if (detail.data.status !== 'WAIT_USER_DECISION') {
-    throw new Error(`Session left WAIT_USER_DECISION without user action: ${detail.data.status}`);
+  if (detail.data.status !== 'PAUSED') {
+    throw new Error(`Session left PAUSED without user action: ${detail.data.status}`);
   }
 
   const cancelledRuntime = laterEvents.find(
     (event) =>
       event.type === 'runtime_failed' &&
       event.metadata?.payload?.code === 'RUNTIME_CANCELLED' &&
-      event.metadata?.payload?.termination?.kind === 'user_cancelled'
+      event.metadata?.payload?.termination?.kind === 'user_paused'
   );
   if (!cancelledRuntime) {
     throw new Error('Expected an in-flight runtime invocation to be cancelled by the user');

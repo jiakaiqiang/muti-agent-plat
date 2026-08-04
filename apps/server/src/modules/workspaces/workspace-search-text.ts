@@ -9,6 +9,7 @@ import type {
 import { isGeneratedWorkspaceDirectory } from '@agent-cluster/shared';
 import { isSensitivePath } from '../../common/path-safety.js';
 import { resolveWorkspacePath } from './workspace-path.js';
+import { assertWorkspacePathWithinRoot } from './workspace-symlink-guard.js';
 
 const DEFAULT_MAX_RESULTS = 100;
 const MAX_PREVIEW_LENGTH = 240;
@@ -27,6 +28,9 @@ export async function searchServerLocalText(args: SearchServerLocalTextArgs): Pr
     rootPath,
     input.path ?? ''
   );
+
+  await assertWorkspacePathWithinRoot(rootPath, searchRootRelative);
+
   const maxResults = Math.max(1, input.maxResults ?? DEFAULT_MAX_RESULTS);
   const caseSensitive = input.caseSensitive === true;
   const needle = caseSensitive ? input.query : input.query.toLowerCase();

@@ -3,7 +3,7 @@ import test from 'node:test';
 import { ConflictException } from '@nestjs/common';
 import { ApiExceptionFilter } from './api-exception.filter.js';
 
-test('API exception filter preserves structured workspace conflict details', () => {
+test('API exception filter preserves structured conflict details', () => {
   let status = 0;
   let body: unknown;
   const host = {
@@ -21,21 +21,19 @@ test('API exception filter preserves structured workspace conflict details', () 
     }
   };
   new ApiExceptionFilter().catch(new ConflictException({
-    code: 'WORKSPACE_ACTIVE_SESSION_CONFLICT',
-    message: 'Workspace already has an active Session.',
-    workspaceId: 'workspace-1',
-    activeSessionId: 'session-1',
-    activeSessionStatus: 'EXECUTING'
+    code: 'SESSION_DELETE_CONFLICT',
+    message: 'Session cleanup did not finish.',
+    sessionId: 'session-1',
+    pendingInvocationIds: ['invocation-1']
   }), host as never);
 
   assert.equal(status, 409);
   assert.deepEqual((body as { error: unknown }).error, {
-    code: 'WORKSPACE_ACTIVE_SESSION_CONFLICT',
-    message: 'Workspace already has an active Session.',
+    code: 'SESSION_DELETE_CONFLICT',
+    message: 'Session cleanup did not finish.',
     details: {
-      workspaceId: 'workspace-1',
-      activeSessionId: 'session-1',
-      activeSessionStatus: 'EXECUTING'
+      sessionId: 'session-1',
+      pendingInvocationIds: ['invocation-1']
     }
   });
 });

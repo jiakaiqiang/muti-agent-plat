@@ -343,7 +343,14 @@ export class PersistenceCutoverService {
   }
 
   private operationalScope(state: Record<string, unknown>) {
-    const activeStatuses = new Set(['AGENT_DISCUSSING', 'EXECUTING', 'REWORKING', 'WAIT_USER_CONFIRM', 'WAIT_USER_DECISION']);
+    const activeStatuses = new Set([
+      'AGENT_DISCUSSING',
+      'EXECUTING',
+      'REWORKING',
+      'WAIT_USER_CONFIRM',
+      'WAIT_USER_DECISION',
+      'PAUSED'
+    ]);
     const sessions = Array.isArray(state.sessions) ? state.sessions : [];
     const invocations = Object.values((state.runtimeInvocationsBySession as Record<string, unknown[]> | undefined) ?? {})
       .flatMap((value) => (Array.isArray(value) ? value : []));

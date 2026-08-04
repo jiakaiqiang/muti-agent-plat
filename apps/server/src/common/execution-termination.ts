@@ -26,6 +26,7 @@ export type CreateExecutionTerminationInput = {
 
 const safeMessages: Record<ExecutionTerminationKind, string> = {
   user_cancelled: '执行已由用户取消。',
+  user_paused: '执行已由用户暂停，可以稍后继续。',
   frontend_disconnected: '前端连接已断开，会话执行已停止。',
   runtime_disconnected: 'Runtime 连接已断开，本次调用已中断且不会自动续跑。',
   phase_timeout: '当前阶段执行超时，已停止本次调用。',
@@ -59,7 +60,7 @@ export function isExecutionTermination(value: unknown): value is ExecutionTermin
     candidate.schemaVersion === '1.0' &&
     typeof candidate.terminationId === 'string' &&
     typeof candidate.occurredAt === 'string' &&
-    ['user_cancelled', 'frontend_disconnected', 'runtime_disconnected', 'phase_timeout', 'runtime_timeout', 'service_shutdown', 'superseded', 'maintenance'].includes(
+    ['user_cancelled', 'user_paused', 'frontend_disconnected', 'runtime_disconnected', 'phase_timeout', 'runtime_timeout', 'service_shutdown', 'superseded', 'maintenance'].includes(
       candidate.kind ?? ''
     ) &&
     ['user', 'orchestrator', 'runtime', 'system', 'operator'].includes(candidate.source ?? '') &&
@@ -95,6 +96,7 @@ export function safeTerminationMessage(termination: ExecutionTermination): strin
 export function terminationDisposition(termination: ExecutionTermination): ExecutionTerminationDisposition {
   if (
     termination.kind === 'user_cancelled' ||
+    termination.kind === 'user_paused' ||
     termination.kind === 'frontend_disconnected' ||
     termination.kind === 'runtime_disconnected' ||
     termination.kind === 'service_shutdown' ||

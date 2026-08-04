@@ -182,30 +182,69 @@ test('deleting a Session removes its managed worktrees and manifests only', asyn
   });
 });
 
-test('fails closed when the selected server-local directory is not a Git repository', async () => {
+test('uses an isolated staging copy when the selected server-local directory is not a Git repository', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-cluster-non-git-'));
+  const staging = await mkdtemp(join(tmpdir(), 'agent-cluster-non-git-staging-'));
   const previousRoot = process.env.AGENT_CLUSTER_WORKTREE_ROOT;
-  process.env.AGENT_CLUSTER_WORKTREE_ROOT = join(root, 'staging');
+  process.env.AGENT_CLUSTER_WORKTREE_ROOT = staging;
   try {
+    await writeFile(join(root, 'source.txt'), 'base\n', 'utf8');
     const bindings = new InvocationWorkspaceBindingsService();
     const input = plan(bindings, root);
-    await assert.rejects(() => new WorktreeExecutionService(bindings).prepare(input), /not a git repository/i);
+    const service = new WorktreeExecutionService(bindings);
+    const lease = await service.prepare(input);
+    assert.equal(lease.manifest.mode, 'staging_copy');
+    assert.notEqual(lease.manifest.executionWorkDir, root);
+    await writeFile(join(lease.manifest.executionWorkDir, 'source.txt'), 'agent\n', 'utf8');
+    const result = await service.capture(lease, completed(input));
+    assert.equal(await readFile(join(root, 'source.txt'), 'utf8'), 'base\n');
+    assert.equal(result.workspaceExecution?.mode, 'staging_copy');
+    assert.equal(result.workspaceExecution?.changeSet.changes[0]?.operation, 'update');
+    service.releaseWriteLease(result.workspaceExecution!.changeSet.id);
+    lease.release();
   } finally {
     if (previousRoot === undefined) delete process.env.AGENT_CLUSTER_WORKTREE_ROOT;
     else process.env.AGENT_CLUSTER_WORKTREE_ROOT = previousRoot;
     await rm(root, { recursive: true, force: true });
+    await rm(staging, { recursive: true, force: true });
   }
 });
 
-test('fails closed when the selected directory is below the Git repository root', async () => {
+test('supports a selected directory below the Git repository root', async () => {
   await withRepository(async ({ repository, bindings }) => {
     const nested = join(repository, 'packages', 'app');
     await mkdir(nested, { recursive: true });
     const input = plan(bindings, nested);
-    await assert.rejects(
-      () => new WorktreeExecutionService(bindings).prepare(input),
-      /requires the selected directory to be the Git repository root/i
-    );
+    const service = new WorktreeExecutionService(bindings);
+    const lease = await service.prepare(input);
+    assert.equal(lease.manifest.mode, 'git_worktree');
+    assert.match(lease.manifest.executionWorkDir.replace(/\\/g, '/'), /packages\/app$/);
+    await writeFile(join(lease.manifest.executionWorkDir, 'nested.txt'), 'nested change\n', 'utf8');
+    const result = await service.capture(lease, completed(input));
+    assert.deepEqual(result.workspaceExecution?.changeSet.changes.map((change) =>
+      change.operation === 'move' ? change.toPath : change.path
+    ), ['nested.txt']);
+    lease.release();
+  });
+});
+
+test('resetTaskDirectory removes the old isolated baseline before an Agent conflict retry', async () => {
+  await withRepository(async ({ repository, staging, bindings }) => {
+    const input = plan(bindings, repository);
+    const service = new WorktreeExecutionService(bindings);
+    const lease = await service.prepare(input);
+    const oldWorktree = lease.manifest.worktreeRoot;
+    lease.release();
+
+    await service.resetTaskDirectory(input.sessionId, input.taskId!);
+
+    await assert.rejects(access(oldWorktree));
+    const manifests = join(staging, 'manifests');
+    const next = await service.prepare(input);
+    assert.equal(next.manifest.mode, 'git_worktree');
+    assert.equal(next.manifest.worktreeRoot, oldWorktree);
+    assert.equal(await access(manifests).then(() => true, () => false), true);
+    next.release();
   });
 });
 

@@ -21,7 +21,7 @@ export class CodexLocalRuntimeAdapter implements LocalRuntimeAdapter {
     const configuredArgs = process.env.AGENT_RUNTIME_CODEX_ARGS_JSON?.trim();
     const args = configuredArgs
       ? parseConfiguredArgs(configuredArgs, 'AGENT_RUNTIME_CODEX_ARGS_JSON')
-      : ['exec', '--json', '--sandbox', 'workspace-write', '-'];
+      : buildCodexArgs();
     if (providerConnection && providerConnection.provider !== 'openai-compatible') {
       throw new Error('MODEL_PROTOCOL_MISMATCH: Codex requires an OpenAI-compatible connection.');
     }
@@ -45,6 +45,10 @@ export class CodexLocalRuntimeAdapter implements LocalRuntimeAdapter {
       usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: plan.executionTarget.modelId ?? 'codex' }
     };
   }
+}
+
+export function buildCodexArgs() {
+  return ['exec', '--json', '--sandbox', 'workspace-write', '--skip-git-repo-check', '-'];
 }
 
 function parseCodexOutput(stdout: string, expectedKind: Parameters<typeof validateRuntimeOutput>[0]): RuntimeOutput {

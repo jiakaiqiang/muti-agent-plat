@@ -133,6 +133,8 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
           schemaVersion: '1.0',
           kind: 'user_message_handling_plan',
           intent: 'constraint',
+          requirementRelation: 'continuation',
+          failedExecutionAction: 'none',
           priority: 'normal',
           shouldPause: false,
           affectedTaskIds: input.taskId ? [input.taskId] : [],

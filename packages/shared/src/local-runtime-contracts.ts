@@ -45,7 +45,11 @@ export type LocalRuntimeWorkspaceRegistration = {
   revision: WorkspaceRevision;
   permissions: LocalRuntimePermissionPolicy;
   registeredAt: ISODateTime;
-  index?: WorkspaceIndexSummary;
+  /**
+   * Required in protocol v6+. Must include `coverage`. Omitting this field or
+   * sending a Summary without `coverage` is a protocol violation.
+   */
+  index: WorkspaceIndexSummary;
 };
 
 export type LocalRuntimeWorkspaceSummary = LocalRuntimeWorkspaceRegistration & {

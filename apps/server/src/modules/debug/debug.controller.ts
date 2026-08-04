@@ -89,7 +89,9 @@ export class DebugController {
           artifactRefCount:
             invocation.contextEnvelope.L6.changeSetIds.length + invocation.contextEnvelope.L6.reportIds.length,
           requestedContextRefCount: invocation.error?.requestedContext?.requestedRefs.length ?? 0,
-          requestedContextPathCount: invocation.error?.requestedContext?.requestedPaths?.length ?? 0,
+          requestedContextPathCount:
+            (invocation.error?.requestedContext?.requestedFiles?.length ?? 0) +
+            (invocation.error?.requestedContext?.requestedPaths?.length ?? 0),
           requestedContextCommandCount: invocation.error?.requestedContext?.requestedCommands?.length ?? 0
         }
       })),

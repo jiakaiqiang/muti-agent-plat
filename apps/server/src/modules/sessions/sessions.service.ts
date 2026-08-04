@@ -21,6 +21,7 @@ import type {
   DecideFileRevisionInput,
   ReprocessFileRevisionInput,
   ResolveFileRevisionFailureInput,
+  ResolveWorkspaceWritebackInput,
   RetryInterruptedFileRevisionInput,
   SaveFileRevisionDraftInput,
   LocalRuntimePermission,
@@ -33,7 +34,9 @@ import type {
   RuntimePreference,
   SessionWorkingDirectory,
   SessionWorkspaceContext,
-  TaskBrief
+  TaskBrief,
+  UserMessageHandlingPlan,
+  WorkspaceWritebackRecord
 } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
 import { messages } from '../../common/messages.js';
@@ -62,6 +65,7 @@ import { WorkdirBriefService } from '../runtimes/streaming/workdir-brief.service
 import { RuntimeService } from '../runtimes/runtime.service.js';
 import { LocalRuntimeConnectionService } from '../local-runtime/local-runtime-connection.service.js';
 import { WorkspaceProviderResolver } from '../workspaces/workspace-provider-resolver.js';
+import { WorkspaceWritebackService } from '../workspaces/workspace-writeback.service.js';
 import { validateServerLocalWorkspace } from '../workspaces/validate-server-local-workspace.js';
 import { CapabilitiesService } from '../capabilities/capabilities.service.js';
 import { FileRevisionsService } from '../file-revisions/file-revisions.service.js';
@@ -85,7 +89,6 @@ const ACTIVE_INVOCATION_SESSION_STATUSES = new Set<SessionStatus>([
   'POST_REVIEW',
   'REWORKING'
 ]);
-const TERMINAL_SESSION_STATUSES = new Set<SessionStatus>(['COMPLETED', 'FAILED', 'CANCELLED']);
 
 @Injectable()
 export class SessionsService implements BeforeApplicationShutdown, OnModuleDestroy {
@@ -120,13 +123,17 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     @Optional() private readonly runtime?: RuntimeService,
     @Optional() private readonly localRuntime?: LocalRuntimeConnectionService,
     @Optional() private readonly workspaceProviders?: WorkspaceProviderResolver,
-    @Optional() private readonly fileRevisions?: FileRevisionsService
+    @Optional() private readonly fileRevisions?: FileRevisionsService,
+    @Optional() private readonly workspaceWritebacks?: WorkspaceWritebackService
   ) {
     const persisted = this.persistence.getCollection<SessionDetail[]>('sessions', []);
+    let recoveredWorkspaceWriteback = false;
     for (const session of persisted) {
       this.assertCurrentSchema(session);
+      if (this.recoverWorkspaceWritebackState(session)) recoveredWorkspaceWriteback = true;
       this.sessions.set(session.id, session);
     }
+    if (recoveredWorkspaceWriteback) this.persist();
     for (const session of this.sessions.values()) {
       this.orchestrator.ensureArchitectureReportSaveConfirmation(session);
     }
@@ -175,7 +182,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
           'WAIT_USER_CONFIRM',
           'WAIT_WORKFLOW_SELECT',
           'WAIT_WORKFLOW_STEP_CONFIRM',
+          'WAIT_WORKSPACE_CONFLICT_RESOLUTION',
           'WAIT_USER_DECISION',
+          'PAUSED',
           'INTERRUPTED'
         ].includes(session.status),
         latestEventSummary: this.events.list(session.id).at(-1)?.content,
@@ -189,7 +198,86 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     if (!session) {
       throw new NotFoundException(`Session not found: ${sessionId}`);
     }
+    if (this.workspaceWritebacks) session.workspaceWritebacks = this.workspaceWritebacks.list(sessionId);
     return session;
+  }
+
+  async resolveWorkspaceWriteback(
+    sessionId: string,
+    writebackId: string,
+    input: ResolveWorkspaceWritebackInput
+  ) {
+    const session = this.get(sessionId);
+    if (!this.workspaceWritebacks) throw new ServiceUnavailableException('Workspace writeback service is unavailable.');
+    const writeback = await this.workspaceWritebacks.resolve(session, writebackId, input);
+    session.workspaceWritebacks = this.workspaceWritebacks.list(sessionId);
+    this.events.create({
+      sessionId,
+      type: writeback.status === 'applied' ? 'runtime_progress' : 'user_confirmation_resolved',
+      content: writeback.status === 'applied'
+        ? 'Workspace changes were applied successfully.'
+        : `Workspace writeback is now ${writeback.status}.`,
+      metadata: createMetadata('system_notice', { workspaceWriteback: writeback })
+    });
+    if (input.action === 'resolve_with_agent') {
+      const conflictPaths = writeback.changeSet.changes
+        .map((change) => change.operation === 'move' ? change.toPath : change.path)
+        .join(', ');
+      const instruction = `请重新处理工作区写回冲突。保留当前目录中的用户修改，并针对这些路径生成新的兼容变更：${conflictPaths}`;
+      this.events.create({
+        sessionId,
+        type: 'user_message',
+        userMessageIntent: 'correction',
+        priority: 'high',
+        content: instruction,
+        metadata: createMetadata('chat_message', { text: instruction, workspaceWritebackId: writeback.id })
+      });
+      if (writeback.taskId) {
+        const task = this.tasks.find(sessionId, writeback.taskId);
+        if (task) this.tasks.update(task, { status: 'pending', resultSummary: instruction });
+        await this.worktreeExecution?.resetTaskDirectory(sessionId, writeback.taskId);
+      }
+      const writebackState = this.workspaceWritebackAggregate(sessionId);
+      if (writebackState === 'blocking') this.setStatus(session, 'WAIT_WORKSPACE_CONFLICT_RESOLUTION');
+      else if (writebackState === 'in_flight') this.setStatus(session, 'APPLYING_CHANGES');
+      else {
+        this.setStatus(session, 'EXECUTING');
+        this.resumeExecution(session);
+      }
+      return writeback;
+    }
+    if (writeback.status === 'applied' || writeback.status === 'abandoned') {
+      const resultSummary = writeback.status === 'applied'
+        ? writeback.resultSummary ?? 'Workspace changes were applied after conflict resolution.'
+        : 'The isolated workspace changes were abandoned by the user.';
+      const writebackState = this.workspaceWritebackAggregate(sessionId);
+      if (writebackState === 'blocking') this.setStatus(session, 'WAIT_WORKSPACE_CONFLICT_RESOLUTION');
+      else if (writebackState === 'in_flight') this.setStatus(session, 'APPLYING_CHANGES');
+      if (writebackState === 'blocking' || writebackState === 'in_flight') return writeback;
+      this.setStatus(session, 'EXECUTING');
+      const resolved = this.workspaceWritebacks.list(sessionId)
+        .filter((item) => item.status === 'applied' || item.status === 'abandoned');
+      let acceptedWorkflowOutcome = false;
+      for (const item of resolved) {
+        if (!item.taskId) continue;
+        const task = this.tasks.find(sessionId, item.taskId);
+        if (!task || task.status !== 'waiting') continue;
+        const itemSummary = item.status === 'applied'
+          ? item.resultSummary ?? resultSummary
+          : 'The isolated workspace changes were abandoned by the user.';
+        this.tasks.update(task, { status: 'completed', resultSummary: itemSummary });
+        if (session.workflowRunId && this.workflowRuntime) {
+          await this.workflowRuntime.acceptExecutionOutcome(sessionId, {
+            kind: 'workflow_step_completed',
+            taskId: item.taskId,
+            resultSummary: itemSummary
+          });
+          acceptedWorkflowOutcome = true;
+        }
+      }
+      if (!acceptedWorkflowOutcome) this.resumeExecution(session);
+    }
+    return writeback;
   }
 
   listRaw() {
@@ -732,10 +820,15 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       const participatingAgentIds = this.agents.resolveIds(input.agentIds);
       const workspaceBinding = await this.resolveWorkspaceBinding(input);
       const workspaceId = workspaceBinding.workingDirectory?.id ?? 'default-workspace';
-      this.assertWorkspaceLeaseAvailable(workspaceId);
+
+      const sessionId = crypto.randomUUID();
+      const leaseAcquired = await this.persistence.acquireWorkspaceSessionLease(workspaceId, sessionId);
+      if (!leaseAcquired) {
+        throw new ConflictException(`Workspace ${workspaceId} is already bound to an active session. Only one session per workspace is allowed.`);
+      }
       const recognizedIntent = this.intentRecognition.recognizeTask(input.input);
       const session: SessionDetail = {
-      id: crypto.randomUUID(),
+      id: sessionId,
       dataEpoch,
       title: this.titleFromInput(input.input),
       originalInput: input.input,
@@ -861,21 +954,6 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     };
   }
 
-  private assertWorkspaceLeaseAvailable(workspaceId: string) {
-    const active = [...this.sessions.values()]
-      .filter((session) => session.workspaceId === workspaceId && !TERMINAL_SESSION_STATUSES.has(session.status))
-      .sort((left, right) => this.compareSessionRecency(left, right))[0];
-    if (!active) return;
-    workspaceMetrics.increment('workspace_active_session_conflict_total');
-    throw new ConflictException({
-      code: 'WORKSPACE_ACTIVE_SESSION_CONFLICT',
-      message: '同一工作区在 V1 中只能运行一个活动会话，请先返回或结束当前会话。',
-      workspaceId,
-      activeSessionId: active.id,
-      activeSessionStatus: active.status
-    });
-  }
-
   private generateBriefInBackground(session: SessionDetail) {
     const generationSeq = (this.briefGenerationSeqBySession.get(session.id) ?? 0) + 1;
     this.briefGenerationSeqBySession.set(session.id, generationSeq);
@@ -920,13 +998,11 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
   async sendMessage(sessionId: string, content: string, mentionedAgentIds: string[] = []) {
     const session = this.get(sessionId);
-    let handlingPlan;
-    try {
-      handlingPlan = await this.orchestrator.recognizeFollowUpMessage(session, content, mentionedAgentIds);
-    } catch (error) {
-      this.logger.warn(`Receiver Runtime intent recognition failed for session ${session.id}: ${String(error)}`);
-      handlingPlan = this.intentRecognition.recognizeUserMessage(content, session.status);
-    }
+    const receiverRecognitionPending = session.status === 'PAUSED';
+    let handlingPlan: UserMessageHandlingPlan = receiverRecognitionPending
+      ? this.intentRecognition.recognizeUserMessage(content, session.status)
+      : await this.recognizeFollowUpHandlingPlan(session, content, mentionedAgentIds);
+    handlingPlan = this.normalizeFollowUpHandlingPlan(session, handlingPlan);
     const event = this.events.create({
       sessionId,
       type: 'user_message',
@@ -947,13 +1023,16 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       type: 'agent_message',
       fromAgentId: coordinator.id,
       toAgentIds: mentionedAgentIds,
-      content: deferred
-        ? `接收者已完成意图识别。当前任务结束后再进行任务拆分与派发：${handlingPlan.coordinatorInstruction}`
-        : `接收者已完成意图识别，开始进行任务拆分与派发：${handlingPlan.coordinatorInstruction}`,
+      content: receiverRecognitionPending
+        ? '会话已停止，消息已加入等待队列；继续后再由接收者进行意图识别和任务拆分。'
+        : deferred
+          ? `接收者已完成意图识别。当前任务结束后再进行任务拆分与派发：${handlingPlan.coordinatorInstruction}`
+          : `接收者已完成意图识别，开始进行任务拆分与派发：${handlingPlan.coordinatorInstruction}`,
       metadata: createMetadata('chat_message', {
         messageKind: 'decision',
         handlingPlan,
         deferred,
+        receiverRecognitionPending,
         receiverResponsibilities: ['intent_recognition', 'task_decomposition']
       })
     });
@@ -989,6 +1068,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       content,
       mentionedAgentIds: Array.from(new Set(mentionedAgentIds)),
       handlingPlan,
+      receiverRecognitionPending: receiverRecognitionPending || undefined,
       status: 'queued',
       queuedAt: nowIso()
     };
@@ -1013,6 +1093,19 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
 
     return { event, handlingPlan, deferred, followUpMessageId: followUp.id };
+  }
+
+  private async recognizeFollowUpHandlingPlan(
+    session: SessionDetail,
+    content: string,
+    mentionedAgentIds: string[]
+  ): Promise<UserMessageHandlingPlan> {
+    try {
+      return await this.orchestrator.recognizeFollowUpMessage(session, content, mentionedAgentIds);
+    } catch (error) {
+      this.logger.warn(`Receiver Runtime intent recognition failed for session ${session.id}: ${String(error)}`);
+      return this.intentRecognition.recognizeUserMessage(content, session.status);
+    }
   }
 
   async confirmBrief(sessionId: string, briefId: string) {
@@ -1485,6 +1578,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   private hasActiveSessionWork(session: SessionDetail) {
     return Boolean(
       session.status === 'INTERRUPTED' ||
+      session.status === 'PAUSED' ||
       session.activeFollowUpMessageId ||
       this.followUpPlanningRuns.has(session.id) ||
       this.briefGenerationRuns.has(session.id) ||
@@ -1528,7 +1622,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
   private async processNextFollowUp(sessionId: string) {
     const session = this.sessions.get(sessionId);
-    if (!session || session.status === 'INTERRUPTED' || session.activeFollowUpMessageId) return;
+    if (!session || session.status === 'INTERRUPTED' || session.status === 'PAUSED' || session.activeFollowUpMessageId) return;
     if (
       this.briefGenerationRuns.has(sessionId) ||
       this.execution.isRunning(sessionId) ||
@@ -1538,10 +1632,33 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
     const followUp = session.pendingFollowUpMessages?.find((item) => item.status === 'queued');
     if (!followUp) return;
+    if (followUp.receiverRecognitionPending) {
+      followUp.handlingPlan = await this.recognizeFollowUpHandlingPlan(
+        session,
+        followUp.content,
+        followUp.mentionedAgentIds
+      );
+      followUp.receiverRecognitionPending = undefined;
+      this.touchSession(session);
+    }
+    followUp.handlingPlan = this.normalizeFollowUpHandlingPlan(session, followUp.handlingPlan);
 
     followUp.status = 'planning';
     followUp.startedAt = nowIso();
     session.activeFollowUpMessageId = followUp.id;
+
+    if (followUp.handlingPlan.failedExecutionAction === 'resume') {
+      this.recordAgentRequirementContext(
+        session,
+        followUp.content,
+        followUp.sourceEventId,
+        this.relevantAgentIds(session, followUp.content, followUp.handlingPlan.affectedAgentIds)
+      );
+      this.completeFollowUpRouting(session, followUp.id);
+      this.retryFailedSession(session, followUp.sourceEventId, true);
+      return;
+    }
+
     this.setStatus(session, 'AGENT_DISCUSSING');
     this.events.create({
       sessionId,
@@ -1563,7 +1680,13 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       session,
       followUp.content,
       followUp.sourceEventId,
-      followUp.mentionedAgentIds
+      followUp.mentionedAgentIds,
+      {
+        discussionRequired:
+          followUp.handlingPlan.requirementRelation === 'new_requirement' ||
+          followUp.handlingPlan.failedExecutionAction === 'replan',
+        requirementRelation: followUp.handlingPlan.requirementRelation
+      }
     );
     session.currentTaskBriefId = brief.id;
     followUp.status = 'executing';
@@ -1571,6 +1694,27 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     this.execution.start(session, brief, tasks, (outcome) => {
       this.applyFollowUpOutcome(sessionId, followUp.id, outcome);
     });
+  }
+
+  private normalizeFollowUpHandlingPlan(
+    session: SessionDetail,
+    plan: UserMessageHandlingPlan
+  ): UserMessageHandlingPlan {
+    const requirementRelation = plan.requirementRelation ?? 'continuation';
+    const failedExecutionAction = session.status === 'FAILED' && requirementRelation === 'continuation'
+      ? plan.failedExecutionAction === 'replan' ? 'replan' : 'resume'
+      : 'none';
+    return { ...plan, requirementRelation, failedExecutionAction };
+  }
+
+  private completeFollowUpRouting(session: SessionDetail, followUpMessageId: string) {
+    session.pendingFollowUpMessages = (session.pendingFollowUpMessages ?? []).filter(
+      (item) => item.id !== followUpMessageId
+    );
+    if (session.activeFollowUpMessageId === followUpMessageId) {
+      session.activeFollowUpMessageId = undefined;
+    }
+    this.touchSession(session);
   }
 
   private applyFollowUpOutcome(sessionId: string, followUpMessageId: string, outcome: ExecutionOutcome) {
@@ -1606,6 +1750,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       !session ||
       session.status === 'CANCELLED' ||
       session.status === 'COMPLETED' ||
+      session.status === 'PAUSED' ||
       session.status === 'INTERRUPTED'
     ) {
       return;
@@ -1614,10 +1759,40 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       this.pauseForWorkflowStepConfirmation(session, outcome.taskId, outcome.resultSummary);
       return;
     }
+    if (outcome.kind === 'approval_required') {
+      this.setStatus(session, 'WAIT_USER_DECISION');
+      this.events.create({
+        sessionId,
+        type: 'session_status_changed',
+        content: '执行已暂停，等待用户授权所需能力。',
+        metadata: createMetadata('system_notice', {
+          status: 'WAIT_USER_DECISION',
+          outcome: outcome.kind,
+          reason: outcome.reason
+        })
+      });
+      return;
+    }
     if (outcome.kind === 'failed' && this.pauseForLocalRuntimeConfirmation(session, outcome.error, 'task_execution')) {
       return;
     }
     if (outcome.kind === 'cancelled') {
+      return;
+    }
+    if (outcome.kind === 'workspace_conflict') {
+      const writebackState = this.workspaceWritebackAggregate(sessionId);
+      if (writebackState === 'blocking') this.setStatus(session, 'WAIT_WORKSPACE_CONFLICT_RESOLUTION');
+      else if (writebackState === 'in_flight') this.setStatus(session, 'APPLYING_CHANGES');
+      else if (writebackState === 'terminal') {
+        const waitingWritebacks = this.workspaceWritebacks?.list(sessionId).filter((record) => {
+          if (!record.taskId || !['applied', 'abandoned'].includes(record.status)) return false;
+          return this.tasks.find(sessionId, record.taskId)?.status === 'waiting';
+        }) ?? [];
+        if (waitingWritebacks.length) {
+          void this.completeTerminalWorkspaceWritebacks(session, waitingWritebacks)
+            .catch((error) => this.failSession(session, error, 'workspace_writeback_resume'));
+        }
+      }
       return;
     }
     if (
@@ -1786,7 +1961,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
           label: path,
           ref: path
         })),
-        requestedPaths: action.missingPaths,
+        requestedFiles: action.missingPaths.map((path) => ({ path })),
         followUpInstruction: 'Load the requested workspace files and retry Post Review with grounded evidence.'
       };
       const resolution = await this.orchestrator.hydrateSupplementalContext(session, requestedContext);
@@ -1949,6 +2124,122 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
   listBriefs(sessionId: string) {
     return this.orchestrator.listBriefs(sessionId);
+  }
+
+  async pause(sessionId: string, reason = '用户已停止会话', confirmationId?: string) {
+    const session = this.get(sessionId);
+    const alreadyPaused = session.status === 'PAUSED';
+    if (!alreadyPaused) {
+      this.assertControlTransition(session.status, 'PAUSED');
+      session.pauseState = {
+        previousStatus: session.status,
+        pausedAt: nowIso(),
+        reason
+      };
+      this.setStatus(session, 'PAUSED');
+    }
+
+    const termination = createExecutionTermination({
+      kind: 'user_paused',
+      source: 'user',
+      scope: 'session',
+      diagnosticRef: 'session_paused'
+    });
+    this.briefGenerationSeqBySession.set(
+      sessionId,
+      (this.briefGenerationSeqBySession.get(sessionId) ?? 0) + 1
+    );
+    const briefRun = this.briefGenerationRuns.get(sessionId);
+    if (briefRun) abortWithTermination(briefRun.controller, termination);
+
+    const [briefStopped, executionStopped, runtimeStopped] = await Promise.all([
+      briefRun ? settlesWithin(briefRun.done, 10_000) : Promise.resolve(true),
+      this.execution.cancelAndWait(sessionId, termination),
+      this.runtime?.cancelSessionAndWait(sessionId, termination) ??
+        Promise.resolve({ requested: 0, completed: 0, timedOut: false })
+    ]);
+    if (!briefStopped || executionStopped.timedOut || runtimeStopped.timedOut) {
+      throw new ConflictException({
+        code: 'SESSION_PAUSE_TIMEOUT',
+        message: '会话已标记为暂停，但部分后台执行未在宽限期内停止，可重试停止。',
+        details: {
+          briefStopped,
+          executionTimedOut: executionStopped.timedOut,
+          runtimeTimedOut: runtimeStopped.timedOut
+        }
+      });
+    }
+
+    const event = alreadyPaused
+      ? this.events.list(sessionId).at(-1)
+      : this.events.create({
+          sessionId,
+          type: 'session_status_changed',
+          priority: 'high',
+          content: reason,
+          metadata: createMetadata('system_notice', {
+            status: 'PAUSED',
+            requestedStatus: 'PAUSED',
+            reason,
+            termination
+          })
+        });
+    const confirmationEvent = confirmationId && !alreadyPaused
+      ? this.events.create({
+          sessionId,
+          type: 'user_confirmation_resolved',
+          content: '用户已停止会话',
+          metadata: createMetadata('system_notice', {
+            confirmationId,
+            status: 'approved',
+            selectedOptionKey: 'pause'
+          })
+        })
+      : undefined;
+    return { session, event, confirmationEvent };
+  }
+
+  resume(sessionId: string, reason = '用户已继续会话', confirmationId?: string) {
+    const session = this.get(sessionId);
+    if (session.status !== 'PAUSED') {
+      return this.control(sessionId, 'EXECUTING', reason, confirmationId);
+    }
+    this.assertControlTransition(session.status, 'EXECUTING');
+    const previousStatus = session.pauseState?.previousStatus ?? 'EXECUTING';
+    session.pauseState = undefined;
+    const nextStatus = this.hasFinalDelivery(sessionId)
+      ? 'COMPLETED'
+      : previousStatus === 'AGENT_DISCUSSING' || previousStatus === 'REVISING_BRIEF'
+        ? 'AGENT_DISCUSSING'
+        : 'EXECUTING';
+    this.setStatus(session, nextStatus);
+    const event = this.events.create({
+      sessionId,
+      type: 'session_status_changed',
+      priority: 'high',
+      content: reason,
+      metadata: createMetadata('system_notice', {
+        status: nextStatus,
+        requestedStatus: 'EXECUTING',
+        reason,
+        resumedFromStatus: previousStatus
+      })
+    });
+    const confirmationEvent = confirmationId
+      ? this.events.create({
+          sessionId,
+          type: 'user_confirmation_resolved',
+          content: messages.userSelectedResume,
+          metadata: createMetadata('system_notice', {
+            confirmationId,
+            status: 'approved',
+            selectedOptionKey: 'resume'
+          })
+        })
+      : undefined;
+    if (nextStatus === 'AGENT_DISCUSSING') this.generateBriefInBackground(session);
+    else if (nextStatus === 'EXECUTING') this.resumeExecution(session);
+    return { session, event, confirmationEvent };
   }
 
   control(sessionId: string, status: SessionStatus, reason?: string, confirmationId?: string) {
@@ -2134,7 +2425,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       this.applyOutcome(session.id, update.outcome);
       return;
     }
-    if (['COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED'].includes(session.status)) return;
+    if (['COMPLETED', 'FAILED', 'CANCELLED', 'PAUSED', 'INTERRUPTED'].includes(session.status)) return;
     if (update.status === 'waiting_human') {
       this.setStatus(session, 'WAIT_WORKFLOW_STEP_CONFIRM');
       return;
@@ -2152,9 +2443,17 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   }
 
   private setStatus(session: SessionDetail, status: SessionStatus) {
+    const previousStatus = session.status;
     session.status = status;
     session.updatedAt = nowIso();
     this.persist();
+
+    const terminalStatuses: SessionStatus[] = ['COMPLETED', 'FAILED', 'CANCELLED'];
+    if (terminalStatuses.includes(status) && !terminalStatuses.includes(previousStatus)) {
+      void this.persistence.releaseWorkspaceSessionLease(session.workspaceId, session.id).catch((error) => {
+        this.logger.error(`Failed to release workspace session lease for ${session.workspaceId}: ${String(error)}`);
+      });
+    }
   }
 
   private async interruptForWorkspaceDisconnect(interruption: {
@@ -2320,15 +2619,16 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
   private assertControlTransition(current: SessionStatus, next: SessionStatus) {
     const allowed: Partial<Record<SessionStatus, SessionStatus[]>> = {
-      AGENT_DISCUSSING: ['CANCELLED'],
+      AGENT_DISCUSSING: ['PAUSED', 'CANCELLED'],
       WAIT_USER_CONFIRM: ['REVISING_BRIEF', 'CANCELLED'],
       WAIT_WORKFLOW_SELECT: ['REVISING_BRIEF', 'CANCELLED'],
       WAIT_WORKFLOW_STEP_CONFIRM: ['EXECUTING', 'CANCELLED'],
-      REVISING_BRIEF: ['WAIT_USER_CONFIRM', 'CANCELLED'],
-      EXECUTING: ['WAIT_USER_DECISION', 'CANCELLED'],
-      POST_REVIEW: ['WAIT_USER_DECISION', 'CANCELLED'],
-      REWORKING: ['WAIT_USER_DECISION', 'CANCELLED', 'EXECUTING'],
+      REVISING_BRIEF: ['WAIT_USER_CONFIRM', 'PAUSED', 'CANCELLED'],
+      EXECUTING: ['WAIT_USER_DECISION', 'PAUSED', 'CANCELLED'],
+      POST_REVIEW: ['WAIT_USER_DECISION', 'PAUSED', 'CANCELLED'],
+      REWORKING: ['WAIT_USER_DECISION', 'PAUSED', 'CANCELLED', 'EXECUTING'],
       WAIT_USER_DECISION: ['EXECUTING', 'CANCELLED'],
+      PAUSED: ['EXECUTING', 'CANCELLED'],
       COMPLETED: [],
       FAILED: [],
       CANCELLED: []
@@ -2470,6 +2770,16 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   }
 
   private isEmptyWorkspace(session: SessionDetail) {
+    const index = session.workspaceIndex;
+    if (
+      index?.status === 'ready' &&
+      index.complete &&
+      !index.truncated &&
+      index.indexedEntries === 0 &&
+      index.entries.length === 0
+    ) {
+      return true;
+    }
     const snapshot = session.workspaceSnapshot;
     return Boolean(
       snapshot &&
@@ -2569,11 +2879,11 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     return /^(继续|重试|恢复|resume|retry|continue)$/i.test(content.trim());
   }
 
-  private retryFailedSession(session: SessionDetail, sourceEventId: string) {
+  private retryFailedSession(session: SessionDetail, sourceEventId: string, resumeCurrentBrief = false) {
     const failurePhase = this.latestFailurePhase(session.id);
     const shouldRetryBrief =
       !session.currentTaskBriefId ||
-      ['discussion', 'brief_generation', 'brief_revision'].includes(failurePhase ?? '');
+      (!resumeCurrentBrief && ['discussion', 'brief_generation', 'brief_revision'].includes(failurePhase ?? ''));
     if (shouldRetryBrief) {
       this.setStatus(session, 'AGENT_DISCUSSING');
       this.events.create({
@@ -2591,6 +2901,11 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       return;
     }
 
+    for (const task of this.tasks.list(session.id)) {
+      if (task.status === 'failed') {
+        this.tasks.update(task, { status: 'pending', resultSummary: undefined });
+      }
+    }
     this.setStatus(session, 'EXECUTING');
     this.events.create({
       sessionId: session.id,
@@ -2686,7 +3001,10 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   private latestFailurePhase(sessionId: string) {
     const events = this.events.list(sessionId);
     for (let index = events.length - 1; index >= 0; index -= 1) {
-      const metadata = events[index]?.metadata as { payload?: { phase?: unknown } } | undefined;
+      const event = events[index];
+      const status = (event?.metadata as { payload?: { status?: unknown } } | undefined)?.payload?.status;
+      if (event?.type !== 'error_reported' && status !== 'FAILED') continue;
+      const metadata = event.metadata as { payload?: { phase?: unknown } } | undefined;
       if (typeof metadata?.payload?.phase === 'string') return metadata.payload.phase;
     }
     return undefined;
@@ -2703,8 +3021,13 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       return;
     }
     if (session.workflowRunId && this.workflowRuntime) {
+      const coordinator = this.pickSessionAgent(session, ['coordinator']);
       void this.workflowRuntime
-        .resumeCurrentExecution(session.workflowRunId)
+        .resumeCurrentExecution(session.workflowRunId, {
+          session,
+          brief,
+          coordinatorId: coordinator.id
+        })
         .then((resumed) => {
           if (!resumed) {
             this.applyOutcome(session.id, {
@@ -2719,6 +3042,75 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     this.tasks.resetStaleRunning(session.id);
     const unfinishedTasks = this.tasks.unfinished(session.id);
     this.execution.start(session, brief, unfinishedTasks, (outcome) => this.applyOutcome(session.id, outcome));
+  }
+
+  private recoverWorkspaceWritebackState(session: SessionDetail) {
+    if (session.status !== 'APPLYING_CHANGES' || !this.workspaceWritebacks) return false;
+    const records = this.workspaceWritebacks.list(session.id);
+    session.workspaceWritebacks = records;
+    const aggregate = this.workspaceWritebackAggregate(session.id);
+    if (aggregate === 'none' || aggregate === 'blocking') {
+      session.status = 'WAIT_WORKSPACE_CONFLICT_RESOLUTION';
+      session.updatedAt = nowIso();
+      return true;
+    }
+    if (aggregate === 'terminal') {
+      for (const record of records) {
+        if (!record.taskId) continue;
+        const task = this.tasks.find(session.id, record.taskId);
+        if (task) {
+          this.tasks.update(task, {
+            status: 'completed',
+            resultSummary: record.resultSummary ?? 'Workspace writeback completed before backend restart.'
+          });
+        }
+      }
+      const occurredAt = nowIso();
+      session.status = 'INTERRUPTED';
+      session.interruption = {
+        reason: 'service_shutdown',
+        invocationId: records.at(-1)?.invocationId,
+        occurredAt,
+        wakeable: true
+      };
+      session.updatedAt = occurredAt;
+      return true;
+    }
+    return false;
+  }
+
+  private workspaceWritebackAggregate(sessionId: string): 'blocking' | 'in_flight' | 'terminal' | 'none' {
+    const records = this.workspaceWritebacks?.list(sessionId) ?? [];
+    if (!records.length) return 'none';
+    if (records.some((record) => record.status === 'conflicted' || record.status === 'failed')) return 'blocking';
+    if (records.some((record) => ['queued', 'merging', 'applying'].includes(record.status))) return 'in_flight';
+    return 'terminal';
+  }
+
+  private async completeTerminalWorkspaceWritebacks(
+    session: SessionDetail,
+    records: WorkspaceWritebackRecord[]
+  ) {
+    this.setStatus(session, 'EXECUTING');
+    let acceptedWorkflowOutcome = false;
+    for (const record of records) {
+      if (!record.taskId) continue;
+      const task = this.tasks.find(session.id, record.taskId);
+      if (!task || task.status !== 'waiting') continue;
+      const resultSummary = record.status === 'applied'
+        ? record.resultSummary ?? 'Workspace changes were applied after conflict resolution.'
+        : 'The isolated workspace changes were abandoned by the user.';
+      this.tasks.update(task, { status: 'completed', resultSummary });
+      if (session.workflowRunId && this.workflowRuntime) {
+        await this.workflowRuntime.acceptExecutionOutcome(session.id, {
+          kind: 'workflow_step_completed',
+          taskId: record.taskId,
+          resultSummary
+        });
+        acceptedWorkflowOutcome = true;
+      }
+    }
+    if (!acceptedWorkflowOutcome) this.resumeExecution(session);
   }
 
   private normalizeRuntimePreference(input?: RuntimePreference): RuntimePreference | undefined {
@@ -2895,6 +3287,10 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       session.pendingInvocations = session.pendingInvocations.filter(
         (i) => i.invocationId !== inv.invocationId
       );
+      const task = this.tasks.find(sessionId, inv.taskId);
+      if (task) this.tasks.update(task, { status: 'pending', resultSummary: undefined });
+      this.resolveSupersededCapabilityRoutingConfirmations(sessionId);
+      this.setStatus(session, 'EXECUTING');
       this.persist();
 
       this.logger.log(
@@ -2903,20 +3299,45 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
       // 异步重试,不阻塞当前响应
       setImmediate(() => {
-        this.orchestrator
-          .retryPendingApprovalInvocation(session, inv)
-          .catch((err: unknown) => {
-            this.logger.error(
-              `[Session ${sessionId}] Failed to retry invocation ${inv.invocationId}:`,
-              err
-            );
-          });
+        this.resumeExecution(session);
       });
     }
   }
 
   private persist() {
     this.persistence.setCollection('sessions', [...this.sessions.values()]);
+  }
+
+  private resolveSupersededCapabilityRoutingConfirmations(sessionId: string) {
+    const events = this.events.list(sessionId);
+    const resolvedIds = new Set(events
+      .filter((event) => event.type === 'user_confirmation_resolved')
+      .map((event) => (event.metadata.payload as { confirmationId?: string } | undefined)?.confirmationId)
+      .filter((value): value is string => Boolean(value)));
+    for (const event of events) {
+      if (event.type !== 'user_confirmation_requested') continue;
+      const payload = event.metadata.payload as {
+        confirmationId?: string;
+        reason?: string;
+        description?: string;
+      } | undefined;
+      if (
+        !payload?.confirmationId ||
+        resolvedIds.has(payload.confirmationId) ||
+        payload.reason !== 'coordinator_routing_needs_user_decision' ||
+        !payload.description?.includes('HUMAN_APPROVAL_REQUIRED')
+      ) continue;
+      this.events.create({
+        sessionId,
+        type: 'user_confirmation_resolved',
+        content: '能力授权已完成，旧的继续/取消确认已自动关闭。',
+        metadata: createMetadata('system_notice', {
+          confirmationId: payload.confirmationId,
+          status: 'approved',
+          selectedOptionKey: 'capabilities_approved'
+        })
+      });
+    }
   }
 }
 

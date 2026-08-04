@@ -59,7 +59,7 @@ export function normalizeRuntimeContextRequest(value: unknown): RuntimeContextRe
   return {
     reason,
     requestedRefs: uniqueRefs(refs).slice(0, MAX_REFS),
-    ...(paths.length ? { requestedPaths: uniqueStrings(paths).slice(0, MAX_PATHS) } : {}),
+    ...(paths.length ? { requestedFiles: uniqueStrings(paths).slice(0, MAX_PATHS).map((path) => ({ path })) } : {}),
     ...(requestedDirectories.length ? { requestedDirectories: requestedDirectories.slice(0, MAX_DIRECTORIES) } : {}),
     ...(requestedSearches.length ? { requestedSearches: requestedSearches.slice(0, MAX_SEARCHES) } : {}),
     ...(requestedCommands.length

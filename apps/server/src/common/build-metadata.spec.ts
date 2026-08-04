@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveBuildCommit } from './build-metadata.js';
+import { captureRuntimeBuildMonitor, resolveBuildCommit } from './build-metadata.js';
 
 test('build commit prefers explicitly configured deployment metadata', () => {
   let gitCalled = false;
@@ -32,4 +32,30 @@ test('build commit falls back to the local git revision and dirty state', () => 
 
 test('build commit remains unknown outside a git checkout', () => {
   assert.equal(resolveBuildCommit({}, () => undefined), 'unknown');
+});
+
+test('runtime build monitor marks a dist process stale after rebuilt JavaScript appears', () => {
+  const modifiedTimes = [1_000, 2_000];
+  const monitor = captureRuntimeBuildMonitor({
+    env: { AGENT_CLUSTER_COMMIT: 'abc1234' },
+    entryPath: 'D:\\project\\dist\\apps\\server\\src\\main.js',
+    latestModifiedAt: () => modifiedTimes.shift()
+  });
+
+  assert.equal(monitor.buildTime, new Date(1_000).toISOString());
+  assert.equal(monitor.buildId, `abc1234:${new Date(1_000).toISOString()}`);
+  assert.equal(monitor.runtimeBuildStale(), true);
+  assert.equal(monitor.runtimeBuildStale(), true, 'stale state is sticky');
+});
+
+test('runtime build monitor does not inspect dist for a source-mode process', () => {
+  let scans = 0;
+  const monitor = captureRuntimeBuildMonitor({
+    env: { AGENT_CLUSTER_COMMIT: 'dev', AGENT_CLUSTER_BUILD_TIME: '2026-07-31T00:00:00.000Z' },
+    entryPath: 'D:\\project\\apps\\server\\scripts\\dev.mjs',
+    latestModifiedAt: () => { scans += 1; return 1_000; }
+  });
+
+  assert.equal(monitor.runtimeBuildStale(), false);
+  assert.equal(scans, 0);
 });

@@ -30,6 +30,7 @@ type SessionStatus =
   | 'POST_REVIEW'
   | 'REWORKING'
   | 'WAIT_USER_DECISION'
+  | 'PAUSED'
   | 'COMPLETED'
   | 'FAILED'
   | 'CANCELLED'
@@ -49,6 +50,7 @@ const sessionStatusLabel = {
   POST_REVIEW: '复盘中',
   REWORKING: '返工中',
   WAIT_USER_DECISION: '等待用户决策',
+  PAUSED: '已停止',
   COMPLETED: '已完成',
   FAILED: '失败',
   CANCELLED: '已取消'
@@ -61,6 +63,7 @@ const sessionStatusLabel = {
 - `WAIT_WORKFLOW_SELECT`：展示工作流列表和工作流管理入口。
 - `WAIT_WORKFLOW_STEP_CONFIRM`：展示当前 Agent 阶段输出、确认继续和要求修改。
 - `EXECUTING`：展示暂停、发送消息、@Agent。
+- `PAUSED`：展示继续按钮；新消息只进入后续队列，不得重新启动模型或工作流。
 - `WAIT_USER_DECISION`：展示决策卡片。
 - `COMPLETED`：展示接受结果、查看产物。
 - `FAILED`：展示重试、查看错误。

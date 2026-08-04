@@ -9,6 +9,7 @@ import type {
 import { isGeneratedWorkspaceDirectory } from '@agent-cluster/shared';
 import { isSensitivePath } from '../../common/path-safety.js';
 import { resolveWorkspacePath } from './workspace-path.js';
+import { assertWorkspacePathWithinRoot } from './workspace-symlink-guard.js';
 
 const DEFAULT_LIMIT = 200;
 
@@ -23,6 +24,9 @@ export async function listServerLocalDirectory(
 ): Promise<ListDirectoryResult> {
   const { rootPath, revision, input } = args;
   const { relative: relativePath, absolute } = resolveWorkspacePath(rootPath, input.path ?? '');
+
+  await assertWorkspacePathWithinRoot(rootPath, relativePath);
+
   const cursorIndex = decodeCursor(input.cursor, Number.MAX_SAFE_INTEGER);
   const limit = Math.max(1, input.limit ?? DEFAULT_LIMIT);
   const targetCount = cursorIndex + limit + 1;

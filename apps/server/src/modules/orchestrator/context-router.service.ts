@@ -702,7 +702,8 @@ export class ContextRouterService {
     return requests.flatMap((request) => {
       const reason = `Requested by runtime after CONTEXT_INSUFFICIENT: ${request.requestedContext.reason}`;
       const hydratedPaths = request.resolution ? new Set(request.resolution.hydratedPaths) : undefined;
-      const requestedRefs = request.requestedContext.requestedRefs
+      const resolvedRefs = request.resolution?.resolvedRefs ?? request.requestedContext.requestedRefs.filter((ref) => Boolean(ref.ref));
+      const requestedRefs = resolvedRefs
         .filter(
           (ref) =>
             !hydratedPaths ||
@@ -713,7 +714,10 @@ export class ContextRouterService {
           ...ref,
           selectionReason: reason
         }));
-      const paths = request.resolution?.hydratedPaths ?? request.requestedContext.requestedPaths ?? [];
+      const paths = request.resolution?.hydratedPaths ?? [
+        ...(request.requestedContext.requestedFiles ?? []).map((item) => item.path),
+        ...(request.requestedContext.requestedPaths ?? [])
+      ];
       const requestedPaths = paths.map((path) => ({
         type: 'workspace_file' as const,
         label: path,

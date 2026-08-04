@@ -261,7 +261,8 @@ async function buildIndex(rootPath: string, state: ServerLocalWorkspaceState): P
       detectedStack: detectedStack(entries),
       indexedEntries: entries.length,
       truncated: pending.length > 0,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
+      coverage: indexCoverage(entries.length)
     };
     state.lastStableComplete = state.index.complete;
     recordIndexSnapshot(state.index, Date.now() - startedAt);
@@ -415,7 +416,8 @@ async function applyIncrementalUpdates(rootPath: string, state: ServerLocalWorks
     detectedStack: detectedStack(entries),
     indexedEntries: entries.length,
     truncated: state.index.truncated,
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
+    coverage: indexCoverage(entries.length)
   };
   recordIndexSnapshot(state.index);
   queuePersistSnapshot(state);
@@ -434,7 +436,19 @@ function emptySnapshot(rootPath: string, revision: WorkspaceRevision): Workspace
     detectedStack: [],
     indexedEntries: 0,
     truncated: false,
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
+    coverage: indexCoverage(0)
+  };
+}
+
+function indexCoverage(indexedEntries: number) {
+  return {
+    visitedEntries: indexedEntries,
+    indexedEntries,
+    excludedGenerated: 0,
+    sensitiveEntries: 0,
+    skippedSymlinks: 0,
+    failedEntries: 0
   };
 }
 

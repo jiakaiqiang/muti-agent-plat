@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { InvocationPlan, LocalRuntimeInvocationRequest } from '@agent-cluster/shared';
 import { buildClaudeArgs, ClaudeCodeLocalRuntimeAdapter } from './adapters/claude-code-adapter.js';
+import { buildCodexArgs } from './adapters/codex-adapter.js';
 import {
   buildRuntimeProcessEnv,
   executeLocalInvocation,
@@ -21,7 +22,13 @@ test('proposal_only keeps staged edits as evidence without applying them to the 
   assert.equal(shouldApplyStagedChangeSet('direct_audited'), true);
 });
 
-test('local Runtime executes in staging and applies changes through delete authorization', async () => {
+test('Codex local adapter permits the managed staging directory without relying on repository trust', () => {
+  assert.deepEqual(buildCodexArgs(), [
+    'exec', '--json', '--sandbox', 'workspace-write', '--skip-git-repo-check', '-'
+  ]);
+});
+
+test('local Runtime executes in staging and returns an isolated ChangeSet for platform writeback', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-runtime-source-'));
   const fixtureRoot = await mkdtemp(join(tmpdir(), 'agent-runtime-fixture-'));
   const fixturePath = join(fixtureRoot, 'runtime-fixture.cjs');
@@ -67,11 +74,22 @@ test('local Runtime executes in staging and applies changes through delete autho
       () => {}
     );
     assert.equal(completed.status, 'completed');
-    assert.equal(await readFile(join(root, 'README.md'), 'utf8'), '# Changed\n');
-    assert.equal(existsSync(join(root, 'delete-me.txt')), false);
-    const runtimeCwd = await readFile(join(root, 'created.txt'), 'utf8');
-    assert.notEqual(runtimeCwd.toLowerCase(), root.toLowerCase());
-    assert.match(runtimeCwd, /agent-runtime-invocation-/);
+    assert.equal(await readFile(join(root, 'README.md'), 'utf8'), '# Original\n');
+    assert.equal(existsSync(join(root, 'delete-me.txt')), true);
+    assert.equal(existsSync(join(root, 'created.txt')), false);
+    assert.equal(completed.workspaceExecution?.mode, 'staging_copy');
+    assert.deepEqual(
+      completed.workspaceExecution?.changeSet.changes.map((change) => [
+        change.operation,
+        'path' in change ? change.path : change.toPath
+      ]).sort((left, right) => String(left[1]).localeCompare(String(right[1]))),
+      [['update', 'README.md'], ['create', 'created.txt'], ['delete', 'delete-me.txt']]
+        .sort((left, right) => left[1].localeCompare(right[1]))
+    );
+    const update = completed.workspaceExecution?.changeSet.changes.find(
+      (change) => change.operation === 'update' && change.path === 'README.md'
+    );
+    assert.equal(update?.operation === 'update' ? update.baseContent : undefined, '# Original\n');
   } finally {
     if (previousCommand === undefined) delete process.env.AGENT_RUNTIME_CODEX_COMMAND;
     else process.env.AGENT_RUNTIME_CODEX_COMMAND = previousCommand;
@@ -150,7 +168,8 @@ test('Claude Code local adapter consumes stream-json and applies staged changes'
     assert.equal(result.usage.outputTokens, 7);
     assert.equal(result.usage.totalTokens, 19);
     assert.equal(result.runtimeSession?.cliSessionId, 'claude-session-test');
-    assert.equal(await readFile(join(root, 'README.md'), 'utf8'), '# Claude changed\n');
+    assert.equal(await readFile(join(root, 'README.md'), 'utf8'), '# Original\n');
+    assert.equal(result.workspaceExecution?.mode, 'staging_copy');
     const inputFrame = JSON.parse((await readFile(stdinPath, 'utf8')).trim()) as {
       type: string;
       message: { content: Array<{ text: string }> };
@@ -275,6 +294,49 @@ test('Claude Code non-zero exit surfaces the structured stdout error', async () 
   }
 });
 
+test('Claude Code tool-call parsing failures are retryable provider failures', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-runtime-claude-tool-parse-source-'));
+  const fixtureRoot = await mkdtemp(join(tmpdir(), 'agent-runtime-claude-tool-parse-fixture-'));
+  const fixturePath = join(fixtureRoot, 'claude-runtime-tool-parse-fixture.cjs');
+  const previousCommand = process.env.AGENT_RUNTIME_CLAUDE_COMMAND;
+  const previousArgs = process.env.AGENT_RUNTIME_CLAUDE_ARGS_JSON;
+  try {
+    await writeFile(join(root, 'README.md'), '# unchanged\n', 'utf8');
+    await writeFile(fixturePath, [
+      "process.stdin.resume();",
+      "process.stdin.on('end', () => {",
+      "  process.stdout.write(JSON.stringify({type:'result',subtype:'error',is_error:true,result:\"The model's tool call could not be parsed (retry also failed).\"}) + '\\n');",
+      "  process.exitCode = 1;",
+      "});"
+    ].join('\n'), 'utf8');
+    process.env.AGENT_RUNTIME_CLAUDE_COMMAND = process.execPath;
+    process.env.AGENT_RUNTIME_CLAUDE_ARGS_JSON = JSON.stringify([fixturePath]);
+
+    const state = await createWorkspaceState(root, 'claude-tool-parse-test');
+    const workspace = new LocalWorkspace(state);
+    const result = await executeLocalInvocation(
+      await invocationRequest(workspace, 'claude_code'),
+      workspace,
+      new AbortController().signal,
+      () => {}
+    );
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error?.code, 'MODEL_ERROR');
+    assert.equal(result.error?.message, 'Claude Code could not parse a model tool call after retry.');
+    assert.equal(result.error?.retryable, true);
+    assert.equal(result.error?.details?.providerFailure, true);
+    assert.equal(result.error?.details?.failureKind, 'tool_call_parse');
+  } finally {
+    if (previousCommand === undefined) delete process.env.AGENT_RUNTIME_CLAUDE_COMMAND;
+    else process.env.AGENT_RUNTIME_CLAUDE_COMMAND = previousCommand;
+    if (previousArgs === undefined) delete process.env.AGENT_RUNTIME_CLAUDE_ARGS_JSON;
+    else process.env.AGENT_RUNTIME_CLAUDE_ARGS_JSON = previousArgs;
+    await rm(root, { recursive: true, force: true });
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
 test('Claude Code format mismatch is a permanent provider configuration failure', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-runtime-claude-format-source-'));
   const fixtureRoot = await mkdtemp(join(tmpdir(), 'agent-runtime-claude-format-fixture-'));
@@ -364,10 +426,10 @@ test('ChangeSet captures extensionless and non-JavaScript UTF-8 files', async ()
     );
 
     assert.equal(result.status, 'completed');
-    assert.equal(await readFile(join(root, 'script.py'), 'utf8'), 'print("new")\n');
-    assert.equal(await readFile(join(root, 'Dockerfile'), 'utf8'), 'FROM node:22\n');
-    assert.equal(await readFile(join(root, 'Makefile'), 'utf8'), 'test:\n\t@echo new\n');
-    assert.equal(await readFile(join(root, 'main.go'), 'utf8'), 'package main\n');
+    assert.equal(await readFile(join(root, 'script.py'), 'utf8'), 'print("old")\n');
+    assert.equal(await readFile(join(root, 'Dockerfile'), 'utf8'), 'FROM node:20\n');
+    assert.equal(await readFile(join(root, 'Makefile'), 'utf8'), 'test:\n\t@echo old\n');
+    assert.equal(existsSync(join(root, 'main.go')), false);
     assert.deepEqual(
       result.systemEvidence.workspaceChangeSet?.changes.map((change) =>
         change.operation === 'move' ? change.toPath : change.path

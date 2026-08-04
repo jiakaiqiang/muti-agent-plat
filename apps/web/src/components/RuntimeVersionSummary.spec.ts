@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia } from 'pinia'
+import { useSessionStore } from '@/stores/session'
 import RuntimeVersionSummary from './RuntimeVersionSummary.vue'
 
 function apiResponse(data: unknown, status = 200) {
@@ -11,7 +12,7 @@ function apiResponse(data: unknown, status = 200) {
 }
 
 function requestPath(input: RequestInfo | URL) {
-  if (typeof input === 'string') return new URL(input).pathname
+  if (typeof input === 'string') return new URL(input, 'http://test.local').pathname
   if (input instanceof URL) return input.pathname
   return new URL(input.url).pathname
 }
@@ -36,6 +37,8 @@ describe('RuntimeVersionSummary', () => {
           service: 'agent-cluster-server',
           version: '0.1.0',
           buildTime: '2026-07-11T02:00:00.000Z',
+          buildId: 'build-abc1234',
+          runtimeBuildStale: false,
           commit: 'abc1234',
           processId: 48020,
           startedAt: '2026-07-11T01:59:00.000Z',
@@ -51,8 +54,10 @@ describe('RuntimeVersionSummary', () => {
       return apiResponse({ message: 'Unexpected request' }, 500)
     })
 
-    const wrapper = mount(RuntimeVersionSummary, { global: { plugins: [createPinia()] } })
+    const pinia = createPinia()
+    const wrapper = mount(RuntimeVersionSummary, { global: { plugins: [pinia] } })
     await flushPromises()
+    expect(useSessionStore(pinia).runtimeHealthError).toBeUndefined()
 
     expect(wrapper.text()).toContain('前端版本')
     expect(wrapper.text()).toContain('0.1.0')

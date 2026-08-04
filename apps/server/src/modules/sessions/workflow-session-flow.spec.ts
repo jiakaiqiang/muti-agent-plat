@@ -113,6 +113,32 @@ test('empty workspace pauses workflow selection until bootstrap is explicitly ap
   assert.equal(starts.length, 1);
 });
 
+test('completed empty Provider index pauses workflow selection without a legacy Snapshot', async () => {
+  const { service, session, starts } = setup();
+  const observedAt = '2026-07-30T00:00:00.000Z';
+  session.workingDirectory = {
+    kind: 'local_bridge', id: 'workspace', name: 'empty-indexed-project', selectedAt: observedAt
+  };
+  session.workspaceIndex = {
+    workspaceId: 'workspace', revision: { id: 'revision-empty', observedAt }, generation: 1,
+    status: 'ready', complete: true, entries: [], entrypoints: [], detectedStack: [], indexedEntries: 0,
+    truncated: false, updatedAt: observedAt,
+    coverage: {
+      visitedEntries: 0, indexedEntries: 0, excludedGenerated: 0, sensitiveEntries: 0,
+      skippedSymlinks: 0, failedEntries: 0
+    }
+  };
+
+  const deferred = await service.selectWorkflow(session.id, {
+    workflowId: 'workflow-1', workflowVersion: 2, confirmationId: 'confirm-workflow'
+  });
+
+  assert.equal(session.status, 'WAIT_USER_DECISION');
+  assert.equal(session.workspaceMode, 'empty_pending_decision');
+  assert.equal(deferred.workflowRun, undefined);
+  assert.equal(starts.length, 0);
+});
+
 test('workflow runtime projection pauses the session only for an explicit human gate', async () => {
   const { service, session, emitRuntimeUpdate } = setup();
   await service.selectWorkflow(session.id, { workflowId: 'workflow-1', workflowVersion: 2, confirmationId: 'confirm-workflow' });

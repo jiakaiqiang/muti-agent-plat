@@ -29,6 +29,10 @@ onMounted(async () => {
     <dd>{{ health?.buildTime ?? '-' }}</dd>
   </div>
   <div>
+    <dt>构建标识 / 状态</dt>
+    <dd>{{ health ? `${health.buildId} / ${health.runtimeBuildStale ? '已过期' : '当前'}` : '-' }}</dd>
+  </div>
+  <div>
     <dt>Commit</dt>
     <dd>{{ health?.commit ?? '-' }}</dd>
   </div>

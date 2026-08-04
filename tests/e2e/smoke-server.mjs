@@ -212,6 +212,8 @@ export async function createPublishedAgentWorkflow(apiBase, name, agentKeys) {
       id: `e2e-agent-${index + 1}-${agentKey}`,
       type: 'agent',
       agentId: agent.id,
+      stageDescription: `Execute the ${agentKey} stage for the E2E workflow.`,
+      outputContract: [`Produce an accepted ${agentKey} stage result.`],
       order: index
     };
   });

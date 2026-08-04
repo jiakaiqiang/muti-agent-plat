@@ -23,7 +23,7 @@ export const WORKSPACE_METRIC_NAMES = [
   'supplemental_context_bytes_total',
   'supplemental_context_retry_total',
   'context_insufficient_terminal_total',
-  'workspace_active_session_conflict_total',
+  'workspace_writeback_conflict_total',
   'workspace_revision_unstable_total',
   ...FILE_REVISION_METRIC_NAMES
 ] as const;

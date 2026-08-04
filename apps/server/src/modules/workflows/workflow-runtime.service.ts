@@ -281,13 +281,18 @@ export class WorkflowRuntimeService {
     });
   }
 
-  async resumeCurrentExecution(runId: string) {
+  async resumeCurrentExecution(
+    runId: string,
+    recoveryContext?: { session: SessionDetail; brief: TaskBrief; coordinatorId: string }
+  ) {
     return this.serialize(runId, async () => {
       const run = this.get(runId);
       if (this.isTerminal(run.status) || this.execution.isRunning(run.sessionId)) return false;
+      if (recoveryContext) this.contexts.set(run.id, recoveryContext);
       const nodeRun = this.currentNodeRun(run);
       const task = nodeRun?.relatedTaskId ? this.tasks.find(run.sessionId, nodeRun.relatedTaskId) : undefined;
       if (!nodeRun || nodeRun.status !== 'running' || !task) return false;
+      this.reconcileTaskDependencies(run, nodeRun, task);
       this.tasks.update(task, { status: 'pending', resultSummary: undefined });
       await this.scheduleTaskExecution(run, nodeRun, task, true);
       return true;
@@ -311,6 +316,7 @@ export class WorkflowRuntimeService {
       if (task?.status === 'completed') {
         await this.serialize(run.id, () => this.completeExecutedNode(run.id, current.id, task.resultSummary ?? '节点已完成。'));
       } else if (!this.execution.isRunning(session.id)) {
+        if (task) this.reconcileTaskDependencies(run, current, task);
         if (task?.status === 'running') this.tasks.update(task, { status: 'pending' });
         await this.scheduleTaskExecution(run, current, task);
       }
@@ -347,6 +353,7 @@ export class WorkflowRuntimeService {
   private async activateAgent(run: WorkflowRun, node: Extract<WorkflowNode, { type: 'agent' }>) {
     const context = this.context(run.id);
     const attempt = this.nextAttempt(run.id, node.id);
+    const upstreamTaskIds = this.latestUpstreamTaskIds(run, node.id);
     const nodeRun: WorkflowNodeRun = {
       id: `wf-node-run:${run.id}:${node.id}:${attempt}`,
       workflowRunId: run.id,
@@ -361,6 +368,9 @@ export class WorkflowRuntimeService {
     this.appendNodeRun(nodeRun);
     const agent = this.agents.getByIdOrKey(node.agentId);
     const taskId = `wf-task:${run.id}:${node.id}:${attempt}`;
+    const stageAcceptanceCriteria = node.outputContract?.length
+      ? [...node.outputContract]
+      : this.defaultStageOutputContract(agent);
     const task: AgentTask = {
       id: taskId,
       sessionId: run.sessionId,
@@ -372,8 +382,12 @@ export class WorkflowRuntimeService {
       routingMode: 'coordinator_controlled',
       autoResolutionAttempted: false,
       assignmentReason: `工作流「${run.workflowName}」节点 ${node.name ?? node.id}。`,
-      contextRequirements: ['已确认任务契约', ...(attempt > 1 ? ['工作流返工说明和上一轮输出'] : this.hasUpstreamNode(run, node.id) ? ['前序工作流节点产物'] : [])],
-      verificationPlan: node.outputContract?.length ? [...node.outputContract] : ['输出可供下游节点消费的阶段结果'],
+      contextRequirements: [
+        '已确认任务契约',
+        ...(node.inputContract?.length ? node.inputContract : this.defaultStageInputContract(agent, upstreamTaskIds.length > 0)),
+        ...(attempt > 1 ? ['工作流返工说明和上一轮输出'] : upstreamTaskIds.length ? ['前序工作流节点产物'] : [])
+      ],
+      verificationPlan: stageAcceptanceCriteria,
       riskNotes: [],
       requiresUserConfirmation: false,
       workflowRunId: run.id,
@@ -382,8 +396,8 @@ export class WorkflowRuntimeService {
       workflowNodeType: 'agent',
       workflowAttempt: attempt,
       executionPurpose: 'agent_work',
-      dependsOnTaskIds: [],
-      acceptanceCriteria: context.brief.acceptanceCriteria,
+      dependsOnTaskIds: upstreamTaskIds,
+      acceptanceCriteria: stageAcceptanceCriteria,
       createdAt: nowIso(),
       updatedAt: nowIso()
     };
@@ -538,7 +552,13 @@ export class WorkflowRuntimeService {
     };
     await this.publishProjection(run);
     const startExecution = () => {
-      this.execution.start(context.session, context.brief, [currentTask], (outcome) => {
+      const executionTasks = [
+        ...currentTask.dependsOnTaskIds
+          .map((taskId) => this.tasks.find(run.sessionId, taskId))
+          .filter((item): item is AgentTask => Boolean(item)),
+        currentTask
+      ];
+      this.execution.start(context.session, context.brief, executionTasks, (outcome) => {
         void this.serialize(run.id, () => this.handleExecutionOutcome(run.id, nodeRun.id, outcome));
       });
     };
@@ -559,6 +579,9 @@ export class WorkflowRuntimeService {
       return;
     }
     if (outcome.kind === 'cancelled') {
+      if (outcome.termination?.kind === 'user_paused') {
+        return;
+      }
       if (this.supersededNodeRunIds.delete(nodeRun.id)) {
         const task = nodeRun.relatedTaskId ? this.tasks.find(run.sessionId, nodeRun.relatedTaskId) : undefined;
         if (!task) {
@@ -589,6 +612,24 @@ export class WorkflowRuntimeService {
       return;
     }
     if (outcome.kind === 'ask_user') {
+      this.updatesSubject.next({
+        kind: 'session_outcome',
+        sessionId: run.sessionId,
+        workflowRunId: run.id,
+        outcome
+      });
+      return;
+    }
+    if (outcome.kind === 'approval_required') {
+      this.updatesSubject.next({
+        kind: 'session_outcome',
+        sessionId: run.sessionId,
+        workflowRunId: run.id,
+        outcome
+      });
+      return;
+    }
+    if (outcome.kind === 'workspace_conflict') {
       this.updatesSubject.next({
         kind: 'session_outcome',
         sessionId: run.sessionId,
@@ -917,21 +958,100 @@ export class WorkflowRuntimeService {
   }
 
   private latestUpstreamOutputRefs(run: WorkflowRun, nodeId: string) {
-    const index = run.definitionSnapshot.nodes.findIndex((node) => node.id === nodeId);
-    const upstreamIds = new Set(run.definitionSnapshot.nodes.slice(0, index).map((node) => node.id));
-    return this.listNodeRuns(run.id)
-      .filter((item) => upstreamIds.has(item.nodeId) && ['completed', 'approved'].includes(item.status))
+    return this.latestSuccessfulUpstreamNodeRuns(run, nodeId)
       .flatMap((item) => item.outputRefs);
   }
 
+  private latestUpstreamTaskIds(run: WorkflowRun, nodeId: string) {
+    return Array.from(new Set(this.latestSuccessfulUpstreamNodeRuns(run, nodeId)
+      .map((item) => item.relatedTaskId)
+      .filter((taskId): taskId is string => Boolean(taskId))));
+  }
+
+  private latestSuccessfulUpstreamNodeRuns(run: WorkflowRun, nodeId: string) {
+    const upstreamIds = this.upstreamNodeIds(run, nodeId);
+    const nodeRuns = this.listNodeRuns(run.id);
+    const latestByNodeId = new Map<string, WorkflowNodeRun>();
+    for (const nodeRun of nodeRuns) {
+      if (upstreamIds.has(nodeRun.nodeId) && ['completed', 'approved'].includes(nodeRun.status)) {
+        latestByNodeId.set(nodeRun.nodeId, nodeRun);
+      }
+    }
+    return nodeRuns.filter((nodeRun) => latestByNodeId.get(nodeRun.nodeId)?.id === nodeRun.id);
+  }
+
   private latestUpstreamSummary(run: WorkflowRun, nodeId: string) {
-    const index = run.definitionSnapshot.nodes.findIndex((node) => node.id === nodeId);
-    const upstreamIds = new Set(run.definitionSnapshot.nodes.slice(0, index).map((node) => node.id));
+    const upstreamIds = this.upstreamNodeIds(run, nodeId);
     return [...this.listNodeRuns(run.id)].reverse().find((item) => upstreamIds.has(item.nodeId) && item.outputSummary)?.outputSummary;
   }
 
   private hasUpstreamNode(run: WorkflowRun, nodeId: string) {
-    return run.definitionSnapshot.nodes.findIndex((node) => node.id === nodeId) > 0;
+    return this.upstreamNodeIds(run, nodeId).size > 0;
+  }
+
+  private upstreamNodeIds(run: WorkflowRun, nodeId: string) {
+    const sourcesByTarget = new Map<string, string[]>();
+    for (const edge of run.definitionSnapshot.edges) {
+      sourcesByTarget.set(edge.targetNodeId, [...(sourcesByTarget.get(edge.targetNodeId) ?? []), edge.sourceNodeId]);
+    }
+    const upstreamIds = new Set<string>();
+    const pending = [...(sourcesByTarget.get(nodeId) ?? [])];
+    while (pending.length) {
+      const sourceNodeId = pending.pop()!;
+      if (sourceNodeId === nodeId || upstreamIds.has(sourceNodeId)) continue;
+      upstreamIds.add(sourceNodeId);
+      pending.push(...(sourcesByTarget.get(sourceNodeId) ?? []));
+    }
+    return upstreamIds;
+  }
+
+  private reconcileTaskDependencies(run: WorkflowRun, nodeRun: WorkflowNodeRun, task: AgentTask) {
+    const originalTaskIds = [...task.dependsOnTaskIds];
+    const expectedTaskIds = this.latestUpstreamTaskIds(run, nodeRun.nodeId);
+    if (
+      originalTaskIds.length === expectedTaskIds.length &&
+      originalTaskIds.every((taskId, index) => taskId === expectedTaskIds[index])
+    ) return false;
+    const contextRequirements = Array.from(new Set([
+      ...(task.contextRequirements ?? []),
+      ...(expectedTaskIds.length ? ['Upstream workflow stage artifacts'] : [])
+    ]));
+    this.tasks.update(task, { dependsOnTaskIds: expectedTaskIds, contextRequirements });
+    this.events.createOnce(`workflow-task-dependencies:${nodeRun.id}`, {
+      sessionId: run.sessionId,
+      type: 'task_dependency_reconciled',
+      content: `Reconciled workflow task dependencies from ${originalTaskIds.length} to ${expectedTaskIds.length}.`,
+      metadata: createMetadata('system_notice', {
+        workflowRunId: run.id,
+        workflowNodeId: nodeRun.nodeId,
+        workflowNodeRunId: nodeRun.id,
+        taskId: task.id,
+        dependsOnTaskIds: expectedTaskIds
+      })
+    });
+    return true;
+  }
+
+  private defaultStageInputContract(agent: { id: string; key?: string; name: string; role?: string }, hasUpstream: boolean) {
+    if (!hasUpstream) return [];
+    const identity = `${agent.key ?? ''} ${agent.id} ${agent.name} ${agent.role ?? ''}`.toLowerCase();
+    if (identity.includes('frontend')) {
+      return ['Consume the upstream architecture, database schema, API contracts, and integration decisions.'];
+    }
+    return ['Consume all completed upstream stage artifacts and decisions before implementation.'];
+  }
+
+  private defaultStageOutputContract(agent: { id: string; key?: string; name: string; role?: string }) {
+    const identity = `${agent.key ?? ''} ${agent.id} ${agent.name} ${agent.role ?? ''}`.toLowerCase();
+    if (identity.includes('architect') || identity.includes('architecture')) {
+      return [
+        'Define the project/module structure and ownership boundaries.',
+        'Define the database schema, entities, relationships, indexes, and migration constraints.',
+        'Define API contracts including routes, methods, request/response schemas, errors, and authentication.',
+        'Record integration protocols, cross-stage decisions, assumptions, and unresolved risks in a downstream-consumable artifact.'
+      ];
+    }
+    return [`Complete the ${agent.name} workflow stage and publish a concrete artifact consumable by downstream stages.`];
   }
 
   private context(runId: string) {

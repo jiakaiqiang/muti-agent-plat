@@ -117,6 +117,12 @@ export function shouldRenderInTimeline(event: CollaborationEvent) {
       typeof payload.checkpointId === 'string' && typeof payload.memoryId === 'string')
   ) return false
   const unsafeVisibility = (event as unknown as { visibility?: unknown }).visibility
+  if (event.type === 'runtime_failed' && payload.code === 'HUMAN_APPROVAL_REQUIRED') return false
+  if (
+    event.type === 'task_rejected' &&
+    typeof (payload as { resultSummary?: unknown }).resultSummary === 'string' &&
+    (payload as { resultSummary: string }).resultSummary.includes('HUMAN_APPROVAL_REQUIRED')
+  ) return false
   if (payload.phase === 'user_message_routing' && event.type.startsWith('runtime_')) return false
   if (!shouldPublishRuntimeEventToCollaboration({
     type: event.type,
@@ -297,8 +303,15 @@ function statusFromEvent(event: CollaborationEvent): AgentCardState['status'] | 
   if (event.type === 'task_completed' || event.type === 'runtime_completed' || event.type === 'post_review_completed') {
     return 'completed'
   }
+  if (
+    event.type === 'task_rejected' &&
+    'resultSummary' in payload &&
+    typeof payload.resultSummary === 'string' &&
+    payload.resultSummary.includes('HUMAN_APPROVAL_REQUIRED')
+  ) return 'waiting'
   if (event.type === 'task_rejected') return 'failed'
   if (event.type === 'runtime_failed') {
+    if ('code' in payload && payload.code === 'HUMAN_APPROVAL_REQUIRED') return 'waiting'
     const kind = (payload as RuntimeEventPayload).termination?.kind
     if (kind === 'service_shutdown' || kind === 'maintenance') return 'waiting'
     if (kind === 'superseded') return 'thinking'
@@ -632,7 +645,19 @@ export const useEventStore = defineStore('event', {
       this.commitServerEvents(normalizedEvent.sessionId, [normalizedEvent])
     },
     async reconcileServerEvents(sessionId: string, generation: number, attempt: number) {
-      if (coordinator.backfillPromise) return coordinator.backfillPromise
+      if (coordinator.backfillPromise) {
+        const sharedBackfill = coordinator.backfillPromise
+        const sharedAbort = coordinator.backfillAbort
+        try {
+          await sharedBackfill
+        } catch (error) {
+          // A reconnect can supersede a backfill while another caller is
+          // waiting on the same promise. Keep the cancellation local to the
+          // stale attempt instead of exposing it to the user action caller.
+          if (!sharedAbort?.signal.aborted) throw error
+        }
+        return
+      }
       coordinator.recovering = true
       coordinator.bufferedEvents = []
       const abort = new AbortController()

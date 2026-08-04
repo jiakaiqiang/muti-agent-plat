@@ -8,6 +8,7 @@ export default mergeConfig(
     test: {
       environment: 'jsdom',
       include: [
+        'src/api/**/*.spec.ts',
         'src/components/**/*.spec.ts',
         'src/router/**/*.spec.ts',
         'src/stores/event-connection.spec.ts',
@@ -16,7 +17,8 @@ export default mergeConfig(
         'src/stores/session-delete.spec.ts',
         'src/stores/session-file-revision.spec.ts',
         'src/stores/session-version-gate.spec.ts',
-        'src/stores/workspaceUi.spec.ts'
+        'src/stores/workspaceUi.spec.ts',
+        'src/utils/**/*.spec.ts'
       ]
     }
   })

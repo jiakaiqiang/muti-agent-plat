@@ -221,6 +221,62 @@ export class PersistenceService implements OnModuleDestroy {
     });
   }
 
+  async acquireWorkspaceSessionLease(workspaceId: string, sessionId: string): Promise<{ acquired: boolean; conflictSessionId?: string }> {
+    if (!this.enabled) return { acquired: true };
+    if (this.backend === 'postgres') {
+      if (!this.relationalStore) throw new Error('RELATIONAL_PERSISTENCE_UNAVAILABLE: relational state store is not initialized.');
+      return this.relationalStore.acquireWorkspaceSessionLease(workspaceId, sessionId);
+    }
+    this.assertWritable();
+    const collection = 'workspaceSessionLeases';
+    const leases = (this.state[collection] as Record<string, string>) ?? {};
+    const existingSessionId = leases[workspaceId];
+    if (existingSessionId && existingSessionId !== sessionId) {
+      return { acquired: false, conflictSessionId: existingSessionId };
+    }
+    leases[workspaceId] = sessionId;
+    this.state[collection] = leases;
+    this.writeFileState();
+    return { acquired: true };
+  }
+
+  async releaseWorkspaceSessionLease(workspaceId: string, sessionId: string): Promise<void> {
+    if (!this.enabled) return;
+    if (this.backend === 'postgres') {
+      if (!this.relationalStore) throw new Error('RELATIONAL_PERSISTENCE_UNAVAILABLE: relational state store is not initialized.');
+      await this.relationalStore.releaseWorkspaceSessionLease(workspaceId, sessionId);
+      return;
+    }
+    this.assertWritable();
+    const collection = 'workspaceSessionLeases';
+    const leases = (this.state[collection] as Record<string, string>) ?? {};
+    if (leases[workspaceId] === sessionId) {
+      delete leases[workspaceId];
+      this.state[collection] = leases;
+      this.writeFileState();
+    }
+  }
+
+  async reconcileWorkspaceSessionLeases(activeSessions: Array<{ workspaceId: string; sessionId: string }>): Promise<void> {
+    if (!this.enabled) return;
+    if (this.backend === 'postgres') {
+      if (!this.relationalStore) throw new Error('RELATIONAL_PERSISTENCE_UNAVAILABLE: relational state store is not initialized.');
+      await this.relationalStore.reconcileWorkspaceSessionLeases(activeSessions);
+      return;
+    }
+    this.assertWritable();
+    const collection = 'workspaceSessionLeases';
+    const activeMap = new Map(activeSessions.map(s => [s.workspaceId, s.sessionId]));
+    const leases = (this.state[collection] as Record<string, string>) ?? {};
+    for (const [workspaceId, sessionId] of Object.entries(leases)) {
+      if (!activeMap.has(workspaceId) || activeMap.get(workspaceId) !== sessionId) {
+        delete leases[workspaceId];
+      }
+    }
+    this.state[collection] = leases;
+    this.writeFileState();
+  }
+
   backendName(): PersistenceBackend {
     return this.backend;
   }

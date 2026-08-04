@@ -195,6 +195,25 @@ test('relational projections preserve catalog versions, bindings, session progre
       [sessionId]: [{ id: taskId, title: 'Projection Task', status: 'completed', assigneeId: agentId, createdAt: now, updatedAt: now }]
     });
     await store.writeCollection('sessions', [{ ...session, status: 'EXECUTING' }]);
+    const writeback = {
+      id: `writeback-${suffix}`,
+      sessionId,
+      taskId,
+      invocationId: `invocation-${suffix}`,
+      workspaceId: `workspace-${suffix}`,
+      providerKind: 'server_local',
+      changeSet: {
+        id: `changes-${suffix}`,
+        baseRevision: revisionBaseline.workspaceRevision,
+        changes: [{ operation: 'create', path: 'result.txt', content: 'done', encoding: 'utf-8' }],
+        createdAt: now
+      },
+      status: 'conflicted',
+      conflicts: [],
+      createdAt: now,
+      updatedAt: now
+    };
+    await store.writeCollection('workspaceWritebacks', [writeback]);
     await store.writeCollection('eventsBySession', {
       [sessionId]: [{ id: eventId, sessionId, type: 'agent_message', content: 'persisted', actor: { type: 'agent', id: agentId }, createdAt: now }]
     });
@@ -239,6 +258,8 @@ test('relational projections preserve catalog versions, bindings, session progre
     assert.equal(loadedFileRevisions.chains.find((item) => item.id === revisionChain.id)?.stateVersion, 2);
     assert.equal(loadedFileRevisions.runs.find((item) => item.id === revisionRun.id)?.status, 'awaiting_confirmation');
     assert.equal(loadedFileRevisions.drafts.find((item) => item.chainId === revisionChain.id)?.contentRef, revisionDraft.contentRef);
+    const loadedWritebacks = loaded.workspaceWritebacks as typeof writeback[];
+    assert.equal(loadedWritebacks.find((item) => item.id === writeback.id)?.status, 'conflicted');
 
     const applyingState = structuredClone(loadedFileRevisions);
     applyingState.chains[0] = { ...applyingState.chains[0], status: 'applying', stateVersion: 3 };

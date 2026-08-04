@@ -29,9 +29,15 @@ export class IntentRecognitionService {
     const intent = this.detectUserMessageIntent(message);
     const isExecuting = ['EXECUTING', 'REWORKING', 'POST_REVIEW'].includes(status);
     const isConstraint = intent === 'constraint' || this.constraintPattern().test(message);
+    const requirementRelation = this.detectRequirementRelation(message);
+    const failedExecutionAction = status === 'FAILED' && requirementRelation === 'continuation'
+      ? this.shouldReplanFailedExecution(message) ? 'replan' : 'resume'
+      : 'none';
 
     return {
       intent,
+      requirementRelation,
+      failedExecutionAction,
       priority: isConstraint ? 'high' : 'normal',
       shouldPause: isExecuting && (isConstraint || intent === 'correction'),
       affectedTaskIds: [],
@@ -97,6 +103,17 @@ export class IntentRecognitionService {
       return 'knowledge_input';
     }
     return 'clarification';
+  }
+
+  private detectRequirementRelation(message: string): UserMessageHandlingPlan['requirementRelation'] {
+    if (/(新需求|新任务|另外(?:一个|一项)?|无关(?:需求|任务)?|separate task|new requirement|new task|unrelated)/i.test(message)) {
+      return 'new_requirement';
+    }
+    return 'continuation';
+  }
+
+  private shouldReplanFailedExecution(message: string) {
+    return /(重新讨论|重新规划|换个方案|调整方案|replan|new approach|different approach)/i.test(message);
   }
 
   private constraintPattern() {

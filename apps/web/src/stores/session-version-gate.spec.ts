@@ -15,6 +15,8 @@ function health(overrides: Record<string, unknown> = {}) {
     service: 'agent-cluster-server',
     version: '0.1.0',
     buildTime: '2026-07-13T01:00:00.000Z',
+    buildId: 'build-abc1234',
+    runtimeBuildStale: false,
     commit: 'abc1234',
     processId: 48020,
     startedAt: '2026-07-13T01:00:00.000Z',
@@ -66,5 +68,10 @@ describe('session backend version gate', () => {
   it('detects an explicitly configured backend commit mismatch', () => {
     expect(runtimeHealthCompatible(health() as never, 'different-commit')).toBe(false)
     expect(runtimeHealthCompatible(health() as never, 'abc1234')).toBe(true)
+  })
+
+  it('rejects a stale build and an older health payload without a build id', () => {
+    expect(runtimeHealthCompatible(health({ runtimeBuildStale: true }) as never)).toBe(false)
+    expect(runtimeHealthCompatible(health({ buildId: undefined, runtimeBuildStale: undefined }) as never)).toBe(false)
   })
 })

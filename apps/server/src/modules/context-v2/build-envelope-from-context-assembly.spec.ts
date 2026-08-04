@@ -324,6 +324,48 @@ test('buildEnvelopeFromContextAssembly carries selected supplemental memory in L
   assert.equal(envelope.L5.bullets.filter((bullet) => bullet.includes(marker)).length, 1);
 });
 
+test('buildEnvelopeFromContextAssembly carries selected upstream artifact summaries in execution L5', () => {
+  const marker = 'UPSTREAM_ARCHITECTURE_CONTRACT_20260731';
+  const contextAssembly = {
+    systemRules: [],
+    sessionGoal: 'Implement the frontend from the approved architecture',
+    budget: { maxInputTokens: 2_000 },
+    selectedEvidenceContents: [{
+      type: 'artifact',
+      label: 'Architecture execution result',
+      ref: 'artifact-architecture',
+      source: 'artifact',
+      content: `${marker}: Nuxt server API, PostgreSQL schema, and SDK contract.`
+    }],
+    summaryMemory: {
+      currentState: 'frontend acceptance', confirmedFacts: [], completed: [], decisions: [],
+      openQuestions: [], risks: [], nextSteps: []
+    },
+    relevantEvents: [],
+    artifacts: [{ artifactId: 'artifact-architecture', type: 'json', title: 'Architecture execution result' }]
+  } as unknown as ContextAssembly;
+  const session = {
+    id: 'artifact-session', workspaceId: 'empty-workspace', tokenUsed: 0, participatingAgentIds: [],
+    createdAt: '2026-07-31T00:00:00.000Z', updatedAt: '2026-07-31T00:00:00.000Z'
+  } as unknown as SessionDetail;
+
+  const envelope = buildEnvelopeFromContextAssembly({
+    session,
+    phase: 'task_acceptance',
+    contextAssembly,
+    identity: {
+      agentId: 'frontend', key: 'frontend', name: 'Frontend', role: 'worker', systemPrompt: 'Work.',
+      profileHash: 'hash', profileRevision: 1, skillBindings: [], requestedToolIds: [], requestedToolKeys: [],
+      capabilityIds: [], knowledgeBaseIds: []
+    },
+    toolCatalogHash: 'catalog'
+  });
+
+  assert.equal(envelope.L3.files.length, 0);
+  assert.ok(envelope.L5.bullets.some((bullet) => bullet.includes(marker)));
+  assert.deepEqual(envelope.L6.reportIds, []);
+});
+
 test('file revision evidence remains navigable without a cached workspace index after restart', () => {
   const contextAssembly = {
     systemRules: ['Use the frozen revision.'],

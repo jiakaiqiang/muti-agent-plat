@@ -2,11 +2,13 @@
 
 > 日期：2026-07-23
 >
-> 最近更新：2026-07-24
+> 最近更新：2026-08-04
 >
-> 状态：Windows + Codex/Claude Code 单用户内部预览；Claude 本机适配器已完成 Stub 验收，真实付费回归仍待单独确认；M1 生产边界收口、M2 执行正确性和 M3 端到端验收均已完成；签名分发、自动升级、多用户体系和主动唤醒仍属后续范围，尚未达到正式产品化交付标准
+> 状态：Windows + Codex/Claude Code 单用户内部预览；Claude 本机适配器已完成 Stub 验收，真实付费回归仍待单独确认；M1 生产边界收口、M2 执行正确性和 M3 端到端验收均已完成；浏览器唤醒协议已进入预览，签名分发、自动升级和多用户体系仍属后续范围，尚未达到正式产品化交付标准
 >
 > 设计依据：[本地与服务器 Runtime 工作区隔离讨论结果](../design/local-and-server-runtime-workspace-separation-discussion-result-v1.md)
+>
+> 生产计划：[生产基础 Runtime 使用计划](production-basic-runtime-usage-plan-v1.md)
 
 ## 0. 当前范围决策
 
@@ -77,7 +79,7 @@
 
 - 签名的独立可执行文件、安装器、发布渠道、回滚和自动升级。
 - Local Runtime 对 Claude Code 的真实付费回归、生产样本和其他操作系统的正式支持。
-- 由浏览器直接触发 CLI 本地目录选择器；当前先由 CLI 注册，再由浏览器选择已连接工作区。
+- 通过签名安装器稳定注册浏览器唤醒协议，并提供开机自启、崩溃恢复和卸载能力。
 - 持久化脱敏本地日志；预览版当前输出到 stdout/stderr。
 - 用户主动重新连接事件流并“唤醒”会话的 API、状态机、幂等键和 UI；本轮只持久化可唤醒中断状态，不提供手动连接入口。
 
@@ -166,7 +168,7 @@
 | M1：生产边界收口 | P0 | 已完成 | 单用户服务器部署不暴露匿名管理面，Agent 不可操作平台源码 | 单用户管理员鉴权、平台仓库全子目录拒绝、Worker fail closed、Worker 环境变量白名单 |
 | M2：执行正确性 | P1 | 已完成 | 所有变更、权限和进程生命周期都有明确且一致的结果 | 完整 ChangeSet、权限交集、统一敏感路径、操作合同与审计、并发锁、Windows 进程树终止 |
 | M3：端到端验收 | P1 | 已完成 | 用真实链路证明本地和服务器模式符合架构边界 | 浏览器到 CLI E2E、服务器 Worker E2E、断线和安全回归测试、验收证据更新 |
-| M4：产品化 | P2 | 后续冻结 | 从内部预览升级为可维护的正式交付 | 签名安装包、升级与回滚、持久化脱敏日志、服务守护、Local Claude 真实验收、macOS/Linux |
+| M4：生产基础 Runtime | P2 | 已登记，待实施 | 从内部预览升级为可维护的本地/服务器双模式正式交付 | [安装与唤醒、设备绑定、稳定 WSS、升级与运维](production-basic-runtime-usage-plan-v1.md) |
 
 ### M1：生产边界收口（已完成）
 
@@ -263,6 +265,6 @@ npm run build
 - 会话主动唤醒 API、状态机和 UI。
 - 签名分发、自动升级和回滚。
 - Local Claude 真实付费回归、macOS 和 Linux 正式支持。
-- 浏览器直接触发 CLI 本地目录选择器。
+- 签名安装器提供的浏览器唤醒、开机自启、升级与卸载闭环。
 
 详细证据见 [Local/Server Runtime 工作区隔离实现验收](../quality/local-and-server-runtime-workspace-separation-acceptance-v1.md)。

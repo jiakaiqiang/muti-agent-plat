@@ -9,6 +9,7 @@ function makeSession(status: SessionDetail['status']): SessionDetail {
   return {
     id: `session-${status.toLowerCase()}`,
     dataEpoch: 'epoch-test',
+    workspaceId: `workspace-${status.toLowerCase()}`,
     status,
     currentTaskBriefId: 'brief-1'
   } as SessionDetail;
@@ -38,7 +39,11 @@ function makeFixture(sessions: SessionDetail[], events?: {
         return Boolean(session);
       }
     } as never,
-    { currentDataEpoch: () => 'epoch-test' } as never,
+    {
+      currentDataEpoch: () => 'epoch-test',
+      releaseWorkspaceSessionLease: async () => undefined,
+      reconcileWorkspaceSessionLeases: async () => undefined
+    } as never,
     undefined,
     events as never
   );
@@ -108,6 +113,7 @@ test('leaves user-waiting and terminal Sessions untouched on boot', async () => 
     makeSession('WAIT_WORKFLOW_SELECT'),
     makeSession('WAIT_WORKFLOW_STEP_CONFIRM'),
     makeSession('WAIT_USER_DECISION'),
+    makeSession('PAUSED'),
     makeSession('COMPLETED'),
     makeSession('FAILED'),
     makeSession('CANCELLED'),

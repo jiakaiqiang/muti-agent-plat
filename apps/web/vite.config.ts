@@ -13,6 +13,14 @@ export default defineConfig({
       '/api': {
         target: devApiProxyTarget,
         changeOrigin: true
+      },
+      '/local-runtime': {
+        target: devApiProxyTarget,
+        changeOrigin: true,
+        ws: true,
+        bypass(request) {
+          return request.headers.upgrade?.toLowerCase() === 'websocket' ? undefined : request.url
+        }
       }
     }
   },

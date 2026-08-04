@@ -22,6 +22,30 @@ test('WorkspaceWriteLock serializes runs on the same path', async () => {
   assert.deepEqual(events, ['A-start', 'A-end', 'B-start', 'B-end']);
 });
 
+test('WorkspaceWriteLock preserves FIFO serialization with three queued runs', async () => {
+  const lock = new WorkspaceWriteLock();
+  const order: string[] = [];
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const first = lock.run('same.txt', async () => {
+    order.push('A-start');
+    await firstGate;
+    order.push('A-end');
+  });
+  const second = lock.run('same.txt', async () => {
+    order.push('B-start');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    order.push('B-end');
+  });
+  const third = lock.run('same.txt', async () => {
+    order.push('C-start');
+    order.push('C-end');
+  });
+  releaseFirst();
+  await Promise.all([first, second, third]);
+  assert.deepEqual(order, ['A-start', 'A-end', 'B-start', 'B-end', 'C-start', 'C-end']);
+});
+
 test('WorkspaceWriteLock allows different paths to run concurrently', async () => {
   const lock = new WorkspaceWriteLock();
   const events: string[] = [];

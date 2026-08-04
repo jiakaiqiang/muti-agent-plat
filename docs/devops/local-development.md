@@ -405,10 +405,11 @@ npm run dev
 
 ```powershell
 node $runtimeCli login --server https://agent.example.com
+node $runtimeCli install --server https://agent.example.com
 node $runtimeCli start
 ```
 
-`login` 会显示一次性设备码和激活页面。浏览器打开该页面并确认后，CLI 才能取得设备令牌。开发 supervisor 会在没有显式值时把 `PUBLIC_WEB_URL` 设置为当前 Web 地址；单独启动稳定后端或服务器部署时必须配置实际可访问的前端地址，例如：
+`login` 会显示一次性设备码和激活页面。浏览器打开该页面并确认后，CLI 才能取得设备令牌。Windows 下的 `install` 会为当前用户注册 `agent-runtime://` 协议；平台“本地运行”菜单可以据此唤醒已安装的 CLI。协议 URL 只允许连接安装时登记的同一服务器，远程服务器必须使用 HTTPS。生产反向代理必须仅在请求包含 WebSocket Upgrade 时把 `/local-runtime` 转发到后端，普通 HTTP GET 仍交给 Web SPA，保证“本地运行”页面可以直接访问和刷新。开发 supervisor 会在没有显式值时把 `PUBLIC_WEB_URL` 设置为当前 Web 地址；单独启动稳定后端或服务器部署时必须配置实际可访问的前端地址，例如：
 
 ```env
 PUBLIC_WEB_URL=https://agent.example.com

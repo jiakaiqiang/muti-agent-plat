@@ -10,7 +10,7 @@ import { useRuntimeModelStore } from '@/stores/runtimeModel'
 import { useWorkspaceUiStore } from '@/stores/workspaceUi'
 import type { WorkspaceKind } from '@/stores/workspaceUi'
 import { apiBaseUrl, runtimeModeLabel } from '@/config/runtime'
-import { ApiRequestError } from '@/api/client'
+import { ApiRequestError, isAbortError } from '@/api/client'
 import {
   sessionStatusLabel,
   type BriefEventPayload,
@@ -18,7 +18,9 @@ import {
   type RuntimeType,
   type SessionStatus,
   type SessionWorkingDirectory,
-  type SessionViewMode
+  type SessionViewMode,
+  type WorkspaceWritebackRecord,
+  type WorkspaceWritebackResolutionAction
 } from '@/types/contracts'
 import AgentStatusPanel from './AgentStatusPanel.vue'
 import AgentPortrait from './AgentPortrait.vue'
@@ -48,6 +50,7 @@ const router = useRouter()
 const { deletingSessionIds } = storeToRefs(sessionStore)
 const pendingDeleteSessionId = ref<string>()
 const deleteSessionError = ref('')
+const isSessionControlBusy = ref(false)
 const backendReachability = ref<'unknown' | 'reachable' | 'unreachable'>('unknown')
 const {
   isSendingMessage,
@@ -239,6 +242,7 @@ function showMessage(text: string, type: 'success' | 'warning' | 'error' | 'info
 }
 
 function showErrorMessage(error: unknown, fallback: string) {
+  if (isAbortError(error)) return
   showMessage(error instanceof Error ? error.message : fallback, 'error')
 }
 
@@ -284,6 +288,13 @@ const agents = computed(() =>
 )
 const tasks = computed(() => eventStore.taskStates(currentSessionId.value))
 const activeConfirmation = computed(() => eventStore.activeConfirmation(currentSessionId.value))
+const activeWorkspaceWritebacks = computed(() =>
+  (sessionStore.currentSession?.workspaceWritebacks ?? [])
+    .filter((writeback) => writeback.status === 'conflicted' || writeback.status === 'failed')
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+)
+const workspaceWritebackBusy = ref(false)
+const workspaceWritebackError = ref('')
 const currentMode = computed(() => sessionStore.currentViewMode)
 const workspaceLabel = computed(() => sessionStore.currentSession?.title ?? '无活动会话')
 const activeAgentIds = computed(() => agentStore.agents.filter((agent) => agent.status === 'active').map((agent) => agent.id))
@@ -318,6 +329,29 @@ const fileRevisionEditorErrorBySession = ref<Record<string, string>>({})
 const fileRevisionEditorBusy = computed(() => Boolean(fileRevisionEditorBusyBySession.value[currentSessionId.value]))
 const fileRevisionEditorError = computed(() => fileRevisionEditorErrorBySession.value[currentSessionId.value] ?? '')
 
+async function resolveWorkspaceWriteback(
+  writeback: WorkspaceWritebackRecord,
+  action: WorkspaceWritebackResolutionAction
+) {
+  const sessionId = currentSessionId.value
+  if (!sessionId || workspaceWritebackBusy.value) return
+  if (action === 'use_session' && !window.confirm('采用会话版本会覆盖当前目录中冲突文件的内容，确认继续吗？')) return
+  workspaceWritebackBusy.value = true
+  workspaceWritebackError.value = ''
+  try {
+    await sessionStore.resolveWorkspaceWriteback(sessionId, writeback.id, {
+      action,
+      ...(action === 'use_session' ? { confirmationId: writeback.id } : {})
+    })
+    showMessage(action === 'resolve_with_agent' ? '已创建冲突修复任务' : '写回处理已完成', 'success')
+  } catch (error) {
+    workspaceWritebackError.value = error instanceof Error ? error.message : '处理工作区写回失败'
+    showErrorMessage(error, '处理工作区写回失败')
+  } finally {
+    workspaceWritebackBusy.value = false
+  }
+}
+
 function setFileRevisionEditorBusy(sessionId: string, busy: boolean) {
   fileRevisionEditorBusyBySession.value[sessionId] = busy
 }
@@ -348,6 +382,19 @@ const derivedStatus = computed(() => {
     ))
   return (statusEvent?.metadata.payload?.status as SessionStatus | undefined) ?? sessionStore.currentSession?.status
 })
+const stoppableSessionStatuses = new Set<SessionStatus>([
+  'AGENT_DISCUSSING',
+  'REVISING_BRIEF',
+  'EXECUTING',
+  'POST_REVIEW',
+  'REWORKING'
+])
+const canStopSession = computed(() => Boolean(
+  currentSessionId.value && derivedStatus.value && stoppableSessionStatuses.has(derivedStatus.value)
+))
+const canResumeStoppedSession = computed(() => Boolean(
+  currentSessionId.value && derivedStatus.value === 'PAUSED'
+))
 
 watch(
   () => [eventStore.sseConnectionState, eventStore.lastSseErrorAt] as const,
@@ -445,6 +492,36 @@ async function syncSessionEventConnection(sessionId: string, status?: SessionSta
 async function reconcileSessionEvents(sessionId: string) {
   const status = sessionStore.currentSession?.id === sessionId ? sessionStore.currentSession.status : undefined
   await syncSessionEventConnection(sessionId, status)
+}
+
+async function stopCurrentSession() {
+  const sessionId = currentSessionId.value
+  if (!sessionId || !canStopSession.value || isSessionControlBusy.value) return
+  isSessionControlBusy.value = true
+  try {
+    await sessionStore.pauseSession(sessionId)
+    await reconcileSessionEvents(sessionId)
+    showMessage('会话已停止，可以稍后继续', 'success')
+  } catch (error) {
+    showErrorMessage(error, '停止会话失败')
+  } finally {
+    isSessionControlBusy.value = false
+  }
+}
+
+async function resumeStoppedSession() {
+  const sessionId = currentSessionId.value
+  if (!sessionId || !canResumeStoppedSession.value || isSessionControlBusy.value) return
+  isSessionControlBusy.value = true
+  try {
+    await sessionStore.resumeSession(sessionId)
+    await reconcileSessionEvents(sessionId)
+    showMessage('会话已继续执行', 'success')
+  } catch (error) {
+    showErrorMessage(error, '继续会话失败')
+  } finally {
+    isSessionControlBusy.value = false
+  }
 }
 
 async function probeBackendReachability() {
@@ -695,16 +772,6 @@ async function confirmCreateSessionFromDialog() {
     workspaceUiStore.closeCreateSession()
     showMessage('会话已保存并创建', 'success')
   } catch (error) {
-    if (error instanceof ApiRequestError && error.code === 'WORKSPACE_ACTIVE_SESSION_CONFLICT') {
-      const activeSessionId = error.details?.activeSessionId
-      if (typeof activeSessionId === 'string' && activeSessionId) {
-        workspaceUiStore.closeCreateSession()
-        await sessionStore.loadSession(activeSessionId)
-        await router.replace({ name: 'workspace-session', params: { sessionId: activeSessionId }, query: route.query })
-        showMessage('该工作区已有活动会话，已返回该会话。', 'warning')
-        return
-      }
-    }
     sessionBindingStatus.value = 'failed'
     sessionCreateError.value = error instanceof Error ? error.message : '创建会话失败'
     showErrorMessage(error, '创建会话失败')
@@ -1158,9 +1225,11 @@ async function resolveConfirmation(optionKey: string) {
   })
 }
 
-async function approveCapability(sessionId: string, capabilityId: string) {
+async function approveCapability(sessionId: string, capabilityIds: string[], agentId?: string) {
   try {
-    await sessionStore.approveCapability(sessionId, capabilityId)
+    for (const capabilityId of capabilityIds) {
+      await sessionStore.approveCapability(sessionId, capabilityId, { agentId })
+    }
     await reconcileSessionEvents(sessionId)
     showMessage('能力已授权，任务将自动恢复执行', 'success')
   } catch (error) {
@@ -1387,6 +1456,28 @@ async function submitWorkflowStepRevision() {
               · {{ discussion.agentCount }} 个 Agent 讨论中，已有 {{ discussion.messageCount }} 条意见
             </span>
           </span>
+          <button
+            v-if="canStopSession"
+            class="header-icon-button session-control-button is-stop"
+            type="button"
+            title="停止会话"
+            aria-label="停止会话"
+            :disabled="isSessionControlBusy"
+            @click="stopCurrentSession"
+          >
+            <UiIcon name="stop" :size="16" />
+          </button>
+          <button
+            v-else-if="canResumeStoppedSession"
+            class="header-icon-button session-control-button is-resume"
+            type="button"
+            title="继续会话"
+            aria-label="继续会话"
+            :disabled="isSessionControlBusy"
+            @click="resumeStoppedSession"
+          >
+            <UiIcon name="play" :size="16" />
+          </button>
           <span v-if="!currentWorkingDirectory" class="runtime-chip">{{ runtimeDisplay }} · {{ apiBaseUrl }}</span>
           <button
             v-for="mode in viewModes"
@@ -1431,6 +1522,50 @@ async function submitWorkflowStepRevision() {
           @failure-decision="resolveActiveFileRevisionFailure"
           @retry-interrupted="retryActiveInterruptedFileRevision"
         />
+        <section
+          v-for="writeback in currentMode === 'chat' ? activeWorkspaceWritebacks : []"
+          :key="writeback.id"
+          class="workspace-writeback-panel"
+          role="alert"
+          aria-live="polite"
+        >
+          <header>
+            <div>
+              <strong>工作区写回需要处理</strong>
+              <p v-if="writeback.status === 'failed'">
+                {{ writeback.error ?? '写回失败，请重试或放弃本次写回。' }}
+              </p>
+              <p v-else>
+                自动三方合并未能安全处理以下 {{ writeback.conflicts.length }} 个冲突。
+              </p>
+            </div>
+            <span>{{ writeback.providerKind }}</span>
+          </header>
+          <ul v-if="writeback.conflicts.length">
+            <li v-for="conflict in writeback.conflicts" :key="`${conflict.path}:${conflict.operation}`">
+              <code>{{ conflict.path }}</code>
+              <span>{{ conflict.message }}</span>
+            </li>
+          </ul>
+          <p v-if="workspaceWritebackError" class="form-error">{{ workspaceWritebackError }}</p>
+          <footer>
+            <button type="button" :disabled="workspaceWritebackBusy" @click="resolveWorkspaceWriteback(writeback, 'retry_merge')">
+              重试合并
+            </button>
+            <button type="button" :disabled="workspaceWritebackBusy" @click="resolveWorkspaceWriteback(writeback, 'resolve_with_agent')">
+              交给 Agent
+            </button>
+            <button type="button" :disabled="workspaceWritebackBusy" @click="resolveWorkspaceWriteback(writeback, 'keep_workspace')">
+              保留当前目录
+            </button>
+            <button type="button" class="danger" :disabled="workspaceWritebackBusy" @click="resolveWorkspaceWriteback(writeback, 'use_session')">
+              采用会话版本
+            </button>
+            <button type="button" :disabled="workspaceWritebackBusy" @click="resolveWorkspaceWriteback(writeback, 'abandon_writeback')">
+              放弃写回
+            </button>
+          </footer>
+        </section>
         <div v-if="currentMode === 'chat'" class="chat-pane">
           <CollaborationTaskBoard
             :brief="activeBriefPayload ?? latestBriefPayload"

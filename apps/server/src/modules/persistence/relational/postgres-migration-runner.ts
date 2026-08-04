@@ -5,7 +5,8 @@ import {
   RELATIONAL_SCHEMA_NAME,
   RELATIONAL_SCHEMA_V1_SQL,
   RELATIONAL_SCHEMA_V2_SQL,
-  RELATIONAL_SCHEMA_V3_SQL
+  RELATIONAL_SCHEMA_V3_SQL,
+  RELATIONAL_SCHEMA_V4_SQL
 } from './relational-schema.js';
 
 type Migration = {
@@ -29,6 +30,11 @@ const MIGRATIONS: Migration[] = [
     version: 3,
     name: 'file_revision_records',
     sql: RELATIONAL_SCHEMA_V3_SQL
+  },
+  {
+    version: 4,
+    name: 'workspace_leases_and_writebacks',
+    sql: RELATIONAL_SCHEMA_V4_SQL
   }
 ];
 

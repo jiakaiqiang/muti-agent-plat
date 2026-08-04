@@ -13,7 +13,7 @@ import type { OpsHealth } from '@agent-cluster/shared';
 import { timingSafeEqual } from 'node:crypto';
 import { Queue, type ConnectionOptions } from 'bullmq';
 import { ok } from '../../common/api-response.js';
-import { resolveBuildCommit } from '../../common/build-metadata.js';
+import { captureRuntimeBuildMonitor, resolveBuildCommit } from '../../common/build-metadata.js';
 import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import { bullMqEnabled, bullMqPrefix, redisConnectionOptions } from '../../common/redis.js';
 import { MaintenanceCoordinatorService } from '../persistence/maintenance-coordinator.service.js';
@@ -32,6 +32,7 @@ const processStartedAt = new Date(Date.now() - process.uptime() * 1_000).toISOSt
 @Controller()
 export class OpsController {
   private readonly buildCommit = resolveBuildCommit();
+  private readonly runtimeBuild = captureRuntimeBuildMonitor();
 
   constructor(
     private readonly persistence: PersistenceService,
@@ -44,7 +45,9 @@ export class OpsController {
       status: 'ok',
       service: 'agent-cluster-server',
       version: '0.1.0',
-      buildTime: this.buildTime(),
+      buildTime: this.runtimeBuild.buildTime,
+      buildId: this.runtimeBuild.buildId,
+      runtimeBuildStale: this.runtimeBuild.runtimeBuildStale(),
       commit: this.commit(),
       processId: process.pid,
       startedAt: processStartedAt,
@@ -146,10 +149,6 @@ export class OpsController {
     } finally {
       await Promise.all(queues.map((queue) => queue.close().catch(() => undefined)));
     }
-  }
-
-  private buildTime() {
-    return process.env.AGENT_CLUSTER_BUILD_TIME?.trim() || process.env.BUILD_TIME?.trim() || 'unknown';
   }
 
   private commit() {

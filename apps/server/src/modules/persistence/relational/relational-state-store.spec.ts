@@ -52,3 +52,31 @@ test('replaceState rolls back when clearing managed state tables fails', async (
   await assert.rejects(() => store.replaceState({}), /truncate failed/);
   assert.equal(queries.at(-1), 'rollback');
 });
+
+test('loadState excludes projections owned by soft-deleted sessions', async () => {
+  const queries: string[] = [];
+  const client = {
+    async query(sql: string) {
+      queries.push(sql);
+      return { rows: [] };
+    },
+    release() {}
+  };
+  const pool = { async connect() { return client; } };
+  const codec = {
+    hydrate<T>(value: T) {
+      return value;
+    }
+  };
+  const store = new RelationalStateStore(pool as never, codec as never);
+
+  await store.loadState();
+
+  const queryFor = (table: string) => queries.find((sql) => sql.includes(`agent_cluster.${table}`)) ?? '';
+  assert.match(queryFor('runtime_invocations'), /join agent_cluster\.sessions s[\s\S]*where s\.deleted_at is null/i);
+  assert.match(queryFor('artifacts'), /join agent_cluster\.sessions s[\s\S]*s\.deleted_at is null/i);
+  assert.match(queryFor('workflow_runs'), /join agent_cluster\.sessions s[\s\S]*where s\.deleted_at is null/i);
+  assert.match(queryFor('file_revision_records'), /join agent_cluster\.sessions s[\s\S]*s\.deleted_at is null/i);
+  assert.match(queryFor('workspace_writebacks'), /join agent_cluster\.sessions s[\s\S]*where s\.deleted_at is null/i);
+  assert.match(queryFor('suggested_tasks'), /join agent_cluster\.sessions s[\s\S]*where s\.deleted_at is null/i);
+});

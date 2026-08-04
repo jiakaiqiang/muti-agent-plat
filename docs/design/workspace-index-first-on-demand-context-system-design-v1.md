@@ -1,5 +1,7 @@
 # Workspace Index First 与按需上下文系统设计 v1
 
+> 2026-07-30 更新：本文中的单活动 Session Lease 章节只保留历史背景。当前同目录多 Session 创建、隔离执行、FIFO 写回、三方合并和冲突恢复以 [`workspace-multi-session-isolation-writeback-v1.md`](./workspace-multi-session-isolation-writeback-v1.md) 为准。
+
 > 日期：2026-07-28
 > 状态：已实施；固定 Windows 环境 100K 真实文件绝对性能基准待发布前归档
 > 适用版本：Agent Cluster V1
@@ -454,13 +456,7 @@ Invocation 启动前读取 live revision：
 
 ### 10.2 冲突行为
 
-创建或恢复第二个活动 Session 时返回：
-
-```text
-409 WORKSPACE_ACTIVE_SESSION_CONFLICT
-```
-
-响应至少包含当前活动 `sessionId`、状态和可执行动作。前端引导用户返回现有 Session，或先明确结束/删除现有 Session；不得静默抢占 Lease。
+本节描述的是已经废弃的行为：历史版本会拒绝创建或恢复第二个活动 Session。当前版本允许创建，并在执行/写回阶段使用隔离目录、FIFO 和冲突恢复保护源目录。
 
 ### 10.3 重启恢复
 
@@ -480,7 +476,7 @@ Invocation 启动前读取 live revision：
 | Context Envelope | 每个 Invocation attempt 内不可变 |
 | Selected Evidence | 记录读取 revision/hash，随 Envelope 冻结 |
 | Session 状态 | Platform Backend 权威持久化 |
-| Active Session Lease | workspaceId 唯一、重启可恢复 |
+| Multi-Session Workspace | workspaceId 可绑定多个活动 Session；写任务隔离、ChangeSet FIFO 写回，状态可持久化恢复 |
 | 文件写回 | base revision + base hash + workspace write lock |
 
 索引不能作为写回并发控制依据；Session Snapshot 也不能替代 live Provider revision。
@@ -639,7 +635,7 @@ Runtime Invocation 审计增加：
 
 | 模块/路径 | 目标改动 |
 | --- | --- |
-| `apps/server/src/modules/sessions/` | Session 创建只绑定 Workspace；增加/接入 Active Session Lease；移除同步 Workspace 扫描 |
+| `apps/server/src/modules/sessions/` | Session 创建只绑定 Workspace；允许相同 Workspace 的多个活动 Session；移除同步 Workspace 扫描 |
 | `apps/server/src/modules/workspaces/` | 增加 Index Snapshot 抽象；Provider 索引读取；保留有界 list/search/read/apply |
 | `apps/server/src/modules/context-v2/` | 直接从 Index Snapshot 构建 L1/L2；L3 只接收真实 Evidence |
 | `apps/server/src/modules/orchestrator/` | 扩展有界 Supplemental Context；revision 校验；重试预算 |
@@ -822,7 +818,7 @@ npm run test:perf:workspace-session-create
 - `supplemental_context_bytes_total`
 - `supplemental_context_retry_total`
 - `context_insufficient_terminal_total`
-- `workspace_active_session_conflict_total`
+- `workspace_writeback_conflict_total`
 - `workspace_revision_unstable_total`
 
 ### 21.2 结构化日志

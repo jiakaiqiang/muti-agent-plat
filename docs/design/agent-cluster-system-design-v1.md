@@ -307,6 +307,8 @@ type UserMessageHandlingPlan = {
     | 'correction'
     | 'knowledge_input'
     | 'preference_input'
+  requirementRelation: 'continuation' | 'new_requirement'
+  failedExecutionAction: 'none' | 'resume' | 'replan'
   priority: 'low' | 'normal' | 'high' | 'critical'
   shouldPause: boolean
   affectedTaskIds: string[]

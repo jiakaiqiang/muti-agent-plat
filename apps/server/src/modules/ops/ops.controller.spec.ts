@@ -36,6 +36,8 @@ test('health exposes build time, commit and effective pipeline version', () => {
       ).health();
 
       assert.equal(response.data.buildTime, '2026-07-11T02:00:00.000Z');
+      assert.equal(response.data.buildId, 'abc1234:2026-07-11T02:00:00.000Z');
+      assert.equal(response.data.runtimeBuildStale, false);
       assert.equal(response.data.commit, 'abc1234');
       assert.equal(response.data.pipelineVersion, 'v2');
       assert.equal(response.data.dataSchemaVersion, 3);

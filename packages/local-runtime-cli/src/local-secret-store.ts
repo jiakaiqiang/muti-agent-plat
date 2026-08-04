@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { stateFilePath } from './state.js';
+import { renameWithRetry } from './atomic-file.js';
 
 type SecretFile = { version: 1; values: Record<string, string> };
 
@@ -48,7 +49,12 @@ export class LocalSecretStore {
     await mkdir(dirname(this.path), { recursive: true });
     const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(temporary, `${JSON.stringify(secrets, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    await rename(temporary, this.path);
+    try {
+      await renameWithRetry(temporary, this.path);
+    } catch (error) {
+      await unlink(temporary).catch(() => undefined);
+      throw error;
+    }
   }
 }
 

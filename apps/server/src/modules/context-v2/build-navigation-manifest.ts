@@ -8,14 +8,19 @@ export interface BuildNavigationManifestArgs {
   entries: WorkspaceIndexEntry[];
   entrypoints: string[];
   maxEntries?: number;
+  budgetTokens?: number;
 }
 
 const DEFAULT_MAX_ENTRIES = 60;
 
+function estimateTokens(byteLength: number): number {
+  return Math.ceil(byteLength / 4);
+}
+
 export function buildNavigationManifest(
   args: BuildNavigationManifestArgs
 ): ContextL1NavigationManifest {
-  const { entries, entrypoints, maxEntries = DEFAULT_MAX_ENTRIES } = args;
+  const { entries, entrypoints, maxEntries = DEFAULT_MAX_ENTRIES, budgetTokens } = args;
   const eligible = entries.filter((entry) => !entry.generated && !entry.sensitive);
   const entrypointSet = new Set(entrypoints);
 
@@ -24,7 +29,21 @@ export function buildNavigationManifest(
     .sort((a, b) => (b.score - a.score) || a.entry.path.localeCompare(b.entry.path));
 
   const total = scored.length;
-  const limit = Math.max(1, maxEntries);
+  let limit = Math.max(1, maxEntries);
+
+  if (budgetTokens !== undefined) {
+    let usedTokens = 0;
+    let count = 0;
+    for (const { entry } of scored) {
+      const entryBytes = Buffer.byteLength(JSON.stringify(toNavigationEntry(entry)), 'utf8');
+      const entryTokens = estimateTokens(entryBytes);
+      if (usedTokens + entryTokens > budgetTokens && count > 0) break;
+      usedTokens += entryTokens;
+      count += 1;
+    }
+    limit = Math.min(limit, count);
+  }
+
   const kept = scored.slice(0, limit);
   const truncated = total > limit;
 

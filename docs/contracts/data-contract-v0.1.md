@@ -59,6 +59,7 @@ type SessionStatus =
   | 'POST_REVIEW'
   | 'REWORKING'
   | 'WAIT_USER_DECISION'
+  | 'PAUSED'
   | 'COMPLETED'
   | 'FAILED'
   | 'CANCELLED'

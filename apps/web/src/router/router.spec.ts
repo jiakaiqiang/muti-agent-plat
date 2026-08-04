@@ -11,6 +11,7 @@ describe('application routes', () => {
     const expectedPaths = [
       '/workspace',
       '/workspace/:sessionId',
+      '/local-runtime',
       '/local-runtime/activate',
       '/workflows',
       '/agents',

@@ -73,10 +73,10 @@ export async function executeLocalInvocation(
     const output = adapterResult.output;
     const after = await snapshotWorkspaceFiles(stagingRoot, true);
     const changeSet = buildChangeSet(currentRevision, before, after);
-    if (changeSet && shouldApplyStagedChangeSet(plan.executionTarget.writeMode)) {
-      const applied = await workspace.applyChangeSet(changeSet, effectivePermissions);
-      if (!applied.ok) {
-        throw new Error(`LOCAL_WORKSPACE_REVISION_CONFLICT: ${applied.conflicts.map((item) => item.message).join('; ')}`);
+    if (changeSet?.changes.some((change) => change.operation === 'delete' || change.operation === 'move')) {
+      const permission = effectivePermissions.workspace_delete;
+      if (permission !== 'allow') {
+        throw new Error(`${permission === 'confirm' ? 'LOCAL_CONFIRMATION_REQUIRED' : 'LOCAL_PERMISSION_DENIED'}: workspace_delete`);
       }
     }
     const completed: AgentRuntimeEvent = {
@@ -102,7 +102,18 @@ export async function executeLocalInvocation(
         invocationId: plan.invocationId
       },
       usage: adapterResult.usage,
-      runtimeSession: adapterResult.runtimeSession
+      runtimeSession: adapterResult.runtimeSession,
+      ...(changeSet && shouldApplyStagedChangeSet(plan.executionTarget.writeMode)
+        ? {
+            workspaceExecution: {
+              mode: 'staging_copy' as const,
+              baseRevision: currentRevision,
+              changeSet,
+              dirtyBaseline: false,
+              requiresUserConfirmation: false
+            }
+          }
+        : {})
     };
   } catch (error) {
     const cancelled = signal.aborted;
@@ -231,12 +242,18 @@ function buildChangeSet(
         path,
         content: requireTextContent(path, current),
         encoding: 'utf-8',
-        expectedHash: previous.hash
+        expectedHash: previous.hash,
+        ...(previous.content !== undefined ? { baseContent: previous.content } : {})
       });
     }
   }
   for (const [path, previous] of before) {
-    if (!after.has(path)) changes.push({ operation: 'delete', path, expectedHash: previous.hash });
+    if (!after.has(path)) changes.push({
+      operation: 'delete',
+      path,
+      expectedHash: previous.hash,
+      ...(previous.content !== undefined ? { baseContent: previous.content } : {})
+    });
   }
   if (!changes.length) return null;
   return { id: randomUUID(), baseRevision, changes, createdAt: new Date().toISOString() };

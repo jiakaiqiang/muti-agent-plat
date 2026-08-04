@@ -109,7 +109,14 @@ test('WorkflowsService publishes immutable versions with explicit approval nodes
   const draft = service.create({
     name: 'Approval flow',
     nodes: [
-      { id: 'agent-1', type: 'agent', agentId: 'requirements', order: 0 },
+      {
+        id: 'agent-1',
+        type: 'agent',
+        agentId: 'requirements',
+        stageDescription: 'Define the accepted requirements.',
+        outputContract: ['Accepted requirements artifact.'],
+        order: 0
+      },
       {
         id: 'human-1',
         type: 'human_approval',
@@ -147,7 +154,14 @@ test('WorkflowsService rejects invalid robot approval and stale draft updates', 
   const draft = service.create({
     name: 'Review validation',
     nodes: [
-      { id: 'agent-1', type: 'agent', agentId: 'requirements', order: 0 },
+      {
+        id: 'agent-1',
+        type: 'agent',
+        agentId: 'requirements',
+        stageDescription: 'Define the accepted requirements.',
+        outputContract: ['Accepted requirements artifact.'],
+        order: 0
+      },
       {
         id: 'robot-1',
         type: 'robot_approval',
@@ -165,6 +179,47 @@ test('WorkflowsService rejects invalid robot approval and stale draft updates', 
     () => service.update(draft.id, { description: 'stale', expectedDraftRevision: 999 }),
     /Workflow draft revision changed/
   );
+});
+
+test('WorkflowsService rejects publish when Agent stage contracts are incomplete', () => {
+  const { service } = setup();
+  const draft = service.create({
+    name: 'Incomplete contracts',
+    nodes: [
+      { id: 'agent-1', type: 'agent', agentId: 'requirements', order: 0 },
+      {
+        id: 'agent-2',
+        type: 'agent',
+        agentId: 'frontend',
+        stageDescription: 'Implement the UI.',
+        outputContract: ['Reviewable UI implementation.'],
+        order: 1
+      }
+    ]
+  });
+  assert.throws(() => service.publish(draft.id), /description and at least one output contract/);
+
+  service.update(draft.id, {
+    nodes: [
+      {
+        id: 'agent-1',
+        type: 'agent',
+        agentId: 'requirements',
+        stageDescription: 'Define requirements.',
+        outputContract: ['Accepted requirements.'],
+        order: 0
+      },
+      {
+        id: 'agent-2',
+        type: 'agent',
+        agentId: 'frontend',
+        stageDescription: 'Implement the UI.',
+        outputContract: ['Reviewable UI implementation.'],
+        order: 1
+      }
+    ]
+  });
+  assert.throws(() => service.publish(draft.id), /requires at least one input contract/);
 });
 
 test('WorkflowsController exposes workflow CRUD', () => {

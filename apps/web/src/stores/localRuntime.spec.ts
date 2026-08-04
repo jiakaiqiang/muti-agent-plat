@@ -35,7 +35,7 @@ describe('localRuntimeErrorMessage', () => {
 
   it('keeps unrelated Runtime errors intact', () => {
     expect(localRuntimeErrorMessage(new Error('Local Runtime CLI is offline.')))
-      .toBe('Local Runtime CLI 未连接，请先启动本机 Runtime。')
+      .toBe('Local Runtime CLI 未连接，请前往“本地运行”启动本地助手。')
   })
 
   it('turns directory picker timeout into a recoverable action', () => {

@@ -124,7 +124,7 @@ try {
     'supplemental_context_bytes_total',
     'supplemental_context_retry_total',
     'context_insufficient_terminal_total',
-    'workspace_active_session_conflict_total',
+    'workspace_writeback_conflict_total',
     'workspace_revision_unstable_total'
   ];
   if (!Array.isArray(workspaceMetrics.data?.names) || !Array.isArray(workspaceMetrics.data?.series)) {

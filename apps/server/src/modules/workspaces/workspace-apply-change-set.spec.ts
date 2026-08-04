@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { FileHash, WorkspaceChangeSet, WorkspaceRevision } from '@agent-cluster/shared';
-import { applyServerLocalChangeSet } from './workspace-apply-change-set.js';
+import { applyServerLocalChangeSet, rollbackAppliedPaths } from './workspace-apply-change-set.js';
 
 const baseRevision = {
   id: 'revision-59-base',
@@ -128,6 +128,60 @@ test('applyServerLocalChangeSet returns ok:false with conflicts when baseHash mi
   });
 });
 
+test('applyServerLocalChangeSet three-way merges non-overlapping current and Session edits', async () => {
+  await withTempRoot(async (root) => {
+    const base = 'one\ntwo\nthree\n';
+    await writeFile(join(root, 'merge.txt'), 'ONE\ntwo\nthree\n');
+    const result = await applyServerLocalChangeSet({
+      rootPath: root,
+      currentRevision: nextRevision,
+      changeSet: {
+        id: '00000000-0000-4000-8000-000000000061',
+        baseRevision,
+        changes: [{
+          operation: 'update',
+          path: 'merge.txt',
+          content: 'one\ntwo\nTHREE\n',
+          encoding: 'utf-8',
+          expectedHash: sha256(base),
+          baseContent: base
+        }],
+        createdAt: baseRevision.observedAt
+      }
+    });
+    assert.equal(result.ok, true);
+    assert.equal(await readFile(join(root, 'merge.txt'), 'utf8'), 'ONE\ntwo\nTHREE\n');
+  });
+});
+
+test('applyServerLocalChangeSet preserves the workspace when three-way edits overlap', async () => {
+  await withTempRoot(async (root) => {
+    const base = 'one\ntwo\n';
+    await writeFile(join(root, 'merge.txt'), 'ONE\ntwo\n');
+    const result = await applyServerLocalChangeSet({
+      rootPath: root,
+      currentRevision: nextRevision,
+      changeSet: {
+        id: '00000000-0000-4000-8000-000000000062',
+        baseRevision,
+        changes: [{
+          operation: 'update',
+          path: 'merge.txt',
+          content: 'first\ntwo\n',
+          encoding: 'utf-8',
+          expectedHash: sha256(base),
+          baseContent: base
+        }],
+        createdAt: baseRevision.observedAt
+      }
+    });
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.conflicts[0]?.code, 'WORKSPACE_MERGE_CONFLICT');
+    assert.equal(await readFile(join(root, 'merge.txt'), 'utf8'), 'ONE\ntwo\n');
+  });
+});
+
 test('applyServerLocalChangeSet rejects create when the target already exists', async () => {
   await withTempRoot(async (root) => {
     await writeFile(join(root, 'existing.ts'), 'user content\n');
@@ -172,5 +226,43 @@ test('applyServerLocalChangeSet creates nested parent directories on create/move
     });
     assert.equal(result.ok, true);
     assert.equal(await readFile(join(root, 'a/b/c/nested.ts'), 'utf8'), 'nested');
+  });
+});
+
+test('applyServerLocalChangeSet rolls back earlier writes when a later path changes during apply', async () => {
+  await withTempRoot(async (root) => {
+    const changeSet = {
+      id: '00000000-0000-4000-8000-000000000063',
+      baseRevision,
+      changes: [
+        { operation: 'create', path: 'same.txt', content: 'first', encoding: 'utf-8' },
+        { operation: 'create', path: 'same.txt', content: 'second', encoding: 'utf-8' }
+      ],
+      createdAt: baseRevision.observedAt
+    } satisfies WorkspaceChangeSet;
+
+    const result = await applyServerLocalChangeSet({ rootPath: root, currentRevision: baseRevision, changeSet });
+
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.conflicts[0]?.operation, 'create');
+    assert.equal(await fileExists(join(root, 'same.txt')), false);
+  });
+});
+
+test('rollback skips a path changed by the user after the batch write', async () => {
+  await withTempRoot(async (root) => {
+    const path = 'shared.txt';
+    await writeFile(join(root, path), 'user edit\n');
+
+    const errors = await rollbackAppliedPaths(
+      root,
+      [{ path, kind: 'file', content: Buffer.from('before\n') }],
+      new Map([[path, { path, kind: 'file' as const, content: Buffer.from('batch edit\n') }]])
+    );
+
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /automatic rollback was skipped/);
+    assert.equal(await readFile(join(root, path), 'utf8'), 'user edit\n');
   });
 });

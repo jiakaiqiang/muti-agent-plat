@@ -19,27 +19,42 @@ export async function buildWorktreeChangeSet(input: {
   baseCommit: string;
   baseRevision: WorkspaceRevision;
   baselineHashes: Record<string, string>;
+  scopePath?: string;
 }): Promise<WorkspaceChangeSet> {
   const changedPaths = await listChangedPaths(input.worktreeRoot, input.baseCommit);
+  const scope = normalizeScope(input.scopePath);
+  const outsideScope = scope
+    ? changedPaths.filter((path) => path !== scope && !path.startsWith(`${scope}/`))
+    : [];
+  if (outsideScope.length) {
+    throw new Error(`worktree changed paths outside the selected directory: ${outsideScope.join(', ')}`);
+  }
   const maxFiles = Number(process.env.AGENT_CLUSTER_WORKTREE_MAX_CHANGED_FILES ?? DEFAULT_MAX_CHANGED_FILES);
   if (changedPaths.length > maxFiles) {
     throw new Error(`worktree changed ${changedPaths.length} files, exceeding the limit of ${maxFiles}`);
   }
 
   const changes: WorkspaceChange[] = [];
-  for (const path of changedPaths) {
+  for (const repositoryPath of changedPaths) {
+    const path = scope ? repositoryPath.slice(scope.length).replace(/^\//, '') : repositoryPath;
+    if (!path) continue;
     if (isWorkspaceSensitivePath(path)) {
       throw new Error(`worktree change contains a sensitive path: ${path}`);
     }
-    const base = await readBaseFile(input.worktreeRoot, input.baseCommit, path);
-    const current = await readCurrentFile(input.worktreeRoot, path);
+    const base = await readBaseFile(input.worktreeRoot, input.baseCommit, repositoryPath);
+    const current = await readCurrentFile(input.worktreeRoot, repositoryPath);
     if (base && current && base.equals(current)) continue;
     if (!base && current) {
       changes.push({ operation: 'create', path, content: decodeText(path, current), encoding: 'utf-8' });
       continue;
     }
     if (base && !current) {
-      changes.push({ operation: 'delete', path, expectedHash: baselineHash(input.baselineHashes, path) });
+      changes.push({
+        operation: 'delete',
+        path,
+        expectedHash: baselineHash(input.baselineHashes, repositoryPath),
+        baseContent: decodeText(path, base)
+      });
       continue;
     }
     if (base && current) {
@@ -48,7 +63,8 @@ export async function buildWorktreeChangeSet(input: {
         path,
         content: decodeText(path, current),
         encoding: 'utf-8',
-        expectedHash: baselineHash(input.baselineHashes, path)
+        expectedHash: baselineHash(input.baselineHashes, repositoryPath),
+        baseContent: decodeText(path, base)
       });
     }
   }
@@ -59,6 +75,11 @@ export async function buildWorktreeChangeSet(input: {
     changes,
     createdAt: new Date().toISOString()
   };
+}
+
+function normalizeScope(value: string | undefined) {
+  const normalized = value?.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+|\/+$/g, '');
+  return normalized && normalized !== '.' ? normalized : undefined;
 }
 
 export function changeSetFileChanges(

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { createHash } from 'node:crypto';
-import { access, copyFile, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, cp, copyFile, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type {
   AgentRunResult,
@@ -16,9 +16,11 @@ import { InvocationWorkspaceBindingsService } from '../runtimes/invocation-works
 import { isWorkspaceSensitivePath } from '../workspaces/workspace-sensitive-guard.js';
 import { runGit, runGitText } from './git-command.js';
 import { buildWorktreeChangeSet } from './worktree-change-set.js';
+import { buildDirectoryChangeSet } from './directory-change-set.js';
 
 type WorktreeManifest = {
   version: '0.1';
+  mode?: 'git_worktree' | 'staging_copy';
   sessionId: string;
   taskId: string;
   repositoryId: string;
@@ -32,10 +34,13 @@ type WorktreeManifest = {
   dirtyBaseline: boolean;
   baselineHashes: Record<string, string>;
   createdAt: string;
+  baselineRoot?: string;
+  autoWriteback?: boolean;
 };
 
 export type WorktreeExecutionLease = {
   manifest: WorktreeManifest;
+  captured?: boolean;
   release(): void;
 };
 
@@ -43,6 +48,8 @@ export type WorktreeExecutionLease = {
 export class WorktreeExecutionService {
   private readonly contexts = new Map<string, WorktreeManifest>();
   private readonly preparing = new Map<string, Promise<WorktreeManifest>>();
+  private readonly directoryTails = new Map<string, Promise<void>>();
+  private readonly pendingDirectoryWriteReleases = new Map<string, () => void>();
 
   constructor(private readonly workspaceBindings: InvocationWorkspaceBindingsService) {}
 
@@ -63,41 +70,79 @@ export class WorktreeExecutionService {
     if (!sourceWorkDir) throw new Error('Worktree execution requires a server-local workspace binding.');
     const key = `${input.sessionId}:${input.taskId}`;
     let manifest = this.contexts.get(key);
+    const gitManaged = await runGitText(sourceWorkDir, ['rev-parse', '--show-toplevel']).then(() => true).catch(() => false);
+    const directoryRelease = gitManaged ? undefined : await this.acquireDirectoryWrite(sourceWorkDir);
     if (!manifest) {
       let pending = this.preparing.get(key);
       if (!pending) {
-        pending = this.createOrRestore(input.sessionId, input.taskId, sourceWorkDir);
+        pending = this.createOrRestore(
+          input.sessionId,
+          input.taskId,
+          sourceWorkDir,
+          input.contextEnvelope.L0.workspace.revision,
+          gitManaged,
+          input.executionTarget.writeMode !== 'proposal_only'
+        );
         this.preparing.set(key, pending);
       }
       try {
         manifest = await pending;
         this.contexts.set(key, manifest);
+      } catch (error) {
+        directoryRelease?.();
+        throw error;
       } finally {
         this.preparing.delete(key);
       }
     }
     this.workspaceBindings.bindInvocation(input.invocationId, manifest.executionWorkDir);
-    return {
+    const lease: WorktreeExecutionLease = {
       manifest,
-      release: () => this.workspaceBindings.unbindInvocation(input.invocationId)
+      release: () => {
+        this.workspaceBindings.unbindInvocation(input.invocationId);
+        if (directoryRelease && !lease.captured) directoryRelease();
+      }
     };
+    if (directoryRelease) this.pendingDirectoryWriteReleases.set(key, directoryRelease);
+    return lease;
   }
 
   async capture(lease: WorktreeExecutionLease, result: AgentRunResult): Promise<AgentRunResult> {
     const { manifest } = lease;
-    const changeSet = await buildWorktreeChangeSet({
-      worktreeRoot: manifest.worktreeRoot,
-      baseCommit: manifest.baseCommit,
-      baseRevision: manifest.baseRevision,
-      baselineHashes: manifest.baselineHashes
-    });
+    const changeSet = manifest.mode === 'staging_copy'
+      ? await buildDirectoryChangeSet({
+          baselineRoot: manifest.baselineRoot!,
+          executionRoot: manifest.executionWorkDir,
+          baseRevision: manifest.baseRevision
+        })
+      : await buildWorktreeChangeSet({
+          worktreeRoot: manifest.worktreeRoot,
+          baseCommit: manifest.baseCommit,
+          baseRevision: manifest.baseRevision,
+          baselineHashes: manifest.baselineHashes,
+          scopePath: relative(manifest.repositoryRoot, manifest.sourceWorkDir)
+        });
+    if (manifest.mode === 'staging_copy' && result.status !== 'completed') {
+      const release = this.pendingDirectoryWriteReleases.get(`${manifest.sessionId}:${manifest.taskId}`);
+      this.pendingDirectoryWriteReleases.delete(`${manifest.sessionId}:${manifest.taskId}`);
+      release?.();
+      return result;
+    }
+    lease.captured = manifest.autoWriteback !== false;
+    if (manifest.mode === 'staging_copy' && manifest.autoWriteback !== false) {
+      const release = this.pendingDirectoryWriteReleases.get(`${manifest.sessionId}:${manifest.taskId}`);
+      if (release) {
+        this.pendingDirectoryWriteReleases.delete(`${manifest.sessionId}:${manifest.taskId}`);
+        this.pendingDirectoryWriteReleases.set(changeSet.id, release);
+      }
+    }
     const workspaceExecution: RuntimeWorkspaceExecution = {
-      mode: 'git_worktree',
-      repositoryId: manifest.repositoryId,
+      mode: manifest.mode ?? 'git_worktree',
+      ...(manifest.mode === 'staging_copy' ? {} : { repositoryId: manifest.repositoryId }),
       baseRevision: manifest.baseRevision,
       changeSet,
       dirtyBaseline: manifest.dirtyBaseline,
-      requiresUserConfirmation: true
+      requiresUserConfirmation: manifest.autoWriteback === false
     };
     const output = markOutputChangesProposed(result.output);
     return {
@@ -118,6 +163,39 @@ export class WorktreeExecutionService {
     };
   }
 
+  releaseWriteLease(changeSetId: string) {
+    const release = this.pendingDirectoryWriteReleases.get(changeSetId);
+    if (!release) return;
+    this.pendingDirectoryWriteReleases.delete(changeSetId);
+    release();
+  }
+
+  async resetTaskDirectory(sessionId: string, taskId: string) {
+    const key = `${sessionId}:${taskId}`;
+    const pending = this.preparing.get(key);
+    if (pending) await pending;
+    const stagingRoot = this.stagingRoot();
+    const sessionSegment = safeSegment(sessionId);
+    const taskSegment = safeSegment(taskId);
+    const manifestPath = join(stagingRoot, 'manifests', sessionSegment, `${taskSegment}.json`);
+    const manifest = this.contexts.get(key) ?? await this.readManifest(manifestPath);
+    if (manifest?.mode !== 'staging_copy' && manifest && await exists(manifest.worktreeRoot)) {
+      try {
+        await runGit(manifest.repositoryRoot, ['worktree', 'remove', '--force', manifest.worktreeRoot]);
+      } catch (error) {
+        if (await exists(manifest.worktreeRoot)) throw error;
+      }
+      await runGit(manifest.repositoryRoot, ['worktree', 'prune']);
+    }
+    if (manifest) await removeRuntimeDirectory(manifest.worktreeRoot);
+    await rm(manifestPath, { force: true });
+    this.contexts.delete(key);
+    this.preparing.delete(key);
+    const release = this.pendingDirectoryWriteReleases.get(key);
+    this.pendingDirectoryWriteReleases.delete(key);
+    release?.();
+  }
+
   async deleteSessionDirectory(sessionId: string): Promise<void> {
     const stagingRoot = this.stagingRoot();
     const sessionSegment = safeSegment(sessionId);
@@ -133,6 +211,7 @@ export class WorktreeExecutionService {
     );
     const manifests = await this.readSessionManifests(manifestDirectory, sessionId);
     for (const manifest of manifests) {
+      if (manifest.mode === 'staging_copy') continue;
       try {
         await runGit(manifest.repositoryRoot, ['worktree', 'remove', '--force', manifest.worktreeRoot]);
       } catch (error) {
@@ -170,7 +249,14 @@ export class WorktreeExecutionService {
     return manifests;
   }
 
-  private async createOrRestore(sessionId: string, taskId: string, sourceWorkDir: string) {
+  private async createOrRestore(
+    sessionId: string,
+    taskId: string,
+    sourceWorkDir: string,
+    workspaceRevision: WorkspaceRevision,
+    gitManaged: boolean,
+    autoWriteback: boolean
+  ) {
     const stagingRoot = this.stagingRoot();
     const sessionSegment = safeSegment(sessionId);
     const taskSegment = safeSegment(taskId);
@@ -178,11 +264,12 @@ export class WorktreeExecutionService {
     const restored = await this.readManifest(manifestPath);
     if (restored && (await exists(restored.executionWorkDir))) return restored;
 
+    if (!gitManaged) {
+      return this.createDirectoryStaging(sessionId, taskId, sourceWorkDir, workspaceRevision, manifestPath, autoWriteback);
+    }
+
     const repositoryRoot = resolve(await runGitText(sourceWorkDir, ['rev-parse', '--show-toplevel']));
     assertPathInside(repositoryRoot, resolve(sourceWorkDir), 'selected working directory');
-    if (canonicalPath(repositoryRoot) !== canonicalPath(sourceWorkDir)) {
-      throw new Error('Managed worktree execution currently requires the selected directory to be the Git repository root.');
-    }
     const commonDirText = await runGitText(repositoryRoot, ['rev-parse', '--git-common-dir']);
     const commonDir = await realpath(isAbsolute(commonDirText) ? commonDirText : resolve(repositoryRoot, commonDirText));
     const repositoryId = createHash('sha256').update(canonicalPath(commonDir)).digest('hex');
@@ -207,6 +294,7 @@ export class WorktreeExecutionService {
         await runGit(worktreeRoot, ['apply', '--binary', '--whitespace=nowarn', '-'], baselinePatch);
       }
       await this.copyUntracked(repositoryRoot, worktreeRoot, untracked);
+      await mkdir(executionWorkDir, { recursive: true });
       const dirtyBaseline = Boolean(await runGitText(worktreeRoot, ['status', '--porcelain', '--untracked-files=normal']));
       if (dirtyBaseline) {
         await runGit(worktreeRoot, ['add', '-A']);
@@ -221,6 +309,7 @@ export class WorktreeExecutionService {
       const createdAt = new Date().toISOString();
       const manifest: WorktreeManifest = {
         version: '0.1',
+        mode: 'git_worktree',
         sessionId,
         taskId,
         repositoryId,
@@ -232,6 +321,7 @@ export class WorktreeExecutionService {
         baseCommit,
         baseRevision: { id: `git:${baseCommit}`, observedAt: createdAt },
         dirtyBaseline,
+        autoWriteback,
         baselineHashes,
         createdAt
       };
@@ -245,6 +335,83 @@ export class WorktreeExecutionService {
       await rm(worktreeRoot, { recursive: true, force: true }).catch(() => undefined);
       throw error;
     }
+  }
+
+  private async createDirectoryStaging(
+    sessionId: string,
+    taskId: string,
+    sourceWorkDir: string,
+    baseRevision: WorkspaceRevision,
+    manifestPath: string,
+    autoWriteback: boolean
+  ) {
+    const stagingRoot = this.stagingRoot();
+    if (isPathInside(sourceWorkDir, stagingRoot)) {
+      throw new Error('Managed staging root must not be inside the selected non-Git workspace.');
+    }
+    const sessionSegment = safeSegment(sessionId);
+    const taskSegment = safeSegment(taskId);
+    const taskRoot = join(stagingRoot, 'runs', sessionSegment, taskSegment);
+    const baselineRoot = join(taskRoot, 'baseline');
+    const executionWorkDir = join(taskRoot, 'workspace');
+    await mkdir(taskRoot, { recursive: true });
+    await this.copyDirectorySnapshot(sourceWorkDir, baselineRoot);
+    await this.copyDirectorySnapshot(baselineRoot, executionWorkDir);
+    const createdAt = new Date().toISOString();
+    const repositoryId = createHash('sha256').update(canonicalPath(sourceWorkDir)).digest('hex');
+    const manifest: WorktreeManifest = {
+      version: '0.1',
+      mode: 'staging_copy',
+      sessionId,
+      taskId,
+      repositoryId,
+      repositoryRoot: resolve(sourceWorkDir),
+      sourceWorkDir: resolve(sourceWorkDir),
+      worktreeRoot: taskRoot,
+      executionWorkDir,
+      sourceHead: '',
+      baseCommit: '',
+      baseRevision,
+      dirtyBaseline: false,
+      autoWriteback,
+      baselineHashes: {},
+      baselineRoot,
+      createdAt
+    };
+    await mkdir(dirname(manifestPath), { recursive: true });
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    return manifest;
+  }
+
+  private async copyDirectorySnapshot(source: string, target: string) {
+    await cp(source, target, {
+      recursive: true,
+      force: false,
+      errorOnExist: true,
+      filter: async (path) => {
+        if (path === source) return true;
+        const relativePath = relative(source, path).replace(/\\/g, '/');
+        if (relativePath.split('/').some((part) => ['.git', 'node_modules', 'dist', 'build', '.next', '.cache', 'coverage'].includes(part))) return false;
+        if (isWorkspaceSensitivePath(relativePath)) return false;
+        return !(await lstat(path)).isSymbolicLink();
+      }
+    });
+  }
+
+  private async acquireDirectoryWrite(sourceWorkDir: string) {
+    const key = canonicalPath(sourceWorkDir);
+    const previous = this.directoryTails.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolveRelease) => { release = resolveRelease; });
+    const tail = previous.catch(() => undefined).then(() => current);
+    this.directoryTails.set(key, tail);
+    await previous.catch(() => undefined);
+    return () => {
+      release();
+      queueMicrotask(() => {
+        if (this.directoryTails.get(key) === tail) this.directoryTails.delete(key);
+      });
+    };
   }
 
   private async copyUntracked(repositoryRoot: string, worktreeRoot: string, paths: string[]) {
@@ -332,6 +499,12 @@ function assertPathInside(root: string, candidate: string, label: string) {
   if (normalizedCandidate !== normalizedRoot && !normalizedCandidate.startsWith(`${normalizedRoot}/`)) {
     throw new Error(`${label} must be inside ${root}: ${candidate}`);
   }
+}
+
+function isPathInside(root: string, candidate: string) {
+  const normalizedRoot = canonicalPath(root);
+  const normalizedCandidate = canonicalPath(candidate);
+  return normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(`${normalizedRoot}/`);
 }
 
 function nulList(content: Buffer) {

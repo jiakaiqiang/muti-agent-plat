@@ -46,6 +46,10 @@ export function healthWatchdogDecision({
   return { ready, consecutiveFailures: nextFailures, action: 'continue' };
 }
 
+export function healthResponseIsUsable(body) {
+  return body?.data?.status === 'ok' && body?.data?.runtimeBuildStale === false && Boolean(body?.data?.buildId);
+}
+
 export function npmWorkspaceInvocation(workspace, extraArgs = [], npmExecPath = process.env.npm_execpath) {
   if (!npmExecPath) throw new Error('npm_execpath is unavailable; run this supervisor through npm run dev.');
   return {
@@ -57,6 +61,7 @@ export function npmWorkspaceInvocation(workspace, extraArgs = [], npmExecPath = 
 export function devWebEnv(env, serverUrl) {
   const configuredApiBase = env.VITE_API_BASE_URL?.trim().replace(/\/$/, '');
   const localApiBases = new Set([
+    '/api',
     `${serverUrl}/api`,
     `${serverUrl.replace('127.0.0.1', 'localhost')}/api`
   ]);
@@ -70,7 +75,7 @@ export function devWebEnv(env, serverUrl) {
   };
 }
 
-export async function runDevSupervisor(options = {}) {
+export function runDevSupervisor(options = {}) {
   const envFile = readRootEnv();
   const env = { ...envFile, ...process.env };
   const serverPort = positivePort(env.SERVER_PORT, DEFAULT_SERVER_PORT);
@@ -128,7 +133,7 @@ export async function runDevSupervisor(options = {}) {
     process.off('SIGTERM', onSigterm);
     console.log(`[dev-supervisor] stopping process group (${reason})`);
     for (const child of children.values()) terminateProcessTree(child);
-    process.exitCode = exitCode;
+    if (options.setProcessExitCode !== false) process.exitCode = exitCode;
     resolveRun(exitCode);
   }
 
@@ -152,6 +157,7 @@ export async function runDevSupervisor(options = {}) {
       fail(`backend health was lost for ${READY_HEALTH_FAILURE_LIMIT * HEALTH_INTERVAL_MS / 1000}s`);
     }
   }, HEALTH_INTERVAL_MS);
+  healthTimer.unref?.();
 
   const onSigint = () => shutdown('SIGINT', 130);
   const onSigterm = () => shutdown('SIGTERM', 143);
@@ -187,7 +193,7 @@ async function defaultFetchHealth(url) {
     const response = await fetch(url, { signal: AbortSignal.timeout(1_500) });
     if (!response.ok) return false;
     const body = await response.json();
-    return body?.data?.status === 'ok';
+    return healthResponseIsUsable(body);
   } catch {
     return false;
   }

@@ -56,7 +56,7 @@ export function localRuntimeErrorMessage(error: unknown) {
     return '本机 Runtime 已在等待目录选择。请先处理已打开的系统目录选择窗口，或稍后重试。'
   }
   if (/Local Runtime 未连接|Local Runtime CLI is offline|Local Runtime CLI 未连接/i.test(message)) {
-    return 'Local Runtime CLI 未连接，请先启动本机 Runtime。'
+    return 'Local Runtime CLI 未连接，请前往“本地运行”启动本地助手。'
   }
   return message
 }

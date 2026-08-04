@@ -74,3 +74,16 @@ test('recognizes user questions without forcing a pause', () => {
   assert.equal(result.shouldPause, false);
   assert.equal(result.requiresBriefRevision, false);
 });
+
+test('classifies explicit new requirements separately from failed-task continuation', () => {
+  const newRequirement = service.recognizeUserMessage('这是一个新需求：增加导出能力', 'FAILED');
+  const resume = service.recognizeUserMessage('继续完成之前失败的任务', 'FAILED');
+  const replan = service.recognizeUserMessage('继续原需求，但换个方案重新讨论', 'FAILED');
+
+  assert.equal(newRequirement.requirementRelation, 'new_requirement');
+  assert.equal(newRequirement.failedExecutionAction, 'none');
+  assert.equal(resume.requirementRelation, 'continuation');
+  assert.equal(resume.failedExecutionAction, 'resume');
+  assert.equal(replan.requirementRelation, 'continuation');
+  assert.equal(replan.failedExecutionAction, 'replan');
+});

@@ -147,22 +147,7 @@ type CreateSessionRequest = {
 
 `local_bridge` 不得携带服务器可访问的绝对路径；`server_local` 必须携带通过平台边界校验的绝对路径。响应只保证 Binding 和首条用户事件已建立，不保证 `workspaceSnapshot` 或完整索引存在。后台索引状态不会阻塞 Session 进入讨论。
 
-同一 `workspaceId` 已存在非终态 Session 时返回 `409`：
-
-```ts
-type WorkspaceActiveSessionConflict = {
-  error: {
-    code: 'WORKSPACE_ACTIVE_SESSION_CONFLICT'
-    message: string
-    details: {
-      workspaceId: string
-      activeSessionId: string
-      activeSessionStatus: SessionStatus
-    }
-  }
-  requestId: string
-}
-```
+同一 `workspaceId` 允许创建多个活动 Session。创建阶段只建立独立 Session Binding，不获取目录级独占 Lease。写能力任务必须进入隔离执行目录；真实目录的变更在任务完成后按 Workspace FIFO 写回，并使用 path hash 与三方合并处理并发修改。
 
 响应：
 
@@ -204,6 +189,7 @@ type SessionDetail = {
     startedAt?: string
   }>
   activeFollowUpMessageId?: string
+  workspaceWritebacks?: WorkspaceWritebackRecord[]
   engineeringRuntime?: {
     sessionDefaultRuntimeType?: RuntimeType
     projectDefaultRuntimeType?: RuntimeType
@@ -217,7 +203,37 @@ type SessionDetail = {
 }
 ```
 
-### 3.3.1 删除会话
+`SessionStatus` 增加 `APPLYING_CHANGES` 与 `WAIT_WORKSPACE_CONFLICT_RESOLUTION`。前者表示隔离执行结果正在串行写回，后者表示自动合并失败或 Provider 写回失败，需要用户处理。
+
+### 3.3.1 处理工作区写回冲突
+
+```text
+POST /api/sessions/:sessionId/workspace-writebacks/:writebackId/resolve
+```
+
+请求：
+
+```ts
+type ResolveWorkspaceWritebackInput = {
+  action:
+    | 'retry_merge'
+    | 'resolve_with_agent'
+    | 'keep_workspace'
+    | 'use_session'
+    | 'abandon_writeback'
+  confirmationId?: string
+}
+```
+
+- `retry_merge`：基于当前工作区重新执行 path hash 校验和三方合并。
+- `resolve_with_agent`：保留当前目录内容，把原任务重新置为待执行，让 Agent 生成兼容变更。
+- `keep_workspace`：保留当前目录，放弃该隔离结果，并继续后续任务。
+- `use_session`：强制使用 Session 版本；必须令 `confirmationId === writebackId`，用于表达覆盖风险的显式确认。
+- `abandon_writeback`：明确放弃写回，并继续后续任务。
+
+响应为更新后的 `WorkspaceWritebackRecord`。`conflicted/failed` 状态保持 Session 在 `WAIT_WORKSPACE_CONFLICT_RESOLUTION`；`applied/abandoned` 会完成或重新安排对应任务并恢复执行。
+
+### 3.3.2 删除会话
 
 ```text
 DELETE /api/sessions/:sessionId
@@ -263,6 +279,21 @@ type SendUserMessageResponse = {
 
 已有会话中的每条消息都必须先经过“接收者”的意图识别，再进入任务拆分。若会话当前有执行中的任务，消息只入持久化后续队列，不中断、不取消、不重调度当前任务；当前任务交付后按 FIFO 顺序处理。没有执行中任务时立即拆分并派发。单个 `@Agent` 将拆分任务限定给该 Agent；多个 `@Agent` 先由被提及 Agent 讨论，再由接收者汇总讨论结果、拆分任务并限定派发到被提及 Agent。接收者只负责意图识别和任务拆分，Agent 拒绝任务时由接收者改派或重新拆分，不由接收者执行专业任务。
 
+接收者还必须输出消息与当前任务契约的关系及失败续接动作：
+
+```ts
+type UserMessageHandlingPlan = {
+  // 原有 intent / priority / affected* 等字段省略
+  requirementRelation: 'continuation' | 'new_requirement'
+  failedExecutionAction: 'none' | 'resume' | 'replan'
+}
+```
+
+- `continuation`：补充、澄清、纠正、追问或继续当前需求；保留当前契约、已完成工作和相关上下文。
+- `new_requirement`：独立于当前目标的新需求；必须启动新一轮讨论并生成新的任务契约，不得续接失败任务。
+- Session 为 `FAILED` 且关系为 `continuation` 时，`resume` 复用当前 brief 和未完成任务，从失败阶段续接；`replan` 保留失败证据但重新讨论和拆分。
+- 语义不明确时接收者应要求用户确认，不得猜测并自动续接；Receiver Runtime 不可用时仅识别显式的新需求/重新讨论表达，其余失败后输入保守按当前需求续接。
+
 ### 3.5 暂停、恢复、取消
 
 ```text
@@ -287,6 +318,10 @@ type SessionControlResponse = {
   event: CollaborationEvent
 }
 ```
+
+`pause` 是可恢复的会话级停止边界，仅允许从 `AGENT_DISCUSSING`、`REVISING_BRIEF`、`EXECUTING`、`POST_REVIEW` 或 `REWORKING` 进入 `PAUSED`。接口必须在 Brief 生成、工作流执行、执行队列和全部 Agent Runtime invocation 都停止后才返回；Runtime 取消必须覆盖模型输出流、本地 Claude/Codex 子进程及其会话心跳。若任一关联调用未在宽限期内停止，接口返回 `409 Conflict` 和 `SESSION_PAUSE_TIMEOUT`。
+
+暂停必须保留已完成任务、Artifact、工作流检查点和当前未完成节点。`resume` 从 `pauseState.previousStatus` 对应的未完成阶段续接，只重置并调度未完成节点，不得重跑已完成节点。`PAUSED` 期间收到的新消息只能进入持久化后续队列，不能调用 Receiver Runtime 或隐式恢复会话；Receiver 意图识别延后到继续会话且当前节点结束之后。`cancel` 仍是不可恢复的终态操作，语义不得与 `pause` 混用。
 
 ### 3.6 处理 Post Review 动作
 

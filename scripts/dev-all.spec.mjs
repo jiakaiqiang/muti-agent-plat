@@ -3,11 +3,18 @@ import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import {
   devWebEnv,
+  healthResponseIsUsable,
   healthWatchdogDecision,
   npmWorkspaceInvocation,
   parseEnvFile,
   runDevSupervisor
 } from './dev-all.mjs';
+
+test('health response rejects stale or pre-build-id backend processes', () => {
+  assert.equal(healthResponseIsUsable({ data: { status: 'ok', buildId: 'build-1', runtimeBuildStale: false } }), true);
+  assert.equal(healthResponseIsUsable({ data: { status: 'ok', buildId: 'build-1', runtimeBuildStale: true } }), false);
+  assert.equal(healthResponseIsUsable({ data: { status: 'ok' } }), false);
+});
 
 test('parseEnvFile reads root development ports without overriding syntax noise', () => {
   assert.deepEqual(parseEnvFile('SERVER_PORT=8099\nWEB_PORT="8089"\n# ignored\nINVALID\n'), {
@@ -76,6 +83,7 @@ test('dev supervisor starts server, web and Local Runtime and fails the group wh
   const spawnOptions = [];
   const previousExitCode = process.exitCode;
   const run = runDevSupervisor({
+    setProcessExitCode: false,
     npmExecPath: 'C:/npm/npm-cli.js',
     spawnProcess(_command, _args, options) {
       const child = new EventEmitter();
@@ -106,6 +114,7 @@ test('dev supervisor preserves an explicit public Web URL', async () => {
   process.env.PUBLIC_WEB_URL = 'https://agent.example.com';
   try {
     const run = runDevSupervisor({
+      setProcessExitCode: false,
       npmExecPath: 'C:/npm/npm-cli.js',
       spawnProcess(_command, _args, options) {
         const child = new EventEmitter();

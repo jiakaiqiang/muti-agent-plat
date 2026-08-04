@@ -6,4 +6,5 @@ export * from './default-agent-presets.js';
 export * from './workspace-ignore.js';
 export * from './local-runtime-contracts.js';
 export * from './workspace-path-safety.js';
+export * from './workspace-three-way-merge.js';
 export * from './runtime-contracts/index.js';

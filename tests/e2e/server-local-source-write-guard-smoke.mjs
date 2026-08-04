@@ -44,6 +44,7 @@ try {
     CODEX_RUNTIME_TEST_COMMAND: 'npm test',
     RUNTIME_STREAMING: 'codex',
     CODEX_RUNTIME_STUB_EDIT_FILES: 'codex',
+    STUB_FIRST_DELAY_MS: '1200',
     AGENT_CLUSTER_WORKTREE_ROOT: worktreeRoot
   });
 
@@ -97,12 +98,24 @@ try {
       confirmationId: workflowSelection.metadata.payload.confirmationId
     })
   });
+  await waitForStatus(server.apiBase, sessionId, 'EXECUTING', 60_000);
+  const sourceDuringExecution = await readFile(join(workspaceRoot, 'src', 'feature.txt'), 'utf8');
+  if (sourceDuringExecution !== 'original source\n') {
+    throw new Error(`Runtime must not directly overwrite server-local source files. Got: ${sourceDuringExecution}`);
+  }
   await waitForStatus(server.apiBase, sessionId, 'COMPLETED', 60_000);
 
   const events = await listEvents(server.apiBase, sessionId);
   const sourceFile = await readFile(join(workspaceRoot, 'src', 'feature.txt'), 'utf8');
-  if (sourceFile !== 'original source\n') {
-    throw new Error(`Mock runtime must not directly overwrite server-local source files. Got: ${sourceFile}`);
+  if (sourceFile !== 'after from codex stub\n') {
+    throw new Error(`Platform writeback must apply the isolated update after execution. Got: ${sourceFile}`);
+  }
+  await stat(join(workspaceRoot, 'src', 'generated-by-codex.txt'));
+
+  const session = (await api(server.apiBase, `/sessions/${sessionId}`)).data;
+  const writeback = session.workspaceWritebacks?.at(-1);
+  if (writeback?.status !== 'applied') {
+    throw new Error(`Expected an applied workspace writeback record. Got: ${JSON.stringify(writeback)}`);
   }
 
   const observedSourceChange = events
@@ -122,7 +135,7 @@ try {
 
   await stat(join(workspaceRoot, 'agent-output', 'final-delivery.md'));
 
-  console.log('server local source write guard smoke ok');
+  console.log('server local isolated execution and automatic writeback smoke ok');
 } finally {
   if (server) {
     await stopSmokeServer(server);

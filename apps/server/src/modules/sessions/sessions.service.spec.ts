@@ -3,8 +3,16 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { SessionDetail } from '@agent-cluster/shared';
+import type { AgentTask, SessionDetail, WorkspaceWritebackRecord } from '@agent-cluster/shared';
 import { SessionsService } from './sessions.service.js';
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for asynchronous Session state.');
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+}
 
 function makeService(options: {
   failHydration?: boolean;
@@ -18,6 +26,16 @@ function makeService(options: {
   fileRevisionDispatches?: string[];
   fileRevisionContinuations?: string[];
   receiverAvailable?: boolean;
+  taskItems?: AgentTask[];
+  workspaceWritebacks?: {
+    list(sessionId: string): WorkspaceWritebackRecord[];
+    resolve(session: SessionDetail, writebackId: string, input: unknown): Promise<WorkspaceWritebackRecord>;
+  };
+  capabilityChecks?: Record<string, boolean>;
+  followUpHandlingPlan?: {
+    requirementRelation: 'continuation' | 'new_requirement';
+    failedExecutionAction: 'none' | 'resume' | 'replan';
+  };
 } = {}) {
   const persistedSessions: SessionDetail[] = structuredClone(options.initialSessions ?? []);
   const persistedSnapshots: SessionDetail[][] = [];
@@ -28,6 +46,7 @@ function makeService(options: {
   const discussionTerminations: unknown[] = [];
   const cancelledTasks: Array<{ sessionId: string; reason: string }> = [];
   const discussionStarts: string[] = [];
+  const followUpRecognitions: string[] = [];
   const followUpPreparations: Array<{ content: string; mentionedAgentIds: string[] }> = [];
   const eventOnceKeys = new Set<string>();
   const service = new SessionsService(
@@ -79,7 +98,12 @@ function makeService(options: {
       },
       deleteSession() {}
     } as never,
-    { deleteSession() {} } as never,
+    {
+      create(input: Record<string, unknown>) {
+        return { id: `memory-${events.length + 1}`, ...input };
+      },
+      deleteSession() {}
+    } as never,
     {
       recognizeTask() {
         return { domain: 'coding', intent: 'implementation', requiresCodeChanges: true };
@@ -99,8 +123,11 @@ function makeService(options: {
     } as never,
     {
       async recognizeFollowUpMessage() {
+        followUpRecognitions.push('recognized');
         return {
           intent: 'command',
+          requirementRelation: options.followUpHandlingPlan?.requirementRelation ?? 'continuation',
+          failedExecutionAction: options.followUpHandlingPlan?.failedExecutionAction ?? 'none',
           priority: 'normal',
           shouldPause: false,
           affectedTaskIds: [],
@@ -114,7 +141,8 @@ function makeService(options: {
         session: SessionDetail,
         content: string,
         _sourceEventId: string,
-        mentionedAgentIds: string[]
+        mentionedAgentIds: string[],
+        _options?: unknown
       ) {
         followUpPreparations.push({ content, mentionedAgentIds });
         return {
@@ -161,17 +189,23 @@ function makeService(options: {
           createdAt: '2026-07-11T00:00:00.000Z'
         };
       },
-      async hydrateSupplementalContext(_session: SessionDetail, requestedContext: { requestedPaths?: string[] }) {
-        const requestedPaths = requestedContext.requestedPaths ?? [];
+      async hydrateSupplementalContext(_session: SessionDetail, requestedContext: { requestedFiles?: Array<{ path: string }> }) {
+        const requestedFiles = requestedContext.requestedFiles ?? [];
+        const requestedPaths = requestedFiles.map((item) => item.path);
         const hydratedPaths = options.failHydration ? [] : requestedPaths;
         return {
-          requestedPaths,
+          requestedFiles,
           hydratedPaths,
+          resolvedRefs: [],
+          failedRefs: [],
           failedPaths: options.failHydration
             ? requestedPaths.map((path) => ({ path, code: 'BROKER_OFFLINE', retryable: true }))
             : [],
           deferredPaths: [],
-          contentBytes: hydratedPaths.length * 10
+          contentBytes: hydratedPaths.length * 10,
+          outcome: options.failHydration ? 'exhausted' : 'resolved',
+          attempt: 1,
+          maxAttempts: 1
         };
       },
       registerSavePendingInvocationCallback() {},
@@ -207,9 +241,26 @@ function makeService(options: {
       }
     } as never,
     {
-      resetStaleRunning() {},
-      unfinished() {
-        return [];
+      resetStaleRunning(sessionId: string) {
+        for (const task of options.taskItems ?? []) {
+          if (task.sessionId === sessionId && task.status === 'running') task.status = 'pending';
+        }
+      },
+      list(sessionId: string) {
+        return (options.taskItems ?? []).filter((task) => task.sessionId === sessionId);
+      },
+      find(sessionId: string, taskId: string) {
+        return (options.taskItems ?? []).find((task) => task.sessionId === sessionId && task.id === taskId);
+      },
+      update(task: AgentTask, patch: Partial<AgentTask>) {
+        Object.assign(task, patch);
+        return task;
+      },
+      unfinished(sessionId: string) {
+        return (options.taskItems ?? []).filter((task) =>
+          task.sessionId === sessionId &&
+          ['pending', 'assigned', 'accepted', 'claimed', 'running', 'waiting', 'blocked', 'reworking'].includes(task.status)
+        );
       },
       cancelUnfinished(sessionId: string, reason: string) {
         cancelledTasks.push({ sessionId, reason });
@@ -229,14 +280,18 @@ function makeService(options: {
       currentDataEpoch() {
         return 'epoch-test';
       },
+      async acquireWorkspaceSessionLease() {
+        return true;
+      },
+      async releaseWorkspaceSessionLease() {},
       setCollection(_key: string, value: SessionDetail[]) {
         persistedSnapshots.push(structuredClone(value));
         persistedSessions.splice(0, persistedSessions.length, ...value);
       }
     } as never,
     {
-      checkInvocation() {
-        return { allowed: true };
+      checkInvocation(capabilityId: string) {
+        return { allowed: options.capabilityChecks?.[capabilityId] ?? true };
       },
       registerApprovalListener() {}
     } as never,
@@ -288,7 +343,8 @@ function makeService(options: {
         return undefined;
       }
     } as never,
-    options.fileRevisions as never
+    options.fileRevisions as never,
+    options.workspaceWritebacks as never
   );
   return {
     service,
@@ -300,10 +356,80 @@ function makeService(options: {
     executionTerminations,
     discussionStarts,
     followUpPreparations,
+    followUpRecognitions,
     discussionTerminations,
     cancelledTasks
   };
 }
+
+test('completed capability approvals resume the waiting task through the execution pipeline', async () => {
+  const session: SessionDetail = {
+    id: 'session-capability-resume',
+    dataEpoch: 'epoch-test',
+    title: 'Capability resume',
+    originalInput: 'Write implementation files.',
+    status: 'WAIT_USER_DECISION',
+    ownerId: 'local-user',
+    workspaceId: 'workspace-capability-resume',
+    tokenUsed: 0,
+    currentTaskBriefId: 'brief-capability-resume',
+    participatingAgentIds: ['backend'],
+    pendingInvocations: [{
+      invocationId: 'invocation-capability-resume',
+      sessionId: 'session-capability-resume',
+      taskId: 'task-capability-resume',
+      agentId: 'backend',
+      phase: 'task_execution',
+      pendingApprovals: [
+        {
+          toolId: 'cap-command-run',
+          toolKey: 'tool.command_run',
+          approvalId: 'approval-command',
+          reasons: ['HUMAN_APPROVAL_REQUIRED']
+        },
+        {
+          toolId: 'cap-file-write',
+          toolKey: 'tool.file_write',
+          approvalId: 'approval-write',
+          reasons: ['HUMAN_APPROVAL_REQUIRED']
+        }
+      ],
+      createdAt: '2026-07-31T00:00:00.000Z'
+    }],
+    createdAt: '2026-07-31T00:00:00.000Z',
+    updatedAt: '2026-07-31T00:00:00.000Z'
+  };
+  const task: AgentTask = {
+    id: 'task-capability-resume',
+    sessionId: session.id,
+    title: 'Write implementation files',
+    description: 'Use command and file tools.',
+    status: 'waiting',
+    assignee: { type: 'agent', id: 'backend' },
+    dependsOnTaskIds: [],
+    acceptanceCriteria: [],
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt
+  };
+  const fixture = makeService({
+    initialSessions: [session],
+    taskItems: [task],
+    capabilityChecks: {
+      'cap-command-run': true,
+      'cap-file-write': true
+    }
+  });
+
+  await fixture.service.retryPendingApprovalTasks(session.id, 'cap-file-write');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const resumedSession = fixture.service.get(session.id);
+  assert.deepEqual(resumedSession.pendingInvocations, []);
+  assert.equal(resumedSession.status, 'EXECUTING');
+  assert.equal(task.status, 'pending');
+  assert.equal(fixture.executionStarts.length, 1);
+  assert.deepEqual(fixture.executionStarts[0], { sessionId: session.id, taskCount: 1 });
+});
 
 test('file revision background dispatch is single-flight per revision id', async () => {
   const dispatches: string[] = [];
@@ -647,18 +773,22 @@ test('backend shutdown persists active work as wakeable and ignores late executi
   assert.equal(session.status, 'INTERRUPTED');
 });
 
-test('pause cancels only the current invocation while explicit cancel terminates the Session', async () => {
-  const fixture = makeService();
+test('pause stops Session execution and Runtime work while preserving a resumable checkpoint', async () => {
+  const runtimeCalls: string[] = [];
+  const fixture = makeService({ runtimeCalls });
   const { session } = await fixture.service.create({ input: 'Pause and resume the current workflow invocation' });
   session.status = 'EXECUTING';
 
-  fixture.service.control(session.id, 'WAIT_USER_DECISION', '用户暂停当前执行');
+  await fixture.service.pause(session.id, '用户停止当前执行');
 
-  assert.equal(session.status, 'WAIT_USER_DECISION');
-  assert.equal((fixture.executionTerminations[0] as { kind?: string })?.kind, 'user_cancelled');
-  assert.equal((fixture.executionTerminations[0] as { scope?: string })?.scope, 'invocation');
+  assert.equal(session.status, 'PAUSED');
+  assert.equal(session.pauseState?.previousStatus, 'EXECUTING');
+  assert.equal((fixture.executionTerminations[0] as { kind?: string })?.kind, 'user_paused');
+  assert.equal((fixture.executionTerminations[0] as { scope?: string })?.scope, 'session');
+  assert.deepEqual(runtimeCalls, [`runtime:${session.id}`]);
 
-  fixture.service.control(session.id, 'EXECUTING', '用户恢复当前执行');
+  fixture.service.resume(session.id, '用户恢复当前执行');
+  assert.equal(session.pauseState, undefined);
   fixture.service.control(session.id, 'CANCELLED', '用户取消整个会话');
 
   assert.equal(session.status, 'CANCELLED');
@@ -885,6 +1015,91 @@ test('a message received during execution is recognized immediately but deferred
   ));
 });
 
+test('a message received while paused remains queued without invoking the Receiver Runtime', async () => {
+  const { service, executionStarts, followUpPreparations, followUpRecognitions } = makeService();
+  const { session } = await service.create({ input: 'Analyze the workspace' });
+  (service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
+  session.status = 'PAUSED';
+  session.pauseState = {
+    previousStatus: 'EXECUTING',
+    pausedAt: '2026-08-01T00:00:00.000Z'
+  };
+
+  const result = await service.sendMessage(session.id, '继续时补充审计日志', ['backend']);
+
+  assert.equal(result.deferred, true);
+  assert.equal(session.status, 'PAUSED');
+  assert.equal(followUpPreparations.length, 0);
+  assert.equal(followUpRecognitions.length, 0);
+  assert.equal(executionStarts.length, 0);
+  assert.equal(session.pendingFollowUpMessages?.[0]?.status, 'queued');
+  assert.equal(session.pendingFollowUpMessages?.[0]?.receiverRecognitionPending, true);
+
+  session.status = 'COMPLETED';
+  await (service as unknown as { processNextFollowUp(sessionId: string): Promise<void> })
+    .processNextFollowUp(session.id);
+
+  assert.equal(followUpRecognitions.length, 1);
+  assert.equal(followUpPreparations.length, 1);
+  assert.equal(executionStarts.length, 1);
+  assert.equal(session.pendingFollowUpMessages?.[0]?.receiverRecognitionPending, undefined);
+});
+
+test('a continuation after failure resumes the previous brief instead of creating a new follow-up brief', async () => {
+  const failedTask: AgentTask = {
+    id: 'failed-task',
+    sessionId: 'placeholder',
+    title: 'Implement current requirement',
+    description: 'Continue the previous work',
+    status: 'failed',
+    dependsOnTaskIds: [],
+    acceptanceCriteria: [],
+    resultSummary: 'Runtime unavailable',
+    createdAt: '2026-07-11T00:00:00.000Z',
+    updatedAt: '2026-07-11T00:00:00.000Z'
+  };
+  const fixture = makeService({
+    taskItems: [failedTask],
+    followUpHandlingPlan: { requirementRelation: 'continuation', failedExecutionAction: 'resume' }
+  });
+  const { session } = await fixture.service.create({ input: 'Implement current requirement' });
+  (fixture.service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
+  failedTask.sessionId = session.id;
+  session.currentTaskBriefId = 'brief-existing';
+  session.status = 'FAILED';
+
+  const result = await fixture.service.sendMessage(session.id, '继续之前失败的实现');
+  assert.equal(result.handlingPlan.requirementRelation, 'continuation');
+  assert.equal(result.handlingPlan.failedExecutionAction, 'resume');
+  assert.equal(result.deferred, false);
+  await waitFor(() => failedTask.status === 'pending');
+
+  assert.equal(fixture.followUpPreparations.length, 0);
+  assert.equal(failedTask.status, 'pending');
+  assert.equal(fixture.executionStarts.length, 1);
+  assert.equal(session.currentTaskBriefId, 'brief-existing');
+  assert.deepEqual(session.pendingFollowUpMessages, []);
+});
+
+test('a new requirement after failure starts a fresh discussion and follow-up brief', async () => {
+  const fixture = makeService({
+    followUpHandlingPlan: { requirementRelation: 'new_requirement', failedExecutionAction: 'none' }
+  });
+  const { session } = await fixture.service.create({ input: 'Implement current requirement' });
+  (fixture.service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
+  session.currentTaskBriefId = 'brief-existing';
+  session.status = 'FAILED';
+
+  const result = await fixture.service.sendMessage(session.id, '这是一个新需求：增加审计导出');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(result.handlingPlan.requirementRelation, 'new_requirement');
+  assert.equal(result.handlingPlan.failedExecutionAction, 'none');
+  assert.equal(fixture.followUpPreparations.length, 1);
+  assert.equal(fixture.executionStarts.length, 1);
+  assert.notEqual(session.currentTaskBriefId, 'brief-existing');
+});
+
 test('queued worker outcomes close the active follow-up and publish the final Session status', async () => {
   const { service, events } = makeService();
   const { session } = await service.create({ input: 'Analyze the workspace' });
@@ -984,7 +1199,7 @@ test('explicit server-local working directory is bound without scanning before p
   }
 });
 
-test('V1 rejects a second active Session for the same workspace and releases the lease after completion', async () => {
+test('allows multiple active Sessions for the same normalized workspace', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-cluster-workspace-lease-'));
   try {
     const { service } = makeService();
@@ -997,26 +1212,17 @@ test('V1 rejects a second active Session for the same workspace and releases the
     };
     const first = await service.create({ input: 'First active task', workingDirectory });
 
-    await assert.rejects(
-      service.create({ input: 'Second active task', workingDirectory }),
-      (error: unknown) => {
-        const response = (error as { getResponse?: () => unknown }).getResponse?.() as Record<string, unknown> | undefined;
-        assert.equal(response?.code, 'WORKSPACE_ACTIVE_SESSION_CONFLICT');
-        assert.equal(response?.activeSessionId, first.session.id);
-        assert.equal(response?.activeSessionStatus, first.session.status);
-        return true;
-      }
-    );
-
-    first.session.status = 'COMPLETED';
-    const next = await service.create({ input: 'Task after lease release', workingDirectory });
-    assert.notEqual(next.session.id, first.session.id);
+    const second = await service.create({ input: 'Second active task', workingDirectory });
+    assert.notEqual(second.session.id, first.session.id);
+    assert.equal(second.session.workspaceId, first.session.workspaceId);
+    assert.equal(first.session.status, 'AGENT_DISCUSSING');
+    assert.equal(second.session.status, 'AGENT_DISCUSSING');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test('V1 rebuilds the active workspace lease from persisted interrupted Sessions', async () => {
+test('persisted interrupted Sessions do not block a new Session for the same workspace after restart', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-cluster-workspace-lease-restart-'));
   try {
     const workingDirectory = {
@@ -1030,19 +1236,261 @@ test('V1 rebuilds the active workspace lease from persisted interrupted Sessions
     created.session.status = 'INTERRUPTED';
     const restarted = makeService({ initialSessions: [created.session] });
 
-    await assert.rejects(
-      restarted.service.create({ input: 'Competing task after restart', workingDirectory }),
-      (error: unknown) => {
-        const response = (error as { getResponse?: () => unknown }).getResponse?.() as Record<string, unknown> | undefined;
-        assert.equal(response?.code, 'WORKSPACE_ACTIVE_SESSION_CONFLICT');
-        assert.equal(response?.activeSessionId, created.session.id);
-        assert.equal(response?.activeSessionStatus, 'INTERRUPTED');
-        return true;
-      }
-    );
+    const competing = await restarted.service.create({ input: 'Competing task after restart', workingDirectory });
+    assert.notEqual(competing.session.id, created.session.id);
+    assert.equal(competing.session.workspaceId, created.session.workspaceId);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('applied workspace writeback completes the waiting task and resumes unfinished execution', async () => {
+  const task: AgentTask = {
+    id: 'task-writeback',
+    sessionId: 'session-writeback',
+    title: 'Apply isolated changes',
+    description: 'Apply changes',
+    status: 'waiting',
+    dependsOnTaskIds: [],
+    acceptanceCriteria: [],
+    createdAt: '2026-07-30T00:00:00.000Z',
+    updatedAt: '2026-07-30T00:00:00.000Z'
+  };
+  const writeback = {
+    id: 'writeback-applied',
+    sessionId: 'session-writeback',
+    taskId: task.id,
+    invocationId: 'invocation-writeback',
+    workspaceId: 'default-workspace',
+    providerKind: 'server_local',
+    changeSet: {
+      id: 'changes-writeback',
+      baseRevision: { id: 'base', observedAt: '2026-07-30T00:00:00.000Z' },
+      changes: [],
+      createdAt: '2026-07-30T00:00:00.000Z'
+    },
+    resultSummary: 'Runtime implementation completed.',
+    status: 'applied',
+    conflicts: [],
+    createdAt: '2026-07-30T00:00:00.000Z',
+    updatedAt: '2026-07-30T00:00:01.000Z'
+  } satisfies WorkspaceWritebackRecord;
+  const fixture = makeService({
+    taskItems: [task],
+    workspaceWritebacks: {
+      list: () => [writeback],
+      resolve: async () => writeback
+    }
+  });
+  const { session } = await fixture.service.create({ input: 'Apply isolated changes' });
+  task.sessionId = session.id;
+  writeback.sessionId = session.id;
+  session.currentTaskBriefId = 'brief-writeback';
+  session.status = 'WAIT_WORKSPACE_CONFLICT_RESOLUTION';
+
+  await fixture.service.resolveWorkspaceWriteback(session.id, writeback.id, { action: 'retry_merge' });
+
+  assert.equal(task.status, 'completed');
+  assert.equal(task.resultSummary, 'Runtime implementation completed.');
+  assert.equal(session.status, 'EXECUTING');
+  assert.equal(fixture.executionStarts.length, 1);
+});
+
+test('Session waits for every blocking workspace writeback before resuming parallel tasks', async () => {
+  const tasks = ['task-writeback-a', 'task-writeback-b'].map((id) => ({
+    id,
+    sessionId: 'session-writeback-multiple',
+    title: id,
+    description: id,
+    status: 'waiting',
+    dependsOnTaskIds: [],
+    acceptanceCriteria: [],
+    createdAt: '2026-07-30T00:00:00.000Z',
+    updatedAt: '2026-07-30T00:00:00.000Z'
+  })) satisfies AgentTask[];
+  const records: WorkspaceWritebackRecord[] = tasks.map((task, index) => ({
+    id: `writeback-multiple-${index}`,
+    sessionId: 'session-writeback-multiple',
+    taskId: task.id,
+    invocationId: `invocation-multiple-${index}`,
+    workspaceId: 'default-workspace',
+    providerKind: 'server_local',
+    changeSet: {
+      id: `changes-multiple-${index}`,
+      baseRevision: { id: 'base', observedAt: '2026-07-30T00:00:00.000Z' },
+      changes: [],
+      createdAt: '2026-07-30T00:00:00.000Z'
+    },
+    resultSummary: `result-${index}`,
+    status: 'conflicted',
+    conflicts: [],
+    createdAt: `2026-07-30T00:00:0${index}.000Z`,
+    updatedAt: `2026-07-30T00:00:0${index}.000Z`
+  }));
+  const fixture = makeService({
+    taskItems: tasks,
+    workspaceWritebacks: {
+      list: () => records,
+      resolve: async (_session, writebackId) => {
+        const record = records.find((item) => item.id === writebackId)!;
+        record.status = 'abandoned';
+        return record;
+      }
+    }
+  });
+  const { session } = await fixture.service.create({ input: 'Resolve parallel writebacks' });
+  for (const task of tasks) task.sessionId = session.id;
+  for (const record of records) record.sessionId = session.id;
+  session.currentTaskBriefId = 'brief-writeback-multiple';
+  session.status = 'WAIT_WORKSPACE_CONFLICT_RESOLUTION';
+
+  await fixture.service.resolveWorkspaceWriteback(session.id, records[0].id, { action: 'keep_workspace' });
+  assert.equal(session.status, 'WAIT_WORKSPACE_CONFLICT_RESOLUTION');
+  assert.deepEqual(tasks.map((task) => task.status), ['waiting', 'waiting']);
+  assert.equal(fixture.executionStarts.length, 0);
+
+  await fixture.service.resolveWorkspaceWriteback(session.id, records[1].id, { action: 'keep_workspace' });
+  assert.equal(session.status, 'EXECUTING');
+  assert.deepEqual(tasks.map((task) => task.status), ['completed', 'completed']);
+  assert.equal(fixture.executionStarts.length, 1);
+});
+
+test('Session remains applying until every writeback is terminal and ignores a stale conflict outcome', async () => {
+  const tasks = ['task-writeback-conflict', 'task-writeback-applying'].map((id) => ({
+    id,
+    sessionId: 'session-writeback-in-flight',
+    title: id,
+    description: id,
+    status: 'waiting',
+    dependsOnTaskIds: [],
+    acceptanceCriteria: [],
+    createdAt: '2026-07-30T00:00:00.000Z',
+    updatedAt: '2026-07-30T00:00:00.000Z'
+  })) satisfies AgentTask[];
+  const records: WorkspaceWritebackRecord[] = [
+    {
+      id: 'writeback-conflict', sessionId: 'session-writeback-in-flight', taskId: tasks[0].id,
+      invocationId: 'invocation-conflict', workspaceId: 'default-workspace', providerKind: 'server_local',
+      changeSet: { id: 'changes-conflict', baseRevision: { id: 'base', observedAt: '2026-07-30T00:00:00.000Z' }, changes: [], createdAt: '2026-07-30T00:00:00.000Z' },
+      status: 'conflicted', conflicts: [], createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z'
+    },
+    {
+      id: 'writeback-applying', sessionId: 'session-writeback-in-flight', taskId: tasks[1].id,
+      invocationId: 'invocation-applying', workspaceId: 'default-workspace', providerKind: 'server_local',
+      changeSet: { id: 'changes-applying', baseRevision: { id: 'base', observedAt: '2026-07-30T00:00:00.000Z' }, changes: [], createdAt: '2026-07-30T00:00:00.000Z' },
+      status: 'applying', conflicts: [], createdAt: '2026-07-30T00:00:01.000Z', updatedAt: '2026-07-30T00:00:01.000Z'
+    }
+  ];
+  const fixture = makeService({
+    taskItems: tasks,
+    workspaceWritebacks: {
+      list: () => records,
+      resolve: async (_session, writebackId) => {
+        const record = records.find((item) => item.id === writebackId)!;
+        record.status = 'abandoned';
+        return record;
+      }
+    }
+  });
+  const { session } = await fixture.service.create({ input: 'Resolve while another writeback applies' });
+  for (const task of tasks) task.sessionId = session.id;
+  for (const record of records) record.sessionId = session.id;
+  session.currentTaskBriefId = 'brief-writeback-in-flight';
+  session.status = 'WAIT_WORKSPACE_CONFLICT_RESOLUTION';
+
+  await fixture.service.resolveWorkspaceWriteback(session.id, records[0].id, { action: 'keep_workspace' });
+  assert.equal(session.status, 'APPLYING_CHANGES');
+  assert.equal(fixture.executionStarts.length, 0);
+
+  records[1].status = 'applied';
+  fixture.service.applyOutcome(session.id, { kind: 'workspace_conflict', reason: 'stale task outcome' });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(session.status, 'EXECUTING');
+  assert.deepEqual(tasks.map((task) => task.status), ['completed', 'completed']);
+  assert.equal(fixture.executionStarts.length, 1);
+});
+
+test('restart converts an interrupted writeback into a user-resolvable Session state', () => {
+  const session = {
+    id: 'session-writeback-restart',
+    dataEpoch: 'epoch-test',
+    title: 'Recover writeback',
+    originalInput: 'Recover writeback',
+    status: 'APPLYING_CHANGES',
+    ownerId: 'local-user',
+    workspaceId: 'default-workspace',
+    tokenUsed: 0,
+    participatingAgentIds: ['coordinator'],
+    createdAt: '2026-07-30T00:00:00.000Z',
+    updatedAt: '2026-07-30T00:00:00.000Z'
+  } satisfies SessionDetail;
+  const writeback = {
+    id: 'writeback-restart',
+    sessionId: session.id,
+    invocationId: 'invocation-restart',
+    workspaceId: session.workspaceId,
+    providerKind: 'server_local',
+    changeSet: {
+      id: 'changes-restart',
+      baseRevision: { id: 'base', observedAt: session.createdAt },
+      changes: [],
+      createdAt: session.createdAt
+    },
+    status: 'failed',
+    conflicts: [],
+    error: 'Workspace writeback was interrupted by a backend restart.',
+    createdAt: session.createdAt,
+    updatedAt: session.createdAt
+  } satisfies WorkspaceWritebackRecord;
+
+  const fixture = makeService({
+    initialSessions: [session],
+    workspaceWritebacks: { list: () => [writeback], resolve: async () => writeback }
+  });
+
+  assert.equal(fixture.service.get(session.id).status, 'WAIT_WORKSPACE_CONFLICT_RESOLUTION');
+  assert.equal(fixture.persistedSnapshots.at(-1)?.[0]?.status, 'WAIT_WORKSPACE_CONFLICT_RESOLUTION');
+});
+
+test('restart keeps the Session blocked when an older writeback failed before a newer one completed', () => {
+  const session = {
+    id: 'session-writeback-restart-multiple',
+    dataEpoch: 'epoch-test',
+    title: 'Recover multiple writebacks',
+    originalInput: 'Recover multiple writebacks',
+    status: 'APPLYING_CHANGES',
+    ownerId: 'local-user',
+    workspaceId: 'default-workspace',
+    tokenUsed: 0,
+    participatingAgentIds: ['coordinator'],
+    createdAt: '2026-07-30T00:00:00.000Z',
+    updatedAt: '2026-07-30T00:00:00.000Z'
+  } satisfies SessionDetail;
+  const records: WorkspaceWritebackRecord[] = ['failed', 'applied'].map((status, index) => ({
+    id: `writeback-restart-multiple-${index}`,
+    sessionId: session.id,
+    invocationId: `invocation-restart-multiple-${index}`,
+    workspaceId: session.workspaceId,
+    providerKind: 'server_local',
+    changeSet: {
+      id: `changes-restart-multiple-${index}`,
+      baseRevision: { id: 'base', observedAt: session.createdAt },
+      changes: [],
+      createdAt: session.createdAt
+    },
+    status: status as 'failed' | 'applied',
+    conflicts: [],
+    createdAt: `2026-07-30T00:00:0${index}.000Z`,
+    updatedAt: `2026-07-30T00:00:0${index}.000Z`
+  }));
+
+  const fixture = makeService({
+    initialSessions: [session],
+    workspaceWritebacks: { list: () => records, resolve: async () => records[0] }
+  });
+
+  assert.equal(fixture.service.get(session.id).status, 'WAIT_WORKSPACE_CONFLICT_RESOLUTION');
 });
 
 test('retired browser-local working directories are rejected', async () => {
@@ -1198,8 +1646,8 @@ test('Post Review actions select distinct Session recovery flows', async () => {
   });
   assert.equal(context.session.status, 'EXECUTING');
   assert.deepEqual(
-    context.session.supplementalContextRequests?.at(-1)?.requestedContext.requestedPaths,
-    ['src/feature.ts']
+    context.session.supplementalContextRequests?.at(-1)?.requestedContext.requestedFiles,
+    [{ path: 'src/feature.ts' }]
   );
   assert.deepEqual(context.session.supplementalContextRequests?.at(-1)?.resolution.hydratedPaths, ['src/feature.ts']);
   assert.equal(context.executionStarts.length, 1);

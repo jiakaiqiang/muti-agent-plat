@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { buildLinearWorkflowEdges, createHumanApprovalNode, createRobotApprovalNode, insertAgentNode, moveWorkflowNode, removeWorkflowNode } from './workflowBuilderModel'
+import {
+  buildLinearWorkflowEdges,
+  createHumanApprovalNode,
+  createRobotApprovalNode,
+  createWorkflowNodeId,
+  insertAgentNode,
+  moveWorkflowNode,
+  removeWorkflowNode
+} from './workflowBuilderModel'
 
 const nodes = [
   { id: 'requirements-node', type: 'agent' as const, agentId: 'requirements', order: 0 },
@@ -34,5 +42,17 @@ describe('workflowBuilderModel', () => {
     expect(createRobotApprovalNode('reviewer', 2, 'robot-node')).toMatchObject({
       id: 'robot-node', type: 'robot_approval', reviewerAgentId: 'reviewer', maxRevisionAttempts: 2, fallback: 'human_approval'
     })
+  })
+
+  it('creates a UUID v4 when crypto.randomUUID is unavailable', () => {
+    const cryptoWithoutRandomUuid = {
+      getRandomValues: <T extends ArrayBufferView | null>(array: T) => {
+        if (array) new Uint8Array(array.buffer, array.byteOffset, array.byteLength).fill(0)
+        return array
+      }
+    }
+
+    expect(createWorkflowNodeId(cryptoWithoutRandomUuid)).toBe('00000000-0000-4000-8000-000000000000')
+    expect(createWorkflowNodeId(null)).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
   })
 })

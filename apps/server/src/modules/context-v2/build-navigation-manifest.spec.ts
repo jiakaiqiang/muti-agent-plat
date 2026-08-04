@@ -83,3 +83,27 @@ test('buildNavigationManifest preserves entrypoints even under a tight budget', 
   const paths = manifest.entries.map((entry) => entry.path);
   assert.ok(paths.includes('src/entry.ts'));
 });
+
+test('buildNavigationManifest respects budgetTokens and truncates accordingly', () => {
+  const entries: WorkspaceIndexEntry[] = [];
+  for (let i = 0; i < 100; i += 1) {
+    entries.push(file(`src/file-${i}.ts`, { language: 'typescript' }));
+  }
+  const manifest = buildNavigationManifest({ entries, entrypoints: [], budgetTokens: 500 });
+  assert.ok(manifest.entries.length < 100);
+  const serialized = JSON.stringify(manifest.entries);
+  const estimatedTokens = Math.ceil(Buffer.byteLength(serialized, 'utf8') / 4);
+  assert.ok(estimatedTokens <= 500);
+});
+
+test('buildNavigationManifest produces deterministic output for same input', () => {
+  const entries = [
+    file('src/a.ts'),
+    file('src/b.ts'),
+    file('src/c.ts')
+  ];
+  const manifest1 = buildNavigationManifest({ entries, entrypoints: [], budgetTokens: 200 });
+  const manifest2 = buildNavigationManifest({ entries, entrypoints: [], budgetTokens: 200 });
+  assert.deepEqual(manifest1.entries, manifest2.entries);
+  assert.equal(manifest1.truncated, manifest2.truncated);
+});

@@ -6,15 +6,20 @@ import type {
 
 const TEST_SUFFIXES = ['.spec', '.test'] as const;
 
+function estimateTokens(byteLength: number): number {
+  return Math.ceil(byteLength / 4);
+}
+
 export interface BuildProjectMapArgs {
   entries: WorkspaceIndexEntry[];
   entrypoints: string[];
   detectedStack?: string[];
   source?: ContextL2ProjectMap['source'];
+  budgetTokens?: number;
 }
 
 export function buildProjectMap(args: BuildProjectMapArgs): ContextL2ProjectMap {
-  const { entries, entrypoints, detectedStack, source = 'generated' } = args;
+  const { entries, entrypoints, detectedStack, source = 'generated', budgetTokens } = args;
   const eligible = entries.filter((entry) => !entry.generated && !entry.sensitive);
   const files = eligible.filter((entry) => entry.kind === 'file');
 
@@ -38,7 +43,7 @@ export function buildProjectMap(args: BuildProjectMapArgs): ContextL2ProjectMap 
     if (isTestPath(file.path)) module.tests.add(file.path);
   }
 
-  const modules: ContextL2ProjectMapModule[] = Array.from(modulesByRoot.entries())
+  let modules: ContextL2ProjectMapModule[] = Array.from(modulesByRoot.entries())
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([name, info]) => ({
       name,
@@ -47,6 +52,19 @@ export function buildProjectMap(args: BuildProjectMapArgs): ContextL2ProjectMap 
       ...(info.entrypoints.size > 0 ? { entrypoints: Array.from(info.entrypoints).sort() } : {}),
       ...(info.tests.size > 0 ? { tests: Array.from(info.tests).sort() } : {})
     }));
+
+  if (budgetTokens !== undefined) {
+    let usedTokens = 0;
+    const kept: ContextL2ProjectMapModule[] = [];
+    for (const module of modules) {
+      const moduleBytes = Buffer.byteLength(JSON.stringify(module), 'utf8');
+      const moduleTokens = estimateTokens(moduleBytes);
+      if (usedTokens + moduleTokens > budgetTokens && kept.length > 0) break;
+      usedTokens += moduleTokens;
+      kept.push(module);
+    }
+    modules = kept;
+  }
 
   return {
     source,

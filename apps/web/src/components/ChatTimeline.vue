@@ -28,7 +28,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   resolveConfirmation: [optionKey: string]
-  approveCapability: [sessionId: string, capabilityId: string]
+  approveCapability: [sessionId: string, capabilityIds: string[], agentId?: string]
 }>()
 
 const agentStore = useAgentStore()
@@ -133,6 +133,7 @@ function confirmationFromMessage(message: ChatMessage): ConfirmationCardState | 
   if (message.messageType !== 'confirmation') return undefined
   const payload = message.payload as (ConfirmationRequestedPayload & Record<string, unknown>) | undefined
   if (!payload) return undefined
+  if (payload.reason === 'approve_capability' || Array.isArray(payload.pendingApprovals)) return undefined
   return {
     confirmationId: payload.confirmationId,
     reason: payload.reason,
@@ -157,7 +158,7 @@ function confirmationFromMessage(message: ChatMessage): ConfirmationCardState | 
 function capabilityApprovalFromMessage(message: ChatMessage) {
   if (message.messageType !== 'confirmation') return undefined
   const payload = message.payload as (ConfirmationRequestedPayload & Record<string, unknown>) | undefined
-  if (!payload || payload.reason !== 'approve_capability') return undefined
+  if (!payload) return undefined
   if (!Array.isArray(payload.pendingApprovals) || !payload.pendingApprovals.length) return undefined
   return {
     sessionId: message.sessionId,
@@ -198,6 +199,14 @@ function requestedContextStatus(message: ChatMessage) {
   if (payload?.rejectionReason) return { label: '已拒绝', tone: 'failed' }
   const resolution = requestedContextResolution(message)
   if (!resolution) return { label: '等待中', tone: 'waiting' }
+  if (resolution.outcome === 'resolved') return { label: '已补充', tone: 'completed' }
+  if (resolution.outcome === 'partial') return { label: '部分完成', tone: 'running' }
+  if (resolution.outcome === 'cancelled') return { label: '已取消', tone: 'failed' }
+  if (resolution.outcome === 'exhausted') {
+    if (resolution.failedPaths.length) return { label: '读取失败', tone: 'failed' }
+    if (resolution.failedRefs?.length) return { label: '引用无效', tone: 'failed' }
+    return { label: '无可用内容', tone: 'failed' }
+  }
   if (resolution.hydratedPaths.length && (resolution.failedPaths.length || resolution.deferredPaths.length)) {
     return { label: '部分完成', tone: 'running' }
   }
@@ -212,7 +221,11 @@ function requestedContextRefs(message: ChatMessage) {
 }
 
 function requestedContextPaths(message: ChatMessage) {
-  return requestedContextPayload(message)?.requestedPaths ?? []
+  const requested = requestedContextPayload(message)
+  return Array.from(new Set([
+    ...(requested?.requestedFiles ?? []).map((item) => item.path),
+    ...(requested?.requestedPaths ?? [])
+  ]))
 }
 
 function requestedContextCommands(message: ChatMessage) {
@@ -742,7 +755,12 @@ function yesNo(value?: boolean) {
           :session-id="capabilityApprovalFromMessage(message)!.sessionId"
           :pending-approvals="capabilityApprovalFromMessage(message)!.pendingApprovals"
           compact
-          @approve="emit('approveCapability', message.sessionId, capabilityApprovalFromMessage(message)!.pendingApprovals[0].toolId)"
+          @approve="emit(
+            'approveCapability',
+            message.sessionId,
+            capabilityApprovalFromMessage(message)!.pendingApprovals.map((approval) => approval.toolId),
+            message.senderAgentId
+          )"
         />
 
         <template v-else>
@@ -878,6 +896,18 @@ function yesNo(value?: boolean) {
             <div v-if="requestedContextResolution(message)?.hydratedPaths.length" class="context-request-list">
               <strong>已读取路径</strong>
               <code v-for="path in requestedContextResolution(message)?.hydratedPaths" :key="`hydrated:${path}`">{{ path }}</code>
+            </div>
+            <div v-if="requestedContextResolution(message)?.resolvedRefs?.length" class="context-request-list">
+              <strong>已解析引用</strong>
+              <code v-for="ref in requestedContextResolution(message)?.resolvedRefs" :key="`resolved-ref:${ref.type}:${ref.ref ?? ref.label}`">
+                {{ [ref.type, ref.label, ref.ref].filter(Boolean).join(' / ') }}
+              </code>
+            </div>
+            <div v-if="requestedContextResolution(message)?.failedRefs?.length" class="context-request-list">
+              <strong>引用失败</strong>
+              <code v-for="ref in requestedContextResolution(message)?.failedRefs" :key="`failed-ref:${ref.type}:${ref.ref ?? ref.label}`">
+                {{ [ref.type, ref.label, ref.ref, ref.code].filter(Boolean).join(' / ') }}
+              </code>
             </div>
             <div v-if="requestedContextResolution(message)?.failedPaths.length" class="context-request-list">
               <strong>读取失败</strong>

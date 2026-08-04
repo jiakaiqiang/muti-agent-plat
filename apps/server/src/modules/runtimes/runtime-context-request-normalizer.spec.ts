@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { normalizeRuntimeContextRequest } from './runtime-context-request-normalizer.js';
 
-test('normalizes string requestedRefs into requestedPaths', () => {
+test('normalizes string requestedRefs into canonical requestedFiles', () => {
   const result = normalizeRuntimeContextRequest({
     reason: 'Need source files',
     requestedRefs: ['src/main.ts', 'package.json'],
@@ -11,7 +11,7 @@ test('normalizes string requestedRefs into requestedPaths', () => {
   assert.deepEqual(result, {
     reason: 'Need source files',
     requestedRefs: [],
-    requestedPaths: ['src/main.ts', 'package.json']
+    requestedFiles: [{ path: 'src/main.ts' }, { path: 'package.json' }]
   });
 });
 
@@ -55,8 +55,8 @@ test('requires concrete refs for workspace-backed evidence and promotes them to 
     normalizeRuntimeContextRequest({
       reason: 'Need symbol source',
       requestedRefs: [{ type: 'workspace_symbol', label: 'main', ref: 'src/main.ts' }]
-    })?.requestedPaths,
-    ['src/main.ts']
+    })?.requestedFiles,
+    [{ path: 'src/main.ts' }]
   );
 });
 

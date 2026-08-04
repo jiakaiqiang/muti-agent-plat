@@ -250,6 +250,48 @@ test('authenticated Local Runtime carries an invocation and disconnects without 
     assert.equal((await handle.result).status, 'completed');
     assert.equal(connections.getWorkspace('workspace-local-runtime')?.revision.id, 'revision-local-4');
 
+    const indexResult = pending.waitFor('workspace-operation-index', 'workspace-local-runtime');
+    gateway.dispatch({
+      requestId: 'workspace-operation-index',
+      invocationId: 'workspace-operation-index-invocation',
+      workspaceId: 'workspace-local-runtime',
+      operation: 'getIndexSnapshot',
+      input: { limit: 10 }
+    });
+    await inbox.next('local_runtime.workspace.operation.request');
+    socket.send(JSON.stringify({
+      kind: 'local_runtime.workspace.operation.result',
+      payload: {
+        requestId: 'workspace-operation-index',
+        workspaceId: 'workspace-local-runtime',
+        operation: 'getIndexSnapshot',
+        status: 'ok',
+        data: {
+          workspaceId: 'workspace-local-runtime',
+          revision: { id: 'revision-local-5', observedAt: '2026-07-24T00:04:00.000Z' },
+          generation: 2,
+          status: 'ready',
+          complete: true,
+          entries: [],
+          entrypoints: [],
+          detectedStack: [],
+          indexedEntries: 0,
+          truncated: false,
+          updatedAt: '2026-07-24T00:04:00.000Z',
+          coverage: {
+            visitedEntries: 0,
+            indexedEntries: 0,
+            excludedGenerated: 0,
+            sensitiveEntries: 0,
+            skippedSymlinks: 0,
+            failedEntries: 0
+          }
+        }
+      }
+    }));
+    await indexResult;
+    assert.equal(connections.getWorkspace('workspace-local-runtime')?.revision.id, 'revision-local-5');
+
     const disconnectPlan = {
       ...plan,
       invocationId: 'invocation-local-runtime-disconnect',
@@ -258,7 +300,7 @@ test('authenticated Local Runtime carries an invocation and disconnects without 
     const interruption = firstValueFrom(connections.interruptions());
     const disconnectHandle = connections.startInvocation(disconnectPlan);
     const disconnectRequest = await inbox.next('local_runtime.invocation.start');
-    assert.equal(disconnectRequest.payload.workspaceRevision.id, 'revision-local-4');
+    assert.equal(disconnectRequest.payload.workspaceRevision.id, 'revision-local-5');
 
     socket.close(1000, 'test disconnect');
     await once(socket, 'close');
@@ -270,6 +312,100 @@ test('authenticated Local Runtime carries an invocation and disconnects without 
     assert.equal(connections.listRuntimeCandidates('workspace-local-runtime').length, 0);
   } finally {
     if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.terminate();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('same Local Runtime device can immediately re-register workspaces after reconnecting', async () => {
+  const persistence = new PersistenceService({ enabled: false });
+  const auth = new LocalRuntimeAuthService(persistence);
+  const gateway = new BrokerGateway(() => 'epoch-test');
+  const connections = new LocalRuntimeConnectionService(
+    auth,
+    gateway,
+    new PendingRequestRegistry(),
+    new HeartbeatTracker(30_000),
+    persistence
+  );
+  const code = auth.createDeviceCode({
+    deviceId: 'device-reconnect',
+    displayName: 'developer-pc',
+    cliVersion: '0.1.0',
+    protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+    runtimes: { codex: 'codex-cli 1.0.0' }
+  }, 'http://localhost');
+  auth.approveDeviceCode(code.userCode);
+  const tokens = auth.exchangeDeviceCode(code.deviceCode);
+  assert.ok('accessToken' in tokens);
+  if (!('accessToken' in tokens)) return;
+
+  const server = createServer();
+  connections.attach(server);
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const socketUrl = `ws://127.0.0.1:${address.port}/local-runtime`;
+  const headers = { Authorization: `Bearer ${tokens.accessToken}` };
+  const registration = {
+    workspaceId: 'workspace-reconnect',
+    displayName: 'local-project',
+    capabilities: { read: true, write: true, command: true, test: true },
+    revision: { id: 'revision-reconnect-1', observedAt: '2026-07-30T00:00:00.000Z' },
+    permissions: DEFAULT_LOCAL_RUNTIME_PERMISSION_POLICY,
+    registeredAt: '2026-07-30T00:00:00.000Z'
+  };
+  const first = new WebSocket(socketUrl, { headers });
+  const firstInbox = new LocalRuntimeMessageInbox(first);
+  let second: WebSocket | undefined;
+
+  try {
+    await once(first, 'open');
+    first.send(JSON.stringify({
+      kind: 'local_runtime.hello',
+      payload: {
+        deviceId: 'device-reconnect',
+        cliVersion: '0.1.0',
+        protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+        runtimes: { codex: 'codex-cli 1.0.0' }
+      }
+    }));
+    await firstInbox.next('local_runtime.connected');
+    first.send(JSON.stringify({ kind: 'local_runtime.workspace.register', payload: registration }));
+    await firstInbox.next('local_runtime.workspace.registered');
+    assert.ok(gateway.getRegistration(registration.workspaceId));
+
+    const firstClosed = once(first, 'close');
+    second = new WebSocket(socketUrl, { headers });
+    const secondInbox = new LocalRuntimeMessageInbox(second);
+    await once(second, 'open');
+    await firstClosed;
+    second.send(JSON.stringify({
+      kind: 'local_runtime.hello',
+      payload: {
+        deviceId: 'device-reconnect',
+        cliVersion: '0.1.0',
+        protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+        runtimes: { codex: 'codex-cli 1.0.0' }
+      }
+    }));
+    await secondInbox.next('local_runtime.connected');
+    second.send(JSON.stringify({
+      kind: 'local_runtime.workspace.register',
+      payload: {
+        ...registration,
+        revision: { id: 'revision-reconnect-2', observedAt: '2026-07-30T00:01:00.000Z' }
+      }
+    }));
+    await secondInbox.next('local_runtime.workspace.registered');
+
+    assert.equal(connections.listWorkspaces().length, 1);
+    assert.equal(connections.getWorkspace(registration.workspaceId)?.revision.id, 'revision-reconnect-2');
+    assert.equal(connections.listRuntimeCandidates(registration.workspaceId)[0]?.runtimeType, 'codex');
+    assert.ok(gateway.getRegistration(registration.workspaceId));
+  } finally {
+    if (first.readyState === WebSocket.OPEN || first.readyState === WebSocket.CONNECTING) first.terminate();
+    if (second?.readyState === WebSocket.OPEN || second?.readyState === WebSocket.CONNECTING) second.terminate();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });

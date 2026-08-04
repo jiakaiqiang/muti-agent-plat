@@ -26,12 +26,12 @@ export async function readServerLocalFile(args: ReadServerLocalFileArgs): Promis
 
   await assertWorkspacePathWithinRoot(rootPath, relative);
 
-  const metadata = await stat(absolute);
-  if (!metadata.isFile()) throw new Error(`workspace read rejected non-file path: ${relative}`);
+  const metadataBefore = await stat(absolute);
+  if (!metadataBefore.isFile()) throw new Error(`workspace read rejected non-file path: ${relative}`);
   const handle = await open(absolute, 'r');
   let probe: Buffer;
   try {
-    probe = Buffer.alloc(Math.min(BINARY_PROBE_BYTES, metadata.size));
+    probe = Buffer.alloc(Math.min(BINARY_PROBE_BYTES, metadataBefore.size));
     const result = await handle.read(probe, 0, probe.byteLength, 0);
     probe = probe.subarray(0, result.bytesRead);
   } finally {
@@ -42,7 +42,13 @@ export async function readServerLocalFile(args: ReadServerLocalFileArgs): Promis
   }
 
   const maxBytes = Math.max(1, input.maxBytes ?? DEFAULT_MAX_BYTES);
-  const selected = await readBoundedText(absolute, metadata.size, maxBytes, input.startLine, input.endLine);
+  const selected = await readBoundedText(absolute, metadataBefore.size, maxBytes, input.startLine, input.endLine);
+
+  const metadataAfter = await stat(absolute);
+  if (metadataBefore.mtime.getTime() !== metadataAfter.mtime.getTime() || metadataBefore.size !== metadataAfter.size) {
+    throw new Error(`WORKSPACE_REVISION_UNSTABLE: ${relative} changed during read operation`);
+  }
+
   const returnedBuffer = Buffer.from(selected.content, 'utf8');
   const fullRead = selected.complete && !selected.lineRange;
   const result: ReadFileResult = {
@@ -53,8 +59,8 @@ export async function readServerLocalFile(args: ReadServerLocalFileArgs): Promis
     truncated: selected.truncated,
     revision,
     rangeHash: hashBuffer(returnedBuffer),
-    fileSize: metadata.size,
-    modifiedAt: metadata.mtime.toISOString(),
+    fileSize: metadataBefore.size,
+    modifiedAt: metadataBefore.mtime.toISOString(),
     ...(selected.startLine !== undefined ? { startLine: selected.startLine } : {}),
     ...(selected.endLine !== undefined ? { endLine: selected.endLine } : {})
   };

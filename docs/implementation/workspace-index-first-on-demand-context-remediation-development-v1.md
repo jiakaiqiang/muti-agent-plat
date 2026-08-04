@@ -1,5 +1,7 @@
 # Workspace Index First 与按需上下文补齐开发设计 V1
 
+> 历史说明：本文的 Lease 补齐项已被 [`../design/workspace-multi-session-isolation-writeback-v1.md`](../design/workspace-multi-session-isolation-writeback-v1.md) 中的隔离执行和 FIFO 写回取代。
+
 > 日期：2026-07-29
 >
 > 状态：Ready for implementation
@@ -318,12 +320,7 @@ build failed
 
 Acquire 必须和 Session 创建处于同一个持久化事务或同一个原子临界区：
 
-```text
-acquire(workspaceId, sessionId)
-  -> no active lease: insert and continue
-  -> same session lease: idempotent success
-  -> other active session: 409 WORKSPACE_ACTIVE_SESSION_CONFLICT
-```
+历史流程为 `acquire(workspaceId, sessionId)` 后拒绝其他活动 Session。该流程不再属于当前产品行为；现行写隔离由 per-task 执行目录和 per-workspace writeback FIFO 提供。
 
 - Postgres 新增 `workspace_active_session_leases` 表，`workspace_id` 为主键或唯一键。
 - Session 进入 `COMPLETED/FAILED/CANCELLED` 时释放 Lease。

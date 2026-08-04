@@ -5,7 +5,7 @@ import { WorkflowRuntimeService } from './workflow-runtime.service.js';
 
 const now = '2026-07-14T00:00:00.000Z';
 
-function fixture(nodes: WorkflowVersion['nodes']) {
+function fixture(nodes: WorkflowVersion['nodes'], edges?: WorkflowVersion['edges']) {
   const session: SessionDetail = {
     id: 'session-1',
     dataEpoch: 'epoch-1',
@@ -41,7 +41,7 @@ function fixture(nodes: WorkflowVersion['nodes']) {
     version: 1,
     name: 'Runtime flow',
     nodes,
-    edges: nodes.slice(0, -1).map((node, index) => ({
+    edges: edges ?? nodes.slice(0, -1).map((node, index) => ({
       id: `edge:${node.id}:${nodes[index + 1].id}`,
       sourceNodeId: node.id,
       targetNodeId: nodes[index + 1].id
@@ -55,6 +55,7 @@ function fixture(nodes: WorkflowVersion['nodes']) {
   const taskItems: AgentTask[] = [];
   const eventItems: Array<Record<string, unknown>> = [];
   const callbacks: Array<(outcome: any) => void> = [];
+  const executionTaskBatches: AgentTask[][] = [];
   const cancelCalls: any[][] = [];
   const updates: any[] = [];
   let executionRunning = false;
@@ -64,7 +65,7 @@ function fixture(nodes: WorkflowVersion['nodes']) {
       getVersion: () => version
     } as never,
     {
-      getByIdOrKey: (id: string) => ({ id, name: id })
+      getByIdOrKey: (id: string) => ({ id, key: id, name: id, role: id })
     } as never,
     {
       add(task: AgentTask) {
@@ -91,8 +92,9 @@ function fixture(nodes: WorkflowVersion['nodes']) {
       }
     } as never,
     {
-      start(_session: SessionDetail, _brief: TaskBrief, _tasks: AgentTask[], callback: (outcome: any) => void) {
+      start(_session: SessionDetail, _brief: TaskBrief, tasks: AgentTask[], callback: (outcome: any) => void) {
         executionRunning = true;
+        executionTaskBatches.push(tasks);
         callbacks.push((outcome) => {
           executionRunning = false;
           callback(outcome);
@@ -109,7 +111,7 @@ function fixture(nodes: WorkflowVersion['nodes']) {
     } as never
   );
   runtime.updates().subscribe((update) => updates.push(update));
-  return { runtime, session, brief, taskItems, eventItems, callbacks, cancelCalls, updates, collections };
+  return { runtime, session, brief, taskItems, eventItems, callbacks, cancelCalls, updates, collections, executionTaskBatches };
 }
 
 async function settle() {
@@ -161,12 +163,209 @@ test('WorkflowRuntimeService pauses only at an explicit human approval node', as
   assert.equal(setup.runtime.get(run.id).status, 'running');
   assert.equal(setup.taskItems.length, 2);
   assert.equal(setup.taskItems[1].workflowNodeId, 'frontend-node');
+  assert.deepEqual(
+    setup.taskItems[1].acceptanceCriteria,
+    ['Complete the frontend workflow stage and publish a concrete artifact consumable by downstream stages.']
+  );
 
   setup.taskItems[1].status = 'completed';
   setup.callbacks[1]({ kind: 'workflow_step_completed', taskId: setup.taskItems[1].id, resultSummary: '前端完成' });
   await settle();
   assert.equal(setup.runtime.get(run.id).status, 'completed');
   assert.ok(setup.updates.some((item) => item.kind === 'projection' && item.status === 'waiting_human'));
+});
+
+test('WorkflowRuntimeService carries completed upstream tasks and node contracts into downstream execution', async () => {
+  const setup = fixture([
+    {
+      id: 'architect-node',
+      type: 'agent',
+      agentId: 'architect',
+      stageDescription: 'Define the project architecture and contracts.',
+      outputContract: ['Architecture and API contracts are defined.'],
+      order: 0
+    },
+    {
+      id: 'frontend-node',
+      type: 'agent',
+      agentId: 'frontend',
+      stageDescription: 'Implement the frontend from the upstream architecture.',
+      inputContract: ['Use the upstream architecture and API contracts.'],
+      outputContract: ['Frontend SDK and management UI are implemented.'],
+      order: 1
+    }
+  ]);
+
+  await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    workflowVersion: 1,
+    confirmationId: 'select-upstream-context'
+  });
+
+  const architectTask = setup.taskItems[0]!;
+  architectTask.status = 'completed';
+  setup.callbacks[0]({
+    kind: 'workflow_step_completed',
+    taskId: architectTask.id,
+    resultSummary: 'Architecture, API contracts, and data model are ready.'
+  });
+  await settle();
+
+  const frontendTask = setup.taskItems[1]!;
+  assert.deepEqual(frontendTask.dependsOnTaskIds, [architectTask.id]);
+  assert.deepEqual(frontendTask.acceptanceCriteria, ['Frontend SDK and management UI are implemented.']);
+  assert.ok(frontendTask.contextRequirements?.includes('Use the upstream architecture and API contracts.'));
+  assert.ok(frontendTask.contextRequirements?.includes('前序工作流节点产物'));
+  assert.deepEqual(setup.executionTaskBatches[1]?.map((task) => task.id), [architectTask.id, frontendTask.id]);
+});
+
+test('WorkflowRuntimeService sends only the latest successful upstream attempt after robot revision', async () => {
+  const setup = fixture([
+    { id: 'architect-node', type: 'agent', agentId: 'architect', order: 0 },
+    {
+      id: 'robot-node',
+      type: 'robot_approval',
+      reviewerAgentId: 'reviewer',
+      reviewPrompt: 'Review the architecture.',
+      criteria: ['Architecture is complete.'],
+      maxRevisionAttempts: 2,
+      fallback: 'human_approval',
+      order: 1
+    },
+    { id: 'frontend-node', type: 'agent', agentId: 'frontend', order: 2 }
+  ]);
+
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-revised-upstream'
+  });
+
+  const firstArchitectTask = setup.taskItems[0]!;
+  firstArchitectTask.status = 'completed';
+  setup.callbacks[0]({
+    kind: 'workflow_step_completed',
+    taskId: firstArchitectTask.id,
+    resultSummary: 'Architecture attempt one.'
+  });
+  await settle();
+
+  setup.taskItems[1]!.status = 'completed';
+  setup.callbacks[1]({
+    kind: 'workflow_step_completed',
+    taskId: setup.taskItems[1]!.id,
+    resultSummary: JSON.stringify({
+      decision: 'revise',
+      reason: 'The API contract is incomplete.',
+      revisionInstruction: 'Add request and response schemas.',
+      evidenceRefs: []
+    })
+  });
+  await settle();
+
+  const revisedArchitectTask = setup.taskItems[2]!;
+  assert.equal(revisedArchitectTask.workflowAttempt, 2);
+  revisedArchitectTask.status = 'completed';
+  setup.callbacks[2]({
+    kind: 'workflow_step_completed',
+    taskId: revisedArchitectTask.id,
+    resultSummary: 'Architecture attempt two with complete schemas.'
+  });
+  await settle();
+
+  const approvingRobotTask = setup.taskItems[3]!;
+  approvingRobotTask.status = 'completed';
+  setup.callbacks[3]({
+    kind: 'workflow_step_completed',
+    taskId: approvingRobotTask.id,
+    resultSummary: JSON.stringify({
+      decision: 'approve',
+      reason: 'The revised architecture is complete.',
+      evidenceRefs: []
+    })
+  });
+  await settle();
+
+  const frontendTask = setup.taskItems[4]!;
+  assert.equal(frontendTask.dependsOnTaskIds.includes(firstArchitectTask.id), false);
+  assert.equal(frontendTask.dependsOnTaskIds.includes(revisedArchitectTask.id), true);
+  assert.equal(frontendTask.dependsOnTaskIds.includes(approvingRobotTask.id), true);
+  const frontendNodeRun = setup.runtime.listNodeRuns(run.id).at(-1)!;
+  assert.equal(frontendNodeRun.inputRefs.includes(`task:${firstArchitectTask.id}`), false);
+  assert.equal(frontendNodeRun.inputRefs.includes(`task:${revisedArchitectTask.id}`), true);
+});
+
+test('WorkflowRuntimeService follows graph edges instead of treating every earlier node as upstream', async () => {
+  const setup = fixture([
+    { id: 'architect-node', type: 'agent', agentId: 'architect', order: 0 },
+    { id: 'unrelated-node', type: 'agent', agentId: 'requirements', order: 1 },
+    { id: 'frontend-node', type: 'agent', agentId: 'frontend', order: 2 }
+  ], [
+    { id: 'edge:architect:frontend', sourceNodeId: 'architect-node', targetNodeId: 'frontend-node' }
+  ]);
+
+  await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-graph-upstream'
+  });
+  const architectTask = setup.taskItems[0]!;
+  architectTask.status = 'completed';
+  setup.callbacks[0]({ kind: 'workflow_step_completed', taskId: architectTask.id, resultSummary: 'Architecture ready.' });
+  await settle();
+  const unrelatedTask = setup.taskItems[1]!;
+  unrelatedTask.status = 'completed';
+  setup.callbacks[1]({ kind: 'workflow_step_completed', taskId: unrelatedTask.id, resultSummary: 'Unrelated result.' });
+  await settle();
+
+  assert.deepEqual(setup.taskItems[2]?.dependsOnTaskIds, [architectTask.id]);
+  assert.deepEqual(setup.executionTaskBatches[2]?.map((task) => task.id), [architectTask.id, setup.taskItems[2]?.id]);
+});
+
+test('WorkflowRuntimeService reconciles missing persisted dependencies before resume', async () => {
+  const setup = fixture([
+    { id: 'architect-node', type: 'agent', agentId: 'architect', order: 0 },
+    { id: 'frontend-node', type: 'agent', agentId: 'frontend', order: 1 }
+  ]);
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-reconcile'
+  });
+  const architectTask = setup.taskItems[0]!;
+  architectTask.status = 'completed';
+  setup.callbacks[0]({ kind: 'workflow_step_completed', taskId: architectTask.id, resultSummary: 'Architecture ready.' });
+  await settle();
+  const frontendTask = setup.taskItems[1]!;
+  frontendTask.status = 'waiting';
+  setup.callbacks[1]({
+    kind: 'cancelled',
+    reason: 'User paused.',
+    termination: {
+      schemaVersion: '1.0',
+      terminationId: 'pause-reconcile',
+      kind: 'user_cancelled',
+      source: 'user',
+      scope: 'invocation',
+      occurredAt: now
+    }
+  });
+  await settle();
+  frontendTask.dependsOnTaskIds = ['stale-upstream-task'];
+
+  assert.equal(await setup.runtime.resumeCurrentExecution(run.id), true);
+  assert.deepEqual(frontendTask.dependsOnTaskIds, [architectTask.id]);
+  assert.deepEqual(setup.executionTaskBatches.at(-1)?.map((task) => task.id), [architectTask.id, frontendTask.id]);
+  assert.equal(setup.eventItems.filter((item) => item.type === 'task_dependency_reconciled').length, 1);
 });
 
 test('WorkflowRuntimeService falls back to human approval for invalid robot output', async () => {
@@ -271,6 +470,27 @@ test('WorkflowRuntimeService keeps an invocation-level user pause resumable', as
   assert.equal(await setup.runtime.resumeCurrentExecution(run.id), true);
   assert.equal(setup.taskItems[0].status, 'pending');
   assert.equal(setup.callbacks.length, 2);
+});
+
+test('WorkflowRuntimeService keeps the current node resumable while workspace conflict is resolved', async () => {
+  const setup = fixture([{ id: 'requirements-node', type: 'agent', agentId: 'requirements', order: 0 }]);
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-workspace-conflict'
+  });
+  const nodeRun = setup.runtime.listNodeRuns(run.id)[0];
+  setup.taskItems[0].status = 'waiting';
+
+  setup.callbacks[0]({ kind: 'workspace_conflict', reason: 'merge conflict' });
+  await settle();
+
+  assert.equal(setup.runtime.get(run.id).status, 'running');
+  assert.equal(nodeRun.status, 'running');
+  assert.equal(setup.taskItems[0].status, 'waiting');
+  assert.ok(setup.updates.some((item) => item.kind === 'session_outcome' && item.outcome.kind === 'workspace_conflict'));
 });
 
 test('WorkflowRuntimeService treats a session-level user cancellation as terminal', async () => {

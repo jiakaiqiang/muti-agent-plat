@@ -75,3 +75,26 @@ test('buildProjectMap detects tests inside __tests__ folders', () => {
   assert.ok(src);
   assert.deepEqual(src!.tests, ['src/__tests__/service.test.ts']);
 });
+
+test('buildProjectMap respects budgetTokens and truncates modules', () => {
+  const entries: WorkspaceIndexEntry[] = [];
+  for (let i = 0; i < 50; i += 1) {
+    entries.push(file(`module-${i}/index.ts`));
+  }
+  const map = buildProjectMap({ entries, entrypoints: [], budgetTokens: 500 });
+  assert.ok(map.modules.length < 50);
+  const serialized = JSON.stringify(map.modules);
+  const estimatedTokens = Math.ceil(Buffer.byteLength(serialized, 'utf8') / 4);
+  assert.ok(estimatedTokens <= 500);
+});
+
+test('buildProjectMap produces deterministic output for same input', () => {
+  const entries = [
+    file('apps/main.ts'),
+    file('packages/util.ts'),
+    file('src/index.ts')
+  ];
+  const map1 = buildProjectMap({ entries, entrypoints: [], budgetTokens: 300 });
+  const map2 = buildProjectMap({ entries, entrypoints: [], budgetTokens: 300 });
+  assert.deepEqual(map1.modules, map2.modules);
+});

@@ -36,13 +36,16 @@ function record(
       requestedCommands: commands.length ? commands : undefined
     },
     resolution: {
-      requestedPaths,
+      requestedFiles: requestedPaths.map((path) => ({ path })),
       hydratedPaths: resolvedPaths,
       failedPaths: requestedPaths
         .filter((path) => !resolvedPaths.includes(path))
         .map((path) => ({ path, code: 'READ_ERROR' as const, retryable: true })),
       deferredPaths: [],
-      contentBytes: 1
+      contentBytes: 1,
+      outcome: resolvedPaths.length === requestedPaths.length ? 'resolved' : 'partial',
+      attempt: 1,
+      maxAttempts: 1
     }
   };
 }
@@ -82,6 +85,21 @@ test('collectSeenContextSignatures handles undefined prior history', () => {
   assert.equal(seen.refs.size, 0);
   assert.equal(seen.paths.size, 0);
   assert.equal(seen.commands.size, 0);
+});
+
+test('collectSeenContextSignatures does not suppress an unresolved semantic ref retry', () => {
+  const prior = record([ref('artifact', 'Architecture design')]);
+  prior.resolution.resolvedRefs = [];
+  prior.resolution.failedRefs = [{
+    type: 'artifact',
+    label: 'Architecture design',
+    code: 'INVALID_REFERENCE',
+    retryable: true
+  }];
+  prior.resolution.outcome = 'exhausted';
+
+  const seen = collectSeenContextSignatures([prior]);
+  assert.equal(seen.refs.has(refSignature(ref('artifact', 'Architecture design'))), false);
 });
 
 test('dedupe applies only to evidence captured at the current workspace revision', () => {
@@ -162,6 +180,7 @@ test('trimToNovelContext returns a candidate trimmed to net-new entries', () => 
   assert.equal(trimmed.reason, 'partial overlap');
   assert.equal(trimmed.followUpInstruction, 'pretty please');
   assert.deepEqual(trimmed.requestedRefs.map((r) => r.ref), ['src/b.ts']);
-  assert.deepEqual(trimmed.requestedPaths, ['docs/b.md']);
+  assert.deepEqual(trimmed.requestedFiles, [{ path: 'docs/b.md' }]);
+  assert.equal(trimmed.requestedPaths, undefined);
   assert.deepEqual(trimmed.requestedCommands, ['npm test'], 'unexecuted commands remain novel');
 });

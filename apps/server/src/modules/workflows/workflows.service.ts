@@ -359,6 +359,20 @@ export class WorkflowsService {
       throw new BadRequestException({ code: 'WORKFLOW_VALIDATION_FAILED', message: 'Workflow must contain at least one Agent node.' });
     }
     workflow.nodes.forEach((node, index) => {
+      if (node.type === 'agent') {
+        if (!node.stageDescription?.trim() || !node.outputContract?.length) {
+          throw new BadRequestException({
+            code: 'WORKFLOW_VALIDATION_FAILED',
+            message: `Agent stage requires a description and at least one output contract: ${node.id}`
+          });
+        }
+        if (index > 0 && !node.inputContract?.length) {
+          throw new BadRequestException({
+            code: 'WORKFLOW_VALIDATION_FAILED',
+            message: `Downstream Agent stage requires at least one input contract: ${node.id}`
+          });
+        }
+      }
       if (node.type !== 'agent' && !workflow.nodes.slice(0, index).some((candidate) => candidate.type === 'agent')) {
         throw new BadRequestException({
           code: 'WORKFLOW_VALIDATION_FAILED',

@@ -42,7 +42,9 @@ import type {
 import {
   DEFAULT_LOCAL_RUNTIME_PERMISSION_POLICY,
   isGeneratedWorkspaceDirectory,
-  isSensitiveWorkspacePath
+  isSensitiveWorkspacePath,
+  mergeWorkspaceText,
+  WORKSPACE_MERGE_CONFLICT
 } from '@agent-cluster/shared';
 import type { LocalWorkspaceState } from './state.js';
 
@@ -387,14 +389,7 @@ export class LocalWorkspace {
   ): Promise<ApplyChangeSetResult> {
     this.assertPermission('workspace_write', permissions);
     const revision = await this.revision();
-    if (revision.id !== changeSet.baseRevision.id) {
-      return {
-        ok: false,
-        changeSetId: changeSet.id,
-        revision,
-        conflicts: [conflict(changeSet, 'update', '.', revision, 'Workspace revision changed.')]
-      };
-    }
+    const mergedChanges: WorkspaceChange[] = [];
     const conflicts: WorkspaceConflictError[] = [];
     for (const change of changeSet.changes) {
       if (change.operation === 'delete' || change.operation === 'move') {
@@ -402,35 +397,136 @@ export class LocalWorkspace {
           throw new Error('LOCAL_CONFIRMATION_REQUIRED: workspace_delete');
         }
       }
-      const detected = await this.validateChange(changeSet, change, revision);
+      const merged = await this.mergeChange(changeSet, change, revision);
+      if (merged.conflict) {
+        conflicts.push(merged.conflict);
+        continue;
+      }
+      if (!merged.change) continue;
+      const detected = await this.validateChange(changeSet, merged.change, revision);
       if (detected) conflicts.push(detected);
+      else mergedChanges.push(merged.change);
     }
     if (conflicts.length) return { ok: false, changeSetId: changeSet.id, revision, conflicts };
-    for (const change of changeSet.changes) {
-      const currentRevision = await this.revision();
-      const changedDuringApply = await this.validateChange(changeSet, change, currentRevision);
-      if (changedDuringApply) {
-        throw new Error(`LOCAL_WORKSPACE_CONFLICT_DURING_APPLY: ${changedDuringApply.path}: ${changedDuringApply.message}`);
+    const snapshots = await Promise.all(this.changePaths(mergedChanges).map((path) => this.snapshotChangePath(path)));
+    const snapshotByPath = new Map(snapshots.map((entry) => [entry.path, entry]));
+    const appliedStates = new Map<string, { path: string; content?: Buffer }>();
+    try {
+      for (const change of mergedChanges) {
+        const currentRevision = await this.revision();
+        const changedDuringApply = await this.validateChange(changeSet, change, currentRevision);
+        if (changedDuringApply) {
+          throw new Error(`LOCAL_WORKSPACE_CONFLICT_DURING_APPLY: ${changedDuringApply.path}: ${changedDuringApply.message}`);
+        }
+        if (change.operation === 'create' || change.operation === 'update') {
+          const target = await this.resolveTarget(change.path);
+          await mkdir(dirname(target), { recursive: true });
+          await writeFileAtomic(target, change.content);
+          appliedStates.set(change.path, { path: change.path, content: Buffer.from(change.content, 'utf8') });
+        } else if (change.operation === 'delete') {
+          await rm(await this.resolveExisting(change.path), { force: false });
+          appliedStates.set(change.path, { path: change.path });
+        } else {
+          const target = await this.resolveTarget(change.toPath);
+          await mkdir(dirname(target), { recursive: true });
+          await rename(await this.resolveExisting(change.fromPath), target);
+          const source = snapshotByPath.get(change.fromPath);
+          if (!source?.content) throw new Error(`Move source snapshot is unavailable: ${change.fromPath}`);
+          appliedStates.set(change.fromPath, { path: change.fromPath });
+          appliedStates.set(change.toPath, { path: change.toPath, content: source.content });
+        }
       }
-      if (change.operation === 'create' || change.operation === 'update') {
-        const target = await this.resolveTarget(change.path);
-        await mkdir(dirname(target), { recursive: true });
-        await writeFileAtomic(target, change.content);
-      } else if (change.operation === 'delete') {
-        await rm(await this.resolveExisting(change.path), { force: false });
-      } else {
-        const target = await this.resolveTarget(change.toPath);
-        await mkdir(dirname(target), { recursive: true });
-        await rename(await this.resolveExisting(change.fromPath), target);
+    } catch (error) {
+      const rollbackErrors: string[] = [];
+      for (const original of snapshots) {
+        const expected = appliedStates.get(original.path);
+        if (!expected) continue;
+        const current = await this.snapshotChangePath(original.path).catch((cause) => {
+          rollbackErrors.push(`${original.path}: cannot inspect current state (${String(cause)})`);
+          return undefined;
+        });
+        if (!current) continue;
+        if (!sameLocalSnapshot(current, expected)) {
+          rollbackErrors.push(`${original.path}: changed after the batch write; automatic rollback was skipped`);
+          continue;
+        }
+        await this.restoreChangePath(original).catch((cause) => {
+          rollbackErrors.push(`${original.path}: rollback failed (${String(cause)})`);
+        });
       }
+      if (rollbackErrors.length) {
+        throw new Error(`LOCAL_WORKSPACE_ROLLBACK_REQUIRES_ATTENTION: ${rollbackErrors.join('; ')}`, { cause: error });
+      }
+      throw error;
     }
     const appliedRevision = this.refreshRevision();
     return {
       ok: true,
       revision: appliedRevision,
       changeSetId: changeSet.id,
-      appliedCount: changeSet.changes.length
+      appliedCount: mergedChanges.length
     };
+  }
+
+  private changePaths(changes: WorkspaceChange[]) {
+    return [...new Set(changes.flatMap((change) =>
+      change.operation === 'move' ? [change.fromPath, change.toPath] : [change.path]
+    ))];
+  }
+
+  private async snapshotChangePath(path: string): Promise<{ path: string; content?: Buffer }> {
+    const target = await this.resolveTarget(path);
+    try {
+      const metadata = await lstat(target);
+      if (!metadata.isFile()) throw new Error(`Workspace write target is not a file: ${path}`);
+      return { path, content: await readFile(target) };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { path };
+      throw error;
+    }
+  }
+
+  private async restoreChangePath(snapshot: { path: string; content?: Buffer }) {
+    const target = await this.resolveTarget(snapshot.path);
+    if (snapshot.content === undefined) {
+      await rm(target, { force: true });
+      return;
+    }
+    await mkdir(dirname(target), { recursive: true });
+    await writeFileAtomic(target, snapshot.content);
+  }
+
+  private async mergeChange(
+    changeSet: WorkspaceChangeSet,
+    change: WorkspaceChange,
+    revision: WorkspaceRevision
+  ): Promise<{ change?: WorkspaceChange; conflict?: WorkspaceConflictError }> {
+    if (change.operation !== 'update' || change.baseContent === undefined) return { change };
+    const target = await this.resolveExisting(change.path).catch(() => undefined);
+    if (!target) return { change };
+    const actualHash = await this.hashFile(target);
+    if (actualHash.value === change.expectedHash.value) return { change };
+    const current = await readFile(target, 'utf8').catch(() => undefined);
+    if (current === undefined) return { change };
+    const merged = mergeWorkspaceText(change.baseContent, current, change.content);
+    if (!merged.ok) {
+      return {
+        conflict: {
+          ...conflict(
+            changeSet,
+            change.operation,
+            change.path,
+            revision,
+            `Current and Session changes overlap: ${change.path}`,
+            change.expectedHash,
+            actualHash
+          ),
+          code: WORKSPACE_MERGE_CONFLICT
+        }
+      };
+    }
+    if (merged.content === current) return {};
+    return { change: { ...change, content: merged.content, expectedHash: actualHash } };
   }
 
   private startRevisionWatcher(): void {
@@ -551,7 +647,15 @@ export class LocalWorkspace {
       detectedStack: detectStack(entries),
       indexedEntries: entries.length,
       truncated: current.truncated,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
+      coverage: {
+        visitedEntries: entries.length,
+        indexedEntries: entries.length,
+        excludedGenerated: 0,
+        sensitiveEntries: 0,
+        skippedSymlinks: 0,
+        failedEntries: 0
+      }
     };
     this.state.index = snapshot;
     await this.onIndexUpdated?.(snapshot);
@@ -650,7 +754,15 @@ export class LocalWorkspace {
       detectedStack: [],
       indexedEntries: 0,
       truncated: false,
-      updatedAt: startedAt
+      updatedAt: startedAt,
+      coverage: {
+        visitedEntries: 0,
+        indexedEntries: 0,
+        excludedGenerated: 0,
+        sensitiveEntries: 0,
+        skippedSymlinks: 0,
+        failedEntries: 0
+      }
     };
     try {
       while (pending.length && entries.length < indexEntryLimit && !this.closed) {
@@ -705,7 +817,15 @@ export class LocalWorkspace {
         detectedStack: detectStack(entries),
         indexedEntries: entries.length,
         truncated: pending.length > 0,
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
+        coverage: {
+          visitedEntries: entries.length,
+          indexedEntries: entries.length,
+          excludedGenerated: 0,
+          sensitiveEntries: 0,
+          skippedSymlinks: 0,
+          failedEntries: 0
+        }
       };
       this.state.index = finalSnapshot;
       this.lastStableIndexComplete = finalSnapshot.complete;
@@ -739,9 +859,22 @@ export class LocalWorkspace {
       detectedStack: [],
       indexedEntries: 0,
       truncated: false,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
+      coverage: {
+        visitedEntries: 0,
+        indexedEntries: 0,
+        excludedGenerated: 0,
+        sensitiveEntries: 0,
+        skippedSymlinks: 0,
+        failedEntries: 0
+      }
     };
   }
+}
+
+function sameLocalSnapshot(left: { content?: Buffer }, right: { content?: Buffer }) {
+  if (left.content === undefined || right.content === undefined) return left.content === right.content;
+  return left.content.equals(right.content);
 }
 
 function encodeIndexCursor(index: number): string {
@@ -840,9 +973,9 @@ async function exists(path: string) {
   try { await lstat(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
 }
 
-async function writeFileAtomic(path: string, content: string) {
+async function writeFileAtomic(path: string, content: string | Uint8Array) {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temporary, content, { encoding: 'utf8', flag: 'wx' });
+  await writeFile(temporary, content, { flag: 'wx' });
   await rename(temporary, path);
 }
 

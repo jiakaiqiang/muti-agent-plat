@@ -5,6 +5,8 @@ export interface LayerDebugSummary {
   itemCount: number;
   approxByteLength: number;
   approxTokens: number;
+  budgetTokens?: number;
+  usedTokens?: number;
   truncated?: boolean;
   notes?: string[];
 }
@@ -22,9 +24,9 @@ export interface ContextDebugSnapshot {
 export function presentContextEnvelopeV2Debug(envelope: ContextEnvelopeV2): ContextDebugSnapshot {
   const layers: LayerDebugSummary[] = [
     summarizeL0(envelope),
-    summarizeL1(envelope),
-    summarizeL2(envelope),
-    summarizeL3(envelope),
+    summarizeL1(envelope, envelope.budget.navigationTokens),
+    summarizeL2(envelope, envelope.budget.projectMapTokens),
+    summarizeL3(envelope, envelope.budget.evidenceTokens),
     summarizeL4(envelope),
     summarizeL5(envelope),
     summarizeL6(envelope)
@@ -47,22 +49,35 @@ function summarizeL0(envelope: ContextEnvelopeV2): LayerDebugSummary {
   return baseSummary('L0', 1, JSON.stringify(envelope.L0).length);
 }
 
-function summarizeL1(envelope: ContextEnvelopeV2): LayerDebugSummary {
+function summarizeL1(envelope: ContextEnvelopeV2, budgetTokens?: number): LayerDebugSummary {
   const summary = baseSummary(
     'L1',
     envelope.L1.navigation.entries.length,
     JSON.stringify(envelope.L1.navigation.entries).length
   );
+  if (budgetTokens !== undefined) {
+    summary.budgetTokens = budgetTokens;
+    summary.usedTokens = summary.approxTokens;
+  }
   if (envelope.L1.navigation.truncated) summary.truncated = true;
   return summary;
 }
 
-function summarizeL2(envelope: ContextEnvelopeV2): LayerDebugSummary {
-  return baseSummary('L2', envelope.L2.modules.length, JSON.stringify(envelope.L2.modules).length);
+function summarizeL2(envelope: ContextEnvelopeV2, budgetTokens?: number): LayerDebugSummary {
+  const summary = baseSummary('L2', envelope.L2.modules.length, JSON.stringify(envelope.L2.modules).length);
+  if (budgetTokens !== undefined) {
+    summary.budgetTokens = budgetTokens;
+    summary.usedTokens = summary.approxTokens;
+  }
+  return summary;
 }
 
-function summarizeL3(envelope: ContextEnvelopeV2): LayerDebugSummary {
+function summarizeL3(envelope: ContextEnvelopeV2, budgetTokens?: number): LayerDebugSummary {
   const summary = baseSummary('L3', envelope.L3.files.length, envelope.L3.totalByteLength);
+  if (budgetTokens !== undefined) {
+    summary.budgetTokens = budgetTokens;
+    summary.usedTokens = summary.approxTokens;
+  }
   if (envelope.L3.truncated) summary.truncated = true;
   return summary;
 }

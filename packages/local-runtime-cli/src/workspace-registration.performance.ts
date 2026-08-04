@@ -25,7 +25,15 @@ const workspace = new LocalWorkspace({
     revision: { id: 'revision-registration-performance', observedAt },
     generation: 1, status: 'ready', complete: true, entries,
     entrypoints: ['src/file-0.ts'], detectedStack: ['node'], indexedEntries: fileCount,
-    truncated: false, updatedAt: observedAt
+    truncated: false, updatedAt: observedAt,
+    coverage: {
+      visitedEntries: fileCount,
+      indexedEntries: fileCount,
+      excludedGenerated: 0,
+      sensitiveEntries: 0,
+      skippedSymlinks: 0,
+      failedEntries: 0
+    }
   }
 }, { watch: false, index: false });
 

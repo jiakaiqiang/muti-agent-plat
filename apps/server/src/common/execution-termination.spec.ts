@@ -18,11 +18,12 @@ function termination(kind: ExecutionTerminationKind) {
 
 test('termination kinds map to stable dispositions and compatibility error codes', () => {
   assert.deepEqual(
-    ['user_cancelled', 'frontend_disconnected', 'runtime_disconnected', 'phase_timeout', 'runtime_timeout', 'service_shutdown', 'superseded', 'maintenance'].map(
+    ['user_cancelled', 'user_paused', 'frontend_disconnected', 'runtime_disconnected', 'phase_timeout', 'runtime_timeout', 'service_shutdown', 'superseded', 'maintenance'].map(
       (kind) => [kind, terminationDisposition(termination(kind as ExecutionTerminationKind)), terminationErrorCode(termination(kind as ExecutionTerminationKind))]
     ),
     [
       ['user_cancelled', 'stop', 'RUNTIME_CANCELLED'],
+      ['user_paused', 'stop', 'RUNTIME_CANCELLED'],
       ['frontend_disconnected', 'stop', 'RUNTIME_CANCELLED'],
       ['runtime_disconnected', 'stop', 'RUNTIME_CANCELLED'],
       ['phase_timeout', 'retry', 'RUNTIME_TIMEOUT'],

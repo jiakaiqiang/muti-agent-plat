@@ -115,6 +115,12 @@ withDefaults(
     <template v-else-if="name === 'check'">
       <path d="m20 6-11 11-5-5" />
     </template>
+    <template v-else-if="name === 'stop'">
+      <rect x="6" y="6" width="12" height="12" rx="1" />
+    </template>
+    <template v-else-if="name === 'play'">
+      <path d="m8 5 11 7-11 7z" />
+    </template>
     <template v-else-if="name === 'refresh-cw'">
       <path d="M21 12a9 9 0 0 1-15.5 6.2L3 16" />
       <path d="M3 21v-5h5" />

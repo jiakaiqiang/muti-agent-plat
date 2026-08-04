@@ -29,9 +29,17 @@ export function evaluateGroundedEvidenceGate(
     ...files.map((file) => file.path),
     ...fileRevisions.map((revision) => revision.filePath)
   ];
-  if (evidencePaths.length === 0) return { ok: false, reason: 'evidence-empty' };
 
   const manifestByPath = new Map(input.envelope.L1.navigation.entries.map((entry) => [entry.path, entry]));
+  const hasAnyNavigableEntry = manifestByPath.size > 0;
+
+  if (evidencePaths.length === 0) {
+    if (!hasAnyNavigableEntry) {
+      return { ok: false, reason: 'evidence-empty' };
+    }
+    return { ok: false, reason: 'evidence-empty' };
+  }
+
   const usablePaths = evidencePaths.filter((path) => {
     const manifestEntry = manifestByPath.get(path);
     if (!manifestEntry) return false;

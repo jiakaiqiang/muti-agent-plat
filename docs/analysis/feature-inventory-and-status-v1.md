@@ -1,6 +1,6 @@
 # Agent Cluster 功能清单与当前状态
 
-> 更新时间：2026-07-13
+> 更新时间：2026-07-30
 > 适用版本：`agent-cluster@0.1.0` 当前工作树
 > 本文基于 `apps/server/`、`apps/web/`、`packages/shared/`、`tests/e2e/` 和现有质量文档重新盘点。旧版 2026-06-04 的 P0/P1 问题多数已经修复，不再作为当前事实来源。
 
@@ -70,8 +70,8 @@ packages/shared
 | Capability governance | 部分 | 能力注册、风险分级、check/approve 可用；真实高风险工具执行仍默认关闭且未做端到端真实工具链。**当前问题**：任务执行中遇到审批阻断后用户授权，任务从头重新执行而非断点恢复。**P1 短期方案**（预检查）：任务启动前根据 Agent Profile 预检查所需能力，批量审批后再执行，避免中途打断。**P2 长期方案**（中断恢复）：保存 `PendingInvocation` 上下文，审批后自动从断点恢复执行。设计见 `docs/design/capability-approval-resume-design.md` 和 `docs/roadmap/remediation-plan-v1.md` § 4.5。 |
 | Artifacts | 完成 | brief、执行结果、复盘、最终交付、通知草稿均创建 artifact；metadata 支持 `fileChanges`。 |
 | Context Pipeline v2 | 完成（本地主链路） | v2 Session 构建 L0-L6 Envelope，Runtime 边界移除重复 legacy workspace payload；源码任务执行 grounded evidence gate，缺证据通过 Workspace Provider 补读后重试。 |
-| 工作区感知 | 完成 | 产品只提供 `local_bridge` 与 `server_local`：本地模式由浏览器选择 CLI 已注册工作区并在本机 Runtime 执行；服务器模式由后端校验服务器目录并在服务器执行，Codex/Claude Code 使用独立 Worker。浏览器目录上传、服务器镜像和写回兼容链路已退役。 |
-| 文件变更写回 | 完成（受控） | Local Runtime CLI 在授权工作区内通过相对路径、权限、base hash 与 revision 校验应用变更；ServerLocal 保留敏感路径、symlink、hash 冲突和 per-path 写锁。 |
+| 工作区感知 | 完成 | 产品只提供 `local_bridge` 与 `server_local`。同一目录允许多个活动 Session；Git 写任务使用独立 worktree 并行，非 Git 写任务使用 staging copy 并按目录 FIFO 串行，读任务可并行。浏览器目录上传与服务器镜像链路已退役。 |
+| 文件变更写回 | 完成（受控） | Codex/Claude Code 不直接修改源目录。ServerLocal 和 Local Runtime 都从隔离目录捕获 ChangeSet，再按 Workspace FIFO 自动写回；path hash 不一致时对 UTF-8 文本尝试三方合并，重叠冲突进入可恢复状态并提供重试、Agent 解决、保留工作区、强制 Session 版本和放弃写回五种动作。批次应用失败会整体回滚。 |
 | 用户原文件修订处理 | 完成（V2 候选迭代主链路） | 支持 `W0 -> U1 -> G1 -> U2 -> G2...` 版本链；第一轮和后续轮使用正确内部 Diff，单/多 Agent 共用冻结证据并由启用的系统默认 Receiver 生成唯一候选，Receiver 不可用时 fail closed；部分 Agent 失败由用户显式选择重试、使用成功结果继续或放弃；统一产物编辑器只展示候选全文，保存草稿不触发 Agent；精确确认和 Workspace Hash CAS 后才写回。候选/草稿可跨重启恢复，中断后按持久化结果显式重试 Agent、Receiver 或只做 apply 对账，Provider 异常不会永久卡在 `applying`；大文件和截断上下文 fail closed，Adapter 真实输出上限参与预检；`proposal_only` 在路由和执行两层只保留读取/搜索工具，业务事件不泄露 Prompt、提案、模型摘要或原始错误。PostgreSQL V2 投影实现数据库 advisory lock + CAS，冲突方刷新本地快照；当前验收环境未配置 `RELATIONAL_TEST_DATABASE_URL`，真实 PostgreSQL 的 `3` 项集成测试跳过。Mock Runtime 两轮 HTTP 和浏览器 E2E 覆盖候选-only 编辑、最终写回和 stale 冲突；真实付费模型 E2E 仍需在具备外部 Runtime 凭据的环境单独执行。 |
 | 飞书通知 | 部分 | 最终交付会创建 `feishu_draft` artifact 和确认卡；确认后记录 dry-run tool 完成事件；不会调用真实飞书接口。 |
 | 前端工作台 | 完成 | 三栏工作台、群聊、工作流、协作图、debug、Agent/Skill/Knowledge/Model/Tool/Notification 管理入口和中文可见文案。 |

@@ -110,7 +110,7 @@ export const useSessionStore = defineStore('session', {
         })
         this.runtimeHealthError = this.backendCompatible
           ? undefined
-          : `BACKEND_VERSION_MISMATCH: expected pipeline=v2 schema=3${expectedBackendCommit ? ` commit=${expectedBackendCommit}` : ''}; received pipeline=${this.runtimeHealth.pipelineVersion} schema=${this.runtimeHealth.dataSchemaVersion} commit=${this.runtimeHealth.commit}.`
+          : `BACKEND_VERSION_MISMATCH: expected pipeline=v2 schema=3 stale=false${expectedBackendCommit ? ` commit=${expectedBackendCommit}` : ''}; received pipeline=${this.runtimeHealth.pipelineVersion} schema=${this.runtimeHealth.dataSchemaVersion} commit=${this.runtimeHealth.commit} build=${this.runtimeHealth.buildId ?? 'missing'} stale=${String(this.runtimeHealth.runtimeBuildStale)}.`
         if (this.runtimeHealthError) {
           this.sessions = []
           this.currentSession = undefined
@@ -451,13 +451,21 @@ export const useSessionStore = defineStore('session', {
     },
     async pauseSession(sessionId: string, confirmationId?: string) {
       await this.assertBackendCompatible()
-      await apiPost(`/sessions/${sessionId}/pause`, confirmationId ? { confirmationId } : undefined)
-      this.setCurrentStatus(sessionId, 'WAIT_USER_DECISION')
+      const result = await apiPost<{ session: SessionDetail }>(
+        `/sessions/${sessionId}/pause`,
+        confirmationId ? { confirmationId } : undefined
+      )
+      await this.loadSession(sessionId)
+      return result
     },
     async resumeSession(sessionId: string, confirmationId?: string) {
       await this.assertBackendCompatible()
-      await apiPost(`/sessions/${sessionId}/resume`, confirmationId ? { confirmationId } : undefined)
-      this.setCurrentStatus(sessionId, 'EXECUTING')
+      const result = await apiPost<{ session: SessionDetail }>(
+        `/sessions/${sessionId}/resume`,
+        confirmationId ? { confirmationId } : undefined
+      )
+      await this.loadSession(sessionId)
+      return result
     },
     async cancelSession(sessionId: string, confirmationId?: string) {
       await this.assertBackendCompatible()
@@ -507,6 +515,19 @@ export const useSessionStore = defineStore('session', {
       await this.assertBackendCompatible()
       const result = await apiPost<{ session: SessionDetail }>(
         `/sessions/${sessionId}/workspace/empty-decision`,
+        input
+      )
+      await this.loadSession(sessionId)
+      return result
+    },
+    async resolveWorkspaceWriteback(
+      sessionId: string,
+      writebackId: string,
+      input: import('@/types/contracts').ResolveWorkspaceWritebackInput
+    ) {
+      await this.assertBackendCompatible()
+      const result = await apiPost<import('@/types/contracts').WorkspaceWritebackRecord>(
+        `/sessions/${sessionId}/workspace-writebacks/${writebackId}/resolve`,
         input
       )
       await this.loadSession(sessionId)
@@ -597,6 +618,8 @@ export function runtimeHealthCompatible(health: OpsHealth | undefined, expectedC
   return (
     health?.pipelineVersion === 'v2' &&
     health.dataSchemaVersion === 3 &&
+    health.runtimeBuildStale === false &&
+    Boolean(health.buildId) &&
     (!expectedCommit || health.commit === expectedCommit)
   )
 }

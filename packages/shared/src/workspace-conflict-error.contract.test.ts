@@ -4,7 +4,7 @@ import type {
   WorkspaceConflictErrorCode,
   WorkspaceRevision
 } from './contracts.js';
-import { WORKSPACE_BASE_HASH_MISMATCH } from './contracts.js';
+import { WORKSPACE_BASE_HASH_MISMATCH, WORKSPACE_MERGE_CONFLICT } from './contracts.js';
 
 type Assert<T extends true> = T;
 type IsExact<T, Expected> = [T] extends [Expected]
@@ -14,7 +14,7 @@ type IsExact<T, Expected> = [T] extends [Expected]
   : false;
 
 type ConflictCodeIsStable = Assert<
-  IsExact<WorkspaceConflictErrorCode, 'WORKSPACE_BASE_HASH_MISMATCH'>
+  IsExact<WorkspaceConflictErrorCode, 'WORKSPACE_BASE_HASH_MISMATCH' | 'WORKSPACE_MERGE_CONFLICT'>
 >;
 
 const baseHash = {
@@ -44,3 +44,4 @@ const conflict = {
 } satisfies WorkspaceConflictError;
 
 void conflict;
+void WORKSPACE_MERGE_CONFLICT;

@@ -5,9 +5,11 @@ import {
   RELATIONAL_SCHEMA_BOOTSTRAP_SQL,
   RELATIONAL_SCHEMA_V2_TABLES,
   RELATIONAL_SCHEMA_V3_TABLES,
+  RELATIONAL_SCHEMA_V4_TABLES,
   RELATIONAL_SCHEMA_V1_SQL,
   RELATIONAL_SCHEMA_V2_SQL,
   RELATIONAL_SCHEMA_V3_SQL,
+  RELATIONAL_SCHEMA_V4_SQL,
   RELATIONAL_TABLES,
   SCHEMA_MIGRATIONS_TABLE
 } from './relational-schema.js';
@@ -17,7 +19,8 @@ test('every relational table and column has a non-empty Chinese explanation', ()
     SCHEMA_MIGRATIONS_TABLE,
     ...RELATIONAL_TABLES,
     ...RELATIONAL_SCHEMA_V2_TABLES,
-    ...RELATIONAL_SCHEMA_V3_TABLES
+    ...RELATIONAL_SCHEMA_V3_TABLES,
+    ...RELATIONAL_SCHEMA_V4_TABLES
   ];
   assert.ok(definitions.length >= 35, 'expected the complete relational domain schema');
 
@@ -36,7 +39,7 @@ test('every relational table and column has a non-empty Chinese explanation', ()
   }
 });
 test('rendered migration emits COMMENT statements for every declared table and column', () => {
-  const sql = `${RELATIONAL_SCHEMA_BOOTSTRAP_SQL}\n${RELATIONAL_SCHEMA_V1_SQL}\n${RELATIONAL_SCHEMA_V2_SQL}\n${RELATIONAL_SCHEMA_V3_SQL}`;
+  const sql = `${RELATIONAL_SCHEMA_BOOTSTRAP_SQL}\n${RELATIONAL_SCHEMA_V1_SQL}\n${RELATIONAL_SCHEMA_V2_SQL}\n${RELATIONAL_SCHEMA_V3_SQL}\n${RELATIONAL_SCHEMA_V4_SQL}`;
   for (const expected of expectedRelationalComments()) {
     const target = expected.column ? `${expected.table}.${expected.column}` : expected.table;
     const prefix = expected.column ? 'comment on column' : 'comment on table';
@@ -48,7 +51,8 @@ test('all external identity tables use text external IDs instead of forcing UUID
   const externalIdentityTables = [
     ...RELATIONAL_TABLES,
     ...RELATIONAL_SCHEMA_V2_TABLES,
-    ...RELATIONAL_SCHEMA_V3_TABLES
+    ...RELATIONAL_SCHEMA_V3_TABLES,
+    ...RELATIONAL_SCHEMA_V4_TABLES
   ].filter((definition) =>
     definition.columns.some((column) => column.name === 'external_id')
   );

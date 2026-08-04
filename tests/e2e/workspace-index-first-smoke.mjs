@@ -38,17 +38,12 @@ try {
     throw new Error(`Session create did not return the first user event: ${JSON.stringify(created.data)}`);
   }
 
-  const conflict = await fetch(`${server.apiBase}/sessions`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ input: 'Competing task', workingDirectory })
+  const second = await api(server.apiBase, '/sessions', {
+    method: 'POST',
+    body: JSON.stringify({ input: 'Parallel task in the same directory', workingDirectory })
   });
-  const conflictBody = await conflict.json();
-  if (
-    conflict.status !== 409 ||
-    conflictBody.error?.code !== 'WORKSPACE_ACTIVE_SESSION_CONFLICT' ||
-    conflictBody.error?.details?.activeSessionId !== session.id
-  ) {
-    throw new Error(`Expected structured active Session conflict: ${conflict.status} ${JSON.stringify(conflictBody)}`);
+  if (second.data.session.id === session.id || second.data.session.workspaceId !== session.workspaceId) {
+    throw new Error(`Expected an independent Session bound to the same workspace: ${JSON.stringify(second.data)}`);
   }
 
   console.log(`workspace index first smoke ok (${durationMs.toFixed(2)}ms)`);

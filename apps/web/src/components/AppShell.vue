@@ -9,6 +9,7 @@ import {
   Cpu,
   DataAnalysis,
   Files,
+  Monitor,
   Operation,
   Setting,
   User
@@ -23,6 +24,7 @@ const { routeRenderError } = storeToRefs(appUiStore)
 
 const navigation = [
   { path: '/workspace', label: '工作台', icon: ChatDotRound, section: 'session' },
+  { path: '/local-runtime', label: '本地运行', icon: Monitor, section: 'local-runtime' },
   { path: '/workflows', label: '工作流管理', icon: Connection, section: 'workflows' },
   { path: '/agents', label: 'Agent 管理', icon: User, section: 'agents' },
   { path: '/skills', label: 'Skill 管理', icon: Operation, section: 'skills' },

@@ -116,7 +116,11 @@ export function buildEnvelopeFromContextAssembly(args: {
           }
         : {}),
       navigation: {
-        ...buildNavigationManifest({ entries: index, entrypoints }),
+        ...buildNavigationManifest({
+          entries: index,
+          entrypoints,
+          budgetTokens: Math.floor(inputTokens * 0.15)
+        }),
         ...(providerIndex
           ? {
               indexGeneration: providerIndex.generation,
@@ -133,7 +137,8 @@ export function buildEnvelopeFromContextAssembly(args: {
       detectedStack: Array.from(new Set([
         ...(providerIndex?.detectedStack ?? []),
         ...(snapshot?.detectedStack ?? [])
-      ]))
+      ])),
+      budgetTokens: Math.floor(inputTokens * 0.1)
     }),
     l3: {
       files: evidence.files,
@@ -268,6 +273,10 @@ function truncateUtf8(content: string, maxBytes: number) {
 
 function summaryBullets(contextAssembly: ContextAssembly): string[] {
   const memory = contextAssembly.summaryMemory;
+  const selectedArtifactContents = (contextAssembly.selectedEvidenceContents ?? [])
+    .filter((item) => item.source === 'artifact' && Boolean((item.content ?? item.summary)?.trim()))
+    .slice(0, 6)
+    .map((item) => `Artifact ${item.label}: ${truncateBullet((item.content ?? item.summary)!.trim())}`);
   const selectedMemoryContents = (contextAssembly.selectedEvidenceContents ?? [])
     .filter((item) => item.source === 'memory' && Boolean(item.content?.trim()))
     .map((item) => item.content!.trim());
@@ -279,6 +288,7 @@ function summaryBullets(contextAssembly: ContextAssembly): string[] {
     .map((content) => `Memory: ${truncateBullet(content)}`);
   return [
     memory.currentState,
+    ...selectedArtifactContents,
     ...memoryBullets,
     ...memory.confirmedFacts,
     ...memory.completed,

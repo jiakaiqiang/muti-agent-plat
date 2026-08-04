@@ -761,6 +761,26 @@ export const RELATIONAL_SCHEMA_V3_TABLES: RelationalTableDefinition[] = [
   ])
 ];
 
+export const RELATIONAL_SCHEMA_V4_TABLES: RelationalTableDefinition[] = [
+  table('workspace_session_leases', '保存单工作区单活动会话租约，防止同一工作区并发接入多个会话。', [
+    column('workspace_id', 'text primary key', '被租约保护的工作区标识。'),
+    column('session_id', 'text not null', '持有租约的会话标识。'),
+    column('acquired_at', 'timestamptz not null', '租约获取时间。')
+  ]),
+  table('workspace_writebacks', '保存隔离执行结果的自动写回、冲突和用户解决状态，支持后端重启后恢复。', [
+    column('external_id', 'text primary key', '写回记录的稳定外部标识。'),
+    column('session_external_id', 'text not null', '写回所属会话的稳定外部标识。'),
+    column('workspace_id', 'text not null', '写回目标工作区标识。'),
+    column('status', 'text not null', '写回当前状态，例如 queued、conflicted、applied 或 abandoned。'),
+    column('source_snapshot', "jsonb not null default '{}'::jsonb", '用于无损恢复完整 WorkspaceWritebackRecord 的快照。'),
+    column('created_at', 'timestamptz not null', '写回记录创建时间。'),
+    column('updated_at', 'timestamptz not null', '写回记录最后更新时间。')
+  ], [], [
+    'create index if not exists workspace_writebacks_session_idx on agent_cluster.workspace_writebacks (session_external_id, created_at)',
+    'create index if not exists workspace_writebacks_workspace_status_idx on agent_cluster.workspace_writebacks (workspace_id, status, created_at)'
+  ])
+];
+
 const CURRENT_VERSION_FOREIGN_KEYS = [
   'alter table agent_cluster.agents add constraint agents_current_version_fk foreign key (current_version_id) references agent_cluster.agent_versions(id)',
   'alter table agent_cluster.skills add constraint skills_current_version_fk foreign key (current_version_id) references agent_cluster.skill_versions(id)',
@@ -817,13 +837,15 @@ export const RELATIONAL_SCHEMA_V1_SQL = [
 
 export const RELATIONAL_SCHEMA_V2_SQL = renderTables(RELATIONAL_SCHEMA_V2_TABLES);
 export const RELATIONAL_SCHEMA_V3_SQL = renderTables(RELATIONAL_SCHEMA_V3_TABLES);
+export const RELATIONAL_SCHEMA_V4_SQL = renderTables(RELATIONAL_SCHEMA_V4_TABLES);
 
 export function expectedRelationalComments() {
   return [
     SCHEMA_MIGRATIONS_TABLE,
     ...RELATIONAL_TABLES,
     ...RELATIONAL_SCHEMA_V2_TABLES,
-    ...RELATIONAL_SCHEMA_V3_TABLES
+    ...RELATIONAL_SCHEMA_V3_TABLES,
+    ...RELATIONAL_SCHEMA_V4_TABLES
   ].flatMap((definition) => [
     { table: definition.name, column: null, comment: definition.comment },
     ...definition.columns.map((item) => ({ table: definition.name, column: item.name, comment: item.comment }))

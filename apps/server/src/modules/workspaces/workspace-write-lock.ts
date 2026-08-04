@@ -8,9 +8,6 @@ export class WorkspaceWriteLock {
   async runAll<T>(paths: readonly string[], task: () => Promise<T>): Promise<T> {
     const unique = Array.from(new Set(paths)).sort();
     const previous = unique.map((path) => this.tails.get(path)).filter((entry): entry is Promise<unknown> => Boolean(entry));
-    if (previous.length > 0) {
-      await Promise.allSettled(previous);
-    }
     let resolveRelease: () => void = () => undefined;
     const release = new Promise<void>((resolve) => {
       resolveRelease = resolve;
@@ -19,6 +16,9 @@ export class WorkspaceWriteLock {
       this.tails.set(path, release);
     }
     try {
+      if (previous.length > 0) {
+        await Promise.allSettled(previous);
+      }
       return await task();
     } finally {
       resolveRelease();

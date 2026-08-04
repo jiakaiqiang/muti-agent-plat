@@ -55,6 +55,30 @@ export class RecoveryService implements OnApplicationBootstrap {
     for (const session of sessions) {
       this.interruptSessionFromPreviousProcess(session);
     }
+
+    await this.reconcileWorkspaceLeases(sessions);
+  }
+
+  private async reconcileWorkspaceLeases(sessions: SessionDetail[]) {
+    const terminalStatuses: SessionStatus[] = ['COMPLETED', 'FAILED', 'CANCELLED'];
+    const activeSessionsByWorkspace = new Map<string, string>();
+
+    for (const session of sessions) {
+      if (!terminalStatuses.includes(session.status)) {
+        const existing = activeSessionsByWorkspace.get(session.workspaceId);
+        if (existing) {
+          this.logger.warn(
+            `Workspace ${session.workspaceId} has multiple active sessions: ${existing}, ${session.id}. Releasing lease for older session.`
+          );
+          await this.persistence.releaseWorkspaceSessionLease(session.workspaceId, existing);
+        }
+        activeSessionsByWorkspace.set(session.workspaceId, session.id);
+      }
+    }
+
+    await this.persistence.reconcileWorkspaceSessionLeases(
+      [...activeSessionsByWorkspace].map(([workspaceId, sessionId]) => ({ workspaceId, sessionId }))
+    );
   }
 
   private interruptSessionFromPreviousProcess(session: SessionDetail) {

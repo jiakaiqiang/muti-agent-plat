@@ -184,6 +184,8 @@ export const UserMessageHandlingPlanOutputSchema = strictObject({
     'knowledge_input',
     'preference_input'
   ] as const),
+  requirementRelation: literalUnion(['continuation', 'new_requirement'] as const),
+  failedExecutionAction: literalUnion(['none', 'resume', 'replan'] as const),
   priority: literalUnion(['low', 'normal', 'high', 'critical'] as const),
   shouldPause: Type.Boolean(),
   affectedTaskIds: StringArray,
@@ -331,6 +333,8 @@ export const runtimeOutputExamples = {
     schemaVersion: '1.0',
     kind: 'user_message_handling_plan',
     intent: 'question',
+    requirementRelation: 'continuation',
+    failedExecutionAction: 'none',
     priority: 'normal',
     shouldPause: false,
     affectedTaskIds: [],

@@ -1,5 +1,7 @@
 # Workspace Index First 与按需上下文实施文档 V1
 
+> 历史说明：下文的单活动 Session 实现已经移除。当前同工作区并发行为以 [`../design/workspace-multi-session-isolation-writeback-v1.md`](../design/workspace-multi-session-isolation-writeback-v1.md) 为准。
+
 > 状态：已实施，等待发布环境绝对性能基准  
 > 权威设计：[`../design/workspace-index-first-on-demand-context-system-design-v1.md`](../design/workspace-index-first-on-demand-context-system-design-v1.md)  
 > 验收证据：[`../quality/workspace-index-first-acceptance-v1.md`](../quality/workspace-index-first-acceptance-v1.md)
@@ -39,7 +41,7 @@ Session 创建不调用 Workspace Scanner，也不等待 `indexComplete=true`。
 | Local Provider Index | `packages/local-runtime-cli/src/workspace.ts` | 后台元数据索引、持久化、文件级 watcher 增量更新、无正文 hash |
 | Server Provider Index | `apps/server/src/modules/workspaces/server-local-workspace-index.ts` | 后台元数据索引、sidecar、分页、文件级增量更新、stale/rebuild、重建期间保留上一代导航 |
 | Session 快速绑定 | `apps/server/src/modules/sessions/sessions.service.ts` | 移除同步扫描，只校验目录/注册信息并建立 Binding |
-| Active Session Lease | `apps/server/src/modules/sessions/sessions.service.ts` | 同 Workspace 非终态 Session 冲突，重启后从持久化 Session 重建语义 |
+| Multi-Session Workspace | `apps/server/src/modules/sessions/sessions.service.ts`、`apps/server/src/modules/workspaces/workspace-writeback.service.ts` | 同 Workspace 允许多个非终态 Session；写任务隔离执行，ChangeSet 按 Workspace FIFO 写回，冲突按 Session 屏障恢复 |
 | Index 刷新 | `apps/server/src/modules/orchestrator/orchestrator.service.ts` | Invocation 前最多等待 500ms 查询最多 50 条任务相关投影；投影先保留基础入口再追加词法相关候选；不固定拉取 2,000 条，失败时继续使用现有状态 |
 | L1/L2/L3 | `apps/server/src/modules/context-v2/build-envelope-from-context-assembly.ts` | L1/L2 来自 Index；L3 只接收当前 revision 的已读正文 |
 | Project Map | `apps/server/src/modules/orchestrator/project-map.service.ts` | 索引提供导航，已读正文补充 scripts 与技术栈，不回退到全仓正文 |
@@ -117,14 +119,7 @@ Session 创建不调用 Workspace Scanner，也不等待 `indexComplete=true`。
 
 ## 6. V1 会话隔离边界
 
-V1 使用单 Workspace 单活动 Session：
-
-- 活动态包括讨论、等待确认、执行、复核、等待决策和可恢复中断。
-- `COMPLETED/FAILED/CANCELLED` 不持有 Lease。
-- 第二个活动 Session 返回结构化 `409 WORKSPACE_ACTIVE_SESSION_CONFLICT`。
-- 该约束由服务端持久化 Session 状态判定，不是前端按钮门禁。
-
-V2 才引入 Session sandbox/worktree、多 revision 快照和跨会话合并；V1 不伪装支持并发隔离。
+历史 V1 曾使用单 Workspace 单活动 Session。该边界已经废弃：当前版本允许多个活动 Session，并通过 Git worktree、非 Git staging copy、FIFO 写回和跨会话三方合并提供并发隔离。
 
 ## 7. 回归原因
 

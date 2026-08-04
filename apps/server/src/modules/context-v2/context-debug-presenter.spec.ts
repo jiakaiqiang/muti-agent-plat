@@ -72,3 +72,16 @@ test('presentContextEnvelopeV2Debug surfaces truncation as a dropped reason', ()
   assert.deepEqual(snap.droppedReasons, ['L1 navigation truncated', 'L3 evidence truncated']);
   assert.equal(snap.layers.find((l) => l.layer === 'L1')?.truncated, true);
 });
+
+test('presentContextEnvelopeV2Debug includes budget and usage for L1, L2, L3', () => {
+  const snap = presentContextEnvelopeV2Debug(baseEnvelope());
+  const l1 = snap.layers.find((l) => l.layer === 'L1');
+  const l2 = snap.layers.find((l) => l.layer === 'L2');
+  const l3 = snap.layers.find((l) => l.layer === 'L3');
+  assert.equal(l1?.budgetTokens, 800);
+  assert.ok(l1?.usedTokens !== undefined);
+  assert.equal(l2?.budgetTokens, 500);
+  assert.ok(l2?.usedTokens !== undefined);
+  assert.equal(l3?.budgetTokens, 3600);
+  assert.ok(l3?.usedTokens !== undefined);
+});

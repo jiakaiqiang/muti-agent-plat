@@ -103,7 +103,8 @@
 | `docs/design/codex-style-agent-collaboration-architecture-v1.md` | 可切换 Engineering Runtime 的群聊协作架构与 token 预算防线 |
 | `docs/ai-agent-context/pluggable-engineering-runtime-memory.md` | 群聊 Agent、ContextPack、Engineering Runtime 与 token 预算的长期架构记忆 |
 | `docs/design/workspace-aware-chat-agent-design-v1.md` | 聊天室 Agent 借鉴 Codex/Claude 工作区感知模型的产品与系统设计 |
-| `docs/design/workspace-index-first-on-demand-context-system-design-v1.md` | V1 工作目录快速绑定、增量元数据索引、Context v2 按需取证和单活动 Session 的权威系统设计 |
+| `docs/design/workspace-index-first-on-demand-context-system-design-v1.md` | 工作目录快速绑定、增量元数据索引和 Context v2 按需取证；其中单活动 Lease 章节已废弃 |
+| `docs/design/workspace-multi-session-isolation-writeback-v1.md` | 同目录多活动 Session、Git/non-Git 隔离、FIFO 自动写回、三方合并和冲突恢复的权威设计 |
 | `docs/design/ui-style-guide-v1.md` | 前端 UI 风格规范 |
 | `docs/implementation/agent-team-implementation-breakdown-v1.md` | Agent 团队实现拆解 |
 | `docs/analysis/feature-inventory-and-status-v1.md` | 功能清单与当前状态 |
@@ -197,7 +198,8 @@
 | L0-L6 Context Envelope | 同上 | `apps/server/src/modules/context-v2/`, `packages/shared/src/contracts.ts` |
 | 动态 Runtime 路由与 fail-closed | 同上 | `apps/server/src/modules/runtime-routing/` |
 | Local/Server Workspace Provider 与 Local Runtime | `docs/design/local-and-server-runtime-workspace-separation-discussion-result-v1.md` | `apps/server/src/modules/workspaces/`, `apps/server/src/modules/local-runtime/`, `apps/web/src/stores/localRuntime.ts` |
-| Workspace Index First、按需 Evidence 与 V1 单活动 Session | `docs/design/workspace-index-first-on-demand-context-system-design-v1.md` | `apps/server/src/modules/sessions/`, `apps/server/src/modules/workspaces/`, `apps/server/src/modules/context-v2/`, `apps/server/src/modules/orchestrator/`, `packages/local-runtime-cli/src/` |
+| Workspace Index First 与按需 Evidence | `docs/design/workspace-index-first-on-demand-context-system-design-v1.md` | `apps/server/src/modules/context-v2/`, `apps/server/src/modules/workspaces/`, `apps/server/src/modules/orchestrator/`, `packages/local-runtime-cli/src/` |
+| 同目录多 Session 隔离与写回 | `docs/design/workspace-multi-session-isolation-writeback-v1.md` | `apps/server/src/modules/sessions/`, `apps/server/src/modules/worktree-execution/`, `apps/server/src/modules/workspaces/`, `packages/local-runtime-cli/src/`, `apps/web/src/components/SessionWorkspace.vue` |
 | Runtime 密钥持久化 | `docs/devops/local-development.md` | `apps/server/src/common/secret-cipher.ts` |
 
 系统只保留 v2 行为；`CONTEXT_PIPELINE_V2_ENABLED` 已失效，历史 Session 不保留旧 Runtime/Model 或 Agent override 执行语义。

@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import type { PostReviewAction } from '@/types/contracts'
 import { resolveSessionWorkspacePostReviewAction } from './session-workspace-post-review-action'
 
@@ -34,5 +36,29 @@ describe('SessionWorkspace Post Review action routing', () => {
     expect(handlers.saveProgress).toHaveBeenCalledWith(actions[2])
     expect(handlers.cancel).toHaveBeenCalledWith(actions[3])
     expect(Object.keys(handlers)).not.toContain('resume')
+  })
+})
+
+describe('SessionWorkspace Session stop controls', () => {
+  const source = readFileSync(resolve(process.cwd(), 'src/components/SessionWorkspace.vue'), 'utf8')
+  const stoppableStatuses = source.match(
+    /const stoppableSessionStatuses = new Set<SessionStatus>\(\[([\s\S]*?)\]\)/
+  )?.[1] ?? ''
+
+  it('offers stop only for interruptible phases and resume only for PAUSED', () => {
+    expect(stoppableStatuses).toContain("'AGENT_DISCUSSING',")
+    expect(stoppableStatuses).toContain("'REVISING_BRIEF',")
+    expect(stoppableStatuses).toContain("'EXECUTING',")
+    expect(stoppableStatuses).toContain("'POST_REVIEW',")
+    expect(stoppableStatuses).toContain("'REWORKING'")
+    expect(stoppableStatuses).not.toContain("'APPLYING_CHANGES'")
+    expect(source).toContain("derivedStatus.value === 'PAUSED'")
+  })
+
+  it('waits for the server pause and resume operations before reconciling state', () => {
+    expect(source).toContain('await sessionStore.pauseSession(sessionId)')
+    expect(source).toContain('await sessionStore.resumeSession(sessionId)')
+    expect(source).toContain('title="停止会话"')
+    expect(source).toContain('title="继续会话"')
   })
 })

@@ -35,7 +35,10 @@ export type SessionStatus =
   | 'EXECUTING'
   | 'POST_REVIEW'
   | 'REWORKING'
+  | 'APPLYING_CHANGES'
+  | 'WAIT_WORKSPACE_CONFLICT_RESOLUTION'
   | 'WAIT_USER_DECISION'
+  | 'PAUSED'
   | 'INTERRUPTED'
   | 'COMPLETED'
   | 'FAILED'
@@ -88,6 +91,8 @@ export type OpsHealth = {
   service: string;
   version: string;
   buildTime: string;
+  buildId: string;
+  runtimeBuildStale: boolean;
   commit: string;
   processId: number;
   startedAt: ISODateTime;
@@ -152,6 +157,10 @@ export type UserMessageIntent =
   | 'correction'
   | 'knowledge_input'
   | 'preference_input';
+
+export type UserMessageRequirementRelation = 'continuation' | 'new_requirement';
+
+export type FailedExecutionAction = 'none' | 'resume' | 'replan';
 
 export type TaskDomain = 'coding' | 'non_coding' | 'mixed';
 export type TaskRoutingMode = 'coordinator_controlled' | 'agent_suggested' | 'agent_delegated';
@@ -230,6 +239,20 @@ export type WorkspaceNavigationEntry = {
   sensitive: boolean;
 };
 
+/**
+ * Aggregate coverage counts for an index generation. Contains only counts,
+ * never local absolute paths or sensitive file names. `indexedEntries` on the
+ * snapshot MUST equal `coverage.indexedEntries`.
+ */
+export type WorkspaceIndexCoverage = {
+  visitedEntries: number;
+  indexedEntries: number;
+  excludedGenerated: number;
+  sensitiveEntries: number;
+  skippedSymlinks: number;
+  failedEntries: number;
+};
+
 export type WorkspaceIndexSnapshot = {
   workspaceId: UUID;
   revision: WorkspaceRevision;
@@ -243,6 +266,7 @@ export type WorkspaceIndexSnapshot = {
   truncated: boolean;
   updatedAt: ISODateTime;
   errorCode?: string;
+  coverage: WorkspaceIndexCoverage;
 };
 
 export type WorkspaceIndexSnapshotPage = Omit<WorkspaceIndexSnapshot, 'entries'> & {
@@ -389,11 +413,15 @@ export type WorkspaceChange =
       content: string;
       encoding: 'utf-8';
       expectedHash: FileHash;
+      /** UTF-8 baseline used for a provider-owned three-way merge. */
+      baseContent?: string;
     }
   | {
       operation: 'delete';
       path: string;
       expectedHash: FileHash;
+      /** UTF-8 baseline retained for conflict inspection and recovery. */
+      baseContent?: string;
     }
   | {
       operation: 'move';
@@ -426,19 +454,63 @@ export type RuntimeArtifactSystemEvidence = {
   invocationId: UUID;
 };
 
-export type RuntimeWorkspaceExecution =
-  {
-    mode: 'git_worktree';
-    repositoryId: string;
-    baseRevision: WorkspaceRevision;
-    changeSet: WorkspaceChangeSet;
-    dirtyBaseline: boolean;
-    requiresUserConfirmation: true;
-  };
+export type WorkspaceWritebackStatus =
+  | 'queued'
+  | 'merging'
+  | 'applying'
+  | 'conflicted'
+  | 'applied'
+  | 'failed'
+  | 'abandoned';
+
+export type WorkspaceWritebackResolutionAction =
+  | 'retry_merge'
+  | 'resolve_with_agent'
+  | 'keep_workspace'
+  | 'use_session'
+  | 'abandon_writeback';
+
+export type WorkspaceWritebackRecord = {
+  id: UUID;
+  sessionId: UUID;
+  taskId?: UUID;
+  invocationId: UUID;
+  workspaceId: string;
+  providerKind: WorkspaceProviderKind;
+  changeSet: WorkspaceChangeSet;
+  /** Original completed Runtime summary, retained while writeback waits for resolution. */
+  resultSummary?: string;
+  status: WorkspaceWritebackStatus;
+  conflicts: WorkspaceConflictError[];
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+  appliedRevision?: WorkspaceRevision;
+  error?: string;
+  resolution?: WorkspaceWritebackResolutionAction;
+};
+
+export type ResolveWorkspaceWritebackInput = {
+  action: WorkspaceWritebackResolutionAction;
+  /** Required when `action` is `use_session`, which can overwrite current files. */
+  confirmationId?: UUID;
+};
+
+export type RuntimeWorkspaceExecution = {
+  mode: 'git_worktree' | 'staging_copy';
+  repositoryId?: string;
+  baseRevision: WorkspaceRevision;
+  changeSet: WorkspaceChangeSet;
+  dirtyBaseline: boolean;
+  requiresUserConfirmation: boolean;
+  writeback?: WorkspaceWritebackRecord;
+};
 
 export const WORKSPACE_BASE_HASH_MISMATCH = 'WORKSPACE_BASE_HASH_MISMATCH' as const;
+export const WORKSPACE_MERGE_CONFLICT = 'WORKSPACE_MERGE_CONFLICT' as const;
 
-export type WorkspaceConflictErrorCode = typeof WORKSPACE_BASE_HASH_MISMATCH;
+export type WorkspaceConflictErrorCode =
+  | typeof WORKSPACE_BASE_HASH_MISMATCH
+  | typeof WORKSPACE_MERGE_CONFLICT;
 
 export type WorkspaceConflictError = {
   code: WorkspaceConflictErrorCode;
@@ -1076,6 +1148,7 @@ export type CollaborationEventType =
   | 'task_started'
   | 'task_waiting'
   | 'task_completed'
+  | 'task_dependency_reconciled'
   | 'task_rejected'
   | 'task_reworked'
   | 'runtime_started'
@@ -1210,11 +1283,19 @@ export type SessionDetail = {
    */
   pendingFollowUpMessages?: SessionFollowUpMessage[];
   activeFollowUpMessageId?: UUID;
+  /** Durable checkpoint used to resume a user-paused Session without replaying completed work. */
+  pauseState?: {
+    previousStatus: SessionStatus;
+    pausedAt: ISODateTime;
+    reason?: string;
+  };
   /**
    * Invocations that are paused waiting for capability approval.
    * After user approves, these are automatically retried.
    */
   pendingInvocations?: PendingInvocation[];
+  /** Durable writeback history for isolated executions in this Session. */
+  workspaceWritebacks?: WorkspaceWritebackRecord[];
   tokenBudget?: number;
   tokenUsed: number;
   taskDomain?: TaskDomain;
@@ -1744,6 +1825,10 @@ export type Artifact = {
 
 export type UserMessageHandlingPlan = {
   intent: UserMessageIntent;
+  /** Optional only for persisted plans created before this routing contract was introduced. */
+  requirementRelation?: UserMessageRequirementRelation;
+  /** Optional only for persisted plans created before this routing contract was introduced. */
+  failedExecutionAction?: FailedExecutionAction;
   priority: EventPriority;
   shouldPause: boolean;
   affectedTaskIds: UUID[];
@@ -1759,6 +1844,7 @@ export type SessionFollowUpMessage = {
   content: string;
   mentionedAgentIds: UUID[];
   handlingPlan: UserMessageHandlingPlan;
+  receiverRecognitionPending?: boolean;
   status: 'queued' | 'planning' | 'executing';
   queuedAt: ISODateTime;
   startedAt?: ISODateTime;
@@ -2228,10 +2314,23 @@ export type FileRevisionCandidateOutput = RegisteredFileRevisionCandidateOutput;
 export type RuntimeArtifactProposal = RegisteredRuntimeArtifactProposal;
 export type RuntimeArtifactMetadata = RegisteredRuntimeArtifactMetadata;
 
+/**
+ * Canonical file request with optional line range. `requestedFiles` is the
+ * only canonical field persisted, audited and processed internally; legacy
+ * `requestedPaths: string[]` is accepted only at the Runtime Normalizer
+ * boundary and immediately converted.
+ */
+export type RuntimeContextFileRequest = {
+  path: string;
+  startLine?: number;
+  endLine?: number;
+  maxBytes?: number;
+};
+
 export type RuntimeContextRequest = {
   reason: string;
   requestedRefs: TaskEvidenceRef[];
-  requestedPaths?: string[];
+  requestedFiles?: RuntimeContextFileRequest[];
   requestedDirectories?: Array<{
     path: string;
     depth?: number;
@@ -2244,6 +2343,12 @@ export type RuntimeContextRequest = {
   }>;
   requestedCommands?: string[];
   followUpInstruction?: string;
+  /**
+   * @deprecated Legacy alias accepted only by the Runtime Normalizer migration
+   * entry; production code must read `requestedFiles`. Never persisted on new
+   * records.
+   */
+  requestedPaths?: string[];
 };
 
 export type SupplementalContextPathFailureCode =
@@ -2255,9 +2360,33 @@ export type SupplementalContextPathFailureCode =
   | 'WORKSPACE_REVISION_UNSTABLE'
   | 'READ_ERROR';
 
+export type SupplementalContextRefFailureCode =
+  | 'INVALID_REFERENCE'
+  | 'NOT_FOUND'
+  | 'AMBIGUOUS_REFERENCE'
+  | 'READ_ERROR';
+
+/** Terminal state of a supplemental hydration pass. */
+export type SupplementalContextOutcome =
+  | 'resolved'
+  | 'partial'
+  | 'exhausted'
+  | 'cancelled';
+
 export type SupplementalContextResolution = {
-  requestedPaths: string[];
+  requestedFiles: RuntimeContextFileRequest[];
   hydratedPaths: string[];
+  /** Canonical evidence references that were found and can be promoted to L3. */
+  resolvedRefs?: TaskEvidenceRef[];
+  /** Explicit failures for semantic evidence references; unresolved refs are never treated as hydrated. */
+  failedRefs?: Array<{
+    type: EvidenceSourceType;
+    label: string;
+    ref?: string;
+    code: SupplementalContextRefFailureCode;
+    retryable: boolean;
+    message?: string;
+  }>;
   /** Revision for each successfully materialized workspace evidence path. */
   evidenceRevisions?: Record<string, WorkspaceRevision>;
   listedDirectories?: string[];
@@ -2270,10 +2399,14 @@ export type SupplementalContextResolution = {
   }>;
   deferredPaths: string[];
   contentBytes: number;
+  outcome: SupplementalContextOutcome;
+  attempt: number;
+  maxAttempts: number;
 };
 
 export type ExecutionTerminationKind =
   | 'user_cancelled'
+  | 'user_paused'
   | 'frontend_disconnected'
   | 'runtime_disconnected'
   | 'phase_timeout'
@@ -2314,6 +2447,7 @@ export type RuntimeError = {
     | 'CAPABILITY_BLOCKED'
     | 'HUMAN_APPROVAL_REQUIRED'
     | 'CONTEXT_INSUFFICIENT'
+    | 'CONTEXT_RETRY_EXHAUSTED'
     | 'TOKEN_BUDGET_EXCEEDED'
     | 'UNKNOWN_ERROR';
   message: string;

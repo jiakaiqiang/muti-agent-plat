@@ -126,7 +126,11 @@ test('architecture routing selects file candidates from the Provider index witho
       detectedStack: ['node'],
       indexedEntries: 3,
       truncated: false,
-      updatedAt: '2026-07-28T00:00:00.000Z'
+      updatedAt: '2026-07-28T00:00:00.000Z',
+      coverage: {
+        visitedEntries: 3, indexedEntries: 3, excludedGenerated: 0,
+        sensitiveEntries: 0, skippedSymlinks: 0, failedEntries: 0
+      }
     }
   };
   const taskContext = new ContextRouterService().route({
@@ -296,15 +300,23 @@ test('supplemental routing promotes only paths that were actually hydrated', () 
       createdAt: '2026-07-13T00:00:00.000Z',
       requestedContext: {
         reason: 'Need two files',
-        requestedRefs: [],
+        requestedRefs: [
+          { type: 'artifact', label: 'Architecture', ref: 'artifact-1' },
+          { type: 'historical_decision', label: 'Missing decision' }
+        ],
         requestedPaths: ['src/main.ts', 'src/missing.ts']
       },
       resolution: {
-        requestedPaths: ['src/main.ts', 'src/missing.ts'],
+        requestedFiles: [{ path: 'src/main.ts' }, { path: 'src/missing.ts' }],
         hydratedPaths: ['src/main.ts'],
+        resolvedRefs: [{ type: 'artifact', label: 'Architecture', ref: 'artifact-1' }],
+        failedRefs: [{ type: 'historical_decision', label: 'Missing decision', code: 'INVALID_REFERENCE', retryable: true }],
         failedPaths: [{ path: 'src/missing.ts', code: 'NOT_FOUND', retryable: false }],
         deferredPaths: [],
-        contentBytes: 32
+        contentBytes: 32,
+        outcome: 'partial',
+        attempt: 1,
+        maxAttempts: 1
       }
     }
   ];
@@ -332,7 +344,9 @@ test('supplemental routing promotes only paths that were actually hydrated', () 
 
   const refs = taskContext.evidenceRefs.map((ref) => ref.ref);
   assert.ok(refs.includes('src/main.ts'));
+  assert.ok(refs.includes('artifact-1'));
   assert.equal(refs.includes('src/missing.ts'), false);
+  assert.equal(taskContext.evidenceRefs.some((ref) => ref.label === 'Missing decision'), false);
 });
 
 test('ai-langchain architecture routing keeps real data-flow source ahead of nested demo indexes', () => {

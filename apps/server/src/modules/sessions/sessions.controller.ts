@@ -5,6 +5,7 @@ import type {
   CreateFileRevisionRunInput,
   DecideFileRevisionInput,
   ReprocessFileRevisionInput,
+  ResolveWorkspaceWritebackInput,
   ResolveFileRevisionFailureInput,
   RetryInterruptedFileRevisionInput,
   SaveFileRevisionDraftInput,
@@ -161,13 +162,13 @@ export class SessionsController {
   }
 
   @Post('sessions/:sessionId/pause')
-  pause(@Param('sessionId') sessionId: string, @Body() body: { reason?: string; confirmationId?: string }) {
-    return ok(this.sessions.control(sessionId, 'WAIT_USER_DECISION', body?.reason ?? '用户已暂停会话', body?.confirmationId));
+  async pause(@Param('sessionId') sessionId: string, @Body() body: { reason?: string; confirmationId?: string }) {
+    return ok(await this.sessions.pause(sessionId, body?.reason ?? '用户已停止会话', body?.confirmationId));
   }
 
   @Post('sessions/:sessionId/resume')
   resume(@Param('sessionId') sessionId: string, @Body() body: { reason?: string; confirmationId?: string }) {
-    return ok(this.sessions.control(sessionId, 'EXECUTING', body?.reason ?? '用户已继续会话', body?.confirmationId));
+    return ok(this.sessions.resume(sessionId, body?.reason ?? '用户已继续会话', body?.confirmationId));
   }
 
   @Post('sessions/:sessionId/cancel')
@@ -218,6 +219,24 @@ export class SessionsController {
     }
   ) {
     return ok(await this.sessions.resolveEmptyWorkspaceDecision(sessionId, body));
+  }
+
+  @Post('sessions/:sessionId/workspace-writebacks/:writebackId/resolve')
+  async resolveWorkspaceWriteback(
+    @Param('sessionId') sessionId: string,
+    @Param('writebackId') writebackId: string,
+    @Body() body: ResolveWorkspaceWritebackInput
+  ) {
+    if (!body || ![
+      'retry_merge',
+      'resolve_with_agent',
+      'keep_workspace',
+      'use_session',
+      'abandon_writeback'
+    ].includes(body.action)) {
+      throw new BadRequestException('A valid workspace writeback action is required.');
+    }
+    return ok(await this.sessions.resolveWorkspaceWriteback(sessionId, writebackId, body));
   }
 
   @Post('sessions/:sessionId/workflow/steps/:taskId/decision')
@@ -301,6 +320,7 @@ function assertCaptureFileRevisionBaselineInput(value: unknown): asserts value i
   if (body.source !== undefined && !['system_output', 'user_selected', 'post_apply'].includes(String(body.source))) {
     invalidRevisionBody('source is invalid.');
   }
+
 }
 
 function assertCreateFileRevisionRunInput(value: unknown): asserts value is CreateFileRevisionRunInput {

@@ -81,7 +81,7 @@ test('one-time permissions elevate a dangerous action without becoming persisten
   });
 });
 
-test('change sets are revision-bound and apply writes only inside the workspace', async () => {
+test('change sets use path hashes so unrelated workspace changes do not block writes', async () => {
   await withWorkspace(async (workspace, root) => {
     const baseRevision = await workspace.revision();
     const applied = await workspace.applyChangeSet({
@@ -93,13 +93,14 @@ test('change sets are revision-bound and apply writes only inside the workspace'
     assert.equal(applied.ok, true);
     assert.equal(await (await import('node:fs/promises')).readFile(join(root, 'src', 'new.ts'), 'utf8'), 'export const value = 1;\n');
 
-    const stale = await workspace.applyChangeSet({
+    const unrelated = await workspace.applyChangeSet({
       id: randomUUID(),
       baseRevision,
       createdAt: new Date().toISOString(),
       changes: [{ operation: 'create', path: 'stale.txt', content: 'stale', encoding: 'utf-8' }]
     });
-    assert.equal(stale.ok, false);
+    assert.equal(unrelated.ok, true);
+    assert.equal(await (await import('node:fs/promises')).readFile(join(root, 'stale.txt'), 'utf8'), 'stale');
   });
 });
 
@@ -122,7 +123,7 @@ test('delete remains blocked until explicitly granted', async () => {
   });
 });
 
-test('concurrent ChangeSets with the same base revision are serialized', async () => {
+test('concurrent non-overlapping ChangeSets with the same base revision are serialized and both applied', async () => {
   await withWorkspace(async (workspace, root) => {
     const baseRevision = await workspace.revision();
     const [first, second] = await Promise.all([
@@ -141,8 +142,41 @@ test('concurrent ChangeSets with the same base revision are serialized', async (
     ]);
 
     assert.equal(first.ok, true);
-    assert.equal(second.ok, false);
+    assert.equal(second.ok, true);
     assert.equal(await (await import('node:fs/promises')).readFile(join(root, 'first.txt'), 'utf8'), 'first');
+    assert.equal(await (await import('node:fs/promises')).readFile(join(root, 'second.txt'), 'utf8'), 'second');
+  });
+});
+
+test('a mid-apply conflict rolls back the whole local ChangeSet', async () => {
+  await withWorkspace(async (workspace, root) => {
+    await writeFile(join(root, 'move.txt'), 'move me', 'utf8');
+    const binary = Buffer.from([0, 255, 1, 254, 2, 253]);
+    await writeFile(join(root, 'binary.bin'), binary);
+    workspace.state.oneTimePermissions = { workspace_delete: true };
+    const permissions = workspace.permissionPolicy();
+    workspace.consumeOneTimePermissions();
+    const revision = await workspace.revision();
+    const hash = { algorithm: 'sha256' as const, value: createHash('sha256').update('move me').digest('hex') };
+    const binaryHash = { algorithm: 'sha256' as const, value: createHash('sha256').update(binary).digest('hex') };
+    await assert.rejects(
+      workspace.applyChangeSet({
+        id: randomUUID(),
+        baseRevision: revision,
+        createdAt: new Date().toISOString(),
+        changes: [
+          { operation: 'create', path: 'created-before-failure.txt', content: 'temporary', encoding: 'utf-8' },
+          { operation: 'update', path: 'binary.bin', content: 'temporary text', encoding: 'utf-8', expectedHash: binaryHash },
+          { operation: 'move', fromPath: 'move.txt', toPath: 'first.txt', expectedHash: hash },
+          { operation: 'move', fromPath: 'move.txt', toPath: 'second.txt', expectedHash: hash }
+        ]
+      }, permissions),
+      /LOCAL_WORKSPACE_CONFLICT_DURING_APPLY/
+    );
+    assert.equal(existsSync(join(root, 'created-before-failure.txt')), false);
+    assert.deepEqual(await readFile(join(root, 'binary.bin')), binary);
+    assert.equal(await readFile(join(root, 'move.txt'), 'utf8'), 'move me');
+    assert.equal(existsSync(join(root, 'first.txt')), false);
     assert.equal(existsSync(join(root, 'second.txt')), false);
   });
 });

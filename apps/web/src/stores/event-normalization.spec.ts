@@ -80,4 +80,28 @@ describe('timeline runtime diagnostics boundary', () => {
       }
     })).toBe(false)
   })
+
+  it('does not render historical capability approval waits as runtime failures', () => {
+    const base = eventWithoutContent()
+    expect(shouldRenderInTimeline({
+      ...base,
+      type: 'runtime_failed',
+      content: '运行时执行任务失败',
+      metadata: {
+        ...base.metadata,
+        renderAs: 'error_card',
+        payload: { code: 'HUMAN_APPROVAL_REQUIRED' }
+      }
+    })).toBe(false)
+    expect(shouldRenderInTimeline({
+      ...base,
+      type: 'task_rejected',
+      content: '任务执行失败',
+      metadata: {
+        ...base.metadata,
+        renderAs: 'task_card',
+        payload: { resultSummary: 'HUMAN_APPROVAL_REQUIRED' }
+      }
+    })).toBe(false)
+  })
 })

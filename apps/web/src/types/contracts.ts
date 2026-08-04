@@ -58,6 +58,9 @@ import type {
   WorkspaceSkippedReason,
   WorkspaceTreeNode,
   WorkspaceChange,
+  WorkspaceWritebackRecord,
+  WorkspaceWritebackResolutionAction,
+  ResolveWorkspaceWritebackInput,
   UserMessageIntent,
   WorkflowStatus
 } from '@agent-cluster/shared'
@@ -128,6 +131,9 @@ export type {
   WorkspaceSkippedReason,
   WorkspaceTreeNode,
   WorkspaceChange,
+  WorkspaceWritebackRecord,
+  WorkspaceWritebackResolutionAction,
+  ResolveWorkspaceWritebackInput,
   UserMessageIntent,
   AgentWorkflowNode,
   HumanApprovalWorkflowNode,
@@ -279,6 +285,12 @@ export type RuntimeContextRequest = {
     type?: string
     label?: string
     ref?: string
+  }>
+  requestedFiles?: Array<{
+    path: string
+    startLine?: number
+    endLine?: number
+    maxBytes?: number
   }>
   requestedPaths?: string[]
   requestedCommands?: string[]
@@ -519,7 +531,10 @@ export const sessionStatusLabel: Record<SessionStatus, string> = {
   EXECUTING: '执行中',
   POST_REVIEW: '复盘中',
   REWORKING: '返工中',
+  APPLYING_CHANGES: '正在写回变更',
+  WAIT_WORKSPACE_CONFLICT_RESOLUTION: '等待处理工作区冲突',
   WAIT_USER_DECISION: '等待用户决策',
+  PAUSED: '已停止',
   INTERRUPTED: '已中断',
   COMPLETED: '已完成',
   FAILED: '失败',

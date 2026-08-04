@@ -127,6 +127,7 @@ interface AgentRuntimeRunHandle {
 - `result` 必须有限时间内结束，并与终止事件状态一致。
 - `cancel()` 必须幂等；取消后结果不得伪装为 completed。
 - `AbortSignal` 与句柄取消作用于同一次 invocation。
+- 上游 `AbortSignal` 中止时，RuntimeService 必须调用本次句柄的 `cancel()`；Local Runtime 必须继续向桥接 CLI 传播取消并终止对应模型进程树，随后在有限时间内结束 `result` 和事件流。
 - Adapter 本体不提供第二套 run/stream/cancel-by-id 协议。
 
 ## 7. ContextEnvelopeV2
@@ -270,7 +271,7 @@ Provider 已启动后返回的 HTTP/网关错误不得归入 `RUNTIME_INVOCATION
 
 ## 12. Managed Workspace Execution
 
-### 12.1 Server-local Git worktree
+### 12.1 Server-local isolated execution
 
 For a write-capable `task_execution` invocation using Codex or Claude Code against a `server_local` workspace, RuntimeService delegates workspace preparation and capture to `apps/server/src/modules/worktree-execution/`.
 
@@ -281,11 +282,29 @@ The adapter still owns the CLI process and uses the invocation-bound work direct
 - platform-authoritative `WorkspaceChangeSet` calculation from real file changes;
 - proposal metadata and source working-tree conflict hashes.
 
-Managed results include `workspaceExecution` with `mode: 'git_worktree'` and `requiresUserConfirmation: true`. Orchestrator must not automatically apply their source changes. See `docs/design/managed-worktree-execution-v1.md` for lifecycle and limits.
+Git repositories use `mode: 'git_worktree'`. The selected directory may be the repository root or a nested directory; captured paths remain relative to the selected directory and changes outside that scope fail closed.
+
+Non-Git directories use `mode: 'staging_copy'`. Read-only tasks may run concurrently, while write-capable task execution is serialized per normalized source directory across staging, Runtime execution, capture, and writeback.
+
+Completed write-capable results default to `requiresUserConfirmation: false`. Orchestrator enqueues their `WorkspaceChangeSet` into the per-workspace FIFO writeback service. `proposal_only` remains confirmation-gated and is not automatically written back.
+
+### 12.2 Local bridge isolated execution
+
+Codex and Claude Code in Local Runtime execute against a Local Runtime-owned staging copy, never directly in the registered source directory. The CLI returns `workspaceExecution.mode: 'staging_copy'` and a bounded UTF-8 `WorkspaceChangeSet`; the platform sends that ChangeSet back through the registered Workspace Provider for the same FIFO writeback and conflict workflow used by `server_local`.
+
+### 12.3 Merge and recovery
+
+Every update/delete carries the captured base hash; text updates may also carry `baseContent`. If the current file changed, Provider apply attempts a conservative three-way merge (`base`, current workspace, Session candidate). Non-overlapping edits merge automatically. Overlapping edits return `WORKSPACE_MERGE_CONFLICT` without partial writes. Each apply batch snapshots touched paths and restores the whole batch if an apply-time race or filesystem error occurs.
+
+Persisted writebacks in `queued/merging/applying` become retryable failures after backend restart. The corresponding Session is restored to `WAIT_WORKSPACE_CONFLICT_RESOLUTION`; Runtime commands are not replayed automatically.
+
+Parallel task writebacks form a Session-level barrier: any `conflicted/failed` record keeps the Session waiting; otherwise any `queued/merging/applying` record keeps it applying; execution resumes only after every record is terminal. Resolution actions are accepted only from blocking states; replayed or competing terminal actions fail closed. PostgreSQL deployments persist the complete writeback record in schema migration V4. Rollback compares the current path with the batch's last written value and never overwrites a later user edit. A Local Runtime one-time `workspace_delete` grant is scoped by Workspace, ChangeSet ID, and canonical full-ChangeSet digest, survives WebSocket reconnects in the running bridge, is consumed after successful apply, and expires after 30 minutes.
+
+See `docs/design/managed-worktree-execution-v1.md` for lifecycle and limits.
 
 ## 13. Structured Termination
 
-`AgentRunResult.termination` is the authoritative reason for an interrupted or timed-out invocation. The supported kinds are `user_cancelled`, `frontend_disconnected`, `runtime_disconnected`, `phase_timeout`, `runtime_timeout`, `service_shutdown`, `superseded`, and `maintenance`. `frontend_disconnected` is deprecated and retained only to decode historical persisted results; current browser SSE disconnects never produce this termination. A Local Runtime transport disconnect remains `runtime_disconnected` and interrupts its invocation.
+`AgentRunResult.termination` is the authoritative reason for an interrupted or timed-out invocation. The supported kinds are `user_cancelled`, `user_paused`, `frontend_disconnected`, `runtime_disconnected`, `phase_timeout`, `runtime_timeout`, `service_shutdown`, `superseded`, and `maintenance`. `user_paused` is resumable and must preserve the Session workflow checkpoint. `frontend_disconnected` is deprecated and retained only to decode historical persisted results; current browser SSE disconnects never produce this termination. A Local Runtime transport disconnect remains `runtime_disconnected` and interrupts its invocation.
 
 Server Codex and Claude Code invocations have lifecycle limits independent of SSE in both streaming and buffered modes: the default absolute deadline is 30 minutes and Worker concurrency defaults to 4. Each isolated platform Worker has a default V8 old-space ceiling of 512 MB; that ceiling does not constrain the RSS or heap of the CLI process spawned by the Worker. Production deployments that require a hard process-tree memory ceiling must add an OS job object, cgroup, or container limit. Deployments may tune the documented limits but must not make browser presence their resource-control mechanism.
 

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { hostname, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import type {
@@ -9,6 +9,7 @@ import type {
   LocalRuntimeTokenResponse,
   WorkspaceIndexSnapshot
 } from '@agent-cluster/shared';
+import { renameWithRetry } from './atomic-file.js';
 
 export type LocalWorkspaceState = {
   workspaceId: string;
@@ -81,8 +82,26 @@ export async function loadState(): Promise<LocalRuntimeState> {
 
 export async function saveState(state: LocalRuntimeState): Promise<void> {
   const path = stateFilePath();
+  const previous = stateWriteQueues.get(path) ?? Promise.resolve();
+  const operation = previous.catch(() => undefined).then(() => writeStateFile(path, state));
+  stateWriteQueues.set(path, operation);
+  try {
+    await operation;
+  } finally {
+    if (stateWriteQueues.get(path) === operation) stateWriteQueues.delete(path);
+  }
+}
+
+const stateWriteQueues = new Map<string, Promise<void>>();
+
+async function writeStateFile(path: string, state: LocalRuntimeState): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-  await rename(temporary, path);
+  try {
+    await renameWithRetry(temporary, path);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
 }

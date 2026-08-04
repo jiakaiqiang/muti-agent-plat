@@ -18,6 +18,8 @@ function health() {
     service: 'agent-cluster-server',
     version: '0.1.0',
     buildTime: '2026-07-25T00:00:00.000Z',
+    buildId: 'build-abc1234',
+    runtimeBuildStale: false,
     commit: 'abc1234',
     processId: 48020,
     startedAt: '2026-07-25T00:00:00.000Z',

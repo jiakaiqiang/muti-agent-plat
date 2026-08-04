@@ -5,7 +5,7 @@
 
 ## 1. 验收结论
 
-功能主链路已经恢复为 Index First + On-demand Evidence。Session 创建不再同步扫描，Index 完成先后不再构成群聊门禁，所有 Runtime 阶段都能在证据不足时按预算补读。V1 同一 Workspace 只允许一个活动 Session。
+功能主链路已经恢复为 Index First + On-demand Evidence。Session 创建不再同步扫描，Index 完成先后不再构成群聊门禁，所有 Runtime 阶段都能在证据不足时按预算补读。同一 Workspace 允许多个活动 Session，写任务由隔离目录和 FIFO 写回保护。
 
 发布结论分两层：
 
@@ -23,8 +23,8 @@
 | AT-22 补读重试上限 | Covered | `apps/server/src/modules/orchestrator/supplemental-context-retry.spec.ts` |
 | AT-23 索引晚完成不阻塞 | Covered | `tests/e2e/workspace-index-first-smoke.mjs`、`tests/e2e/server-local-project-analysis-smoke.mjs` |
 | AT-24 至 AT-25 revision 变化/不稳定 | Covered | `apps/server/src/modules/orchestrator/orchestrator.service.spec.ts`、服务端项目分析 E2E |
-| AT-26 至 AT-29 Lease/终态/恢复 | Covered | `apps/server/src/modules/sessions/sessions.service.spec.ts`、`tests/e2e/workspace-index-first-smoke.mjs`、`tests/e2e/recovery-smoke.mjs` |
-| AT-30 写回冲突 | Covered | Workspace ChangeSet 单元测试、`tests/e2e/server-local-source-conflict-guard-smoke.mjs` |
+| AT-26 至 AT-29 多 Session/终态/恢复 | Covered | `apps/server/src/modules/sessions/sessions.service.spec.ts`、`apps/server/src/modules/worktree-execution/worktree-execution.service.spec.ts`、`tests/e2e/workspace-index-first-smoke.mjs` |
+| AT-30 写回冲突 | Covered | Workspace ChangeSet、三方合并、写回服务单元测试与 `tests/e2e/server-local-source-conflict-guard-smoke.mjs` |
 | AT-31 Local Runtime 断线 | Covered | `tests/e2e/browser-local-runtime-cli-e2e.mjs`、Recovery E2E |
 | AT-32 敏感路径与边界 | Covered | Workspace sensitive/symlink/path 测试、`tests/e2e/security-smoke.mjs` |
 
@@ -43,7 +43,7 @@
 - `POST /sessions` 小于 1s。
 - 创建响应没有同步生成的 `workspaceSnapshot`。
 - 响应包含 `server_local` Binding 和首条 `user_message`。
-- 第二个活动 Session 返回统一 API 错误包装下的 409、code 和 activeSessionId。
+- 第二个活动 Session 创建成功，拥有独立 Session id，并绑定同一 `workspaceId`。
 
 ### 3.2 索引晚于分析
 
@@ -84,7 +84,7 @@ npm run test:perf:workspace-session-create
 | 无 L3 正文仍允许源码结论成功 | Evidence Gate 阻断并自动补读 |
 | Supplemental 无时间/字节/重试上限 | 10s/512KB/2 轮 |
 | 架构分析因入口文件补读长期等待 | 首次预读限制为 1.5s/8 文件/256KB，失败后继续 |
-| 同 Workspace 第二活动 Session | 409 阻断 |
+| 同 Workspace 多活动 Session 无隔离 | Git worktree / non-Git staging copy + FIFO 写回 |
 | Local Runtime 断线静默切 Server | 禁止 |
 | sensitive/symlink/Workspace 边界失败 | 纳入聚合测试 |
 | PERF-01/02/03 CI 回归失败 | 聚合性能命令失败 |

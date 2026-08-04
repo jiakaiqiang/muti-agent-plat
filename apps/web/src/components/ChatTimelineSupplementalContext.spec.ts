@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage } from '@/types/contracts'
 import ChatTimeline from './ChatTimeline.vue'
 
-function message(resolution: Record<string, unknown>): ChatMessage {
+function message(resolution: Record<string, unknown>, requestedContext?: Record<string, unknown>): ChatMessage {
   return {
     id: 'message-1',
     sessionId: 'session-1',
@@ -20,7 +20,8 @@ function message(resolution: Record<string, unknown>): ChatMessage {
       requestedContext: {
         reason: 'Need source',
         requestedRefs: [],
-        requestedPaths: ['src/main.ts']
+        requestedPaths: ['src/main.ts'],
+        ...requestedContext
       },
       resolution
     }
@@ -45,7 +46,8 @@ describe('ChatTimeline supplemental context status', () => {
           hydratedPaths: [],
           failedPaths: [{ path: 'src/main.ts', code: 'BROKER_OFFLINE', retryable: true }],
           deferredPaths: [],
-          contentBytes: 0
+          contentBytes: 0,
+          outcome: 'exhausted'
         })]
       },
       global: { stubs: { AgentPortrait: true } }
@@ -53,5 +55,45 @@ describe('ChatTimeline supplemental context status', () => {
     expect(wrapper.text()).toContain('读取失败')
     expect(wrapper.text()).toContain('src/main.ts / BROKER_OFFLINE')
     expect(wrapper.text()).not.toContain('等待中')
+  })
+
+  it('uses semantic resolution outcomes and renders canonical file/ref details', () => {
+    const wrapper = mount(ChatTimeline, {
+      props: {
+        messages: [message({
+          requestedFiles: [{ path: 'docs/architecture.md' }],
+          hydratedPaths: [],
+          resolvedRefs: [{ type: 'artifact', label: 'Architecture', ref: 'artifact-1' }],
+          failedRefs: [],
+          failedPaths: [],
+          deferredPaths: [],
+          contentBytes: 128,
+          outcome: 'resolved'
+        }, {
+          requestedPaths: undefined,
+          requestedFiles: [{ path: 'docs/architecture.md' }],
+          requestedRefs: [{ type: 'artifact', label: 'Architecture' }]
+        })]
+      },
+      global: { stubs: { AgentPortrait: true } }
+    })
+    expect(wrapper.text()).toContain('已补充')
+    expect(wrapper.text()).toContain('docs/architecture.md')
+    expect(wrapper.text()).toContain('artifact / Architecture / artifact-1')
+  })
+
+  it('shows invalid semantic references as terminal failures', () => {
+    const wrapper = mount(ChatTimeline, {
+      props: {
+        messages: [message({
+          requestedFiles: [], hydratedPaths: [], resolvedRefs: [],
+          failedRefs: [{ type: 'historical_decision', label: 'Missing decision', code: 'INVALID_REFERENCE', retryable: true }],
+          failedPaths: [], deferredPaths: [], contentBytes: 0, outcome: 'exhausted'
+        }, { requestedPaths: undefined, requestedRefs: [{ type: 'historical_decision', label: 'Missing decision' }] })]
+      },
+      global: { stubs: { AgentPortrait: true } }
+    })
+    expect(wrapper.text()).toContain('引用无效')
+    expect(wrapper.text()).toContain('historical_decision / Missing decision / INVALID_REFERENCE')
   })
 })

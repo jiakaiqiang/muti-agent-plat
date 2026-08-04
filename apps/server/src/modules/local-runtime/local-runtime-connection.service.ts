@@ -382,7 +382,11 @@ export class LocalRuntimeConnectionService {
   }
 
   private attachClient(socket: WebSocket, deviceId: string, ownerId: string) {
-    this.disconnectDevice(deviceId, 'superseded_connection');
+    const previousClient = this.clientsByDeviceId.get(deviceId);
+    if (previousClient) {
+      this.detachClient(previousClient);
+      previousClient.socket.close(4001, 'superseded_connection');
+    }
     const clientId = `local-runtime:${deviceId}:${randomUUID()}`;
     const client: LocalRuntimeClient = {
       clientId,
@@ -479,9 +483,9 @@ export class LocalRuntimeConnectionService {
       const workspace = this.workspaces.get(message.payload.workspaceId);
       if (!workspace || workspace.deviceId !== client.deviceId) throw new Error('Workspace result does not belong to this device.');
       this.recordOperationResult(message.payload);
-      if (message.payload.status === 'ok' && message.payload.operation === 'getRevision') {
-        const revision = message.payload.data as import('@agent-cluster/shared').WorkspaceRevision | undefined;
-        if (revision?.id) workspace.revision = revision;
+      if (message.payload.status === 'ok') {
+        const revision = workspaceRevisionFromOperationData(message.payload.data);
+        if (revision?.id) workspace.revision = structuredClone(revision);
       }
       if (!this.pendingWorkspaceRequests.settle(message.payload)) {
         this.logger.warn(`Ignored unmatched Local Runtime workspace result: ${message.payload.requestId}`);
@@ -909,4 +913,18 @@ function toolNamesFor(capabilities: readonly WorkspaceCapabilityKey[]) {
     ...(values.has('write') ? ['write_file'] : []),
     ...(values.has('test') || values.has('command') ? ['run_test'] : [])
   ];
+}
+
+function workspaceRevisionFromOperationData(data: unknown): import('@agent-cluster/shared').WorkspaceRevision | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  if ('id' in data && 'observedAt' in data && typeof data.id === 'string' && typeof data.observedAt === 'string') {
+    return { id: data.id, observedAt: data.observedAt };
+  }
+  if (!('revision' in data)) return undefined;
+  const revision = data.revision;
+  if (!revision || typeof revision !== 'object') return undefined;
+  if (!('id' in revision) || !('observedAt' in revision)) return undefined;
+  return typeof revision.id === 'string' && typeof revision.observedAt === 'string'
+    ? { id: revision.id, observedAt: revision.observedAt }
+    : undefined;
 }

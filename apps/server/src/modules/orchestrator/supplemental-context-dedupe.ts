@@ -28,7 +28,11 @@ export function collectSeenContextSignatures(
     const hydratedPaths = entry.resolution
       ? new Set(entry.resolution.hydratedPaths.filter(revisionMatches))
       : undefined;
-    for (const ref of entry.requestedContext.requestedRefs ?? []) {
+    const providedRefs = entry.resolution?.resolvedRefs
+      ?? ((entry.resolution?.failedRefs?.length ?? 0) === 0
+        ? (entry.requestedContext.requestedRefs ?? []).filter((ref) => Boolean(ref.ref))
+        : []);
+    for (const ref of providedRefs) {
       if (
         hydratedPaths &&
         (ref.type === 'workspace_file' || ref.type === 'workspace_symbol' || ref.type === 'test') &&
@@ -40,7 +44,10 @@ export function collectSeenContextSignatures(
     }
     const providedPaths = entry.resolution
       ? entry.resolution.hydratedPaths.filter(revisionMatches)
-      : entry.requestedContext.requestedPaths ?? [];
+      : [
+          ...(entry.requestedContext.requestedFiles ?? []).map((item) => item.path),
+          ...(entry.requestedContext.requestedPaths ?? [])
+        ];
     for (const path of providedPaths) {
       if (path) paths.add(path);
     }
@@ -66,6 +73,8 @@ export function collectSeenContextSignatures(
 
 export type RequestedContextDiff = {
   novelRefs: TaskEvidenceRef[];
+  novelFiles: NonNullable<RuntimeContextRequest['requestedFiles']>;
+  /** @deprecated compatibility projection of novelFiles. */
   novelPaths: string[];
   novelCommands: string[];
   novelDirectories: NonNullable<RuntimeContextRequest['requestedDirectories']>;
@@ -81,9 +90,12 @@ export function diffRequestedContext(
   for (const ref of candidate.requestedRefs ?? []) {
     if (!seen.refs.has(refSignature(ref))) novelRefs.push(ref);
   }
-  const novelPaths = (candidate.requestedPaths ?? []).filter(
-    (path) => path && !seen.paths.has(path)
-  );
+  const candidateFiles = Array.from(new Map([
+    ...(candidate.requestedFiles ?? []),
+    ...(candidate.requestedPaths ?? []).map((path) => ({ path }))
+  ].map((item) => [JSON.stringify(item), item])).values());
+  const novelFiles = candidateFiles.filter((item) => item.path && !seen.paths.has(item.path));
+  const novelPaths = novelFiles.map((item) => item.path);
   const novelCommands = (candidate.requestedCommands ?? []).filter(
     (command) => command && !seen.commands.has(command)
   );
@@ -95,7 +107,7 @@ export function diffRequestedContext(
   );
   const hasNovelEntries =
     novelRefs.length > 0 || novelPaths.length > 0 || novelDirectories.length > 0 || novelSearches.length > 0 || novelCommands.length > 0;
-  return { novelRefs, novelPaths, novelDirectories, novelSearches, novelCommands, hasNovelEntries };
+  return { novelRefs, novelFiles, novelPaths, novelDirectories, novelSearches, novelCommands, hasNovelEntries };
 }
 
 export function trimToNovelContext(
@@ -107,7 +119,7 @@ export function trimToNovelContext(
   return {
     reason: candidate.reason,
     requestedRefs: diff.novelRefs,
-    requestedPaths: diff.novelPaths.length ? diff.novelPaths : undefined,
+    requestedFiles: diff.novelFiles.length ? diff.novelFiles : undefined,
     requestedDirectories: diff.novelDirectories.length ? diff.novelDirectories : undefined,
     requestedSearches: diff.novelSearches.length ? diff.novelSearches : undefined,
     requestedCommands: diff.novelCommands.length ? diff.novelCommands : undefined,

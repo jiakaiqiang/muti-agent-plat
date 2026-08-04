@@ -19,7 +19,7 @@ export function canRetryWithSupplementalContext(
 ): boolean {
   if (code !== 'CONTEXT_INSUFFICIENT') return false;
   if (!requestedContext) return false;
-  if (!(requestedContext.requestedRefs.length || requestedContext.requestedPaths?.length || requestedContext.requestedDirectories?.length || requestedContext.requestedSearches?.length)) return false;
+  if (!(requestedContext.requestedRefs.length || requestedContext.requestedFiles?.length || requestedContext.requestedPaths?.length || requestedContext.requestedDirectories?.length || requestedContext.requestedSearches?.length)) return false;
   if (!Number.isFinite(maxRetries) || maxRetries <= 0) return false;
   return retryCount < maxRetries;
 }

@@ -25,9 +25,9 @@ function apiResponse(data: unknown, status = 200) {
 }
 
 function requestPath(input: RequestInfo | URL) {
-  if (typeof input === 'string') return new URL(input).pathname
+  if (typeof input === 'string') return new URL(input, 'http://test.local').pathname
   if (input instanceof URL) return input.pathname
-  return new URL(input.url).pathname
+  return new URL(input.url, 'http://test.local').pathname
 }
 
 describe('SkillManager', () => {

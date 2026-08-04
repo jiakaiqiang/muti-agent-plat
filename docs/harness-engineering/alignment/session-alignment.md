@@ -1,6 +1,6 @@
 # Session Alignment 会话状态对齐
 
-> 最后修改时间：2026-07-13 18:47:00 +08:00
+> 最后修改时间：2026-07-30 19:42:00 +08:00
 > 修改人：Codex
 > 修改的 Agent：Codex
 
@@ -21,6 +21,8 @@
 | EXECUTING | implementation | 已确认的计划正在执行。 |
 | POST_REVIEW | review | 正在比对产出与意图、证据。 |
 | REWORKING | implementation / verification | 正在处理明确的返工目标。 |
+| APPLYING_CHANGES | implementation / verification | 隔离执行已完成，平台正在按工作区 FIFO 校验、合并并写回变更。 |
+| WAIT_WORKSPACE_CONFLICT_RESOLUTION | human_intervention | 自动写回无法安全完成，等待用户重试合并、让 Agent 解决、保留当前工作区、显式采用 Session 版本或放弃写回。 |
 | WAIT_USER_DECISION | human_intervention | 范围、风险或权限需要人工决策。 |
 | COMPLETED | delivery | 交付完成，可沉淀记忆。 |
 | FAILED | feedback | 失败必须经 07-feedback-loop 路由。 |
@@ -36,3 +38,9 @@
 - `WAIT_WORKFLOW_SELECT` 只允许用户显式选择有效工作流，选择后平台按工作流节点顺序创建并绑定 Agent 任务。
 - `WAIT_WORKFLOW_STEP_CONFIRM` 必须先把当前节点的 Agent、环节名称和输出展示到群聊；用户确认后才能推进下一节点，提出修改时只重跑当前节点。
 - 恢复服务和队列重试不得把上述状态自动转换为 `EXECUTING`，否则会绕过人工确认。
+
+## 工作区写回闸口
+
+- `APPLYING_CHANGES` 只能执行确定性的 Workspace Provider 校验、合并和写回，不能重新调用模型或命令。
+- `WAIT_WORKSPACE_CONFLICT_RESOLUTION` 禁止静默覆盖当前工作区；`use_session` 必须携带当前 writeback id 作为显式确认。
+- 用户完成处理后，只恢复受影响任务和未完成流水线，不重复已经成功写回的变更。

@@ -1,6 +1,15 @@
 #!/usr/bin/env node
+import { createRequire } from 'node:module';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DEFAULT_LOCAL_RUNTIME_PERMISSION_POLICY, LOCAL_RUNTIME_PERMISSION_KEYS } from '@agent-cluster/shared';
 import type { LocalRuntimePermission } from '@agent-cluster/shared';
+import {
+  installLocalRuntimeProtocolHandler,
+  normalizeLocalRuntimeServerUrl,
+  parseLocalRuntimeLaunchUrl,
+  updateTrustedLocalRuntimeServer
+} from './protocol-handler.js';
 import { createDeviceCode, approveDeviceCode, exchangeDeviceCode, fetchDeviceStatus, revokeDevice, runBridge } from './transport.js';
 import { createWorkspaceState, LocalWorkspace } from './workspace.js';
 import { loadState, saveState, stateFilePath } from './state.js';
@@ -17,7 +26,7 @@ async function main(args: string[]) {
   const state = await loadState();
   const server = option(args, '--server');
   if (server) {
-    state.serverUrl = server;
+    updateTrustedLocalRuntimeServer(state, server);
     await saveState(state);
   }
 
@@ -51,12 +60,14 @@ async function main(args: string[]) {
     throw new Error('Device authorization expired. Run login again.');
   }
   if (command === 'start') {
-    const controller = new AbortController();
-    const stop = () => controller.abort(new Error('Local Runtime stopped by user.'));
-    process.once('SIGINT', stop);
-    process.once('SIGTERM', stop);
-    process.stdout.write(`Starting Local Runtime for ${state.workspaces.length} workspace(s).\n`);
-    await runBridge(state, CLI_VERSION, controller.signal);
+    await startRuntime(state);
+    return;
+  }
+  if (command === 'launch-uri') {
+    const launchUrl = args[1];
+    if (!launchUrl) throw new Error('Usage: agent-runtime launch-uri <agent-runtime://connect?...>');
+    parseLocalRuntimeLaunchUrl(launchUrl, state.serverUrl);
+    await startRuntime(state);
     return;
   }
   if (command === 'status') {
@@ -134,7 +145,10 @@ async function main(args: string[]) {
     return;
   }
   if (command === 'install') {
-    process.stdout.write('This is the npm preview distribution. Upgrade with the package manager used to install it.\n');
+    state.serverUrl = normalizeLocalRuntimeServerUrl(state.serverUrl);
+    await saveState(state);
+    await installLocalRuntimeProtocolHandler(currentCliInvocation());
+    process.stdout.write(`Registered agent-runtime:// for ${state.serverUrl}.\n`);
     return;
   }
   if (command === 'logs') {
@@ -156,6 +170,25 @@ function option(args: string[], name: string) {
   return index >= 0 ? args[index + 1] : undefined;
 }
 
+async function startRuntime(state: Awaited<ReturnType<typeof loadState>>) {
+  const controller = new AbortController();
+  const stop = () => controller.abort(new Error('Local Runtime stopped by user.'));
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+  process.stdout.write(`Starting Local Runtime for ${state.workspaces.length} workspace(s).\n`);
+  await runBridge(state, CLI_VERSION, controller.signal);
+}
+
+function currentCliInvocation() {
+  const cliEntry = fileURLToPath(import.meta.url);
+  if (!cliEntry.endsWith('.ts')) {
+    return { executable: process.execPath, args: [cliEntry] };
+  }
+  const require = createRequire(import.meta.url);
+  const tsxCli = resolve(dirname(require.resolve('tsx/package.json')), 'dist', 'cli.mjs');
+  return { executable: process.execPath, args: [tsxCli, cliEntry] };
+}
+
 function printHelp() {
   process.stdout.write([
     'Usage: agent-runtime <command>',
@@ -168,6 +201,7 @@ function printHelp() {
     '  workspace add|list|revoke|grant [--once]|reset-permissions',
     '  workspaces',
     '  revoke [device|workspace-id]',
+    '  install [--server <url>]',
     '  logs',
     ''
   ].join('\n'));

@@ -37,6 +37,7 @@ function createService(
   configuredAdapters: AgentRuntimeAdapter[] = adapters,
   executions: {
     worktree?: unknown;
+    localRuntime?: unknown;
     serverWorker?: unknown | null;
     workspaceBindings?: unknown;
   } = {},
@@ -86,7 +87,7 @@ function createService(
     placeholders[4] as never,
     placeholders[5] as never,
     executions.worktree as never,
-    undefined,
+    executions.localRuntime as never,
     serverWorker as never,
     workspaceBindings as never
   );
@@ -132,6 +133,50 @@ test('cancels every active invocation belonging to a Session and waits for resul
   assert.equal(cancelCount, 2);
   assert.deepEqual(stopped, { requested: 2, completed: 2, timedOut: false });
   assert.equal(service.activeInvocationCount('delete-me'), 0);
+});
+
+test('forwards a parent abort to a Local Runtime handle exactly once', async () => {
+  let resolveResult!: (result: AgentRunResult) => void;
+  let cancelCount = 0;
+  let receivedTermination: unknown;
+  const localRuntime = {
+    startInvocation(plan: InvocationPlan) {
+      return {
+        events: (async function* () {})(),
+        result: new Promise<AgentRunResult>((resolve) => {
+          resolveResult = resolve;
+        }),
+        async cancel(termination: unknown) {
+          cancelCount += 1;
+          receivedTermination = termination;
+          resolveResult(completed(plan, 'claude_code'));
+        }
+      };
+    }
+  };
+  const { service } = createService([], [], { localRuntime, serverWorker: null });
+  const controller = new AbortController();
+  const plan = makeInvocationPlan({
+    executionTarget: {
+      runtimeType: 'claude_code',
+      executionLocation: 'local',
+      workspaceProviderKind: 'local_bridge'
+    }
+  });
+  const execution = service.start(plan, controller.signal);
+  const termination = createExecutionTermination({
+    kind: 'user_paused',
+    source: 'user',
+    scope: 'session'
+  });
+
+  controller.abort(termination);
+  const result = await execution.result;
+
+  assert.equal(cancelCount, 1);
+  assert.equal((receivedTermination as { kind?: string }).kind, 'user_paused');
+  assert.equal(result.status, 'cancelled');
+  assert.equal(result.termination?.kind, 'user_paused');
 });
 
 test('module initialization waits for asynchronous Runtime registration', async () => {

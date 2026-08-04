@@ -8,6 +8,25 @@ import type {
 
 export type WorkflowResource = { type: WorkflowNode['type']; agentId?: string }
 
+type WorkflowIdCrypto = Partial<Pick<Crypto, 'randomUUID' | 'getRandomValues'>>
+
+export function createWorkflowNodeId(cryptoApi: WorkflowIdCrypto | null = globalThis.crypto) {
+  if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID()
+
+  const bytes = new Uint8Array(16)
+  if (typeof cryptoApi?.getRandomValues === 'function') {
+    cryptoApi.getRandomValues(bytes)
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256)
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = [...bytes].map((value) => value.toString(16).padStart(2, '0'))
+  return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex.slice(6, 8).join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10).join('')}`
+}
+
 export function normalizeWorkflowNodes(nodes: WorkflowNode[]) {
   return nodes.map((node, order) => ({ ...node, order }))
 }
@@ -26,11 +45,11 @@ export function insertWorkflowNode(nodes: WorkflowNode[], node: WorkflowNode, ta
   return normalizeWorkflowNodes(next)
 }
 
-export function createAgentNode(agentId: string, order: number, nodeId = crypto.randomUUID()): AgentWorkflowNode {
+export function createAgentNode(agentId: string, order: number, nodeId = createWorkflowNodeId()): AgentWorkflowNode {
   return { id: nodeId, type: 'agent', agentId, order, inputContract: [], outputContract: [] }
 }
 
-export function createHumanApprovalNode(order: number, nodeId = crypto.randomUUID()): HumanApprovalWorkflowNode {
+export function createHumanApprovalNode(order: number, nodeId = createWorkflowNodeId()): HumanApprovalWorkflowNode {
   return {
     id: nodeId,
     type: 'human_approval',
@@ -46,7 +65,7 @@ export function createHumanApprovalNode(order: number, nodeId = crypto.randomUUI
 export function createRobotApprovalNode(
   reviewerAgentId: string,
   order: number,
-  nodeId = crypto.randomUUID()
+  nodeId = createWorkflowNodeId()
 ): RobotApprovalWorkflowNode {
   return {
     id: nodeId,
@@ -61,13 +80,13 @@ export function createRobotApprovalNode(
   }
 }
 
-export function createWorkflowNode(resource: WorkflowResource, order: number, nodeId = crypto.randomUUID()) {
+export function createWorkflowNode(resource: WorkflowResource, order: number, nodeId = createWorkflowNodeId()) {
   if (resource.type === 'agent') return createAgentNode(resource.agentId ?? '', order, nodeId)
   if (resource.type === 'human_approval') return createHumanApprovalNode(order, nodeId)
   return createRobotApprovalNode(resource.agentId ?? '', order, nodeId)
 }
 
-export function insertAgentNode(nodes: WorkflowNode[], agentId: string, targetIndex: number, nodeId = crypto.randomUUID()) {
+export function insertAgentNode(nodes: WorkflowNode[], agentId: string, targetIndex: number, nodeId = createWorkflowNodeId()) {
   return insertWorkflowNode(nodes, createAgentNode(agentId, targetIndex, nodeId), targetIndex)
 }
 

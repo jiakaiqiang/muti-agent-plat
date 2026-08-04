@@ -264,6 +264,25 @@ export class RuntimeService implements OnModuleInit {
       }
     }
 
+    let cancellation: Promise<void> | undefined;
+    const cancelUnderlyingHandle = (termination: Parameters<AgentRuntimeRunHandle['cancel']>[0]) => {
+      cancellation ??= handle.cancel(termination);
+      return cancellation;
+    };
+    const cancelLocalRuntimeOnAbort = () => {
+      const termination = terminationFromSignal(invocationSignal) ?? createExecutionTermination({
+        kind: 'user_cancelled',
+        source: 'user',
+        scope: 'invocation',
+        phase: input.phase
+      });
+      void cancelUnderlyingHandle(termination).catch(() => undefined);
+    };
+    if (isLocalExecution) {
+      if (invocationSignal.aborted) cancelLocalRuntimeOnAbort();
+      else invocationSignal.addEventListener('abort', cancelLocalRuntimeOnAbort, { once: true });
+    }
+
     const result = handle.result
       .catch((error: unknown) => this.unsupportedResult(input, errorMessage(error)))
       .then((resolved) => {
@@ -294,7 +313,7 @@ export class RuntimeService implements OnModuleInit {
           phase: input.phase
         });
         abortWithTermination(invocationController, resolvedTermination);
-        await handle.cancel(resolvedTermination);
+        await cancelUnderlyingHandle(resolvedTermination);
       },
       hasStreamingEvents:
         isLocalExecution || (Boolean(adapter?.start) && runtimeStreamingEnabledFor(input.executionTarget.runtimeType))
@@ -305,10 +324,12 @@ export class RuntimeService implements OnModuleInit {
       done: result.then(
         () => {
           signal?.removeEventListener('abort', forwardParentAbort);
+          invocationSignal.removeEventListener('abort', cancelLocalRuntimeOnAbort);
           this.releaseActiveInvocation(input.sessionId, input.invocationId);
         },
         () => {
           signal?.removeEventListener('abort', forwardParentAbort);
+          invocationSignal.removeEventListener('abort', cancelLocalRuntimeOnAbort);
           this.releaseActiveInvocation(input.sessionId, input.invocationId);
         }
       )

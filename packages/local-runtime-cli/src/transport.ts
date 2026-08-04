@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type {
   LocalRuntimeClientMessage,
   LocalRuntimeDeviceCode,
@@ -90,11 +91,12 @@ export async function revokeDevice(state: LocalRuntimeState) {
 }
 
 export async function runBridge(state: LocalRuntimeState, cliVersion: string, signal: AbortSignal) {
+  const writebackAuthorizations = new LocalWritebackAuthorizationStore();
   while (!signal.aborted) {
     try {
       if (state.tokens) await ensureAccessToken(state);
       else await authorizeLoopbackDevice(state, cliVersion);
-      await runBridgeConnection(state, cliVersion, signal);
+      await runBridgeConnection(state, cliVersion, signal, writebackAuthorizations);
     } catch (error) {
       if (signal.aborted) break;
       if (isAuthorizationFailure(error) && state.tokens) {
@@ -107,7 +109,12 @@ export async function runBridge(state: LocalRuntimeState, cliVersion: string, si
   }
 }
 
-async function runBridgeConnection(state: LocalRuntimeState, cliVersion: string, signal: AbortSignal) {
+async function runBridgeConnection(
+  state: LocalRuntimeState,
+  cliVersion: string,
+  signal: AbortSignal,
+  writebackAuthorizations: LocalWritebackAuthorizationStore
+) {
   const accessToken = state.tokens?.accessToken;
   if (!accessToken) throw new Error('Local Runtime access token is unavailable.');
   const socketUrl = new URL('/local-runtime', state.serverUrl);
@@ -154,7 +161,15 @@ async function runBridgeConnection(state: LocalRuntimeState, cliVersion: string,
       }, 15_000);
     });
     socket.on('message', (data) => {
-      void handleServerMessage(JSON.parse(data.toString()) as LocalRuntimeServerMessage, state, workspaces, active, secrets, send)
+      void handleServerMessage(
+        JSON.parse(data.toString()) as LocalRuntimeServerMessage,
+        state,
+        workspaces,
+        active,
+        writebackAuthorizations,
+        secrets,
+        send
+      )
         .catch((error) => process.stderr.write(`Local Runtime request failed: ${error instanceof Error ? error.message : String(error)}\n`));
     });
     socket.on('unexpected-response', (_, response) => reject(new Error(`WebSocket upgrade rejected with HTTP ${response.statusCode}.`)));
@@ -177,6 +192,7 @@ async function handleServerMessage(
   state: LocalRuntimeState,
   workspaces: Map<string, LocalWorkspace>,
   active: Map<string, AbortController>,
+  writebackAuthorizations: LocalWritebackAuthorizationStore,
   secrets: LocalSecretStore,
   send: (message: LocalRuntimeClientMessage) => void
 ) {
@@ -324,7 +340,7 @@ async function handleServerMessage(
     return;
   }
   if (message.kind === 'local_runtime.workspace.operation.request') {
-    const result = await handleWorkspaceOperation(message.payload, workspaces);
+    const result = await handleWorkspaceOperation(message.payload, workspaces, writebackAuthorizations);
     send({ kind: 'local_runtime.workspace.operation.result', payload: result });
     return;
   }
@@ -334,7 +350,8 @@ async function handleServerMessage(
     if (!workspace) throw new Error(`Unregistered local workspace: ${workspaceId}`);
     if (active.has(plan.invocationId)) throw new Error(`Duplicate invocation: ${plan.invocationId}`);
     const localPermissions = workspace.permissionPolicy();
-    if (workspace.consumeOneTimePermissions().length) await saveState(state);
+    const consumedPermissions = workspace.consumeOneTimePermissions();
+    if (consumedPermissions.length) await saveState(state);
     const controller = new AbortController();
     active.set(plan.invocationId, controller);
     const emit = (event: Parameters<typeof send>[0] extends never ? never : import('@agent-cluster/shared').AgentRuntimeEvent) => {
@@ -355,6 +372,14 @@ async function handleServerMessage(
       providerConnectionError
     )
       .then(async (result) => {
+        const changeSet = result.workspaceExecution?.changeSet;
+        if (
+          changeSet &&
+          consumedPermissions.includes('workspace_delete') &&
+          changeSet.changes.some((change) => change.operation === 'delete' || change.operation === 'move')
+        ) {
+          writebackAuthorizations.authorizeDelete(workspaceId, changeSet);
+        }
         const workspaceRevision = await workspace.revision();
         send({
           kind: 'local_runtime.invocation.result',
@@ -425,12 +450,16 @@ async function localConnectionForPlan(
 }
 
 export async function workspaceRegistration(workspace: LocalWorkspace) {
+  const index = workspace.state.index;
+  if (!index) {
+    throw new Error('LOCAL_WORKSPACE_INDEX_MISSING: Workspace index is required in protocol v6+.');
+  }
   return {
     workspaceId: workspace.state.workspaceId,
     displayName: workspace.state.displayName,
     capabilities: workspace.capabilities(),
     revision: await workspace.revision(),
-    ...(workspace.state.index ? { index: indexSummary(workspace.state.index) } : {}),
+    index: indexSummary(index),
     permissions: workspace.permissionPolicy(),
     registeredAt: workspace.state.registeredAt
   };
@@ -443,17 +472,19 @@ function indexSummary(index: NonNullable<LocalWorkspace['state']['index']>) {
 
 async function handleWorkspaceOperation(
   request: Extract<LocalRuntimeServerMessage, { kind: 'local_runtime.workspace.operation.request' }>['payload'],
-  workspaces: Map<string, LocalWorkspace>
+  workspaces: Map<string, LocalWorkspace>,
+  writebackAuthorizations = new LocalWritebackAuthorizationStore()
 ): Promise<WorkspaceOperationResult> {
   const workspace = workspaces.get(request.workspaceId);
   if (!workspace) return operationError(request, 'LOCAL_WORKSPACE_NOT_FOUND', 'Workspace is not registered on this device.');
   try {
     if (request.ownerId !== 'local-user') throw new Error('LOCAL_OWNER_MISMATCH: Workspace operation owner is invalid.');
     const actualRevision = await workspace.revision();
-    if (!['getRevision', 'getIndexSnapshot', 'queryWorkspaceIndex'].includes(request.operation) && actualRevision.id !== request.workspaceRevision.id) {
+    if (!['getRevision', 'getIndexSnapshot', 'queryWorkspaceIndex', 'applyChangeSet'].includes(request.operation) && actualRevision.id !== request.workspaceRevision.id) {
       throw new Error('LOCAL_WORKSPACE_REVISION_CONFLICT: Workspace changed before the requested operation.');
     }
-    const permissions = intersectOperationPermissions(request.permissions, workspace.permissionPolicy());
+    const basePermissions = intersectOperationPermissions(request.permissions, workspace.permissionPolicy());
+    const permissions = writebackAuthorizations.permissionsFor(request, basePermissions);
     assertOperationPermission(request.operation, permissions);
     let data: unknown;
     if (request.operation === 'capabilities') data = workspace.capabilities();
@@ -464,13 +495,77 @@ async function handleWorkspaceOperation(
     else if (request.operation === 'statFile') data = await workspace.statFile(request.input);
     else if (request.operation === 'readFile') data = await workspace.readFile(request.input);
     else if (request.operation === 'searchText') data = await workspace.searchText(request.input);
-    else data = await workspace.applyChangeSet(request.input, permissions);
+    else {
+      data = await workspace.applyChangeSet(request.input, permissions);
+      writebackAuthorizations.recordApplyResult(request, data as import('@agent-cluster/shared').ApplyChangeSetResult);
+    }
     return { requestId: request.requestId, workspaceId: request.workspaceId, operation: request.operation, status: 'ok', data };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const code = message.includes(':') ? message.slice(0, message.indexOf(':')) : 'LOCAL_WORKSPACE_OPERATION_FAILED';
     return operationError(request, code, message);
   }
+}
+
+export class LocalWritebackAuthorizationStore {
+  private readonly deleteAuthorizations = new Map<string, Map<string, { digest: string; expiresAt: number }>>();
+
+  constructor(
+    private readonly ttlMs = 30 * 60 * 1_000,
+    private readonly now: () => number = Date.now
+  ) {}
+
+  authorizeDelete(workspaceId: string, changeSet: import('@agent-cluster/shared').WorkspaceChangeSet) {
+    const authorized = this.deleteAuthorizations.get(workspaceId) ?? new Map<string, { digest: string; expiresAt: number }>();
+    authorized.set(changeSet.id, { digest: canonicalChangeSetDigest(changeSet), expiresAt: this.now() + this.ttlMs });
+    this.deleteAuthorizations.set(workspaceId, authorized);
+  }
+
+  permissionsFor(
+    request: Extract<LocalRuntimeServerMessage, { kind: 'local_runtime.workspace.operation.request' }>['payload'],
+    base: LocalRuntimePermissionPolicy
+  ): LocalRuntimePermissionPolicy {
+    if (request.operation !== 'applyChangeSet' || !this.hasDelete(request.workspaceId, request.input)) return base;
+    return { ...base, workspace_delete: 'allow' };
+  }
+
+  recordApplyResult(
+    request: Extract<LocalRuntimeServerMessage, { kind: 'local_runtime.workspace.operation.request' }>['payload'],
+    result: import('@agent-cluster/shared').ApplyChangeSetResult
+  ) {
+    if (request.operation !== 'applyChangeSet' || !result.ok) return;
+    const authorized = this.deleteAuthorizations.get(request.workspaceId);
+    authorized?.delete(request.input.id);
+    if (authorized?.size === 0) this.deleteAuthorizations.delete(request.workspaceId);
+  }
+
+  private hasDelete(workspaceId: string, changeSet: import('@agent-cluster/shared').WorkspaceChangeSet) {
+    const authorized = this.deleteAuthorizations.get(workspaceId);
+    const entry = authorized?.get(changeSet.id);
+    if (!entry) return false;
+    if (entry.expiresAt <= this.now()) {
+      authorized?.delete(changeSet.id);
+      if (authorized?.size === 0) this.deleteAuthorizations.delete(workspaceId);
+      return false;
+    }
+    if (entry.digest === canonicalChangeSetDigest(changeSet)) return true;
+    return false;
+  }
+}
+
+function canonicalChangeSetDigest(changeSet: import('@agent-cluster/shared').WorkspaceChangeSet) {
+  return createHash('sha256').update(stableJson(changeSet)).digest('hex');
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function intersectOperationPermissions(

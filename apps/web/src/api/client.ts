@@ -29,9 +29,20 @@ export class ApiRequestError extends Error {
   }
 }
 
+export function isAbortError(error: unknown) {
+  if (!error || typeof error !== 'object') return false
+  const candidate = error as { name?: unknown; message?: unknown; code?: unknown }
+  return candidate.name === 'AbortError' ||
+    candidate.name === 'CanceledError' ||
+    candidate.code === 'ABORT_ERR' ||
+    (typeof candidate.message === 'string' && /signal is aborted without reason/i.test(candidate.message))
+}
+
 async function request<T>(path: string, init?: ApiRequestInit) {
   const { timeoutMs, timeoutMessage, ...requestInit } = init ?? {}
   const resolvedTimeoutMs = timeoutMs && timeoutMs > 0 ? timeoutMs : undefined
+  const resolvedTimeoutMessage =
+    timeoutMessage ?? `${requestInit.method ?? 'GET'} ${path} timed out after ${timeoutMs}ms`
   const timeoutController = resolvedTimeoutMs ? new AbortController() : undefined
   const upstreamSignal = requestInit.signal
   const forwardAbort = () => timeoutController?.abort(upstreamSignal?.reason)
@@ -57,17 +68,20 @@ async function request<T>(path: string, init?: ApiRequestInit) {
           responsePromise,
           new Promise<Response>((_, reject) => {
             timeoutHandle = setTimeout(() => {
-              timeoutController.abort()
-              reject(
-                new Error(
-                  timeoutMessage ??
-                    `${requestInit.method ?? 'GET'} ${path} timed out after ${timeoutMs}ms`
-                )
-              )
+              const timeoutError = new Error(resolvedTimeoutMessage)
+              timeoutController.abort(timeoutError)
+              reject(timeoutError)
             }, resolvedTimeoutMs)
           })
         ])
       : await responsePromise
+  } catch (error) {
+    // Browsers may reject fetch with their own AbortError before the timeout
+    // race settles. Do not leak that implementation detail to the UI.
+    if (timeoutController && isAbortError(error) && !upstreamSignal?.aborted) {
+      throw new Error(resolvedTimeoutMessage)
+    }
+    throw error
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle)
     upstreamSignal?.removeEventListener('abort', forwardAbort)

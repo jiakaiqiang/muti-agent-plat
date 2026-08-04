@@ -20,6 +20,7 @@ import type {
   SessionDetail,
   SupplementalContextResolution,
   TaskBrief,
+  TaskContext,
   TaskAcceptanceDecisionOutput,
   TaskBriefOutput,
   TaskExecutionResultOutput
@@ -37,6 +38,7 @@ import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import {
   artifactCreatedEventPayload,
   effectiveStructuredOutputLimit,
+  type ExecutionOutcome,
   OrchestratorService,
   usableAgentMessageOutput
 } from './orchestrator.service.js';
@@ -207,7 +209,11 @@ function makeService(
       setCollection() {}
     } as never,
     {} as never,
-    {} as never,
+    {
+      workspaceFocus() {
+        return undefined;
+      }
+    } as never,
     {
       compileIdentity({ agent: definition }: { agent: Agent }) {
         return makeInvocationPlan({ agent: { ...definition, agentId: definition.id } }).agent;
@@ -452,7 +458,13 @@ test('receiver Runtime recognizes every follow-up intent without requesting inte
       session: SessionDetail,
       content: string,
       mentionedAgentIds: string[]
-    ): Promise<{ intent: string; shouldPause: boolean; coordinatorInstruction: string }>;
+    ): Promise<{
+      intent: string;
+      requirementRelation?: string;
+      failedExecutionAction?: string;
+      shouldPause: boolean;
+      coordinatorInstruction: string;
+    }>;
     createContextAssembly(): ContextAssembly;
     runRuntime(
       session: SessionDetail,
@@ -478,6 +490,8 @@ test('receiver Runtime recognizes every follow-up intent without requesting inte
         schemaVersion: '1.0',
         kind: 'user_message_handling_plan',
         intent: 'command',
+        requirementRelation: 'continuation',
+        failedExecutionAction: 'none',
         priority: 'normal',
         shouldPause: true,
         affectedTaskIds: [],
@@ -497,6 +511,8 @@ test('receiver Runtime recognizes every follow-up intent without requesting inte
 
   assert.equal(invocationPhase, 'user_message_routing');
   assert.equal(plan.intent, 'command');
+  assert.equal(plan.requirementRelation, 'continuation');
+  assert.equal(plan.failedExecutionAction, 'none');
   assert.equal(plan.shouldPause, false);
   assert.equal(plan.coordinatorInstruction, 'decompose later');
   assert.ok(routedContext?.constraints.includes('Current user message: 完成后增加缓存'));
@@ -1051,6 +1067,7 @@ type TaskExecutionTestService = {
     error?: RuntimeError;
     code?: RuntimeError['code'];
     retryable?: boolean;
+    approvalRequired?: boolean;
   }>;
   createContextAssembly(): ContextAssembly;
   runRuntime(session: SessionDetail, input: {
@@ -1060,6 +1077,14 @@ type TaskExecutionTestService = {
   }): Promise<AgentRunResult>;
   emitTaskHandoff(): void;
   createSummaryMemoryCheckpoint(): void;
+  createTaskContext(
+    session: SessionDetail,
+    brief: TaskBrief | undefined,
+    task: AgentTask | undefined,
+    phase: 'execution',
+    relevantMemories: ContextAssembly['relevantMemories'],
+    ragSnippets: ContextAssembly['ragSnippets']
+  ): TaskContext;
 };
 
 function taskExecutionHarness(output: TaskExecutionResultOutput) {
@@ -1195,6 +1220,289 @@ test('architecture claim fallback does not reassign to requirements after archit
   assert.equal(alternative, undefined);
 });
 
+test('supplemental semantic refs resolve exact artifacts and expose full bounded proposal content', async () => {
+  const artifact: Artifact = {
+    id: 'artifact-architecture',
+    dataEpoch: 'epoch-test',
+    sessionId: 'session-1',
+    taskId: 'task-architect',
+    agentId: 'architect',
+    type: 'markdown',
+    title: 'System architecture',
+    contentSummary: 'Architecture completed.',
+    metadata: { phase: 'task_execution' },
+    runtimeProposals: [createRuntimeArtifactOutput({
+      type: 'markdown',
+      title: 'System architecture details',
+      summary: 'Concrete schema and API design.',
+      content: 'Database schema: users(id, email). API: POST /users with request and response schemas.'
+    })],
+    platformProjections: [],
+    systemEvidence: null,
+    createdAt: '2026-07-03T00:00:00.000Z'
+  };
+  const service = makeService([artifact]) as unknown as {
+    hydrateSupplementalContext(session: SessionDetail, request: RuntimeContextRequest): Promise<SupplementalContextResolution>;
+    selectedEvidenceContent(session: SessionDetail, evidence: { type: 'artifact'; label: string; ref: string }): { content?: string } | undefined;
+  };
+  const activeSession = session();
+  const resolution = await service.hydrateSupplementalContext(activeSession, {
+    reason: 'Need the architecture body',
+    requestedRefs: [{ type: 'artifact', label: 'System architecture' }],
+    requestedFiles: []
+  });
+
+  assert.deepEqual(resolution.resolvedRefs, [{ type: 'artifact', label: 'System architecture', ref: artifact.id }]);
+  assert.deepEqual(resolution.failedRefs, []);
+  assert.equal(resolution.outcome, 'resolved');
+  assert.ok(resolution.contentBytes > (artifact.contentSummary?.length ?? 0));
+  assert.match(service.selectedEvidenceContent(activeSession, {
+    type: 'artifact', label: artifact.title, ref: artifact.id
+  })?.content ?? '', /POST \/users/);
+});
+
+test('resolved semantic refs are injected into the immediate Runtime retry', async () => {
+  const artifact: Artifact = {
+    id: 'artifact-runtime-retry-architecture',
+    dataEpoch: 'epoch-test',
+    sessionId: 'session-1',
+    taskId: 'task-architect',
+    agentId: 'architect',
+    type: 'markdown',
+    title: 'Runtime retry architecture',
+    contentSummary: 'Architecture summary.',
+    metadata: { phase: 'task_execution' },
+    runtimeProposals: [createRuntimeArtifactOutput({
+      type: 'markdown',
+      title: 'Runtime retry architecture details',
+      summary: 'Detailed architecture.',
+      content: 'RETRY_ARCHITECTURE_BODY: POST /projects uses ProjectCreateRequest and ProjectResponse.'
+    })],
+    platformProjections: [],
+    systemEvidence: null,
+    createdAt: '2026-07-31T00:00:00.000Z'
+  };
+  const service = makeService([artifact]) as unknown as {
+    runRuntime(session: SessionDetail, input: {
+      invocationId: string;
+      sessionId: string;
+      phase: 'discussion';
+      agent: Agent;
+      contextAssembly: ContextAssembly;
+      expectedOutput: { kind: 'agent_message'; schemaVersion: '1.0' };
+      budget: Record<string, number>;
+    }): Promise<AgentRunResult>;
+    runRuntimeAttempt(session: SessionDetail, input: {
+      invocationId: string;
+      contextAssembly: ContextAssembly;
+    }): Promise<AgentRunResult>;
+    recordSupplementalContextRequest(): void;
+  };
+  const retryEvidence: Array<ContextAssembly['selectedEvidenceContents']> = [];
+  let attempt = 0;
+  service.recordSupplementalContextRequest = () => {};
+  service.runRuntimeAttempt = async (_activeSession, input) => {
+    attempt += 1;
+    retryEvidence.push(input.contextAssembly.selectedEvidenceContents);
+    if (attempt === 1) {
+      return {
+        invocationId: input.invocationId,
+        runtimeType: 'mock',
+        status: 'failed',
+        output: createAgentMessageOutput({ messageKind: 'risk', content: 'Need the architecture body.' }),
+        events: [],
+        artifacts: [],
+        systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, model: 'mock' },
+        error: {
+          code: 'CONTEXT_INSUFFICIENT',
+          message: 'Need the architecture body.',
+          retryable: true,
+          requestedContext: {
+            reason: 'Need the architecture body.',
+            requestedRefs: [{ type: 'artifact', label: artifact.title }],
+            requestedFiles: []
+          }
+        }
+      };
+    }
+    return {
+      invocationId: input.invocationId,
+      runtimeType: 'mock',
+      status: 'completed',
+      output: createAgentMessageOutput({ messageKind: 'answer', content: 'Implemented from the architecture.' }),
+      events: [],
+      artifacts: [],
+      systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, model: 'mock' }
+    };
+  };
+
+  const result = await service.runRuntime(session(), {
+    invocationId: 'semantic-ref-retry',
+    sessionId: 'session-1',
+    phase: 'discussion',
+    agent: agent('backend'),
+    contextAssembly: {
+      taskContext: { evidenceRefs: [] } as unknown as TaskContext,
+      selectedEvidenceContents: []
+    } as unknown as ContextAssembly,
+    expectedOutput: { kind: 'agent_message', schemaVersion: '1.0' },
+    budget: {}
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.equal(attempt, 2);
+  assert.match(JSON.stringify(retryEvidence[1]), /RETRY_ARCHITECTURE_BODY/);
+  assert.equal(retryEvidence[1]?.some((item) => item.ref === artifact.id), true);
+});
+
+test('supplemental semantic refs report invalid null refs as exhausted instead of resolved', async () => {
+  const service = makeService() as unknown as {
+    hydrateSupplementalContext(session: SessionDetail, request: RuntimeContextRequest): Promise<SupplementalContextResolution>;
+  };
+  const resolution = await service.hydrateSupplementalContext(session(), {
+    reason: 'Need a missing decision',
+    requestedRefs: [{ type: 'historical_decision', label: 'User-confirmed task details' }]
+  });
+
+  assert.deepEqual(resolution.resolvedRefs, []);
+  assert.equal(resolution.failedRefs?.[0]?.code, 'INVALID_REFERENCE');
+  assert.equal(resolution.outcome, 'exhausted');
+});
+
+test('bootstrap workflow task can auto-recover once when an upstream dependency artifact exists', async () => {
+  const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+  const upstreamArtifact: Artifact = {
+    id: 'artifact-architecture',
+    dataEpoch: 'epoch-test',
+    sessionId: 'session-1',
+    taskId: 'task-architecture',
+    agentId: 'architect',
+    type: 'json',
+    title: 'Architecture execution result',
+    contentSummary: 'Architecture, API contracts, and data model are defined.',
+    metadata: { phase: 'task_execution' },
+    runtimeProposals: [],
+    platformProjections: [],
+    systemEvidence: null,
+    createdAt: '2026-07-31T00:00:00.000Z'
+  };
+  const service = makeService(
+    [upstreamArtifact],
+    recorder,
+    undefined,
+    undefined,
+    ['coordinator', 'architect', 'frontend', 'backend']
+  ) as unknown as TaskExecutionTestService;
+  service.createContextAssembly = () => ({
+    relevantMemories: [],
+    budget: { maxInputTokens: 2_000, maxOutputTokens: 500, maxTotalTokens: 2_500 }
+  }) as unknown as ContextAssembly;
+  service.runRuntime = async (_session, input) => ({
+    invocationId: input.invocationId,
+    runtimeType: 'mock',
+    status: 'completed',
+    output: input.phase === 'task_acceptance'
+      ? {
+          ...runtimeOutputExamples.task_acceptance_decision,
+          status: input.agent.key === 'frontend' ? 'blocked' : 'accepted',
+          reason: input.agent.key === 'frontend'
+            ? 'Frontend needs the upstream architecture contract.'
+            : 'Backend can continue from the upstream architecture.',
+          handoffSuggestion: input.agent.key === 'frontend'
+            ? {
+                targetAgentKey: 'backend', targetAgentId: null,
+                reason: 'Backend can initialize the shared contracts.', missingContext: [], riskLevel: 'low'
+              }
+            : null,
+          alternativeAgentKeys: input.agent.key === 'frontend' ? ['backend'] : []
+        }
+      : runtimeOutputExamples.task_execution_result,
+    events: [],
+    artifacts: [],
+    systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+    usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, model: 'mock' }
+  });
+  service.emitTaskHandoff = () => {};
+  service.createSummaryMemoryCheckpoint = () => {};
+
+  const activeSession: SessionDetail = {
+    ...session(),
+    status: 'EXECUTING',
+    workspaceMode: 'bootstrap',
+    participatingAgentIds: ['coordinator', 'architect', 'frontend', 'backend']
+  };
+  const task: AgentTask = {
+    id: 'task-frontend',
+    sessionId: activeSession.id,
+    title: 'Implement the frontend stage',
+    description: 'Use the upstream design contract to initialize the project.',
+    status: 'assigned',
+    assignee: { type: 'agent', id: 'frontend' },
+    routingMode: 'coordinator_controlled',
+    autoResolutionAttempted: false,
+    dependsOnTaskIds: ['task-architecture'],
+    acceptanceCriteria: ['Frontend implementation is initialized.'],
+    createdAt: '2026-07-31T00:00:00.000Z',
+    updatedAt: '2026-07-31T00:00:00.000Z'
+  };
+  const brief: TaskBrief = {
+    id: 'brief-bootstrap', sessionId: activeSession.id, version: 1,
+    goal: 'Build a new project from scratch.', scope: [], outOfScope: [], constraints: [],
+    acceptanceCriteria: task.acceptanceCriteria, risks: [], openQuestions: [], confirmedByUser: true,
+    createdAt: '2026-07-31T00:00:00.000Z'
+  };
+
+  const outcome = await service.runOneTask(activeSession, brief, task);
+
+  assert.equal(outcome.ok, true);
+  assert.equal(task.autoResolutionAttempted, true);
+  assert.deepEqual(task.assignee, { type: 'agent', id: 'backend' });
+  assert.ok(recorder.events.some((event) => event.type === 'task_reassigned'));
+});
+
+test('task context exposes upstream dependency artifacts as directly readable evidence', () => {
+  const upstreamArtifact: Artifact = {
+    id: 'artifact-upstream-contract',
+    dataEpoch: 'epoch-test',
+    sessionId: 'session-1',
+    taskId: 'task-upstream',
+    agentId: 'architect',
+    type: 'markdown',
+    title: 'Upstream architecture contract',
+    contentSummary: 'Use POST /api/projects and the Project data model.',
+    metadata: { phase: 'task_execution' },
+    runtimeProposals: [],
+    platformProjections: [],
+    systemEvidence: null,
+    createdAt: '2026-07-31T00:00:00.000Z'
+  };
+  const service = makeService([upstreamArtifact]) as unknown as TaskExecutionTestService;
+  const activeSession: SessionDetail = {
+    ...session(),
+    taskDomain: 'non_coding'
+  };
+  const task: AgentTask = {
+    id: 'task-downstream',
+    sessionId: activeSession.id,
+    title: 'Implement the frontend stage',
+    description: 'Consume the upstream contract.',
+    status: 'assigned',
+    assignee: { type: 'agent', id: 'frontend' },
+    dependsOnTaskIds: ['task-upstream'],
+    acceptanceCriteria: ['Frontend stage is complete.'],
+    createdAt: '2026-07-31T00:00:00.000Z',
+    updatedAt: '2026-07-31T00:00:00.000Z'
+  };
+
+  const context = service.createTaskContext(activeSession, undefined, task, 'execution', [], []);
+  const dependencyRef = context.evidenceRefs.find((ref) => ref.ref === upstreamArtifact.id);
+
+  assert.equal(dependencyRef?.type, 'artifact');
+  assert.equal(dependencyRef?.selectionReason, 'Upstream task dependency.');
+});
+
 test('runtime index refresh requests a bounded task-relevant projection instead of a full snapshot', async () => {
   const revision = { id: 'revision-query', observedAt: '2026-07-28T00:00:00.000Z' };
   let queryInput: { query?: string; pathHints?: string[]; limit?: number } | undefined;
@@ -1263,7 +1571,11 @@ test('architecture preload is strictly bounded and continues when the Provider r
       detectedStack: ['TypeScript'],
       indexedEntries: 10,
       truncated: false,
-      updatedAt: revision.observedAt
+      updatedAt: revision.observedAt,
+      coverage: {
+        visitedEntries: 10, indexedEntries: 10, excludedGenerated: 0,
+        sensitiveEntries: 0, skippedSymlinks: 0, failedEntries: 0
+      }
     }
   };
   let capturedRequest: RuntimeContextRequest | undefined;
@@ -1286,8 +1598,8 @@ test('architecture preload is strictly bounded and continues when the Provider r
     service.preloadArchitectureTaskContext(activeSession, architectureTask(), 'architect')
   );
 
-  assert.equal(capturedRequest?.requestedPaths?.length, 8);
-  assert.equal(capturedRequest?.requestedPaths?.includes('package.json'), true);
+  assert.equal(capturedRequest?.requestedFiles?.length, 8);
+  assert.equal(capturedRequest?.requestedFiles?.some((item) => item.path === 'package.json'), true);
   assert.deepEqual(capturedOptions, {
     deadlineMs: 1_500,
     maxOperations: 8,
@@ -1328,7 +1640,11 @@ test('supplemental hydration processes eight existing files and defers the remai
       workspaceId: 'workspace-1', revision, generation: 1, status: 'ready', complete: true,
       entries: paths.map((path) => ({ path, kind: 'file' as const, size: 20, generated: false, sensitive: false })),
       entrypoints: [], detectedStack: [], indexedEntries: paths.length, truncated: false,
-      updatedAt: revision.observedAt
+      updatedAt: revision.observedAt,
+      coverage: {
+        visitedEntries: paths.length, indexedEntries: paths.length, excludedGenerated: 0,
+        sensitiveEntries: 0, skippedSymlinks: 0, failedEntries: 0
+      }
     }
   };
 
@@ -1943,6 +2259,86 @@ test('task acceptance Runtime failure preserves the structured contract error', 
   const payload = runtimeFailed?.metadata.payload as { runtimeError?: RuntimeError } | undefined;
   assert.equal(payload?.runtimeError?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
   assert.deepEqual(payload?.runtimeError?.details, { expectedKind: 'task_acceptance_decision' });
+});
+
+test('task execution pending approval waits without emitting failure events', async () => {
+  const { recorder, service, activeSession, task, brief } = taskExecutionHarness(
+    runtimeOutputExamples.task_execution_result
+  );
+  service.runRuntime = async (_session, input) => ({
+    invocationId: input.invocationId,
+    runtimeType: 'mock',
+    status: input.phase === 'task_acceptance' ? 'completed' : 'pending_approval',
+    output: input.phase === 'task_acceptance'
+      ? runtimeOutputExamples.task_acceptance_decision
+      : createAgentMessageOutput({ messageKind: 'progress', content: 'Approval required.' }),
+    events: [],
+    artifacts: [],
+    systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+    usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, model: 'mock' },
+    ...(input.phase === 'task_acceptance' ? {} : {
+      error: {
+        code: 'HUMAN_APPROVAL_REQUIRED' as const,
+        message: 'Approval required.',
+        retryable: true
+      }
+    })
+  });
+
+  const outcome = await service.runOneTask(activeSession, brief, task);
+
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.approvalRequired, true);
+  assert.equal(task.status, 'waiting');
+  assert.equal(recorder.events.some((event) => event.type === 'runtime_failed'), false);
+  assert.equal(recorder.events.some((event) => event.type === 'task_rejected'), false);
+  assert.ok(recorder.events.some((event) =>
+    event.type === 'task_waiting' &&
+    (event.metadata.payload as { reason?: string }).reason === 'capability_approval_required'
+  ));
+});
+
+test('pipeline preserves pending approval as an interactive outcome', async () => {
+  const service = makeService() as unknown as {
+    runPipeline(session: SessionDetail, brief: TaskBrief, tasks: AgentTask[]): Promise<ExecutionOutcome>;
+    runOneTask(): Promise<{ ok: false; message: string; approvalRequired: true }>;
+  };
+  service.runOneTask = async () => ({
+    ok: false,
+    message: 'Approval required.',
+    approvalRequired: true
+  });
+  const activeSession = { ...session(), status: 'EXECUTING' as const };
+  const task: AgentTask = {
+    id: 'task-approval-required',
+    sessionId: activeSession.id,
+    title: 'Write implementation files',
+    description: 'Requires high-risk tools.',
+    status: 'assigned',
+    dependsOnTaskIds: [],
+    acceptanceCriteria: [],
+    createdAt: '2026-07-03T00:00:00.000Z',
+    updatedAt: '2026-07-03T00:00:00.000Z'
+  };
+  const brief: TaskBrief = {
+    id: 'brief-approval-required',
+    sessionId: activeSession.id,
+    version: 1,
+    goal: 'Write implementation files.',
+    scope: [],
+    outOfScope: [],
+    constraints: [],
+    acceptanceCriteria: [],
+    risks: [],
+    openQuestions: [],
+    confirmedByUser: true,
+    createdAt: '2026-07-03T00:00:00.000Z'
+  };
+
+  const outcome = await service.runPipeline(activeSession, brief, [task]);
+
+  assert.deepEqual(outcome, { kind: 'approval_required', reason: 'Approval required.' });
 });
 
 test('infrastructure failure classification adds contract violations without swallowing interactive errors', () => {

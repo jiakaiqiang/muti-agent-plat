@@ -19,10 +19,16 @@ const routes: RouteRecordRaw[] = [
     meta: { section: 'session', title: '工作台' }
   },
   {
+    path: '/local-runtime',
+    name: 'local-runtime',
+    component: () => import('@/views/LocalRuntimeManagerView.vue'),
+    meta: { section: 'local-runtime', title: '本地运行' }
+  },
+  {
     path: '/local-runtime/activate',
     name: 'local-runtime-activate',
     component: () => import('@/views/LocalRuntimeActivationView.vue'),
-    meta: { section: 'settings', title: '连接本机 Runtime' }
+    meta: { section: 'local-runtime', title: '连接本机 Runtime' }
   },
   {
     path: '/workflows',

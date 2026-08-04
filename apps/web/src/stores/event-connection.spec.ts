@@ -211,6 +211,24 @@ describe('event stream recovery coordinator', () => {
     expect(FakeEventSource.instances).toHaveLength(1)
   })
 
+  it('swallows an aborted shared backfill for concurrent callers', async () => {
+    vi.mocked(fetch).mockImplementation((_input, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(new DOMException('signal is aborted without reason', 'AbortError'))
+      }, { once: true })
+    }))
+    const store = useEventStore()
+    store.ensureConnected('session-1')
+    const stream = FakeEventSource.instances[0]!
+    stream.onopen?.(new Event('open'))
+
+    const concurrentReconcile = store.ensureConnectedAndReconcile('session-1')
+    stream.onerror?.(new Event('error'))
+
+    await expect(concurrentReconcile).resolves.toBeUndefined()
+    expect(store.sseConnectionState).toBe('reconnecting')
+  })
+
   it('atomically captures live tail events before a terminal Session disconnects', async () => {
     const store = useEventStore()
     store.ensureConnected('session-1')

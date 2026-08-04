@@ -3,6 +3,7 @@ import { BrokerGateway } from './runtime-broker/broker-gateway.js';
 import { PendingRequestRegistry } from './runtime-broker/pending-request-registry.js';
 import { WorkspaceProviderResolver } from './workspace-provider-resolver.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
+import { WorkspaceWritebackService } from './workspace-writeback.service.js';
 
 @Global()
 @Module({
@@ -13,8 +14,9 @@ import { PersistenceService } from '../persistence/persistence.service.js';
       inject: [PersistenceService]
     },
     PendingRequestRegistry,
-    WorkspaceProviderResolver
+    WorkspaceProviderResolver,
+    WorkspaceWritebackService
   ],
-  exports: [BrokerGateway, PendingRequestRegistry, WorkspaceProviderResolver]
+  exports: [BrokerGateway, PendingRequestRegistry, WorkspaceProviderResolver, WorkspaceWritebackService]
 })
 export class WorkspacesModule {}

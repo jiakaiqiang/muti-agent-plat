@@ -42,7 +42,7 @@ export class ExecutionWorker implements OnModuleInit, OnModuleDestroy {
         const { sessionId, briefId, dataEpoch } = job.data;
         assertCurrentDataEpoch(this.persistence.currentDataEpoch(), dataEpoch, `execution job ${job.id}`);
         const session = this.sessions.get(sessionId);
-        if (['CANCELLED', 'COMPLETED'].includes(session.status)) {
+        if (['PAUSED', 'INTERRUPTED', 'CANCELLED', 'COMPLETED'].includes(session.status)) {
           this.logger.log(`Skipping execution job ${job.id}; session ${sessionId} is ${session.status}`);
           return;
         }

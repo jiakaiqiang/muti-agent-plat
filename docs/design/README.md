@@ -12,7 +12,8 @@
 - `multica-refactor-completion-system-design-v1.md`：Multica 对标补全实施系统设计，定义 RunHandle、Runtime Session、Actor 双写、Workdir Brief、Skill 与 Autopilot；当前状态为已实现并完成受控环境验证。
 - `workspace-aware-context-v2-integration-closure-v1.md`：Context v2 主链路闭环、Agent 动态执行目标、Workspace Provider、Browser WebSocket Broker 与兼容边界。
 - `local-and-server-runtime-workspace-separation-discussion-result-v1.md`：浏览器本地 Runtime、服务器 Runtime、业务工作区归属、平台控制面隔离及实施验收结论。
-- `workspace-index-first-on-demand-context-system-design-v1.md`：V1 工作目录快速绑定、Provider 侧增量索引、Context v2 按需取证、单工作区单活动 Session 与完整验收规则的权威设计。
+- `workspace-index-first-on-demand-context-system-design-v1.md`：工作目录快速绑定、Provider 侧增量索引和 Context v2 按需取证；旧单活动 Lease 章节仅保留历史背景。
+- `workspace-multi-session-isolation-writeback-v1.md`：同目录多活动 Session、Git/non-Git 隔离、自动写回、三方合并和冲突恢复的权威设计。
 - `context-pipeline-v2-only-agent-decoupling-system-design-v1.md`：Context Pipeline v2 单轨、Agent/Profile/Skill/Tool/Runtime 解耦及“活动数据零保留 + 外部加密只读归档”cutover 的权威系统设计。
 - `context-v2-session-evidence-remediation-development-design-v1.md`：旧会话可见、架构 Evidence 为空、补读去重与加密只读归档的修复设计和验证矩阵。
 - `user-file-revision-multi-agent-processing-system-design-v1.md`：用户直接修改原文件后，由系统确定性 Diff、默认 Receiver Agent 分派一个或多个 Agent、汇总候选 ChangeSet 并经用户确认安全写回的系统设计。

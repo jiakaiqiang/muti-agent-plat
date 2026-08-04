@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { authorizeLoopbackDevice, workspaceRegistration } from './transport.js';
+import { authorizeLoopbackDevice, LocalWritebackAuthorizationStore, workspaceRegistration } from './transport.js';
 import { defaultState } from './state.js';
 import { LocalWorkspace } from './workspace.js';
 
@@ -70,7 +70,15 @@ test('workspace registration returns an index summary without serializing index 
         path: `src/file-${index}.ts`, kind: 'file' as const, size: 1, generated: false, sensitive: false
       })),
       entrypoints: ['src/file-0.ts'], detectedStack: ['node'], indexedEntries: 100_000,
-      truncated: false, updatedAt: revision.observedAt
+      truncated: false, updatedAt: revision.observedAt,
+      coverage: {
+        visitedEntries: 100_000,
+        indexedEntries: 100_000,
+        excludedGenerated: 0,
+        sensitiveEntries: 0,
+        skippedSymlinks: 0,
+        failedEntries: 0
+      }
     }
   }, { watch: false, index: false });
 
@@ -79,4 +87,45 @@ test('workspace registration returns an index summary without serializing index 
   assert.equal(registration.index?.indexedEntries, 100_000);
   assert.equal('entries' in (registration.index ?? {}), false);
   workspace.close();
+});
+
+test('one-time delete authorization is bound to one ChangeSet and consumed only after apply succeeds', () => {
+  let now = 1_000;
+  const authorizations = new LocalWritebackAuthorizationStore(100, () => now);
+  const base = {
+    workspace_read: 'allow', workspace_write: 'allow', workspace_delete: 'confirm',
+    command_execute: 'allow', test_execute: 'allow', dependency_install: 'confirm'
+  } as const;
+  const request = {
+    kind: 'local_runtime.workspace.operation.request' as const,
+    payload: {
+      requestId: 'request-delete', invocationId: 'invocation-delete', ownerId: 'local-user',
+      workspaceId: 'workspace-delete', workspaceRevision: { id: 'revision-delete', observedAt: '2026-07-30T00:00:00.000Z' },
+      permissions: base, operation: 'applyChangeSet' as const,
+      input: {
+        id: 'changes-delete', baseRevision: { id: 'revision-delete', observedAt: '2026-07-30T00:00:00.000Z' },
+        changes: [], createdAt: '2026-07-30T00:00:00.000Z'
+      }
+    }
+  }.payload;
+
+  authorizations.authorizeDelete(request.workspaceId, request.input);
+  assert.equal(authorizations.permissionsFor(request, base).workspace_delete, 'allow');
+  assert.equal(authorizations.permissionsFor({ ...request, input: { ...request.input, id: 'other' } }, base).workspace_delete, 'confirm');
+  assert.equal(authorizations.permissionsFor({
+    ...request,
+    input: { ...request.input, changes: [{ operation: 'delete' as const, path: 'other.txt', expectedHash: { algorithm: 'sha256' as const, value: 'different' } }] }
+  }, base).workspace_delete, 'confirm');
+  authorizations.recordApplyResult(request, {
+    ok: false, changeSetId: request.input.id, revision: request.workspaceRevision, conflicts: []
+  });
+  assert.equal(authorizations.permissionsFor(request, base).workspace_delete, 'allow');
+  authorizations.recordApplyResult(request, {
+    ok: true, changeSetId: request.input.id, revision: request.workspaceRevision, appliedCount: 0
+  });
+  assert.equal(authorizations.permissionsFor(request, base).workspace_delete, 'confirm');
+
+  authorizations.authorizeDelete(request.workspaceId, request.input);
+  now += 101;
+  assert.equal(authorizations.permissionsFor(request, base).workspace_delete, 'confirm');
 });
