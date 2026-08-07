@@ -1,10 +1,11 @@
-import type { InvocationPlan, LocalRuntimePermissionPolicy } from '@agent-cluster/shared';
+import { getRuntimeOutputContract, type InvocationPlan, type LocalRuntimePermissionPolicy } from '@agent-cluster/shared';
 
 export function buildLocalRuntimePrompt(
   providerName: string,
   plan: InvocationPlan,
   permissions: LocalRuntimePermissionPolicy
 ) {
+  const outputContract = getRuntimeOutputContract(plan.expectedOutput.kind);
   return [
     `You are running as an Agent Cluster local ${providerName} Runtime.`,
     'Operate only inside the current authorized working directory.',
@@ -13,6 +14,10 @@ export function buildLocalRuntimePrompt(
     `Effective local permissions: ${JSON.stringify(permissions)}.`,
     'Return exactly one JSON object matching the required output contract, with no markdown fences.',
     `Required output kind: ${plan.expectedOutput.kind}.`,
+    'Output JSON Schema:',
+    JSON.stringify(outputContract.schema),
+    'Output JSON example:',
+    JSON.stringify(outputContract.example),
     '',
     'Runtime input JSON:',
     JSON.stringify({

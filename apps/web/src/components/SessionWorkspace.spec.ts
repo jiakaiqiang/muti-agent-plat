@@ -62,3 +62,27 @@ describe('SessionWorkspace Session stop controls', () => {
     expect(source).toContain('title="继续会话"')
   })
 })
+
+describe('SessionWorkspace local directory picker lifecycle', () => {
+  const source = readFileSync(resolve(process.cwd(), 'src/components/SessionWorkspace.vue'), 'utf8')
+
+  it('cancels the active directory picker when the create-session dialog closes', () => {
+    expect(source).toMatch(
+      /function closeCreateSessionDialog\(\) \{[\s\S]*?localRuntimeStore\.cancelWorkspaceAuthorization\(\)[\s\S]*?sessionLocalRuntimeWorkspaceId\.value = ''[\s\S]*?sessionBindingStatus\.value = 'idle'[\s\S]*?workspaceUiStore\.closeCreateSession\(\)/
+    )
+  })
+
+  it('uses a keepalive cancellation request when the browser refreshes or leaves', () => {
+    expect(source).toContain("window.addEventListener('beforeunload', cancelLocalRuntimeAuthorizationOnPageExit)")
+    expect(source).toContain("window.addEventListener('pagehide', cancelLocalRuntimeAuthorizationOnPageExit)")
+    expect(source).toMatch(
+      /function cancelLocalRuntimeAuthorizationOnPageExit\(\) \{[\s\S]*?cancelWorkspaceAuthorization\(\{ keepalive: true \}\)/
+    )
+  })
+
+  it('ignores the expected browser abort after cancelling directory selection', () => {
+    expect(source).toMatch(
+      /async function authorizeLocalRuntimeWorkspace\(\)[\s\S]*?catch \(error\) \{[\s\S]*?if \(isAbortError\(error\)\) return/
+    )
+  })
+})

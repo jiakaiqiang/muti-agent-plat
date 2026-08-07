@@ -1,9 +1,15 @@
 import { BadRequestException, Inject, Injectable, NotFoundException, Optional, forwardRef } from '@nestjs/common';
 import { defaultAgents } from '@agent-cluster/shared';
-import type { AgentDefinition as Agent, CompiledAgentProfile } from '@agent-cluster/shared';
+import type {
+  AgentCatalogSurface,
+  AgentDefinition as Agent,
+  CompiledAgentProfile,
+  SystemAgentRole
+} from '@agent-cluster/shared';
 import { defaultCapabilityIdsByAgentKey } from '../capabilities/default-capabilities.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { AgentProfileCompilerService } from '../agent-profile/agent-profile-compiler.service.js';
+import { SystemAgentRegistryService } from './system-agent-registry.service.js';
 
 const truthyValues = new Set(['1', 'true', 'yes', 'on']);
 const defaultAgentsByKey = new Map(defaultAgents.map((agent) => [agent.key, agent]));
@@ -18,6 +24,7 @@ export class AgentsService {
 
   constructor(
     private readonly persistence: PersistenceService,
+    private readonly systemAgents: SystemAgentRegistryService,
     @Optional()
     @Inject(forwardRef(() => AgentProfileCompilerService))
     private readonly profileCompiler?: AgentProfileCompilerService
@@ -39,19 +46,27 @@ export class AgentsService {
     const persistedCustomAgents = persistedAgents.filter((agent) => !this.isDefaultAgent(agent));
     for (const agent of [...visibleDefaultAgents, ...persistedCustomAgents]) {
       const defaultCapabilityIds = defaultCapabilityIdsByAgentKey[agent.key] ?? [];
-      this.agents.set(agent.id, {
+      const normalized = {
         ...agent,
         profileMarkdown: agent.profileMarkdown.trim() || this.defaultProfileMarkdown(agent),
         tags: this.normalizeStringList(agent.tags),
         capabilityIds: Array.from(new Set([...defaultCapabilityIds, ...agent.capabilityIds])),
         profileRevision: agent.profileRevision
-      });
+      };
+      this.agents.set(agent.id, this.withServerPolicy(normalized));
     }
     this.persist();
   }
 
   list() {
     return [...this.agents.values()];
+  }
+
+  listForSurface(surface: AgentCatalogSurface) {
+    return this.list().filter((agent) => {
+      if (!this.systemAgents.isAllowedOnSurface(agent, surface)) return false;
+      return surface === 'management' || agent.status === 'active';
+    });
   }
 
   findByIdOrKey(idOrKey: string) {
@@ -71,11 +86,39 @@ export class AgentsService {
   }
 
   resolveIds(ids?: string[]) {
-    const selected = ids?.length ? ids.map((id) => this.getByIdOrKey(id)) : this.list();
+    const selected = ids?.length
+      ? ids.map((id) => this.getForSurface(id, 'chat'))
+      : this.listForSurface('chat');
     return selected.map((agent) => agent.id);
   }
 
+  getForSurface(idOrKey: string, surface: AgentCatalogSurface) {
+    const agent = this.getByIdOrKey(idOrKey);
+    if (!this.systemAgents.isAllowedOnSurface(agent, surface) || (surface !== 'management' && agent.status !== 'active')) {
+      throw new BadRequestException({
+        code: 'AGENT_SURFACE_NOT_ALLOWED',
+        message: `Agent is not available on ${surface}: ${agent.key}`
+      });
+    }
+    return agent;
+  }
+
+  resolveSystemRole(role: SystemAgentRole) {
+    const registration = this.systemAgents.getByRole(role);
+    const agent = this.getByIdOrKey(registration.agentId);
+    if (agent.status !== 'active') {
+      throw new BadRequestException(`System Agent is unavailable: ${registration.key}`);
+    }
+    return agent;
+  }
+
+  findSystemByKey(key: string) {
+    const registration = this.systemAgents.findByKey(key);
+    return registration ? this.findByIdOrKey(registration.agentId) : undefined;
+  }
+
   create(input: Partial<Agent> & Pick<Agent, 'name' | 'role'>) {
+    this.systemAgents.assertCreatable(input);
     const now = new Date().toISOString();
     const profileMarkdown = input.profileMarkdown?.trim() || this.defaultProfileMarkdown(input);
     const capabilityIds = this.normalizeStringList(input.capabilityIds);
@@ -95,13 +138,15 @@ export class AgentsService {
       createdAt: input.createdAt ?? now,
       updatedAt: input.updatedAt ?? now
     };
-    this.agents.set(agent.id, agent);
+    const decorated = this.withServerPolicy(agent);
+    this.agents.set(agent.id, decorated);
     this.persist();
-    return agent;
+    return decorated;
   }
 
   update(agentId: string, patch: Partial<Agent>) {
     const current = this.getByIdOrKey(agentId);
+    this.systemAgents.assertPatchAllowed(current, patch);
     const profileMarkdown = patch.profileMarkdown?.trim() || current.profileMarkdown;
     const capabilityIds = patch.capabilityIds
       ? this.normalizeStringList(patch.capabilityIds)
@@ -112,7 +157,7 @@ export class AgentsService {
     ) {
       this.compileOrThrow(profileMarkdown, capabilityIds);
     }
-    const updated: Agent = {
+    const updated: Agent = this.withServerPolicy({
       ...current,
       ...patch,
       id: current.id,
@@ -124,7 +169,7 @@ export class AgentsService {
         : current.defaultKnowledgeBaseIds,
       profileRevision: current.profileRevision + 1,
       updatedAt: new Date().toISOString()
-    };
+    });
     if (this.isDefaultAgent(updated)) {
       this.persistedDefaultAgentIds.add(updated.id);
     }
@@ -202,13 +247,16 @@ export class AgentsService {
       return seed;
     }
 
+    const systemRegistration = this.systemAgents.findByAgent(seed);
     return {
       ...seed,
-      status: persisted.status ?? seed.status,
+      name: systemRegistration ? (persisted.name?.trim() || seed.name) : seed.name,
+      description: systemRegistration ? (persisted.description?.trim() || seed.description) : seed.description,
+      status: systemRegistration ? 'active' : (persisted.status ?? seed.status),
       profileMarkdown: persisted.profileMarkdown,
-      tags: this.normalizeStringList(persisted.tags),
-      capabilityIds: this.normalizeStringList(persisted.capabilityIds),
-      defaultKnowledgeBaseIds: this.normalizeStringList(persisted.defaultKnowledgeBaseIds),
+      tags: systemRegistration ? seed.tags : this.normalizeStringList(persisted.tags),
+      capabilityIds: systemRegistration ? seed.capabilityIds : this.normalizeStringList(persisted.capabilityIds),
+      defaultKnowledgeBaseIds: systemRegistration ? seed.defaultKnowledgeBaseIds : this.normalizeStringList(persisted.defaultKnowledgeBaseIds),
       profileRevision: persisted.profileRevision,
       createdAt: persisted.createdAt ?? seed.createdAt,
       updatedAt: seed.updatedAt
@@ -217,6 +265,13 @@ export class AgentsService {
 
   private isDefaultAgent(agent: Pick<Agent, 'id' | 'key'>) {
     return defaultAgentIds.has(agent.id) || defaultAgentKeys.has(agent.key);
+  }
+
+  private withServerPolicy(agent: Agent): Agent {
+    return {
+      ...agent,
+      management: this.systemAgents.policyFor(agent)
+    };
   }
 
   private uniqueAgentKey(source: string) {

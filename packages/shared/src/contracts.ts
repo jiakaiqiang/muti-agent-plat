@@ -16,7 +16,8 @@ import type {
   TaskAcceptanceDecisionOutput as RegisteredTaskAcceptanceDecisionOutput,
   TaskBriefOutput as RegisteredTaskBriefOutput,
   TaskExecutionResultOutput as RegisteredTaskExecutionResultOutput,
-  UserMessageHandlingPlanOutput as RegisteredUserMessageHandlingPlanOutput
+  UserMessageHandlingPlanOutput as RegisteredUserMessageHandlingPlanOutput,
+  IntentRoutingDecisionOutput as RegisteredIntentRoutingDecisionOutput
 } from './runtime-contracts/output-contracts.js';
 
 export type UUID = string;
@@ -159,6 +160,56 @@ export type UserMessageIntent =
   | 'preference_input';
 
 export type UserMessageRequirementRelation = 'continuation' | 'new_requirement';
+
+export type RequirementScopeRelation =
+  | 'same_requirement'
+  | 'related_new_requirement'
+  | 'independent_new_requirement'
+  | 'ambiguous';
+
+export type ContextInheritancePolicy =
+  | 'inherit_confirmed'
+  | 'inherit_selected'
+  | 'clean_task_context'
+  | 'ask_user';
+
+export type WorkItemStatus =
+  | 'OPEN'
+  | 'WAITING_USER'
+  | 'EXECUTING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'CANCELLED';
+
+export type IntentRoutingStatus =
+  | 'RECEIVED'
+  | 'SNAPSHOT_READY'
+  | 'CLASSIFYING'
+  | 'VALIDATING'
+  | 'APPLYING'
+  | 'ROUTED'
+  | 'CLARIFICATION_REQUIRED'
+  | 'PENDING_RETRY'
+  | 'REJECTED';
+
+export type IntentRoutingAction =
+  | 'continue_active_work_item'
+  | 'create_related_work_item'
+  | 'create_independent_work_item'
+  | 'clarify'
+  | 'pause'
+  | 'cancel'
+  | 'confirm'
+  | 'reject'
+  | 'resume'
+  | 'replan';
+
+export type IntentRoutingRolloutMode =
+  | 'disabled'
+  | 'shadow'
+  | 'enforce_new_sessions'
+  | 'enforce_selected_sessions'
+  | 'enforce_all_current_epoch';
 
 export type FailedExecutionAction = 'none' | 'resume' | 'replan';
 
@@ -1189,6 +1240,11 @@ export type CollaborationEventType =
   | 'file_revision_applied'
   | 'file_revision_stale'
   | 'file_revision_failed'
+  | 'intent_clarification_required'
+  | 'work_item_created'
+  | 'work_item_activated'
+  | 'decision_superseded'
+  | 'follow_up_queued'
   | 'error_reported';
 
 export type EventRenderType =
@@ -1241,6 +1297,14 @@ export type CollaborationEvent<TPayload extends Record<string, unknown> = Record
 export type SessionDetail = {
   id: UUID;
   dataEpoch: UUID;
+  /** Optimistic concurrency revision for Session-scoped routing mutations. */
+  revision?: number;
+  /** The logical requirement currently selected in this chat window. */
+  activeWorkItemId?: UUID;
+  /** Revision of the Session-wide decision ledger used by intent snapshots. */
+  decisionLedgerRevision?: number;
+  /** Marks Sessions created after WorkItem-aware routing became available. */
+  intentRoutingGeneration?: 'v2';
   title: string;
   originalInput: string;
   /**
@@ -1344,6 +1408,25 @@ export type AgentDefinition = {
   profileRevision: number;
   createdAt: ISODateTime;
   updatedAt: ISODateTime;
+  /** Server-derived policy. Persisted values never grant system privileges. */
+  management?: AgentManagementPolicy;
+};
+
+export type SystemAgentRole = 'intent_router' | 'coordinator';
+export type AgentCatalogSurface = 'management' | 'chat' | 'workflow' | 'mention';
+export type AgentEditableField = 'name' | 'description' | 'profileMarkdown';
+
+export type AgentManagementPolicy = {
+  owner: 'system' | 'user';
+  systemRole?: SystemAgentRole;
+  protected: boolean;
+  allowedSurfaces: AgentCatalogSurface[];
+  editableFields: AgentEditableField[];
+};
+
+export type SystemAgentRuntimePolicy = RuntimePreference & {
+  role: SystemAgentRole;
+  updatedAt?: ISODateTime;
 };
 
 export type WorkflowStatus = 'draft' | 'published' | 'archived';
@@ -1492,6 +1575,7 @@ export type WorkflowRun = {
   workflowVersion: number;
   workflowName: string;
   sessionId: UUID;
+  workItemId?: UUID;
   briefId: UUID;
   ownerId: UUID;
   definitionSnapshot: WorkflowVersion;
@@ -1684,6 +1768,7 @@ export type RuntimeInvocationProfileSnapshot = {
 export type TaskBrief = {
   id: UUID;
   sessionId: UUID;
+  workItemId?: UUID;
   version: number;
   goal: string;
   scope: string[];
@@ -1700,6 +1785,7 @@ export type TaskBrief = {
 export type AgentTask = {
   id: UUID;
   sessionId: UUID;
+  workItemId?: UUID;
   title: string;
   description: string;
   status: AgentTaskStatus;
@@ -1810,6 +1896,7 @@ export type Artifact = {
   id: UUID;
   dataEpoch: UUID;
   sessionId: UUID;
+  workItemId?: UUID;
   taskId?: UUID;
   agentId?: UUID;
   type: ArtifactType;
@@ -1838,12 +1925,121 @@ export type UserMessageHandlingPlan = {
   coordinatorInstruction: string;
 };
 
+export type WorkItem = {
+  id: UUID;
+  sessionId: UUID;
+  parentWorkItemId?: UUID;
+  title: string;
+  goal: string;
+  status: WorkItemStatus;
+  revision: number;
+  createdFromEventId: UUID;
+  inheritedDecisionIds: UUID[];
+  inheritedArtifactIds: UUID[];
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+};
+
+export type DecisionRecordStatus = 'proposed' | 'confirmed' | 'superseded' | 'rejected';
+export type DecisionRecordKind = 'requirement' | 'constraint' | 'preference' | 'approval' | 'correction';
+
+export type DecisionRecord = {
+  id: UUID;
+  sessionId: UUID;
+  workItemId: UUID;
+  kind: DecisionRecordKind;
+  status: DecisionRecordStatus;
+  content: string;
+  sourceEventId: UUID;
+  supersedesDecisionId?: UUID;
+  revision: number;
+  confirmedBy?: ActorRef;
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+};
+
+export type IntentSnapshotRevision = {
+  sessionRevision: number;
+  activeWorkItemId?: UUID;
+  activeWorkItemRevision?: number;
+  decisionLedgerRevision: number;
+  workflowRunId?: UUID;
+  workflowRevision?: number;
+  latestEventSeq: number;
+};
+
+export type IntentContextSnapshot = {
+  id: UUID;
+  sessionId: UUID;
+  sourceEventId: UUID;
+  activeWorkItemId?: UUID;
+  activeWorkItem?: Pick<WorkItem, 'id' | 'title' | 'goal' | 'status' | 'revision'>;
+  currentMessage: string;
+  pendingConfirmation?: string;
+  validDecisionIds: UUID[];
+  validDecisions: Array<Pick<DecisionRecord, 'id' | 'kind' | 'status' | 'content' | 'revision'>>;
+  candidateWorkItemIds: UUID[];
+  candidateWorkItems: Array<Pick<WorkItem, 'id' | 'title' | 'goal' | 'status' | 'revision'>>;
+  failureCheckpoint?: string;
+  revision: IntentSnapshotRevision;
+  snapshotHash: string;
+  createdAt: ISODateTime;
+};
+
+export type IntentRoutingDecisionV2 = {
+  dialogueAct: UserMessageIntent;
+  scopeRelation: RequirementScopeRelation;
+  contextPolicy: ContextInheritancePolicy;
+  requestedAction: IntentRoutingAction;
+  selectedWorkItemId?: UUID;
+  selectedDecisionIds: UUID[];
+  selectedArtifactIds: UUID[];
+  goalSegments: string[];
+  missingFields: string[];
+  ambiguityReasons: string[];
+  reasonCodes: string[];
+  riskLevel: CapabilityRiskLevel;
+  modelConfidence?: number;
+};
+
+export type IntentRoutingValidation = {
+  schemaValid: boolean;
+  referencesValid: boolean;
+  transitionValid: boolean;
+  snapshotCurrent: boolean;
+  safeToApply: boolean;
+  serverConfidence: number;
+  errors: string[];
+};
+
+export type IntentRoutingRecord = {
+  id: UUID;
+  sessionId: UUID;
+  sourceEventId: UUID;
+  sessionSeq: number;
+  status: IntentRoutingStatus;
+  policyVersion: string;
+  rolloutMode: IntentRoutingRolloutMode;
+  snapshotId?: UUID;
+  invocationId?: UUID;
+  decision?: IntentRoutingDecisionV2;
+  validation?: IntentRoutingValidation;
+  finalAction?: IntentRoutingAction;
+  reasonCodes: string[];
+  retryCount: number;
+  idempotencyKey: string;
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+};
+
 export type SessionFollowUpMessage = {
   id: UUID;
   sourceEventId: UUID;
   content: string;
   mentionedAgentIds: UUID[];
   handlingPlan: UserMessageHandlingPlan;
+  workItemId?: UUID;
+  routingId?: UUID;
   receiverRecognitionPending?: boolean;
   status: 'queued' | 'planning' | 'executing';
   queuedAt: ISODateTime;
@@ -2251,6 +2447,7 @@ export type PendingInvocation = {
 export type InvocationPlan = {
   invocationId: UUID;
   sessionId: UUID;
+  workItemId?: UUID;
   taskId?: UUID;
   phase: AgentRunPhase;
   agent: CompiledAgentIdentity;
@@ -2544,6 +2741,7 @@ export type PostReviewAction = RegisteredPostReviewAction;
 export type PostReviewReportOutput = RegisteredPostReviewReportOutput;
 export type FinalDeliveryOutput = RegisteredFinalDeliveryOutput;
 export type UserMessageHandlingPlanOutput = RegisteredUserMessageHandlingPlanOutput;
+export type IntentRoutingDecisionOutput = RegisteredIntentRoutingDecisionOutput;
 
 export type AgentRuntimeAdapter = {
   type: RuntimeType;

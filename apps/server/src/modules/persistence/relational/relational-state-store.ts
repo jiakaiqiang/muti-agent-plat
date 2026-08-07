@@ -8,6 +8,7 @@ import {
   RELATIONAL_SCHEMA_V2_TABLES,
   RELATIONAL_SCHEMA_V3_TABLES,
   RELATIONAL_SCHEMA_V4_TABLES,
+  RELATIONAL_SCHEMA_V5_TABLES,
   RELATIONAL_TABLES
 } from './relational-schema.js';
 
@@ -84,7 +85,14 @@ const KNOWN_COLLECTIONS = new Set([
   'localRuntimeOperationAudits',
   'cutoverAudits',
   'workspaceSessionLeases',
-  'workspaceWritebacks'
+  'workspaceWritebacks',
+  'workItemsBySession',
+  'decisionRecordsBySession',
+  'contextSnapshotsBySession',
+  'intentRoutingRecordsBySession',
+  'followUpMessagesBySession',
+  'eventOutbox',
+  'systemAgentRuntimePolicies'
 ]);
 
 const RETAINED_OPERATIONAL_TABLES = new Set(['migration_runs', 'migration_errors']);
@@ -92,7 +100,8 @@ const REPLACEABLE_RELATIONAL_TABLES = [
   ...RELATIONAL_TABLES,
   ...RELATIONAL_SCHEMA_V2_TABLES,
   ...RELATIONAL_SCHEMA_V3_TABLES,
-  ...RELATIONAL_SCHEMA_V4_TABLES
+  ...RELATIONAL_SCHEMA_V4_TABLES,
+  ...RELATIONAL_SCHEMA_V5_TABLES
 ]
   .map((definition) => definition.name)
   .filter((name) => !RETAINED_OPERATIONAL_TABLES.has(name))
@@ -181,6 +190,31 @@ export class RelationalStateStore {
       const externalized = this.codec.externalize(value);
       await this.registerContents(client, externalized.contents);
       await this.writeFileRevisions(client, record(externalized.value));
+      await client.query('commit');
+    } catch (error) {
+      await client.query('rollback').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async writeCollectionsAtomically(expectedRevision: string, changes: PersistedState, lockKey?: string): Promise<void> {
+    assertRelationalCollectionsMapped(changes);
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      await client.query('select pg_advisory_xact_lock(hashtext($1))', ['agent_cluster:state-mutation']);
+      if (lockKey) await client.query('select pg_advisory_xact_lock(hashtext($1))', [`agent_cluster:${lockKey}`]);
+      const current = await this.loadStateWithClient(client);
+      if (computePersistenceRevision(current) !== expectedRevision) {
+        throw new Error('PERSISTENCE_REVISION_CONFLICT: PostgreSQL state changed before atomic mutation.');
+      }
+      const externalized = this.codec.externalize(changes);
+      await this.registerContents(client, externalized.contents);
+      for (const key of collectionWriteOrder(externalized.value)) {
+        await this.writeCollectionWithClient(client, key, externalized.value[key]);
+      }
       await client.query('commit');
     } catch (error) {
       await client.query('rollback').catch(() => undefined);
@@ -484,6 +518,13 @@ export class RelationalStateStore {
       case 'cutoverAudits': return this.writeCutoverAudits(client, array(value));
       case 'workspaceSessionLeases': return this.writeWorkspaceSessionLeases(client, record(value));
       case 'workspaceWritebacks': return this.writeWorkspaceWritebacks(client, array(value));
+      case 'workItemsBySession': return this.writeWorkItems(client, record(value));
+      case 'decisionRecordsBySession': return this.writeDecisionRecords(client, record(value));
+      case 'contextSnapshotsBySession': return this.writeContextSnapshots(client, record(value));
+      case 'intentRoutingRecordsBySession': return this.writeIntentRoutingRecords(client, record(value));
+      case 'followUpMessagesBySession': return this.writeFollowUpMessages(client, record(value));
+      case 'eventOutbox': return this.writeEventOutbox(client, array(value));
+      case 'systemAgentRuntimePolicies': return this.writeSystemAgentRuntimePolicies(client, record(value));
       default: throw new Error(`RELATIONAL_COLLECTION_UNMAPPED: ${key}`);
     }
   }
@@ -681,10 +722,14 @@ export class RelationalStateStore {
         [externalId]
       );
       const currentStatus = text(item.status, 'USER_INPUT');
+      const activeWorkItemId = item.activeWorkItemId
+        ? await idByExternal(client, 'work_items', text(item.activeWorkItemId))
+        : null;
       const sessionId = await upsertId(client, 'sessions', externalId, {
         title: text(item.title, externalId), status: currentStatus, owner_id: text(item.ownerId, 'local-user'),
         project_id: nullableText(item.projectId), context_pipeline_version: text(item.contextPipelineVersion, 'v2'),
         data_epoch: text(item.dataEpoch), revision: integer(item.revision, 1),
+        active_work_item_id: activeWorkItemId,
         working_directory: item.workingDirectory ? JSON.stringify(item.workingDirectory) : null,
         metadata: json({ sourceRecord: item }), created_at: date(item.createdAt), updated_at: date(item.updatedAt), deleted_at: null
       });
@@ -811,14 +856,15 @@ export class RelationalStateStore {
       for (const item of array(briefs).map(record)) {
         await client.query(
           `insert into agent_cluster.briefs
-           (external_id,session_id,title,goal,scope,constraints,acceptance_criteria,source_snapshot,
+           (external_id,session_id,work_item_id,title,goal,scope,constraints,acceptance_criteria,source_snapshot,
             confirmed_by_user,confirmed_at,created_at,updated_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
            on conflict (external_id) do update set title=excluded.title,goal=excluded.goal,scope=excluded.scope,
              constraints=excluded.constraints,acceptance_criteria=excluded.acceptance_criteria,
              source_snapshot=excluded.source_snapshot,confirmed_by_user=excluded.confirmed_by_user,
-             confirmed_at=excluded.confirmed_at,updated_at=excluded.updated_at`,
-          [text(item.id), sessionId, text(item.title, 'Task Brief'), text(item.goal), json(item.scope), json(item.constraints),
+             confirmed_at=excluded.confirmed_at,work_item_id=excluded.work_item_id,updated_at=excluded.updated_at`,
+          [text(item.id), sessionId, item.workItemId ? await idByExternal(client, 'work_items', text(item.workItemId)) : null,
+            text(item.title, 'Task Brief'), text(item.goal), json(item.scope), json(item.constraints),
             json(item.acceptanceCriteria), json({ sourceRecord: item }), boolean(item.confirmedByUser),
             nullableDate(item.confirmedAt), date(item.createdAt), date(item.updatedAt ?? item.createdAt)]
         );
@@ -855,17 +901,18 @@ export class RelationalStateStore {
         const assignee = record(item.assignee);
         await client.query(
           `insert into agent_cluster.tasks
-           (external_id,session_id,brief_id,title,description,status,assignee_type,assignee_external_id,
+           (external_id,session_id,work_item_id,brief_id,title,description,status,assignee_type,assignee_external_id,
             agent_version_id,priority,dependencies,acceptance_criteria,result_summary,source_snapshot,revision,
             created_at,updated_at,completed_at,deleted_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,null)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,null)
            on conflict (external_id) do update set title=excluded.title,description=excluded.description,status=excluded.status,
              assignee_type=excluded.assignee_type,assignee_external_id=excluded.assignee_external_id,
              agent_version_id=excluded.agent_version_id,priority=excluded.priority,dependencies=excluded.dependencies,
              acceptance_criteria=excluded.acceptance_criteria,result_summary=excluded.result_summary,
              source_snapshot=excluded.source_snapshot,revision=excluded.revision,updated_at=excluded.updated_at,
-             completed_at=excluded.completed_at,deleted_at=null`,
-          [text(item.id), sessionId, item.briefId ? await idByExternal(client, 'briefs', text(item.briefId)) : null,
+             completed_at=excluded.completed_at,work_item_id=excluded.work_item_id,deleted_at=null`,
+          [text(item.id), sessionId, item.workItemId ? await idByExternal(client, 'work_items', text(item.workItemId)) : null,
+            item.briefId ? await idByExternal(client, 'briefs', text(item.briefId)) : null,
             text(item.title), nullableText(item.description), text(item.status), nullableText(assignee.type),
             nullableText(assignee.id ?? item.assigneeId), await currentVersionId(client, 'agents', text(assignee.id ?? item.assigneeId)),
             integer(item.priority, 0), json(item.dependencies), json(item.acceptanceCriteria), nullableText(item.resultSummary),
@@ -1024,12 +1071,14 @@ export class RelationalStateStore {
       const item = record(rawArtifact);
       await client.query(
         `insert into agent_cluster.artifacts
-         (external_id,session_id,legacy_session_external_id,task_id,runtime_invocation_id,artifact_type,title,summary,content_object_id,
+         (external_id,session_id,legacy_session_external_id,work_item_id,task_id,runtime_invocation_id,artifact_type,title,summary,content_object_id,
           metadata,status,created_at,updated_at,deleted_at)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'active',$11,$12,null)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'active',$12,$13,null)
          on conflict (external_id) do update set title=excluded.title,summary=excluded.summary,
-           content_object_id=excluded.content_object_id,metadata=excluded.metadata,updated_at=excluded.updated_at,deleted_at=null`,
+           content_object_id=excluded.content_object_id,metadata=excluded.metadata,work_item_id=excluded.work_item_id,
+           updated_at=excluded.updated_at,deleted_at=null`,
         [text(item.id), await idByExternal(client, 'sessions', text(item.sessionId)), text(item.sessionId),
+          item.workItemId ? await idByExternal(client, 'work_items', text(item.workItemId)) : null,
           item.taskId ? await idByExternal(client, 'tasks', text(item.taskId)) : null,
           item.invocationId ? await idByExternal(client, 'runtime_invocations', text(item.invocationId)) : null,
           text(item.type), text(item.title), nullableText(item.contentSummary), await firstContentId(client, item),
@@ -1179,15 +1228,17 @@ export class RelationalStateStore {
         const profile = record(item.profileSnapshot);
         await client.query(
           `insert into agent_cluster.runtime_invocations
-           (external_id,session_id,legacy_session_external_id,task_id,agent_version_id,runtime_type,
+           (external_id,session_id,legacy_session_external_id,work_item_id,task_id,agent_version_id,runtime_type,
             runtime_model_config_id,status,context_envelope,profile_snapshot,result_summary,system_evidence,usage,
             error_code,error_message,started_at,completed_at,updated_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
            on conflict (external_id) do update set status=excluded.status,context_envelope=excluded.context_envelope,
              profile_snapshot=excluded.profile_snapshot,result_summary=excluded.result_summary,
              system_evidence=excluded.system_evidence,usage=excluded.usage,error_code=excluded.error_code,
-             error_message=excluded.error_message,completed_at=excluded.completed_at,updated_at=excluded.updated_at`,
+             error_message=excluded.error_message,completed_at=excluded.completed_at,
+             work_item_id=excluded.work_item_id,updated_at=excluded.updated_at`,
           [text(item.invocationId ?? item.id), sessionId, sessionId ? null : sessionExternalId,
+            item.workItemId ? await idByExternal(client, 'work_items', text(item.workItemId)) : null,
             item.taskId ? await idByExternal(client, 'tasks', text(item.taskId)) : null,
             await currentVersionId(client, 'agents', text(item.agentId ?? profile.agentId)), text(item.runtimeType, 'unknown'),
             null, text(item.status), json(item.contextEnvelope ?? record(item.plan).contextEnvelope),
@@ -1209,12 +1260,14 @@ export class RelationalStateStore {
       if (!workflowVersion) continue;
       await client.query(
         `insert into agent_cluster.workflow_runs
-         (external_id,session_id,legacy_session_external_id,workflow_version_id,status,current_node_key,definition_snapshot,revision,started_at,completed_at,updated_at)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         (external_id,session_id,legacy_session_external_id,work_item_id,workflow_version_id,status,current_node_key,definition_snapshot,revision,started_at,completed_at,updated_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
          on conflict (external_id) do update set status=excluded.status,current_node_key=excluded.current_node_key,
            definition_snapshot=excluded.definition_snapshot,revision=excluded.revision,
-           completed_at=excluded.completed_at,updated_at=excluded.updated_at`,
-        [text(item.id), sessionId, sessionId ? null : text(item.sessionId), workflowVersion, text(item.status), nullableText(item.currentNodeId),
+           completed_at=excluded.completed_at,work_item_id=excluded.work_item_id,updated_at=excluded.updated_at`,
+        [text(item.id), sessionId, sessionId ? null : text(item.sessionId),
+          item.workItemId ? await idByExternal(client, 'work_items', text(item.workItemId)) : null,
+          workflowVersion, text(item.status), nullableText(item.currentNodeId),
           json({ sourceRecord: item }), integer(item.revision, 1), date(item.createdAt), nullableDate(item.completedAt), date(item.updatedAt)]
       );
     }
@@ -1345,6 +1398,174 @@ export class RelationalStateStore {
     }
   }
 
+  private async writeWorkItems(client: PoolClient, value: Record<string, unknown>) {
+    const active = new Set<string>();
+    const parentIds = new Map<string, string>();
+    for (const [sessionExternalId, values] of Object.entries(value)) {
+      const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
+      if (!sessionId) continue;
+      for (const item of array(values).map(record)) {
+        const externalId = text(item.id);
+        active.add(externalId);
+        const workItemId = await upsertId(client, 'work_items', externalId, {
+          session_id: sessionId,
+          parent_work_item_id: null,
+          title: text(item.title, externalId),
+          goal: text(item.goal),
+          status: text(item.status, 'OPEN'),
+          revision: integer(item.revision, 1),
+          created_from_event_external_id: text(item.createdFromEventId),
+          source_snapshot: json({ sourceRecord: item }),
+          created_at: date(item.createdAt),
+          updated_at: date(item.updatedAt),
+          deleted_at: null
+        });
+        if (item.parentWorkItemId) parentIds.set(workItemId, text(item.parentWorkItemId));
+      }
+    }
+    for (const [workItemId, parentExternalId] of parentIds) {
+      const parentId = await idByExternal(client, 'work_items', parentExternalId);
+      if (parentId) await client.query('update agent_cluster.work_items set parent_work_item_id=$2 where id=$1', [workItemId, parentId]);
+    }
+    await client.query(`
+      update agent_cluster.sessions s
+         set active_work_item_id = w.id
+        from agent_cluster.work_items w
+       where nullif(s.metadata->'sourceRecord'->>'activeWorkItemId', '') = w.external_id
+         and w.session_id = s.id
+    `);
+    await softDeleteMissing(client, 'work_items', active);
+  }
+
+  private async writeSystemAgentRuntimePolicies(client: PoolClient, value: Record<string, unknown>) {
+    for (const [role, raw] of Object.entries(value)) {
+      const item = record(raw);
+      await client.query(
+        `insert into agent_cluster.system_agent_runtime_policies
+         (system_role,preferred_runtime_type,preferred_model_id,allowed_runtime_types,source_snapshot,updated_at)
+         values ($1,$2,$3,$4,$5,$6)
+         on conflict (system_role) do update set preferred_runtime_type=excluded.preferred_runtime_type,
+           preferred_model_id=excluded.preferred_model_id,allowed_runtime_types=excluded.allowed_runtime_types,
+           source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at`,
+        [role, nullableText(item.preferredRuntimeType), nullableText(item.preferredModelId),
+          json(item.allowedRuntimeTypes, []), json({ sourceRecord: item }), date(item.updatedAt)]
+      );
+    }
+  }
+
+  private async writeDecisionRecords(client: PoolClient, value: Record<string, unknown>) {
+    const supersedes = new Map<string, string>();
+    for (const [sessionExternalId, values] of Object.entries(value)) {
+      const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
+      if (!sessionId) continue;
+      for (const item of array(values).map(record)) {
+        const workItemId = await idByExternal(client, 'work_items', text(item.workItemId));
+        if (!workItemId) continue;
+        const decisionId = await upsertId(client, 'decision_records', text(item.id), {
+          session_id: sessionId,
+          work_item_id: workItemId,
+          decision_kind: text(item.kind, 'requirement'),
+          status: text(item.status, 'proposed'),
+          content: text(item.content),
+          source_event_external_id: text(item.sourceEventId),
+          supersedes_decision_id: null,
+          revision: integer(item.revision, 1),
+          confirmation: json(item.confirmedBy),
+          source_snapshot: json({ sourceRecord: item }),
+          created_at: date(item.createdAt),
+          updated_at: date(item.updatedAt)
+        });
+        if (item.supersedesDecisionId) supersedes.set(decisionId, text(item.supersedesDecisionId));
+      }
+    }
+    for (const [decisionId, supersededExternalId] of supersedes) {
+      const supersededId = await idByExternal(client, 'decision_records', supersededExternalId);
+      if (supersededId) await client.query('update agent_cluster.decision_records set supersedes_decision_id=$2 where id=$1', [decisionId, supersededId]);
+    }
+  }
+
+  private async writeContextSnapshots(client: PoolClient, value: Record<string, unknown>) {
+    for (const [sessionExternalId, values] of Object.entries(value)) {
+      const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
+      if (!sessionId) continue;
+      for (const item of array(values).map(record)) {
+        const workItemId = item.activeWorkItemId
+          ? await idByExternal(client, 'work_items', text(item.activeWorkItemId))
+          : null;
+        await client.query(
+          `insert into agent_cluster.context_snapshots
+           (external_id,session_id,work_item_id,source_event_external_id,purpose,revision_vector,snapshot_hash,payload,created_at)
+           values ($1,$2,$3,$4,'intent_routing',$5,$6,$7,$8)
+           on conflict (external_id) do nothing`,
+          [text(item.id), sessionId, workItemId, text(item.sourceEventId), json(item.revision), text(item.snapshotHash),
+            json({ sourceRecord: item }), date(item.createdAt)]
+        );
+      }
+    }
+  }
+
+  private async writeIntentRoutingRecords(client: PoolClient, value: Record<string, unknown>) {
+    for (const [sessionExternalId, values] of Object.entries(value)) {
+      const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
+      if (!sessionId) continue;
+      for (const item of array(values).map(record)) {
+        const snapshotId = item.snapshotId
+          ? await idByExternal(client, 'context_snapshots', text(item.snapshotId))
+          : null;
+        await client.query(
+          `insert into agent_cluster.intent_routing_records
+           (external_id,session_id,source_event_external_id,session_seq,status,policy_version,rollout_mode,
+            context_snapshot_id,runtime_invocation_external_id,decision_payload,validation_payload,final_action,
+            reason_codes,retry_count,idempotency_key,source_snapshot,created_at,updated_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+           on conflict (external_id) do update set status=excluded.status,context_snapshot_id=excluded.context_snapshot_id,
+             runtime_invocation_external_id=excluded.runtime_invocation_external_id,decision_payload=excluded.decision_payload,
+             validation_payload=excluded.validation_payload,final_action=excluded.final_action,reason_codes=excluded.reason_codes,
+             retry_count=excluded.retry_count,source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at`,
+          [text(item.id), sessionId, text(item.sourceEventId), integer(item.sessionSeq), text(item.status),
+            text(item.policyVersion), text(item.rolloutMode), snapshotId, nullableText(item.invocationId), json(item.decision),
+            json(item.validation), nullableText(item.finalAction), json(item.reasonCodes, []), integer(item.retryCount),
+            text(item.idempotencyKey), json({ sourceRecord: item }), date(item.createdAt), date(item.updatedAt)]
+        );
+      }
+    }
+  }
+
+  private async writeFollowUpMessages(client: PoolClient, value: Record<string, unknown>) {
+    for (const [sessionExternalId, values] of Object.entries(value)) {
+      const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
+      if (!sessionId) continue;
+      for (const item of array(values).map(record)) {
+        const workItemId = item.workItemId ? await idByExternal(client, 'work_items', text(item.workItemId)) : null;
+        const routingId = item.routingId ? await idByExternal(client, 'intent_routing_records', text(item.routingId)) : null;
+        await client.query(
+          `insert into agent_cluster.session_follow_up_messages
+           (external_id,session_id,work_item_id,routing_record_id,source_event_external_id,status,handling_payload,queued_at,started_at,completed_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           on conflict (external_id) do update set work_item_id=excluded.work_item_id,routing_record_id=excluded.routing_record_id,
+             status=excluded.status,handling_payload=excluded.handling_payload,started_at=excluded.started_at,completed_at=excluded.completed_at`,
+          [text(item.id), sessionId, workItemId, routingId, text(item.sourceEventId), text(item.status),
+            json({ sourceRecord: item }), date(item.queuedAt), nullableDate(item.startedAt), nullableDate(item.completedAt)]
+        );
+      }
+    }
+  }
+
+  private async writeEventOutbox(client: PoolClient, values: unknown[]) {
+    for (const item of values.map(record)) {
+      await client.query(
+        `insert into agent_cluster.event_outbox
+         (external_id,aggregate_type,aggregate_external_id,event_type,payload,idempotency_key,status,attempt_count,available_at,created_at,published_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         on conflict (idempotency_key) do update set status=excluded.status,attempt_count=excluded.attempt_count,
+           available_at=excluded.available_at,published_at=excluded.published_at,payload=excluded.payload`,
+        [text(item.id), text(item.aggregateType), text(item.aggregateId), text(item.eventType), json({ sourceRecord: item }),
+          text(item.idempotencyKey), text(item.status, 'pending'), integer(item.attempts), date(item.availableAt ?? item.createdAt),
+          date(item.createdAt), nullableDate(item.publishedAt)]
+      );
+    }
+  }
+
   private async loadMetadata(client: PoolClient, state: PersistedState) {
     const result = await client.query<Record<string, unknown>>('select * from agent_cluster.system_data_metadata where singleton_key=\'current\'');
     const row = result.rows[0];
@@ -1365,6 +1586,10 @@ export class RelationalStateStore {
     const versionsByWorkflowId = groupRows(versionRows.rows, 'workflow_id');
     state.workflowCatalog = { schemaVersion: 2, workflows, versionsByWorkflowId };
     state.workflows = workflows;
+    state.systemAgentRuntimePolicies = await keyedSources(
+      client,
+      `select system_role external_id,source_snapshot->'sourceRecord' value from agent_cluster.system_agent_runtime_policies order by system_role`
+    );
   }
 
   private async loadSessions(client: PoolClient, state: PersistedState) {
@@ -1382,6 +1607,12 @@ export class RelationalStateStore {
       client,
       `select w.source_snapshot->'sourceRecord' value from agent_cluster.workspace_writebacks w join agent_cluster.sessions s on s.external_id=w.session_external_id where s.deleted_at is null order by w.created_at,w.external_id`
     );
+    state.workItemsBySession = await groupedSources(client, `select s.external_id group_id,w.source_snapshot->'sourceRecord' value from agent_cluster.work_items w join agent_cluster.sessions s on s.id=w.session_id where s.deleted_at is null and w.deleted_at is null order by s.id,w.created_at`);
+    state.decisionRecordsBySession = await groupedSources(client, `select s.external_id group_id,d.source_snapshot->'sourceRecord' value from agent_cluster.decision_records d join agent_cluster.sessions s on s.id=d.session_id where s.deleted_at is null order by s.id,d.created_at`);
+    state.contextSnapshotsBySession = await groupedSources(client, `select s.external_id group_id,c.payload->'sourceRecord' value from agent_cluster.context_snapshots c join agent_cluster.sessions s on s.id=c.session_id where s.deleted_at is null order by s.id,c.created_at`);
+    state.intentRoutingRecordsBySession = await groupedSources(client, `select s.external_id group_id,r.source_snapshot->'sourceRecord' value from agent_cluster.intent_routing_records r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by s.id,r.session_seq`);
+    state.followUpMessagesBySession = await groupedSources(client, `select s.external_id group_id,f.handling_payload->'sourceRecord' value from agent_cluster.session_follow_up_messages f join agent_cluster.sessions s on s.id=f.session_id where s.deleted_at is null order by s.id,f.queued_at`);
+    state.eventOutbox = await sourceRecords(client, `select payload->'sourceRecord' value from agent_cluster.event_outbox where payload ? 'sourceRecord' order by id`);
   }
 
   private async loadFileRevisionsWithClient(client: PoolClient) {
@@ -1447,7 +1678,7 @@ export class RelationalStateStore {
 }
 
 function collectionWriteOrder(state: PersistedState): string[] {
-  const order = ['systemDataMetadata','agents','skills','capabilities','workflowCatalog','workflows','sessions','fileRevisions','workspaceWritebacks','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','localRuntimeDevices','localRuntimeOperationAudits','cutoverAudits'];
+  const order = ['systemDataMetadata','agents','systemAgentRuntimePolicies','skills','capabilities','workflowCatalog','workflows','sessions','workItemsBySession','decisionRecordsBySession','contextSnapshotsBySession','intentRoutingRecordsBySession','followUpMessagesBySession','fileRevisions','workspaceWritebacks','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','localRuntimeDevices','localRuntimeOperationAudits','eventOutbox','cutoverAudits'];
   return order.filter((key) => Object.prototype.hasOwnProperty.call(state, key));
 }
 

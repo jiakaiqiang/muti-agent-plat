@@ -41,6 +41,27 @@ test('health watchdog allows startup grace and fails after a previously healthy 
   );
 });
 
+test('health watchdog allows a 60 second manual backend rebuild after readiness', () => {
+  assert.equal(
+    healthWatchdogDecision({
+      ready: true,
+      consecutiveFailures: 7,
+      elapsedMs: 30_000,
+      healthy: false
+    }).action,
+    'continue'
+  );
+  assert.equal(
+    healthWatchdogDecision({
+      ready: true,
+      consecutiveFailures: 29,
+      elapsedMs: 60_000,
+      healthy: false
+    }).action,
+    'fail_lost_health'
+  );
+});
+
 test('health watchdog fails when initial readiness never succeeds', () => {
   assert.equal(
     healthWatchdogDecision({
@@ -78,29 +99,32 @@ test('explicit remote Web API traffic bypasses the local Vite proxy', () => {
   );
 });
 
-test('dev supervisor starts server, web and Local Runtime and fails the group when one child exits', async () => {
+test('dev supervisor keeps only server and web resident and fails the group when one child exits', async () => {
   const children = [];
   const spawnOptions = [];
+  const spawnArgs = [];
   const previousExitCode = process.exitCode;
   const run = runDevSupervisor({
     setProcessExitCode: false,
     npmExecPath: 'C:/npm/npm-cli.js',
-    spawnProcess(_command, _args, options) {
+    spawnProcess(_command, args, options) {
       const child = new EventEmitter();
       child.pid = undefined;
       child.exitCode = null;
       children.push(child);
       spawnOptions.push(options);
+      spawnArgs.push(args);
       return child;
     },
     fetchHealth: async () => true
   });
 
-  assert.equal(children.length, 3);
+  assert.equal(children.length, 2);
   assert.equal(spawnOptions[0].env.PUBLIC_WEB_URL, 'http://127.0.0.1:8089');
   assert.equal(spawnOptions[1].env.VITE_API_BASE_URL, '/api');
   assert.equal(spawnOptions[1].env.VITE_SSE_BASE_URL, '/api');
   assert.equal(spawnOptions[1].env.AGENT_CLUSTER_DEV_API_PROXY_TARGET, 'http://127.0.0.1:8099');
+  assert.equal(spawnArgs.some((args) => args.includes('@agent-cluster/local-runtime-cli')), false);
   children[0].emit('exit', 1, null);
   assert.equal(await run, 1);
   process.exitCode = previousExitCode;
@@ -109,6 +133,7 @@ test('dev supervisor starts server, web and Local Runtime and fails the group wh
 test('dev supervisor preserves an explicit public Web URL', async () => {
   const children = [];
   const spawnOptions = [];
+  const spawnArgs = [];
   const previousExitCode = process.exitCode;
   const previousPublicWebUrl = process.env.PUBLIC_WEB_URL;
   process.env.PUBLIC_WEB_URL = 'https://agent.example.com';
@@ -116,19 +141,21 @@ test('dev supervisor preserves an explicit public Web URL', async () => {
     const run = runDevSupervisor({
       setProcessExitCode: false,
       npmExecPath: 'C:/npm/npm-cli.js',
-      spawnProcess(_command, _args, options) {
+      spawnProcess(_command, args, options) {
         const child = new EventEmitter();
         child.pid = undefined;
         child.exitCode = null;
         children.push(child);
         spawnOptions.push(options);
+        spawnArgs.push(args);
         return child;
       },
       fetchHealth: async () => true
     });
 
-    assert.equal(children.length, 3);
+    assert.equal(children.length, 2);
     assert.equal(spawnOptions[0].env.PUBLIC_WEB_URL, 'https://agent.example.com');
+    assert.equal(spawnArgs.some((args) => args.includes('@agent-cluster/local-runtime-cli')), false);
     children[0].emit('exit', 1, null);
     assert.equal(await run, 1);
   } finally {

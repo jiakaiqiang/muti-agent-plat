@@ -1,5 +1,6 @@
 import type { AgentDefinition } from './contracts.js';
 import { defaultAgentPresets } from './default-agent-presets.js';
+import { SYSTEM_AGENT_REGISTRATIONS } from './system-agents.js';
 
 const defaultAgentTimestamp = '2026-05-28T00:00:00.000Z';
 
@@ -50,5 +51,22 @@ export const defaultAgents: AgentDefinition[] = defaultAgentPresets.map((preset)
   defaultKnowledgeBaseIds: [],
   profileRevision: 1,
   createdAt: defaultAgentTimestamp,
-  updatedAt: defaultAgentTimestamp
+  updatedAt: defaultAgentTimestamp,
+  management: (() => {
+    const registration = SYSTEM_AGENT_REGISTRATIONS.find((item) => item.key === preset.key);
+    return registration
+      ? {
+          owner: 'system' as const,
+          systemRole: registration.role,
+          protected: true,
+          allowedSurfaces: [...registration.allowedSurfaces],
+          editableFields: [...registration.editableFields]
+        }
+      : {
+          owner: 'user' as const,
+          protected: false,
+          allowedSurfaces: ['management', 'chat', 'workflow', 'mention'] as const,
+          editableFields: ['name', 'description', 'profileMarkdown'] as const
+        };
+  })()
 }));

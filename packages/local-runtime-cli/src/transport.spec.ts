@@ -3,9 +3,34 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { authorizeLoopbackDevice, LocalWritebackAuthorizationStore, workspaceRegistration } from './transport.js';
+import {
+  authorizeLoopbackDevice,
+  initializeSelectedWorkspace,
+  LocalWritebackAuthorizationStore,
+  workspaceRegistration
+} from './transport.js';
 import { defaultState } from './state.js';
 import { LocalWorkspace } from './workspace.js';
+import { probeLocalRuntimeCapabilities } from './adapters/registry.js';
+
+test('Runtime capability probe reports each installed CLI without starting a model process', async () => {
+  const previousCodexVersion = process.env.AGENT_RUNTIME_CODEX_VERSION;
+  const previousClaudeVersion = process.env.AGENT_RUNTIME_CLAUDE_VERSION;
+  process.env.AGENT_RUNTIME_CODEX_VERSION = 'codex-test 1.0';
+  process.env.AGENT_RUNTIME_CLAUDE_VERSION = 'claude-test 2.0';
+  try {
+    const capabilities = await probeLocalRuntimeCapabilities();
+    assert.deepEqual(capabilities.map(({ runtimeType, status, version }) => ({ runtimeType, status, version })), [
+      { runtimeType: 'codex', status: 'ready', version: 'codex-test 1.0' },
+      { runtimeType: 'claude_code', status: 'ready', version: 'claude-test 2.0' }
+    ]);
+  } finally {
+    if (previousCodexVersion === undefined) delete process.env.AGENT_RUNTIME_CODEX_VERSION;
+    else process.env.AGENT_RUNTIME_CODEX_VERSION = previousCodexVersion;
+    if (previousClaudeVersion === undefined) delete process.env.AGENT_RUNTIME_CLAUDE_VERSION;
+    else process.env.AGENT_RUNTIME_CLAUDE_VERSION = previousClaudeVersion;
+  }
+});
 
 test('loopback authorization stores a trusted device token without login', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'agent-runtime-loopback-'));
@@ -50,6 +75,33 @@ test('loopback authorization stores a trusted device token without login', async
     else process.env.AGENT_RUNTIME_CODEX_VERSION = previousCodexVersion;
     if (previousClaudeVersion === undefined) delete process.env.AGENT_RUNTIME_CLAUDE_VERSION;
     else process.env.AGENT_RUNTIME_CLAUDE_VERSION = previousClaudeVersion;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('cancelled workspace initialization leaves no workspace state, watcher or index work behind', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-runtime-cancelled-workspace-'));
+  const state = defaultState('http://127.0.0.1:8099');
+  const workspaces = new Map<string, LocalWorkspace>();
+  const tails = new Map<string, Promise<void>>();
+  const controller = new AbortController();
+
+  try {
+    const initialization = initializeSelectedWorkspace(
+      directory,
+      state,
+      workspaces,
+      tails,
+      controller.signal
+    );
+    controller.abort(new Error('dialog closed'));
+
+    await assert.rejects(initialization, /dialog closed/);
+    assert.equal(state.workspaces.length, 0);
+    assert.equal(workspaces.size, 0);
+    assert.equal(tails.size, 0);
+  } finally {
+    for (const workspace of workspaces.values()) workspace.close();
     await rm(directory, { recursive: true, force: true });
   }
 });

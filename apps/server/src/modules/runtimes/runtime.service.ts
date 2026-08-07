@@ -44,6 +44,7 @@ export type RuntimeInvocationLog = {
   dataEpoch: string;
   invocationId: string;
   sessionId: string;
+  workItemId?: string;
   taskId?: string;
   agentId: string;
   agentKey: string;
@@ -396,6 +397,7 @@ export class RuntimeService implements OnModuleInit {
       dataEpoch: this.persistence.currentDataEpoch(),
       invocationId: input.invocationId,
       sessionId: input.sessionId,
+      ...(input.workItemId ? { workItemId: input.workItemId } : {}),
       ...(input.taskId ? { taskId: input.taskId } : {}),
       agentId: input.agent.agentId,
       agentKey: input.agent.key,

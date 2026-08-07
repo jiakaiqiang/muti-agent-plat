@@ -313,7 +313,7 @@ export class WorkflowsService {
         };
         if (node.type === 'agent') {
           if (!node.agentId?.trim()) throw new BadRequestException('Workflow node agent id is required.');
-          const agentId = resolveAgents ? this.agents.getByIdOrKey(node.agentId).id : node.agentId.trim();
+          const agentId = resolveAgents ? this.agents.getForSurface(node.agentId, 'workflow').id : node.agentId.trim();
           return {
             ...base,
             type: 'agent',
@@ -338,7 +338,7 @@ export class WorkflowsService {
         if (node.type === 'robot_approval') {
           if (!node.reviewerAgentId?.trim()) throw new BadRequestException('Robot approval reviewer Agent is required.');
           const reviewerAgentId = resolveAgents
-            ? this.agents.getByIdOrKey(node.reviewerAgentId).id
+            ? this.agents.getForSurface(node.reviewerAgentId, 'workflow').id
             : node.reviewerAgentId.trim();
           return {
             ...base,

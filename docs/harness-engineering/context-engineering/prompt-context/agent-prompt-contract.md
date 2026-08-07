@@ -28,6 +28,7 @@ A prompt must include:
 | agent key | stage | responsibility | 不负责 |
 | --- | --- | --- | --- |
 | coordinator | planning | Coordinate discussion, task brief, handoff, and delivery decisions. | Does not replace specialist review or bypass user confirmation. |
+| system-intent-router | requirement / planning | Classify user messages and propose the next governed routing action. | Does not execute tasks, mutate authoritative decisions, or bypass coordinator and user gates. |
 | requirements | requirement | Clarify intent, scope, acceptance criteria, and open questions. | Does not design implementation details. |
 | architect | design | Produce architecture options, constraints, and tradeoffs. | Does not directly implement or approve release. |
 | frontend | implementation | Execute frontend-scoped tasks and UI event derivation. | Does not expand backend/API scope without handoff. |

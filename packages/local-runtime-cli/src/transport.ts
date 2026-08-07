@@ -14,7 +14,7 @@ import type {
 } from '@agent-cluster/shared';
 import { LOCAL_RUNTIME_PROTOCOL_VERSION, runtimeTypesForModelProvider } from '@agent-cluster/shared';
 import WebSocket from 'ws';
-import { detectAvailableLocalRuntimes } from './adapters/registry.js';
+import { detectAvailableLocalRuntimes, probeLocalRuntimeCapabilities } from './adapters/registry.js';
 import { executeLocalInvocation } from './runtime.js';
 import type { LocalRuntimeState } from './state.js';
 import { saveState } from './state.js';
@@ -121,6 +121,8 @@ async function runBridgeConnection(
   socketUrl.protocol = socketUrl.protocol === 'https:' ? 'wss:' : 'ws:';
   const socket = new WebSocket(socketUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
   const active = new Map<string, AbortController>();
+  const workspaceAuthorizations = new Map<string, AbortController>();
+  const workspaceInitializations = new Map<string, Promise<void>>();
   const secrets = new LocalSecretStore();
   const workspaces = new Map(state.workspaces.map((workspace) => [
     workspace.workspaceId,
@@ -137,14 +139,16 @@ async function runBridgeConnection(
     let opened = false;
     socket.on('open', async () => {
       opened = true;
-      const runtimes = await detectAvailableLocalRuntimes();
+      const capabilities = await probeLocalRuntimeCapabilities();
+      const runtimes = runtimesFromCapabilities(capabilities);
       send({
         kind: 'local_runtime.hello',
         payload: {
           deviceId: state.deviceId,
           cliVersion,
           protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
-          runtimes
+          runtimes,
+          capabilities
         }
       });
       for (const workspace of workspaces.values()) {
@@ -166,6 +170,8 @@ async function runBridgeConnection(
         state,
         workspaces,
         active,
+        workspaceAuthorizations,
+        workspaceInitializations,
         writebackAuthorizations,
         secrets,
         send
@@ -178,6 +184,8 @@ async function runBridgeConnection(
       if (heartbeat) clearInterval(heartbeat);
       for (const controller of active.values()) controller.abort(new Error('Local Runtime connection closed.'));
       active.clear();
+      for (const controller of workspaceAuthorizations.values()) controller.abort(new Error('Local Runtime connection closed.'));
+      workspaceAuthorizations.clear();
       resolve();
     });
   }).finally(() => {
@@ -192,10 +200,20 @@ async function handleServerMessage(
   state: LocalRuntimeState,
   workspaces: Map<string, LocalWorkspace>,
   active: Map<string, AbortController>,
+  workspaceAuthorizations: Map<string, AbortController>,
+  workspaceInitializations: Map<string, Promise<void>>,
   writebackAuthorizations: LocalWritebackAuthorizationStore,
   secrets: LocalSecretStore,
   send: (message: LocalRuntimeClientMessage) => void
 ) {
+  if (message.kind === 'local_runtime.capabilities.request') {
+    const capabilities = await probeLocalRuntimeCapabilities();
+    send({
+      kind: 'local_runtime.capabilities.result',
+      payload: { requestId: message.payload.requestId, capabilities }
+    });
+    return;
+  }
   if (message.kind === 'local_runtime.provider_connection.upsert') {
     const { requestId, connection } = message.payload;
     try {
@@ -248,32 +266,47 @@ async function handleServerMessage(
     return;
   }
   if (message.kind === 'local_runtime.workspace.authorization.request') {
-    try {
-      const selectedPath = await selectWorkspaceDirectory(message.payload.title);
-      if (!selectedPath) {
-        send({
-          kind: 'local_runtime.workspace.authorization.result',
-          payload: { requestId: message.payload.requestId, status: 'cancelled' }
-        });
-        return;
-      }
-      let workspaceState = state.workspaces.find(
-        (workspace) => workspace.rootPath.toLowerCase() === selectedPath.toLowerCase()
-      );
-      if (!workspaceState) {
-        workspaceState = await createWorkspaceState(selectedPath);
-        state.workspaces.push(workspaceState);
-        await saveState(state);
-      }
-      let workspace = workspaces.get(workspaceState.workspaceId);
-      if (!workspace) {
-        workspace = new LocalWorkspace(workspaceState, { onIndexUpdated: () => saveState(state) });
-        workspaces.set(workspaceState.workspaceId, workspace);
-      }
+    const { requestId } = message.payload;
+    if (workspaceAuthorizations.has(requestId)) {
       send({
         kind: 'local_runtime.workspace.authorization.result',
         payload: {
-          requestId: message.payload.requestId,
+          requestId,
+          status: 'error',
+          error: { code: 'DUPLICATE_WORKSPACE_AUTHORIZATION', message: 'Workspace authorization request is already active.' }
+        }
+      });
+      return;
+    }
+    const controller = new AbortController();
+    workspaceAuthorizations.set(requestId, controller);
+    try {
+      const selectedPath = await selectWorkspaceDirectory(
+        message.payload.title,
+        process.platform,
+        undefined,
+        controller.signal
+      );
+      if (!selectedPath) {
+        send({
+          kind: 'local_runtime.workspace.authorization.result',
+          payload: { requestId, status: 'cancelled' }
+        });
+        return;
+      }
+      if (controller.signal.aborted) return;
+      const workspace = await initializeSelectedWorkspace(
+        selectedPath,
+        state,
+        workspaces,
+        workspaceInitializations,
+        controller.signal
+      );
+      if (controller.signal.aborted) return;
+      send({
+        kind: 'local_runtime.workspace.authorization.result',
+        payload: {
+          requestId,
           status: 'selected',
           workspace: await workspaceRegistration(workspace)
         }
@@ -281,16 +314,24 @@ async function handleServerMessage(
     } catch (error) {
       send({
         kind: 'local_runtime.workspace.authorization.result',
-        payload: {
-          requestId: message.payload.requestId,
-          status: 'error',
-          error: {
-            code: 'LOCAL_WORKSPACE_AUTHORIZATION_FAILED',
-            message: error instanceof Error ? error.message : String(error)
-          }
-        }
+        payload: controller.signal.aborted
+          ? { requestId, status: 'cancelled' }
+          : {
+              requestId,
+              status: 'error',
+              error: {
+                code: 'LOCAL_WORKSPACE_AUTHORIZATION_FAILED',
+                message: error instanceof Error ? error.message : String(error)
+              }
+            }
       });
+    } finally {
+      workspaceAuthorizations.delete(requestId);
     }
+    return;
+  }
+  if (message.kind === 'local_runtime.workspace.authorization.cancel') {
+    workspaceAuthorizations.get(message.payload.requestId)?.abort(new Error('Workspace authorization cancelled.'));
     return;
   }
   if (message.kind === 'local_runtime.workspace.permission.grant.request') {
@@ -410,6 +451,61 @@ async function handleServerMessage(
   if (message.kind === 'local_runtime.workspace.registered') return;
   if (message.kind === 'local_runtime.connected') {
     process.stdout.write(`Connected Local Runtime device ${message.payload.deviceId}.\n`);
+  }
+}
+
+function runtimesFromCapabilities(
+  capabilities: Awaited<ReturnType<typeof probeLocalRuntimeCapabilities>>
+) {
+  return Object.fromEntries(
+    capabilities
+      .filter((capability) => capability.status === 'ready' && capability.version)
+      .map((capability) => [capability.runtimeType, capability.version] as const)
+  );
+}
+
+export async function initializeSelectedWorkspace(
+  selectedPath: string,
+  state: LocalRuntimeState,
+  workspaces: Map<string, LocalWorkspace>,
+  initializationTails: Map<string, Promise<void>>,
+  signal: AbortSignal
+) {
+  const key = process.platform === 'win32' ? selectedPath.toLowerCase() : selectedPath;
+  const previous = initializationTails.get(key) ?? Promise.resolve();
+  const initialization = previous.catch(() => undefined).then(async () => {
+    signal.throwIfAborted();
+    let workspaceState = state.workspaces.find((workspace) => {
+      const rootPath = process.platform === 'win32' ? workspace.rootPath.toLowerCase() : workspace.rootPath;
+      return rootPath === key;
+    });
+    if (!workspaceState) {
+      workspaceState = await createWorkspaceState(selectedPath);
+      signal.throwIfAborted();
+      state.workspaces.push(workspaceState);
+      try {
+        await saveState(state);
+        signal.throwIfAborted();
+      } catch (error) {
+        state.workspaces = state.workspaces.filter((candidate) => candidate !== workspaceState);
+        await saveState(state).catch(() => undefined);
+        throw error;
+      }
+    }
+    signal.throwIfAborted();
+    let workspace = workspaces.get(workspaceState.workspaceId);
+    if (!workspace) {
+      workspace = new LocalWorkspace(workspaceState, { onIndexUpdated: () => saveState(state) });
+      workspaces.set(workspaceState.workspaceId, workspace);
+    }
+    return workspace;
+  });
+  const tail = initialization.then(() => undefined, () => undefined);
+  initializationTails.set(key, tail);
+  try {
+    return await initialization;
+  } finally {
+    if (initializationTails.get(key) === tail) initializationTails.delete(key);
   }
 }
 

@@ -30,6 +30,7 @@ import type {
   RuntimeError,
   SessionDetail,
   SessionFollowUpMessage,
+  IntentRoutingRolloutMode,
   SessionStatus,
   RuntimePreference,
   SessionWorkingDirectory,
@@ -52,6 +53,8 @@ import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import { AgentsService } from '../agents/agents.service.js';
 import { EventsService } from '../events/events.service.js';
 import { IntentRecognitionService } from '../intent-recognition/intent-recognition.service.js';
+import { SemanticIntentRouterService } from '../intent-recognition/semantic-intent-router.service.js';
+import { ContextManagementService } from '../context-management/context-management.service.js';
 import { MemoryService } from '../memory/memory.service.js';
 import { ExecutionOutcome, OrchestratorService, usableAgentMessageOutput } from '../orchestrator/orchestrator.service.js';
 import { ExecutionService } from '../execution/execution.service.js';
@@ -69,6 +72,8 @@ import { WorkspaceWritebackService } from '../workspaces/workspace-writeback.ser
 import { validateServerLocalWorkspace } from '../workspaces/validate-server-local-workspace.js';
 import { CapabilitiesService } from '../capabilities/capabilities.service.js';
 import { FileRevisionsService } from '../file-revisions/file-revisions.service.js';
+import { RouteApplicationService } from '../message-routing/route-application.service.js';
+import { MessageIngressService } from '../message-routing/message-ingress.service.js';
 
 type CreateSessionInput = {
   input: string;
@@ -100,6 +105,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     { controller: AbortController; done: Promise<void> }
   >();
   private readonly followUpPlanningRuns = new Map<string, Promise<void>>();
+  private readonly intentRoutingRuns = new Map<string, Promise<void>>();
   private readonly deletingSessionIds = new Set<string>();
   private readonly fileRevisionDispatches = new Set<string>();
   private shuttingDown = false;
@@ -124,7 +130,11 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     @Optional() private readonly localRuntime?: LocalRuntimeConnectionService,
     @Optional() private readonly workspaceProviders?: WorkspaceProviderResolver,
     @Optional() private readonly fileRevisions?: FileRevisionsService,
-    @Optional() private readonly workspaceWritebacks?: WorkspaceWritebackService
+    @Optional() private readonly workspaceWritebacks?: WorkspaceWritebackService,
+    @Optional() private readonly contextManagement?: ContextManagementService,
+    @Optional() private readonly semanticIntentRouter?: SemanticIntentRouterService,
+    @Optional() private readonly routeApplication?: RouteApplicationService,
+    @Optional() private readonly messageIngress?: MessageIngressService
   ) {
     const persisted = this.persistence.getCollection<SessionDetail[]>('sessions', []);
     let recoveredWorkspaceWriteback = false;
@@ -200,6 +210,196 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
     if (this.workspaceWritebacks) session.workspaceWritebacks = this.workspaceWritebacks.list(sessionId);
     return session;
+  }
+
+  listWorkItems(sessionId: string) {
+    this.get(sessionId);
+    return this.contextManagement?.listWorkItems(sessionId) ?? [];
+  }
+
+  getWorkItem(sessionId: string, workItemId: string) {
+    this.get(sessionId);
+    if (!this.contextManagement) throw new ServiceUnavailableException('Context management is unavailable.');
+    return this.contextManagement.getWorkItem(sessionId, workItemId);
+  }
+
+  async activateWorkItem(sessionId: string, workItemId: string) {
+    const session = this.get(sessionId);
+    if (!this.contextManagement) throw new ServiceUnavailableException('Context management is unavailable.');
+    const previousWorkItemId = session.activeWorkItemId;
+    const workItem = await this.contextManagement.activateWorkItem(session, workItemId);
+    this.touchSession(session);
+    this.events.create({
+      sessionId,
+      type: 'work_item_activated',
+      content: `已切换到任务上下文：${workItem.title}`,
+      metadata: createMetadata('system_notice', {
+        workItemId: workItem.id,
+        previousWorkItemId,
+        workflowResumeTriggered: false
+      })
+    });
+    return { workItem, workflowResumeTriggered: false };
+  }
+
+  listDecisions(sessionId: string) {
+    this.get(sessionId);
+    return this.contextManagement?.listDecisions(sessionId) ?? [];
+  }
+
+  getIntentRouting(sessionId: string, routingId: string) {
+    this.get(sessionId);
+    const routing = this.contextManagement?.listRoutingRecords(sessionId).find((item) => item.id === routingId);
+    if (!routing) throw new NotFoundException(`IntentRoutingRecord not found: ${routingId}`);
+    return routing;
+  }
+
+  debugIntentRouting(sessionId: string) {
+    this.get(sessionId);
+    if (!this.contextManagement) return { routings: [], snapshots: [] };
+    return {
+      routings: this.contextManagement.listRoutingRecords(sessionId),
+      snapshots: this.contextManagement.listSnapshots(sessionId).map((snapshot) => ({
+        id: snapshot.id,
+        sourceEventId: snapshot.sourceEventId,
+        activeWorkItemId: snapshot.activeWorkItemId,
+        candidateWorkItemIds: snapshot.candidateWorkItemIds,
+        validDecisionIds: snapshot.validDecisionIds,
+        revision: snapshot.revision,
+        snapshotHash: snapshot.snapshotHash,
+        createdAt: snapshot.createdAt
+      }))
+    };
+  }
+
+  async clarifyIntentRouting(
+    sessionId: string,
+    routingId: string,
+    input: {
+      choice: 'continue_current' | 'related_new' | 'independent_new';
+      confirmationId?: string;
+    }
+  ) {
+    const session = this.get(sessionId);
+    if (!this.contextManagement || !this.routeApplication) {
+      throw new ServiceUnavailableException('Intent routing is unavailable.');
+    }
+    const routing = this.getIntentRouting(sessionId, routingId);
+    const followUp = (session.pendingFollowUpMessages ?? []).find((item) => item.routingId === routingId) ??
+      this.contextManagement.listFollowUps(sessionId).find((item) => item.routingId === routingId);
+    if (routing.status === 'ROUTED') {
+      return { routing, workItem: followUp?.workItemId
+        ? this.contextManagement.getWorkItem(sessionId, followUp.workItemId)
+        : this.contextManagement.activeWorkItem(session) };
+    }
+    if (routing.status !== 'CLARIFICATION_REQUIRED') {
+      throw new ConflictException(`Intent routing is not waiting for clarification: ${routing.status}`);
+    }
+    if (!followUp) throw new NotFoundException(`Follow-up message not found for routing: ${routingId}`);
+    if (!(session.pendingFollowUpMessages ?? []).some((item) => item.id === followUp.id)) {
+      session.pendingFollowUpMessages = [...(session.pendingFollowUpMessages ?? []), followUp];
+    }
+    const active = this.contextManagement.activeWorkItem(session);
+    if (!active) throw new ConflictException('No active WorkItem is available for clarification.');
+    const snapshot = await this.contextManagement.buildIntentSnapshot({
+      session,
+      sourceEventId: routing.sourceEventId,
+      currentMessage: followUp.content,
+      latestEventSeq: this.events.list(sessionId).length,
+      pendingConfirmation: this.pendingConfirmationSummary(sessionId),
+      failureCheckpoint: this.latestFailurePhase(sessionId)
+    });
+    await this.contextManagement.updateRoutingRecord(sessionId, routingId, {
+      status: 'SNAPSHOT_READY',
+      snapshotId: snapshot.id,
+      reasonCodes: [...routing.reasonCodes, `USER_CLARIFIED_${input.choice.toUpperCase()}`]
+    });
+    await this.contextManagement.updateRoutingRecord(sessionId, routingId, { status: 'CLASSIFYING' });
+    const related = input.choice === 'related_new';
+    const independent = input.choice === 'independent_new';
+    const decision = {
+      dialogueAct: 'command' as const,
+      scopeRelation: independent
+        ? 'independent_new_requirement' as const
+        : related ? 'related_new_requirement' as const : 'same_requirement' as const,
+      contextPolicy: independent
+        ? 'clean_task_context' as const
+        : related ? 'inherit_selected' as const : 'inherit_confirmed' as const,
+      requestedAction: independent
+        ? 'create_independent_work_item' as const
+        : related ? 'create_related_work_item' as const : 'continue_active_work_item' as const,
+      selectedWorkItemId: active.id,
+      selectedDecisionIds: related || !independent
+        ? this.contextManagement.validDecisions(sessionId, active.id).map((item) => item.id)
+        : [],
+      selectedArtifactIds: related ? [...active.inheritedArtifactIds] : [],
+      goalSegments: independent || related ? [followUp.content] : [],
+      missingFields: [],
+      ambiguityReasons: [],
+      reasonCodes: [`USER_CLARIFIED_${input.choice.toUpperCase()}`],
+      riskLevel: 'low' as const
+    };
+    const validation = {
+      schemaValid: true,
+      referencesValid: true,
+      transitionValid: true,
+      snapshotCurrent: true,
+      safeToApply: true,
+      serverConfidence: 1,
+      errors: []
+    };
+    const validating = await this.contextManagement.updateRoutingRecord(sessionId, routingId, {
+      status: 'VALIDATING',
+      decision,
+      validation
+    });
+    const confirmationResolvedEvent = this.events.createDraft({
+      sessionId,
+      type: 'user_confirmation_resolved',
+      content: '任务关系已确认。',
+      metadata: createMetadata('system_notice', {
+        confirmationId: input.confirmationId,
+        routingId,
+        status: 'approved',
+        selectedOptionKey: input.choice
+      })
+    });
+    const applied = await this.routeApplication.apply({
+      session,
+      snapshot,
+      followUp,
+      outcome: { routing: validating, decision, validation, autoApplicable: true },
+      additionalEvents: [confirmationResolvedEvent]
+    });
+    followUp.workItemId = applied.workItem.id;
+    followUp.handlingPlan = applied.handlingPlan;
+    if (!applied.committedEvents?.some((event) => event.type === 'user_confirmation_resolved')) this.events.create({
+      sessionId,
+      type: 'user_confirmation_resolved',
+      content: '任务关系已确认。',
+      metadata: createMetadata('system_notice', {
+        confirmationId: input.confirmationId,
+        routingId,
+        status: 'approved',
+        selectedOptionKey: input.choice
+      })
+    });
+    if (!applied.committedEvent) this.events.create({
+      sessionId,
+      type: applied.createdWorkItem ? 'work_item_created' : 'work_item_activated',
+      content: applied.createdWorkItem
+        ? `已创建任务上下文：${applied.workItem.title}`
+        : `继续任务上下文：${applied.workItem.title}`,
+      metadata: createMetadata('system_notice', {
+        routingId,
+        workItemId: applied.workItem.id,
+        previousWorkItemId: applied.previousWorkItemId,
+        inheritedDecisionIds: applied.workItem.inheritedDecisionIds,
+        inheritedArtifactIds: applied.workItem.inheritedArtifactIds
+      })
+    });
+    if (!this.hasActiveSessionWork(session)) this.scheduleFollowUpPlanning(sessionId);
+    return { routing: applied.routing, workItem: applied.workItem };
   }
 
   async resolveWorkspaceWriteback(
@@ -710,6 +910,62 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     return recovered;
   }
 
+  async recoverIntentRoutings(sessionIds?: string[]) {
+    if (!this.contextManagement || !this.semanticIntentRouter) return [];
+    const allowed = sessionIds ? new Set(sessionIds) : undefined;
+    const recovered: Array<{ sessionId: string; routingId: string; action: string }> = [];
+    for (const session of this.sessions.values()) {
+      if (allowed && !allowed.has(session.id)) continue;
+      const records = [...this.contextManagement.listRoutingRecords(session.id)]
+        .sort((left, right) => left.sessionSeq - right.sessionSeq);
+      for (const routing of records) {
+        const followUp = (session.pendingFollowUpMessages ?? []).find((item) => item.routingId === routing.id) ??
+          this.contextManagement.listFollowUps(session.id).find((item) => item.routingId === routing.id);
+        if (!followUp) continue;
+        if (!(session.pendingFollowUpMessages ?? []).some((item) => item.id === followUp.id)) {
+          session.pendingFollowUpMessages = [...(session.pendingFollowUpMessages ?? []), followUp];
+          this.touchSession(session);
+        }
+        if (routing.status === 'ROUTED') {
+          if (!this.hasActiveSessionWork(session) && followUp.status === 'queued') {
+            this.scheduleFollowUpPlanning(session.id);
+            recovered.push({ sessionId: session.id, routingId: routing.id, action: 'follow_up_rescheduled' });
+          }
+          continue;
+        }
+        if (routing.status === 'CLARIFICATION_REQUIRED' || routing.status === 'REJECTED') continue;
+        if (routing.status === 'CLASSIFYING' || routing.status === 'VALIDATING' || routing.status === 'APPLYING') {
+          await this.contextManagement.updateRoutingRecord(session.id, routing.id, {
+            status: 'PENDING_RETRY',
+            reasonCodes: [...routing.reasonCodes, 'RECOVERED_AFTER_RESTART']
+          });
+        }
+        const snapshot = await this.contextManagement.buildIntentSnapshot({
+          session,
+          sourceEventId: routing.sourceEventId,
+          currentMessage: followUp.content,
+          latestEventSeq: this.events.list(session.id).length,
+          pendingConfirmation: this.pendingConfirmationSummary(session.id),
+          failureCheckpoint: this.latestFailurePhase(session.id)
+        });
+        await this.contextManagement.updateRoutingRecord(session.id, routing.id, {
+          status: 'SNAPSHOT_READY',
+          snapshotId: snapshot.id,
+          reasonCodes: [...routing.reasonCodes, 'RECOVERED_AFTER_RESTART']
+        });
+        this.enqueueIntentRouting(
+          session.id,
+          routing.id,
+          snapshot.id,
+          followUp.id,
+          followUp.handlingPlan.requirementRelation
+        );
+        recovered.push({ sessionId: session.id, routingId: routing.id, action: 'routing_requeued' });
+      }
+    }
+    return recovered;
+  }
+
   async delete(sessionId: string) {
     this.persistence.assertWritable();
     if (this.shuttingDown) {
@@ -763,6 +1019,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       this.memories.deleteSession(sessionId);
       this.events.deleteSession(sessionId);
       this.orchestrator.deleteSession(sessionId);
+      await this.contextManagement?.deleteSession(sessionId);
       await this.fileRevisions?.deleteSession(sessionId);
       this.persist();
       return { deleted: true, sessionId: session.id };
@@ -830,6 +1087,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       const session: SessionDetail = {
       id: sessionId,
       dataEpoch,
+      revision: 1,
+      decisionLedgerRevision: 0,
+      intentRoutingGeneration: 'v2',
       title: this.titleFromInput(input.input),
       originalInput: input.input,
       status: 'AGENT_DISCUSSING',
@@ -857,6 +1117,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       const firstEvent = this.events.create({
         sessionId: session.id,
         type: 'user_message',
+        sessionUserId: session.ownerId,
         userMessageIntent: 'clarification',
         priority: 'normal',
         content: input.input,
@@ -868,6 +1129,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
           autopilotRunId: session.autopilotRunId
         })
       });
+
+      await this.contextManagement?.ensureInitialWorkItem(session, firstEvent.id, input.input);
 
       this.generateBriefInBackground(session);
 
@@ -895,6 +1158,20 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       }
       if (registration.displayName !== input.workingDirectory.name) {
         throw new BadRequestException('Local Runtime workspace name does not match its registered workspaceId.');
+      }
+      if (!input.runtimePreference?.preferredRuntimeType) {
+        throw new BadRequestException('LOCAL_RUNTIME_REQUIRED: Select an available Runtime for the local workspace.');
+      }
+      const requestedRuntimeTypes = new Set([
+        ...(input.runtimePreference?.preferredRuntimeType ? [input.runtimePreference.preferredRuntimeType] : []),
+        ...(input.runtimePreference?.allowedRuntimeTypes ?? [])
+      ]);
+      for (const runtimeType of requestedRuntimeTypes) {
+        if (!this.localRuntime?.isRuntimeAvailable(input.workingDirectory.id, runtimeType)) {
+          throw new BadRequestException(
+            `LOCAL_RUNTIME_UNAVAILABLE: Runtime ${runtimeType} is unavailable on the connected device.`
+          );
+        }
       }
       return {
         workingDirectory: input.workingDirectory,
@@ -996,24 +1273,39 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     void done;
   }
 
-  async sendMessage(sessionId: string, content: string, mentionedAgentIds: string[] = []) {
+  async sendMessage(
+    sessionId: string,
+    content: string,
+    mentionedAgentIds: string[] = [],
+    clientMessageId?: string
+  ) {
     const session = this.get(sessionId);
+    const replay = this.findMessageReplay(session, clientMessageId);
+    if (replay) return replay;
+    const routingMode = this.intentRoutingMode();
+    if (this.shouldEnforceIntentRouting(session, routingMode)) {
+      return this.sendMessageWithIntentV2(session, content, mentionedAgentIds, clientMessageId, routingMode);
+    }
     const receiverRecognitionPending = session.status === 'PAUSED';
-    let handlingPlan: UserMessageHandlingPlan = receiverRecognitionPending
+    const explicitResumeCommand = this.isResumeCommand(content) &&
+      (session.status === 'FAILED' || this.hasFailedWorkflowRun(session));
+    const useLocalIntentRecognition = receiverRecognitionPending || explicitResumeCommand;
+    let handlingPlan: UserMessageHandlingPlan = useLocalIntentRecognition
       ? this.intentRecognition.recognizeUserMessage(content, session.status)
       : await this.recognizeFollowUpHandlingPlan(session, content, mentionedAgentIds);
     handlingPlan = this.normalizeFollowUpHandlingPlan(session, handlingPlan);
     const event = this.events.create({
       sessionId,
       type: 'user_message',
+      sessionUserId: session.ownerId,
       userMessageIntent: handlingPlan.intent,
       priority: handlingPlan.priority,
       content,
       toAgentIds: mentionedAgentIds,
-      metadata: createMetadata('chat_message', {
-        text: content,
-        mentionedAgentIds
-      })
+      metadata: {
+        ...createMetadata('chat_message', { text: content, mentionedAgentIds }),
+        ...(clientMessageId ? { idempotencyKey: this.messageIdempotencyKey(sessionId, clientMessageId) } : {})
+      }
     });
 
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
@@ -1073,7 +1365,29 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       queuedAt: nowIso()
     };
     session.pendingFollowUpMessages = [...(session.pendingFollowUpMessages ?? []), followUp];
+
+    if (routingMode !== 'disabled' && this.contextManagement && this.semanticIntentRouter) {
+      const workItem = await this.contextManagement.ensureInitialWorkItem(session, event.id, session.originalInput);
+      const routing = await this.contextManagement.createRoutingRecord({
+        session,
+        sourceEventId: event.id,
+        idempotencyKey: `${session.id}:${event.id}:intent-v2.1`,
+        rolloutMode: routingMode
+      });
+      const snapshot = await this.contextManagement.buildIntentSnapshot({
+        session,
+        sourceEventId: event.id,
+        currentMessage: content,
+        latestEventSeq: this.events.list(session.id).length,
+        pendingConfirmation: this.pendingConfirmationSummary(session.id),
+        failureCheckpoint: this.latestFailurePhase(session.id)
+      });
+      followUp.workItemId = workItem.id;
+      followUp.routingId = routing.id;
+      this.enqueueIntentRouting(session.id, routing.id, snapshot.id, followUp.id, handlingPlan.requirementRelation);
+    }
     this.touchSession(session);
+    await this.contextManagement?.saveFollowUp(session.id, followUp);
 
     if (deferred) {
       this.events.create({
@@ -1092,7 +1406,343 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       this.scheduleFollowUpPlanning(session.id);
     }
 
-    return { event, handlingPlan, deferred, followUpMessageId: followUp.id };
+    return {
+      event,
+      handlingPlan,
+      deferred,
+      followUpMessageId: followUp.id,
+      routingId: followUp.routingId,
+      routingStatus: followUp.routingId ? 'SNAPSHOT_READY' as const : undefined,
+      idempotentReplay: false as const
+    };
+  }
+
+  private intentRoutingMode(): IntentRoutingRolloutMode {
+    const configured = process.env.INTENT_ROUTING_MODE?.trim();
+    const compatible = configured === 'enforce_existing_sessions'
+      ? 'enforce_selected_sessions'
+      : configured === 'enforce_all' ? 'enforce_all_current_epoch' : configured;
+    return compatible && [
+      'disabled',
+      'shadow',
+      'enforce_new_sessions',
+      'enforce_selected_sessions',
+      'enforce_all_current_epoch'
+    ].includes(compatible)
+      ? compatible as IntentRoutingRolloutMode
+      : 'shadow';
+  }
+
+  private shouldEnforceIntentRouting(session: SessionDetail, mode: IntentRoutingRolloutMode) {
+    if (mode === 'enforce_all_current_epoch') return session.dataEpoch === this.persistence.currentDataEpoch();
+    if (mode === 'enforce_new_sessions') return session.intentRoutingGeneration === 'v2';
+    if (mode === 'enforce_selected_sessions') {
+      const selected = new Set((process.env.INTENT_ROUTING_SESSION_IDS ?? '')
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean));
+      return selected.has(session.id);
+    }
+    return false;
+  }
+
+  private async sendMessageWithIntentV2(
+    session: SessionDetail,
+    content: string,
+    mentionedAgentIds: string[],
+    clientMessageId: string | undefined,
+    routingMode: IntentRoutingRolloutMode
+  ) {
+    const handlingPlan = this.pendingIntentHandlingPlan();
+    const deferred = this.hasActiveSessionWork(session);
+
+    if (!this.contextManagement || !this.semanticIntentRouter || !this.routeApplication || !this.messageIngress) {
+      throw new ServiceUnavailableException('Intent V2 routing services are unavailable.');
+    }
+    const committed = await this.messageIngress.commit({
+      session,
+      content,
+      mentionedAgentIds,
+      handlingPlan,
+      routingMode,
+      messageIdempotencyKey: clientMessageId ? this.messageIdempotencyKey(session.id, clientMessageId) : undefined
+    });
+    const { event, followUp, routing, workItem } = committed;
+    if (committed.idempotentReplay) {
+      return {
+        event,
+        handlingPlan: followUp.handlingPlan,
+        deferred,
+        followUpMessageId: followUp.id,
+        routingId: routing.id,
+        routingStatus: routing.status,
+        idempotentReplay: true as const
+      };
+    }
+    const snapshot = await this.contextManagement.buildIntentSnapshot({
+      session,
+      sourceEventId: event.id,
+      currentMessage: content,
+      latestEventSeq: this.events.list(session.id).length,
+      pendingConfirmation: this.pendingConfirmationSummary(session.id),
+      failureCheckpoint: this.latestFailurePhase(session.id)
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'follow_up_queued',
+      content: '消息已保存，正在识别它与当前任务的关系。',
+      metadata: createMetadata('system_notice', {
+        routingId: routing.id,
+        followUpMessageId: followUp.id,
+        workItemId: workItem.id,
+        status: 'SNAPSHOT_READY'
+      })
+    });
+    this.enqueueIntentRouting(session.id, routing.id, snapshot.id, followUp.id);
+    return {
+      event,
+      handlingPlan,
+      deferred,
+      followUpMessageId: followUp.id,
+      routingId: routing.id,
+      routingStatus: 'SNAPSHOT_READY' as const,
+      idempotentReplay: false as const
+    };
+  }
+
+  private pendingIntentHandlingPlan(): UserMessageHandlingPlan {
+    return {
+      intent: 'clarification',
+      priority: 'normal',
+      shouldPause: false,
+      affectedTaskIds: [],
+      affectedAgentIds: [],
+      requiresBriefRevision: false,
+      requiresUserConfirmation: false,
+      coordinatorInstruction: '等待系统意图识别完成。'
+    };
+  }
+
+  private findMessageReplay(session: SessionDetail, clientMessageId?: string) {
+    if (clientMessageId === undefined) return undefined;
+    const normalized = clientMessageId.trim();
+    if (!normalized || normalized.length > 200) {
+      throw new BadRequestException('Idempotency-Key must contain 1-200 characters.');
+    }
+    const key = this.messageIdempotencyKey(session.id, normalized);
+    const event = this.events.list(session.id).find((item) => item.metadata.idempotencyKey === key);
+    if (!event) return undefined;
+    const followUp = (session.pendingFollowUpMessages ?? []).find((item) => item.sourceEventId === event.id) ??
+      this.contextManagement?.listFollowUps(session.id).find((item) => item.sourceEventId === event.id);
+    const routing = followUp?.routingId
+      ? this.contextManagement?.listRoutingRecords(session.id).find((item) => item.id === followUp.routingId)
+      : undefined;
+    return {
+      event,
+      handlingPlan: followUp?.handlingPlan ?? this.pendingIntentHandlingPlan(),
+      deferred: Boolean(followUp),
+      followUpMessageId: followUp?.id,
+      routingId: routing?.id,
+      routingStatus: routing?.status,
+      idempotentReplay: true as const
+    };
+  }
+
+  private messageIdempotencyKey(sessionId: string, clientMessageId: string) {
+    return `message:${sessionId}:${clientMessageId.trim()}`;
+  }
+
+  private pendingConfirmationSummary(sessionId: string) {
+    const pending = [...this.events.list(sessionId)].reverse().find((event) =>
+      event.type === 'user_confirmation_requested' || event.type === 'intent_clarification_required'
+    );
+    if (!pending) return undefined;
+    const resolved = this.events.list(sessionId).some((event) =>
+      event.type === 'user_confirmation_resolved' &&
+      (event.metadata.payload as { confirmationId?: string } | undefined)?.confirmationId ===
+        (pending.metadata.payload as { confirmationId?: string } | undefined)?.confirmationId
+    );
+    return resolved ? undefined : pending.content;
+  }
+
+  private enqueueIntentRouting(
+    sessionId: string,
+    routingId: string,
+    snapshotId: string,
+    followUpId: string,
+    legacyRelation?: UserMessageHandlingPlan['requirementRelation']
+  ) {
+    const previous = this.intentRoutingRuns.get(sessionId) ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(() =>
+      this.processIntentRouting(sessionId, routingId, snapshotId, followUpId, legacyRelation)
+    ).catch((error) => {
+      this.logger.warn(`Intent routing failed for session ${sessionId}: ${String(error)}`);
+    }).finally(() => {
+      if (this.intentRoutingRuns.get(sessionId) === run) this.intentRoutingRuns.delete(sessionId);
+    });
+    this.intentRoutingRuns.set(sessionId, run);
+  }
+
+  private async processIntentRouting(
+    sessionId: string,
+    routingId: string,
+    snapshotId: string,
+    followUpId: string,
+    legacyRelation?: UserMessageHandlingPlan['requirementRelation']
+  ) {
+    const startedAt = Date.now();
+    const session = this.sessions.get(sessionId);
+    if (!session || this.deletingSessionIds.has(sessionId)) return;
+    try {
+      const routing = this.contextManagement?.listRoutingRecords(session.id).find((item) => item.id === routingId);
+      const snapshot = this.contextManagement?.listSnapshots(session.id).find((item) => item.id === snapshotId);
+      if (!routing || !snapshot || !this.semanticIntentRouter || !this.contextManagement) return;
+      const outcome = await this.semanticIntentRouter.classify(session, routing, snapshot);
+      if (
+        outcome.validation.errors.includes('SNAPSHOT_STALE') &&
+        outcome.routing.reasonCodes.filter((code) => code === 'SNAPSHOT_REBUILT').length < 1
+      ) {
+        workspaceMetrics.increment('intent_route_stale_snapshot_total');
+        const followUp = session.pendingFollowUpMessages?.find((item) => item.id === followUpId) ??
+          this.contextManagement.listFollowUps(session.id).find((item) => item.id === followUpId);
+        if (!followUp) return;
+        const rebuilt = await this.contextManagement.buildIntentSnapshot({
+          session,
+          sourceEventId: routing.sourceEventId,
+          currentMessage: followUp.content,
+          latestEventSeq: this.events.list(session.id).length,
+          pendingConfirmation: this.pendingConfirmationSummary(session.id),
+          failureCheckpoint: this.latestFailurePhase(session.id)
+        });
+        await this.contextManagement.updateRoutingRecord(session.id, routingId, {
+          status: 'SNAPSHOT_READY',
+          snapshotId: rebuilt.id,
+          reasonCodes: [...new Set([...outcome.routing.reasonCodes, 'SNAPSHOT_REBUILT'])]
+        });
+        await this.processIntentRouting(sessionId, routingId, rebuilt.id, followUpId, legacyRelation);
+        return;
+      }
+      if (routing.rolloutMode === 'shadow') {
+        const v2Continuation = outcome.decision.scopeRelation === 'same_requirement';
+        const legacyContinuation = legacyRelation === 'continuation';
+        const shadowResult = v2Continuation === legacyContinuation ? 'shadow_match' : 'shadow_difference';
+        await this.contextManagement.updateRoutingRecord(session.id, routingId, {
+          reasonCodes: [
+            ...outcome.routing.reasonCodes,
+            v2Continuation === legacyContinuation ? 'SHADOW_MATCH' : 'SHADOW_DIFFERENCE'
+          ]
+        });
+        workspaceMetrics.increment('intent_route_total', 1, {
+          relation: outcome.decision.scopeRelation,
+          action: outcome.decision.requestedAction,
+          result: shadowResult
+        });
+        workspaceMetrics.observe('intent_route_latency_ms', Date.now() - startedAt, { result: shadowResult });
+        return;
+      }
+      const followUp = session.pendingFollowUpMessages?.find((item) => item.id === followUpId);
+      if (!followUp) return;
+      if (!outcome.autoApplicable) {
+        const reason = intentClarificationMetricReason(outcome.validation.errors);
+        workspaceMetrics.increment('intent_route_total', 1, {
+          relation: outcome.decision.scopeRelation,
+          action: outcome.decision.requestedAction,
+          result: 'clarification_required'
+        });
+        workspaceMetrics.increment('intent_route_clarification_total', 1, { reason });
+        workspaceMetrics.observe('intent_route_latency_ms', Date.now() - startedAt, {
+          result: 'clarification_required'
+        });
+        this.emitIntentClarification(session, followUp, outcome.routing.reasonCodes);
+        return;
+      }
+      if (!this.routeApplication) throw new ServiceUnavailableException('Route application service is unavailable.');
+      const applied = await this.routeApplication.apply({ session, snapshot, followUp, outcome });
+      workspaceMetrics.increment('intent_route_total', 1, {
+        relation: outcome.decision.scopeRelation,
+        action: outcome.decision.requestedAction,
+        result: 'routed'
+      });
+      workspaceMetrics.observe('intent_route_latency_ms', Date.now() - startedAt, { result: 'routed' });
+      followUp.workItemId = applied.workItem.id;
+      followUp.handlingPlan = applied.handlingPlan;
+      if (!applied.committedEvent) this.events.create({
+        sessionId: session.id,
+        type: applied.createdWorkItem ? 'work_item_created' : 'work_item_activated',
+        content: applied.createdWorkItem
+          ? `已创建任务上下文：${applied.workItem.title}`
+          : `继续任务上下文：${applied.workItem.title}`,
+        metadata: createMetadata('system_notice', {
+          routingId,
+          workItemId: applied.workItem.id,
+          previousWorkItemId: applied.previousWorkItemId,
+          inheritedDecisionIds: applied.workItem.inheritedDecisionIds,
+          inheritedArtifactIds: applied.workItem.inheritedArtifactIds
+        })
+      });
+      const action = outcome.decision.requestedAction;
+      if (action === 'pause') {
+        this.completeFollowUpRouting(session, followUp.id);
+        await this.pause(session.id, '用户通过意图路由请求暂停会话');
+        return;
+      }
+      if (action === 'cancel') {
+        this.completeFollowUpRouting(session, followUp.id);
+        this.control(session.id, 'CANCELLED', '用户通过意图路由请求取消会话');
+        return;
+      }
+      const coordinator = this.pickSessionAgent(session, ['coordinator']);
+      this.events.create({
+        sessionId: session.id,
+        type: 'agent_message',
+        fromAgentId: coordinator.id,
+        toAgentIds: followUp.mentionedAgentIds,
+        content: `意图识别已完成，开始处理：${applied.handlingPlan.coordinatorInstruction}`,
+        metadata: createMetadata('chat_message', {
+          messageKind: 'decision',
+          routingId,
+          workItemId: applied.workItem.id,
+          handlingPlan: applied.handlingPlan
+        })
+      });
+      if (!this.hasActiveSessionWork(session)) this.scheduleFollowUpPlanning(session.id);
+    } catch (error) {
+      workspaceMetrics.increment('intent_route_total', 1, {
+        relation: 'unknown',
+        action: 'unknown',
+        result: 'processing_error'
+      });
+      workspaceMetrics.observe('intent_route_latency_ms', Date.now() - startedAt, { result: 'processing_error' });
+      this.logger.warn(`Intent routing processing failed for session ${session.id}: ${String(error)}`);
+    }
+  }
+
+  private emitIntentClarification(
+    session: SessionDetail,
+    followUp: SessionFollowUpMessage,
+    reasonCodes: string[]
+  ) {
+    const confirmationId = crypto.randomUUID();
+    this.events.create({
+      sessionId: session.id,
+      type: 'intent_clarification_required',
+      priority: 'high',
+      content: '无法安全确定这条消息与现有任务的关系，请选择处理方式。',
+      metadata: createMetadata('confirmation_card', {
+        confirmationId,
+        reason: 'intent_relation_clarification',
+        routingId: followUp.routingId,
+        followUpMessageId: followUp.id,
+        reasonCodes,
+        title: '选择任务关系',
+        description: followUp.content,
+        options: [
+          { key: 'continue_current', label: '继续当前任务', style: 'primary' },
+          { key: 'related_new', label: '作为相关新任务', style: 'default' },
+          { key: 'independent_new', label: '作为独立新任务', style: 'default' }
+        ]
+      })
+    });
   }
 
   private async recognizeFollowUpHandlingPlan(
@@ -1115,6 +1765,38 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
     const brief = this.orchestrator.confirmBrief(session, briefId);
     session.currentTaskBriefId = brief.id;
+    if (this.contextManagement) {
+      const activeWorkItem = await this.contextManagement.ensureInitialWorkItem(
+        session,
+        `brief-confirmation:${brief.id}`,
+        brief.goal
+      );
+      const confirmationEvent = this.events.createDraft({
+        sessionId,
+        type: 'user_confirmation_resolved',
+        sessionUserId: session.ownerId,
+        content: '任务契约已确认并写入决策账本。',
+        metadata: createMetadata('system_notice', {
+          relatedBriefId: brief.id,
+          workItemId: activeWorkItem.id,
+          status: 'approved',
+          reason: 'confirm_task_brief'
+        })
+      });
+      await this.contextManagement.recordConfirmedDecisions({
+        session,
+        workItemId: activeWorkItem.id,
+        sourceEvent: confirmationEvent,
+        decisions: [
+          { kind: 'requirement', content: brief.goal },
+          ...(brief.scope.length ? [{ kind: 'constraint' as const, content: `In scope: ${brief.scope.join('; ')}` }] : []),
+          ...(brief.outOfScope.length ? [{ kind: 'constraint' as const, content: `Out of scope: ${brief.outOfScope.join('; ')}` }] : []),
+          ...brief.constraints.map((content) => ({ kind: 'constraint' as const, content })),
+          { kind: 'approval', content: `Task Brief ${brief.id} version ${brief.version} confirmed by user.` }
+        ]
+      });
+      this.events.acceptCommitted(confirmationEvent);
+    }
     const availableWorkflows = this.workflows?.list().filter((workflow) => workflow.status === 'published') ?? [];
     this.setStatus(session, 'WAIT_WORKFLOW_SELECT');
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
@@ -1701,10 +2383,20 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     plan: UserMessageHandlingPlan
   ): UserMessageHandlingPlan {
     const requirementRelation = plan.requirementRelation ?? 'continuation';
-    const failedExecutionAction = session.status === 'FAILED' && requirementRelation === 'continuation'
+    const resumableFailure = session.status === 'FAILED' || this.hasFailedWorkflowRun(session);
+    const failedExecutionAction = resumableFailure && requirementRelation === 'continuation'
       ? plan.failedExecutionAction === 'replan' ? 'replan' : 'resume'
       : 'none';
     return { ...plan, requirementRelation, failedExecutionAction };
+  }
+
+  private hasFailedWorkflowRun(session: SessionDetail) {
+    if (!session.workflowRunId || !this.workflowRuntime) return false;
+    try {
+      return this.workflowRuntime.get(session.workflowRunId).status === 'failed';
+    } catch {
+      return false;
+    }
   }
 
   private completeFollowUpRouting(session: SessionDetail, followUpMessageId: string) {
@@ -2448,6 +3140,13 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     session.updatedAt = nowIso();
     this.persist();
 
+    const workItemStatus = this.workItemStatusForSessionStatus(status);
+    if (workItemStatus) {
+      void this.contextManagement?.updateActiveWorkItemStatus(session, workItemStatus).catch((error) => {
+        this.logger.error(`Failed to update active WorkItem status for ${session.id}: ${String(error)}`);
+      });
+    }
+
     const terminalStatuses: SessionStatus[] = ['COMPLETED', 'FAILED', 'CANCELLED'];
     if (terminalStatuses.includes(status) && !terminalStatuses.includes(previousStatus)) {
       void this.persistence.releaseWorkspaceSessionLease(session.workspaceId, session.id).catch((error) => {
@@ -2901,9 +3600,11 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       return;
     }
 
-    for (const task of this.tasks.list(session.id)) {
-      if (task.status === 'failed') {
-        this.tasks.update(task, { status: 'pending', resultSummary: undefined });
+    if (!session.workflowRunId || !this.workflowRuntime) {
+      for (const task of this.tasks.list(session.id)) {
+        if (task.status === 'failed') {
+          this.tasks.update(task, { status: 'pending', resultSummary: undefined });
+        }
       }
     }
     this.setStatus(session, 'EXECUTING');
@@ -3039,8 +3740,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         .catch((error) => this.failSession(session, error, 'workflow_resume'));
       return;
     }
-    this.tasks.resetStaleRunning(session.id);
-    const unfinishedTasks = this.tasks.unfinished(session.id);
+    this.tasks.resetStaleRunning(session.id, session.activeWorkItemId);
+    const unfinishedTasks = this.tasks.unfinished(session.id, session.activeWorkItemId);
     this.execution.start(session, brief, unfinishedTasks, (outcome) => this.applyOutcome(session.id, outcome));
   }
 
@@ -3206,14 +3907,24 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   private participatingAgents(session: SessionDetail) {
     const agents = session.participatingAgentIds
       .map((agentId) => this.agents.findByIdOrKey(agentId))
-      .filter((agent): agent is Agent => Boolean(agent));
-    return agents.length ? agents : this.agents.list();
+      .filter((agent): agent is Agent => Boolean(agent))
+      .filter((agent) => agent.management?.allowedSurfaces.includes('chat') ?? true)
+      .filter((agent) => agent.status === 'active');
+    if (agents.length) return agents;
+    const catalog = this.agents as unknown as {
+      listForSurface?: (surface: 'chat') => Agent[];
+      list?: () => Agent[];
+    };
+    return catalog.listForSurface?.('chat') ?? catalog.list?.() ?? [];
   }
 
   private pickSessionAgent(session: SessionDetail, preferredKeys: string[]) {
     const agents = this.participatingAgents(session);
+    const catalog = this.agents as unknown as {
+      findSystemByKey?: (key: string) => Agent | undefined;
+    };
     for (const key of preferredKeys) {
-      const preferred = agents.find((agent) => agent.key === key);
+      const preferred = catalog.findSystemByKey?.(key) ?? agents.find((agent) => agent.key === key);
       if (preferred) {
         return preferred;
       }
@@ -3339,6 +4050,37 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       });
     }
   }
+
+  private workItemStatusForSessionStatus(status: SessionStatus) {
+    if (status === 'COMPLETED') return 'COMPLETED' as const;
+    if (status === 'FAILED') return 'FAILED' as const;
+    if (status === 'CANCELLED') return 'CANCELLED' as const;
+    if (['EXECUTING', 'POST_REVIEW', 'REWORKING', 'APPLYING_CHANGES'].includes(status)) {
+      return 'EXECUTING' as const;
+    }
+    if ([
+      'WAIT_USER_CONFIRM',
+      'WAIT_WORKFLOW_SELECT',
+      'WAIT_WORKFLOW_STEP_CONFIRM',
+      'WAIT_WORKSPACE_CONFLICT_RESOLUTION',
+      'WAIT_USER_DECISION',
+      'PAUSED',
+      'INTERRUPTED'
+    ].includes(status)) return 'WAITING_USER' as const;
+    if (status === 'AGENT_DISCUSSING' || status === 'REVISING_BRIEF') return 'OPEN' as const;
+    return undefined;
+  }
+}
+
+function intentClarificationMetricReason(errors: string[]) {
+  if (errors.includes('SNAPSHOT_STALE')) return 'snapshot_stale';
+  if (errors.includes('REFERENCE_OUTSIDE_SNAPSHOT')) return 'invalid_reference';
+  if (errors.includes('STATE_TRANSITION_INVALID')) return 'invalid_transition';
+  if (errors.includes('REQUIRED_FIELDS_MISSING')) return 'missing_fields';
+  if (errors.includes('HIGH_RISK_REQUIRES_CONFIRMATION')) return 'high_risk';
+  if (errors.includes('CONFIRMATION_TARGET_REQUIRED')) return 'confirmation_target';
+  if (errors.includes('INTENT_AMBIGUOUS')) return 'ambiguous';
+  return 'other';
 }
 
 async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {

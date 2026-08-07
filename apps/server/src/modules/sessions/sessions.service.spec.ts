@@ -21,7 +21,12 @@ function makeService(options: {
   permissionGrants?: string[];
   executionRunning?: boolean;
   initialSessions?: SessionDetail[];
-  localWorkspace?: { workspaceId: string; displayName: string; files?: Record<string, string> };
+  localWorkspace?: {
+    workspaceId: string;
+    displayName: string;
+    files?: Record<string, string>;
+    runtimeTypes?: Array<'codex' | 'claude_code'>;
+  };
   fileRevisions?: unknown;
   fileRevisionDispatches?: string[];
   fileRevisionContinuations?: string[];
@@ -32,6 +37,7 @@ function makeService(options: {
     resolve(session: SessionDetail, writebackId: string, input: unknown): Promise<WorkspaceWritebackRecord>;
   };
   capabilityChecks?: Record<string, boolean>;
+  workflowResumeCalls?: string[];
   followUpHandlingPlan?: {
     requirementRelation: 'continuation' | 'new_requirement';
     failedExecutionAction: 'none' | 'resume' | 'replan';
@@ -49,26 +55,35 @@ function makeService(options: {
   const followUpRecognitions: string[] = [];
   const followUpPreparations: Array<{ content: string; mentionedAgentIds: string[] }> = [];
   const eventOnceKeys = new Set<string>();
+  const findAgentById = (id: string) => {
+    if (id === 'coordinator' && options.receiverAvailable === false) return undefined;
+    return {
+      id,
+      key: id,
+      name: id,
+      role: id,
+      status: 'active' as const,
+      capabilityIds: [],
+      defaultKnowledgeBaseIds: [],
+      createdAt: '2026-07-11T00:00:00.000Z',
+      updatedAt: '2026-07-11T00:00:00.000Z'
+    };
+  };
   const service = new SessionsService(
     {
       resolveIds(agentIds?: string[]) {
         return agentIds ?? ['coordinator'];
       },
       findByIdOrKey(id: string) {
-        if (id === 'coordinator' && options.receiverAvailable === false) return undefined;
-        return {
-          id,
-          key: id,
-          name: id,
-          role: id,
-          status: 'active',
-          capabilityIds: [],
-          defaultKnowledgeBaseIds: [],
-          createdAt: '2026-07-11T00:00:00.000Z',
-          updatedAt: '2026-07-11T00:00:00.000Z'
-        };
+        return findAgentById(id);
+      },
+      findSystemByKey(key: string) {
+        return key === 'coordinator' ? findAgentById(key) : undefined;
       },
       list() {
+        return [];
+      },
+      listForSurface() {
         return [];
       }
     } as never,
@@ -296,7 +311,18 @@ function makeService(options: {
       registerApprovalListener() {}
     } as never,
     undefined,
-    undefined,
+    options.workflowResumeCalls ? {
+      updates() {
+        return { subscribe() { return { unsubscribe() {} }; } };
+      },
+      async resumeCurrentExecution(runId: string) {
+        options.workflowResumeCalls!.push(runId);
+        return true;
+      },
+      get() {
+        return { status: 'failed' };
+      }
+    } as never : undefined,
     options.cleanupCalls ? { async deleteSessionDirectory(sessionId: string) { options.cleanupCalls!.push(`worktree:${sessionId}`); } } as never : undefined,
     options.cleanupCalls ? { deleteSessionDirectory(sessionId: string) { options.cleanupCalls!.push(`brief:${sessionId}`); } } as never : undefined,
     options.runtimeCalls ? {
@@ -314,6 +340,10 @@ function makeService(options: {
           capabilities: { read: true, write: true, command: true, test: true },
           revision: { id: 'local-revision', observedAt: '2026-07-24T00:00:00.000Z' }
         };
+      },
+      isRuntimeAvailable(workspaceId: string, runtimeType: string) {
+        return workspaceId === options.localWorkspace?.workspaceId
+          && (options.localWorkspace.runtimeTypes ?? ['codex']).includes(runtimeType as 'codex' | 'claude_code');
       },
       async grantWorkspacePermissionOnce(workspaceId: string, permission: string) {
         options.permissionGrants?.push(`${workspaceId}:${permission}`);
@@ -883,6 +913,7 @@ test('Local Runtime dangerous actions pause for one-time user approval and resum
   });
   const { session } = await fixture.service.create({
     input: 'Delete a generated file after confirmation',
+    runtimePreference: { preferredRuntimeType: 'codex', allowedRuntimeTypes: ['codex'] },
     workingDirectory: {
       kind: 'local_bridge',
       id: 'workspace-local',
@@ -1045,6 +1076,29 @@ test('a message received while paused remains queued without invoking the Receiv
   assert.equal(session.pendingFollowUpMessages?.[0]?.receiverRecognitionPending, undefined);
 });
 
+test('message ingress replays the durable event and follow-up for the same Idempotency-Key', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Analyze the workspace' });
+  (fixture.service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
+  session.status = 'PAUSED';
+  session.pauseState = {
+    previousStatus: 'EXECUTING',
+    pausedAt: '2026-08-07T00:00:00.000Z'
+  };
+
+  const first = await fixture.service.sendMessage(session.id, '继续时增加审计日志', [], 'client-message-1');
+  const replay = await fixture.service.sendMessage(session.id, '这段内容不会再次落库', [], 'client-message-1');
+
+  assert.equal(replay.idempotentReplay, true);
+  assert.equal(replay.event.id, first.event.id);
+  assert.equal(replay.followUpMessageId, first.followUpMessageId);
+  assert.equal(session.pendingFollowUpMessages?.length, 1);
+  assert.equal(fixture.events.filter((event) =>
+    event.type === 'user_message' &&
+    (event.metadata as { idempotencyKey?: string } | undefined)?.idempotencyKey === 'message:' + session.id + ':client-message-1'
+  ).length, 1);
+});
+
 test('a continuation after failure resumes the previous brief instead of creating a new follow-up brief', async () => {
   const failedTask: AgentTask = {
     id: 'failed-task',
@@ -1079,6 +1133,76 @@ test('a continuation after failure resumes the previous brief instead of creatin
   assert.equal(fixture.executionStarts.length, 1);
   assert.equal(session.currentTaskBriefId, 'brief-existing');
   assert.deepEqual(session.pendingFollowUpMessages, []);
+});
+
+test('an explicit resume command bypasses Receiver misclassification after failure', async () => {
+  const failedTask: AgentTask = {
+    id: 'failed-task-explicit-resume',
+    sessionId: 'placeholder',
+    title: 'Implement current requirement',
+    description: 'Continue the previous work',
+    status: 'failed',
+    dependsOnTaskIds: [],
+    acceptanceCriteria: [],
+    resultSummary: 'Runtime unavailable',
+    createdAt: '2026-07-11T00:00:00.000Z',
+    updatedAt: '2026-07-11T00:00:00.000Z'
+  };
+  const fixture = makeService({
+    taskItems: [failedTask],
+    followUpHandlingPlan: { requirementRelation: 'new_requirement', failedExecutionAction: 'none' }
+  });
+  const { session } = await fixture.service.create({ input: 'Implement current requirement' });
+  (fixture.service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
+  failedTask.sessionId = session.id;
+  session.currentTaskBriefId = 'brief-existing';
+  session.status = 'FAILED';
+
+  const result = await fixture.service.sendMessage(session.id, '继续');
+  await waitFor(() => failedTask.status === 'pending');
+
+  assert.equal(result.handlingPlan.requirementRelation, 'continuation');
+  assert.equal(result.handlingPlan.failedExecutionAction, 'resume');
+  assert.deepEqual(fixture.followUpRecognitions, []);
+  assert.equal(fixture.followUpPreparations.length, 0);
+  assert.equal(fixture.executionStarts.length, 1);
+  assert.equal(session.currentTaskBriefId, 'brief-existing');
+  assert.deepEqual(session.pendingFollowUpMessages, []);
+});
+
+test('a continuation after workflow failure delegates retry without reopening the failed task record', async () => {
+  const failedTask: AgentTask = {
+    id: 'failed-workflow-task',
+    sessionId: 'placeholder',
+    title: 'Retry workflow stage',
+    description: 'Preserve the failed attempt and create a new workflow attempt.',
+    status: 'failed',
+    dependsOnTaskIds: [],
+    acceptanceCriteria: [],
+    resultSummary: 'Runtime failed',
+    createdAt: '2026-07-11T00:00:00.000Z',
+    updatedAt: '2026-07-11T00:00:00.000Z'
+  };
+  const workflowResumeCalls: string[] = [];
+  const fixture = makeService({
+    taskItems: [failedTask],
+    workflowResumeCalls,
+    followUpHandlingPlan: { requirementRelation: 'continuation', failedExecutionAction: 'resume' }
+  });
+  const { session } = await fixture.service.create({ input: 'Retry the failed workflow stage' });
+  (fixture.service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
+  failedTask.sessionId = session.id;
+  session.currentTaskBriefId = 'brief-existing';
+  session.workflowRunId = 'workflow-run-failed';
+  session.status = 'WAIT_USER_DECISION';
+
+  await fixture.service.sendMessage(session.id, 'continue');
+  await waitFor(() => workflowResumeCalls.length === 1);
+
+  assert.deepEqual(workflowResumeCalls, ['workflow-run-failed']);
+  assert.equal(failedTask.status, 'failed');
+  assert.equal(fixture.executionStarts.length, 0);
+  assert.equal(session.status, 'EXECUTING');
 });
 
 test('a new requirement after failure starts a fresh discussion and follow-up brief', async () => {
@@ -1532,6 +1656,49 @@ test('local_bridge Session stores only a connected opaque workspace identity', a
   assert.equal(session.workspaceContext?.binding.boundRevision.id, 'local-revision');
   assert.equal(persistedSessions[0]?.workingDirectory?.path, undefined);
   assert.equal(JSON.stringify(persistedSessions[0]).includes('C:\\'), false);
+});
+
+test('local_bridge Session rejects a Runtime that the connected device cannot execute', async () => {
+  const { service } = makeService({
+    localWorkspace: {
+      workspaceId: 'local-workspace-id',
+      displayName: 'local-project',
+      runtimeTypes: ['codex']
+    }
+  });
+
+  await assert.rejects(
+    service.create({
+      input: 'Use an unavailable local Runtime',
+      workingDirectory: {
+        kind: 'local_bridge',
+        id: 'local-workspace-id',
+        name: 'local-project',
+        selectedAt: '2026-08-06T00:00:00.000Z'
+      },
+      runtimePreference: { preferredRuntimeType: 'claude_code', allowedRuntimeTypes: ['claude_code'] }
+    }),
+    /LOCAL_RUNTIME_UNAVAILABLE: Runtime claude_code/
+  );
+});
+
+test('local_bridge Session requires an explicit preferred Runtime', async () => {
+  const { service } = makeService({
+    localWorkspace: { workspaceId: 'local-workspace-id', displayName: 'local-project' }
+  });
+
+  await assert.rejects(
+    service.create({
+      input: 'Do not route a local workspace through the global default',
+      workingDirectory: {
+        kind: 'local_bridge',
+        id: 'local-workspace-id',
+        name: 'local-project',
+        selectedAt: '2026-08-06T00:00:00.000Z'
+      }
+    }),
+    /LOCAL_RUNTIME_REQUIRED/
+  );
 });
 
 test('local_bridge Session rejects paths, offline workspaces, and mismatched registration names', async () => {

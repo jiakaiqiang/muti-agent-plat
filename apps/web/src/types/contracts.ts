@@ -45,6 +45,8 @@ import type {
   HandoffSuggestion,
   TaskRoutingMode,
   RuntimeType,
+  IntentRoutingRecord,
+  IntentRoutingStatus,
   SessionDetail,
   SessionListItem,
   SessionWorkingDirectory,
@@ -62,6 +64,9 @@ import type {
   WorkspaceWritebackResolutionAction,
   ResolveWorkspaceWritebackInput,
   UserMessageIntent,
+  WorkItem,
+  SystemAgentRole,
+  SystemAgentRuntimePolicy,
   WorkflowStatus
 } from '@agent-cluster/shared'
 
@@ -118,6 +123,8 @@ export type {
   HandoffSuggestion,
   TaskRoutingMode,
   RuntimeType,
+  IntentRoutingRecord,
+  IntentRoutingStatus,
   SessionDetail,
   SessionListItem,
   SessionWorkingDirectory,
@@ -135,6 +142,9 @@ export type {
   WorkspaceWritebackResolutionAction,
   ResolveWorkspaceWritebackInput,
   UserMessageIntent,
+  WorkItem,
+  SystemAgentRole,
+  SystemAgentRuntimePolicy,
   AgentWorkflowNode,
   HumanApprovalWorkflowNode,
   RobotApprovalWorkflowNode,
@@ -168,6 +178,7 @@ export type ConfirmationReason =
   | 'confirm_feishu_notification'
   | 'confirm_file_revision_apply'
   | 'continue_after_budget_warning'
+  | 'intent_relation_clarification'
 
 export type ConfirmationOption = {
   key: string
@@ -256,6 +267,9 @@ export type ConfirmationRequestedPayload = {
     approvalId: string
     reasons: string[]
   }>
+  routingId?: string
+  followUpMessageId?: string
+  reasonCodes?: string[]
 }
 
 export type TaskEventPayload = {
@@ -491,6 +505,9 @@ export type ConfirmationCardState = {
   workflowStepCount?: number
   outputSummary?: string
   workflowOptions?: ConfirmationRequestedPayload['workflowOptions']
+  routingId?: string
+  followUpMessageId?: string
+  reasonCodes?: string[]
 }
 
 export type TaskViewState = {

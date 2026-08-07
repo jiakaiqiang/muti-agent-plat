@@ -1,17 +1,33 @@
 import { defineStore } from 'pinia'
-import { apiGet, apiPost } from '@/api/client'
+import { apiDelete, apiGet, apiPost, isAbortError } from '@/api/client'
+import { createLocalRuntimeLaunchUrl, requestLocalRuntimeLaunch } from '@/utils/localRuntimeLauncher'
 import type {
+  LocalRuntimeCapabilityStatus,
   LocalRuntimeDevice,
   LocalRuntimeWorkspaceSummary,
   RuntimeType
 } from '@agent-cluster/shared'
 
 type LocalRuntimeDeviceView = LocalRuntimeDevice & { connected: boolean }
-type LocalRuntimeWorkspaceResponse = Omit<LocalRuntimeWorkspaceSummary, 'runtimeTypes'> & {
+type LocalRuntimeWorkspaceResponse = Omit<LocalRuntimeWorkspaceSummary, 'runtimeTypes' | 'runtimeCapabilities'> & {
   runtimeTypes?: readonly RuntimeType[]
+  runtimeCapabilities?: readonly LocalRuntimeCapabilityStatus[]
+}
+
+export type LocalRuntimeConnectionState = 'idle' | 'checking' | 'waking' | 'probing' | 'ready' | 'failed'
+
+type EnsureLocalRuntimeOptions = {
+  timeoutMs?: number
+  pollIntervalMs?: number
+  launch?: (launchUrl: string) => void
+  wait?: (durationMs: number) => Promise<void>
 }
 
 const adminTokenStorageKey = 'agent-cluster.local-runtime-admin-token'
+const authorizationControllers = new Map<string, AbortController>()
+const authorizationPromises = new Map<string, Promise<LocalRuntimeWorkspaceSummary>>()
+let connectionPromise: Promise<LocalRuntimeWorkspaceSummary[]> | undefined
+let connectionAttempt = 0
 
 export function readLocalRuntimeAdminToken() {
   return typeof sessionStorage === 'undefined' ? '' : sessionStorage.getItem(adminTokenStorageKey) ?? ''
@@ -34,7 +50,8 @@ export function normalizeLocalRuntimeWorkspaces(
 ): LocalRuntimeWorkspaceSummary[] {
   return workspaces.map((workspace) => ({
     ...workspace,
-    runtimeTypes: [...(workspace.runtimeTypes ?? [])]
+    runtimeTypes: [...(workspace.runtimeTypes ?? [])],
+    runtimeCapabilities: [...(workspace.runtimeCapabilities ?? [])]
   }))
 }
 
@@ -56,7 +73,10 @@ export function localRuntimeErrorMessage(error: unknown) {
     return '本机 Runtime 已在等待目录选择。请先处理已打开的系统目录选择窗口，或稍后重试。'
   }
   if (/Local Runtime 未连接|Local Runtime CLI is offline|Local Runtime CLI 未连接/i.test(message)) {
-    return 'Local Runtime CLI 未连接，请前往“本地运行”启动本地助手。'
+    return '未检测到本地助手，请重新检测或确认已安装本地桥接组件。'
+  }
+  if (/capabilit.*timed out|capability detection/i.test(message)) {
+    return '本机 Runtime 探测超时，请重新检测。'
   }
   return message
 }
@@ -67,11 +87,20 @@ export const useLocalRuntimeStore = defineStore('localRuntime', {
     devices: [] as LocalRuntimeDeviceView[],
     loading: false,
     authorizing: false,
+    activeAuthorizationRequestId: '',
+    connectionState: 'idle' as LocalRuntimeConnectionState,
+    connectionError: '',
+    runtimeCapabilities: [] as LocalRuntimeCapabilityStatus[],
     error: ''
   }),
   getters: {
     workspaceById: (state) => (workspaceId: string) =>
-      state.workspaces.find((workspace) => workspace.workspaceId === workspaceId)
+      state.workspaces.find((workspace) => workspace.workspaceId === workspaceId),
+    connectedDevices: (state) => state.devices.filter((device) => device.connected),
+    isConnected(): boolean {
+      return this.connectedDevices.length > 0
+    },
+    connectionBusy: (state) => ['checking', 'waking', 'probing'].includes(state.connectionState)
   },
   actions: {
     async loadWorkspaces() {
@@ -83,6 +112,7 @@ export const useLocalRuntimeStore = defineStore('localRuntime', {
           adminRequest()
         )
         this.workspaces = normalizeLocalRuntimeWorkspaces(workspaces)
+        this.runtimeCapabilities = [...(this.workspaces[0]?.runtimeCapabilities ?? [])]
         return this.workspaces
       } catch (error) {
         const message = localRuntimeErrorMessage(error)
@@ -96,30 +126,143 @@ export const useLocalRuntimeStore = defineStore('localRuntime', {
       this.devices = await apiGet<LocalRuntimeDeviceView[]>('/local-runtime/devices', adminRequest())
       return this.devices
     },
-    async authorizeWorkspace() {
-      this.authorizing = true
-      this.error = ''
+    async refreshCapabilities() {
+      this.connectionState = 'probing'
+      const capabilities = await apiPost<LocalRuntimeCapabilityStatus[]>(
+        '/local-runtime/capabilities/refresh',
+        {},
+        { ...adminRequest(), timeoutMs: 12_000, timeoutMessage: '本机 Runtime 探测超时，请重新检测。' }
+      )
+      this.runtimeCapabilities = capabilities
+      await this.loadWorkspaces()
+      if (!this.workspaces.length) this.runtimeCapabilities = capabilities
+      return this.runtimeCapabilities
+    },
+    async ensureConnected(options: EnsureLocalRuntimeOptions = {}) {
+      if (connectionPromise) return connectionPromise
+      const attempt = ++connectionAttempt
+      const wait = options.wait ?? ((durationMs) => new Promise<void>((resolve) => window.setTimeout(resolve, durationMs)))
+      const pollIntervalMs = options.pollIntervalMs ?? 1_000
+      const timeoutMs = options.timeoutMs ?? 15_000
+      const assertActive = () => {
+        if (attempt === connectionAttempt) return
+        const error = new Error('Local Runtime connection check was cancelled.')
+        error.name = 'AbortError'
+        throw error
+      }
+
+      const operation = (async () => {
+        this.connectionState = 'checking'
+        this.connectionError = ''
+        this.error = ''
+        try {
+          await this.loadDevices()
+          assertActive()
+          if (!this.isConnected) {
+            const config = await apiGet<{ serverUrl: string }>('/local-runtime/launch-config')
+            assertActive()
+            this.connectionState = 'waking'
+            const launchUrl = createLocalRuntimeLaunchUrl(config.serverUrl)
+            ;(options.launch ?? requestLocalRuntimeLaunch)(launchUrl)
+            const deadline = Date.now() + timeoutMs
+            while (Date.now() < deadline) {
+              await wait(pollIntervalMs)
+              assertActive()
+              await this.loadDevices()
+              if (this.isConnected) break
+            }
+          }
+          assertActive()
+          if (!this.isConnected) {
+            throw new Error('未检测到本地助手，请确认已安装本地桥接组件，然后重新检测。')
+          }
+          await this.refreshCapabilities()
+          assertActive()
+          this.connectionState = 'ready'
+          return this.workspaces
+        } catch (error) {
+          if (isAbortError(error)) throw error
+          const message = localRuntimeErrorMessage(error)
+          this.connectionState = 'failed'
+          this.connectionError = message
+          this.error = message
+          throw new Error(message)
+        }
+      })()
+      connectionPromise = operation
       try {
-        const workspace = await apiPost<LocalRuntimeWorkspaceResponse>(
+        return await operation
+      } finally {
+        if (connectionPromise === operation) connectionPromise = undefined
+      }
+    },
+    cancelConnectionCheck() {
+      connectionAttempt += 1
+      connectionPromise = undefined
+      if (this.connectionBusy) this.connectionState = 'idle'
+    },
+    async authorizeWorkspace() {
+      const activeRequestId = this.activeAuthorizationRequestId
+      const activePromise = activeRequestId ? authorizationPromises.get(activeRequestId) : undefined
+      if (activePromise) return activePromise
+
+      const requestId = crypto.randomUUID()
+      const controller = new AbortController()
+      this.authorizing = true
+      this.activeAuthorizationRequestId = requestId
+      this.error = ''
+      authorizationControllers.set(requestId, controller)
+      const authorization = (async () => {
+        const workspaceResponse = await apiPost<LocalRuntimeWorkspaceResponse>(
           '/local-runtime/workspaces/authorize',
-          {},
+          { requestId },
           {
             ...adminRequest(),
+            signal: controller.signal,
             timeoutMs: 130_000,
             timeoutMessage: '等待本机目录选择超时，请重新选择。'
           }
         )
+        const [workspace] = normalizeLocalRuntimeWorkspaces([workspaceResponse])
         this.workspaces = normalizeLocalRuntimeWorkspaces([
           ...this.workspaces.filter((item) => item.workspaceId !== workspace.workspaceId),
           workspace
         ])
         return this.workspaceById(workspace.workspaceId)!
+      })()
+      authorizationPromises.set(requestId, authorization)
+      try {
+        return await authorization
       } catch (error) {
+        if (isAbortError(error)) throw error
         const message = localRuntimeErrorMessage(error)
-        this.error = message
+        if (this.activeAuthorizationRequestId === requestId) this.error = message
         throw new Error(message)
       } finally {
-        this.authorizing = false
+        authorizationControllers.delete(requestId)
+        authorizationPromises.delete(requestId)
+        if (this.activeAuthorizationRequestId === requestId) {
+          this.activeAuthorizationRequestId = ''
+          this.authorizing = false
+        }
+      }
+    },
+    async cancelWorkspaceAuthorization(options: { keepalive?: boolean } = {}) {
+      const requestId = this.activeAuthorizationRequestId
+      this.activeAuthorizationRequestId = ''
+      this.authorizing = false
+      this.error = ''
+      if (!requestId) return false
+      const cancellation = apiDelete<{ requestId: string; cancelled: boolean }>(
+        `/local-runtime/workspaces/authorizations/${encodeURIComponent(requestId)}`,
+        { ...adminRequest(), keepalive: options.keepalive }
+      )
+      authorizationControllers.get(requestId)?.abort()
+      try {
+        return (await cancellation).cancelled
+      } finally {
+        authorizationControllers.delete(requestId)
+        authorizationPromises.delete(requestId)
       }
     },
     async approveDevice(userCode: string, adminToken = readLocalRuntimeAdminToken()) {

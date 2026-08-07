@@ -13,6 +13,9 @@ function setup() {
     getByIdOrKey: (id: string) => {
       if (!['requirements', 'product', 'frontend'].includes(id)) throw new Error(`Agent not found: ${id}`);
       return { id };
+    },
+    getForSurface(id: string) {
+      return this.getByIdOrKey(id);
     }
   };
   const service = new WorkflowsService(persistence as never, agents as never);
@@ -54,6 +57,24 @@ test('WorkflowsService rejects duplicate names and unknown agents', () => {
       nodes: [{ id: 'node-1', type: 'agent', agentId: 'missing', order: 0 }]
     }),
     /Agent not found/
+  );
+});
+
+test('WorkflowsService rejects Agents hidden from the workflow catalog', () => {
+  const persistence = { getCollection: (_key: string, fallback: unknown) => fallback, setCollection() {} };
+  const agents = {
+    getForSurface(id: string) {
+      if (id === 'coordinator') throw new Error('Agent is not available on workflow: coordinator');
+      return { id };
+    }
+  };
+  const service = new WorkflowsService(persistence as never, agents as never);
+  assert.throws(
+    () => service.create({
+      name: 'Invalid system flow',
+      nodes: [{ id: 'node-1', type: 'agent', agentId: 'coordinator', order: 0 }]
+    }),
+    /not available on workflow/
   );
 });
 

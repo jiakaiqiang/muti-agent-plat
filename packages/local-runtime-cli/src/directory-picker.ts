@@ -3,16 +3,18 @@ import { promisify } from 'node:util';
 
 type PickerRunner = (
   command: string,
-  args: string[]
+  args: string[],
+  signal?: AbortSignal
 ) => Promise<{ stdout: string; stderr?: string }>;
 
 const execFileAsync = promisify(execFile);
 
-const defaultRunner: PickerRunner = async (command, args) => {
+const defaultRunner: PickerRunner = async (command, args, signal) => {
   const result = await execFileAsync(command, args, {
     encoding: 'utf8',
     windowsHide: shouldHideChildWindow(command),
-    timeout: 120_000
+    timeout: 120_000,
+    signal
   });
   return { stdout: String(result.stdout), stderr: String(result.stderr) };
 };
@@ -20,15 +22,16 @@ const defaultRunner: PickerRunner = async (command, args) => {
 export async function selectWorkspaceDirectory(
   title = '选择 Agent Runtime 授权工作目录',
   platform = process.platform,
-  run: PickerRunner = defaultRunner
+  run: PickerRunner = defaultRunner,
+  signal?: AbortSignal
 ): Promise<string | undefined> {
   const command = directoryPickerCommand(platform, title);
   try {
-    const result = await run(command.command, command.args);
+    const result = await run(command.command, command.args, signal);
     const selected = result.stdout.trim();
     return selected || undefined;
   } catch (error) {
-    if (isPickerCancellation(error)) return undefined;
+    if (signal?.aborted || isPickerCancellation(error)) return undefined;
     if (isPickerTimeout(error)) {
       throw new Error('LOCAL_DIRECTORY_PICKER_TIMEOUT: 本机目录选择窗口超时未完成，请确认 Local Runtime 运行在当前桌面会话，并重新选择。');
     }
@@ -60,7 +63,7 @@ export function directoryPickerCommand(platform: NodeJS.Platform, title: string)
 
 function isPickerCancellation(error: unknown) {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  return code === '1';
+  return code === '1' || code === 'ABORT_ERR';
 }
 
 function isPickerTimeout(error: unknown) {

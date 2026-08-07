@@ -47,6 +47,11 @@ export function runRuntimeCommand(input: {
   signal: AbortSignal;
   shell?: boolean;
   envOverrides?: NodeJS.ProcessEnv;
+  /**
+   * 每收到一整行 stdout 就回调一次,用于把运行中的进度回传出去。
+   * 不传时行为与逐行回调引入前一致;回调抛错不影响进程收敛。
+   */
+  onStdoutLine?: (line: string) => void;
 }): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
   return new Promise((resolve, reject) => {
     const child = spawn(input.command, input.args, {
@@ -59,9 +64,24 @@ export function runRuntimeCommand(input: {
     });
     let stdout = '';
     let stderr = '';
+    let pendingLine = '';
+    const emitLine = (line: string) => {
+      if (!input.onStdoutLine || !line) return;
+      try {
+        input.onStdoutLine(line);
+      } catch {
+        // 进度回传是诊断用途,解析失败不能中断运行时进程。
+      }
+    };
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => { stdout = appendBounded(stdout, chunk); });
+    child.stdout.on('data', (chunk: string) => {
+      stdout = appendBounded(stdout, chunk);
+      if (!input.onStdoutLine) return;
+      const segments = (pendingLine + chunk).split(/\r?\n/);
+      pendingLine = segments.pop() ?? '';
+      for (const segment of segments) emitLine(segment);
+    });
     child.stderr.on('data', (chunk: string) => { stderr = appendBounded(stderr, chunk); });
     const abort = () => { void terminateProcessTree(child); };
     if (input.signal.aborted) abort();
@@ -72,6 +92,10 @@ export function runRuntimeCommand(input: {
     });
     child.on('close', (exitCode) => {
       input.signal.removeEventListener('abort', abort);
+      // 末行可能没有换行符结尾。
+      const trailing = pendingLine;
+      pendingLine = '';
+      emitLine(trailing);
       resolve({ stdout, stderr, exitCode });
     });
     child.stdin.end(input.stdin, 'utf8');

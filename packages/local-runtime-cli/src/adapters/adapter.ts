@@ -1,5 +1,6 @@
 import type {
   AgentRunResult,
+  AgentRuntimeEvent,
   InvocationPlan,
   LocalRuntimePermissionPolicy,
   RuntimeOutput,
@@ -16,6 +17,11 @@ export type LocalRuntimeAdapterContext = {
   signal: AbortSignal;
   permissions: LocalRuntimePermissionPolicy;
   providerConnection?: LocalRuntimeProviderConnectionInput;
+  /**
+   * 把运行中的中间事件回传给服务端时间线。可选:不传时适配器只在
+   * 结束时返回结果,行为与回传能力引入前一致。
+   */
+  emit?: (event: AgentRuntimeEvent) => void;
 };
 
 export type LocalRuntimeAdapterResult = {

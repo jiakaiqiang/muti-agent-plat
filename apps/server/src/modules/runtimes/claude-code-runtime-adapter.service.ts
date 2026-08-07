@@ -501,7 +501,7 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
             '  - title: non-empty string',
             '  - description: non-empty string',
             '  - suggestedAgentKey: string or null (e.g., "architect", "frontend", "backend")',
-            '  - routingMode: EXACTLY one of "coordinator_controlled", "agent_suggested", "agent_delegated", or null (copy the underscore spelling)',
+            '  - routingMode must be exactly "coordinator_controlled", "agent_suggested", "agent_delegated", or null (copy the underscore spelling)',
             '  - assignmentReason: string or null',
             '  - contextRequirements: array of strings',
             '  - verificationPlan: array of strings',

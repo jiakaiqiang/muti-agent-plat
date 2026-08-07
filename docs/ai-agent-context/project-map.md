@@ -103,6 +103,8 @@
 | `docs/design/codex-style-agent-collaboration-architecture-v1.md` | 可切换 Engineering Runtime 的群聊协作架构与 token 预算防线 |
 | `docs/ai-agent-context/pluggable-engineering-runtime-memory.md` | 群聊 Agent、ContextPack、Engineering Runtime 与 token 预算的长期架构记忆 |
 | `docs/design/workspace-aware-chat-agent-design-v1.md` | 聊天室 Agent 借鉴 Codex/Claude 工作区感知模型的产品与系统设计 |
+| `docs/design/intent-context-workitem-system-agent-target-design-v1.md` | 意图识别、WorkItem 上下文、决策账本、系统 Intent Router/Coordinator 与迁移风险的权威目标设计 |
+| `docs/design/intent-context-workitem-system-agent-system-design-v1.md` | 上述目标设计的模块、状态机、事务、持久化、API、恢复、安全和灰度系统设计 |
 | `docs/design/workspace-index-first-on-demand-context-system-design-v1.md` | 工作目录快速绑定、增量元数据索引和 Context v2 按需取证；其中单活动 Lease 章节已废弃 |
 | `docs/design/workspace-multi-session-isolation-writeback-v1.md` | 同目录多活动 Session、Git/non-Git 隔离、FIFO 自动写回、三方合并和冲突恢复的权威设计 |
 | `docs/design/ui-style-guide-v1.md` | 前端 UI 风格规范 |

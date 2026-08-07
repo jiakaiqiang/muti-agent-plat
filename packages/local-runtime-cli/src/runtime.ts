@@ -68,6 +68,7 @@ export async function executeLocalInvocation(
       cwd: stagingRoot,
       signal,
       permissions: effectivePermissions,
+      emit,
       ...(providerConnection ? { providerConnection } : {})
     });
     const output = adapterResult.output;

@@ -2,10 +2,11 @@ import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Subject } from 'rxjs';
 import type { ActorRef, CollaborationEvent, CollaborationEventType, EventMetadata, UUID } from '@agent-cluster/shared';
 import { nowIso } from '../../common/time.js';
+import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { deriveActor } from './derive-actor.js';
 
-type CreateEventInput<TPayload extends Record<string, unknown> = Record<string, unknown>> = {
+export type CreateEventInput<TPayload extends Record<string, unknown> = Record<string, unknown>> = {
   sessionId: UUID;
   type: CollaborationEventType;
   content: string;
@@ -29,9 +30,22 @@ export class EventsService implements OnModuleDestroy {
     for (const [sessionId, events] of Object.entries(persisted)) {
       this.eventsBySession.set(sessionId, events);
     }
+    queueMicrotask(() => this.recoverPendingOutbox());
   }
 
   create<TPayload extends Record<string, unknown> = Record<string, unknown>>(
+    input: CreateEventInput<TPayload>
+  ): CollaborationEvent<TPayload> {
+    const event = this.createDraft(input);
+    this.appendToMemory(event as CollaborationEvent);
+    const committed = this.persist();
+    void committed.then((success) => {
+      if (success) this.publishCommitted(event as CollaborationEvent);
+    });
+    return event;
+  }
+
+  createDraft<TPayload extends Record<string, unknown> = Record<string, unknown>>(
     input: CreateEventInput<TPayload>
   ): CollaborationEvent<TPayload> {
     const actor: ActorRef =
@@ -55,18 +69,14 @@ export class EventsService implements OnModuleDestroy {
       actor,
       createdAt: nowIso()
     };
-
-    const current = this.eventsBySession.get(input.sessionId) ?? [];
-    current.push(event as CollaborationEvent);
-    this.eventsBySession.set(input.sessionId, current);
-    const committed = this.persist();
-    void committed.then((success) => {
-      if (success) {
-        this.subjectFor(input.sessionId).next(event as CollaborationEvent);
-        void this.persistence.markEventPublished(event.id);
-      }
-    });
     return event;
+  }
+
+  acceptCommitted(event: CollaborationEvent): boolean {
+    if ((this.eventsBySession.get(event.sessionId) ?? []).some((item) => item.id === event.id)) return false;
+    this.appendToMemory(event);
+    this.publishCommitted(event);
+    return true;
   }
 
   createOnce<TPayload extends Record<string, unknown> = Record<string, unknown>>(
@@ -125,6 +135,35 @@ export class EventsService implements OnModuleDestroy {
     for (const subject of this.subjectsBySession.values()) subject.complete();
     this.subjectsBySession.clear();
     return this.persistence.flush();
+  }
+
+  private appendToMemory(event: CollaborationEvent) {
+    const current = this.eventsBySession.get(event.sessionId) ?? [];
+    current.push(event);
+    this.eventsBySession.set(event.sessionId, current);
+  }
+
+  private publishCommitted(event: CollaborationEvent) {
+    this.subjectFor(event.sessionId).next(event);
+    workspaceMetrics.observe('event_outbox_lag_ms', Math.max(0, Date.now() - Date.parse(event.createdAt)), {
+      eventType: event.type
+    });
+    void this.persistence.markEventPublished(event.id);
+  }
+
+  private recoverPendingOutbox() {
+    const pending = this.persistence.getCollection<Array<Record<string, unknown>>>('eventOutbox', [])
+      .filter((item) => item.status === 'pending');
+    for (const record of pending) {
+      const payload = record.payload as { event?: CollaborationEvent } | undefined;
+      const event = payload?.event;
+      if (!event || !(this.eventsBySession.get(event.sessionId) ?? []).some((item) => item.id === event.id)) continue;
+      workspaceMetrics.observe('event_outbox_lag_ms', Math.max(0, Date.now() - Date.parse(event.createdAt)), {
+        eventType: event.type,
+        recovery: 'true'
+      });
+      void this.persistence.markEventPublished(event.id);
+    }
   }
 
   private persist() {

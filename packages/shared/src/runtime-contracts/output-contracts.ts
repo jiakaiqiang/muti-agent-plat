@@ -195,6 +195,53 @@ export const UserMessageHandlingPlanOutputSchema = strictObject({
   coordinatorInstruction: NonEmptyString
 });
 
+export const IntentRoutingDecisionOutputSchema = strictObject({
+  ...RuntimeOutputHeader,
+  kind: Type.Literal('intent_routing_decision'),
+  dialogueAct: literalUnion([
+    'clarification',
+    'constraint',
+    'command',
+    'question',
+    'correction',
+    'knowledge_input',
+    'preference_input'
+  ] as const),
+  scopeRelation: literalUnion([
+    'same_requirement',
+    'related_new_requirement',
+    'independent_new_requirement',
+    'ambiguous'
+  ] as const),
+  contextPolicy: literalUnion([
+    'inherit_confirmed',
+    'inherit_selected',
+    'clean_task_context',
+    'ask_user'
+  ] as const),
+  requestedAction: literalUnion([
+    'continue_active_work_item',
+    'create_related_work_item',
+    'create_independent_work_item',
+    'clarify',
+    'pause',
+    'cancel',
+    'confirm',
+    'reject',
+    'resume',
+    'replan'
+  ] as const),
+  selectedWorkItemId: NullableString,
+  selectedDecisionIds: StringArray,
+  selectedArtifactIds: StringArray,
+  goalSegments: StringArray,
+  missingFields: StringArray,
+  ambiguityReasons: StringArray,
+  reasonCodes: StringArray,
+  riskLevel: literalUnion(['low', 'medium', 'high'] as const),
+  modelConfidence: Type.Union([Type.Number({ minimum: 0, maximum: 1 }), Type.Null()])
+});
+
 export const runtimeOutputSchemas = {
   agent_message: AgentMessageOutputSchema,
   task_acceptance_decision: TaskAcceptanceDecisionOutputSchema,
@@ -203,7 +250,8 @@ export const runtimeOutputSchemas = {
   file_revision_candidate: FileRevisionCandidateOutputSchema,
   post_review_report: PostReviewReportOutputSchema,
   final_delivery: FinalDeliveryOutputSchema,
-  user_message_handling_plan: UserMessageHandlingPlanOutputSchema
+  user_message_handling_plan: UserMessageHandlingPlanOutputSchema,
+  intent_routing_decision: IntentRoutingDecisionOutputSchema
 } as const;
 
 export type AgentMessageOutput = Static<typeof AgentMessageOutputSchema>;
@@ -218,6 +266,7 @@ export type PostReviewAction = Static<typeof PostReviewActionSchema>;
 export type PostReviewReportOutput = Static<typeof PostReviewReportOutputSchema>;
 export type FinalDeliveryOutput = Static<typeof FinalDeliveryOutputSchema>;
 export type UserMessageHandlingPlanOutput = Static<typeof UserMessageHandlingPlanOutputSchema>;
+export type IntentRoutingDecisionOutput = Static<typeof IntentRoutingDecisionOutputSchema>;
 
 export type RuntimeOutput =
   | AgentMessageOutput
@@ -227,7 +276,8 @@ export type RuntimeOutput =
   | FileRevisionCandidateOutput
   | PostReviewReportOutput
   | FinalDeliveryOutput
-  | UserMessageHandlingPlanOutput;
+  | UserMessageHandlingPlanOutput
+  | IntentRoutingDecisionOutput;
 
 export type RuntimeOutputByKind = {
   [K in RuntimeOutput['kind']]: Extract<RuntimeOutput, { kind: K }>;
@@ -342,5 +392,22 @@ export const runtimeOutputExamples = {
     requiresBriefRevision: false,
     requiresUserConfirmation: false,
     coordinatorInstruction: 'Answer the user question.'
+  },
+  intent_routing_decision: {
+    schemaVersion: '1.0',
+    kind: 'intent_routing_decision',
+    dialogueAct: 'question',
+    scopeRelation: 'same_requirement',
+    contextPolicy: 'inherit_confirmed',
+    requestedAction: 'continue_active_work_item',
+    selectedWorkItemId: 'work-item-id',
+    selectedDecisionIds: [],
+    selectedArtifactIds: [],
+    goalSegments: ['Answer the current question.'],
+    missingFields: [],
+    ambiguityReasons: [],
+    reasonCodes: ['ACTIVE_WORK_ITEM_REFERENCE'],
+    riskLevel: 'low',
+    modelConfidence: 0.9
   }
 } as const satisfies { [K in RuntimeOutput['kind']]: RuntimeOutputByKind[K] };

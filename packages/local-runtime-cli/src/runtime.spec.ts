@@ -4,9 +4,9 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { InvocationPlan, LocalRuntimeInvocationRequest } from '@agent-cluster/shared';
+import type { AgentRuntimeEvent, InvocationPlan, LocalRuntimeInvocationRequest } from '@agent-cluster/shared';
 import { buildClaudeArgs, ClaudeCodeLocalRuntimeAdapter } from './adapters/claude-code-adapter.js';
-import { buildCodexArgs } from './adapters/codex-adapter.js';
+import { buildCodexArgs, parseCodexOutput, withCodexOutputSchema } from './adapters/codex-adapter.js';
 import {
   buildRuntimeProcessEnv,
   executeLocalInvocation,
@@ -28,6 +28,44 @@ test('Codex local adapter permits the managed staging directory without relying 
   ]);
 });
 
+test('Codex local adapter appends the platform-controlled output schema', () => {
+  assert.deepEqual(
+    withCodexOutputSchema(
+      [...buildCodexArgs(), '--output-schema', 'untrusted-schema.json', '--output-schema=another-schema.json'],
+      'C:\\temp\\runtime-output.schema.json'
+    ),
+    [
+      'exec',
+      '--json',
+      '--sandbox',
+      'workspace-write',
+      '--skip-git-repo-check',
+      '--output-schema',
+      'C:\\temp\\runtime-output.schema.json',
+      '-'
+    ]
+  );
+});
+
+test('Codex local adapter ignores JSONL protocol frames after the completed agent message', () => {
+  const output = {
+    schemaVersion: '1.0',
+    kind: 'agent_message',
+    messageKind: 'summary',
+    content: 'Codex completed the structured response.',
+    targetAgentIds: [],
+    targetAgentKeys: [],
+    mentionedAgentIds: [],
+    relatedTaskIds: []
+  };
+  const stdout = [
+    JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(output) } }),
+    JSON.stringify({ kind: 'agent_message', payload: { protocol: 'not-a-runtime-output' } })
+  ].join('\n');
+
+  assert.deepEqual(parseCodexOutput(stdout, 'agent_message'), output);
+});
+
 test('local Runtime executes in staging and returns an isolated ChangeSet for platform writeback', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-runtime-source-'));
   const fixtureRoot = await mkdtemp(join(tmpdir(), 'agent-runtime-fixture-'));
@@ -40,6 +78,10 @@ test('local Runtime executes in staging and returns an isolated ChangeSet for pl
     await writeFile(fixturePath, [
       "const fs = require('node:fs');",
       "const path = require('node:path');",
+      "const schemaIndex = process.argv.indexOf('--output-schema');",
+      "if (schemaIndex < 0 || !process.argv[schemaIndex + 1]) throw new Error('missing Codex output schema');",
+      "const schema = JSON.parse(fs.readFileSync(process.argv[schemaIndex + 1], 'utf8'));",
+      "if (schema.properties?.kind?.const !== 'agent_message') throw new Error('unexpected Codex output schema');",
       "fs.writeFileSync(path.join(process.cwd(), 'README.md'), '# Changed\\n');",
       "fs.unlinkSync(path.join(process.cwd(), 'delete-me.txt'));",
       "fs.writeFileSync(path.join(process.cwd(), 'created.txt'), process.cwd());",
@@ -176,6 +218,90 @@ test('Claude Code local adapter consumes stream-json and applies staged changes'
     };
     assert.equal(inputFrame.type, 'user');
     assert.match(inputFrame.message.content[0]?.text ?? '', /local Claude Code Runtime/);
+  } finally {
+    if (previousCommand === undefined) delete process.env.AGENT_RUNTIME_CLAUDE_COMMAND;
+    else process.env.AGENT_RUNTIME_CLAUDE_COMMAND = previousCommand;
+    if (previousArgs === undefined) delete process.env.AGENT_RUNTIME_CLAUDE_ARGS_JSON;
+    else process.env.AGENT_RUNTIME_CLAUDE_ARGS_JSON = previousArgs;
+    await rm(root, { recursive: true, force: true });
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test('Claude Code streams tool activity to the timeline while the model is still running', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-runtime-claude-progress-'));
+  const fixtureRoot = await mkdtemp(join(tmpdir(), 'agent-runtime-claude-progress-fixture-'));
+  const fixturePath = join(fixtureRoot, 'claude-progress-fixture.cjs');
+  const previousCommand = process.env.AGENT_RUNTIME_CLAUDE_COMMAND;
+  const previousArgs = process.env.AGENT_RUNTIME_CLAUDE_ARGS_JSON;
+  try {
+    const output = {
+      schemaVersion: '1.0',
+      kind: 'agent_message',
+      messageKind: 'progress',
+      content: 'claude done',
+      targetAgentIds: [],
+      targetAgentKeys: [],
+      mentionedAgentIds: [],
+      relatedTaskIds: []
+    };
+    await writeFile(fixturePath, [
+      "process.stdin.resume();",
+      "process.stdin.on('end', () => {",
+      `  const frames = ${JSON.stringify([
+        { type: 'system', subtype: 'init' },
+        {
+          type: 'assistant',
+          message: {
+            content: [
+              { type: 'text', text: 'reading the workspace first' },
+              { type: 'tool_use', id: 'toolu_01', name: 'Read', input: { file_path: 'README.md' } }
+            ]
+          }
+        },
+        {
+          type: 'user',
+          message: {
+            content: [{ type: 'tool_result', tool_use_id: 'toolu_01', content: '# Original' }]
+          }
+        },
+        {
+          type: 'result',
+          subtype: 'success',
+          structured_output: output,
+          usage: { input_tokens: 3, output_tokens: 4 }
+        }
+      ])};`,
+      "  for (const frame of frames) process.stdout.write(JSON.stringify(frame) + '\\n');",
+      "});"
+    ].join('\n'), 'utf8');
+    process.env.AGENT_RUNTIME_CLAUDE_COMMAND = process.execPath;
+    process.env.AGENT_RUNTIME_CLAUDE_ARGS_JSON = JSON.stringify([fixturePath]);
+
+    const state = await createWorkspaceState(root, 'claude-progress-test');
+    state.permissions = { ...state.permissions, command_execute: 'allow', workspace_write: 'allow' };
+    const workspace = new LocalWorkspace(state);
+    const emitted: AgentRuntimeEvent[] = [];
+    const result = await executeLocalInvocation(
+      await invocationRequest(workspace, 'claude_code'),
+      workspace,
+      new AbortController().signal,
+      (event) => emitted.push(event)
+    );
+
+    assert.equal(result.status, 'completed');
+    // 工具事件必须在 runtime_completed 之前到达,否则时间线上仍然只有心跳。
+    const kinds = emitted.map((event) => event.type);
+    assert.deepEqual(
+      kinds.filter((kind) => kind === 'tool_called' || kind === 'tool_completed'),
+      ['tool_called', 'tool_completed']
+    );
+    assert.ok(kinds.indexOf('tool_called') < kinds.indexOf('runtime_completed'));
+    const called = emitted.find((event) => event.type === 'tool_called');
+    assert.equal(called?.metadata?.name, 'Read');
+    assert.equal(called?.visibility, 'user');
+    // tool_result 只带 tool_use_id,工具名靠解析器回填。
+    assert.equal(emitted.find((event) => event.type === 'tool_completed')?.metadata?.name, 'Read');
   } finally {
     if (previousCommand === undefined) delete process.env.AGENT_RUNTIME_CLAUDE_COMMAND;
     else process.env.AGENT_RUNTIME_CLAUDE_COMMAND = previousCommand;

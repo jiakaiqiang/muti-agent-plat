@@ -1,5 +1,17 @@
-import type { InvocationPlan, LocalRuntimePermissionPolicy, RuntimeOutput, RuntimeUsage } from '@agent-cluster/shared';
-import { getRuntimeOutputContract, validateRuntimeOutput } from '@agent-cluster/shared';
+import type {
+  AgentRuntimeEvent,
+  InvocationPlan,
+  LocalRuntimePermissionPolicy,
+  RuntimeOutput,
+  RuntimeUsage,
+  UUID
+} from '@agent-cluster/shared';
+import {
+  ClaudeStreamJsonParser,
+  frameToRuntimeEvent,
+  getRuntimeOutputContract,
+  validateRuntimeOutput
+} from '@agent-cluster/shared';
 import { detectRuntimeVersion, parseConfiguredArgs, runRuntimeCommand } from '../runtime-process.js';
 import { localRuntimeError } from '../runtime-error.js';
 import type { LocalRuntimeAdapter } from './adapter.js';
@@ -32,7 +44,7 @@ export class ClaudeCodeLocalRuntimeAdapter implements LocalRuntimeAdapter {
     }
   }
 
-  async execute({ plan, cwd, signal, permissions, providerConnection }: Parameters<LocalRuntimeAdapter['execute']>[0]) {
+  async execute({ plan, cwd, signal, permissions, providerConnection, emit }: Parameters<LocalRuntimeAdapter['execute']>[0]) {
     const command = resolveClaudeCommand();
     const configuredArgs = process.env.AGENT_RUNTIME_CLAUDE_ARGS_JSON?.trim();
     const args = configuredArgs
@@ -49,7 +61,8 @@ export class ClaudeCodeLocalRuntimeAdapter implements LocalRuntimeAdapter {
       cwd,
       signal,
       shell: command.shell,
-      envOverrides: providerConnection ? claudeProviderEnvironment(providerConnection) : undefined
+      envOverrides: providerConnection ? claudeProviderEnvironment(providerConnection) : undefined,
+      ...(emit ? { onStdoutLine: claudeProgressReporter(plan.invocationId, emit) } : {})
     });
     if (exitCode !== 0) {
       const processFailure = formatClaudeProcessFailure(stdout, stderr, exitCode);
@@ -91,6 +104,20 @@ export class ClaudeCodeLocalRuntimeAdapter implements LocalRuntimeAdapter {
       runtimeSession: result.cliSessionId ? { cliSessionId: result.cliSessionId } : undefined
     };
   }
+}
+
+/**
+ * 把 `--output-format stream-json` 的每一行翻成时间线事件。解析器是有状态的
+ * (靠 tool_use_id 回填工具名),因此每次调用独占一个实例。
+ */
+function claudeProgressReporter(invocationId: UUID, emit: (event: AgentRuntimeEvent) => void) {
+  const parser = new ClaudeStreamJsonParser();
+  return (line: string) => {
+    for (const frame of parser.feedLine(line)) {
+      const event = frameToRuntimeEvent(invocationId, frame);
+      if (event) emit(event);
+    }
+  };
 }
 
 function claudeProviderEnvironment(connection: NonNullable<Parameters<LocalRuntimeAdapter['execute']>[0]['providerConnection']>) {

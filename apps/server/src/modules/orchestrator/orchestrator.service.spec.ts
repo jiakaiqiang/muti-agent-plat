@@ -107,6 +107,9 @@ function makeService(
         const found = agents.get(key);
         if (!found) throw new Error(`Unknown agent: ${key}`);
         return found;
+      },
+      findSystemByKey(key: string) {
+        return key === 'coordinator' ? agents.get(key) : undefined;
       }
     } as never,
     {

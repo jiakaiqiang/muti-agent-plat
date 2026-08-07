@@ -23,6 +23,7 @@ export {
   PostReviewReportOutputSchema,
   FinalDeliveryOutputSchema,
   UserMessageHandlingPlanOutputSchema,
+  IntentRoutingDecisionOutputSchema,
   runtimeOutputSchemas,
   runtimeOutputExamples
 } from './output-contracts.js';

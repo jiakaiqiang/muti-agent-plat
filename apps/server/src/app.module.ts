@@ -23,10 +23,12 @@ import { WorkspacesModule } from './modules/workspaces/workspaces.module.js';
 import { LocalRuntimeModule } from './modules/local-runtime/local-runtime.module.js';
 import { MaintenanceModule } from './modules/persistence/maintenance.module.js';
 import { WorkflowsModule } from './modules/workflows/workflows.module.js';
+import { ContextManagementModule } from './modules/context-management/context-management.module.js';
 
 @Module({
   imports: [
     PersistenceModule,
+    ContextManagementModule,
     CapabilitiesModule,
     AgentProfileModule,
     AgentsModule,

@@ -9,9 +9,10 @@
   ],
   "scripts": {
     "dev": "node scripts/dev-all.mjs",
+    "dev:restart-server": "node scripts/dev-restart-server.mjs",
     "start:server:stable": "npm run build -w @agent-cluster/shared && npm run build -w @agent-cluster/server && npm start -w @agent-cluster/server",
     "dev:workspaces": "npm run dev --workspaces --if-present",
-    "test:dev-supervisor": "node --test scripts/dev-all.spec.mjs",
+    "test:dev-supervisor": "node --test scripts/dev-all.spec.mjs scripts/dev-restart-server.spec.mjs",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test -w @agent-cluster/local-runtime-cli && npm run test -w @agent-cluster/shared && npm run test -w @agent-cluster/server && npm run test -w @project/web && npm run test:dev-supervisor",

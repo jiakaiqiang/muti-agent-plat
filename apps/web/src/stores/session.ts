@@ -10,13 +10,16 @@ import type {
   FileRevisionRun,
   FileRevisionState,
   FileHash,
+  IntentRoutingRecord,
+  IntentRoutingStatus,
   SessionDetail,
   RuntimePreference,
   SessionListItem,
   SessionStatus,
   SessionViewMode,
   SessionWorkingDirectory,
-  CollaborationEvent
+  CollaborationEvent,
+  WorkItem
 } from '@/types/contracts'
 import type { PostReviewAction } from '@/types/contracts'
 
@@ -71,6 +74,20 @@ function sessionRecencyTime(session: SessionListItem) {
   return Date.parse(session.updatedAt || session.createdAt) || Date.parse(session.createdAt) || 0
 }
 
+const terminalIntentRoutingStatuses = new Set<IntentRoutingStatus>([
+  'ROUTED',
+  'CLARIFICATION_REQUIRED',
+  'REJECTED'
+])
+
+function createMessageIdempotencyKey() {
+  return globalThis.crypto?.randomUUID?.() ?? `message-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+function waitForIntentRoutingPoll(delayMs: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, delayMs))
+}
+
 export const useSessionStore = defineStore('session', {
   state: () => ({
     sessions: [] as SessionListItem[],
@@ -88,7 +105,10 @@ export const useSessionStore = defineStore('session', {
     fileRevisionRequestGeneration: {} as Record<string, number>,
     fileRevisionCandidateRequestGeneration: {} as Record<string, number>,
     fileRevisionDraftRequestGeneration: {} as Record<string, number>,
-    fileRevisionLoadingBySession: {} as Record<string, boolean>
+    fileRevisionLoadingBySession: {} as Record<string, boolean>,
+    workItemsBySession: {} as Record<string, WorkItem[]>,
+    intentRoutingsById: {} as Record<string, IntentRoutingRecord>,
+    intentRoutingIdsBySession: {} as Record<string, string[]>
   }),
   getters: {
     isFavorite: (state) => (sessionId: string) => state.favoriteSessionIds.includes(sessionId),
@@ -98,7 +118,17 @@ export const useSessionStore = defineStore('session', {
       : emptyFileRevisionState(),
     fileRevisionLoading: (state) => Boolean(
       state.currentSession && state.fileRevisionLoadingBySession[state.currentSession.id]
-    )
+    ),
+    activeWorkItem: (state) => {
+      const session = state.currentSession
+      if (!session?.activeWorkItemId) return undefined
+      return (state.workItemsBySession[session.id] ?? []).find((item) => item.id === session.activeWorkItemId)
+    },
+    pendingIntentRoutingCount: (state) => (sessionId: string) =>
+      (state.intentRoutingIdsBySession[sessionId] ?? []).filter((routingId) => {
+        const status = state.intentRoutingsById[routingId]?.status
+        return status !== undefined && !terminalIntentRoutingStatuses.has(status)
+      }).length
   },
   actions: {
     async loadRuntimeHealth(force = false) {
@@ -163,6 +193,7 @@ export const useSessionStore = defineStore('session', {
         },
         ...this.sessions
       ])
+      await this.loadWorkItems(session.id)
       return session
     },
     async loadSession(sessionId?: string) {
@@ -176,13 +207,73 @@ export const useSessionStore = defineStore('session', {
       }
       try {
         this.currentSession = await apiGet<SessionDetail>(`/sessions/${selectedSessionId}`)
+        if (this.currentSession) await this.loadWorkItems(this.currentSession.id)
       } finally {
         this.loading = false
       }
     },
     async sendMessage(sessionId: string, content: string, mentionedAgentIds: string[] = []) {
       await this.assertBackendCompatible()
-      return apiPost<{ event: CollaborationEvent }>(`/sessions/${sessionId}/messages`, { content, mentionedAgentIds })
+      const result = await apiPost<{
+        event: CollaborationEvent
+        routingId?: string
+        routingStatus?: IntentRoutingStatus
+      }>(`/sessions/${sessionId}/messages`, { content, mentionedAgentIds }, {
+        headers: { 'Idempotency-Key': createMessageIdempotencyKey() }
+      })
+      if (result.routingId) {
+        this.recordIntentRouting(sessionId, {
+          id: result.routingId,
+          sessionId,
+          status: result.routingStatus ?? 'RECEIVED'
+        } as IntentRoutingRecord)
+        void this.pollIntentRouting(sessionId, result.routingId).catch((error) => {
+          console.warn(`Failed to track intent routing ${result.routingId}.`, error)
+        })
+      }
+      return result
+    },
+    async loadWorkItems(sessionId: string) {
+      const page = await apiPage<WorkItem>(`/sessions/${sessionId}/work-items`)
+      this.workItemsBySession[sessionId] = page.items
+      return page.items
+    },
+    recordIntentRouting(sessionId: string, routing: IntentRoutingRecord) {
+      this.intentRoutingsById[routing.id] = routing
+      const ids = this.intentRoutingIdsBySession[sessionId] ?? []
+      if (!ids.includes(routing.id)) this.intentRoutingIdsBySession[sessionId] = [...ids, routing.id]
+    },
+    async pollIntentRouting(sessionId: string, routingId: string) {
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        const routing = await apiGet<IntentRoutingRecord>(
+          `/sessions/${sessionId}/message-routings/${routingId}`
+        )
+        this.recordIntentRouting(sessionId, routing)
+        if (terminalIntentRoutingStatuses.has(routing.status)) {
+          await this.loadWorkItems(sessionId)
+          await this.refreshCurrentSession(sessionId)
+          return routing
+        }
+        await waitForIntentRoutingPoll(1_000)
+      }
+      throw new Error(`Intent routing timed out: ${routingId}`)
+    },
+    async clarifyIntentRouting(
+      sessionId: string,
+      routingId: string,
+      input: {
+        choice: 'continue_current' | 'related_new' | 'independent_new'
+        confirmationId?: string
+      }
+    ) {
+      const result = await apiPost<{ routing: IntentRoutingRecord; workItem: WorkItem }>(
+        `/sessions/${sessionId}/message-routings/${routingId}/clarify`,
+        input
+      )
+      this.recordIntentRouting(sessionId, result.routing)
+      await this.loadWorkItems(sessionId)
+      await this.refreshCurrentSession(sessionId)
+      return result
     },
     async loadFileRevisions(sessionId: string) {
       await this.assertBackendCompatible()

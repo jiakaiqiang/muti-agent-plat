@@ -93,7 +93,7 @@ import {
 import { ContextRouterService } from './context-router.service.js';
 import { ProjectMapService } from './project-map.service.js';
 import { consumeRuntimeEvents } from './runtime-stream-consumer.js';
-import { shouldEmitHeartbeat } from './runtime-heartbeat-policy.js';
+import { shouldEmitHeartbeat, shouldSuppressHeartbeat } from './runtime-heartbeat-policy.js';
 import { smartRuntimePick } from './smart-runtime-pick.js';
 import { buildCoverageSystemRule, buildWorkspaceManifest } from './workspace-manifest.js';
 import {
@@ -339,6 +339,7 @@ export class OrchestratorService {
     const brief: TaskBrief = {
       id: crypto.randomUUID(),
       sessionId: session.id,
+      workItemId: session.activeWorkItemId,
       version: (this.briefsBySession.get(session.id)?.length ?? 0) + 1,
       goal: output.goal,
       scope: output.scope,
@@ -386,6 +387,7 @@ export class OrchestratorService {
     const briefFileChanges = allowGeneratedFileWrites ? this.briefFileChanges(brief, suggestedTasks) : [];
     const briefArtifact = this.artifacts.create({
       sessionId: session.id,
+      workItemId: session.activeWorkItemId,
       agentId: coordinator.id,
       type: 'markdown',
       title: `任务契约 v${brief.version}`,
@@ -577,6 +579,7 @@ export class OrchestratorService {
     const brief: TaskBrief = {
       id: crypto.randomUUID(),
       sessionId: session.id,
+      workItemId: session.activeWorkItemId,
       version: (this.briefsBySession.get(session.id)?.length ?? 0) + 1,
       goal: output.goal,
       scope: output.scope,
@@ -759,6 +762,7 @@ export class OrchestratorService {
     const brief: TaskBrief = {
       id: crypto.randomUUID(),
       sessionId: session.id,
+      workItemId: session.activeWorkItemId,
       version: (this.briefsBySession.get(session.id)?.length ?? 0) + 1,
       goal: output.goal,
       scope: output.scope,
@@ -803,6 +807,7 @@ export class OrchestratorService {
     const briefFileChanges = allowGeneratedFileWrites ? this.briefFileChanges(brief, suggestedTasks) : [];
     const briefArtifact = this.artifacts.create({
       sessionId: session.id,
+      workItemId: session.activeWorkItemId,
       agentId: coordinator.id,
       type: 'markdown',
       title: `任务契约 v${brief.version}（定向修订）`,
@@ -984,6 +989,7 @@ export class OrchestratorService {
     const fileChanges = this.shouldWriteGeneratedFiles(session) ? this.workspaceAnalysisFileChanges(analysis.markdown) : [];
     const artifact = this.artifacts.create({
       sessionId: session.id,
+      workItemId: session.activeWorkItemId,
       agentId: coordinator.id,
       type: 'markdown',
       title: '工作区架构分析',
@@ -1052,7 +1058,8 @@ export class OrchestratorService {
     const suggestions = this.suggestedTasksByBriefId.get(brief.id) ?? this.defaultSuggestedTasks(session);
     const tasks = this.tasks.createFromSuggestions(session.id, suggestions, agentIdByKey, {
       assignedBy: { type: 'agent', id: coordinator.id },
-      routingMode: 'coordinator_controlled'
+      routingMode: 'coordinator_controlled',
+      workItemId: session.activeWorkItemId
     });
     if (options.eligibleAgentIds?.length) {
       const eligibleAgentIds = Array.from(new Set(options.eligibleAgentIds));
@@ -1362,6 +1369,7 @@ export class OrchestratorService {
     return this.listBriefs(session.id).filter((item) => item.confirmedByUser).at(-1) ?? {
       id: crypto.randomUUID(),
       sessionId: session.id,
+      workItemId: session.activeWorkItemId,
       version: 1,
       goal: `Process the confirmed user revision of ${run.filePath}.`,
       scope: [run.filePath],
@@ -1387,6 +1395,7 @@ export class OrchestratorService {
     const task: AgentTask = {
       id: crypto.randomUUID(),
       sessionId: session.id,
+      workItemId: session.activeWorkItemId,
       title: `处理用户对 ${run.filePath} 的修订`,
       description: [
         `Process file revision ${run.id}.`,
@@ -1437,6 +1446,7 @@ export class OrchestratorService {
     const task: AgentTask = {
       id: crypto.randomUUID(),
       sessionId: session.id,
+      workItemId: session.activeWorkItemId,
       title: `汇总 ${run.filePath} 的多 Agent 修订结果`,
       description: [
         `Synthesize the completed Agent proposals for file revision ${run.id}.`,
@@ -2798,6 +2808,7 @@ export class OrchestratorService {
     const reviewFileChanges = allowGeneratedFileWrites ? this.reviewFileChanges(reviewOutput) : [];
     const reviewArtifact = this.artifacts.create({
       sessionId: session.id,
+      workItemId: session.activeWorkItemId,
       agentId: review.id,
       type: 'test_report',
       title: messages.reviewReportTitle,
@@ -2898,6 +2909,7 @@ export class OrchestratorService {
       : undefined;
     const deliveryArtifact = this.artifacts.create({
       sessionId: session.id,
+      workItemId: session.activeWorkItemId,
       agentId: coordinator.id,
       type: 'markdown',
       title: isArchitectureAnalysis ? '完整系统架构说明' : messages.finalDeliveryTitle,
@@ -2915,6 +2927,7 @@ export class OrchestratorService {
     const notificationDraft = notification
       ? this.artifacts.create({
           sessionId: session.id,
+          workItemId: session.activeWorkItemId,
           agentId: notification.id,
           type: 'feishu_draft',
           title: messages.notificationDraftTitle,
@@ -3627,6 +3640,7 @@ export class OrchestratorService {
       : [];
     return this.artifacts.create({
       sessionId,
+      workItemId: task.workItemId,
       taskId: task.id,
       agentId,
       type: testAgent && agentId === testAgent.id ? 'test_report' : 'json',
@@ -4177,6 +4191,7 @@ export class OrchestratorService {
     const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
     const artifact = this.artifacts.create({
       sessionId: session.id,
+      workItemId: session.activeWorkItemId,
       agentId: coordinator.id,
       type: 'markdown',
       title: '完整系统架构说明',
@@ -6027,6 +6042,7 @@ export class OrchestratorService {
     };
     const artifact = this.artifacts.create({
       sessionId: session.id,
+      workItemId: session.activeWorkItemId,
       taskId: task?.id,
       agentId: agent.id,
       type: 'json',
@@ -6447,7 +6463,11 @@ export class OrchestratorService {
         budget: input.budget,
         writeModeOverride: input.writeModeOverride
       });
-      resolvedPlan = { ...resolvedPlan, attempt: input.attempt };
+      resolvedPlan = {
+        ...resolvedPlan,
+        workItemId: inputSession.activeWorkItemId,
+        attempt: input.attempt
+      };
       if (input.writeModeOverride) {
         resolvedPlan = applyRuntimeWriteModeOverride(resolvedPlan, input.writeModeOverride);
       }
@@ -6568,7 +6588,7 @@ export class OrchestratorService {
     const heartbeatTimer = shouldEmitHeartbeat(adapter, execution.hasStreamingEvents)
       ? setInterval(() => {
           const now = Date.now();
-          if (now - lastVisibleRuntimeActivityAt < RUNTIME_HEARTBEAT_INTERVAL_MS) return;
+          if (shouldSuppressHeartbeat(now, lastVisibleRuntimeActivityAt, RUNTIME_HEARTBEAT_INTERVAL_MS)) return;
           this.events.create({
             sessionId: plan.sessionId,
             type: 'runtime_progress',
@@ -7052,7 +7072,9 @@ export class OrchestratorService {
   private participatingAgents(session: SessionDetail) {
     return session.participatingAgentIds
       .map((agentId) => this.agents.findByIdOrKey(agentId))
-      .filter((agent): agent is Agent => Boolean(agent));
+      .filter((agent): agent is Agent => Boolean(agent))
+      .filter((agent) => agent.management?.allowedSurfaces.includes('chat') ?? true)
+      .filter((agent) => agent.status === 'active');
   }
 
   private requireDefaultFileRevisionReceiver() {
@@ -7073,7 +7095,7 @@ export class OrchestratorService {
   private pickSessionAgent(session: SessionDetail, preferredKeys: string[], fallbackIndex = 0) {
     const agents = this.participatingAgents(session);
     for (const key of preferredKeys) {
-      const preferred = agents.find((agent) => agent.key === key);
+      const preferred = this.agents.findSystemByKey(key) ?? agents.find((agent) => agent.key === key);
       if (preferred) {
         return preferred;
       }

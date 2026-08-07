@@ -3,7 +3,12 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useAgentStore, type AgentFormState } from '@/stores/agent'
 import { useSkillStore } from '@/stores/skill'
-import type { AgentDefinition, CapabilityDefinition } from '@/types/contracts'
+import type {
+  AgentDefinition,
+  CapabilityDefinition,
+  RuntimeType,
+  SystemAgentRole
+} from '@/types/contracts'
 import UiIcon from './UiIcon.vue'
 
 const props = defineProps<{
@@ -33,7 +38,8 @@ const {
   selectedResourceKey,
   libraryCollapsed,
   createForm,
-  editForms
+  editForms,
+  systemAgentRuntimePolicies
 } = storeToRefs(agentStore)
 
 const activeAgentCount = computed(() => props.agents.filter((agent) => agent.status === 'active').length)
@@ -44,6 +50,20 @@ const activeForm = computed<AgentFormState | null>(() => {
   return null
 })
 const selectedAgent = computed(() => props.agents.find((agent) => agent.id === selectedAgentId.value))
+const isSystemAgent = computed(() => selectedAgent.value?.management?.owner === 'system')
+const systemAgentRole = computed(() => selectedAgent.value?.management?.systemRole)
+const runtimePolicySaving = ref(false)
+const preferredRuntimeType = ref<RuntimeType | ''>('')
+const preferredModelId = ref('')
+const allowedRuntimeTypes = ref<RuntimeType[]>([])
+const runtimeTypeOptions: Array<{ value: RuntimeType; label: string }> = [
+  { value: 'generic_llm', label: '通用 LLM' },
+  { value: 'codex', label: 'Codex' },
+  { value: 'claude_code', label: 'Claude Code' },
+  { value: 'code_reader', label: '代码读取器' },
+  { value: 'test_runner', label: '测试运行器' },
+  { value: 'mock', label: 'Mock' }
+]
 const filteredAgents = computed(() => {
   const q = agentSearch.value.trim().toLowerCase()
   return props.agents.filter(
@@ -227,6 +247,7 @@ function openProfileEditor() {
 }
 
 async function addResource(kind: 'skill' | 'tool', key: string, capabilityId?: string) {
+  if (isSystemAgent.value) return
   if (!activeForm.value && selectedAgent.value) {
     startEdit(selectedAgent.value)
     await nextTick()
@@ -240,6 +261,7 @@ function selectResource(kind: 'skill' | 'tool', key: string) {
 }
 
 function removeCanvasResource(resource: CanvasResource) {
+  if (isSystemAgent.value) return
   const form = activeForm.value
   if (!form) return
   const placeholder = `\${${resource.kind}:${resource.key}}`
@@ -256,6 +278,7 @@ function removeCanvasResource(resource: CanvasResource) {
 }
 
 function clearCanvas() {
+  if (isSystemAgent.value) return
   const form = activeForm.value
   if (!form) return
   form.profileMarkdown = form.profileMarkdown
@@ -427,13 +450,15 @@ async function updateAgent(agent: AgentDefinition) {
   savingAgentId.value = agent.id
   formError.value = ''
   try {
-    await agentStore.updateAgent(agent.id, {
-      name,
-      role: firstParagraph(form.profileMarkdown) || name,
-      tags: normalizedTags(form.tags),
-      profileMarkdown: form.profileMarkdown,
-      capabilityIds: form.capabilityIds
-    })
+    await agentStore.updateAgent(agent.id, isSystemAgent.value
+      ? { name, profileMarkdown: form.profileMarkdown }
+      : {
+          name,
+          role: firstParagraph(form.profileMarkdown) || name,
+          tags: normalizedTags(form.tags),
+          profileMarkdown: form.profileMarkdown,
+          capabilityIds: form.capabilityIds
+        })
     profilePanelOpen.value = false
   } catch (error) {
     formError.value = extractError(error)
@@ -457,6 +482,7 @@ function extractError(error: unknown) {
 }
 
 async function toggleAgentStatus(agent: AgentDefinition) {
+  if (agent.management?.protected) return
   savingAgentId.value = agent.id
   formError.value = ''
   try {
@@ -465,6 +491,37 @@ async function toggleAgentStatus(agent: AgentDefinition) {
     formError.value = extractError(error)
   } finally {
     savingAgentId.value = ''
+  }
+}
+
+function toggleAllowedRuntime(runtimeType: RuntimeType, checked: boolean) {
+  allowedRuntimeTypes.value = checked
+    ? [...new Set([...allowedRuntimeTypes.value, runtimeType])]
+    : allowedRuntimeTypes.value.filter((item) => item !== runtimeType)
+  if (preferredRuntimeType.value && !allowedRuntimeTypes.value.includes(preferredRuntimeType.value)) {
+    preferredRuntimeType.value = ''
+  }
+}
+
+function onAllowedRuntimeChange(runtimeType: RuntimeType, event: Event) {
+  toggleAllowedRuntime(runtimeType, (event.target as HTMLInputElement).checked)
+}
+
+async function saveSystemRuntimePolicy() {
+  const role = systemAgentRole.value
+  if (!role) return
+  runtimePolicySaving.value = true
+  formError.value = ''
+  try {
+    await agentStore.updateSystemAgentRuntimePolicy(role, {
+      preferredRuntimeType: preferredRuntimeType.value || null,
+      preferredModelId: preferredModelId.value.trim() || null,
+      allowedRuntimeTypes: [...allowedRuntimeTypes.value]
+    })
+  } catch (error) {
+    formError.value = extractError(error)
+  } finally {
+    runtimePolicySaving.value = false
   }
 }
 
@@ -482,6 +539,17 @@ watch(
     if (!selected && agents[0]) selectAgent(agents[0])
   },
   { immediate: true }
+)
+
+watch(
+  [systemAgentRole, systemAgentRuntimePolicies],
+  ([role, policies]) => {
+    const policy = role ? policies[role as SystemAgentRole] : undefined
+    preferredRuntimeType.value = policy?.preferredRuntimeType ?? ''
+    preferredModelId.value = policy?.preferredModelId ?? ''
+    allowedRuntimeTypes.value = [...(policy?.allowedRuntimeTypes ?? [])]
+  },
+  { immediate: true, deep: true }
 )
 </script>
 
@@ -512,7 +580,7 @@ watch(
         <div class="agent-directory-list">
           <button v-for="(agent, index) in filteredAgents" :key="agent.id" type="button" :class="['agent-row', { selected: agent.id === selectedAgentId }]" @click="selectAgent(agent)">
             <span :class="['agent-row-icon', `tone-${(index % 5) + 1}`]"><UiIcon :name="index % 3 === 1 ? 'workflow' : index % 3 === 2 ? 'sparkles' : 'bot'" :size="18" /></span>
-            <span><strong>{{ agent.name }}</strong><small>v{{ agent.profileRevision }}　{{ formatUpdatedAt(agent.updatedAt) }}</small></span>
+            <span><strong>{{ agent.name }} <b v-if="agent.management?.owner === 'system'" class="system-agent-badge">系统</b></strong><small>v{{ agent.profileRevision }}　{{ formatUpdatedAt(agent.updatedAt) }}</small></span>
             <em :class="agent.status">{{ agent.status === 'active' ? '启用' : '停用' }}</em>
           </button>
           <p v-if="!filteredAgents.length">未找到匹配的 Agent</p>
@@ -522,7 +590,7 @@ watch(
 
       <main v-if="selectedAgent || showCreateForm" class="agent-designer">
         <header class="agent-designer-top">
-          <div class="agent-current"><span><UiIcon name="sparkles" :size="18" /></span><strong>{{ showCreateForm ? activeForm?.name || '新 Agent' : selectedAgent?.name }}</strong><button type="button" title="编辑 Agent 资料" @click="openProfileEditor"><UiIcon name="settings" :size="14" /></button></div>
+          <div class="agent-current"><span><UiIcon name="sparkles" :size="18" /></span><strong>{{ showCreateForm ? activeForm?.name || '新 Agent' : selectedAgent?.name }}</strong><b v-if="isSystemAgent" class="system-agent-badge">系统</b><button type="button" title="编辑 Agent 资料" @click="openProfileEditor"><UiIcon name="settings" :size="14" /></button></div>
           <nav aria-label="Agent 管理视图">
             <button type="button" :class="{ active: activeTab === 'edit' }" @click="activeTab = 'edit'">编辑</button>
             <button type="button" :class="{ active: activeTab === 'config' }" @click="activeTab = 'config'">配置</button>
@@ -536,16 +604,16 @@ watch(
           <div><h2>{{ activeTab === 'edit' ? '能力编排' : activeTab === 'config' ? '运行配置' : activeTab === 'test' ? 'Profile 测试' : activeTab === 'logs' ? '变更日志' : '版本记录' }}</h2><p v-if="activeTab === 'edit'">组合 Skills 与 Tools，定义 Agent 的专业能力与执行边界</p></div>
           <div class="designer-actions">
             <button type="button" @click="openProfileEditor"><UiIcon name="settings" :size="15" />资料设置</button>
-            <button type="button" @click="canvasLayout = canvasLayout === 'linear' ? 'branch' : 'linear'"><UiIcon name="workflow" :size="15" />自动布局</button>
+            <button v-if="!isSystemAgent" type="button" @click="canvasLayout = canvasLayout === 'linear' ? 'branch' : 'linear'"><UiIcon name="workflow" :size="15" />自动布局</button>
             <i></i>
-            <button type="button" :disabled="!canvasResources.length" @click="clearCanvas"><UiIcon name="trash" :size="15" />清空画布</button>
+            <button v-if="!isSystemAgent" type="button" :disabled="!canvasResources.length" @click="clearCanvas"><UiIcon name="trash" :size="15" />清空画布</button>
             <i></i>
             <button type="button" class="save" :disabled="hasBlockingErrors || Boolean(savingAgentId)" @click="showCreateForm ? createAgent() : selectedAgent ? updateAgent(selectedAgent) : undefined">{{ savingAgentId ? '保存中' : '保存编排' }}</button>
           </div>
         </section>
 
-        <div v-if="activeTab === 'edit'" class="designer-grid">
-          <aside class="resource-library" aria-label="能力资源库">
+        <div v-if="activeTab === 'edit'" :class="['designer-grid', { 'system-readonly': isSystemAgent }]">
+          <aside v-if="!isSystemAgent" class="resource-library" aria-label="能力资源库">
             <section class="resource-group">
               <header><h3><UiIcon name="sparkles" :size="16" />Skills</h3><button type="button" :aria-expanded="!libraryCollapsed.skill" title="展开或收起 Skills" @click="libraryCollapsed.skill = !libraryCollapsed.skill"><UiIcon name="chevron" :size="14" /></button></header>
               <template v-if="!libraryCollapsed.skill">
@@ -581,7 +649,7 @@ watch(
               <button type="button" class="flow-add" title="从资源库添加能力"><UiIcon name="plus" :size="13" /></button>
               <template v-for="resource in canvasResources" :key="`${resource.kind}:${resource.key}`">
                 <article :class="['flow-node', `tone-${resource.tone}`, { selected: selectedResourceKey === `${resource.kind}:${resource.key}` }]" @click="selectResource(resource.kind, resource.key)">
-                  <span class="flow-node-icon"><UiIcon :name="resource.kind === 'skill' ? 'sparkles' : 'settings'" :size="16" /></span><span class="flow-node-copy"><strong>{{ resource.name }}</strong><small>{{ resource.description }}</small></span><em>{{ resource.status }}</em><button type="button" title="移除能力" @click.stop="removeCanvasResource(resource)"><UiIcon name="x" :size="14" /></button>
+                  <span class="flow-node-icon"><UiIcon :name="resource.kind === 'skill' ? 'sparkles' : 'settings'" :size="16" /></span><span class="flow-node-copy"><strong>{{ resource.name }}</strong><small>{{ resource.description }}</small></span><em>{{ resource.status }}</em><button v-if="!isSystemAgent" type="button" title="移除能力" @click.stop="removeCanvasResource(resource)"><UiIcon name="x" :size="14" /></button>
                 </article>
                 <button type="button" class="flow-add" title="添加下一项能力"><UiIcon name="plus" :size="13" /></button>
               </template>
@@ -599,14 +667,27 @@ watch(
               <section><h4>能力</h4><ul><li><UiIcon name="check" :size="13" />{{ detailResource.kind === 'skill' ? '上下文规则注入' : detailResource.sourceKind === 'internal' ? '平台能力绑定' : '运行时能力授权' }}</li><li><UiIcon name="check" :size="13" />可追踪引用</li><li><UiIcon name="check" :size="13" />Profile 编译校验</li></ul></section>
               <section><h4>输入</h4><ul><li><UiIcon name="check" :size="13" />Agent Profile</li><li><UiIcon name="check" :size="13" />任务上下文</li></ul></section>
               <section><h4>配置</h4><dl><div><dt>引用类型</dt><dd>{{ (detailResource.sourceKind || detailResource.kind).toUpperCase() }}</dd></div><div><dt>引用键</dt><dd>{{ detailResource.key }}</dd></div><div><dt>状态</dt><dd>已启用</dd></div></dl></section>
-              <button type="button" class="detail-remove" @click="removeCanvasResource(detailResource)">移除该能力</button>
+              <button v-if="!isSystemAgent" type="button" class="detail-remove" @click="removeCanvasResource(detailResource)">移除该能力</button>
             </template>
             <div v-else class="detail-empty"><UiIcon name="workflow" :size="24" /><span>选择画布节点查看详情</span></div>
           </aside>
         </div>
 
         <div v-else class="secondary-view">
-          <section v-if="activeTab === 'config'" class="config-view"><div><span>Agent 状态</span><strong>{{ selectedAgent ? statusLabel(selectedAgent.status) : '草稿' }}</strong></div><div><span>能力数量</span><strong>{{ canvasResources.length }}</strong></div><div><span>Profile Token</span><strong>{{ compiled?.estimatedTokens ?? '—' }}</strong></div><div><span>标签</span><strong>{{ activeForm?.tags || '未配置' }}</strong></div><button v-if="selectedAgent" type="button" @click="toggleAgentStatus(selectedAgent)">{{ selectedAgent.status === 'active' ? '停用 Agent' : '启用 Agent' }}</button></section>
+          <section v-if="activeTab === 'config'" class="config-view">
+            <div><span>Agent 状态</span><strong>{{ selectedAgent ? statusLabel(selectedAgent.status) : '草稿' }}</strong></div>
+            <div><span>能力数量</span><strong>{{ canvasResources.length }}</strong></div>
+            <div><span>Profile Token</span><strong>{{ compiled?.estimatedTokens ?? '—' }}</strong></div>
+            <div><span>所有者</span><strong>{{ isSystemAgent ? '系统' : '用户' }}</strong></div>
+            <template v-if="isSystemAgent">
+              <label class="runtime-policy-field"><span>系统角色</span><strong>{{ systemAgentRole }}</strong></label>
+              <label class="runtime-policy-field"><span>首选 Runtime</span><select v-model="preferredRuntimeType"><option value="">跟随默认策略</option><option v-for="option in runtimeTypeOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
+              <label class="runtime-policy-field"><span>首选 Model</span><input v-model.trim="preferredModelId" type="text" placeholder="跟随 Runtime 默认模型" /></label>
+              <fieldset class="runtime-policy-runtimes"><legend>允许的 Runtime</legend><label v-for="option in runtimeTypeOptions" :key="option.value"><input type="checkbox" :checked="allowedRuntimeTypes.includes(option.value)" @change="onAllowedRuntimeChange(option.value, $event)" />{{ option.label }}</label></fieldset>
+              <button type="button" :disabled="runtimePolicySaving" @click="saveSystemRuntimePolicy">{{ runtimePolicySaving ? '保存中' : '保存 Runtime 策略' }}</button>
+            </template>
+            <button v-else-if="selectedAgent" type="button" @click="toggleAgentStatus(selectedAgent)">{{ selectedAgent.status === 'active' ? '停用 Agent' : '启用 Agent' }}</button>
+          </section>
           <section v-else-if="activeTab === 'test'" class="test-view"><span :class="{ error: hasBlockingErrors }"><UiIcon :name="hasBlockingErrors ? 'x' : 'check'" :size="24" /></span><div><h3>{{ hasBlockingErrors ? 'Profile 校验未通过' : 'Profile 校验通过' }}</h3><p>{{ validating ? '正在校验当前配置…' : diagnostics.length ? `${diagnostics.length} 条诊断信息` : '引用和能力授权关系有效。' }}</p></div><button type="button" @click="revalidate">重新测试</button></section>
           <section v-else-if="activeTab === 'logs'" class="timeline-view"><div><time>{{ selectedAgent ? formatUpdatedAt(selectedAgent.updatedAt) : '当前' }}</time><strong>Profile 配置已更新</strong><p>当前版本包含 {{ canvasResources.length }} 项能力。</p></div><div><time>{{ selectedAgent ? formatUpdatedAt(selectedAgent.createdAt) : '当前' }}</time><strong>Agent 已创建</strong><p>建立 Agent 身份与能力边界。</p></div></section>
           <section v-else class="version-view"><header><span>版本</span><span>状态</span><span>更新时间</span></header><div><strong>v{{ selectedAgent?.profileRevision ?? 1 }}</strong><em>当前版本</em><time>{{ selectedAgent ? formatUpdatedAt(selectedAgent.updatedAt) : '尚未保存' }}</time></div></section>
@@ -615,7 +696,7 @@ watch(
         <div v-if="profilePanelOpen && activeForm" class="profile-backdrop" @click.self="profilePanelOpen = false">
           <section class="profile-editor" role="dialog" aria-modal="true" aria-label="Agent 资料编辑">
             <header><div><h2>{{ showCreateForm ? '新建 Agent' : '编辑 Agent 资料' }}</h2><p>维护身份信息与 Profile Markdown</p></div><button type="button" title="关闭" @click="profilePanelOpen = false"><UiIcon name="x" :size="17" /></button></header>
-            <div class="profile-fields"><label><span>名称</span><input v-model.trim="activeForm.name" type="text" placeholder="例如 前端开发 Agent" /></label><label><span>标签</span><input v-model.trim="activeForm.tags" type="text" placeholder="例如 frontend, vue" /></label></div>
+            <div class="profile-fields"><label><span>名称</span><input v-model.trim="activeForm.name" type="text" placeholder="例如 前端开发 Agent" /></label><label><span>标签</span><input v-model.trim="activeForm.tags" type="text" placeholder="例如 frontend, vue" :disabled="isSystemAgent" /></label></div>
             <div class="profile-tabs"><button type="button" :class="{ active: previewMode === 'source' }" @click="previewMode = 'source'">源码</button><button type="button" :class="{ active: previewMode === 'preview' }" @click="previewMode = 'preview'">编译预览</button><span>{{ validating ? '校验中…' : compiled ? `约 ${compiled.estimatedTokens} tokens` : '' }}</span></div>
             <textarea v-if="previewMode === 'source'" ref="editorRef" v-model="activeForm.profileMarkdown" rows="18" @drop="onDropReference" @dragover.prevent></textarea><pre v-else>{{ compiled?.systemPrompt || '暂无编译结果' }}</pre>
             <div v-if="diagnostics.length" class="profile-diagnostics"><p v-for="(diagnostic, index) in diagnostics" :key="index" :class="diagnostic.severity"><UiIcon :name="diagnostic.severity === 'error' ? 'x' : 'check'" :size="14" />{{ diagnostic.message }}</p></div>
@@ -634,7 +715,7 @@ watch(
 
 <style scoped>
 /* High-density Agent capability workbench */
-.agent-manager { --am-blue:#2468f2; --am-text:#10213f; --am-muted:#687b9c; --am-border:#dce5f2; display:grid; grid-template-rows:auto minmax(0,1fr); gap:0; height:100%; min-height:700px; color:var(--am-text); background:#f6f9fe; }
+.agent-manager { --am-blue:#409eff; --am-text:#10213f; --am-muted:#687b9c; --am-border:#dce5f2; display:grid; grid-template-rows:auto minmax(0,1fr); gap:0; height:100%; min-height:700px; color:var(--am-text); background:#f6f9fe; }
 .agent-manager button,.agent-manager input,.agent-manager textarea { font:inherit; }
 .agent-page-head { display:flex; align-items:center; justify-content:space-between; gap:24px; min-height:74px; padding:12px 20px; border-bottom:1px solid #e5ebf5; background:#f8fbff; }
 .agent-page-title,.agent-page-summary,.agent-page-summary dl,.agent-current,.designer-actions,.resource-group h3,.resource-search,.detail-identity { display:flex; align-items:center; }
@@ -650,11 +731,13 @@ watch(
 .agent-directory-list { display:grid; align-content:start; gap:7px; min-height:0; overflow-y:auto; scrollbar-width:thin; }.agent-directory-list > p { padding:24px 8px; color:var(--am-muted); font-size:12px; text-align:center; }
 .agent-row { display:grid; grid-template-columns:30px minmax(0,1fr) auto; align-items:center; gap:9px; width:100%; min-height:64px; padding:9px; border:1px solid #e4eaf3; border-radius:6px; background:#fff; color:var(--am-text); text-align:left; transition:border-color 180ms ease,background 180ms ease,box-shadow 180ms ease; }.agent-row:hover { border-color:#aac7fb; background:#fbfdff; }.agent-row.selected { border-color:#5f91ff; background:#f5f9ff; box-shadow:0 4px 11px rgb(36 104 242 / 8%); }
 .agent-row-icon,.resource-main > span:first-child,.flow-node-icon,.detail-identity > span,.agent-current > span { display:grid; place-items:center; flex:0 0 auto; width:30px; height:30px; border-radius:7px; background:#eaf2ff; color:var(--am-blue); }.agent-row > span:nth-child(2) { display:grid; gap:5px; min-width:0; }.agent-row strong,.agent-row small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.agent-row strong { font-size:12px; }.agent-row small { color:#7184a5; font-size:9px; }.agent-row em { color:#16a46a; font-size:10px; font-style:normal; font-weight:700; }.agent-row em.disabled { color:#94a3b8; }
+.system-agent-badge { display:inline-flex; align-items:center; min-height:18px; padding:0 5px; border:1px solid #b3d8ff; border-radius:4px; background:#ecf5ff; color:#337ecc; font-size:9px; font-weight:700; vertical-align:middle; }
 .agent-directory-create { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:32px; border:1px solid #dbe4f1; border-radius:6px; background:#fff; color:#18355f; font-size:11px; font-weight:700; }.agent-directory-create:hover { border-color:#8eb2f7; color:var(--am-blue); }
 .agent-designer { position:relative; display:grid; grid-template-rows:auto auto minmax(0,1fr); overflow:hidden; }.agent-designer-top { display:grid; grid-template-rows:48px 40px; padding:0 14px; border-bottom:1px solid var(--am-border); }.agent-current { gap:9px; }.agent-current strong { font-size:15px; }.agent-current > span { width:28px; height:28px; }.agent-current button,.resource-group header button,.resource-search > button,.resource-items > li > button:last-child,.capability-detail > header button,.profile-editor > header button { display:grid; place-items:center; width:29px; height:29px; padding:0; border:1px solid #dbe4f1; border-radius:6px; background:#fff; color:#607493; }.agent-current button { width:24px; height:24px; border:0; background:transparent; }.agent-current button:hover,.resource-group header button:hover,.resource-search > button:hover { border-color:#8eb2f7; color:var(--am-blue); }
 .agent-designer-top nav { display:flex; align-items:end; gap:28px; }.agent-designer-top nav button { position:relative; height:40px; padding:0 2px; border:0; background:transparent; color:#657897; font-size:12px; }.agent-designer-top nav button.active { color:var(--am-blue); font-weight:700; }.agent-designer-top nav button.active::after { content:''; position:absolute; right:0; bottom:-1px; left:0; height:2px; background:var(--am-blue); }
 .designer-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; min-height:64px; padding:10px 14px; }.designer-heading h2 { font-size:13px; }.designer-heading p { margin-top:4px; color:#7184a5; font-size:10px; }.designer-actions { gap:8px; }.designer-actions > button { display:inline-flex; align-items:center; justify-content:center; gap:5px; min-height:29px; padding:0 10px; border:1px solid #dce5f2; border-radius:5px; background:#fff; color:#486181; font-size:10px; font-weight:600; }.designer-actions > button:hover { border-color:#8eb2f7; color:var(--am-blue); }.designer-actions > i { width:1px; height:22px; margin:0 3px; background:#e1e7f0; }.designer-actions > button.save { border-color:var(--am-blue); background:var(--am-blue); color:#fff; }
 .designer-grid { display:grid; grid-template-columns:282px minmax(360px,1fr) 278px; gap:12px; min-height:0; padding:0 14px 14px; }.resource-library,.capability-canvas,.capability-detail { min-width:0; min-height:0; border:1px solid var(--am-border); border-radius:6px; background:#fff; }.resource-library { display:grid; grid-template-rows:minmax(0,1fr) minmax(0,1fr); gap:12px; border:0; }.resource-group { display:grid; grid-template-rows:auto auto minmax(0,1fr); min-height:0; padding:10px; border:1px solid var(--am-border); border-radius:6px; }.resource-group > header { display:flex; align-items:center; justify-content:space-between; min-height:30px; }.resource-group h3 { gap:6px; color:#18355f; font-size:12px; }
+.designer-grid.system-readonly { grid-template-columns:minmax(360px,1fr) 278px; }
 .resource-search { gap:5px; margin:4px 0 8px; }.resource-search label { flex:1; min-width:0; min-height:30px; }.resource-items { display:grid; align-content:start; gap:4px; min-height:0; margin:0; padding:0; overflow-y:auto; list-style:none; scrollbar-width:thin; }.resource-items li { display:grid; grid-template-columns:minmax(0,1fr) auto 28px; align-items:center; gap:5px; min-height:43px; padding:4px 2px 4px 5px; border:1px solid transparent; border-radius:5px; background:#fbfcfe; }.resource-items li:hover { border-color:#d7e4f7; background:#f6f9fe; }.resource-main { display:flex; align-items:center; gap:8px; min-width:0; padding:0; border:0; background:transparent; color:var(--am-text); text-align:left; }.resource-main > span:first-child { width:25px; height:25px; border-radius:5px; }.resource-main > span:last-child { display:grid; gap:2px; min-width:0; }.resource-main strong,.resource-main small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.resource-main strong { font-size:10px; }.resource-main small { color:#7184a5; font-size:8px; }.resource-items em { color:#5590ee; font-size:8px; font-style:normal; }.resource-items li.empty { display:grid; place-items:center; color:#94a3b8; font-size:10px; }
 .tone-1 { background:#eee7ff !important; color:#7c3aed !important; }.tone-2 { background:#e8f1ff !important; color:#2f6fe8 !important; }.tone-3 { background:#e1f8f5 !important; color:#0ba69b !important; }.tone-4 { background:#fff3dc !important; color:#e7960b !important; }.tone-5 { background:#ffe9ef !important; color:#e64d79 !important; }
 .capability-canvas { position:relative; overflow:auto; background-color:#fbfdff; background-image:linear-gradient(rgb(95 124 168 / 7%) 1px,transparent 1px),linear-gradient(90deg,rgb(95 124 168 / 7%) 1px,transparent 1px),radial-gradient(circle,rgb(91 118 158 / 15%) 1px,transparent 1.2px); background-size:24px 24px,24px 24px,12px 12px; }.canvas-flow { display:flex; flex-direction:column; align-items:center; min-width:350px; min-height:100%; padding:22px 30px 60px; }.flow-terminal { display:inline-flex; align-items:center; gap:7px; height:30px; padding:0 14px; border:1px solid #77d89a; border-radius:16px; background:#ebfbf0; color:#258b4d; font-size:11px; }.flow-terminal span { width:9px; height:9px; border:2px solid currentColor; border-radius:50%; }.flow-terminal.end { border-color:#aebbd0; background:#f0f4f9; color:#607493; }
@@ -664,14 +747,15 @@ watch(
 .capability-detail { display:flex; flex-direction:column; padding:12px; overflow-y:auto; }.capability-detail > header { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }.capability-detail h3 { font-size:12px; }.detail-identity { gap:9px; padding-bottom:12px; }.detail-identity > span { display:grid; place-items:center; width:32px; height:32px; border-radius:7px; }.detail-identity > div { display:grid; grid-template-columns:auto auto; align-items:center; gap:2px 7px; min-width:0; }.detail-identity strong { font-size:11px; }.detail-identity em { color:#5590ee; font-size:8px; font-style:normal; }.detail-identity small { grid-column:1 / -1; color:#7184a5; font-size:8px; }
 .capability-detail section { padding:10px 8px; border-top:1px solid #eef2f7; background:#fbfcfe; }.capability-detail h4 { margin-bottom:7px; font-size:9px; }.capability-detail section p { color:#617493; font-size:9px; line-height:1.6; }.capability-detail ul { display:grid; gap:6px; margin:0; padding:0; list-style:none; }.capability-detail li { display:flex; align-items:center; gap:6px; color:#607493; font-size:9px; }.capability-detail dl { display:grid; gap:6px; margin:0; }.capability-detail dl div { display:grid; grid-template-columns:70px minmax(0,1fr); gap:8px; font-size:9px; }.capability-detail dt { color:#7b8ca6; }.capability-detail dd { margin:0; color:#213a60; overflow-wrap:anywhere; }.detail-remove { min-height:31px; margin-top:auto; border:1px solid #ffb9c5; border-radius:5px; background:#fff; color:#e34864; font-size:10px; }.detail-empty { display:grid; place-items:center; gap:8px; margin:auto; color:#8a9bb4; font-size:10px; }
 .secondary-view { min-height:0; padding:0 14px 14px; }.config-view,.test-view,.timeline-view,.version-view { min-height:420px; padding:24px; border:1px solid var(--am-border); border-radius:6px; background:#fbfdff; }.config-view { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); align-content:start; gap:12px; }.config-view div { display:grid; gap:7px; padding:14px; border:1px solid #e2e9f3; border-radius:6px; background:#fff; }.config-view span { color:#7184a5; font-size:10px; }.config-view strong { font-size:13px; overflow-wrap:anywhere; }.config-view > button { grid-column:1 / -1; justify-self:start; min-height:34px; padding:0 12px; border:1px solid #dce5f2; border-radius:5px; background:#fff; color:#526987; }
+.runtime-policy-field { display:grid; gap:7px; padding:14px; border:1px solid #e2e9f3; border-radius:6px; background:#fff; }.runtime-policy-field select,.runtime-policy-field input { width:100%; min-height:34px; padding:0 9px; border:1px solid #dcdfe6; border-radius:4px; background:#fff; color:#303133; font-size:11px; }.runtime-policy-runtimes { grid-column:1 / -1; display:flex; flex-wrap:wrap; gap:10px 18px; margin:0; padding:14px; border:1px solid #e2e9f3; border-radius:6px; background:#fff; }.runtime-policy-runtimes legend { padding:0 5px; color:#7184a5; font-size:10px; }.runtime-policy-runtimes label { display:inline-flex; align-items:center; gap:6px; color:#526987; font-size:11px; }
 .test-view { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-content:start; align-items:center; gap:14px; }.test-view > span { display:grid; place-items:center; width:48px; height:48px; border-radius:50%; background:#e9f9f0; color:#20a366; }.test-view > span.error { background:#fff0f2; color:#e34864; }.test-view h3 { font-size:14px; }.test-view p { margin-top:5px; color:#7184a5; font-size:11px; }.test-view > button { min-height:32px; padding:0 12px; border:1px solid #b9cef4; border-radius:5px; background:#fff; color:var(--am-blue); }
 .timeline-view { display:grid; align-content:start; gap:0; }.timeline-view > div { display:grid; grid-template-columns:130px minmax(0,1fr); gap:4px 20px; padding:0 0 28px 24px; border-left:1px solid #ccd8e8; }.timeline-view time { grid-row:1 / 3; color:#7184a5; font-size:10px; }.timeline-view strong { font-size:12px; }.timeline-view p { color:#7184a5; font-size:10px; }.version-view { padding:0; overflow:hidden; }.version-view header,.version-view > div { display:grid; grid-template-columns:1fr 1fr 2fr; gap:12px; padding:13px 16px; }.version-view header { border-bottom:1px solid #dce5f2; background:#f4f7fb; color:#7184a5; font-size:10px; }.version-view > div { align-items:center; background:#fff; font-size:11px; }.version-view em { justify-self:start; padding:3px 7px; border-radius:10px; background:#e7f8ee; color:#208b54; font-style:normal; }.version-view time { color:#7184a5; }
 .profile-backdrop { position:absolute; inset:0; display:grid; place-items:center; padding:20px; background:rgb(16 33 63 / 32%); z-index:10; }.profile-editor { display:grid; grid-template-rows:auto auto auto minmax(240px,1fr) auto auto auto; gap:12px; width:min(760px,100%); max-height:calc(100% - 20px); padding:18px; overflow:auto; border:1px solid #d7e1ef; border-radius:8px; background:#fff; box-shadow:0 20px 50px rgb(20 45 82 / 24%); }.profile-editor > header { display:flex; align-items:flex-start; justify-content:space-between; }.profile-editor h2 { font-size:16px; }.profile-editor header p { margin-top:4px; color:#7184a5; font-size:10px; }.profile-fields { display:grid; grid-template-columns:1fr 1fr; gap:12px; }.profile-fields label { display:grid; gap:6px; }.profile-fields label span { color:#607493; font-size:10px; font-weight:700; }.profile-fields input { min-height:34px; padding:0 10px; border:1px solid #d7e1ef; border-radius:5px; outline:0; }
-.profile-tabs { display:flex; align-items:center; gap:6px; }.profile-tabs button { min-height:28px; padding:0 10px; border:1px solid #dbe4f1; border-radius:5px; background:#fff; color:#607493; font-size:10px; }.profile-tabs button.active { border-color:var(--am-blue); background:var(--am-blue); color:#fff; }.profile-tabs span { margin-left:auto; color:#7184a5; font-size:10px; }.profile-editor textarea,.profile-editor pre { box-sizing:border-box; width:100%; min-height:260px; margin:0; padding:12px; overflow:auto; border:1px solid #d7e1ef; border-radius:6px; outline:0; background:#fbfcfe; color:#1d3557; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:11px; line-height:1.6; white-space:pre-wrap; resize:vertical; }.profile-diagnostics { display:grid; gap:5px; }.profile-diagnostics p { display:flex; align-items:center; gap:5px; color:#ad7017; font-size:10px; }.profile-diagnostics p.error,.form-error { color:#d5415c; }.profile-capabilities { display:flex; flex-wrap:wrap; gap:5px; }.profile-capabilities span { padding:4px 7px; border-radius:4px; background:#eef4fd; color:#315d9c; font-size:9px; }.profile-capabilities small { color:#8a9bb4; }.profile-editor footer { display:flex; justify-content:flex-end; gap:8px; }.profile-editor footer button { min-height:33px; padding:0 13px; border:1px solid #d8e2ef; border-radius:5px; background:#fff; color:#526987; }.profile-editor footer button.primary { border-color:var(--am-blue); background:var(--am-blue); color:#fff; }.form-error { font-size:10px; }
+.profile-tabs { display:flex; align-items:center; gap:6px; }.profile-tabs button { min-height:28px; padding:0 10px; border:1px solid #dbe4f1; border-radius:5px; background:#fff; color:#607493; font-size:10px; }.profile-tabs button.active { border-color:var(--am-blue); background:var(--am-blue); color:#fff; }.profile-tabs span { margin-left:auto; color:#7184a5; font-size:10px; }.profile-editor textarea,.profile-editor pre { box-sizing:border-box; width:100%; min-height:260px; margin:0; padding:12px; overflow:auto; border:1px solid #d7e1ef; border-radius:6px; outline:0; background:#fbfcfe; color:#1d3557; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:11px; line-height:1.6; white-space:pre-wrap; resize:vertical; }.profile-fields input:disabled { background:#f5f7fa; color:#909399; cursor:not-allowed; }.profile-diagnostics { display:grid; gap:5px; }.profile-diagnostics p { display:flex; align-items:center; gap:5px; color:#ad7017; font-size:10px; }.profile-diagnostics p.error,.form-error { color:#d5415c; }.profile-capabilities { display:flex; flex-wrap:wrap; gap:5px; }.profile-capabilities span { padding:4px 7px; border-radius:4px; background:#eef4fd; color:#315d9c; font-size:9px; }.profile-capabilities small { color:#8a9bb4; }.profile-editor footer { display:flex; justify-content:flex-end; gap:8px; }.profile-editor footer button { min-height:33px; padding:0 13px; border:1px solid #d8e2ef; border-radius:5px; background:#fff; color:#526987; }.profile-editor footer button.primary { border-color:var(--am-blue); background:var(--am-blue); color:#fff; }.form-error { font-size:10px; }
 .empty-designer { display:grid; place-items:center; align-content:center; gap:10px; }.empty-designer > span { display:grid; place-items:center; width:58px; height:58px; border-radius:50%; background:#edf4ff; color:var(--am-blue); }.empty-designer h2 { font-size:15px; }
 @media (max-width:1450px) { .designer-grid { grid-template-columns:250px minmax(340px,1fr) 240px; }.designer-actions > button { padding:0 7px; }.resource-items li { grid-template-columns:minmax(0,1fr) 28px; }.resource-items li > em { display:none; } }
-@media (max-width:1180px) { .agent-page-body { grid-template-columns:210px minmax(0,1fr); }.designer-grid { grid-template-columns:235px minmax(340px,1fr); }.capability-detail { display:none; }.designer-actions > button:not(.save) { width:30px; padding:0; overflow:hidden; font-size:0; } }
+@media (max-width:1180px) { .agent-page-body { grid-template-columns:210px minmax(0,1fr); }.designer-grid { grid-template-columns:235px minmax(340px,1fr); }.designer-grid.system-readonly { grid-template-columns:minmax(340px,1fr); }.capability-detail { display:none; }.designer-actions > button:not(.save) { width:30px; padding:0; overflow:hidden; font-size:0; } }
 @media (max-width:900px) { .agent-manager { height:auto; min-height:100vh; overflow:auto; }.agent-page-title p { display:none; }.agent-page-body { grid-template-columns:1fr; min-height:auto; }.agent-directory { grid-template-rows:auto auto minmax(0,1fr) auto; min-height:230px; }.agent-directory-list { display:flex; overflow-x:auto; }.agent-row { flex:0 0 220px; }.agent-designer { min-height:760px; }.designer-grid { grid-template-columns:230px minmax(340px,1fr); overflow-x:auto; } }
-@media (max-width:620px) { .agent-page-head { align-items:flex-start; flex-direction:column; }.agent-page-summary { width:100%; justify-content:space-between; }.agent-page-body { padding:0 10px 12px; }.agent-designer { min-height:1020px; overflow:visible; }.designer-heading { align-items:flex-start; flex-direction:column; }.designer-actions { width:100%; overflow-x:auto; }.designer-grid { grid-template-columns:1fr; min-height:850px; overflow:visible; }.resource-library { grid-template-columns:1fr 1fr; grid-template-rows:300px; overflow-x:auto; }.resource-group { min-width:250px; }.capability-canvas { min-height:520px; }.profile-fields,.config-view { grid-template-columns:1fr; }.profile-backdrop { position:fixed; padding:10px; }.profile-editor { max-height:calc(100vh - 20px); } }
+@media (max-width:620px) { .agent-page-head { align-items:flex-start; flex-direction:column; }.agent-page-summary { width:100%; justify-content:space-between; }.agent-page-body { padding:0 10px 12px; }.agent-designer { min-height:1020px; overflow:visible; }.designer-heading { align-items:flex-start; flex-direction:column; }.designer-actions { width:100%; overflow-x:auto; }.designer-grid,.designer-grid.system-readonly { grid-template-columns:1fr; min-height:850px; overflow:visible; }.resource-library { grid-template-columns:1fr 1fr; grid-template-rows:300px; overflow-x:auto; }.resource-group { min-width:250px; }.capability-canvas { min-height:520px; }.profile-fields,.config-view { grid-template-columns:1fr; }.profile-backdrop { position:fixed; padding:10px; }.profile-editor { max-height:calc(100vh - 20px); } }
 @media (prefers-reduced-motion:reduce) { .agent-row,.flow-node,.agent-primary { transition:none; } }
 </style>

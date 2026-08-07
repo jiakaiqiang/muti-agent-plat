@@ -13,6 +13,19 @@ export const FILE_REVISION_METRIC_NAMES = [
   'file_revision_recovery_total'
 ] as const;
 
+export const INTENT_ROUTING_METRIC_NAMES = [
+  'intent_route_total',
+  'intent_route_latency_ms',
+  'intent_route_runtime_failure_total',
+  'intent_route_schema_repair_total',
+  'intent_route_clarification_total',
+  'intent_route_stale_snapshot_total',
+  'routing_idempotency_replay_total',
+  'decision_inheritance_total',
+  'work_item_created_total',
+  'event_outbox_lag_ms'
+] as const;
+
 export const WORKSPACE_METRIC_NAMES = [
   'workspace_authorization_duration_ms',
   'session_create_duration_ms',
@@ -25,6 +38,7 @@ export const WORKSPACE_METRIC_NAMES = [
   'context_insufficient_terminal_total',
   'workspace_writeback_conflict_total',
   'workspace_revision_unstable_total',
+  ...INTENT_ROUTING_METRIC_NAMES,
   ...FILE_REVISION_METRIC_NAMES
 ] as const;
 

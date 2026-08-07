@@ -24,6 +24,7 @@
 | APPLYING_CHANGES | implementation / verification | 隔离执行已完成，平台正在按工作区 FIFO 校验、合并并写回变更。 |
 | WAIT_WORKSPACE_CONFLICT_RESOLUTION | human_intervention | 自动写回无法安全完成，等待用户重试合并、让 Agent 解决、保留当前工作区、显式采用 Session 版本或放弃写回。 |
 | WAIT_USER_DECISION | human_intervention | 范围、风险或权限需要人工决策。 |
+| PAUSED | human_intervention | 会话保留暂停检查点，等待用户显式恢复，不自动继续执行。 |
 | COMPLETED | delivery | 交付完成，可沉淀记忆。 |
 | FAILED | feedback | 失败必须经 07-feedback-loop 路由。 |
 | CANCELLED | terminal | 本轮被显式终止。 |

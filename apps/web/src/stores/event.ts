@@ -36,6 +36,7 @@ const eventTypeToMessageType: Partial<Record<CollaborationEvent['type'], ChatMes
   task_rejected: 'task',
   task_reworked: 'task',
   user_confirmation_requested: 'confirmation',
+  intent_clarification_required: 'confirmation',
   capability_approval_required: 'confirmation',
   capability_approved: 'text',
   runtime_started: 'task',
@@ -50,6 +51,10 @@ const eventTypeToMessageType: Partial<Record<CollaborationEvent['type'], ChatMes
   post_review_started: 'review',
   post_review_completed: 'review',
   final_delivery_created: 'delivery',
+  follow_up_queued: 'text',
+  work_item_created: 'text',
+  work_item_activated: 'text',
+  decision_superseded: 'text',
   error_reported: 'error'
 }
 
@@ -169,7 +174,7 @@ function confirmationStatuses(events: CollaborationEvent[]) {
   const confirmationIdByBriefId = new Map<string, string>()
 
   for (const event of events) {
-    if (event.type === 'user_confirmation_requested') {
+    if (event.type === 'user_confirmation_requested' || event.type === 'intent_clarification_required') {
       const payload = payloadOf<ConfirmationRequestedPayload & Record<string, unknown>>(event)
       statuses.set(payload.confirmationId, 'pending')
       if (payload.relatedBriefId) {
@@ -357,7 +362,7 @@ export const useEventStore = defineStore('event', {
       return events.filter(shouldRenderInTimeline).map((event) => {
         const payload = event.metadata.payload ?? {}
         const confirmationId =
-          event.type === 'user_confirmation_requested'
+          event.type === 'user_confirmation_requested' || event.type === 'intent_clarification_required'
             ? (payload as ConfirmationRequestedPayload).confirmationId
             : undefined
         return {
@@ -538,7 +543,7 @@ export const useEventStore = defineStore('event', {
     activeConfirmation: (state) => (sessionId: string): ConfirmationCardState | undefined => {
       let card: ConfirmationCardState | undefined
       for (const event of state.eventsBySessionId[sessionId] ?? []) {
-        if (event.type === 'user_confirmation_requested') {
+        if (event.type === 'user_confirmation_requested' || event.type === 'intent_clarification_required') {
           const payload = payloadOf<ConfirmationRequestedPayload & Record<string, unknown>>(event)
           card = {
             confirmationId: payload.confirmationId,
@@ -570,7 +575,10 @@ export const useEventStore = defineStore('event', {
             workflowStepIndex: payload.workflowStepIndex as number | undefined,
             workflowStepCount: payload.workflowStepCount as number | undefined,
             outputSummary: payload.outputSummary as string | undefined,
-            workflowOptions: payload.workflowOptions
+            workflowOptions: payload.workflowOptions,
+            routingId: payload.routingId as string | undefined,
+            followUpMessageId: payload.followUpMessageId as string | undefined,
+            reasonCodes: payload.reasonCodes as string[] | undefined
           }
         }
         if (event.type === 'user_confirmation_resolved' && card) {

@@ -5,7 +5,10 @@ import type {
   AgentDefinition,
   CapabilityDefinition,
   CompiledAgentProfile,
-  ProfileDiagnostic
+  ProfileDiagnostic,
+  RuntimeType,
+  SystemAgentRole,
+  SystemAgentRuntimePolicy
 } from '@/types/contracts'
 
 export type AgentFormState = {
@@ -80,7 +83,8 @@ export const useAgentStore = defineStore('agent', {
     selectedResourceKey: '',
     libraryCollapsed: { skill: false, tool: false },
     createForm: emptyAgentForm(),
-    editForms: {} as Record<string, AgentFormState>
+    editForms: {} as Record<string, AgentFormState>,
+    systemAgentRuntimePolicies: {} as Partial<Record<SystemAgentRole, SystemAgentRuntimePolicy>>
   }),
   getters: {
     agentById: (state) => (agentId: string) => state.agents.find((agent) => agent.id === agentId),
@@ -94,10 +98,17 @@ export const useAgentStore = defineStore('agent', {
   actions: {
     async loadAgents() {
       try {
-        this.agents = mergeWithDefaultAgents(await apiGet<AgentDefinition[]>('/agents'))
+        const agents = await apiGet<AgentDefinition[]>('/agents')
+        this.agents = mergeWithDefaultAgents(agents)
       } catch (error) {
         console.warn('Failed to load agents from API; using built-in defaults.', error)
         this.agents = mergeWithDefaultAgents([])
+      }
+      try {
+        const policies = await apiGet<SystemAgentRuntimePolicy[]>('/system-agent-runtime-policies')
+        this.systemAgentRuntimePolicies = Object.fromEntries(policies.map((policy) => [policy.role, policy]))
+      } catch (error) {
+        console.warn('Failed to load system Agent Runtime policies.', error)
       }
     },
     async createAgent(input: CreateAgentInput) {
@@ -121,6 +132,21 @@ export const useAgentStore = defineStore('agent', {
     },
     async validateProfile(input: ValidateProfileInput) {
       return await apiPost<CompiledAgentProfile>('/agents/profile/validate', input)
+    },
+    async updateSystemAgentRuntimePolicy(
+      role: SystemAgentRole,
+      input: {
+        preferredRuntimeType?: RuntimeType | null
+        preferredModelId?: string | null
+        allowedRuntimeTypes?: RuntimeType[]
+      }
+    ) {
+      const policy = await apiPatch<SystemAgentRuntimePolicy>(
+        `/system-agent-runtime-policies/${role}`,
+        input
+      )
+      this.systemAgentRuntimePolicies[role] = policy
+      return policy
     }
   }
 })

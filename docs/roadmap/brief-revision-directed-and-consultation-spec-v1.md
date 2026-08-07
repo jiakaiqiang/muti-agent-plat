@@ -135,4 +135,4 @@
 
 ## 5. 开发注意（本地环境）
 
-`npm run dev` 的 dev-supervisor 带健康看门狗：`node --watch` 期间改后端源码会触发重启，重启空窗健康探测连续失败达上限（`READY_HEALTH_FAILURE_LIMIT=8`）时会误杀整个进程组并 exit 1。这是监督进程行为，非服务崩溃，重启 `npm run dev` 即可。
+`npm run dev` 的后端不监听源码变更；修改 backend/shared 后显式执行 `npm run dev:restart-server`。该命令只重启后端，Web 和 Local Runtime 保持运行。dev-supervisor 保留 60 秒健康恢复窗口（`READY_HEALTH_FAILURE_LIMIT=30`，每 2 秒探测一次）用于覆盖手动重启时的 shared/server 构建和 Nest 启动；超过窗口仍不可达时才关闭整个进程组并 exit 1。

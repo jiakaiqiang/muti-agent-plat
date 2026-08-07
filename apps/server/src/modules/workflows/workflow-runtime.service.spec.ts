@@ -9,6 +9,7 @@ function fixture(nodes: WorkflowVersion['nodes'], edges?: WorkflowVersion['edges
   const session: SessionDetail = {
     id: 'session-1',
     dataEpoch: 'epoch-1',
+    activeWorkItemId: 'work-item-1',
     title: 'Workflow runtime',
     originalInput: 'Implement the workflow.',
     status: 'WAIT_WORKFLOW_SELECT',
@@ -23,6 +24,7 @@ function fixture(nodes: WorkflowVersion['nodes'], edges?: WorkflowVersion['edges
   const brief: TaskBrief = {
     id: 'brief-1',
     sessionId: session.id,
+    workItemId: 'work-item-1',
     version: 1,
     goal: 'Implement the workflow.',
     scope: [],
@@ -470,6 +472,74 @@ test('WorkflowRuntimeService keeps an invocation-level user pause resumable', as
   assert.equal(await setup.runtime.resumeCurrentExecution(run.id), true);
   assert.equal(setup.taskItems[0].status, 'pending');
   assert.equal(setup.callbacks.length, 2);
+});
+
+test('WorkflowRuntimeService retries a failed workflow node as a new auditable attempt', async () => {
+  const setup = fixture([{ id: 'requirements-node', type: 'agent', agentId: 'requirements', order: 0 }]);
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-failed-retry'
+  });
+  const firstTask = setup.taskItems[0]!;
+  const firstNodeRun = setup.runtime.listNodeRuns(run.id)[0]!;
+  firstTask.status = 'failed';
+  setup.callbacks[0]({ kind: 'failed', reason: 'Runtime failed.' });
+  await settle();
+
+  assert.equal(run.status, 'failed');
+  assert.equal(run.currentNodeId, undefined);
+  assert.equal(firstNodeRun.status, 'failed');
+  assert.equal(firstNodeRun.error?.code, 'WORKFLOW_NODE_EXECUTION_FAILED');
+  assert.ok(firstNodeRun.completedAt);
+
+  assert.equal(await setup.runtime.resumeCurrentExecution(run.id), true);
+
+  const secondTask = setup.taskItems[1]!;
+  const secondNodeRun = setup.runtime.listNodeRuns(run.id)[1]!;
+  assert.equal(run.status, 'running');
+  assert.equal(run.currentNodeId, 'requirements-node');
+  assert.equal(run.failure, undefined);
+  assert.equal(run.completedAt, undefined);
+  assert.equal(firstTask.status, 'failed');
+  assert.equal(secondTask.status, 'assigned');
+  assert.equal(secondNodeRun.status, 'running');
+  assert.equal(secondNodeRun.attempt, 2);
+
+  secondTask.status = 'failed';
+  setup.callbacks[1]({ kind: 'failed', reason: 'Runtime failed again.' });
+  await settle();
+
+  assert.equal(run.status, 'failed');
+  assert.equal(secondNodeRun.status, 'failed');
+  assert.equal(setup.eventItems.filter((item) => item.type === 'workflow_run_failed').length, 2);
+});
+
+test('WorkflowRuntimeService refuses to resume a run owned by a different active WorkItem', async () => {
+  const setup = fixture([{ id: 'requirements-node', type: 'agent', agentId: 'requirements', order: 0 }]);
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-work-item-guard'
+  });
+  setup.taskItems[0]!.status = 'failed';
+  setup.callbacks[0]!({ kind: 'failed', reason: 'Runtime failed.' });
+  await settle();
+
+  const switchedSession = { ...setup.session, activeWorkItemId: 'work-item-2' };
+  const resumed = await setup.runtime.resumeCurrentExecution(run.id, {
+    session: switchedSession,
+    brief: setup.brief,
+    coordinatorId: 'coordinator'
+  });
+
+  assert.equal(resumed, false);
+  assert.equal(setup.runtime.get(run.id).status, 'failed');
+  assert.equal(setup.callbacks.length, 1);
 });
 
 test('WorkflowRuntimeService keeps the current node resumable while workspace conflict is resolved', async () => {

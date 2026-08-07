@@ -1,4 +1,6 @@
-import { Body, Controller, Delete, Get, Headers, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, Param, Post, Res, ServiceUnavailableException, UseGuards } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import type { ServerResponse } from 'node:http';
 import type { CreateLocalRuntimeDeviceCodeRequest, LocalRuntimeProviderConnectionInput } from '@agent-cluster/shared';
 import { LocalRuntimeAuthService } from './local-runtime-auth.service.js';
 import { LocalRuntimeConnectionService } from './local-runtime-connection.service.js';
@@ -13,13 +15,21 @@ export class LocalRuntimeController {
     private readonly connections: LocalRuntimeConnectionService
   ) {}
 
+  @Get('launch-config')
+  launchConfig(
+    @Headers('x-forwarded-proto') forwardedProto?: string,
+    @Headers('host') host?: string
+  ) {
+    return ok({ serverUrl: publicServerOrigin(forwardedProto, host) });
+  }
+
   @Post('device-codes')
   createDeviceCode(
     @Body() body: CreateLocalRuntimeDeviceCodeRequest,
     @Headers('x-forwarded-proto') forwardedProto?: string,
     @Headers('host') host?: string
   ) {
-    const publicUrl = process.env.PUBLIC_WEB_URL?.trim() || `${forwardedProto || 'http'}://${host || 'localhost:3000'}`;
+    const publicUrl = publicServerOrigin(forwardedProto, host);
     return this.auth.createDeviceCode(body, publicUrl);
   }
 
@@ -80,17 +90,46 @@ export class LocalRuntimeController {
     return ok(this.connections.listWorkspaces());
   }
 
+  @Post('capabilities/refresh')
+  @UseGuards(LocalRuntimeAdminGuard)
+  async refreshCapabilities(@Body() body: { deviceId?: string }) {
+    return ok(await this.connections.refreshCapabilities(body.deviceId?.trim() || undefined));
+  }
+
   @Post('workspaces/authorize')
   @UseGuards(LocalRuntimeAdminGuard)
-  async authorizeWorkspace(@Body() body: { deviceId?: string }) {
+  async authorizeWorkspace(
+    @Body() body: { deviceId?: string; requestId?: string },
+    @Res({ passthrough: true }) response: ServerResponse
+  ) {
     const startedAt = Date.now();
+    const requestId = body.requestId?.trim() || randomUUID();
+    let settled = false;
+    const cancelOnDisconnect = () => {
+      if (!settled) this.connections.cancelWorkspaceAuthorization(requestId);
+    };
+    response.once('close', cancelOnDisconnect);
     try {
-      return ok(await this.connections.authorizeWorkspace(body.deviceId?.trim() || undefined));
+      return ok(await this.connections.authorizeWorkspace(
+        body.deviceId?.trim() || undefined,
+        requestId
+      ));
     } finally {
+      settled = true;
+      response.off('close', cancelOnDisconnect);
       workspaceMetrics.observe('workspace_authorization_duration_ms', Date.now() - startedAt, {
         providerKind: 'local_bridge'
       });
     }
+  }
+
+  @Delete('workspaces/authorizations/:requestId')
+  @UseGuards(LocalRuntimeAdminGuard)
+  cancelWorkspaceAuthorization(@Param('requestId') requestId: string) {
+    return ok({
+      requestId,
+      cancelled: this.connections.cancelWorkspaceAuthorization(requestId)
+    });
   }
 
   @Post('provider-connections')
@@ -111,4 +150,16 @@ export class LocalRuntimeController {
 
 function bearerToken(value: string | undefined) {
   return value?.match(/^Bearer\s+([^\s]+)$/i)?.[1] ?? '';
+}
+
+function publicServerOrigin(forwardedProto?: string, host?: string) {
+  const configured = process.env.PUBLIC_WEB_URL?.trim();
+  const candidate = configured || `${forwardedProto || 'http'}://${host || 'localhost:3000'}`;
+  try {
+    const url = new URL(candidate);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error();
+    return url.origin;
+  } catch {
+    throw new ServiceUnavailableException('PUBLIC_WEB_URL must be a valid HTTP or HTTPS origin.');
+  }
 }

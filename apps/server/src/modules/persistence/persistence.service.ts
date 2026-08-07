@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
-import type { SystemDataMetadata } from '@agent-cluster/shared';
+import type { CollaborationEvent, SystemDataMetadata } from '@agent-cluster/shared';
 import { randomUUID } from 'node:crypto';
 import {
   closeSync,
@@ -25,7 +25,7 @@ import {
 import { ContentReferenceCodec } from './content-reference-codec.js';
 import { LocalContentStore } from './local-content-store.js';
 
-type PersistedState = Record<string, unknown>;
+export type PersistedState = Record<string, unknown>;
 export type PersistenceBackend = 'file' | 'postgres';
 export type CollectionCompareAndSetResult =
   | { status: 'applied' }
@@ -130,6 +130,7 @@ export class PersistenceService implements OnModuleDestroy {
     if (this.backend === 'postgres') {
       return this.writePostgresCollection(key, this.state[key]);
     } else {
+      if (key === 'eventsBySession') this.mergeFileEventOutbox(this.state[key]);
       this.writeFileState();
       return Promise.resolve(true);
     }
@@ -182,6 +183,51 @@ export class PersistenceService implements OnModuleDestroy {
     return settled;
   }
 
+  async mutateStateAtomically<T>(
+    expectedRevision: string,
+    mutator: (draft: PersistedState) => T,
+    options?: { lockKey?: string }
+  ): Promise<T> {
+    this.assertWritable();
+    const draft = this.clone(this.state);
+    if (computePersistenceRevision(draft) !== expectedRevision) {
+      throw new Error('PERSISTENCE_REVISION_CONFLICT: persisted state changed before atomic mutation.');
+    }
+    const result = mutator(draft);
+
+    if (!this.enabled) {
+      this.state = this.clone(draft);
+      return result;
+    }
+
+    if (this.backend === 'file') {
+      this.writeFileState(draft);
+      this.state = this.clone(draft);
+      return result;
+    }
+
+    if (!this.relationalStore) {
+      throw new Error('RELATIONAL_PERSISTENCE_UNAVAILABLE: relational state store is not initialized.');
+    }
+    const changes = Object.fromEntries(
+      Object.entries(draft).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(this.state[key]))
+    );
+    const operation = this.pendingPostgresWrites.then(() =>
+      this.relationalStore!.writeCollectionsAtomically(expectedRevision, changes, options?.lockKey)
+    );
+    this.pendingPostgresWrites = operation.then(() => undefined, () => undefined);
+    try {
+      await operation;
+    } catch (cause) {
+      if (String(cause).includes('PERSISTENCE_REVISION_CONFLICT')) {
+        this.state = await this.relationalStore.loadState();
+      }
+      throw cause;
+    }
+    this.state = this.clone(draft);
+    return result;
+  }
+
   async flush(): Promise<void> {
     await this.pendingPostgresWrites;
     const error = this.pendingPostgresWriteError;
@@ -214,7 +260,21 @@ export class PersistenceService implements OnModuleDestroy {
   }
 
   markEventPublished(eventExternalId: string): Promise<boolean> {
-    if (!this.enabled || this.backend !== 'postgres') return Promise.resolve(true);
+    if (!this.enabled) return Promise.resolve(true);
+    if (this.backend === 'file') {
+      const outbox = Array.isArray(this.state.eventOutbox)
+        ? this.state.eventOutbox as Array<Record<string, unknown>>
+        : [];
+      const record = outbox.find((item) => item.id === `outbox:${eventExternalId}`);
+      if (record && record.status !== 'published') {
+        record.status = 'published';
+        record.publishedAt = new Date().toISOString();
+        record.attempts = Number(record.attempts ?? 0) + 1;
+        this.state.eventOutbox = outbox;
+        this.writeFileState();
+      }
+      return Promise.resolve(true);
+    }
     return this.enqueuePostgresWrite(`event-published:${eventExternalId}`, () => {
       if (!this.relationalStore) throw new Error('RELATIONAL_PERSISTENCE_UNAVAILABLE: relational state store is not initialized.');
       return this.relationalStore.markEventPublished(eventExternalId);
@@ -294,7 +354,7 @@ export class PersistenceService implements OnModuleDestroy {
   }
 
   stateRevision(): string {
-    return computePersistenceRevision(this.state);
+    return computePersistenceRevision(this.clone(this.state));
   }
 
   enterMaintenanceMode(): void {
@@ -373,6 +433,35 @@ export class PersistenceService implements OnModuleDestroy {
       this.logger.warn(`Ignoring unreadable persistence file ${this.filePath}: ${String(error)}`);
       return {};
     }
+  }
+
+  private mergeFileEventOutbox(value: unknown) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+    const current = Array.isArray(this.state.eventOutbox)
+      ? this.state.eventOutbox as Array<Record<string, unknown>>
+      : [];
+    const byId = new Map(current.map((item) => [String(item.id), item]));
+    for (const [sessionId, events] of Object.entries(value as Record<string, CollaborationEvent[]>)) {
+      if (!Array.isArray(events)) continue;
+      for (const event of events) {
+        const id = `outbox:${event.id}`;
+        if (byId.has(id)) continue;
+        const record: Record<string, unknown> = {
+          id,
+          idempotencyKey: `session:${sessionId}:event:${event.id}`,
+          aggregateType: 'session',
+          aggregateId: sessionId,
+          eventType: event.type,
+          payload: { event },
+          status: 'pending',
+          attempts: 0,
+          createdAt: event.createdAt
+        };
+        current.push(record);
+        byId.set(id, record);
+      }
+    }
+    this.state.eventOutbox = current;
   }
 
   private writeFileState(state: PersistedState = this.state) {

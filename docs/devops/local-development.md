@@ -370,17 +370,25 @@ npm run build
 
 真实 Codex 验收属于可能产生费用的外部调用，必须先取得当次明确授权，再设置 `RUN_REAL_CODEX_ACCEPTANCE=1` 执行 `npm run test:e2e:real-codex-acceptance`。`probe` 模式可用 `REAL_CODEX_ACCEPTANCE_RUNS` 显式限制调用次数；默认仍为 3。验收同时检查 `turn/start` 接受 Strict Schema、最终 `item/completed` 输出通过同源 validator、Token/CLI session/stream metrics 均有效。
 
-## 稳定后端与 Watch 边界
+## 稳定后端与手动重启
 
-需要验证业务文件修改不会触发平台重启时，使用编译产物入口：
+开发入口 `npm run dev` 启动后端、Web 和 Local Runtime。后端只启动一次，不监听 `apps/server/src`、`packages/shared/src` 或业务工作区；修改任何文件都不会自动重启后端。
+
+修改后端或 shared 源码后，在另一个终端显式执行：
+
+```bash
+npm run dev:restart-server
+```
+
+该命令只重启后端子进程，按需重新构建 shared/server，并等待 `/api/health` 返回新的 `processId`；Web 和 Local Runtime 保持运行。命令超时或构建失败时返回非零退出码。后端重启会中断正在执行的群聊，因此应在当前会话没有执行中任务时运行。
+
+需要脱离开发进程组、单独验证编译产物时，使用：
 
 ```bash
 npm run start:server:stable
 ```
 
 该命令先构建 shared/server，再运行 `dist/apps/server/src/main.js`，不启用源码 Watch。通过 `GET /api/health` 记录 `processId` 和 `startedAt`；修改会话绑定的业务目录后，这两个值都应保持不变。
-
-开发入口 `npm run dev` 的后端 Watch 只覆盖 `apps/server/src` 和 `packages/shared/src`。每次触发会记录具体文件路径、watcher PID 和 watcher `startedAt`，业务工作区、Browser Mirror 和 `dist` 不属于 Watch 根目录。
 
 ## Local Runtime CLI 内部预览
 
@@ -399,7 +407,13 @@ node $runtimeCli version
 npm run dev
 ```
 
-开发 supervisor 会同时启动 Server、Web 和 Local Runtime CLI。回环地址启用开发管理员豁免时，CLI 会自动取得本机设备令牌，不要求开发者先执行 `agent-runtime login`。创建会话并选择“本机 Runtime”后，点击“选择本机目录”，平台会通过已连接的 CLI 打开操作系统目录选择器；目录绝对路径只写入 CLI 本地状态，浏览器和平台后端只接收 `workspaceId` 并自动选中新工作区。
+开发 supervisor 只常驻启动 Server 和 Web，Local Runtime CLI 在创建本机会话时按需唤醒。首次使用前需为当前构建注册一次自定义协议：
+
+```powershell
+node $runtimeCli install --server http://127.0.0.1:8089
+```
+
+回环地址启用开发管理员豁免时，被唤醒的 CLI 会自动取得本机设备令牌，不要求开发者先执行 `agent-runtime login`。创建会话并选择“本机 Runtime”后，浏览器先检查在线设备；若离线则通过 `agent-runtime://` 唤醒 CLI，连接成功后探测 Codex 与 Claude Code 是否已安装可用。点击“选择本机目录”会通过已连接的 CLI 打开操作系统目录选择器；目录绝对路径只写入 CLI 本地状态，浏览器和平台后端只接收 `workspaceId` 并自动选中新工作区。
 
 单独运行 CLI 或非回环部署仍保留显式设备码绑定流程：
 
@@ -423,7 +437,7 @@ Local Runtime 的设备审批、设备管理和工作区列表使用单用户管
 
 创建会话时选择“本机 Runtime”，可直接点击“选择本机目录”新增并选中工作区，也可选择 CLI 已注册且在线的工作区。平台只保存 `workspaceId`，本地绝对路径只存在于 CLI 状态文件：Windows 默认位于 `%LOCALAPPDATA%\agent-runtime\state.json`，可用 `AGENT_RUNTIME_STATE_FILE` 覆盖以进行隔离测试。
 
-Local Runtime CLI 会通过 Adapter Registry 探测并上报本机实际可用的 Codex 与 Claude Code。工作区连接后，浏览器会按照设备上报的 `runtimeTypes` 自动启用对应选项，不要求用户先在浏览器填写命令路径。Windows 下 Claude Code 默认从 PATH 中的 `claude.exe` 探测；若 npm 只暴露 `claude.cmd`，CLI 会解析其同级安装目录中的 `node_modules/@anthropic-ai/claude-code/bin/claude.exe`。也可以显式指定：
+Local Runtime CLI 会通过 Adapter Registry 探测并上报本机实际可用的 Codex 与 Claude Code。探测只执行版本检查，不启动模型进程，也不会自动安装缺失的 CLI；模型进程只在任务实际产生 invocation 时启动。工作区连接后，浏览器会按照设备上报的 `runtimeTypes` 自动启用对应选项，不要求用户先在浏览器填写命令路径。Windows 下 Claude Code 默认从 PATH 中的 `claude.exe` 探测；若 npm 只暴露 `claude.cmd`，CLI 会解析其同级安装目录中的 `node_modules/@anthropic-ai/claude-code/bin/claude.exe`。也可以显式指定：
 
 ```powershell
 $env:AGENT_RUNTIME_CLAUDE_COMMAND='C:\path\to\claude.exe'

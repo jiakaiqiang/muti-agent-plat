@@ -12,12 +12,16 @@ import { CapabilitiesModule } from '../capabilities/capabilities.module.js';
 import { SessionsController } from './sessions.controller.js';
 import { SessionsService } from './sessions.service.js';
 import { FileRevisionsModule } from '../file-revisions/file-revisions.module.js';
+import { ContextManagementModule } from '../context-management/context-management.module.js';
+import { MessageRoutingModule } from '../message-routing/message-routing.module.js';
 
 @Module({
   imports: [
     AgentsModule,
     EventsModule,
     MemoryModule,
+    ContextManagementModule,
+    MessageRoutingModule,
     IntentRecognitionModule,
     OrchestratorModule,
     RuntimeModule,

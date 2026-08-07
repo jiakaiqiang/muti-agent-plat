@@ -147,6 +147,7 @@ export class WorkflowRuntimeService {
       workflowVersion: version.version,
       workflowName: version.name,
       sessionId: input.session.id,
+      workItemId: input.session.activeWorkItemId,
       briefId: input.brief.id,
       ownerId: input.session.ownerId,
       definitionSnapshot: structuredClone(version),
@@ -287,8 +288,29 @@ export class WorkflowRuntimeService {
   ) {
     return this.serialize(runId, async () => {
       const run = this.get(runId);
-      if (this.isTerminal(run.status) || this.execution.isRunning(run.sessionId)) return false;
+      if (this.execution.isRunning(run.sessionId)) return false;
+      if (
+        recoveryContext &&
+        run.workItemId &&
+        recoveryContext.session.activeWorkItemId !== run.workItemId
+      ) return false;
       if (recoveryContext) this.contexts.set(run.id, recoveryContext);
+      if (run.status === 'failed') {
+        const failedNodeId = this.failedNodeId(run);
+        if (!failedNodeId || !this.contexts.has(run.id)) return false;
+        run.currentNodeId = failedNodeId;
+        this.failCurrentNodeRun(run);
+        run.status = 'running';
+        run.failure = undefined;
+        run.completedAt = undefined;
+        run.revision += 1;
+        run.updatedAt = nowIso();
+        this.persist();
+        await this.publishProjection(run);
+        await this.activateCurrentNode(run.id);
+        return true;
+      }
+      if (this.isTerminal(run.status)) return false;
       const nodeRun = this.currentNodeRun(run);
       const task = nodeRun?.relatedTaskId ? this.tasks.find(run.sessionId, nodeRun.relatedTaskId) : undefined;
       if (!nodeRun || nodeRun.status !== 'running' || !task) return false;
@@ -374,6 +396,7 @@ export class WorkflowRuntimeService {
     const task: AgentTask = {
       id: taskId,
       sessionId: run.sessionId,
+      workItemId: run.workItemId,
       title: node.name?.trim() || `工作流阶段 · ${agent.name}`,
       description: node.stageDescription?.trim() || `执行工作流「${run.workflowName}」中的 ${agent.name} 阶段。`,
       status: 'assigned',
@@ -428,6 +451,7 @@ export class WorkflowRuntimeService {
     const task: AgentTask = {
       id: taskId,
       sessionId: run.sessionId,
+      workItemId: run.workItemId,
       title: node.name?.trim() || `机器人确认 · ${reviewer.name}`,
       description: [
         node.reviewPrompt,
@@ -784,6 +808,7 @@ export class WorkflowRuntimeService {
     failure?: WorkflowRun['failure']
   ) {
     if (this.isTerminal(run.status)) return;
+    if (status === 'failed') this.failCurrentNodeRun(run, failure);
     run.status = status;
     run.currentNodeId = undefined;
     run.failure = failure;
@@ -796,8 +821,8 @@ export class WorkflowRuntimeService {
       : status === 'failed'
         ? 'workflow_run_failed'
         : 'workflow_run_cancelled';
-    await this.runEffect(run, 'emit_event', `run-${status}`, { failure }, () => {
-      this.events.createOnce(`workflow-run-${status}:${run.id}`, {
+    await this.runEffect(run, 'emit_event', `run-${status}:${run.revision}`, { failure }, () => {
+      this.events.createOnce(`workflow-run-${status}:${run.id}:${run.revision}`, {
         sessionId: run.sessionId,
         type: eventType,
         priority: status === 'failed' ? 'high' : undefined,
@@ -951,6 +976,31 @@ export class WorkflowRuntimeService {
 
   private currentNodeRun(run: WorkflowRun) {
     return [...this.listNodeRuns(run.id)].reverse().find((item) => item.nodeId === run.currentNodeId);
+  }
+
+  private failedNodeId(run: WorkflowRun) {
+    const definitionNodeIds = new Set(run.definitionSnapshot.nodes.map((node) => node.id));
+    if (run.failure?.nodeId && definitionNodeIds.has(run.failure.nodeId)) return run.failure.nodeId;
+    return [...this.listNodeRuns(run.id)]
+      .reverse()
+      .find((item) => definitionNodeIds.has(item.nodeId) && ['failed', 'running'].includes(item.status))
+      ?.nodeId;
+  }
+
+  private failCurrentNodeRun(run: WorkflowRun, failure = run.failure) {
+    const failedNodeId = failure?.nodeId ?? run.currentNodeId;
+    if (!failedNodeId) return;
+    const nodeRun = [...this.listNodeRuns(run.id)]
+      .reverse()
+      .find((item) => item.nodeId === failedNodeId && item.status === 'running');
+    if (!nodeRun) return;
+    nodeRun.status = 'failed';
+    nodeRun.completedAt = nowIso();
+    nodeRun.error = {
+      code: failure?.code ?? 'WORKFLOW_NODE_EXECUTION_FAILED',
+      message: failure?.message ?? 'Workflow node execution failed.',
+      retryable: true
+    };
   }
 
   private nextAttempt(runId: string, nodeId: string) {

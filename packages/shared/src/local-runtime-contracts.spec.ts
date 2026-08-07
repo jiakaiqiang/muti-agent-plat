@@ -6,13 +6,34 @@ import {
   LOCAL_RUNTIME_PROTOCOL_VERSION
 } from './local-runtime-contracts.js';
 import type {
+  LocalRuntimeCapabilityStatus,
   LocalRuntimeInvocationResult,
   LocalRuntimeWorkspacePermissionGrantRequest,
   LocalRuntimeWorkspaceOperationRequest
 } from './local-runtime-contracts.js';
 
+test('Local Runtime capability probes distinguish executable readiness without invoking a model', () => {
+  const capabilities: LocalRuntimeCapabilityStatus[] = [
+    {
+      runtimeType: 'codex',
+      status: 'ready',
+      version: 'codex-cli 1.0.0',
+      checkedAt: '2026-08-06T00:00:00.000Z'
+    },
+    {
+      runtimeType: 'claude_code',
+      status: 'not_found',
+      reasonCode: 'RUNTIME_COMMAND_NOT_FOUND',
+      checkedAt: '2026-08-06T00:00:00.000Z'
+    }
+  ];
+
+  assert.equal(capabilities[0]?.status, 'ready');
+  assert.equal(capabilities[1]?.reasonCode, 'RUNTIME_COMMAND_NOT_FOUND');
+});
+
 test('local runtime protocol and default permissions are explicit', () => {
-  assert.equal(LOCAL_RUNTIME_PROTOCOL_VERSION, 6);
+  assert.equal(LOCAL_RUNTIME_PROTOCOL_VERSION, 7);
   assert.deepEqual(Object.keys(DEFAULT_LOCAL_RUNTIME_PERMISSION_POLICY).sort(), [...LOCAL_RUNTIME_PERMISSION_KEYS].sort());
   assert.equal(DEFAULT_LOCAL_RUNTIME_PERMISSION_POLICY.workspace_read, 'allow');
   assert.equal(DEFAULT_LOCAL_RUNTIME_PERMISSION_POLICY.workspace_write, 'allow');

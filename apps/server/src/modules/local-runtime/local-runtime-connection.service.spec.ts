@@ -65,11 +65,55 @@ test('authenticated Local Runtime carries an invocation and disconnects without 
     }));
     assert.equal((await inbox.next('local_runtime.connected')).payload.deviceId, 'device-local-runtime');
 
-    const authorization = connections.authorizeWorkspace();
+    const capabilityRefresh = connections.refreshCapabilities('device-local-runtime');
+    const capabilityRequest = await inbox.next('local_runtime.capabilities.request');
+    socket.send(JSON.stringify({
+      kind: 'local_runtime.capabilities.result',
+      payload: {
+        requestId: capabilityRequest.payload.requestId,
+        capabilities: [
+          {
+            runtimeType: 'codex',
+            status: 'ready',
+            version: 'codex-cli 1.1.0',
+            checkedAt: '2026-08-06T00:00:00.000Z'
+          },
+          {
+            runtimeType: 'claude_code',
+            status: 'ready',
+            version: 'claude-code 2.2.0',
+            checkedAt: '2026-08-06T00:00:00.000Z'
+          }
+        ]
+      }
+    }));
+    assert.deepEqual(await capabilityRefresh, [
+      {
+        runtimeType: 'codex',
+        status: 'ready',
+        version: 'codex-cli 1.1.0',
+        checkedAt: '2026-08-06T00:00:00.000Z'
+      },
+      {
+        runtimeType: 'claude_code',
+        status: 'ready',
+        version: 'claude-code 2.2.0',
+        checkedAt: '2026-08-06T00:00:00.000Z'
+      }
+    ]);
+
+    const cancelledAuthorization = connections.authorizeWorkspace(undefined, 'authorization-cancelled');
+    const cancelledRequest = await inbox.next('local_runtime.workspace.authorization.request');
+    const authorization = connections.authorizeWorkspace(undefined, 'authorization-selected');
     const authorizationRequest = await inbox.next('local_runtime.workspace.authorization.request');
-    await assert.rejects(
-      Promise.resolve().then(() => connections.authorizeWorkspace()),
-      /正在等待目录选择/
+    assert.equal(cancelledRequest.payload.requestId, 'authorization-cancelled');
+    assert.equal(authorizationRequest.payload.requestId, 'authorization-selected');
+
+    assert.equal(connections.cancelWorkspaceAuthorization('authorization-cancelled'), true);
+    await assert.rejects(cancelledAuthorization, /已取消选择本机工作目录/);
+    assert.equal(
+      (await inbox.next('local_runtime.workspace.authorization.cancel')).payload.requestId,
+      'authorization-cancelled'
     );
     socket.send(JSON.stringify({
       kind: 'local_runtime.workspace.authorization.result',
@@ -106,6 +150,7 @@ test('authenticated Local Runtime carries an invocation and disconnects without 
     assert.equal(summary?.workspaceId, 'workspace-local-runtime');
     assert.equal(summary?.displayName, 'local-project');
     assert.deepEqual(summary?.runtimeTypes, ['codex', 'claude_code']);
+    assert.equal(summary?.runtimeCapabilities[0]?.version, 'codex-cli 1.1.0');
     assert.equal('path' in (summary ?? {}), false);
     assert.equal(gateway.getRegistration('workspace-local-runtime')?.providerKind, 'local_bridge');
 

@@ -18,7 +18,7 @@ export class TasksService {
     sessionId: UUID,
     suggestions: SuggestedAgentTask[],
     agentIdByKey: Map<string, string>,
-    options: { assignedBy?: ActorRef; routingMode?: TaskRoutingMode } = {}
+    options: { assignedBy?: ActorRef; routingMode?: TaskRoutingMode; workItemId?: UUID } = {}
   ) {
     const titleToId = new Map<string, string>();
     const tasks: AgentTask[] = suggestions.map((suggestion) => {
@@ -28,6 +28,7 @@ export class TasksService {
       const task: AgentTask = {
         id: crypto.randomUUID(),
         sessionId,
+        workItemId: options.workItemId,
         title: suggestion.title,
         description: suggestion.description,
         status: 'assigned',
@@ -83,15 +84,16 @@ export class TasksService {
     return task;
   }
 
-  unfinished(sessionId: string) {
+  unfinished(sessionId: string, workItemId?: string) {
     return this.list(sessionId).filter((task) =>
+      (!workItemId || !task.workItemId || task.workItemId === workItemId) &&
       ['pending', 'assigned', 'accepted', 'claimed', 'running', 'waiting', 'blocked', 'reworking'].includes(task.status)
     );
   }
 
-  resetStaleRunning(sessionId: string) {
+  resetStaleRunning(sessionId: string, workItemId?: string) {
     for (const task of this.list(sessionId)) {
-      if (task.status === 'running') {
+      if (task.status === 'running' && (!workItemId || !task.workItemId || task.workItemId === workItemId)) {
         this.update(task, { status: 'pending' });
       }
     }

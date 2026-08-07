@@ -46,6 +46,13 @@ docs/ai-agent-context/tool-workflow-rules.md
 - 质量验收：`docs/quality/`
 - 运维开发：`docs/devops/`
 
+## 本地开发
+
+- 后端 dev 不使用 watch，`apps/server/scripts/dev-entry.mjs` 固定 `sourceWatch=disabled`。
+- 不要引入 watch、nodemon、`tsc --watch`、`--watch` 等自动重启方案。
+- 改完后端代码后手动执行 `npm run dev:restart-server`。
+- 前端由 Vite HMR 自动生效。前端已热更但后端未重启时，新接口会 404（如 `Cannot GET /api/...`），先重启后端再排查代码。
+
 ## 验证
 
 根据任务选择最小有效验证集合：

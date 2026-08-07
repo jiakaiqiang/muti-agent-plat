@@ -112,6 +112,24 @@ const workspaceDirectoryRequiredMessage = computed(() =>
     ? '请输入服务器本地工作目录'
     : '请先选择已连接的本地 Runtime 工作区'
 )
+const localRuntimeConnectionLabel = computed(() => {
+  const capabilitySummary = localRuntimeStore.runtimeCapabilities.map((capability) => {
+    const name = capability.runtimeType === 'codex' ? 'Codex' : 'Claude Code'
+    const status = capability.status === 'ready'
+      ? '可用'
+      : capability.status === 'not_found' ? '未安装' : '探测失败'
+    return `${name} ${status}`
+  }).join('，')
+  const labels = {
+    idle: '等待检测本地助手',
+    checking: '正在检测本地助手...',
+    waking: '正在唤醒本地助手...',
+    probing: '正在探测 Codex / Claude Code...',
+    ready: capabilitySummary ? `本地助手已连接：${capabilitySummary}` : '本地助手已连接',
+    failed: localRuntimeStore.connectionError || '本地助手连接失败'
+  }
+  return labels[localRuntimeStore.connectionState]
+})
 
 function isRuntimeAvailableForWorkspace(runtimeType: RuntimeType) {
   if (sessionWorkspaceKind.value === 'local_bridge') {
@@ -180,6 +198,8 @@ async function switchWorkspaceView(mode: SessionViewMode) {
 }
 
 onMounted(async () => {
+  window.addEventListener('beforeunload', cancelLocalRuntimeAuthorizationOnPageExit)
+  window.addEventListener('pagehide', cancelLocalRuntimeAuthorizationOnPageExit)
   const view = routeViewMode()
   if (view) {
     sessionStore.switchViewMode(view)
@@ -234,8 +254,15 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  window.removeEventListener('beforeunload', cancelLocalRuntimeAuthorizationOnPageExit)
+  window.removeEventListener('pagehide', cancelLocalRuntimeAuthorizationOnPageExit)
   eventStore.disconnectSse()
+  void localRuntimeStore.cancelWorkspaceAuthorization().catch(() => undefined)
 })
+
+function cancelLocalRuntimeAuthorizationOnPageExit() {
+  void localRuntimeStore.cancelWorkspaceAuthorization({ keepalive: true }).catch(() => undefined)
+}
 
 function showMessage(text: string, type: 'success' | 'warning' | 'error' | 'info' = 'info') {
   workspaceUiStore.showMessage(text, type)
@@ -288,6 +315,10 @@ const agents = computed(() =>
 )
 const tasks = computed(() => eventStore.taskStates(currentSessionId.value))
 const activeConfirmation = computed(() => eventStore.activeConfirmation(currentSessionId.value))
+const activeWorkItem = computed(() => sessionStore.activeWorkItem)
+const pendingIntentRoutingCount = computed(() =>
+  currentSessionId.value ? sessionStore.pendingIntentRoutingCount(currentSessionId.value) : 0
+)
 const activeWorkspaceWritebacks = computed(() =>
   (sessionStore.currentSession?.workspaceWritebacks ?? [])
     .filter((writeback) => writeback.status === 'conflicted' || writeback.status === 'failed')
@@ -616,10 +647,15 @@ function openCreateSessionDialog() {
     void runtimeModelStore.loadConfig().catch(() => undefined)
   }
   void runtimeModelStore.loadAvailability().catch(() => undefined)
-  if (sessionWorkspaceKind.value === 'local_bridge') loadLocalRuntimeWorkspaces()
+  if (sessionWorkspaceKind.value === 'local_bridge') void ensureLocalRuntimeReady()
 }
 
 function closeCreateSessionDialog() {
+  localRuntimeStore.cancelConnectionCheck()
+  void localRuntimeStore.cancelWorkspaceAuthorization().catch(() => undefined)
+  sessionLocalRuntimeWorkspaceId.value = ''
+  sessionBindingStatus.value = 'idle'
+  sessionCreateError.value = ''
   workspaceUiStore.closeCreateSession()
 }
 
@@ -643,30 +679,63 @@ function handleRuntimePreferenceChange() {
     })
 }
 
+function reconcileLocalRuntimePreference() {
+  if (sessionWorkspaceKind.value !== 'local_bridge') return
+  const availableRuntimeTypes = selectedLocalRuntimeWorkspace.value?.runtimeTypes
+    .filter((runtimeType): runtimeType is Extract<RuntimeType, 'codex' | 'claude_code'> => (
+      runtimeType === 'codex' || runtimeType === 'claude_code'
+    )) ?? []
+  const selectedRuntimeType = sessionRuntimeType.value
+  if (
+    !selectedRuntimeType ||
+    (selectedRuntimeType !== 'codex' && selectedRuntimeType !== 'claude_code') ||
+    !availableRuntimeTypes.includes(selectedRuntimeType)
+  ) {
+    sessionRuntimeType.value = availableRuntimeTypes[0] ?? ''
+  }
+}
+
 function selectSessionWorkspaceKind(kind: WorkspaceKind) {
+  if (kind !== 'local_bridge') {
+    void localRuntimeStore.cancelWorkspaceAuthorization().catch(() => undefined)
+    sessionLocalRuntimeWorkspaceId.value = ''
+    sessionBindingStatus.value = 'idle'
+  }
   workspaceUiStore.setSessionWorkspaceKind(kind)
   sessionCreateError.value = ''
   sessionFallbackRuntimeTypes.value = []
-  if (kind === 'local_bridge') loadLocalRuntimeWorkspaces()
+  if (kind === 'local_bridge') void ensureLocalRuntimeReady()
 }
 
-function loadLocalRuntimeWorkspaces() {
-  void localRuntimeStore.loadWorkspaces().then((workspaces) => {
+async function ensureLocalRuntimeReady() {
+  sessionCreateError.value = ''
+  try {
+    const workspaces = await localRuntimeStore.ensureConnected()
     if (!workspaces.some((workspace) => workspace.workspaceId === sessionLocalRuntimeWorkspaceId.value)) {
       sessionLocalRuntimeWorkspaceId.value = workspaces[0]?.workspaceId ?? ''
     }
-  }).catch((error) => {
+    reconcileLocalRuntimePreference()
+    handleRuntimePreferenceChange()
+    return workspaces
+  } catch (error) {
+    if (isAbortError(error)) return []
     sessionCreateError.value = error instanceof Error ? error.message : '读取本地 Runtime 工作区失败'
-  })
+    return []
+  }
 }
 
 async function authorizeLocalRuntimeWorkspace() {
   sessionCreateError.value = ''
   try {
+    if (localRuntimeStore.connectionState !== 'ready') {
+      await localRuntimeStore.ensureConnected()
+    }
     const workspace = await localRuntimeStore.authorizeWorkspace()
     sessionLocalRuntimeWorkspaceId.value = workspace.workspaceId
+    reconcileLocalRuntimePreference()
     handleRuntimePreferenceChange()
   } catch (error) {
+    if (isAbortError(error)) return
     sessionCreateError.value = error instanceof Error ? error.message : '本机工作目录授权失败'
   }
 }
@@ -718,6 +787,15 @@ async function createSessionFromDialog() {
   }
   if (!selectedSessionAgentIds.value.length) {
     sessionCreateError.value = '请选择至少一个 Agent'
+    showMessage(sessionCreateError.value, 'warning')
+    return
+  }
+  if (sessionWorkspaceKind.value === 'local_bridge' && localRuntimeStore.connectionState !== 'ready') {
+    await ensureLocalRuntimeReady()
+    if (!localRuntimeStore.isConnected || localRuntimeStore.connectionError) return
+  }
+  if (sessionWorkspaceKind.value === 'local_bridge' && !sessionRuntimeType.value) {
+    sessionCreateError.value = '当前设备没有可用于创建会话的 Codex 或 Claude Code'
     showMessage(sessionCreateError.value, 'warning')
     return
   }
@@ -1021,6 +1099,18 @@ async function retryActiveInterruptedFileRevision() {
 async function resolveConfirmation(optionKey: string) {
   if (!sessionStore.currentSession || !activeConfirmation.value) return
   const sessionId = sessionStore.currentSession.id
+  if (
+    activeConfirmation.value.reason === 'intent_relation_clarification' &&
+    activeConfirmation.value.routingId &&
+    (optionKey === 'continue_current' || optionKey === 'related_new' || optionKey === 'independent_new')
+  ) {
+    await sessionStore.clarifyIntentRouting(sessionId, activeConfirmation.value.routingId, {
+      choice: optionKey,
+      confirmationId: activeConfirmation.value.confirmationId
+    })
+    await reconcileSessionEvents(sessionId)
+    return
+  }
   if (
     activeConfirmation.value.reason === 'confirm_file_revision_apply' &&
     activeConfirmation.value.revisionId &&
@@ -1435,6 +1525,10 @@ async function submitWorkflowStepRevision() {
             <UiIcon name="folder" :size="15" />
             {{ currentWorkingDirectory.name }}
           </span>
+          <span v-if="activeWorkItem" class="work-item-chip" :title="activeWorkItem.goal">
+            <UiIcon name="workflow" :size="15" />
+            {{ activeWorkItem.title }}
+          </span>
           <button
             v-if="currentWorkingDirectory"
             class="header-icon-button"
@@ -1492,7 +1586,10 @@ async function submitWorkflowStepRevision() {
         </div>
       </header>
 
-      <div :class="['workspace-content', { 'has-backend-alert': backendConnectionNotice }]">
+      <div :class="['workspace-content', {
+        'has-backend-alert': backendConnectionNotice,
+        'has-intent-routing': pendingIntentRoutingCount > 0
+      }]">
         <div
           v-if="backendConnectionNotice"
           :class="['backend-offline-alert', `is-${backendConnectionNotice.tone}`]"
@@ -1503,6 +1600,16 @@ async function submitWorkflowStepRevision() {
             <strong>{{ backendConnectionNotice.title }}</strong>
             <span>{{ backendConnectionNotice.detail }}</span>
           </div>
+        </div>
+        <div
+          v-if="currentMode === 'chat' && pendingIntentRoutingCount > 0"
+          class="intent-routing-indicator"
+          role="status"
+          aria-live="polite"
+        >
+          <span aria-hidden="true"></span>
+          正在识别消息意图
+          <small v-if="pendingIntentRoutingCount > 1">{{ pendingIntentRoutingCount }} 条</small>
         </div>
         <FileRevisionCandidateEditor
           v-if="currentMode === 'chat' && activeFileRevisionRun"
@@ -1670,10 +1777,25 @@ async function submitWorkflowStepRevision() {
         </label>
         <div v-else class="dialog-field">
           <span>本机工作目录</span>
+          <div
+            :class="['local-runtime-connection-state', `is-${localRuntimeStore.connectionState}`]"
+            role="status"
+            aria-live="polite"
+          >
+            <span>{{ localRuntimeConnectionLabel }}</span>
+            <button
+              v-if="localRuntimeStore.connectionState === 'failed'"
+              type="button"
+              :disabled="localRuntimeStore.connectionBusy"
+              @click="ensureLocalRuntimeReady"
+            >
+              重新检测
+            </button>
+          </div>
           <div class="local-runtime-workspace-picker">
           <select
             v-model="sessionLocalRuntimeWorkspaceId"
-            :disabled="localRuntimeStore.loading || localRuntimeStore.authorizing"
+            :disabled="localRuntimeStore.loading || localRuntimeStore.authorizing || localRuntimeStore.connectionBusy"
           >
             <option value="">
               {{ localRuntimeStore.loading ? '正在读取本机 Runtime...' : '请选择已连接工作区' }}
@@ -1689,7 +1811,7 @@ async function submitWorkflowStepRevision() {
           <button
             type="button"
             class="local-runtime-authorize-button"
-            :disabled="localRuntimeStore.loading || localRuntimeStore.authorizing"
+            :disabled="localRuntimeStore.loading || localRuntimeStore.authorizing || localRuntimeStore.connectionBusy"
             @click="authorizeLocalRuntimeWorkspace"
           >
             {{ localRuntimeStore.authorizing ? '等待目录选择...' : '选择本机目录' }}
@@ -1704,12 +1826,18 @@ async function submitWorkflowStepRevision() {
         </div>
         <label class="dialog-field">
           <span>Runtime 偏好</span>
-          <select v-model="sessionRuntimeType" @change="handleRuntimePreferenceChange">
+          <select
+            v-model="sessionRuntimeType"
+            :disabled="sessionWorkspaceKind === 'local_bridge' && localRuntimeStore.connectionBusy"
+            @change="handleRuntimePreferenceChange"
+          >
             <option
               v-for="option in sessionRuntimeOptions"
               :key="option.value"
               :value="option.value"
-              :disabled="Boolean(option.value && !isRuntimeAvailableForWorkspace(option.value))"
+              :disabled="sessionWorkspaceKind === 'local_bridge'
+                ? !option.value || !isRuntimeAvailableForWorkspace(option.value)
+                : Boolean(option.value && !isRuntimeAvailableForWorkspace(option.value))"
             >
               {{ option.label }}{{ option.value && !isRuntimeAvailableForWorkspace(option.value) ? '（不可用）' : '' }}
             </option>

@@ -10,6 +10,7 @@ import { filterSessionsForDataEpoch } from '../persistence/data-epoch-guard.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { WorkdirBriefService } from '../runtimes/streaming/workdir-brief.service.js';
 import { SessionsService } from '../sessions/sessions.service.js';
+import { ContextManagementService } from '../context-management/context-management.service.js';
 
 const INTERRUPT_ON_BOOT_STATUSES = new Set<SessionStatus>([
   'AGENT_DISCUSSING',
@@ -32,7 +33,8 @@ export class RecoveryService implements OnApplicationBootstrap {
     private readonly sessions: SessionsService,
     private readonly persistence: PersistenceService,
     @Optional() private readonly workdirBrief?: WorkdirBriefService,
-    @Optional() private readonly events?: EventsService
+    @Optional() private readonly events?: EventsService,
+    @Optional() private readonly contextManagement?: ContextManagementService
   ) {}
 
   async onApplicationBootstrap() {
@@ -52,8 +54,28 @@ export class RecoveryService implements OnApplicationBootstrap {
     }
 
     const sessions = filterSessionsForDataEpoch(this.sessions.listRaw(), this.persistence.currentDataEpoch());
+    if ((process.env.AGENT_CLUSTER_WORKITEM_BOOTSTRAP ?? 'true').trim().toLowerCase() !== 'false') {
+      let bootstrapped = 0;
+      for (const session of sessions) {
+        const existing = this.contextManagement?.activeWorkItem(session);
+        if (existing || !this.contextManagement) continue;
+        await this.contextManagement.ensureInitialWorkItem(
+          session,
+          `legacy-bootstrap:${session.id}`,
+          session.originalInput,
+          workItemStatusForSession(session.status)
+        );
+        bootstrapped += 1;
+      }
+      if (bootstrapped > 0) this.logger.log(`Bootstrapped ${bootstrapped} legacy Session WorkItem context(s).`);
+    }
     for (const session of sessions) {
       this.interruptSessionFromPreviousProcess(session);
+    }
+
+    const routingRecoveries = await this.sessions.recoverIntentRoutings?.(sessions.map((session) => session.id)) ?? [];
+    if (routingRecoveries.length > 0) {
+      this.logger.log(`Intent routing recovery reconciled ${routingRecoveries.length} record(s).`);
     }
 
     await this.reconcileWorkspaceLeases(sessions);
@@ -148,4 +170,14 @@ export class RecoveryService implements OnApplicationBootstrap {
     });
     return payload.runtimeInvocationId;
   }
+}
+
+function workItemStatusForSession(status: SessionStatus): 'OPEN' | 'WAITING_USER' | 'EXECUTING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' {
+  if (status === 'COMPLETED') return 'COMPLETED';
+  if (status === 'FAILED' || status === 'INTERRUPTED') return 'FAILED';
+  if (status === 'CANCELLED') return 'CANCELLED';
+  if (status === 'WAIT_USER_CONFIRM' || status === 'WAIT_WORKFLOW_SELECT' || status === 'WAIT_WORKFLOW_STEP_CONFIRM' ||
+      status === 'WAIT_WORKSPACE_CONFLICT_RESOLUTION' || status === 'WAIT_USER_DECISION' || status === 'PAUSED') return 'WAITING_USER';
+  if (status === 'EXECUTING' || status === 'AGENT_DISCUSSING' || status === 'REVISING_BRIEF' || status === 'POST_REVIEW' || status === 'REWORKING') return 'EXECUTING';
+  return 'OPEN';
 }

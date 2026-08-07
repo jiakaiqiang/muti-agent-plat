@@ -16,6 +16,8 @@ import type {
   AgentRuntimeRunHandle,
   ExecutionTermination,
   InvocationPlan,
+  LocalRuntimeCapabilityRefreshResult,
+  LocalRuntimeCapabilityStatus,
   LocalRuntimeClientMessage,
   LocalRuntimeHello,
   LocalRuntimePermission,
@@ -102,6 +104,13 @@ type PendingProviderConnection = {
   timer: ReturnType<typeof setTimeout>;
 };
 
+type PendingCapabilityRefresh = {
+  deviceId: string;
+  resolve: (capabilities: LocalRuntimeCapabilityStatus[]) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
 export type LocalRuntimeCandidate = {
   runtimeType: RuntimeType;
   available: true;
@@ -122,6 +131,7 @@ export class LocalRuntimeConnectionService {
   private readonly pendingWorkspaceAuthorizations = new Map<string, PendingWorkspaceAuthorization>();
   private readonly pendingWorkspacePermissionGrants = new Map<string, PendingWorkspacePermissionGrant>();
   private readonly pendingProviderConnections = new Map<string, PendingProviderConnection>();
+  private readonly pendingCapabilityRefreshes = new Map<string, PendingCapabilityRefresh>();
   private readonly operationAudits: LocalRuntimeOperationAudit[];
   private readonly interruptionSubject = new Subject<{
     sessionId: string;
@@ -165,11 +175,32 @@ export class LocalRuntimeConnectionService {
     return [...this.workspaces.values()].map((workspace) => {
       const client = this.clientsByDeviceId.get(workspace.deviceId);
       const runtimeTypes = Object.keys(client?.hello?.runtimes ?? {}).filter(isRuntimeType);
-      return structuredClone({ ...workspace, runtimeTypes });
+      const runtimeCapabilities = capabilityStatuses(client?.hello);
+      return structuredClone({ ...workspace, runtimeTypes, runtimeCapabilities });
     });
   }
 
-  authorizeWorkspace(deviceId?: string): Promise<LocalRuntimeWorkspaceSummary> {
+  refreshCapabilities(deviceId?: string): Promise<LocalRuntimeCapabilityStatus[]> {
+    const connectedClients = [...this.clientsByDeviceId.values()]
+      .filter((client) => client.hello && client.socket.readyState === WebSocket.OPEN)
+      .sort((left, right) => right.connectedAt.localeCompare(left.connectedAt));
+    const client = deviceId
+      ? connectedClients.find((candidate) => candidate.deviceId === deviceId)
+      : connectedClients[0];
+    if (!client) throw new ServiceUnavailableException('Local Runtime CLI is not connected.');
+
+    const requestId = randomUUID();
+    return new Promise<LocalRuntimeCapabilityStatus[]>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingCapabilityRefreshes.delete(requestId);
+        reject(new RequestTimeoutException('Timed out while detecting local Runtime capabilities.'));
+      }, 10_000);
+      this.pendingCapabilityRefreshes.set(requestId, { deviceId: client.deviceId, resolve, reject, timer });
+      this.send(client, { kind: 'local_runtime.capabilities.request', payload: { requestId } });
+    });
+  }
+
+  authorizeWorkspace(deviceId?: string, requestedRequestId?: string): Promise<LocalRuntimeWorkspaceSummary> {
     const connectedClients = [...this.clientsByDeviceId.values()]
       .filter((client) => client.hello && client.socket.readyState === WebSocket.OPEN)
       .sort((left, right) => right.connectedAt.localeCompare(left.connectedAt));
@@ -179,14 +210,14 @@ export class LocalRuntimeConnectionService {
     if (!client) {
       throw new ServiceUnavailableException('Local Runtime 未连接，请先启动本机 Runtime。');
     }
-    if ([...this.pendingWorkspaceAuthorizations.values()].some((pending) => pending.deviceId === client.deviceId)) {
-      throw new ConflictException('本机 Runtime 正在等待目录选择，请先处理已打开的系统目录选择窗口，或等待当前请求超时后重试。');
+    const requestId = requestedRequestId || randomUUID();
+    if (this.pendingWorkspaceAuthorizations.has(requestId)) {
+      throw new ConflictException('本机目录授权请求 ID 已在使用中。');
     }
-
-    const requestId = randomUUID();
     return new Promise<LocalRuntimeWorkspaceSummary>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingWorkspaceAuthorizations.delete(requestId);
+        this.sendWorkspaceAuthorizationCancellation(client.deviceId, requestId);
         reject(new RequestTimeoutException('等待本机目录选择超时，请重试。'));
       }, 120_000);
       this.pendingWorkspaceAuthorizations.set(requestId, {
@@ -200,6 +231,16 @@ export class LocalRuntimeConnectionService {
         payload: { requestId, title: '选择 Agent Runtime 授权工作目录' }
       });
     });
+  }
+
+  cancelWorkspaceAuthorization(requestId: string): boolean {
+    const pending = this.pendingWorkspaceAuthorizations.get(requestId);
+    if (!pending) return false;
+    clearTimeout(pending.timer);
+    this.pendingWorkspaceAuthorizations.delete(requestId);
+    this.sendWorkspaceAuthorizationCancellation(pending.deviceId, requestId);
+    pending.reject(new BadRequestException('已取消选择本机工作目录。'));
+    return true;
   }
 
   grantWorkspacePermissionOnce(
@@ -236,6 +277,10 @@ export class LocalRuntimeConnectionService {
   getWorkspace(workspaceId: string) {
     const workspace = this.workspaces.get(workspaceId);
     return workspace ? structuredClone(workspace) : undefined;
+  }
+
+  isRuntimeAvailable(workspaceId: string, runtimeType: RuntimeType) {
+    return this.listRuntimeCandidates(workspaceId).some((candidate) => candidate.runtimeType === runtimeType);
   }
 
   isDeviceConnected(deviceId: string) {
@@ -475,6 +520,10 @@ export class LocalRuntimeConnectionService {
       this.finishWorkspacePermissionGrant(client, message.payload);
       return;
     }
+    if (message.kind === 'local_runtime.capabilities.result') {
+      this.finishCapabilityRefresh(client, message.payload);
+      return;
+    }
     if (message.kind === 'local_runtime.provider_connection.result') {
       this.finishProviderConnection(client, message.payload);
       return;
@@ -614,6 +663,15 @@ export class LocalRuntimeConnectionService {
     pending.resolve(workspace);
   }
 
+  private sendWorkspaceAuthorizationCancellation(deviceId: string, requestId: string) {
+    const client = this.clientsByDeviceId.get(deviceId);
+    if (!client?.hello || client.socket.readyState !== WebSocket.OPEN) return;
+    this.send(client, {
+      kind: 'local_runtime.workspace.authorization.cancel',
+      payload: { requestId }
+    });
+  }
+
   private finishWorkspacePermissionGrant(
     client: LocalRuntimeClient,
     result: LocalRuntimeWorkspacePermissionGrantResult
@@ -661,6 +719,23 @@ export class LocalRuntimeConnectionService {
       return;
     }
     pending.resolve(result.connection);
+  }
+
+  private finishCapabilityRefresh(client: LocalRuntimeClient, result: LocalRuntimeCapabilityRefreshResult) {
+    const pending = this.pendingCapabilityRefreshes.get(result.requestId);
+    if (!pending) {
+      this.logger.warn(`Ignored unmatched Local Runtime capability result: ${result.requestId}`);
+      return;
+    }
+    if (pending.deviceId !== client.deviceId) throw new Error('Capability result does not belong to this device.');
+    clearTimeout(pending.timer);
+    this.pendingCapabilityRefreshes.delete(result.requestId);
+    const capabilities = normalizeCapabilityStatuses(result.capabilities);
+    if (!client.hello) throw new Error('Local Runtime capability result arrived before hello.');
+    client.hello.capabilities = capabilities;
+    client.hello.runtimes = runtimesFromCapabilityStatuses(capabilities);
+    this.auth.touch(client.deviceId, client.hello);
+    pending.resolve(structuredClone(capabilities));
   }
 
   private recordOperationRequest(request: LocalRuntimeWorkspaceOperationRequest) {
@@ -721,6 +796,12 @@ export class LocalRuntimeConnectionService {
       clearTimeout(pending.timer);
       pending.reject(new ServiceUnavailableException('Local Runtime disconnected before storing the provider credential.'));
       this.pendingProviderConnections.delete(requestId);
+    }
+    for (const [requestId, pending] of this.pendingCapabilityRefreshes) {
+      if (pending.deviceId !== client.deviceId) continue;
+      clearTimeout(pending.timer);
+      pending.reject(new ServiceUnavailableException('Local Runtime disconnected during capability detection.'));
+      this.pendingCapabilityRefreshes.delete(requestId);
     }
     const workspaceIds = [...this.workspaces.values()]
       .filter((workspace) => workspace.deviceId === client.deviceId)
@@ -904,6 +985,38 @@ function rejectUpgrade(socket: Duplex, status: number, message: string) {
 
 function isRuntimeType(value: string): value is RuntimeType {
   return ['mock', 'generic_llm', 'code_reader', 'test_runner', 'codex', 'claude_code', 'mcp_tool', 'human'].includes(value);
+}
+
+function normalizeCapabilityStatuses(
+  capabilities: readonly LocalRuntimeCapabilityStatus[]
+): LocalRuntimeCapabilityStatus[] {
+  const byRuntime = new Map<LocalRuntimeCapabilityStatus['runtimeType'], LocalRuntimeCapabilityStatus>();
+  for (const capability of capabilities) {
+    if (!['codex', 'claude_code'].includes(capability.runtimeType)) continue;
+    if (!['ready', 'not_found', 'probe_failed'].includes(capability.status)) continue;
+    byRuntime.set(capability.runtimeType, structuredClone(capability));
+  }
+  return [...byRuntime.values()];
+}
+
+function runtimesFromCapabilityStatuses(capabilities: readonly LocalRuntimeCapabilityStatus[]) {
+  return Object.fromEntries(
+    capabilities
+      .filter((capability) => capability.status === 'ready' && capability.version)
+      .map((capability) => [capability.runtimeType, capability.version] as const)
+  );
+}
+
+function capabilityStatuses(hello: LocalRuntimeHello | undefined): LocalRuntimeCapabilityStatus[] {
+  if (!hello) return [];
+  if (hello.capabilities?.length) return normalizeCapabilityStatuses(hello.capabilities);
+  const checkedAt = nowIso();
+  return Object.entries(hello.runtimes)
+    .filter((entry): entry is [RuntimeType, string] => isRuntimeType(entry[0]) && Boolean(entry[1]))
+    .filter((entry): entry is [LocalRuntimeCapabilityStatus['runtimeType'], string] => (
+      entry[0] === 'codex' || entry[0] === 'claude_code'
+    ))
+    .map(([runtimeType, version]) => ({ runtimeType, status: 'ready', version, checkedAt }));
 }
 
 function toolNamesFor(capabilities: readonly WorkspaceCapabilityKey[]) {

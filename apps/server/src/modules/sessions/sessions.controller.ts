@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, Header, Param, Post, Put } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Header, Headers, HttpCode, Param, Post, Put } from '@nestjs/common';
 import { ok } from '../../common/api-response.js';
 import type {
   CaptureFileRevisionBaselineInput,
@@ -47,6 +47,60 @@ export class SessionsController {
   @Get('sessions/:sessionId')
   detail(@Param('sessionId') sessionId: string) {
     return ok(this.sessions.get(sessionId));
+  }
+
+  @Get('sessions/:sessionId/work-items')
+  workItems(@Param('sessionId') sessionId: string) {
+    return ok({ items: this.sessions.listWorkItems(sessionId), hasMore: false });
+  }
+
+  @Get('sessions/:sessionId/work-items/:workItemId')
+  workItem(
+    @Param('sessionId') sessionId: string,
+    @Param('workItemId') workItemId: string
+  ) {
+    return ok(this.sessions.getWorkItem(sessionId, workItemId));
+  }
+
+  @Post('sessions/:sessionId/work-items/:workItemId/activate')
+  async activateWorkItem(
+    @Param('sessionId') sessionId: string,
+    @Param('workItemId') workItemId: string
+  ) {
+    return ok(await this.sessions.activateWorkItem(sessionId, workItemId));
+  }
+
+  @Get('sessions/:sessionId/decisions')
+  decisions(@Param('sessionId') sessionId: string) {
+    return ok({ items: this.sessions.listDecisions(sessionId), hasMore: false });
+  }
+
+  @Get('sessions/:sessionId/message-routings/:routingId')
+  messageRouting(
+    @Param('sessionId') sessionId: string,
+    @Param('routingId') routingId: string
+  ) {
+    return ok(this.sessions.getIntentRouting(sessionId, routingId));
+  }
+
+  @Post('sessions/:sessionId/message-routings/:routingId/clarify')
+  async clarifyMessageRouting(
+    @Param('sessionId') sessionId: string,
+    @Param('routingId') routingId: string,
+    @Body() body: {
+      choice: 'continue_current' | 'related_new' | 'independent_new';
+      confirmationId?: string;
+    }
+  ) {
+    if (!['continue_current', 'related_new', 'independent_new'].includes(body.choice)) {
+      throw new BadRequestException('Invalid intent clarification choice.');
+    }
+    return ok(await this.sessions.clarifyIntentRouting(sessionId, routingId, body));
+  }
+
+  @Get('sessions/:sessionId/debug/intent-routing')
+  debugIntentRouting(@Param('sessionId') sessionId: string) {
+    return ok(this.sessions.debugIntentRouting(sessionId));
   }
 
   @Get('sessions/:sessionId/file-revisions')
@@ -146,11 +200,13 @@ export class SessionsController {
   }
 
   @Post('sessions/:sessionId/messages')
+  @HttpCode(202)
   sendMessage(
     @Param('sessionId') sessionId: string,
-    @Body() body: { content: string; mentionedAgentIds?: string[] }
+    @Body() body: { content: string; mentionedAgentIds?: string[] },
+    @Headers('idempotency-key') idempotencyKey?: string
   ) {
-    return this.sessions.sendMessage(sessionId, body.content, body.mentionedAgentIds).then(ok);
+    return this.sessions.sendMessage(sessionId, body.content, body.mentionedAgentIds, idempotencyKey).then(ok);
   }
 
   @Post('sessions/:sessionId/memories/confirm')

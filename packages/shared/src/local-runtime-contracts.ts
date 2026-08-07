@@ -14,7 +14,7 @@ import type {
   WorkspaceRevision
 } from './contracts.js';
 
-export const LOCAL_RUNTIME_PROTOCOL_VERSION = 6 as const;
+export const LOCAL_RUNTIME_PROTOCOL_VERSION = 7 as const;
 
 export const LOCAL_RUNTIME_PERMISSION_KEYS = [
   'workspace_read',
@@ -56,6 +56,20 @@ export type LocalRuntimeWorkspaceSummary = LocalRuntimeWorkspaceRegistration & {
   deviceId: UUID;
   connectedAt: ISODateTime;
   runtimeTypes: readonly RuntimeType[];
+  runtimeCapabilities: readonly LocalRuntimeCapabilityStatus[];
+};
+
+export type LocalRuntimeCapabilityStatus = {
+  runtimeType: Extract<RuntimeType, 'codex' | 'claude_code'>;
+  status: 'ready' | 'not_found' | 'probe_failed';
+  version?: string;
+  reasonCode?: string;
+  checkedAt: ISODateTime;
+};
+
+export type LocalRuntimeCapabilityRefreshResult = {
+  requestId: UUID;
+  capabilities: readonly LocalRuntimeCapabilityStatus[];
 };
 
 export type LocalRuntimeWorkspaceAuthorizationRequest = {
@@ -194,6 +208,7 @@ export type LocalRuntimeHello = {
   cliVersion: string;
   protocolVersion: number;
   runtimes: Readonly<Partial<Record<RuntimeType, string>>>;
+  capabilities?: readonly LocalRuntimeCapabilityStatus[];
 };
 
 export type LocalRuntimeInvocationRequest = {
@@ -223,6 +238,7 @@ export type LocalRuntimeClientMessage =
   | { kind: 'local_runtime.workspace.unregister'; payload: { workspaceId: UUID } }
   | { kind: 'local_runtime.workspace.authorization.result'; payload: LocalRuntimeWorkspaceAuthorizationResult }
   | { kind: 'local_runtime.workspace.permission.grant.result'; payload: LocalRuntimeWorkspacePermissionGrantResult }
+  | { kind: 'local_runtime.capabilities.result'; payload: LocalRuntimeCapabilityRefreshResult }
   | { kind: 'local_runtime.provider_connection.result'; payload: LocalRuntimeProviderConnectionResult }
   | { kind: 'local_runtime.workspace.operation.result'; payload: import('./contracts.js').WorkspaceOperationResult }
   | { kind: 'local_runtime.invocation.event'; payload: AgentRuntimeEvent }
@@ -236,7 +252,9 @@ export type LocalRuntimeServerMessage =
   | { kind: 'local_runtime.workspace.registered'; payload: LocalRuntimeWorkspaceRegistration }
   | { kind: 'local_runtime.workspace.registration_rejected'; payload: { workspaceId: UUID; code: string; message: string } }
   | { kind: 'local_runtime.workspace.authorization.request'; payload: LocalRuntimeWorkspaceAuthorizationRequest }
+  | { kind: 'local_runtime.workspace.authorization.cancel'; payload: { requestId: UUID } }
   | { kind: 'local_runtime.workspace.permission.grant.request'; payload: LocalRuntimeWorkspacePermissionGrantRequest }
+  | { kind: 'local_runtime.capabilities.request'; payload: { requestId: UUID } }
   | { kind: 'local_runtime.provider_connection.upsert'; payload: LocalRuntimeProviderConnectionUpsertRequest }
   | { kind: 'local_runtime.provider_connection.delete'; payload: LocalRuntimeProviderConnectionDeleteRequest }
   | { kind: 'local_runtime.workspace.operation.request'; payload: LocalRuntimeWorkspaceOperationRequest }

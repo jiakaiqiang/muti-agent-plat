@@ -781,6 +781,110 @@ export const RELATIONAL_SCHEMA_V4_TABLES: RelationalTableDefinition[] = [
   ])
 ];
 
+export const RELATIONAL_SCHEMA_V5_TABLES: RelationalTableDefinition[] = [
+  table('system_agent_runtime_policies', '保存系统 Agent 与 Runtime/Model 解耦的独立路由策略。', [
+    column('system_role', 'text primary key', '系统 Agent 的稳定角色标识。'),
+    column('preferred_runtime_type', 'text', '优先选择的 Runtime 类型。'),
+    column('preferred_model_id', 'text', '优先选择的模型配置标识。'),
+    column('allowed_runtime_types', "jsonb not null default '[]'::jsonb", '允许参与路由的 Runtime 类型集合。'),
+    column('source_snapshot', "jsonb not null default '{}'::jsonb", '用于无损恢复 RuntimePolicy 合同的兼容快照。'),
+    column('updated_at', 'timestamptz not null default now()', '策略最后更新时间。')
+  ]),
+  table('work_items', '保存同一会话窗口中的独立或关联逻辑需求及其上下文边界。', [
+    column('id', 'bigint generated always as identity primary key', 'WorkItem 内部主键。'),
+    column('external_id', 'text not null unique', 'WorkItem 对外稳定标识。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '所属 Session 内部主键。'),
+    column('parent_work_item_id', 'bigint references agent_cluster.work_items(id)', '关联新需求继承的父 WorkItem。'),
+    column('title', 'text not null', 'WorkItem 展示标题。'),
+    column('goal', 'text not null', '当前逻辑需求的权威目标。'),
+    column('status', 'text not null', 'WorkItem 独立状态机中的当前状态。'),
+    column('revision', 'bigint not null default 1', 'WorkItem 乐观并发修订号。'),
+    column('created_from_event_external_id', 'text not null', '创建本 WorkItem 的用户事件外部标识。'),
+    column('source_snapshot', "jsonb not null default '{}'::jsonb", '用于无损恢复 WorkItem 合同的兼容快照。'),
+    column('created_at', 'timestamptz not null', 'WorkItem 创建时间。'),
+    column('updated_at', 'timestamptz not null', 'WorkItem 最后更新时间。'),
+    column('deleted_at', 'timestamptz', 'WorkItem 进入不可见软删除状态的时间。')
+  ], [], [
+    'create index if not exists work_items_session_status_idx on agent_cluster.work_items (session_id, status, updated_at desc) where deleted_at is null'
+  ]),
+  table('decision_records', '保存用户确认、约束、偏好和纠正形成的可追溯决策账本。', [
+    column('id', 'bigint generated always as identity primary key', 'DecisionRecord 内部主键。'),
+    column('external_id', 'text not null unique', 'DecisionRecord 对外稳定标识。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '所属 Session 内部主键。'),
+    column('work_item_id', 'bigint not null references agent_cluster.work_items(id) on delete cascade', '所属 WorkItem 内部主键。'),
+    column('decision_kind', 'text not null', '决策类别，例如 requirement、constraint 或 approval。'),
+    column('status', 'text not null', '决策当前状态，例如 confirmed 或 superseded。'),
+    column('content', 'text not null', '决策的规范化文本内容。'),
+    column('source_event_external_id', 'text not null', '产生该决策的用户事件外部标识。'),
+    column('supersedes_decision_id', 'bigint references agent_cluster.decision_records(id)', '被当前决策替代的旧决策。'),
+    column('revision', 'bigint not null default 1', 'DecisionRecord 修订号。'),
+    column('confirmation', "jsonb not null default '{}'::jsonb", '确认主体与确认来源的审计快照。'),
+    column('source_snapshot', "jsonb not null default '{}'::jsonb", '用于无损恢复 DecisionRecord 合同的兼容快照。'),
+    column('created_at', 'timestamptz not null', '决策首次记录时间。'),
+    column('updated_at', 'timestamptz not null', '决策最后更新时间。')
+  ], [], ['create index if not exists decision_records_work_item_idx on agent_cluster.decision_records (work_item_id, status, created_at)']),
+  table('work_item_decision_inheritances', '记录关联新 WorkItem 显式继承的已确认决策。', [
+    column('work_item_id', 'bigint not null references agent_cluster.work_items(id) on delete cascade', '继承决策的目标 WorkItem。'),
+    column('decision_id', 'bigint not null references agent_cluster.decision_records(id) on delete cascade', '被继承的 DecisionRecord。'),
+    column('source_work_item_id', 'bigint not null references agent_cluster.work_items(id)', '决策原始所属 WorkItem。'),
+    column('created_at', 'timestamptz not null default now()', '继承关系创建时间。')
+  ], ['primary key (work_item_id, decision_id)']),
+  table('work_item_artifact_inheritances', '记录关联新 WorkItem 显式继承的交付物引用。', [
+    column('work_item_id', 'bigint not null references agent_cluster.work_items(id) on delete cascade', '继承交付物的目标 WorkItem。'),
+    column('artifact_id', 'bigint not null references agent_cluster.artifacts(id) on delete cascade', '被继承的 Artifact。'),
+    column('source_work_item_id', 'bigint not null references agent_cluster.work_items(id)', '交付物原始所属 WorkItem。'),
+    column('created_at', 'timestamptz not null default now()', '继承关系创建时间。')
+  ], ['primary key (work_item_id, artifact_id)']),
+  table('context_snapshots', '保存意图路由和 Runtime 上下文组装使用的不可变最小快照。', [
+    column('id', 'bigint generated always as identity primary key', 'ContextSnapshot 内部主键。'),
+    column('external_id', 'text not null unique', 'ContextSnapshot 对外稳定标识。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '所属 Session 内部主键。'),
+    column('work_item_id', 'bigint references agent_cluster.work_items(id) on delete set null', '快照关联的活动 WorkItem。'),
+    column('source_event_external_id', 'text not null', '触发快照的用户事件外部标识。'),
+    column('purpose', 'text not null', '快照用途，例如 intent_routing 或 runtime_context。'),
+    column('revision_vector', "jsonb not null default '{}'::jsonb", '参与快照一致性校验的修订向量。'),
+    column('snapshot_hash', 'text not null', '规范化快照内容的 SHA-256。'),
+    column('payload', "jsonb not null default '{}'::jsonb", '不包含完整历史和工作区正文的最小快照载荷。'),
+    column('created_at', 'timestamptz not null', '快照创建时间。')
+  ], [], ['create index if not exists context_snapshots_session_idx on agent_cluster.context_snapshots (session_id, created_at desc)']),
+  table('intent_routing_records', '保存每条用户消息从接收、分类、校验到应用的完整路由审计。', [
+    column('id', 'bigint generated always as identity primary key', 'IntentRoutingRecord 内部主键。'),
+    column('external_id', 'text not null unique', 'IntentRoutingRecord 对外稳定标识。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '所属 Session 内部主键。'),
+    column('source_event_external_id', 'text not null', '被路由的用户事件外部标识。'),
+    column('session_seq', 'bigint not null', '消息在 Session 内的严格顺序号。'),
+    column('status', 'text not null', '消息级路由状态。'),
+    column('policy_version', 'text not null', '执行本次判断的路由策略版本。'),
+    column('rollout_mode', 'text not null', '本次判断采用的发布模式。'),
+    column('context_snapshot_id', 'bigint references agent_cluster.context_snapshots(id)', '分类时使用的不可变 ContextSnapshot。'),
+    column('runtime_invocation_external_id', 'text', '意图 Agent Runtime 调用外部标识。'),
+    column('decision_payload', "jsonb not null default '{}'::jsonb", '模型返回并经解析的结构化路由建议。'),
+    column('validation_payload', "jsonb not null default '{}'::jsonb", '服务端 Schema、引用、状态与风险校验结果。'),
+    column('final_action', 'text', '服务端最终应用的路由动作。'),
+    column('reason_codes', "jsonb not null default '[]'::jsonb", '稳定的裁决原因代码。'),
+    column('retry_count', 'integer not null default 0', '分类或应用的有限重试次数。'),
+    column('idempotency_key', 'text not null unique', '路由流程幂等键。'),
+    column('source_snapshot', "jsonb not null default '{}'::jsonb", '用于无损恢复 IntentRoutingRecord 合同的兼容快照。'),
+    column('created_at', 'timestamptz not null', '路由记录创建时间。'),
+    column('updated_at', 'timestamptz not null', '路由记录最后更新时间。')
+  ], ['unique (session_id, session_seq, policy_version)'], [
+    'create index if not exists intent_routing_pending_idx on agent_cluster.intent_routing_records (status, updated_at)'
+  ]),
+  table('session_follow_up_messages', '保存路由完成后等待 Coordinator 规划或执行的用户补充消息。', [
+    column('id', 'bigint generated always as identity primary key', 'FollowUpMessage 内部主键。'),
+    column('external_id', 'text not null unique', 'FollowUpMessage 对外稳定标识。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '所属 Session 内部主键。'),
+    column('work_item_id', 'bigint references agent_cluster.work_items(id) on delete set null', '消息路由后归属的 WorkItem。'),
+    column('routing_record_id', 'bigint references agent_cluster.intent_routing_records(id) on delete set null', '产生该 FollowUp 的路由记录。'),
+    column('source_event_external_id', 'text not null', '原始用户事件外部标识。'),
+    column('status', 'text not null', 'FollowUp 当前排队、规划或执行状态。'),
+    column('handling_payload', "jsonb not null default '{}'::jsonb", '消息内容、提及对象和处理计划快照。'),
+    column('queued_at', 'timestamptz not null', '进入处理队列的时间。'),
+    column('started_at', 'timestamptz', '开始规划或执行的时间。'),
+    column('completed_at', 'timestamptz', '处理完成的时间。')
+  ], [], ['create index if not exists session_follow_up_messages_queue_idx on agent_cluster.session_follow_up_messages (session_id, status, queued_at)'])
+];
+
 const CURRENT_VERSION_FOREIGN_KEYS = [
   'alter table agent_cluster.agents add constraint agents_current_version_fk foreign key (current_version_id) references agent_cluster.agent_versions(id)',
   'alter table agent_cluster.skills add constraint skills_current_version_fk foreign key (current_version_id) references agent_cluster.skill_versions(id)',
@@ -838,6 +942,17 @@ export const RELATIONAL_SCHEMA_V1_SQL = [
 export const RELATIONAL_SCHEMA_V2_SQL = renderTables(RELATIONAL_SCHEMA_V2_TABLES);
 export const RELATIONAL_SCHEMA_V3_SQL = renderTables(RELATIONAL_SCHEMA_V3_TABLES);
 export const RELATIONAL_SCHEMA_V4_SQL = renderTables(RELATIONAL_SCHEMA_V4_TABLES);
+export const RELATIONAL_SCHEMA_V5_SQL = [
+  renderTables(RELATIONAL_SCHEMA_V5_TABLES),
+  'alter table agent_cluster.sessions add column if not exists active_work_item_id bigint',
+  "comment on column agent_cluster.sessions.active_work_item_id is '会话当前活动 WorkItem 内部主键。'",
+  'do $$ begin alter table agent_cluster.sessions add constraint sessions_active_work_item_fk foreign key (active_work_item_id) references agent_cluster.work_items(id); exception when duplicate_object then null; end $$',
+  ...['briefs', 'tasks', 'artifacts', 'runtime_invocations', 'workflow_runs'].flatMap((tableName) => [
+    `alter table agent_cluster.${tableName} add column if not exists work_item_id bigint`,
+    `comment on column agent_cluster.${tableName}.work_item_id is '该记录所属 WorkItem 内部主键。'`,
+    `do $$ begin alter table agent_cluster.${tableName} add constraint ${tableName}_work_item_fk foreign key (work_item_id) references agent_cluster.work_items(id) on delete set null; exception when duplicate_object then null; end $$`
+  ])
+].map((statement) => statement.endsWith(';') ? statement : `${statement};`).join('\n\n');
 
 export function expectedRelationalComments() {
   return [
@@ -845,7 +960,8 @@ export function expectedRelationalComments() {
     ...RELATIONAL_TABLES,
     ...RELATIONAL_SCHEMA_V2_TABLES,
     ...RELATIONAL_SCHEMA_V3_TABLES,
-    ...RELATIONAL_SCHEMA_V4_TABLES
+    ...RELATIONAL_SCHEMA_V4_TABLES,
+    ...RELATIONAL_SCHEMA_V5_TABLES
   ].flatMap((definition) => [
     { table: definition.name, column: null, comment: definition.comment },
     ...definition.columns.map((item) => ({ table: definition.name, column: item.name, comment: item.comment }))

@@ -29,3 +29,17 @@ test('directory picker reports a structured timeout error', async () => {
     /LOCAL_DIRECTORY_PICKER_TIMEOUT/
   );
 });
+
+test('directory picker cancellation aborts only the requested picker process', async () => {
+  const controller = new AbortController();
+  const selection = selectWorkspaceDirectory('Select', 'win32', async (_command, _args, signal) => {
+    return await new Promise((_, reject) => {
+      signal?.addEventListener('abort', () => {
+        reject(Object.assign(new Error('cancelled'), { code: 'ABORT_ERR' }));
+      }, { once: true });
+    });
+  }, controller.signal);
+
+  controller.abort();
+  assert.equal(await selection, undefined);
+});

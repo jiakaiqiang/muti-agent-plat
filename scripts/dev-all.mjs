@@ -8,7 +8,7 @@ const DEFAULT_SERVER_PORT = 8099;
 const DEFAULT_WEB_PORT = 8089;
 const HEALTH_INTERVAL_MS = 2_000;
 const INITIAL_HEALTH_TIMEOUT_MS = 120_000;
-const READY_HEALTH_FAILURE_LIMIT = 8;
+const READY_HEALTH_FAILURE_LIMIT = 30;
 
 export function parseEnvFile(contents) {
   const values = {};
@@ -81,6 +81,7 @@ export function runDevSupervisor(options = {}) {
   const serverPort = positivePort(env.SERVER_PORT, DEFAULT_SERVER_PORT);
   const webPort = positivePort(env.WEB_PORT, DEFAULT_WEB_PORT);
   env.PUBLIC_WEB_URL ||= `http://127.0.0.1:${webPort}`;
+  const publicWebUrl = new URL(env.PUBLIC_WEB_URL).origin;
   const healthUrl = `http://127.0.0.1:${serverPort}/api/health`;
   const serverUrl = `http://127.0.0.1:${serverPort}`;
   const spawnProcess = options.spawnProcess ?? spawn;
@@ -111,14 +112,12 @@ export function runDevSupervisor(options = {}) {
     ['--', '--port', String(webPort), '--strictPort'],
     devWebEnv(env, serverUrl)
   );
-  const localRuntime = startWorkspace('@agent-cluster/local-runtime-cli', ['--', '--server', serverUrl]);
   children.set('server', server);
   children.set('web', web);
-  children.set('local-runtime', localRuntime);
 
   console.log(`[dev-supervisor] server health: ${healthUrl}`);
   console.log(`[dev-supervisor] web: http://127.0.0.1:${webPort}`);
-  console.log(`[dev-supervisor] local Runtime: ${serverUrl}`);
+  console.log(`[dev-supervisor] local Runtime: on-demand via ${publicWebUrl}`);
 
   function fail(message) {
     console.error(`[dev-supervisor] ${message}`);

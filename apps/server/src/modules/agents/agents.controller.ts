@@ -1,4 +1,5 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import type { AgentCatalogSurface } from '@agent-cluster/shared';
 import { ok } from '../../common/api-response.js';
 import { AgentsService } from './agents.service.js';
 
@@ -7,8 +8,12 @@ export class AgentsController {
   constructor(private readonly agents: AgentsService) {}
 
   @Get()
-  list() {
-    return ok(this.agents.list());
+  list(@Query('surface') surface?: AgentCatalogSurface) {
+    const selectedSurface = surface ?? 'management';
+    if (!['management', 'chat', 'workflow', 'mention'].includes(selectedSurface)) {
+      throw new BadRequestException(`Invalid Agent catalog surface: ${selectedSurface}`);
+    }
+    return ok(this.agents.listForSurface(selectedSurface));
   }
 
   @Get(':agentId')

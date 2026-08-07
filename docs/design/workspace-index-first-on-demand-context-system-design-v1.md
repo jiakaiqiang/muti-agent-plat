@@ -353,7 +353,7 @@ Lease 由 Platform Backend 持久化或通过现有 Persistence 抽象保存。�
 
 ```text
 User -> Web: 选择本机目录
-Web -> Backend: POST /local-runtime/workspaces/authorize
+Web -> Backend: POST /local-runtime/workspaces/authorize { requestId }
 Backend -> Local Runtime: authorize request
 Local Runtime: realpath/stat/boundary/security validation
 Local Runtime: create workspaceId + revision + watcher
@@ -362,6 +362,7 @@ Local Runtime -> IndexService: start/resume background indexing
 ```
 
 同步路径只允许执行目录本身的校验，禁止递归枚举子目录。
+每个新建会话弹窗的目录授权使用独立 `requestId`；同一 Local Runtime 设备允许并行授权，结果不得按设备或 Session 串扰。关闭弹窗、刷新页面或切换到服务器工作区时，Web 必须取消对应 `requestId`，Backend 也必须在等待授权的 HTTP 连接断开时执行兜底取消，再通知 Local Runtime 终止该请求的系统目录选择器。取消后不得继续注册 Workspace、启动 watcher/索引或更新弹窗选择状态。
 
 ### 9.2 Session 创建
 
