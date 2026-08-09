@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { loadState } from './state.js';
-import { createWorkspaceState, LocalWorkspace, normalizeRelative } from './workspace.js';
+import { createWorkspaceState, isExcludedIndexDirectory, LocalWorkspace, normalizeRelative } from './workspace.js';
 
 async function withWorkspace(run: (workspace: LocalWorkspace, root: string) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), 'agent-runtime-workspace-'));
@@ -337,6 +337,48 @@ test('workspace watcher incrementally updates index entries after add, modify an
     const removed = await waitForReadyIndex(workspace, modified.generation);
     assert.equal(removed.entries.some((entry) => entry.path === 'src/added.ts'), false);
     assert.equal(removed.entries.some((entry) => entry.path === 'src/main.ts'), true);
+    workspace.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('index walk and revision watcher share one exclusion rule for generated and transient directories', async () => {
+  for (const name of ['.git', 'node_modules', 'dist', 'coverage', '.vite', '.turbo', '.output', '.nuxt', '.tmp', '.tmp-dev-logs', 'logs']) {
+    assert.equal(isExcludedIndexDirectory(name), true, `${name} should be excluded`);
+  }
+  for (const name of ['src', 'apps', 'packages', 'docs']) {
+    assert.equal(isExcludedIndexDirectory(name), false, `${name} should not be excluded`);
+  }
+
+  const root = await mkdtemp(join(tmpdir(), 'agent-runtime-index-exclude-'));
+  try {
+    await mkdir(join(root, 'src'));
+    await writeFile(join(root, 'src', 'main.ts'), 'export const main = true;', 'utf8');
+    const workspace = new LocalWorkspace(await createWorkspaceState(root, 'index-exclude'));
+    const initial = await waitForReadyIndex(workspace, 0);
+
+    // Directories the watcher previously reported but the index refused to keep. Writing into them
+    // must leave the indexed entry set untouched, otherwise the watcher keeps feeding the index paths
+    // it discards and every build/test write rewrites the whole state file.
+    const before = [...initial.entries].map((entry) => entry.path).sort();
+    for (const name of ['.tmp', '.tmp-dev-logs', 'logs', '.vite', '.turbo']) {
+      await mkdir(join(root, name), { recursive: true });
+      await writeFile(join(root, name, 'noise.txt'), 'noise', 'utf8');
+    }
+    await delay(400);
+
+    const afterNoise = await workspace.getIndexSnapshot({ limit: 1_000 });
+    assert.deepEqual(
+      [...afterNoise.entries].map((entry) => entry.path).sort(),
+      before,
+      'transient writes must not change the indexed entry set'
+    );
+
+    // A real source change still advances the index.
+    await writeFile(join(root, 'src', 'added.ts'), 'export const added = true;', 'utf8');
+    const advanced = await waitForReadyIndex(workspace, initial.generation);
+    assert.equal(advanced.entries.some((entry) => entry.path === 'src/added.ts'), true);
     workspace.close();
   } finally {
     await rm(root, { recursive: true, force: true });

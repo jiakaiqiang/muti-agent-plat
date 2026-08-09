@@ -49,6 +49,7 @@ import {
 import type { LocalWorkspaceState } from './state.js';
 
 const ignoredDirectories = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.cache', 'coverage']);
+const transientDirectories = new Set(['.tmp', '.tmp-dev-logs', 'logs']);
 const indexEntryLimit = 100_000;
 const indexYieldInterval = 250;
 const locallyConfirmablePermissions = new Set<LocalRuntimePermission>([
@@ -56,6 +57,13 @@ const locallyConfirmablePermissions = new Set<LocalRuntimePermission>([
   'command_execute',
   'dependency_install'
 ]);
+
+// The index walk and the revision watcher must share one exclusion rule. When they disagree, the
+// watcher keeps reporting paths the index refuses to keep, which oscillates between incremental
+// flushes and full rebuilds and rewrites the whole state file on every event.
+export function isExcludedIndexDirectory(name: string) {
+  return ignoredDirectories.has(name) || transientDirectories.has(name) || isGeneratedWorkspaceDirectory(name);
+}
 
 export type LocalWorkspaceOptions = {
   hashFile?: (path: string) => Promise<FileHash>;
@@ -774,7 +782,7 @@ export class LocalWorkspace {
           const absolute = join(directory, child.name);
           const path = relative(this.state.rootPath, absolute).replace(/\\/g, '/');
           if (isSensitiveWorkspacePath(path)) continue;
-          if (child.isDirectory() && (ignoredDirectories.has(child.name) || isGeneratedWorkspaceDirectory(child.name))) {
+          if (child.isDirectory() && isExcludedIndexDirectory(child.name)) {
             continue;
           }
           const metadata = await stat(absolute).catch(() => undefined);
@@ -925,7 +933,7 @@ function nextWorkspaceRevision(): WorkspaceRevision {
 function isIgnoredRevisionPath(value: string) {
   const path = value.replace(/\\/g, '/').replace(/^\.\//, '');
   const parts = path.split('/').filter(Boolean);
-  return parts.some((part) => ignoredDirectories.has(part)) || isSensitiveWorkspacePath(path);
+  return parts.some((part) => isExcludedIndexDirectory(part)) || isSensitiveWorkspacePath(path);
 }
 
 export function normalizeRelative(value: string) {
