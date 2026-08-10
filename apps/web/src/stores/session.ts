@@ -690,6 +690,14 @@ export const useSessionStore = defineStore('session', {
       await this.assertBackendCompatible()
       return apiPost(`/capabilities/${capabilityId}/approve`, { sessionId, ...input })
     },
+    async approveCapabilities(
+      sessionId: string,
+      capabilityIds: string[],
+      input?: { agentId?: string; reason?: string }
+    ) {
+      await this.assertBackendCompatible()
+      return apiPost('/capabilities/approvals', { sessionId, capabilityIds, ...input })
+    },
     switchViewMode(mode: SessionViewMode) {
       this.currentViewMode = mode
     },

@@ -326,6 +326,7 @@ const activeWorkspaceWritebacks = computed(() =>
 )
 const workspaceWritebackBusy = ref(false)
 const workspaceWritebackError = ref('')
+const capabilityApprovalBusy = ref(false)
 const currentMode = computed(() => sessionStore.currentViewMode)
 const workspaceLabel = computed(() => sessionStore.currentSession?.title ?? '无活动会话')
 const activeAgentIds = computed(() => agentStore.agents.filter((agent) => agent.status === 'active').map((agent) => agent.id))
@@ -1316,14 +1317,16 @@ async function resolveConfirmation(optionKey: string) {
 }
 
 async function approveCapability(sessionId: string, capabilityIds: string[], agentId?: string) {
+  if (capabilityApprovalBusy.value) return
+  capabilityApprovalBusy.value = true
   try {
-    for (const capabilityId of capabilityIds) {
-      await sessionStore.approveCapability(sessionId, capabilityId, { agentId })
-    }
+    await sessionStore.approveCapabilities(sessionId, capabilityIds, { agentId })
     await reconcileSessionEvents(sessionId)
     showMessage('能力已授权，任务将自动恢复执行', 'success')
   } catch (error) {
     showErrorMessage(error, '授权能力失败')
+  } finally {
+    capabilityApprovalBusy.value = false
   }
 }
 
@@ -1686,6 +1689,7 @@ async function submitWorkflowStepRevision() {
           <ChatTimeline
             :messages="messages"
             :workspace-snapshot="sessionStore.currentSession?.workspaceSnapshot"
+            :capability-approval-busy="capabilityApprovalBusy"
             @resolve-confirmation="resolveConfirmation"
             @approve-capability="approveCapability"
           />

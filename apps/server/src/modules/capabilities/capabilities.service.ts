@@ -10,6 +10,13 @@ type CapabilityInvocationCheck = {
   reason?: string;
 };
 
+export type CapabilityApprovalResult = {
+  capability: RuntimeCapabilityDefinition;
+  approved: true;
+  approvalKey: string;
+  newlyApproved: boolean;
+};
+
 export type CapabilityUpsertInput = {
   key: string;
   kind?: CapabilityKind;
@@ -231,31 +238,50 @@ export class CapabilitiesService {
   }
 
   async approve(capabilityId: string, input: CapabilityInvocationCheck) {
-    const capability = this.get(capabilityId);
-    const approvalKey = this.approvalKey(capability.id, input.sessionId, input.agentId);
-    this.approvals.add(approvalKey);
-    this.persist();
+    const [result] = await this.approveMany([capabilityId], input);
+    return result!;
+  }
+
+  async approveMany(capabilityIds: string[], input: CapabilityInvocationCheck): Promise<CapabilityApprovalResult[]> {
+    const capabilities = [...new Set(capabilityIds)].map((capabilityId) => this.get(capabilityId));
+    if (capabilities.length === 0) {
+      throw new BadRequestException('At least one capability is required.');
+    }
+
+    const results = capabilities.map((capability) => {
+      const approvalKey = this.approvalKey(capability.id, input.sessionId, input.agentId);
+      return {
+        capability,
+        approved: true as const,
+        approvalKey,
+        newlyApproved: !this.approvals.has(approvalKey)
+      };
+    });
+
+    const newlyApproved = results.filter((result) => result.newlyApproved);
+    for (const result of newlyApproved) {
+      this.approvals.add(result.approvalKey);
+    }
+    if (newlyApproved.length > 0) this.persist();
 
     if (input.sessionId) {
-      for (const listener of this.approvalListeners) {
-        try {
-          await listener({
-            sessionId: input.sessionId,
-            capabilityId: capability.id,
-            ...(input.agentId ? { agentId: input.agentId } : {})
-          });
-        } catch (error) {
-          // 单个监听器失败不影响审批结果本身；日志由监听器自行处理。
-          console.error('[CapabilitiesService] approval listener failed', error);
+      for (const result of newlyApproved) {
+        for (const listener of this.approvalListeners) {
+          try {
+            await listener({
+              sessionId: input.sessionId,
+              capabilityId: result.capability.id,
+              ...(input.agentId ? { agentId: input.agentId } : {})
+            });
+          } catch (error) {
+            // 单个监听器失败不影响审批结果本身；日志由监听器自行处理。
+            console.error('[CapabilitiesService] approval listener failed', error);
+          }
         }
       }
     }
 
-    return {
-      capability,
-      approved: true,
-      approvalKey
-    };
+    return results;
   }
 
   checkInvocation(capabilityId: string, input: CapabilityInvocationCheck) {

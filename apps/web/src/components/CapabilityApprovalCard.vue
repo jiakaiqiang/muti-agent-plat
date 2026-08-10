@@ -11,18 +11,25 @@ type PendingApproval = {
 const props = defineProps<{
   sessionId: string
   pendingApprovals: PendingApproval[]
+  approvedApprovalIds?: string[]
+  busy?: boolean
   compact?: boolean
 }>()
 
 const emit = defineEmits<{ approve: [] }>()
 
 const approvalList = computed(() => {
+  const approvedIds = new Set(props.approvedApprovalIds ?? [])
   return props.pendingApprovals.map((approval) => ({
+    approvalId: approval.approvalId,
     toolKey: approval.toolKey,
     toolId: approval.toolId,
-    reasons: approval.reasons.join(', ')
+    reasons: approval.reasons.join(', '),
+    approved: approvedIds.has(approval.approvalId)
   }))
 })
+
+const allApproved = computed(() => approvalList.value.every((approval) => approval.approved))
 </script>
 
 <template>
@@ -43,15 +50,22 @@ const approvalList = computed(() => {
       >
         <div class="capability-approval-item__header">
           <strong>{{ approval.toolKey }}</strong>
-          <span class="status-pill pending">待授权</span>
+          <span class="status-pill" :class="approval.approved ? 'approved' : 'pending'">
+            {{ approval.approved ? '已授权' : '待授权' }}
+          </span>
         </div>
         <p class="capability-approval-item__reason">{{ approval.reasons }}</p>
       </article>
     </div>
 
     <div class="capability-approval-card__actions">
-      <button class="action-button primary" type="button" @click="emit('approve')">
-        全部授权
+      <button
+        class="action-button primary"
+        type="button"
+        :disabled="busy || allApproved"
+        @click="emit('approve')"
+      >
+        {{ allApproved ? '已全部授权' : busy ? '授权中...' : '全部授权' }}
       </button>
     </div>
   </section>

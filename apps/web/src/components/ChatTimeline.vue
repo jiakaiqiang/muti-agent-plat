@@ -24,6 +24,7 @@ import { observedArtifactFileChanges, platformArtifactProjections } from './arti
 const props = defineProps<{
   messages: ChatMessage[]
   workspaceSnapshot?: WorkspaceSnapshot
+  capabilityApprovalBusy?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -160,9 +161,17 @@ function capabilityApprovalFromMessage(message: ChatMessage) {
   const payload = message.payload as (ConfirmationRequestedPayload & Record<string, unknown>) | undefined
   if (!payload) return undefined
   if (!Array.isArray(payload.pendingApprovals) || !payload.pendingApprovals.length) return undefined
+  const approvedIds = new Set(
+    props.messages
+      .map((candidate) => candidate.payload?.approvalKey)
+      .filter((approvalKey): approvalKey is string => typeof approvalKey === 'string')
+  )
   return {
     sessionId: message.sessionId,
-    pendingApprovals: payload.pendingApprovals
+    pendingApprovals: payload.pendingApprovals,
+    approvedApprovalIds: payload.pendingApprovals
+      .map((approval) => approval.approvalId)
+      .filter((approvalId) => approvedIds.has(approvalId))
   }
 }
 
@@ -754,6 +763,8 @@ function yesNo(value?: boolean) {
           v-else-if="capabilityApprovalFromMessage(message)"
           :session-id="capabilityApprovalFromMessage(message)!.sessionId"
           :pending-approvals="capabilityApprovalFromMessage(message)!.pendingApprovals"
+          :approved-approval-ids="capabilityApprovalFromMessage(message)!.approvedApprovalIds"
+          :busy="capabilityApprovalBusy"
           compact
           @approve="emit(
             'approveCapability',

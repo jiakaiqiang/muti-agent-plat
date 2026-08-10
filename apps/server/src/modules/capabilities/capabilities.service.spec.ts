@@ -63,3 +63,28 @@ test('CapabilitiesService allows deletion of unreferenced custom capabilities', 
   assert.equal(result.removed, true);
   assert.equal(result.capability.id, capability.id);
 });
+
+test('CapabilitiesService grants a batch before notifying listeners and ignores duplicate approvals', async () => {
+  const { service, collections } = setup();
+  const listenerCalls: string[] = [];
+
+  service.registerApprovalListener(({ sessionId, capabilityId, agentId }) => {
+    listenerCalls.push(capabilityId);
+    assert.equal(service.checkInvocation('cap-command-run', { sessionId, agentId }).allowed, true);
+    assert.equal(service.checkInvocation('cap-file-write', { sessionId, agentId }).allowed, true);
+  });
+
+  const input = { sessionId: 'session-1', agentId: 'agent-1' };
+  const first = await service.approveMany(['cap-command-run', 'cap-file-write', 'cap-command-run'], input);
+
+  assert.deepEqual(first.map((result) => result.capability.id), ['cap-command-run', 'cap-file-write']);
+  assert.deepEqual(first.map((result) => result.newlyApproved), [true, true]);
+  assert.deepEqual(listenerCalls, ['cap-command-run', 'cap-file-write']);
+
+  const second = await service.approveMany(['cap-command-run', 'cap-file-write'], input);
+  assert.deepEqual(second.map((result) => result.newlyApproved), [false, false]);
+  assert.deepEqual(listenerCalls, ['cap-command-run', 'cap-file-write']);
+
+  const persisted = collections.get('capabilities') as { approvals: string[] };
+  assert.equal(persisted.approvals.filter((key) => key.startsWith('session-1:agent-1:')).length, 2);
+});

@@ -1,7 +1,11 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/common';
 import { ok } from '../../common/api-response.js';
 import { CapabilityAuditService } from './capability-audit.service.js';
-import { CapabilitiesService, type CapabilityUpsertInput } from './capabilities.service.js';
+import {
+  CapabilitiesService,
+  type CapabilityApprovalResult,
+  type CapabilityUpsertInput
+} from './capabilities.service.js';
 import { EventsService } from '../events/events.service.js';
 
 @Controller('capabilities')
@@ -60,28 +64,43 @@ export class CapabilitiesController {
   ) {
     const input = body ?? {};
     const result = await this.capabilities.approve(capabilityId, input);
-    this.audit.recordApproval(input, result);
-
-    // 发送审批完成事件
-    if (input.sessionId) {
-      this.events.create({
-        sessionId: input.sessionId,
-        type: 'capability_approved',
-        ...(input.agentId ? { fromAgentId: input.agentId } : {}),
-        toAgentIds: [],
-        content: `能力 ${result.capability.name} 已授权`,
-        metadata: {
-          schemaVersion: '0.1',
-          renderAs: 'system_notice',
-          payload: {
-            capabilityId,
-            capabilityKey: result.capability.key,
-            approvalKey: result.approvalKey
-          }
-        }
-      });
-    }
+    this.publishApproval(input, result);
 
     return ok(result);
+  }
+
+  @Post('approvals')
+  async approveMany(
+    @Body() body: { capabilityIds?: string[]; sessionId?: string; agentId?: string; reason?: string }
+  ) {
+    const { capabilityIds = [], ...input } = body ?? {};
+    const results = await this.capabilities.approveMany(capabilityIds, input);
+    for (const result of results) this.publishApproval(input, result);
+    return ok(results);
+  }
+
+  private publishApproval(
+    input: { sessionId?: string; agentId?: string; reason?: string },
+    result: CapabilityApprovalResult
+  ) {
+    if (!result.newlyApproved) return;
+    this.audit.recordApproval(input, result);
+    if (!input.sessionId) return;
+    this.events.create({
+      sessionId: input.sessionId,
+      type: 'capability_approved',
+      ...(input.agentId ? { fromAgentId: input.agentId } : {}),
+      toAgentIds: [],
+      content: `能力 ${result.capability.name} 已授权`,
+      metadata: {
+        schemaVersion: '0.1',
+        renderAs: 'system_notice',
+        payload: {
+          capabilityId: result.capability.id,
+          capabilityKey: result.capability.key,
+          approvalKey: result.approvalKey
+        }
+      }
+    });
   }
 }
