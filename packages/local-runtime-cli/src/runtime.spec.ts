@@ -463,6 +463,53 @@ test('Claude Code tool-call parsing failures are retryable provider failures', a
   }
 });
 
+test('Claude Code HTTP 524 failures preserve provider retry metadata', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-runtime-claude-524-source-'));
+  const fixtureRoot = await mkdtemp(join(tmpdir(), 'agent-runtime-claude-524-fixture-'));
+  const fixturePath = join(fixtureRoot, 'claude-runtime-524-fixture.cjs');
+  const previousCommand = process.env.AGENT_RUNTIME_CLAUDE_COMMAND;
+  const previousArgs = process.env.AGENT_RUNTIME_CLAUDE_ARGS_JSON;
+  try {
+    await writeFile(join(root, 'README.md'), '# unchanged\n', 'utf8');
+    await writeFile(fixturePath, [
+      "process.stdin.resume();",
+      "process.stdin.on('end', () => {",
+      "  const result = 'API Error: 524 {\"status\":524,\"error_name\":\"origin_response_timeout\",\"error_category\":\"origin\",\"zone\":\"gateway.example.test\",\"ray_id\":\"ray-safe\",\"retryable\":true,\"retry_after\":120}. This is a server-side issue.';",
+      "  process.stdout.write(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,result}) + '\\n');",
+      "  process.exitCode = 1;",
+      "});"
+    ].join('\n'), 'utf8');
+    process.env.AGENT_RUNTIME_CLAUDE_COMMAND = process.execPath;
+    process.env.AGENT_RUNTIME_CLAUDE_ARGS_JSON = JSON.stringify([fixturePath]);
+
+    const state = await createWorkspaceState(root, 'claude-524-test');
+    const workspace = new LocalWorkspace(state);
+    const request = await invocationRequest(workspace, 'claude_code');
+    const result = await executeLocalInvocation(
+      request,
+      workspace,
+      new AbortController().signal,
+      () => {}
+    );
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error?.code, 'RUNTIME_TIMEOUT');
+    assert.equal(result.error?.message, 'Claude model gateway timed out (HTTP 524).');
+    assert.equal(result.error?.retryable, true);
+    assert.equal(result.error?.details?.providerFailure, true);
+    assert.equal(result.error?.details?.httpStatus, 524);
+    assert.equal(result.error?.details?.retryAfterMs, 120_000);
+    assert.equal(result.error?.details?.diagnosticRef, request.plan.invocationId);
+  } finally {
+    if (previousCommand === undefined) delete process.env.AGENT_RUNTIME_CLAUDE_COMMAND;
+    else process.env.AGENT_RUNTIME_CLAUDE_COMMAND = previousCommand;
+    if (previousArgs === undefined) delete process.env.AGENT_RUNTIME_CLAUDE_ARGS_JSON;
+    else process.env.AGENT_RUNTIME_CLAUDE_ARGS_JSON = previousArgs;
+    await rm(root, { recursive: true, force: true });
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
 test('Claude Code format mismatch is a permanent provider configuration failure', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-runtime-claude-format-source-'));
   const fixtureRoot = await mkdtemp(join(tmpdir(), 'agent-runtime-claude-format-fixture-'));

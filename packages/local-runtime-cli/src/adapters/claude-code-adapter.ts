@@ -8,6 +8,7 @@ import type {
 } from '@agent-cluster/shared';
 import {
   ClaudeStreamJsonParser,
+  classifyClaudeProviderFailure,
   frameToRuntimeEvent,
   getRuntimeOutputContract,
   validateRuntimeOutput
@@ -66,22 +67,11 @@ export class ClaudeCodeLocalRuntimeAdapter implements LocalRuntimeAdapter {
     });
     if (exitCode !== 0) {
       const processFailure = formatClaudeProcessFailure(stdout, stderr, exitCode);
-      if (isProviderFormatMismatch(processFailure)) {
-        throw localRuntimeError({
-          code: 'MODEL_ERROR',
-          message: 'Claude Code provider is incompatible: it rejected Claude Chat requests and only accepts OpenAI request formats. Configure an Anthropic-compatible endpoint or disable Claude Code Runtime.',
-          retryable: false,
-          details: {
-            provider: 'claude_code',
-            providerFailure: true,
-            stage: 'provider_response',
-            httpStatus: 400,
-            failureKind: 'provider_format_mismatch',
-            requestedFormat: 'claude_chat',
-            acceptedFormats: ['openai_chat', 'openai_responses']
-          }
-        });
-      }
+      const providerError = classifyClaudeProviderFailure(
+        { stdout, stderr, exitCode, message: processFailure },
+        plan.invocationId
+      );
+      if (providerError) throw localRuntimeError(providerError);
       if (isToolCallParseFailure(processFailure)) {
         throw localRuntimeError({
           code: 'MODEL_ERROR',
@@ -129,13 +119,6 @@ function claudeProviderEnvironment(connection: NonNullable<Parameters<LocalRunti
     ANTHROPIC_DEFAULT_SONNET_MODEL: connection.model,
     ANTHROPIC_DEFAULT_HAIKU_MODEL: connection.model
   };
-}
-
-function isProviderFormatMismatch(message: string) {
-  return /API Error:\s*400/i.test(message)
-    && /Format mismatch/i.test(message)
-    && /\bclaude_chat\b/i.test(message)
-    && /\bopenai_(?:chat|responses)\b/i.test(message);
 }
 
 function isToolCallParseFailure(message: string) {
