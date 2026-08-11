@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Optional, Param, Patch, Post, Query } from '@nestjs/common';
+import { BadGatewayException, BadRequestException, Body, Controller, Delete, Get, Logger, Optional, Param, Patch, Post, Query } from '@nestjs/common';
 import type {
   InvocationPlan,
   RuntimeModelCreateInput,
@@ -12,6 +12,8 @@ import { LocalRuntimeConnectionService } from '../local-runtime/local-runtime-co
 
 @Controller('runtimes')
 export class RuntimeController {
+  private readonly logger = new Logger(RuntimeController.name);
+
   constructor(
     private readonly runtime: RuntimeService,
     private readonly modelConfig: RuntimeModelConfigService,
@@ -35,25 +37,22 @@ export class RuntimeController {
 
   @Post('model-config/models')
   async addModel(@Body() body: RuntimeModelCreateInput) {
-    const config = await this.modelConfig.addModel(body);
-    if (body.kind === 'remote' && (body.credentialLocation ?? 'server') === 'local') {
-      try {
-        await this.storeLocalCredential(config.currentModelId, body);
-      } catch (error) {
-        await this.modelConfig.deleteModel(config.currentModelId).catch(() => undefined);
-        throw error;
-      }
-    }
+    const storesCredentialLocally = body.kind === 'remote' && (body.credentialLocation ?? 'server') === 'local';
+    const config = await this.modelConfig.addModel(
+      body,
+      storesCredentialLocally
+        ? async (_nextConfig, affectedModelId) => this.storeLocalCredential(affectedModelId, body)
+        : undefined
+    );
     return ok(config);
   }
 
   @Patch('model-config/models/:modelId')
   async updateModel(@Param('modelId') modelId: string, @Body() body?: RuntimeModelUpdateInput) {
     const input = body ?? {};
-    const config = await this.modelConfig.updateModel(modelId, input);
-    const selected = config.availableModels.find((model) => model.id === config.currentModelId) ??
-      config.availableModels.find((model) => model.id === modelId);
-    if (selected?.credentialLocation === 'local' && input.apiKey?.trim()) {
+    const config = await this.modelConfig.updateModel(modelId, input, async (nextConfig, affectedModelId) => {
+      const selected = nextConfig.availableModels.find((model) => model.id === affectedModelId);
+      if (selected?.credentialLocation !== 'local' || !input.apiKey?.trim()) return;
       await this.storeLocalCredential(selected.id, {
         kind: 'remote',
         provider: selected.provider === 'anthropic-compatible' ? selected.provider : 'openai-compatible',
@@ -63,7 +62,7 @@ export class RuntimeController {
         baseUrl: selected.baseUrl ?? '',
         apiKey: input.apiKey
       });
-    }
+    });
     return ok(config);
   }
 
@@ -170,16 +169,26 @@ export class RuntimeController {
   }
 
   private async storeLocalCredential(modelId: string, input: Extract<RuntimeModelCreateInput, { kind: 'remote' }>) {
-    if (!this.localRuntime) throw new Error('Local Runtime credential bridge is unavailable.');
+    if (!this.localRuntime) {
+      throw new BadGatewayException('Local Runtime 凭据桥接不可用。请确认 Local Runtime 正在运行后重试。');
+    }
     const deviceId = input.deviceId?.trim();
-    if (!deviceId) throw new Error('A Local Runtime device must be selected for a local credential.');
+    if (!deviceId) throw new BadRequestException('必须选择一个已连接的 Local Runtime 设备。');
     const provider = input.provider ?? 'openai-compatible';
-    await this.localRuntime.upsertProviderConnection(deviceId, {
-      connectionId: modelId,
-      provider,
-      model: input.model,
-      baseUrl: input.baseUrl,
-      apiKey: input.apiKey
-    });
+    try {
+      await this.localRuntime.upsertProviderConnection(deviceId, {
+        connectionId: modelId,
+        provider,
+        model: input.model,
+        baseUrl: input.baseUrl,
+        apiKey: input.apiKey
+      });
+    } catch (error) {
+      this.logger.error(
+        `Local Runtime credential storage failed for model ${modelId}.`,
+        error instanceof Error ? error.stack : undefined
+      );
+      throw new BadGatewayException('无法在本机安全保存 API Key。请确认 Local Runtime 正在运行后重试。');
+    }
   }
 }

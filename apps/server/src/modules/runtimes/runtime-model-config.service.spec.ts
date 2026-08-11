@@ -191,3 +191,87 @@ test('update/delete reject non-persisted entries (env and discovered models)', a
     restoreEnv();
   }
 });
+
+test('failed local credential provisioning restores the complete previous model configuration', async () => {
+  const restoreEnv = withRemoteEnv();
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ models: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    })) as typeof fetch;
+
+  try {
+    const service = new RuntimeModelConfigService(makePersistence() as never);
+    const existing = await service.addModel({
+      kind: 'remote',
+      model: 'existing-model',
+      baseUrl: 'https://existing.test/v1',
+      apiKey: 'sk-existing'
+    });
+    const previousModelId = existing.currentModelId;
+
+    await assert.rejects(
+      () => service.addModel({
+        kind: 'remote',
+        provider: 'openai-compatible',
+        credentialLocation: 'local',
+        deviceId: 'device-1',
+        model: 'local-credential-model',
+        baseUrl: 'https://local-credential.test/v1',
+        apiKey: 'sk-local'
+      }, async () => {
+        throw new Error('credential provisioning failed');
+      }),
+      /credential provisioning failed/
+    );
+
+    const restored = service.getConfigSnapshot();
+    assert.equal(restored.currentModelId, previousModelId);
+    assert.ok(restored.availableModels.some((model) => model.id === previousModelId));
+    assert.ok(!restored.availableModels.some((model) => model.model === 'local-credential-model'));
+    assert.equal(service.connectionForModelId(previousModelId).apiKey, 'sk-existing');
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv();
+  }
+});
+
+test('failed local credential reprovisioning restores edited model metadata', async () => {
+  const restoreEnv = withRemoteEnv();
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ models: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    })) as typeof fetch;
+
+  try {
+    const service = new RuntimeModelConfigService(makePersistence() as never);
+    const added = await service.addModel({
+      kind: 'remote',
+      provider: 'openai-compatible',
+      credentialLocation: 'local',
+      deviceId: 'device-1',
+      label: 'Original label',
+      model: 'local-model',
+      baseUrl: 'https://local.test/v1',
+      apiKey: 'sk-local'
+    });
+
+    await assert.rejects(
+      () => service.updateModel(added.currentModelId, {
+        label: 'Changed label',
+        apiKey: 'sk-replacement'
+      }, async () => {
+        throw new Error('credential reprovisioning failed');
+      }),
+      /credential reprovisioning failed/
+    );
+
+    const restored = service.getConfigSnapshot();
+    assert.equal(restored.currentModelId, added.currentModelId);
+    assert.equal(restored.currentModelOption.label, 'Original label');
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv();
+  }
+});

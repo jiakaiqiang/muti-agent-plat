@@ -61,6 +61,8 @@ export type RuntimeModelConnection = {
   deviceId?: string;
 };
 
+type RuntimeModelProvisioner = (config: RuntimeModelConfig, affectedModelId: string) => Promise<void>;
+
 const collectionKey = 'runtimeModelConfig';
 const localDefaultBaseUrl = 'http://127.0.0.1:11434/v1';
 
@@ -164,7 +166,11 @@ export class RuntimeModelConfigService {
     return this.getConfig();
   }
 
-  async addModel(input: RuntimeModelCreateInput): Promise<RuntimeModelConfig> {
+  async addModel(
+    input: RuntimeModelCreateInput,
+    provision?: RuntimeModelProvisioner
+  ): Promise<RuntimeModelConfig> {
+    const previousConfig = this.config;
     const model = this.normalizeModelId(input.model);
     if (!model) {
       throw new BadRequestException('Model name is required.');
@@ -207,10 +213,23 @@ export class RuntimeModelConfigService {
       });
     }
 
-    return this.getConfig();
+    const config = await this.getConfig();
+    try {
+      await provision?.(config, config.currentModelId);
+      return config;
+    } catch (error) {
+      this.config = previousConfig;
+      this.persist();
+      throw error;
+    }
   }
 
-  async updateModel(modelId: string, input: RuntimeModelUpdateInput): Promise<RuntimeModelConfig> {
+  async updateModel(
+    modelId: string,
+    input: RuntimeModelUpdateInput,
+    provision?: RuntimeModelProvisioner
+  ): Promise<RuntimeModelConfig> {
+    const previousConfig = this.config;
     const id = this.normalizeModelId(modelId);
     const existing = id ? this.config.models?.find((model) => model.id === id) : undefined;
     if (!id || !existing) {
@@ -267,7 +286,15 @@ export class RuntimeModelConfigService {
       updatedAt: now
     };
     this.persist();
-    return this.getConfig();
+    const config = await this.getConfig();
+    try {
+      await provision?.(config, nextId);
+      return config;
+    } catch (error) {
+      this.config = previousConfig;
+      this.persist();
+      throw error;
+    }
   }
 
   async deleteModel(modelId: string): Promise<RuntimeModelConfig> {

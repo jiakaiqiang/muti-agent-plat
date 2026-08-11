@@ -66,8 +66,19 @@ function selectModel(modelId: string) {
   saveMessage.value = ''
 }
 
+async function runModelRequest(request: () => Promise<void>) {
+  saveMessage.value = ''
+  try {
+    await request()
+    return true
+  } catch {
+    // The domain store owns the user-visible error state.
+    return false
+  }
+}
+
 async function switchModel(modelId: string) {
-  await modelStore.switchModel(modelId)
+  if (!await runModelRequest(() => modelStore.switchModel(modelId))) return
   selectedModelId.value = modelStore.currentModelId
   saveMessage.value = '当前默认模型已切换。仅影响之后新建的 Session。'
 }
@@ -75,7 +86,7 @@ async function switchModel(modelId: string) {
 async function addLocalModel() {
   const model = localModelName.value.trim()
   if (!model) return
-  await modelStore.addModel({ kind: 'local', model })
+  if (!await runModelRequest(() => modelStore.addModel({ kind: 'local', model }))) return
   selectedModelId.value = modelStore.currentModelId
   localModelName.value = ''
   saveMessage.value = '本地模型已添加到模型列表。'
@@ -86,7 +97,7 @@ async function addRemoteModel() {
   const baseUrl = remoteBaseUrl.value.trim()
   const apiKey = remoteApiKey.value.trim()
   if (!model || !baseUrl || !apiKey) return
-  await modelStore.addModel({
+  const added = await runModelRequest(() => modelStore.addModel({
     kind: 'remote',
     label: remoteLabel.value.trim() || undefined,
     model,
@@ -95,7 +106,8 @@ async function addRemoteModel() {
     provider: remoteProvider.value,
     credentialLocation: remoteCredentialLocation.value,
     ...(remoteCredentialLocation.value === 'local' ? { deviceId: remoteDeviceId.value } : {})
-  })
+  }))
+  if (!added) return
   selectedModelId.value = modelStore.currentModelId
   remoteLabel.value = ''
   remoteModelName.value = ''
@@ -144,7 +156,7 @@ async function saveModelEdit() {
       input.apiKey = apiKey
     }
   }
-  await modelStore.updateModel(model.id, input)
+  if (!await runModelRequest(() => modelStore.updateModel(model.id, input))) return
   selectedModelId.value = modelStore.currentModelId
   closeEditDialog()
   saveMessage.value = '模型信息已更新。'
@@ -152,7 +164,7 @@ async function saveModelEdit() {
 
 async function removeModel(model: RuntimeModelOption) {
   if (!window.confirm(`确认删除模型「${model.label}」？删除后新建 Session 会回落到当前默认模型。`)) return
-  await modelStore.deleteModel(model.id)
+  if (!await runModelRequest(() => modelStore.deleteModel(model.id))) return
   if (selectedModelId.value === model.id) {
     selectedModelId.value = modelStore.currentModelId
   }
@@ -249,7 +261,7 @@ onMounted(async () => {
             <span>API Key</span>
             <input v-model="remoteApiKey" type="password" autocomplete="new-password" placeholder="sk-..." />
           </label>
-          <button type="button" class="primary" :disabled="!canAddRemote" @click="addRemoteModel">
+          <button type="button" class="primary" data-testid="add-remote-model" :disabled="!canAddRemote" @click="addRemoteModel">
             <UiIcon name="plus" :size="16" />
             添加远端模型
           </button>
