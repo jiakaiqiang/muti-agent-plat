@@ -5,8 +5,10 @@ import { join } from 'node:path';
 import test from 'node:test';
 import {
   authorizeLoopbackDevice,
+  createWorkspaceIndexPersistence,
   initializeSelectedWorkspace,
   LocalWritebackAuthorizationStore,
+  unregisterRemovedWorkspaces,
   workspaceRegistration
 } from './transport.js';
 import { defaultState } from './state.js';
@@ -77,6 +79,111 @@ test('loopback authorization stores a trusted device token without login', async
     else process.env.AGENT_RUNTIME_CLAUDE_VERSION = previousClaudeVersion;
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('workspace index persistence debounces updates and flushes only the latest entries', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-runtime-index-debounce-'));
+  const stateFile = join(directory, 'state.json');
+  const indexFile = join(directory, 'workspace-debounce-index.json');
+  const previousStateFile = process.env.AGENT_RUNTIME_STATE_FILE;
+  process.env.AGENT_RUNTIME_STATE_FILE = stateFile;
+  try {
+    const state = defaultState();
+    const revision = { id: 'revision-debounce', observedAt: '2026-08-10T00:00:00.000Z' };
+    const snapshot = {
+      workspaceId: 'workspace-debounce',
+      revision,
+      generation: 1,
+      status: 'ready' as const,
+      complete: true,
+      entries: [{ path: 'first.ts', kind: 'file' as const, size: 1, generated: false, sensitive: false }],
+      entrypoints: [],
+      detectedStack: ['node'],
+      indexedEntries: 1,
+      truncated: false,
+      updatedAt: revision.observedAt,
+      coverage: {
+        visitedEntries: 1,
+        indexedEntries: 1,
+        excludedGenerated: 0,
+        sensitiveEntries: 0,
+        skippedSymlinks: 0,
+        failedEntries: 0
+      }
+    };
+    state.workspaces.push({
+      workspaceId: snapshot.workspaceId,
+      displayName: 'debounced-workspace',
+      rootPath: directory,
+      permissions: {
+        workspace_read: 'allow', workspace_write: 'allow', workspace_delete: 'confirm',
+        command_execute: 'allow', test_execute: 'allow', dependency_install: 'confirm'
+      },
+      permissionPolicyVersion: 2,
+      registeredAt: revision.observedAt,
+      index: snapshot
+    });
+    const persistence = createWorkspaceIndexPersistence(state, 60_000);
+    persistence.onIndexUpdated(snapshot);
+    const latest = {
+      ...snapshot,
+      generation: 2,
+      entries: [{ path: 'latest.ts', kind: 'file' as const, size: 2, generated: false, sensitive: false }]
+    };
+    state.workspaces[0]!.index = latest;
+    persistence.onIndexUpdated(latest);
+
+    await assert.rejects(readFile(indexFile, 'utf8'), /ENOENT/);
+    await persistence.flush();
+
+    assert.equal(JSON.parse(await readFile(indexFile, 'utf8'))[0]?.path, 'latest.ts');
+    const persistedState = JSON.parse(await readFile(stateFile, 'utf8')) as {
+      workspaces: Array<{ index?: { entries?: unknown; generation: number } }>;
+    };
+    assert.equal(persistedState.workspaces[0]?.index?.generation, 2);
+    assert.equal(persistedState.workspaces[0]?.index?.entries, undefined);
+  } finally {
+    if (previousStateFile === undefined) delete process.env.AGENT_RUNTIME_STATE_FILE;
+    else process.env.AGENT_RUNTIME_STATE_FILE = previousStateFile;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('active bridge unregisters a workspace removed from persisted local state', () => {
+  const state = defaultState();
+  const workspaceState = {
+    workspaceId: 'workspace-revoked',
+    displayName: 'revoked-workspace',
+    rootPath: 'D:/revoked-workspace',
+    permissions: {
+      workspace_read: 'allow', workspace_write: 'allow', workspace_delete: 'confirm',
+      command_execute: 'allow', test_execute: 'allow', dependency_install: 'confirm'
+    } as const,
+    permissionPolicyVersion: 2 as const,
+    registeredAt: '2026-08-10T00:00:00.000Z'
+  };
+  state.workspaces.push(workspaceState);
+  const workspaces = new Map([
+    [workspaceState.workspaceId, new LocalWorkspace(workspaceState, { watch: false, index: false })]
+  ]);
+  const messages: unknown[] = [];
+  const dropped: string[] = [];
+
+  unregisterRemovedWorkspaces(
+    state,
+    workspaces,
+    new Set(),
+    (message) => messages.push(message),
+    (workspaceId) => dropped.push(workspaceId)
+  );
+
+  assert.deepEqual(dropped, ['workspace-revoked']);
+  assert.deepEqual(state.workspaces, []);
+  assert.equal(workspaces.size, 0);
+  assert.deepEqual(messages, [{
+    kind: 'local_runtime.workspace.unregister',
+    payload: { workspaceId: 'workspace-revoked' }
+  }]);
 });
 
 test('cancelled workspace initialization leaves no workspace state, watcher or index work behind', async () => {

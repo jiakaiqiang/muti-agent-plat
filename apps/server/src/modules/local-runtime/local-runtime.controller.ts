@@ -90,6 +90,15 @@ export class LocalRuntimeController {
     return ok(this.connections.listWorkspaces());
   }
 
+  @Delete('workspaces/:workspaceId')
+  @UseGuards(LocalRuntimeAdminGuard)
+  unregisterWorkspace(@Param('workspaceId') workspaceId: string) {
+    return ok({
+      workspaceId,
+      unregistered: this.connections.unregisterWorkspace(workspaceId)
+    });
+  }
+
   @Post('capabilities/refresh')
   @UseGuards(LocalRuntimeAdminGuard)
   async refreshCapabilities(@Body() body: { deviceId?: string }) {

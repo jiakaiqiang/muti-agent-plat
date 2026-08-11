@@ -86,6 +86,8 @@ type PendingWorkspaceAuthorization = {
   resolve: (workspace: LocalRuntimeWorkspaceSummary) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  /** Set when the CLI reports the OS folder-picker dialog has actually appeared. */
+  promptedAt?: string;
 };
 
 type PendingWorkspacePermissionGrant = {
@@ -509,7 +511,16 @@ export class LocalRuntimeConnectionService {
       return;
     }
     if (message.kind === 'local_runtime.workspace.unregister') {
-      this.unregisterWorkspace(client, message.payload.workspaceId, 'local workspace unregistered');
+      this.unregisterWorkspaceForClient(client, message.payload.workspaceId, 'local workspace unregistered');
+      return;
+    }
+    if (message.kind === 'local_runtime.workspace.authorization.prompted') {
+      const { requestId, promptedAt } = message.payload;
+      const pending = this.pendingWorkspaceAuthorizations.get(requestId);
+      if (pending) {
+        pending.promptedAt = promptedAt;
+        this.logger.log(`Local Runtime workspace authorization dialog appeared for request ${requestId} at ${promptedAt}`);
+      }
       return;
     }
     if (message.kind === 'local_runtime.workspace.authorization.result') {
@@ -766,7 +777,16 @@ export class LocalRuntimeConnectionService {
     void this.persistence?.setCollection(OPERATION_AUDIT_COLLECTION, this.operationAudits);
   }
 
-  private unregisterWorkspace(client: LocalRuntimeClient, workspaceId: string, reason: string) {
+  unregisterWorkspace(workspaceId: string, reason = 'local workspace unregistered by administrator'): boolean {
+    const workspace = this.workspaces.get(workspaceId);
+    if (!workspace) return false;
+    const client = this.clientsByDeviceId.get(workspace.deviceId);
+    if (!client) return false;
+    this.unregisterWorkspaceForClient(client, workspaceId, reason);
+    return true;
+  }
+
+  private unregisterWorkspaceForClient(client: LocalRuntimeClient, workspaceId: string, reason: string) {
     const workspace = this.workspaces.get(workspaceId);
     if (!workspace || workspace.deviceId !== client.deviceId) return;
     this.workspaces.delete(workspaceId);
@@ -806,7 +826,9 @@ export class LocalRuntimeConnectionService {
     const workspaceIds = [...this.workspaces.values()]
       .filter((workspace) => workspace.deviceId === client.deviceId)
       .map((workspace) => workspace.workspaceId);
-    for (const workspaceId of workspaceIds) this.unregisterWorkspace(client, workspaceId, 'local runtime disconnected');
+    for (const workspaceId of workspaceIds) {
+      this.unregisterWorkspaceForClient(client, workspaceId, 'local runtime disconnected');
+    }
     this.gateway.detachClient(client.clientId);
     this.interruptInvocations(client.deviceId, 'Local Runtime CLI disconnected.');
   }

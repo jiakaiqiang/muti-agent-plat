@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { unwatchFile, watchFile } from 'node:fs';
 import type {
   LocalRuntimeClientMessage,
   LocalRuntimeDeviceCode,
@@ -9,6 +10,7 @@ import type {
   LocalRuntimeServerMessage,
   LocalRuntimeTokenPendingResponse,
   LocalRuntimeTokenResponse,
+  WorkspaceIndexSnapshot,
   WorkspaceOperationRequest,
   WorkspaceOperationResult
 } from '@agent-cluster/shared';
@@ -17,7 +19,12 @@ import WebSocket from 'ws';
 import { detectAvailableLocalRuntimes, probeLocalRuntimeCapabilities } from './adapters/registry.js';
 import { executeLocalInvocation } from './runtime.js';
 import type { LocalRuntimeState } from './state.js';
-import { saveState } from './state.js';
+import {
+  loadPersistedWorkspaceIds,
+  saveState,
+  saveWorkspaceIndex,
+  stateFilePath
+} from './state.js';
 import { createWorkspaceState, LocalWorkspace } from './workspace.js';
 import { selectWorkspaceDirectory } from './directory-picker.js';
 import { LocalSecretStore } from './local-secret-store.js';
@@ -124,14 +131,32 @@ async function runBridgeConnection(
   const workspaceAuthorizations = new Map<string, AbortController>();
   const workspaceInitializations = new Map<string, Promise<void>>();
   const secrets = new LocalSecretStore();
+  const indexPersistence = createWorkspaceIndexPersistence(state);
   const workspaces = new Map(state.workspaces.map((workspace) => [
     workspace.workspaceId,
-    new LocalWorkspace(workspace, { onIndexUpdated: () => saveState(state) })
+    new LocalWorkspace(workspace, { onIndexUpdated: indexPersistence.onIndexUpdated })
   ]));
   let heartbeat: NodeJS.Timeout | undefined;
   const send = (message: LocalRuntimeClientMessage) => {
     if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
   };
+  const watchedStatePath = stateFilePath();
+  let workspaceRevocationSync = Promise.resolve();
+  const syncWorkspaceRevocations = () => {
+    workspaceRevocationSync = workspaceRevocationSync.then(async () => {
+      const persistedWorkspaceIds = await loadPersistedWorkspaceIds();
+      unregisterRemovedWorkspaces(
+        state,
+        workspaces,
+        persistedWorkspaceIds,
+        send,
+        indexPersistence.drop
+      );
+    }).catch((error) => {
+      process.stderr.write(`Failed to synchronize Local Runtime workspace revocations: ${error instanceof Error ? error.message : String(error)}\n`);
+    });
+  };
+  watchFile(watchedStatePath, { interval: 250, persistent: false }, syncWorkspaceRevocations);
   const closeForAbort = () => socket.close(1000, 'local_runtime_stopped');
   signal.addEventListener('abort', closeForAbort, { once: true });
 
@@ -174,6 +199,7 @@ async function runBridgeConnection(
         workspaceInitializations,
         writebackAuthorizations,
         secrets,
+        indexPersistence,
         send
       )
         .catch((error) => process.stderr.write(`Local Runtime request failed: ${error instanceof Error ? error.message : String(error)}\n`));
@@ -188,10 +214,13 @@ async function runBridgeConnection(
       workspaceAuthorizations.clear();
       resolve();
     });
-  }).finally(() => {
+  }).finally(async () => {
+    unwatchFile(watchedStatePath, syncWorkspaceRevocations);
+    await workspaceRevocationSync;
     signal.removeEventListener('abort', closeForAbort);
     if (heartbeat) clearInterval(heartbeat);
     for (const workspace of workspaces.values()) workspace.close();
+    await indexPersistence.flush();
   });
 }
 
@@ -204,6 +233,7 @@ async function handleServerMessage(
   workspaceInitializations: Map<string, Promise<void>>,
   writebackAuthorizations: LocalWritebackAuthorizationStore,
   secrets: LocalSecretStore,
+  indexPersistence: WorkspaceIndexPersistence,
   send: (message: LocalRuntimeClientMessage) => void
 ) {
   if (message.kind === 'local_runtime.capabilities.request') {
@@ -285,7 +315,15 @@ async function handleServerMessage(
         message.payload.title,
         process.platform,
         undefined,
-        controller.signal
+        controller.signal,
+        // Report to the server that the OS dialog actually appeared. Without this the server
+        // cannot distinguish a user who is slow to click from a dialog that never spawned.
+        () => {
+          send({
+            kind: 'local_runtime.workspace.authorization.prompted',
+            payload: { requestId, promptedAt: new Date().toISOString() }
+          });
+        }
       );
       if (!selectedPath) {
         send({
@@ -300,7 +338,8 @@ async function handleServerMessage(
         state,
         workspaces,
         workspaceInitializations,
-        controller.signal
+        controller.signal,
+        indexPersistence.onIndexUpdated
       );
       if (controller.signal.aborted) return;
       send({
@@ -469,7 +508,8 @@ export async function initializeSelectedWorkspace(
   state: LocalRuntimeState,
   workspaces: Map<string, LocalWorkspace>,
   initializationTails: Map<string, Promise<void>>,
-  signal: AbortSignal
+  signal: AbortSignal,
+  onIndexUpdated: (snapshot: WorkspaceIndexSnapshot) => void | Promise<void> = () => saveState(state)
 ) {
   const key = process.platform === 'win32' ? selectedPath.toLowerCase() : selectedPath;
   const previous = initializationTails.get(key) ?? Promise.resolve();
@@ -495,7 +535,7 @@ export async function initializeSelectedWorkspace(
     signal.throwIfAborted();
     let workspace = workspaces.get(workspaceState.workspaceId);
     if (!workspace) {
-      workspace = new LocalWorkspace(workspaceState, { onIndexUpdated: () => saveState(state) });
+      workspace = new LocalWorkspace(workspaceState, { onIndexUpdated });
       workspaces.set(workspaceState.workspaceId, workspace);
     }
     return workspace;
@@ -506,6 +546,70 @@ export async function initializeSelectedWorkspace(
     return await initialization;
   } finally {
     if (initializationTails.get(key) === tail) initializationTails.delete(key);
+  }
+}
+
+type WorkspaceIndexPersistence = ReturnType<typeof createWorkspaceIndexPersistence>;
+
+export function createWorkspaceIndexPersistence(
+  state: LocalRuntimeState,
+  debounceMs = 500
+) {
+  const pending = new Map<string, WorkspaceIndexSnapshot>();
+  let timer: NodeJS.Timeout | undefined;
+  let writeTail = Promise.resolve();
+
+  const flush = async () => {
+    if (timer) clearTimeout(timer);
+    timer = undefined;
+    if (!pending.size) {
+      await writeTail;
+      return;
+    }
+    const snapshots = [...pending.values()];
+    pending.clear();
+    const operation = writeTail.then(async () => {
+      await Promise.all(snapshots.map((snapshot) => (
+        saveWorkspaceIndex(snapshot.workspaceId, snapshot.entries)
+      )));
+      await saveState(state);
+    });
+    writeTail = operation.catch(() => undefined);
+    await operation;
+  };
+
+  const onIndexUpdated = (snapshot: WorkspaceIndexSnapshot) => {
+    pending.set(snapshot.workspaceId, snapshot);
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      void flush().catch((error) => {
+        process.stderr.write(`Failed to persist Local Runtime workspace index: ${error instanceof Error ? error.message : String(error)}\n`);
+      });
+    }, debounceMs);
+    timer.unref?.();
+  };
+
+  const drop = (workspaceId: string) => {
+    pending.delete(workspaceId);
+  };
+
+  return { onIndexUpdated, flush, drop };
+}
+
+export function unregisterRemovedWorkspaces(
+  state: LocalRuntimeState,
+  workspaces: Map<string, LocalWorkspace>,
+  persistedWorkspaceIds: ReadonlySet<string>,
+  send: (message: LocalRuntimeClientMessage) => void,
+  onRemoved?: (workspaceId: string) => void
+) {
+  for (const [workspaceId, workspace] of workspaces) {
+    if (persistedWorkspaceIds.has(workspaceId)) continue;
+    onRemoved?.(workspaceId);
+    workspace.close();
+    workspaces.delete(workspaceId);
+    state.workspaces = state.workspaces.filter((candidate) => candidate.workspaceId !== workspaceId);
+    send({ kind: 'local_runtime.workspace.unregister', payload: { workspaceId } });
   }
 }
 

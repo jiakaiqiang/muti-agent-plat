@@ -12,7 +12,7 @@ import {
 } from './protocol-handler.js';
 import { createDeviceCode, approveDeviceCode, exchangeDeviceCode, fetchDeviceStatus, revokeDevice, runBridge } from './transport.js';
 import { createWorkspaceState, LocalWorkspace } from './workspace.js';
-import { loadState, saveState, stateFilePath } from './state.js';
+import { loadState, removeWorkspace, saveState, stateFilePath } from './state.js';
 
 const CLI_VERSION = '0.1.0';
 
@@ -83,6 +83,14 @@ async function main(args: string[]) {
     listWorkspaces(state);
     return;
   }
+  if (command === 'remove-workspace') {
+    const id = args[1];
+    if (!id) throw new Error('Usage: agent-runtime remove-workspace <workspace-id>');
+    const removed = await removeWorkspace(state, id);
+    if (!removed) throw new Error(`Unknown workspace: ${id}`);
+    process.stdout.write(`Revoked workspace ${removed.workspaceId}.\n`);
+    return;
+  }
   if (command === 'workspace') {
     const action = args[1] ?? 'list';
     if (action === 'list') { listWorkspaces(state); return; }
@@ -100,10 +108,8 @@ async function main(args: string[]) {
     }
     if (action === 'revoke') {
       const id = args[2];
-      const index = state.workspaces.findIndex((item) => item.workspaceId === id);
-      if (index < 0) throw new Error(`Unknown workspace: ${id}`);
-      const [removed] = state.workspaces.splice(index, 1);
-      await saveState(state);
+      const removed = id ? await removeWorkspace(state, id) : undefined;
+      if (!removed) throw new Error(`Unknown workspace: ${id ?? ''}`);
       process.stdout.write(`Revoked workspace ${removed.workspaceId}.\n`);
       return;
     }
@@ -199,6 +205,7 @@ function printHelp() {
     '  status',
     '  version',
     '  workspace add|list|revoke|grant [--once]|reset-permissions',
+    '  remove-workspace <workspace-id>',
     '  workspaces',
     '  revoke [device|workspace-id]',
     '  install [--server <url>]',

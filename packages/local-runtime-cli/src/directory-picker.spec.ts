@@ -16,6 +16,25 @@ test('directory picker returns the selected path without exposing it to the plat
   assert.equal(selected, 'D:\\projects\\demo');
 });
 
+test('directory picker reports prompted only after the picker process starts', async () => {
+  const events: string[] = [];
+  const selected = await selectWorkspaceDirectory(
+    'Select',
+    'win32',
+    async (_command, _args, _signal, onStarted) => {
+      events.push('runner-started');
+      onStarted?.();
+      events.push('selection-completed');
+      return { stdout: 'D:\\projects\\demo\r\n' };
+    },
+    undefined,
+    () => events.push('prompted')
+  );
+
+  assert.equal(selected, 'D:\\projects\\demo');
+  assert.deepEqual(events, ['runner-started', 'prompted', 'selection-completed']);
+});
+
 test('directory picker returns undefined when the user cancels', async () => {
   const selected = await selectWorkspaceDirectory('Select', 'win32', async () => ({ stdout: '' }));
   assert.equal(selected, undefined);

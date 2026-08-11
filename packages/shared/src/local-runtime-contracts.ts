@@ -236,6 +236,10 @@ export type LocalRuntimeClientMessage =
   | { kind: 'local_runtime.heartbeat'; payload: { deviceId: UUID; sentAt: ISODateTime } }
   | { kind: 'local_runtime.workspace.register'; payload: LocalRuntimeWorkspaceRegistration }
   | { kind: 'local_runtime.workspace.unregister'; payload: { workspaceId: UUID } }
+  | {
+      kind: 'local_runtime.workspace.authorization.prompted';
+      payload: { requestId: UUID; promptedAt: ISODateTime };
+    }
   | { kind: 'local_runtime.workspace.authorization.result'; payload: LocalRuntimeWorkspaceAuthorizationResult }
   | { kind: 'local_runtime.workspace.permission.grant.result'; payload: LocalRuntimeWorkspacePermissionGrantResult }
   | { kind: 'local_runtime.capabilities.result'; payload: LocalRuntimeCapabilityRefreshResult }

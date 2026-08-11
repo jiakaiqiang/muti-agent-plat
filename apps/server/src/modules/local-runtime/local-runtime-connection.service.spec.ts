@@ -109,6 +109,14 @@ test('authenticated Local Runtime carries an invocation and disconnects without 
     assert.equal(cancelledRequest.payload.requestId, 'authorization-cancelled');
     assert.equal(authorizationRequest.payload.requestId, 'authorization-selected');
 
+    socket.send(JSON.stringify({
+      kind: 'local_runtime.workspace.authorization.prompted',
+      payload: {
+        requestId: authorizationRequest.payload.requestId,
+        promptedAt: '2026-07-24T00:00:00.000Z'
+      }
+    }));
+
     assert.equal(connections.cancelWorkspaceAuthorization('authorization-cancelled'), true);
     await assert.rejects(cancelledAuthorization, /已取消选择本机工作目录/);
     assert.equal(
@@ -153,6 +161,23 @@ test('authenticated Local Runtime carries an invocation and disconnects without 
     assert.equal(summary?.runtimeCapabilities[0]?.version, 'codex-cli 1.1.0');
     assert.equal('path' in (summary ?? {}), false);
     assert.equal(gateway.getRegistration('workspace-local-runtime')?.providerKind, 'local_bridge');
+
+    socket.send(JSON.stringify({
+      kind: 'local_runtime.workspace.register',
+      payload: {
+        workspaceId: 'workspace-remove',
+        displayName: 'remove-project',
+        capabilities: { read: true, write: true, command: true, test: true },
+        revision: { id: 'revision-remove-1', observedAt: '2026-07-24T00:00:00.000Z' },
+        permissions: DEFAULT_LOCAL_RUNTIME_PERMISSION_POLICY,
+        registeredAt: '2026-07-24T00:00:00.000Z'
+      }
+    }));
+    await inbox.next('local_runtime.workspace.registered');
+    assert.equal(connections.unregisterWorkspace('workspace-remove'), true);
+    assert.equal(connections.getWorkspace('workspace-remove'), undefined);
+    assert.equal(gateway.getRegistration('workspace-remove'), undefined);
+    assert.equal(connections.unregisterWorkspace('workspace-remove'), false);
 
     const permissionGrant = connections.grantWorkspacePermissionOnce('workspace-local-runtime', 'workspace_delete');
     const permissionGrantRequest = await inbox.next('local_runtime.workspace.permission.grant.request');

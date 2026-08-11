@@ -50,7 +50,7 @@ export class CodexLocalRuntimeAdapter implements LocalRuntimeAdapter {
           CODEX_MODEL: providerConnection.model
         } : undefined
       });
-      if (exitCode !== 0) throw new Error(`Codex exited with code ${exitCode}: ${stderr.trim().slice(-4000)}`);
+      if (exitCode !== 0) throw new Error(formatCodexProcessFailure(stdout, stderr, exitCode));
       const output = parseCodexOutput(stdout, plan.expectedOutput.kind);
       return {
         output,
@@ -64,6 +64,65 @@ export class CodexLocalRuntimeAdapter implements LocalRuntimeAdapter {
 
 export function buildCodexArgs() {
   return ['exec', '--json', '--sandbox', 'workspace-write', '--skip-git-repo-check', '-'];
+}
+
+/**
+ * `codex exec --json` 把失败原因写在 stdout 的 JSONL 帧里,stderr 常常是空的。
+ * 只读 stderr 会得到没有原因的 "exited with code 1:",因此这里按
+ * 结构化帧 → stderr → stdout 末行的顺序取详情。
+ */
+export function formatCodexProcessFailure(stdout: string, stderr: string, exitCode: number | null) {
+  const structuredError = extractCodexStreamError(stdout);
+  const stderrMessage = stderr.trim();
+  const stdoutFallback = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1);
+  const detail = structuredError || stderrMessage || stdoutFallback;
+  return `Codex exited with code ${exitCode}${detail ? `: ${detail.slice(-4000)}` : '.'}`;
+}
+
+function extractCodexStreamError(stdout: string) {
+  let reportedError: string | undefined;
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const frame = JSON.parse(trimmed) as Record<string, unknown>;
+      const frameError = codexFrameError(frame);
+      if (frameError) reportedError = frameError;
+    } catch {
+      // 非 JSON 的状态行只作为最后的兜底。
+    }
+  }
+  return reportedError;
+}
+
+function codexFrameError(frame: Record<string, unknown>): string | undefined {
+  const nested = errorText(frame.error);
+  if (nested) return nested;
+  if (frame.type === 'error' || frame.type === 'turn.failed') {
+    const message = errorText(frame.message);
+    if (message) return message;
+  }
+  for (const nestedKey of ['payload', 'item'] as const) {
+    const nestedFrame = frame[nestedKey];
+    if (!nestedFrame || typeof nestedFrame !== 'object' || Array.isArray(nestedFrame)) continue;
+    const nestedMessage = codexFrameError(nestedFrame as Record<string, unknown>);
+    if (nestedMessage) return nestedMessage;
+  }
+  return undefined;
+}
+
+function errorText(value: unknown): string | undefined {
+  if (typeof value === 'string') return value.trim() || undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const message = typeof record.message === 'string' ? record.message.trim() : '';
+  const code = typeof record.code === 'string' || typeof record.code === 'number' ? String(record.code) : '';
+  if (message) return code ? `${message} (${code})` : message;
+  return code || undefined;
 }
 
 export function withCodexOutputSchema(args: string[], schemaPath: string) {

@@ -49,3 +49,19 @@ test('launch config exposes the public web origin used by the browser and Runtim
     else process.env.PUBLIC_WEB_URL = previousPublicWebUrl;
   }
 });
+
+test('workspace delete endpoint unregisters the requested server workspace', () => {
+  const requests: string[] = [];
+  const connections = {
+    unregisterWorkspace: (workspaceId: string) => {
+      requests.push(workspaceId);
+      return true;
+    }
+  } as unknown as LocalRuntimeConnectionService;
+  const controller = new LocalRuntimeController({} as LocalRuntimeAuthService, connections);
+
+  const result = controller.unregisterWorkspace('workspace-remove');
+
+  assert.deepEqual(requests, ['workspace-remove']);
+  assert.deepEqual(result.data, { workspaceId: 'workspace-remove', unregistered: true });
+});

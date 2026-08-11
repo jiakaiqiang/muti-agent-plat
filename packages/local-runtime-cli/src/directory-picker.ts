@@ -1,33 +1,44 @@
 import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 
 type PickerRunner = (
   command: string,
   args: string[],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  // Called once the picker child process is actually running. The whole wait between "dialog
+  // requested" and "user chose" is otherwise silent, so a dialog that never appeared looks
+  // exactly like a slow user.
+  onStarted?: () => void
 ) => Promise<{ stdout: string; stderr?: string }>;
 
-const execFileAsync = promisify(execFile);
-
-const defaultRunner: PickerRunner = async (command, args, signal) => {
-  const result = await execFileAsync(command, args, {
-    encoding: 'utf8',
-    windowsHide: shouldHideChildWindow(command),
-    timeout: 120_000,
-    signal
+const defaultRunner: PickerRunner = (command, args, signal, onStarted) =>
+  new Promise((resolve, reject) => {
+    const child = execFile(
+      command,
+      args,
+      {
+        encoding: 'utf8',
+        windowsHide: shouldHideChildWindow(command),
+        timeout: 120_000,
+        signal
+      },
+      (error, stdout, stderr) => {
+        if (error) reject(error);
+        else resolve({ stdout: String(stdout), stderr: String(stderr) });
+      }
+    );
+    if (child.pid !== undefined) onStarted?.();
   });
-  return { stdout: String(result.stdout), stderr: String(result.stderr) };
-};
 
 export async function selectWorkspaceDirectory(
   title = '选择 Agent Runtime 授权工作目录',
   platform = process.platform,
   run: PickerRunner = defaultRunner,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onPrompted?: () => void
 ): Promise<string | undefined> {
   const command = directoryPickerCommand(platform, title);
   try {
-    const result = await run(command.command, command.args, signal);
+    const result = await run(command.command, command.args, signal, onPrompted);
     const selected = result.stdout.trim();
     return selected || undefined;
   } catch (error) {

@@ -7,6 +7,13 @@ import { renameWithRetry } from './atomic-file.js';
 
 type SecretFile = { version: 1; values: Record<string, string> };
 
+const powershellDpapiPreamble = [
+  '[Console]::InputEncoding = [Text.Encoding]::UTF8',
+  '[Console]::OutputEncoding = [Text.Encoding]::UTF8',
+  '$OutputEncoding = [Text.Encoding]::UTF8',
+  'Add-Type -AssemblyName System.Security'
+].join('; ');
+
 export class LocalSecretStore {
   private readonly path: string;
 
@@ -60,14 +67,14 @@ export class LocalSecretStore {
 
 async function protect(value: string) {
   return runDpapi(
-    "$input = [Console]::In.ReadToEnd(); $bytes = [Text.Encoding]::UTF8.GetBytes($input); $encrypted = [Security.Cryptography.ProtectedData]::Protect($bytes, $null, [Security.Cryptography.DataProtectionScope]::CurrentUser); [Convert]::ToBase64String($encrypted)",
+    `${powershellDpapiPreamble}; $payload = [Console]::In.ReadToEnd(); $bytes = [Text.Encoding]::UTF8.GetBytes($payload); $encrypted = [Security.Cryptography.ProtectedData]::Protect($bytes, $null, [Security.Cryptography.DataProtectionScope]::CurrentUser); [Convert]::ToBase64String($encrypted)`,
     value
   );
 }
 
 async function unprotect(value: string) {
   return runDpapi(
-    "$input = [Console]::In.ReadToEnd(); $encrypted = [Convert]::FromBase64String($input); $bytes = [Security.Cryptography.ProtectedData]::Unprotect($encrypted, $null, [Security.Cryptography.DataProtectionScope]::CurrentUser); [Text.Encoding]::UTF8.GetString($bytes)",
+    `${powershellDpapiPreamble}; $payload = [Console]::In.ReadToEnd(); $encrypted = [Convert]::FromBase64String($payload); $bytes = [Security.Cryptography.ProtectedData]::Unprotect($encrypted, $null, [Security.Cryptography.DataProtectionScope]::CurrentUser); [Text.Encoding]::UTF8.GetString($bytes)`,
     value
   );
 }

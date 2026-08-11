@@ -7,6 +7,7 @@ import type {
   LocalRuntimePermission,
   LocalRuntimePermissionPolicy,
   LocalRuntimeTokenResponse,
+  WorkspaceNavigationEntry,
   WorkspaceIndexSnapshot
 } from '@agent-cluster/shared';
 import { renameWithRetry } from './atomic-file.js';
@@ -63,6 +64,15 @@ export async function loadState(): Promise<LocalRuntimeState> {
     if (!Array.isArray(parsed.providerConnections)) parsed.providerConnections = [];
     parsed.schemaVersion = 2;
     for (const workspace of parsed.workspaces) {
+      if (workspace.index) {
+        const inlineEntries = Array.isArray(workspace.index.entries) ? workspace.index.entries : [];
+        const persistedEntries = await loadWorkspaceIndex(workspace.workspaceId);
+        workspace.index.entries = persistedEntries ?? inlineEntries;
+        if (!persistedEntries && inlineEntries.length) {
+          await saveWorkspaceIndex(workspace.workspaceId, inlineEntries);
+          migrated = true;
+        }
+      }
       if (workspace.permissionPolicyVersion === 2) continue;
       workspace.permissions = {
         ...workspace.permissions,
@@ -92,12 +102,91 @@ export async function saveState(state: LocalRuntimeState): Promise<void> {
   }
 }
 
+export async function saveWorkspaceIndex(
+  workspaceId: string,
+  entries: readonly WorkspaceNavigationEntry[]
+): Promise<void> {
+  const path = workspaceIndexFilePath(workspaceId);
+  await enqueueJsonWrite(path, entries);
+}
+
+export async function loadWorkspaceIndex(
+  workspaceId: string
+): Promise<WorkspaceNavigationEntry[] | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(workspaceIndexFilePath(workspaceId), 'utf8')) as unknown;
+    return Array.isArray(parsed) ? parsed as WorkspaceNavigationEntry[] : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT' || error instanceof SyntaxError) return undefined;
+    throw error;
+  }
+}
+
+export async function loadPersistedWorkspaceIds(): Promise<Set<string>> {
+  const parsed = JSON.parse(await readFile(stateFilePath(), 'utf8')) as { workspaces?: unknown };
+  if (!Array.isArray(parsed.workspaces)) throw new Error('Local Runtime state has no workspace list.');
+  return new Set(parsed.workspaces.flatMap((workspace) => {
+    const workspaceId = (workspace as { workspaceId?: unknown })?.workspaceId;
+    return typeof workspaceId === 'string' ? [workspaceId] : [];
+  }));
+}
+
+export async function removeWorkspace(
+  state: LocalRuntimeState,
+  workspaceId: string
+): Promise<LocalWorkspaceState | undefined> {
+  const index = state.workspaces.findIndex((workspace) => workspace.workspaceId === workspaceId);
+  if (index < 0) return undefined;
+  const [removed] = state.workspaces.splice(index, 1);
+  await saveState(state);
+  await unlink(workspaceIndexFilePath(workspaceId)).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error;
+  });
+  return removed;
+}
+
 const stateWriteQueues = new Map<string, Promise<void>>();
 
 async function writeStateFile(path: string, state: LocalRuntimeState): Promise<void> {
+  const persisted = {
+    ...state,
+    workspaces: state.workspaces.map((workspace) => ({
+      ...workspace,
+      ...(workspace.index
+        ? { index: withoutEntries(workspace.index) }
+        : {})
+    }))
+  };
+  await writeJsonFile(path, persisted);
+}
+
+function workspaceIndexFilePath(workspaceId: string) {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(workspaceId)) {
+    throw new Error(`Invalid Local Runtime workspace ID: ${workspaceId}`);
+  }
+  return join(dirname(stateFilePath()), `${workspaceId}-index.json`);
+}
+
+function withoutEntries(snapshot: WorkspaceIndexSnapshot): Omit<WorkspaceIndexSnapshot, 'entries'> {
+  const { entries: _entries, ...metadata } = snapshot;
+  return metadata;
+}
+
+async function enqueueJsonWrite(path: string, value: unknown): Promise<void> {
+  const previous = stateWriteQueues.get(path) ?? Promise.resolve();
+  const operation = previous.catch(() => undefined).then(() => writeJsonFile(path, value));
+  stateWriteQueues.set(path, operation);
+  try {
+    await operation;
+  } finally {
+    if (stateWriteQueues.get(path) === operation) stateWriteQueues.delete(path);
+  }
+}
+
+async function writeJsonFile(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   try {
     await renameWithRetry(temporary, path);
   } catch (error) {
