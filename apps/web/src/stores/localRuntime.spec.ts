@@ -146,6 +146,72 @@ describe('browser-triggered Local Runtime workspace authorization', () => {
     expect(store.runtimeCapabilities[0]?.runtimeType).toBe('codex')
   })
 
+  it('revalidates a cached ready state before returning the selected workspace', async () => {
+    let deviceReads = 0
+    const launch = vi.fn()
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/local-runtime/devices')) {
+        deviceReads += 1
+        return jsonResponse(deviceReads === 1 ? [] : [{
+          deviceId: 'device-local',
+          ownerId: 'local-user',
+          displayName: 'developer-pc',
+          cliVersion: '0.1.0',
+          protocolVersion: 7,
+          runtimes: {},
+          createdAt: '2026-08-06T00:00:00.000Z',
+          lastSeenAt: '2026-08-06T00:00:00.000Z',
+          connected: true
+        }])
+      }
+      if (url.endsWith('/local-runtime/launch-config')) {
+        return jsonResponse({ serverUrl: 'http://127.0.0.1:8089' })
+      }
+      if (url.endsWith('/local-runtime/capabilities/refresh') && init?.method === 'POST') {
+        return jsonResponse([{
+          runtimeType: 'codex',
+          status: 'ready',
+          version: 'codex 1.0',
+          checkedAt: '2026-08-06T00:00:00.000Z'
+        }])
+      }
+      if (url.endsWith('/local-runtime/workspaces')) {
+        return jsonResponse([{
+          workspaceId: 'workspace-cached',
+          deviceId: 'device-local',
+          displayName: 'cached-project',
+          connectedAt: '2026-08-06T00:00:00.000Z',
+          runtimeTypes: ['codex'],
+          runtimeCapabilities: []
+        }])
+      }
+      throw new Error(`Unexpected request: ${init?.method ?? 'GET'} ${url}`)
+    }))
+
+    const store = useLocalRuntimeStore()
+    store.connectionState = 'ready'
+    store.workspaces = normalizeLocalRuntimeWorkspaces([{
+      workspaceId: 'workspace-cached',
+      deviceId: 'device-local',
+      displayName: 'cached-project',
+      connectedAt: '2026-08-05T00:00:00.000Z',
+      runtimeTypes: ['codex']
+    }])
+
+    const workspace = await store.ensureWorkspaceConnected('workspace-cached', {
+      launch,
+      pollIntervalMs: 1,
+      timeoutMs: 100,
+      wait: async () => undefined
+    })
+
+    expect(deviceReads).toBe(2)
+    expect(launch).toHaveBeenCalledOnce()
+    expect(workspace.workspaceId).toBe('workspace-cached')
+    expect(store.connectionState).toBe('ready')
+  })
+
   it('deduplicates repeated clicks while one directory picker is active', async () => {
     let resolveFetch!: (response: Response) => void
     const fetch = vi.fn(() => new Promise<Response>((resolve) => {

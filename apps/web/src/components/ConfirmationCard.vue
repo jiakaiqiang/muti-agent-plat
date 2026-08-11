@@ -4,14 +4,29 @@ import type { ConfirmationCardState, PostReviewAction } from '@/types/contracts'
 import { useWorkflowStore } from '@/stores/workflow'
 import WorkflowSelectionDialog, { type WorkflowSelectionOption } from './workflow/WorkflowSelectionDialog.vue'
 
-const props = defineProps<{ confirmation: ConfirmationCardState; compact?: boolean }>()
+const props = defineProps<{
+  confirmation: ConfirmationCardState
+  compact?: boolean
+  autoOpenWorkflowDialog?: boolean
+}>()
 const emit = defineEmits<{ resolve: [optionKey: string] }>()
 const workflowStore = useWorkflowStore()
-const showWorkflowDialog = ref(props.confirmation.reason === 'select_workflow' && props.confirmation.status === 'pending')
+const showWorkflowDialog = ref(
+  Boolean(props.autoOpenWorkflowDialog) &&
+  props.confirmation.reason === 'select_workflow' &&
+  props.confirmation.status === 'pending'
+)
 
 watch(
-  () => [props.confirmation.confirmationId, props.confirmation.reason, props.confirmation.status] as const,
-  ([, reason, status]) => { showWorkflowDialog.value = reason === 'select_workflow' && status === 'pending' },
+  () => [
+    props.confirmation.confirmationId,
+    props.confirmation.reason,
+    props.confirmation.status,
+    props.autoOpenWorkflowDialog
+  ] as const,
+  ([, reason, status, autoOpen]) => {
+    showWorkflowDialog.value = Boolean(autoOpen) && reason === 'select_workflow' && status === 'pending'
+  },
   { immediate: true }
 )
 

@@ -71,7 +71,11 @@ describe('ConfirmationCard', () => {
       confirmationId: 'select-1', reason: 'select_workflow', title: '选择工作流', description: '选择后开始执行',
       status: 'pending', options: [], workflowOptions: []
     }
-    const wrapper = mount(ConfirmationCard, { attachTo: document.body, props: { confirmation }, global: { plugins: [createPinia()] } })
+    const wrapper = mount(ConfirmationCard, {
+      attachTo: document.body,
+      props: { confirmation, autoOpenWorkflowDialog: true },
+      global: { plugins: [createPinia()] }
+    })
     await flushPromises()
     const dialog = document.body.querySelector('.workflow-dialog') as HTMLElement
     expect(dialog.textContent).toContain('需求交付流程')
@@ -97,7 +101,7 @@ describe('ConfirmationCard', () => {
     }
     const wrapper = mount(ConfirmationCard, {
       attachTo: document.body,
-      props: { confirmation },
+      props: { confirmation, autoOpenWorkflowDialog: true },
       global: { plugins: [createPinia()] }
     })
     await flushPromises()
@@ -107,5 +111,39 @@ describe('ConfirmationCard', () => {
     await flushPromises()
     expect(document.body.querySelectorAll('.workflow-dialog')).toHaveLength(0)
     wrapper.unmount()
+  })
+
+  it('keeps duplicate workflow confirmation cards inline unless one surface owns auto-open', async () => {
+    const confirmation: ConfirmationCardState = {
+      confirmationId: 'select-single-owner',
+      reason: 'select_workflow',
+      title: '选择工作流',
+      description: '选择后开始执行',
+      status: 'pending',
+      options: [],
+      workflowOptions: []
+    }
+    const passive = mount(ConfirmationCard, {
+      attachTo: document.body,
+      props: { confirmation },
+      global: { plugins: [createPinia()] }
+    })
+    const owner = mount(ConfirmationCard, {
+      attachTo: document.body,
+      props: { confirmation, autoOpenWorkflowDialog: true },
+      global: { plugins: [createPinia()] }
+    })
+    await flushPromises()
+
+    expect(document.body.querySelectorAll('.workflow-dialog')).toHaveLength(1)
+    await owner.setProps({ autoOpenWorkflowDialog: false })
+    await flushPromises()
+    expect(document.body.querySelectorAll('.workflow-dialog')).toHaveLength(0)
+
+    await passive.get('.confirmation-card__workflow-selection .primary').trigger('click')
+    await flushPromises()
+    expect(document.body.querySelectorAll('.workflow-dialog')).toHaveLength(1)
+    passive.unmount()
+    owner.unmount()
   })
 })

@@ -196,6 +196,18 @@ export const useLocalRuntimeStore = defineStore('localRuntime', {
         if (connectionPromise === operation) connectionPromise = undefined
       }
     },
+    async ensureWorkspaceConnected(workspaceId: string, options: EnsureLocalRuntimeOptions = {}) {
+      const normalizedWorkspaceId = workspaceId.trim()
+      if (!normalizedWorkspaceId) {
+        throw new Error('请先选择已连接的本地 Runtime 工作区。')
+      }
+      const workspaces = await this.ensureConnected(options)
+      const workspace = workspaces.find((candidate) => candidate.workspaceId === normalizedWorkspaceId)
+      if (!workspace) {
+        throw new Error('所选本地 Runtime 工作区已断开，请重新选择本机目录。')
+      }
+      return workspace
+    },
     cancelConnectionCheck() {
       connectionAttempt += 1
       connectionPromise = undefined

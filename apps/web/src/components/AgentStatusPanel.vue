@@ -16,6 +16,7 @@ const props = defineProps<{
   capabilities: RuntimeCapabilityDefinition[]
   tasks: TaskViewState[]
   activeConfirmation?: ConfirmationCardState
+  autoOpenWorkflowDialog?: boolean
   connected: boolean
 }>()
 
@@ -79,6 +80,7 @@ function artifactMeta(artifact: TaskViewState['artifacts'][number]) {
     <ConfirmationCard
       v-if="activeConfirmation"
       :confirmation="activeConfirmation"
+      :auto-open-workflow-dialog="autoOpenWorkflowDialog"
       compact
       @resolve="emit('resolveConfirmation', $event)"
     />

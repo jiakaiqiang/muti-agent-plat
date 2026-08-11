@@ -725,6 +725,22 @@ async function ensureLocalRuntimeReady() {
   }
 }
 
+async function ensureSelectedLocalRuntimeReady() {
+  sessionCreateError.value = ''
+  try {
+    const workspace = await localRuntimeStore.ensureWorkspaceConnected(sessionLocalRuntimeWorkspaceId.value)
+    if (sessionRuntimeType.value && !workspace.runtimeTypes.includes(sessionRuntimeType.value)) {
+      throw new Error(`${sessionRuntimeType.value} 已无法在所选本地 Runtime 工作区运行，请重新选择 Runtime。`)
+    }
+    return true
+  } catch (error) {
+    if (isAbortError(error)) return false
+    sessionCreateError.value = error instanceof Error ? error.message : '本地助手连接检查失败'
+    showMessage(sessionCreateError.value, 'warning')
+    return false
+  }
+}
+
 async function authorizeLocalRuntimeWorkspace() {
   sessionCreateError.value = ''
   try {
@@ -791,9 +807,8 @@ async function createSessionFromDialog() {
     showMessage(sessionCreateError.value, 'warning')
     return
   }
-  if (sessionWorkspaceKind.value === 'local_bridge' && localRuntimeStore.connectionState !== 'ready') {
-    await ensureLocalRuntimeReady()
-    if (!localRuntimeStore.isConnected || localRuntimeStore.connectionError) return
+  if (sessionWorkspaceKind.value === 'local_bridge') {
+    if (!(await ensureSelectedLocalRuntimeReady())) return
   }
   if (sessionWorkspaceKind.value === 'local_bridge' && !sessionRuntimeType.value) {
     sessionCreateError.value = '当前设备没有可用于创建会话的 Codex 或 Claude Code'
@@ -840,6 +855,10 @@ async function confirmCreateSessionFromDialog() {
   isCreatingSession.value = true
   sessionCreateError.value = ''
   try {
+    if (sessionWorkspaceKind.value === 'local_bridge' && !(await ensureSelectedLocalRuntimeReady())) {
+      showCreateConfirmDialog.value = false
+      return
+    }
     await createSession(
       input,
       selectedSessionAgentIds.value,
@@ -1739,6 +1758,7 @@ async function submitWorkflowStepRevision() {
       :capabilities="agentStore.capabilities"
       :tasks="tasks"
       :active-confirmation="activeConfirmation"
+      :auto-open-workflow-dialog="!showCreateSessionDialog && !showCreateConfirmDialog"
       :connected="eventStore.sseConnected"
       @resolve-confirmation="resolveConfirmation"
     />
