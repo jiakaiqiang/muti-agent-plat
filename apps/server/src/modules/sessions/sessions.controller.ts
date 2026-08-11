@@ -277,6 +277,17 @@ export class SessionsController {
     return ok(await this.sessions.resolveEmptyWorkspaceDecision(sessionId, body));
   }
 
+  @Post('sessions/:sessionId/workflow/agent-substitution')
+  async resolveWorkflowAgentSubstitution(
+    @Param('sessionId') sessionId: string,
+    @Body() body: { confirmationId: string; taskId: string; agentId: string }
+  ) {
+    if (!body?.confirmationId || !body.taskId || !body.agentId) {
+      throw new BadRequestException('confirmationId, taskId and agentId are required.');
+    }
+    return ok(await this.sessions.resolveWorkflowAgentSubstitution(sessionId, body));
+  }
+
   @Post('sessions/:sessionId/workspace-writebacks/:writebackId/resolve')
   async resolveWorkspaceWriteback(
     @Param('sessionId') sessionId: string,

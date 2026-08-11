@@ -63,6 +63,16 @@ describe('SessionWorkspace Session stop controls', () => {
   })
 })
 
+describe('SessionWorkspace workflow Agent substitution', () => {
+  const source = readFileSync(resolve(process.cwd(), 'src/components/SessionWorkspace.vue'), 'utf8')
+
+  it('routes an explicit Agent option through the dedicated substitution API', () => {
+    expect(source).toContain("activeConfirmation.value.reason === 'workflow_agent_substitution'")
+    expect(source).toContain("optionKey.startsWith('agent:')")
+    expect(source).toContain('await sessionStore.resolveWorkflowAgentSubstitution(sessionId')
+  })
+})
+
 describe('SessionWorkspace local directory picker lifecycle', () => {
   const source = readFileSync(resolve(process.cwd(), 'src/components/SessionWorkspace.vue'), 'utf8')
 

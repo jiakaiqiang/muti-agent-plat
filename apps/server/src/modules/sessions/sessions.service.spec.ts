@@ -38,6 +38,7 @@ function makeService(options: {
   };
   capabilityChecks?: Record<string, boolean>;
   workflowResumeCalls?: string[];
+  workflowSubstitutionCalls?: Array<{ runId: string; taskId: string; agentId: string }>;
   followUpHandlingPlan?: {
     requirementRelation: 'continuation' | 'new_requirement';
     failedExecutionAction: 'none' | 'resume' | 'replan';
@@ -90,7 +91,10 @@ function makeService(options: {
         return [];
       },
       listForSurface() {
-        return [];
+        return ['backend', 'test'].map((id) => findAgentById(id)!);
+      },
+      getForSurface(id: string) {
+        return findAgentById(id)!;
       }
     } as never,
     {
@@ -317,13 +321,17 @@ function makeService(options: {
       registerApprovalListener() {}
     } as never,
     undefined,
-    options.workflowResumeCalls ? {
+    options.workflowResumeCalls || options.workflowSubstitutionCalls ? {
       updates() {
         return { subscribe() { return { unsubscribe() {} }; } };
       },
       async resumeCurrentExecution(runId: string) {
-        options.workflowResumeCalls!.push(runId);
+        options.workflowResumeCalls?.push(runId);
         return true;
+      },
+      async substituteCurrentAgent(input: { runId: string; taskId: string; agentId: string }) {
+        options.workflowSubstitutionCalls?.push(input);
+        return input;
       },
       get() {
         return { status: 'failed' };
@@ -1887,6 +1895,64 @@ test('ask_user confirmation payload preserves structured Post Review actions', a
   assert.ok(confirmation);
   const metadata = confirmation.metadata as { payload?: { actions?: unknown } };
   assert.deepEqual(metadata.payload?.actions, actions);
+});
+
+test('workflow Agent substitution requires an explicit candidate selection', async () => {
+  const workflowSubstitutionCalls: Array<{ runId: string; taskId: string; agentId: string }> = [];
+  const { service, events } = makeService({ workflowSubstitutionCalls });
+  const { session } = await service.create({ input: 'Run a backend workflow stage.' });
+  session.workflowRunId = 'workflow-run-substitution';
+  session.participatingAgentIds = ['coordinator', 'backend', 'test'];
+
+  service.applyOutcome(session.id, {
+    kind: 'ask_user',
+    reason: 'Backend Agent rejected the current stage.',
+    workflowAgentSubstitution: {
+      taskId: 'workflow-task-substitution',
+      workflowRunId: session.workflowRunId,
+      workflowNodeId: 'backend-node',
+      currentAgentId: 'backend',
+      candidates: [{ id: 'test', key: 'test', name: 'test', role: 'test' }]
+    }
+  });
+
+  const confirmation = events.find((event) => event.type === 'user_confirmation_requested');
+  const payload = confirmation?.metadata
+    ? (confirmation.metadata as { payload?: {
+        confirmationId?: string;
+        reason?: string;
+        candidateAgentIds?: string[];
+        options?: Array<{ key: string }>;
+      } }).payload
+    : undefined;
+  assert.equal(payload?.reason, 'workflow_agent_substitution');
+  assert.deepEqual(payload?.candidateAgentIds, ['test']);
+  assert.deepEqual(payload?.options?.map((option: { key: string }) => option.key), ['agent:test', 'cancel']);
+  const confirmationId = payload?.confirmationId;
+  assert.ok(confirmationId);
+
+  await assert.rejects(
+    service.resolveWorkflowAgentSubstitution(session.id, {
+      confirmationId,
+      taskId: 'workflow-task-substitution',
+      agentId: 'backend'
+    }),
+    /not an approved substitution candidate/
+  );
+
+  await service.resolveWorkflowAgentSubstitution(session.id, {
+    confirmationId,
+    taskId: 'workflow-task-substitution',
+    agentId: 'test'
+  });
+
+  assert.deepEqual(workflowSubstitutionCalls, [{
+    runId: 'workflow-run-substitution',
+    taskId: 'workflow-task-substitution',
+    agentId: 'test'
+  }]);
+  assert.equal(session.status, 'EXECUTING');
+  assert.ok(events.some((event) => event.type === 'user_confirmation_resolved'));
 });
 
 async function postReviewActionFixture(action: {

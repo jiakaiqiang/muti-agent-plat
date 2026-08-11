@@ -126,7 +126,12 @@ import { applyRuntimeWriteModeOverride } from './runtime-write-mode-policy.js';
 export type ExecutionOutcome =
   | { kind: 'delivered' }
   | { kind: 'rework'; reason: string }
-  | { kind: 'ask_user'; reason: string; actions?: PostReviewAction[] }
+  | {
+      kind: 'ask_user';
+      reason: string;
+      actions?: PostReviewAction[];
+      workflowAgentSubstitution?: WorkflowAgentSubstitutionRequest;
+    }
   | { kind: 'approval_required'; reason: string }
   | { kind: 'workflow_step_completed'; taskId: string; resultSummary: string }
   | { kind: 'workspace_conflict'; reason: string }
@@ -152,7 +157,16 @@ type TaskRunOutcome =
       code?: RuntimeError['code'];
       retryable?: boolean;
       error?: RuntimeError;
+      workflowAgentSubstitution?: WorkflowAgentSubstitutionRequest;
     };
+
+export type WorkflowAgentSubstitutionRequest = {
+  taskId: string;
+  workflowRunId: string;
+  workflowNodeId?: string;
+  currentAgentId: string;
+  candidates: Array<Pick<Agent, 'id' | 'key' | 'name' | 'role'>>;
+};
 
 type RuntimeInvocationDraft = {
   invocationId: string;
@@ -1683,6 +1697,13 @@ export class OrchestratorService {
         if (failedTask.result.workspaceConflict) {
           return { kind: 'workspace_conflict', reason: failedTask.result.message };
         }
+        if (failedTask.result.workflowAgentSubstitution) {
+          return {
+            kind: 'ask_user',
+            reason: `${messages.taskFailed(failedTask.task.title)}: ${failedTask.result.message}`,
+            workflowAgentSubstitution: failedTask.result.workflowAgentSubstitution
+          };
+        }
         if (this.isInfrastructureTaskFailure(failedTask.result)) {
           return {
             kind: 'failed',
@@ -1804,7 +1825,8 @@ export class OrchestratorService {
         message: claim.message,
         error: claim.error,
         code: claim.error?.code,
-        retryable: claim.error?.retryable
+        retryable: claim.error?.retryable,
+        workflowAgentSubstitution: claim.workflowAgentSubstitution
       };
     }
     if (claim.agent.id !== taskAgent.id) {
@@ -2220,7 +2242,12 @@ export class OrchestratorService {
     contextRetryCount = 0
   ): Promise<
     | { ok: true; agent: Agent; decision: TaskAcceptanceDecisionOutput; invocationId: string }
-    | { ok: false; message: string; error?: RuntimeError }
+    | {
+        ok: false;
+        message: string;
+        error?: RuntimeError;
+        workflowAgentSubstitution?: WorkflowAgentSubstitutionRequest;
+      }
   > {
     if (attemptedAgentIds.has(candidate.id) && contextRetryCount === 0) {
       return {
@@ -2260,6 +2287,39 @@ export class OrchestratorService {
         retryable: false,
         details: { phase: 'task_acceptance', status: result.status }
       };
+      if (
+        !isFileRevisionTask &&
+        this.canRetryWithSupplementalContext(runtimeError.code, runtimeError.requestedContext, contextRetryCount)
+      ) {
+        const novelContext = this.resolveRetryRequest(
+          session,
+          runtimeError.code,
+          runtimeError.requestedContext,
+          contextRetryCount
+        );
+        if (novelContext) {
+          const resolution = await this.hydrateSupplementalContext(session, novelContext, {
+            workItemId: task.workItemId ?? session.activeWorkItemId
+          });
+          this.recordSupplementalContextRequest(session, task, candidate.id, novelContext, resolution);
+          if (this.hasUsableSupplementalContext(session, novelContext, resolution)) {
+            this.tasks.update(task, {
+              status: 'assigned',
+              resultSummary: `Retrying ${candidate.name} acceptance with supplemental context.`
+            });
+            return this.resolveTaskClaim(
+              session,
+              brief,
+              task,
+              candidate,
+              coordinator,
+              signal,
+              attemptedAgentIds,
+              contextRetryCount + 1
+            );
+          }
+        }
+      }
       const publicMessage = isFileRevisionTask
         ? 'File revision task acceptance failed.'
         : message;
@@ -2304,7 +2364,8 @@ export class OrchestratorService {
 
     const isArchitectureTask = this.isArchitectureAnalysisTask(session, task, brief);
     const requestedContext = this.acceptanceDecisionRequestedContext(session, task, decision, isArchitectureTask);
-    if (isArchitectureTask && requestedContext) {
+    const isWorkflowTask = Boolean(task.workflowRunId && task.workflowNodeRunId);
+    if ((isArchitectureTask || isWorkflowTask) && requestedContext) {
       if (this.canRetryWithSupplementalContext('CONTEXT_INSUFFICIENT', requestedContext, contextRetryCount)) {
         const novelContext = this.resolveRetryRequest(session, 'CONTEXT_INSUFFICIENT', requestedContext, contextRetryCount);
         if (novelContext) {
@@ -2335,6 +2396,7 @@ export class OrchestratorService {
     const hasUsableUpstreamArtifacts = this.taskDependencyArtifacts(session, task).length > 0;
     const canAutoResolve =
       !isFileRevisionTask &&
+      !isWorkflowTask &&
       task.autoResolutionAttempted !== true &&
       (session.workspaceMode !== 'bootstrap' || hasUsableUpstreamArtifacts);
     const alternative = canAutoResolve ? this.findAlternativeClaimAgent(session, task, decision, attemptedAgentIds) : undefined;
@@ -2349,7 +2411,21 @@ export class OrchestratorService {
     this.emitTaskBlockedEvent(session, task, candidate, coordinator, decision);
 
     if (!alternative) {
-      return { ok: false, message: blockedSummary };
+      return {
+        ok: false,
+        message: blockedSummary,
+        ...(isWorkflowTask && task.workflowRunId
+          ? {
+              workflowAgentSubstitution: {
+                taskId: task.id,
+                workflowRunId: task.workflowRunId,
+                workflowNodeId: task.workflowNodeId,
+                currentAgentId: candidate.id,
+                candidates: this.workflowSubstitutionCandidates(session, attemptedAgentIds)
+              }
+            }
+          : {})
+      };
     }
 
     this.tasks.update(task, {
@@ -2645,6 +2721,7 @@ export class OrchestratorService {
     decision: TaskAcceptanceDecisionOutput,
     attemptedAgentIds: Set<string>
   ) {
+    if (task.workflowRunId) return undefined;
     const eligibleAgentIds = task.eligibleAgentIds?.length ? new Set(task.eligibleAgentIds) : undefined;
     const participants = this.participatingAgents(session).filter(
       (agent) => !eligibleAgentIds || eligibleAgentIds.has(agent.id)
@@ -4566,6 +4643,16 @@ export class OrchestratorService {
       ];
     }
     return contextAssembly;
+  }
+
+  private workflowSubstitutionCandidates(session: SessionDetail, attemptedAgentIds: Set<string>) {
+    const participantIds = new Set(session.participatingAgentIds);
+    return this.agents
+      .listForSurface('workflow')
+      .filter((agent) => participantIds.has(agent.id))
+      .filter((agent) => !attemptedAgentIds.has(agent.id))
+      .filter((agent) => !['coordinator', 'notification'].includes(agent.key))
+      .map(({ id, key, name, role }) => ({ id, key, name, role }));
   }
 
   private createWorkItemContextSlice(session: SessionDetail, workItemId?: string): WorkItemContextSlice {

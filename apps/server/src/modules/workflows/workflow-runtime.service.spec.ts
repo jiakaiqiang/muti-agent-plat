@@ -17,7 +17,7 @@ function fixture(nodes: WorkflowVersion['nodes'], edges?: WorkflowVersion['edges
     workspaceId: 'workspace',
     tokenUsed: 0,
     currentTaskBriefId: 'brief-1',
-    participatingAgentIds: ['coordinator'],
+    participatingAgentIds: ['coordinator', 'requirements', 'frontend', 'reviewer', 'architect'],
     createdAt: now,
     updatedAt: now
   };
@@ -67,7 +67,8 @@ function fixture(nodes: WorkflowVersion['nodes'], edges?: WorkflowVersion['edges
       getVersion: () => version
     } as never,
     {
-      getByIdOrKey: (id: string) => ({ id, key: id, name: id, role: id })
+      getByIdOrKey: (id: string) => ({ id, key: id, name: id, role: id }),
+      getForSurface: (id: string) => ({ id, key: id, name: id, role: id })
     } as never,
     {
       add(task: AgentTask) {
@@ -85,6 +86,11 @@ function fixture(nodes: WorkflowVersion['nodes'], edges?: WorkflowVersion['edges
       cancelUnfinished() {}
     } as never,
     {
+      create(input: Record<string, unknown>) {
+        const event = { id: `event-${eventItems.length + 1}`, ...input };
+        eventItems.push(event);
+        return event;
+      },
       createOnce(idempotencyKey: string, input: Record<string, unknown>) {
         const existing = eventItems.find((item) => item.idempotencyKey === idempotencyKey);
         if (existing) return existing;
@@ -145,6 +151,8 @@ test('WorkflowRuntimeService pauses only at an explicit human approval node', as
   });
   assert.equal(setup.taskItems.length, 1);
   assert.equal(setup.callbacks.length, 1);
+  assert.deepEqual(setup.taskItems[0].eligibleAgentIds, ['requirements']);
+  assert.equal(setup.taskItems[0].workflowAgentOverride, false);
 
   setup.taskItems[0].status = 'completed';
   setup.callbacks[0]({ kind: 'workflow_step_completed', taskId: setup.taskItems[0].id, resultSummary: '需求完成' });
@@ -363,11 +371,53 @@ test('WorkflowRuntimeService reconciles missing persisted dependencies before re
   });
   await settle();
   frontendTask.dependsOnTaskIds = ['stale-upstream-task'];
+  frontendTask.assignee = { type: 'agent', id: 'requirements' };
+  frontendTask.eligibleAgentIds = undefined;
 
   assert.equal(await setup.runtime.resumeCurrentExecution(run.id), true);
+  assert.deepEqual(frontendTask.assignee, { type: 'agent', id: 'frontend' });
+  assert.deepEqual(frontendTask.eligibleAgentIds, ['frontend']);
   assert.deepEqual(frontendTask.dependsOnTaskIds, [architectTask.id]);
   assert.deepEqual(setup.executionTaskBatches.at(-1)?.map((task) => task.id), [architectTask.id, frontendTask.id]);
   assert.equal(setup.eventItems.filter((item) => item.type === 'task_dependency_reconciled').length, 1);
+});
+
+test('WorkflowRuntimeService applies an explicit Agent substitution without restoring the node default', async () => {
+  const setup = fixture([
+    { id: 'backend-node', type: 'agent', agentId: 'requirements', order: 0 }
+  ]);
+  setup.session.participatingAgentIds.push('frontend');
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-substitution'
+  });
+  const task = setup.taskItems[0]!;
+  task.status = 'blocked';
+  setup.callbacks[0]({
+    kind: 'cancelled',
+    reason: 'Waiting for user selection.',
+    termination: {
+      schemaVersion: '1.0',
+      terminationId: 'workflow-substitution-wait',
+      kind: 'user_cancelled',
+      source: 'user',
+      scope: 'invocation',
+      occurredAt: now
+    }
+  });
+  await settle();
+
+  await setup.runtime.substituteCurrentAgent({ runId: run.id, taskId: task.id, agentId: 'frontend' });
+
+  assert.deepEqual(task.assignee, { type: 'agent', id: 'frontend' });
+  assert.deepEqual(task.eligibleAgentIds, ['frontend']);
+  assert.equal(task.workflowAgentOverride, true);
+  assert.equal(task.status, 'pending');
+  assert.deepEqual(setup.executionTaskBatches.at(-1)?.map((item) => item.id), [task.id]);
+  assert.equal(setup.eventItems.filter((item) => item.type === 'task_reassigned').length, 1);
 });
 
 test('WorkflowRuntimeService falls back to human approval for invalid robot output', async () => {

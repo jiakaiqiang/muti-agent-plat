@@ -152,6 +152,7 @@ function confirmationFromMessage(message: ChatMessage): ConfirmationCardState | 
     workflowRunId: payload.workflowRunId as string | undefined,
     workflowNodeId: payload.workflowNodeId as string | undefined,
     workflowNodeRunId: payload.workflowNodeRunId as string | undefined,
+    candidateAgentIds: payload.candidateAgentIds as string[] | undefined,
     expectedRunRevision: payload.expectedRunRevision as number | undefined
   }
 }

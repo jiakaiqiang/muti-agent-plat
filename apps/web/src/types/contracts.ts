@@ -169,6 +169,7 @@ export type ConfirmationReason =
   | 'initialize_empty_workspace'
   | 'confirm_workflow_step'
   | 'confirm_workflow_human_gate'
+  | 'workflow_agent_substitution'
   | 'approve_high_risk_capability'
   | 'approve_capability'
   | 'approve_local_runtime_permission'
@@ -242,6 +243,7 @@ export type ConfirmationRequestedPayload = {
   workflowRunId?: string
   workflowNodeId?: string
   workflowNodeRunId?: string
+  candidateAgentIds?: string[]
   expectedRunRevision?: number
   workflowStepIndex?: number
   workflowStepCount?: number
@@ -500,6 +502,7 @@ export type ConfirmationCardState = {
   workflowRunId?: string
   workflowNodeId?: string
   workflowNodeRunId?: string
+  candidateAgentIds?: string[]
   expectedRunRevision?: number
   workflowStepIndex?: number
   workflowStepCount?: number

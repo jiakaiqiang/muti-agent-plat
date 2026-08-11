@@ -2909,21 +2909,39 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       })
     });
     if (outcome.kind === 'ask_user') {
+      const substitution = outcome.workflowAgentSubstitution;
       this.events.create({
         sessionId,
         type: 'user_confirmation_requested',
         priority: 'high',
-        content: 'Coordinator 自动处理未能继续推进，请确认下一步。',
+        content: substitution
+          ? '当前工作流 Agent 无法继续，请明确选择是否改派。'
+          : 'Coordinator 自动处理未能继续推进，请确认下一步。',
         metadata: createMetadata('confirmation_card', {
           confirmationId: crypto.randomUUID(),
-          reason: 'coordinator_routing_needs_user_decision',
-          title: '需要用户确认下一步',
-          description: reason || '任务在自动恢复后仍无法继续，需要用户确认是否继续执行或取消。',
+          reason: substitution ? 'workflow_agent_substitution' : 'coordinator_routing_needs_user_decision',
+          title: substitution ? '选择替代工作流 Agent' : '需要用户确认下一步',
+          description: substitution
+            ? `${reason}\n系统不会自动跨角色改派。请选择一个当前会话中可用于工作流的 Agent，或取消执行。`
+            : reason || '任务在自动恢复后仍无法继续，需要用户确认是否继续执行或取消。',
           actions: outcome.actions,
-          options: [
-            { key: 'resume', label: messages.reworkResume, style: 'primary' },
-            { key: 'cancel', label: messages.reworkCancel, style: 'default' }
-          ]
+          relatedTaskId: substitution?.taskId,
+          workflowRunId: substitution?.workflowRunId,
+          workflowNodeId: substitution?.workflowNodeId,
+          candidateAgentIds: substitution?.candidates.map((agent) => agent.id),
+          options: substitution
+            ? [
+                ...substitution.candidates.map((agent, index) => ({
+                  key: `agent:${agent.id}`,
+                  label: `改派给 ${agent.name}`,
+                  style: index === 0 ? 'primary' as const : 'default' as const
+                })),
+                { key: 'cancel', label: messages.reworkCancel, style: 'danger' as const }
+              ]
+            : [
+                { key: 'resume', label: messages.reworkResume, style: 'primary' },
+                { key: 'cancel', label: messages.reworkCancel, style: 'default' }
+              ]
         })
       });
     }
@@ -3183,6 +3201,57 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
   listBriefs(sessionId: string) {
     return this.orchestrator.listBriefs(sessionId);
+  }
+
+  async resolveWorkflowAgentSubstitution(
+    sessionId: string,
+    input: { confirmationId: string; taskId: string; agentId: string }
+  ) {
+    const session = this.get(sessionId);
+    if (session.status !== 'WAIT_USER_DECISION') {
+      throw new BadRequestException(`Workflow Agent substitution is not active: ${session.status}`);
+    }
+    if (!this.workflowRuntime || !session.workflowRunId) {
+      throw new ServiceUnavailableException('Workflow Runtime is unavailable.');
+    }
+    const request = this.assertPendingConfirmation(sessionId, input.confirmationId, 'workflow_agent_substitution');
+    const payload = request.metadata.payload as {
+      relatedTaskId?: string;
+      workflowRunId?: string;
+      candidateAgentIds?: string[];
+    } | undefined;
+    if (payload?.relatedTaskId !== input.taskId || payload.workflowRunId !== session.workflowRunId) {
+      throw new BadRequestException('Workflow Agent substitution target does not match the pending confirmation.');
+    }
+    if (!payload.candidateAgentIds?.includes(input.agentId)) {
+      throw new BadRequestException(`Agent is not an approved substitution candidate: ${input.agentId}`);
+    }
+    const agent = this.agents.getForSurface(input.agentId, 'workflow');
+    if (!session.participatingAgentIds.includes(agent.id)) {
+      throw new BadRequestException(`Agent is not part of this session: ${agent.id}`);
+    }
+    await this.workflowRuntime.substituteCurrentAgent({
+      runId: session.workflowRunId,
+      taskId: input.taskId,
+      agentId: agent.id
+    });
+    this.events.create({
+      sessionId,
+      type: 'user_confirmation_resolved',
+      priority: 'high',
+      content: `用户选择将工作流任务改派给 ${agent.name}。`,
+      metadata: createMetadata('system_notice', {
+        confirmationId: input.confirmationId,
+        status: 'approved',
+        selectedOptionKey: `agent:${agent.id}`,
+        relatedTaskId: input.taskId,
+        workflowRunId: session.workflowRunId,
+        agentId: agent.id
+      })
+    });
+    this.setStatus(session, 'EXECUTING');
+    this.touchSession(session);
+    return { session };
   }
 
   async pause(sessionId: string, reason = '用户已停止会话', confirmationId?: string) {

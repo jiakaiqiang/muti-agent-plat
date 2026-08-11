@@ -571,6 +571,7 @@ export const useEventStore = defineStore('event', {
             workflowRunId: payload.workflowRunId as string | undefined,
             workflowNodeId: payload.workflowNodeId as string | undefined,
             workflowNodeRunId: payload.workflowNodeRunId as string | undefined,
+            candidateAgentIds: payload.candidateAgentIds as string[] | undefined,
             expectedRunRevision: payload.expectedRunRevision as number | undefined,
             workflowStepIndex: payload.workflowStepIndex as number | undefined,
             workflowStepCount: payload.workflowStepCount as number | undefined,

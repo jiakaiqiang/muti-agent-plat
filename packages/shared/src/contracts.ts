@@ -1818,6 +1818,8 @@ export type AgentTask = {
   workflowNodeRunId?: UUID;
   workflowNodeType?: WorkflowNode['type'];
   workflowAttempt?: number;
+  /** True only when the user explicitly selected a replacement Agent for this workflow node. */
+  workflowAgentOverride?: boolean;
   executionPurpose?: 'agent_work' | 'workflow_review' | 'file_revision' | 'revision_synthesis';
   /** Links task execution to the immutable user-revision snapshot in L3. */
   fileRevisionId?: UUID;

@@ -1195,6 +1195,27 @@ async function resolveConfirmation(optionKey: string) {
   }
 
   if (
+    activeConfirmation.value.reason === 'workflow_agent_substitution' &&
+    activeConfirmation.value.relatedTaskId
+  ) {
+    if (optionKey.startsWith('agent:')) {
+      const agentId = optionKey.slice('agent:'.length)
+      await sessionStore.resolveWorkflowAgentSubstitution(sessionId, {
+        confirmationId: activeConfirmation.value.confirmationId,
+        taskId: activeConfirmation.value.relatedTaskId,
+        agentId
+      })
+      await reconcileSessionEvents(sessionId)
+      return
+    }
+    if (optionKey === 'cancel') {
+      await sessionStore.cancelSession(sessionId, activeConfirmation.value.confirmationId)
+      await reconcileSessionEvents(sessionId)
+      return
+    }
+  }
+
+  if (
     activeConfirmation.value.reason === 'confirm_workflow_human_gate' &&
     activeConfirmation.value.workflowRunId &&
     activeConfirmation.value.workflowNodeRunId

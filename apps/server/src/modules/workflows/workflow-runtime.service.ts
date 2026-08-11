@@ -72,6 +72,12 @@ export type WorkflowHumanDecisionInput = {
   instruction?: string;
 };
 
+export type WorkflowAgentSubstitutionInput = {
+  runId: string;
+  taskId: string;
+  agentId: string;
+};
+
 @Injectable()
 export class WorkflowRuntimeService {
   private readonly runs = new Map<string, WorkflowRun>();
@@ -314,10 +320,67 @@ export class WorkflowRuntimeService {
       const nodeRun = this.currentNodeRun(run);
       const task = nodeRun?.relatedTaskId ? this.tasks.find(run.sessionId, nodeRun.relatedTaskId) : undefined;
       if (!nodeRun || nodeRun.status !== 'running' || !task) return false;
+      this.restoreWorkflowNodeAgent(run, task);
       this.reconcileTaskDependencies(run, nodeRun, task);
       this.tasks.update(task, { status: 'pending', resultSummary: undefined });
       await this.scheduleTaskExecution(run, nodeRun, task, true);
       return true;
+    });
+  }
+
+  async substituteCurrentAgent(input: WorkflowAgentSubstitutionInput) {
+    return this.serialize(input.runId, async () => {
+      const run = this.get(input.runId);
+      if (this.isTerminal(run.status)) throw new ConflictException(`Workflow run is terminal: ${run.status}`);
+      if (this.execution.isRunning(run.sessionId)) {
+        throw new ConflictException('Workflow execution is still running.');
+      }
+      const context = this.context(run.id);
+      const node = this.currentNode(run);
+      const nodeRun = this.currentNodeRun(run);
+      if (node?.type !== 'agent' || !nodeRun || nodeRun.status !== 'running' || nodeRun.relatedTaskId !== input.taskId) {
+        throw new BadRequestException(`Workflow Agent task is not current: ${input.taskId}`);
+      }
+      const task = this.tasks.find(run.sessionId, input.taskId);
+      if (!task || task.workflowRunId !== run.id || task.workflowNodeId !== node.id) {
+        throw new BadRequestException(`Workflow task does not belong to the current node: ${input.taskId}`);
+      }
+      const agent = this.agents.getForSurface(input.agentId, 'workflow');
+      if (!context.session.participatingAgentIds.includes(agent.id)) {
+        throw new BadRequestException(`Agent is not part of this session: ${agent.id}`);
+      }
+      const previousAssignee = task.assignee;
+      this.tasks.update(task, {
+        status: 'pending',
+        assignee: { type: 'agent', id: agent.id },
+        eligibleAgentIds: [agent.id],
+        autoResolutionAttempted: false,
+        workflowAgentOverride: true,
+        resultSummary: undefined
+      });
+      this.events.create({
+        sessionId: run.sessionId,
+        type: 'task_reassigned',
+        taskId: task.id,
+        fromAgentId: context.coordinatorId,
+        toAgentIds: [agent.id, context.coordinatorId],
+        content: `用户已将工作流任务「${task.title}」改派给 ${agent.name}。`,
+        metadata: createMetadata('task_card', {
+          taskId: task.id,
+          title: task.title,
+          status: 'assigned',
+          assignedBy: task.assignedBy,
+          assignee: task.assignee,
+          previousAssignee,
+          eligibleAgentIds: task.eligibleAgentIds,
+          workflowRunId: run.id,
+          workflowNodeId: node.id,
+          workflowNodeRunId: nodeRun.id,
+          workflowAgentOverride: true
+        })
+      });
+      await this.scheduleTaskExecution(run, nodeRun, task, true);
+      return { run, task, agent };
     });
   }
 
@@ -338,7 +401,10 @@ export class WorkflowRuntimeService {
       if (task?.status === 'completed') {
         await this.serialize(run.id, () => this.completeExecutedNode(run.id, current.id, task.resultSummary ?? '节点已完成。'));
       } else if (!this.execution.isRunning(session.id)) {
-        if (task) this.reconcileTaskDependencies(run, current, task);
+        if (task) {
+          this.restoreWorkflowNodeAgent(run, task);
+          this.reconcileTaskDependencies(run, current, task);
+        }
         if (task?.status === 'running') this.tasks.update(task, { status: 'pending' });
         await this.scheduleTaskExecution(run, current, task);
       }
@@ -402,6 +468,7 @@ export class WorkflowRuntimeService {
       status: 'assigned',
       assignedBy: { type: 'agent', id: context.coordinatorId },
       assignee: { type: 'agent', id: agent.id },
+      eligibleAgentIds: [agent.id],
       routingMode: 'coordinator_controlled',
       autoResolutionAttempted: false,
       assignmentReason: `工作流「${run.workflowName}」节点 ${node.name ?? node.id}。`,
@@ -418,6 +485,7 @@ export class WorkflowRuntimeService {
       workflowNodeRunId: nodeRun.id,
       workflowNodeType: 'agent',
       workflowAttempt: attempt,
+      workflowAgentOverride: false,
       executionPurpose: 'agent_work',
       dependsOnTaskIds: upstreamTaskIds,
       acceptanceCriteria: stageAcceptanceCriteria,
@@ -461,6 +529,7 @@ export class WorkflowRuntimeService {
       status: 'assigned',
       assignedBy: { type: 'agent', id: context.coordinatorId },
       assignee: { type: 'agent', id: reviewer.id },
+      eligibleAgentIds: [reviewer.id],
       routingMode: 'coordinator_controlled',
       autoResolutionAttempted: false,
       assignmentReason: `工作流「${run.workflowName}」机器人确认节点。`,
@@ -473,6 +542,7 @@ export class WorkflowRuntimeService {
       workflowNodeRunId: nodeRun.id,
       workflowNodeType: 'robot_approval',
       workflowAttempt: attempt,
+      workflowAgentOverride: false,
       executionPurpose: 'workflow_review',
       dependsOnTaskIds: [],
       acceptanceCriteria: node.criteria,
@@ -976,6 +1046,21 @@ export class WorkflowRuntimeService {
 
   private currentNodeRun(run: WorkflowRun) {
     return [...this.listNodeRuns(run.id)].reverse().find((item) => item.nodeId === run.currentNodeId);
+  }
+
+  private restoreWorkflowNodeAgent(run: WorkflowRun, task: AgentTask) {
+    if (task.workflowAgentOverride) return;
+    const node = this.currentNode(run);
+    if (node?.type !== 'agent' || task.workflowNodeId !== node.id) return;
+    const agent = this.agents.getForSurface(node.agentId, 'workflow');
+    const assigneeId = task.assignee?.type === 'agent' ? task.assignee.id : undefined;
+    if (assigneeId === agent.id && task.eligibleAgentIds?.length === 1 && task.eligibleAgentIds[0] === agent.id) return;
+    this.tasks.update(task, {
+      assignee: { type: 'agent', id: agent.id },
+      eligibleAgentIds: [agent.id],
+      autoResolutionAttempted: false,
+      resultSummary: undefined
+    });
   }
 
   private failedNodeId(run: WorkflowRun) {

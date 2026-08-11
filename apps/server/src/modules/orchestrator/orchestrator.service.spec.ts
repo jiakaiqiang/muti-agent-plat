@@ -108,6 +108,9 @@ function makeService(
         if (!found) throw new Error(`Unknown agent: ${key}`);
         return found;
       },
+      listForSurface() {
+        return [...agents.values()];
+      },
       findSystemByKey(key: string) {
         return key === 'coordinator' ? agents.get(key) : undefined;
       }
@@ -642,6 +645,57 @@ test('receiver rejection fallback cannot escape an explicit mentioned-agent boun
   const alternative = service.findAlternativeClaimAgent(inputSession, task, decision, new Set(['backend']));
 
   assert.equal(alternative?.key, 'test');
+});
+
+test('workflow receiver rejection never triggers an automatic cross-role fallback', () => {
+  const service = makeService() as unknown as {
+    findAlternativeClaimAgent(
+      session: SessionDetail,
+      task: AgentTask,
+      decision: TaskAcceptanceDecisionOutput,
+      attemptedAgentIds: Set<string>
+    ): Agent | undefined;
+  };
+  const inputSession = session();
+  const task: AgentTask = {
+    id: 'workflow-task-fixed-agent',
+    sessionId: inputSession.id,
+    title: '发放',
+    description: '执行工作流中的后端专业阶段。',
+    status: 'blocked',
+    assignee: { type: 'agent', id: 'backend' },
+    eligibleAgentIds: ['backend'],
+    workflowRunId: 'workflow-run-1',
+    workflowNodeId: 'backend-node',
+    workflowNodeRunId: 'backend-node-run',
+    dependsOnTaskIds: [],
+    acceptanceCriteria: [],
+    createdAt: '2026-07-03T00:00:00.000Z',
+    updatedAt: '2026-07-03T00:00:00.000Z'
+  };
+  const decision: TaskAcceptanceDecisionOutput = {
+    schemaVersion: '1.0',
+    kind: 'task_acceptance_decision',
+    status: 'rejected',
+    reason: 'Missing implementation evidence.',
+    missingContext: [],
+    requestedContext: null,
+    handoffSuggestion: {
+      targetAgentKey: 'requirements',
+      targetAgentId: null,
+      reason: 'Ask requirements.',
+      riskLevel: 'low',
+      missingContext: []
+    },
+    confidence: 0.8,
+    alternativeAgentKeys: ['requirements'],
+    alternativeAgentIds: [],
+    agentMessages: []
+  };
+
+  const alternative = service.findAlternativeClaimAgent(inputSession, task, decision, new Set(['backend']));
+
+  assert.equal(alternative, undefined);
 });
 
 test('retryable provider failures retry once and then fall back inside the session allowlist', async () => {
@@ -2263,6 +2317,87 @@ test('task acceptance Runtime failure preserves the structured contract error', 
   const payload = runtimeFailed?.metadata.payload as { runtimeError?: RuntimeError } | undefined;
   assert.equal(payload?.runtimeError?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
   assert.deepEqual(payload?.runtimeError?.details, { expectedKind: 'task_acceptance_decision' });
+});
+
+test('workflow task acceptance supplements context and retries the original Agent first', async () => {
+  const { service, activeSession, task, brief } = taskExecutionHarness(runtimeOutputExamples.task_execution_result);
+  task.workflowRunId = 'workflow-run-context-retry';
+  task.workflowNodeId = 'backend-node';
+  task.workflowNodeRunId = 'backend-node-run';
+  const phases: string[] = [];
+  let acceptanceAttempt = 0;
+  (service as any).hydrateSupplementalContext = async () => ({
+    requestedFiles: [{ path: 'src/backend.ts' }],
+    hydratedPaths: ['src/backend.ts'],
+    resolvedRefs: [],
+    failedRefs: [],
+    failedPaths: [],
+    deferredPaths: [],
+    contentBytes: 128,
+    outcome: 'resolved',
+    attempt: 1,
+    maxAttempts: 1
+  });
+  (service as any).recordSupplementalContextRequest = (
+    inputSession: SessionDetail,
+    inputTask: AgentTask,
+    agentId: string,
+    requestedContext: RuntimeContextRequest,
+    resolution: SupplementalContextResolution
+  ) => {
+    inputSession.supplementalContextRequests = [{
+      id: 'context-request-1',
+      taskId: inputTask.id,
+      agentId,
+      requestedContext,
+      resolution,
+      createdAt: '2026-07-03T00:00:00.000Z'
+    }];
+  };
+  service.runRuntime = async (_session, input) => {
+    phases.push(input.phase);
+    if (input.phase === 'task_acceptance' && acceptanceAttempt++ === 0) {
+      return {
+        invocationId: input.invocationId,
+        runtimeType: 'mock',
+        status: 'failed',
+        output: createAgentMessageOutput({ messageKind: 'risk', content: 'Need the backend source.' }),
+        events: [],
+        artifacts: [],
+        systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, model: 'mock' },
+        error: {
+          code: 'CONTEXT_INSUFFICIENT',
+          message: 'Need the backend source.',
+          retryable: true,
+          requestedContext: {
+            reason: 'Read the implementation before accepting.',
+            requestedRefs: [],
+            requestedFiles: [{ path: 'src/backend.ts' }]
+          }
+        }
+      };
+    }
+    return {
+      invocationId: input.invocationId,
+      runtimeType: 'mock',
+      status: 'completed',
+      output: input.phase === 'task_acceptance'
+        ? runtimeOutputExamples.task_acceptance_decision
+        : runtimeOutputExamples.task_execution_result,
+      events: [],
+      artifacts: [],
+      systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, model: 'mock' }
+    };
+  };
+
+  const outcome = await service.runOneTask(activeSession, brief, task);
+
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(phases, ['task_acceptance', 'task_acceptance', 'task_execution']);
+  assert.equal(task.assignee?.id, 'backend');
+  assert.equal(activeSession.supplementalContextRequests?.length, 1);
 });
 
 test('task execution pending approval waits without emitting failure events', async () => {

@@ -611,6 +611,18 @@ export const useSessionStore = defineStore('session', {
       await this.loadSession(sessionId)
       return result
     },
+    async resolveWorkflowAgentSubstitution(
+      sessionId: string,
+      input: { confirmationId: string; taskId: string; agentId: string }
+    ) {
+      await this.assertBackendCompatible()
+      const result = await apiPost<{ session: SessionDetail }>(
+        `/sessions/${sessionId}/workflow/agent-substitution`,
+        input
+      )
+      await this.loadSession(sessionId)
+      return result
+    },
     async resolveWorkspaceWriteback(
       sessionId: string,
       writebackId: string,
