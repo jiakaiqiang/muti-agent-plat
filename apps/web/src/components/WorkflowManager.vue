@@ -10,6 +10,7 @@ import WorkflowCanvas from './workflow/WorkflowCanvas.vue'
 import WorkflowNodeInspector from './workflow/WorkflowNodeInspector.vue'
 import {
   buildLinearWorkflowEdges,
+  completeAgentNodeContracts,
   createWorkflowNode,
   insertWorkflowNode,
   removeWorkflowNode,
@@ -37,7 +38,7 @@ const {
   deleteTarget
 } = storeToRefs(workflowStore)
 
-const activeAgents = computed(() => agentStore.agents.filter((agent) => agent.status === 'active'))
+const activeAgents = computed(() => agentStore.workflowAgents)
 const selectedWorkflow = computed(() => workflowStore.selectedWorkflow)
 const selectedNode = computed(() => draftNodes.value.find((node) => node.id === selectedNodeId.value))
 const canSave = computed(() => Boolean(draftName.value.trim()) && !workflowStore.saving)
@@ -53,7 +54,7 @@ onMounted(async () => {
   try {
     await Promise.all([
       workflowStore.loadWorkflows(),
-      agentStore.agents.length ? Promise.resolve() : agentStore.loadAgents()
+      agentStore.loadAgentsForSurface('workflow')
     ])
   } catch (error) {
     errorMessage.value = messageOf(error, '加载工作流失败')
@@ -180,11 +181,13 @@ function validate(publish: boolean) {
 async function saveDraft() {
   const validation = validate(false)
   if (validation) throw new Error(validation)
+  const nodes = completeAgentNodeContracts(draftNodes.value, activeAgents.value)
+  draftNodes.value = nodes
   const input = {
     name: draftName.value.trim(),
     description: draftDescription.value.trim() || undefined,
-    nodes: draftNodes.value,
-    edges: buildLinearWorkflowEdges(draftNodes.value)
+    nodes,
+    edges: buildLinearWorkflowEdges(nodes)
   }
   if (creating.value) {
     const created = await workflowStore.createWorkflow(input)

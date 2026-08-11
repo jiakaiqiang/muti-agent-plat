@@ -35,7 +35,7 @@ const notificationEvents = computed(() =>
 
 onMounted(async () => {
   await Promise.allSettled([
-    agentStore.agents.length ? Promise.resolve() : agentStore.loadAgents(),
+    agentStore.agentsBySurface.management?.length ? Promise.resolve() : agentStore.loadAgents(),
     agentStore.capabilities.length ? Promise.resolve() : agentStore.loadCapabilities(),
     knowledgeStore.knowledgeBases.length ? Promise.resolve() : knowledgeStore.loadKnowledgeBases(),
     runtimeModelStore.availability.length ? Promise.resolve() : runtimeModelStore.loadAvailability(),

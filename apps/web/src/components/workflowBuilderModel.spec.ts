@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildLinearWorkflowEdges,
+  completeAgentNodeContracts,
   createHumanApprovalNode,
   createRobotApprovalNode,
   createWorkflowNodeId,
@@ -41,6 +42,27 @@ describe('workflowBuilderModel', () => {
     })
     expect(createRobotApprovalNode('reviewer', 2, 'robot-node')).toMatchObject({
       id: 'robot-node', type: 'robot_approval', reviewerAgentId: 'reviewer', maxRevisionAttempts: 2, fallback: 'human_approval'
+    })
+  })
+
+  it('completes required Agent stage contracts without replacing explicit values', () => {
+    const completed = completeAgentNodeContracts([
+      { id: 'requirements-node', type: 'agent', agentId: 'requirements', order: 0, inputContract: [], outputContract: [] },
+      { id: 'frontend-node', type: 'agent', agentId: 'frontend', order: 1, stageDescription: 'Build the UI.', inputContract: [], outputContract: ['UI implementation.'] }
+    ], [
+      { id: 'requirements', name: '需求分析师', role: '澄清并确认需求。' },
+      { id: 'frontend', name: '前端开发工程师', role: '实现前端界面。' }
+    ])
+
+    expect(completed[0]).toMatchObject({
+      stageDescription: '澄清并确认需求。',
+      inputContract: [],
+      outputContract: ['需求分析师阶段执行结果。']
+    })
+    expect(completed[1]).toMatchObject({
+      stageDescription: 'Build the UI.',
+      inputContract: ['上游节点的已确认输出。'],
+      outputContract: ['UI implementation.']
     })
   })
 

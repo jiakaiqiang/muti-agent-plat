@@ -212,7 +212,7 @@ onMounted(async () => {
       return
     }
     await Promise.all([
-      agentStore.loadAgents(),
+      agentStore.loadAgentsForSurface('chat'),
       agentStore.loadCapabilities(),
       sessionStore.loadSessions(),
       runtimeModelStore.loadAvailability()
@@ -329,11 +329,11 @@ const workspaceWritebackError = ref('')
 const capabilityApprovalBusy = ref(false)
 const currentMode = computed(() => sessionStore.currentViewMode)
 const workspaceLabel = computed(() => sessionStore.currentSession?.title ?? '无活动会话')
-const activeAgentIds = computed(() => agentStore.agents.filter((agent) => agent.status === 'active').map((agent) => agent.id))
+const activeAgentIds = computed(() => agentStore.chatAgents.filter((agent) => agent.status === 'active').map((agent) => agent.id))
 const participatingAgents = computed(() => {
   const session = sessionStore.currentSession
   if (!session) return []
-  return agentStore.agents.filter((agent) => session.participatingAgentIds.includes(agent.id))
+  return agentStore.chatAgents.filter((agent) => session.participatingAgentIds.includes(agent.id))
 })
 const fileRevisionAgents = computed(() =>
   participatingAgents.value.filter((agent) => agent.status === 'active' && agent.key !== 'coordinator')
@@ -792,7 +792,7 @@ function toggleSessionAgent(agentId: string) {
 
 async function createSessionFromDialog() {
   const input = newSessionInput.value.trim()
-  if (!agentStore.agents.length) {
+  if (!agentStore.chatAgents.length) {
     sessionCreateError.value = '请先添加 Agent'
     showMessage(sessionCreateError.value, 'warning')
     return
@@ -1754,7 +1754,7 @@ async function submitWorkflowStepRevision() {
     <AgentStatusPanel
       v-else
       :agents="agents"
-      :available-agents="agentStore.agents"
+      :available-agents="agentStore.chatAgents"
       :capabilities="agentStore.capabilities"
       :tasks="tasks"
       :active-confirmation="activeConfirmation"
@@ -1921,9 +1921,9 @@ async function submitWorkflowStepRevision() {
         </section>
         <div class="dialog-agent-picker">
           <span>参与 Agent</span>
-          <p v-if="!agentStore.agents.length" class="empty-state">暂无 Agent，请先到 Agent 管理添加 Agent。</p>
+          <p v-if="!agentStore.chatAgents.length" class="empty-state">暂无 Agent，请先到 Agent 管理添加 Agent。</p>
           <button
-            v-for="agent in agentStore.agents"
+            v-for="agent in agentStore.chatAgents"
             :key="agent.id"
             type="button"
             :class="{ selected: selectedSessionAgentIds.includes(agent.id) }"

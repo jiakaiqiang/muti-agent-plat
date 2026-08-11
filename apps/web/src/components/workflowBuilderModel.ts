@@ -1,4 +1,5 @@
 import type {
+  AgentDefinition,
   AgentWorkflowNode,
   HumanApprovalWorkflowNode,
   RobotApprovalWorkflowNode,
@@ -9,6 +10,7 @@ import type {
 export type WorkflowResource = { type: WorkflowNode['type']; agentId?: string }
 
 type WorkflowIdCrypto = Partial<Pick<Crypto, 'randomUUID' | 'getRandomValues'>>
+type WorkflowAgentSummary = Pick<AgentDefinition, 'id' | 'name' | 'role' | 'description'>
 
 export function createWorkflowNodeId(cryptoApi: WorkflowIdCrypto | null = globalThis.crypto) {
   if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID()
@@ -29,6 +31,24 @@ export function createWorkflowNodeId(cryptoApi: WorkflowIdCrypto | null = global
 
 export function normalizeWorkflowNodes(nodes: WorkflowNode[]) {
   return nodes.map((node, order) => ({ ...node, order }))
+}
+
+export function completeAgentNodeContracts(nodes: WorkflowNode[], agents: WorkflowAgentSummary[]) {
+  const agentsById = new Map(agents.map((agent) => [agent.id, agent]))
+  return normalizeWorkflowNodes(nodes).map((node, index) => {
+    if (node.type !== 'agent') return node
+    const agent = agentsById.get(node.agentId)
+    const stageDescription = node.stageDescription?.trim() || agent?.role.trim() || agent?.description?.trim() || '完成当前工作流阶段。'
+    const inputContract = (node.inputContract ?? []).some((item) => item.trim())
+      ? node.inputContract
+      : index > 0
+        ? ['上游节点的已确认输出。']
+        : []
+    const outputContract = (node.outputContract ?? []).some((item) => item.trim())
+      ? node.outputContract
+      : [`${agent?.name || node.name || 'Agent'}阶段执行结果。`]
+    return { ...node, stageDescription, inputContract, outputContract }
+  })
 }
 
 export function buildLinearWorkflowEdges(nodes: WorkflowNode[]): WorkflowEdge[] {

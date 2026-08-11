@@ -44,7 +44,8 @@ describe('WorkflowManager', () => {
   afterEach(() => vi.unstubAllGlobals())
 
   it('adds Agent, human approval and robot approval nodes and saves the draft', async () => {
-    fetchMock.mockImplementation(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/agents?surface=workflow')) return response([agent])
       if (init?.method === 'PATCH') {
         const body = JSON.parse(String(init.body)) as Partial<WorkflowDefinition>
         return response({ ...workflow, ...body, draftRevision: 2, version: 2 })
@@ -68,7 +69,8 @@ describe('WorkflowManager', () => {
   })
 
   it('creates a dedicated draft with no implicit publication', async () => {
-    fetchMock.mockImplementation(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/agents?surface=workflow')) return response([agent])
       if (init?.method === 'POST') {
         const body = JSON.parse(String(init.body)) as Partial<WorkflowDefinition>
         return response({ ...workflow, ...body, id: 'workflow-created' })
@@ -86,12 +88,18 @@ describe('WorkflowManager', () => {
     const body = JSON.parse(String(postCall?.[1]?.body))
     expect(body.name).toBe('需求交付流程')
     expect(body.nodes).toHaveLength(1)
+    expect(body.nodes[0]).toMatchObject({
+      stageDescription: '需求分析',
+      inputContract: [],
+      outputContract: ['需求分析师阶段执行结果。']
+    })
     expect(body.status).toBeUndefined()
   })
 
   it('saves then publishes an exact immutable version', async () => {
     fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
+      if (url.endsWith('/agents?surface=workflow')) return response([agent])
       if (url.endsWith('/publish')) {
         return response({ ...workflow, id: 'workflow-published', name: '发布流程', status: 'published', currentPublishedVersion: 1 })
       }

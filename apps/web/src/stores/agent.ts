@@ -65,6 +65,7 @@ function mergeWithDefaultAgents(agents: AgentDefinition[]) {
 export const useAgentStore = defineStore('agent', {
   state: () => ({
     agents: [] as AgentDefinition[],
+    agentsBySurface: {} as Partial<Record<'management' | 'chat' | 'workflow' | 'mention', AgentDefinition[]>>,
     capabilities: [] as CapabilityDefinition[],
     showCreateForm: false,
     editingAgentId: '',
@@ -87,6 +88,15 @@ export const useAgentStore = defineStore('agent', {
     systemAgentRuntimePolicies: {} as Partial<Record<SystemAgentRole, SystemAgentRuntimePolicy>>
   }),
   getters: {
+    chatAgents: (state) => (state.agentsBySurface.chat ?? state.agents).filter((agent) =>
+      agent.status === 'active' && (agent.management?.allowedSurfaces.includes('chat') ?? true)
+    ),
+    workflowAgents: (state) => (state.agentsBySurface.workflow ?? state.agents).filter((agent) =>
+      agent.status === 'active' && (agent.management?.allowedSurfaces.includes('workflow') ?? true)
+    ),
+    mentionAgents: (state) => (state.agentsBySurface.mention ?? state.agents).filter((agent) =>
+      agent.status === 'active' && (agent.management?.allowedSurfaces.includes('mention') ?? true)
+    ),
     agentById: (state) => (agentId: string) => state.agents.find((agent) => agent.id === agentId),
     agentName: (state) => (agentId?: string) =>
       agentId ? state.agents.find((agent) => agent.id === agentId)?.name ?? agentId : 'System',
@@ -98,11 +108,13 @@ export const useAgentStore = defineStore('agent', {
   actions: {
     async loadAgents() {
       try {
-        const agents = await apiGet<AgentDefinition[]>('/agents')
+      const agents = await apiGet<AgentDefinition[]>('/agents')
         this.agents = mergeWithDefaultAgents(agents)
+        this.agentsBySurface.management = this.agents
       } catch (error) {
         console.warn('Failed to load agents from API; using built-in defaults.', error)
         this.agents = mergeWithDefaultAgents([])
+        this.agentsBySurface.management = this.agents
       }
       try {
         const policies = await apiGet<SystemAgentRuntimePolicy[]>('/system-agent-runtime-policies')
@@ -110,6 +122,12 @@ export const useAgentStore = defineStore('agent', {
       } catch (error) {
         console.warn('Failed to load system Agent Runtime policies.', error)
       }
+    },
+    async loadAgentsForSurface(surface: 'chat' | 'workflow' | 'mention') {
+      const agents = await apiGet<AgentDefinition[]>(`/agents?surface=${surface}`)
+      this.agentsBySurface[surface] = agents
+      this.agents = mergeWithDefaultAgents([...this.agents, ...agents])
+      return agents
     },
     async createAgent(input: CreateAgentInput) {
       const agent = await apiPost<AgentDefinition>('/agents', input)
