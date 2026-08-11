@@ -49,6 +49,7 @@ export class RouteApplicationService {
           routingId: route.routing.id,
           workItemId: route.workItem.id,
           previousWorkItemId: route.previousWorkItemId,
+          deferredActivation: route.deferredActivation,
           inheritedDecisionIds: route.workItem.inheritedDecisionIds,
           inheritedArtifactIds: route.workItem.inheritedArtifactIds
         })

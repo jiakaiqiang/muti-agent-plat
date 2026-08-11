@@ -315,11 +315,15 @@ test('persists execution target, tool catalog, and ContextEnvelope together', as
 });
 
 test('persists Runtime usage and result status', async () => {
-  const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'mock' } });
+  const plan = makeInvocationPlan({
+    workItemId: '00000000-0000-4000-8000-000000000905',
+    executionTarget: { runtimeType: 'mock' }
+  });
   const { service } = createService([adapter('mock')]);
   await service.run(plan);
   const [log] = service.listInvocations(plan.sessionId);
   assert.equal(log.status, 'completed');
+  assert.equal(log.workItemId, plan.workItemId);
   assert.equal(log.dataEpoch, 'epoch-test');
   assert.equal(log.usage?.totalTokens, 15);
   assert.equal(log.systemEvidence.invocationId, plan.invocationId);

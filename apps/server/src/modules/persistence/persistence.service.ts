@@ -259,25 +259,66 @@ export class PersistenceService implements OnModuleDestroy {
     });
   }
 
-  markEventPublished(eventExternalId: string): Promise<boolean> {
-    if (!this.enabled) return Promise.resolve(true);
+  async claimPendingEventOutbox(
+    workerId: string,
+    limit = 100,
+    leaseMs = 30_000
+  ): Promise<Array<Record<string, unknown>>> {
+    if (!this.enabled) return [];
     if (this.backend === 'file') {
+      const now = Date.now();
       const outbox = Array.isArray(this.state.eventOutbox)
         ? this.state.eventOutbox as Array<Record<string, unknown>>
         : [];
-      const record = outbox.find((item) => item.id === `outbox:${eventExternalId}`);
-      if (record && record.status !== 'published') {
-        record.status = 'published';
-        record.publishedAt = new Date().toISOString();
+      const claimed = outbox.filter((record) => {
+        const availableAt = Date.parse(String(record.availableAt ?? record.createdAt ?? ''));
+        const leaseExpiresAt = Date.parse(String(record.leaseExpiresAt ?? ''));
+        return (record.status === 'pending' || (record.status === 'publishing' && leaseExpiresAt <= now)) &&
+          (!Number.isFinite(availableAt) || availableAt <= now);
+      }).slice(0, Math.max(0, limit));
+      if (claimed.length === 0) return [];
+      const leaseExpiresAt = new Date(now + leaseMs).toISOString();
+      for (const record of claimed) {
+        record.status = 'publishing';
+        record.leaseOwner = workerId;
+        record.leaseExpiresAt = leaseExpiresAt;
         record.attempts = Number(record.attempts ?? 0) + 1;
-        this.state.eventOutbox = outbox;
-        this.writeFileState();
       }
+      this.state.eventOutbox = outbox;
+      this.writeFileState();
+      return this.clone(claimed);
+    }
+    if (!this.relationalStore) {
+      throw new Error('RELATIONAL_PERSISTENCE_UNAVAILABLE: relational state store is not initialized.');
+    }
+    const operation = this.pendingPostgresWrites.then(() =>
+      this.relationalStore!.claimPendingEventOutbox(workerId, limit, leaseMs)
+    );
+    this.pendingPostgresWrites = operation.then(() => undefined, () => undefined);
+    try {
+      const claimed = await operation;
+      this.mergeClaimedEventOutbox(claimed);
+      return claimed;
+    } catch (cause) {
+      const error = new Error(`POSTGRES_PERSISTENCE_WRITE_FAILED: claim-event-outbox: ${String(cause)}`, { cause });
+      this.logger.error(error.message);
+      this.pendingPostgresWriteError ??= error;
+      throw error;
+    }
+  }
+
+  markEventPublished(eventExternalId: string): Promise<boolean> {
+    if (!this.enabled) return Promise.resolve(true);
+    if (this.backend === 'file') {
+      if (this.markLocalEventPublished(eventExternalId)) this.writeFileState();
       return Promise.resolve(true);
     }
     return this.enqueuePostgresWrite(`event-published:${eventExternalId}`, () => {
       if (!this.relationalStore) throw new Error('RELATIONAL_PERSISTENCE_UNAVAILABLE: relational state store is not initialized.');
       return this.relationalStore.markEventPublished(eventExternalId);
+    }).then((published) => {
+      if (published) this.markLocalEventPublished(eventExternalId);
+      return published;
     });
   }
 
@@ -462,6 +503,35 @@ export class PersistenceService implements OnModuleDestroy {
       }
     }
     this.state.eventOutbox = current;
+  }
+
+  private markLocalEventPublished(eventExternalId: string): boolean {
+    const outbox = Array.isArray(this.state.eventOutbox)
+      ? this.state.eventOutbox as Array<Record<string, unknown>>
+      : [];
+    const record = outbox.find((item) => item.id === `outbox:${eventExternalId}`);
+    if (!record || record.status === 'published') return false;
+    const wasClaimed = record.status === 'publishing';
+    record.status = 'published';
+    record.publishedAt = new Date().toISOString();
+    if (!wasClaimed) record.attempts = Number(record.attempts ?? 0) + 1;
+    delete record.leaseOwner;
+    delete record.leaseExpiresAt;
+    this.state.eventOutbox = outbox;
+    return true;
+  }
+
+  private mergeClaimedEventOutbox(claimed: Array<Record<string, unknown>>) {
+    const outbox = Array.isArray(this.state.eventOutbox)
+      ? this.state.eventOutbox as Array<Record<string, unknown>>
+      : [];
+    const byId = new Map(outbox.map((record) => [String(record.id), record]));
+    for (const record of claimed) {
+      const current = byId.get(String(record.id));
+      if (current) Object.assign(current, this.clone(record));
+      else outbox.push(this.clone(record));
+    }
+    this.state.eventOutbox = outbox;
   }
 
   private writeFileState(state: PersistedState = this.state) {

@@ -6,6 +6,7 @@ import { PersistenceService } from '../persistence/persistence.service.js';
 type CreateMemoryInput = {
   sessionId: UUID;
   agentId?: UUID;
+  workItemId?: UUID;
   scope?: MemoryScope;
   content: string;
   sourceEventId?: UUID;
@@ -29,6 +30,7 @@ export class MemoryService {
       id: crypto.randomUUID(),
       sessionId: input.sessionId,
       agentId: input.agentId,
+      workItemId: input.workItemId,
       scope: input.scope ?? 'session',
       content: input.content,
       sourceEventId: input.sourceEventId,

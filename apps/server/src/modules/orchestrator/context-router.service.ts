@@ -14,6 +14,8 @@ import { shouldPublishRuntimeEventToCollaboration } from '@agent-cluster/shared'
 
 export type ContextRouteInput = {
   session: SessionDetail;
+  /** Goal scoped to the owning WorkItem; falls back to the legacy Session goal during migration. */
+  currentGoal?: string;
   brief?: TaskBrief;
   task?: AgentTask;
   phase: AgentRunPhase;
@@ -30,9 +32,10 @@ export type ContextRouteInput = {
 export class ContextRouterService {
   route(input: ContextRouteInput): TaskContext {
     const { session, brief, task, phase, projectMap, workspaceFocus, relevantMemories, ragSnippets, artifacts, events } = input;
+    const userGoal = input.currentGoal?.trim() || session.originalInput;
     const domain = session.taskDomain ?? (session.workingDirectory ? 'mixed' : 'non_coding');
     const intent = session.taskIntent ?? (brief ? 'implementation' : 'analysis');
-    const isArchitectureAnalysis = this.isArchitectureAnalysis(session, task);
+    const isArchitectureAnalysis = this.isArchitectureAnalysis(session, task, userGoal);
     const contextEvents = events.filter((event) => {
       const payload = event.metadata?.payload as { code?: unknown; visibility?: unknown } | undefined;
       return shouldPublishRuntimeEventToCollaboration({
@@ -59,7 +62,7 @@ export class ContextRouterService {
       : [];
     const validationRules = this.createValidationRules(domain, intent);
     const candidateEvidenceRefs: TaskContext['evidenceRefs'] = [
-      { type: 'user_input', label: 'session.originalInput' },
+      { type: 'user_input', label: 'workItem.goal' },
       ...supplementalEvidenceRefs,
       ...(projectMap
         ? [
@@ -131,9 +134,9 @@ export class ContextRouterService {
     const scopedCandidates = task
       ? [...candidateEvidenceRefs, { type: 'artifact' as const, label: task.title, ref: task.id }]
       : candidateEvidenceRefs;
-    const evidenceSelection = this.createEvidenceSelection(session, domain, intent, phase, task, scopedCandidates);
+    const evidenceSelection = this.createEvidenceSelection(session, domain, intent, phase, task, scopedCandidates, userGoal);
     const evidenceRefs = evidenceSelection.selectedRefs;
-    const taskMap = this.createTaskMap(session, domain, brief, projectMap, workspaceFocus, evidenceSelection);
+    const taskMap = this.createTaskMap(session, domain, brief, projectMap, workspaceFocus, evidenceSelection, userGoal);
 
     return {
       domain,
@@ -149,7 +152,8 @@ export class ContextRouterService {
         task,
         taskMap,
         validationRules,
-        evidenceRefs
+        evidenceRefs,
+        userGoal
       ),
       executionMode: session.participatingAgentIds.length > 1 ? 'multi_agent' : 'single_agent',
       validationMode: domain === 'coding' || domain === 'mixed' ? 'mixed' : 'human_review',
@@ -171,13 +175,14 @@ export class ContextRouterService {
     task: AgentTask | undefined,
     taskMap: TaskContext['taskMap'],
     validationRules: TaskContext['validationRules'],
-    evidenceRefs: TaskContext['evidenceRefs']
+    evidenceRefs: TaskContext['evidenceRefs'],
+    userGoal: string
   ): TaskContext['stagePlan'] {
     const read: TaskContext['stagePlan']['read'] = [
       {
         action: 'read',
         label: 'User goal and classified intent',
-        refs: ['session.originalInput'],
+        refs: ['workItem.goal'],
         reason: `Classified as ${domain}/${intent}; keep the stage grounded in the user goal.`
       }
     ];
@@ -341,9 +346,9 @@ export class ContextRouterService {
     }
   }
 
-  private isArchitectureAnalysis(session: SessionDetail, task?: AgentTask) {
+  private isArchitectureAnalysis(session: SessionDetail, task?: AgentTask, currentGoal?: string) {
     return /architecture|architect|project structure|project analysis|main execution|main flow|main path|架构|结构|目录|熟悉|分析项目|项目分析|了解项目|主链路/i.test(
-      [session.originalInput, task?.title, task?.description, task?.assignmentReason]
+      [currentGoal ?? session.originalInput, task?.title, task?.description, task?.assignmentReason]
         .filter(Boolean)
         .join('\n')
     );
@@ -530,11 +535,12 @@ export class ContextRouterService {
     intent: TaskContext['intent'],
     phase: AgentRunPhase,
     task: AgentTask | undefined,
-    candidateRefs: TaskContext['evidenceRefs']
+    candidateRefs: TaskContext['evidenceRefs'],
+    userGoal: string
   ): TaskContext['evidenceSelection'] {
     const uniqueCandidates = this.uniqueEvidenceRefs(candidateRefs);
     const isArchitectureAnalysis =
-      this.isArchitectureAnalysis(session, task) ||
+      this.isArchitectureAnalysis(session, task, userGoal) ||
       uniqueCandidates.some((ref) => ref.selectionReason?.startsWith('Architecture analysis priority'));
     const maxEvidenceRefs = isArchitectureAnalysis
       ? 32
@@ -576,7 +582,7 @@ export class ContextRouterService {
           : domain === 'mixed'
             ? 'mixed_minimal'
             : 'coding_minimal',
-      query: [session.originalInput, task?.title, task?.description].filter(Boolean).join(' | '),
+      query: [userGoal, task?.title, task?.description].filter(Boolean).join(' | '),
       maxEvidenceRefs,
       selectedCount: selected.length,
       omittedCount: omitted.length,
@@ -734,7 +740,8 @@ export class ContextRouterService {
     brief: TaskBrief | undefined,
     projectMap: ProjectMap | undefined,
     focus: ContextAssembly['workspaceFocus'],
-    evidenceSelection: TaskContext['evidenceSelection']
+    evidenceSelection: TaskContext['evidenceSelection'],
+    userGoal: string
   ): TaskContext['taskMap'] {
     if (domain === 'coding' || domain === 'mixed') {
       const moduleFiles = this.uniqueFirstStrings(
@@ -821,7 +828,7 @@ export class ContextRouterService {
         },
         {
           type: 'entrypoint' as const,
-          label: this.shortText(session.originalInput, 120),
+          label: this.shortText(userGoal, 120),
           reason: 'User goal is the analysis entrypoint for the Domain Map.'
         },
         ...(brief?.scope ?? []).slice(0, 4).map((item) => ({

@@ -13,6 +13,7 @@ import { ContextRouterService } from './context-router.service.js';
 import { OrchestratorService } from './orchestrator.service.js';
 import { ProjectMapService } from './project-map.service.js';
 import { FileRevisionsModule } from '../file-revisions/file-revisions.module.js';
+import { ContextManagementModule } from '../context-management/context-management.module.js';
 
 @Module({
   imports: [
@@ -26,7 +27,8 @@ import { FileRevisionsModule } from '../file-revisions/file-revisions.module.js'
     ArtifactsModule,
     CapabilitiesModule,
     SkillsModule,
-    FileRevisionsModule
+    FileRevisionsModule,
+    ContextManagementModule
   ],
   providers: [ContextRouterService, ProjectMapService, OrchestratorService],
   exports: [ContextRouterService, ProjectMapService, OrchestratorService]

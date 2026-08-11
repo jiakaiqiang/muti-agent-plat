@@ -8,6 +8,7 @@ test('buildEnvelopeFromContextAssembly creates the authoritative grounded v2 lay
   const contextAssembly = {
     systemRules: ['Stay grounded.'],
     sessionGoal: 'Inspect the repository',
+    currentUserMessage: '继续',
     budget: { maxInputTokens: 10_000 },
     selectedEvidenceContents: [{
       type: 'workspace_file',
@@ -46,10 +47,30 @@ test('buildEnvelopeFromContextAssembly creates the authoritative grounded v2 lay
     toolCatalogHash: 'catalog-hash'
   });
   assert.equal(envelope.version, 'v2');
+  assert.equal(envelope.L1.currentUserMessage, undefined);
+  assert.equal('currentUserMessage' in envelope.L0, false);
   assert.equal(envelope.L3.files[0]?.path, 'src/main.ts');
   assert.equal(envelope.L3.totalByteLength > 0, true);
   assert.equal(envelope.budget.navigationTokens, 1500);
   assert.equal(envelope.budget.evidenceTokens, 4000);
+  assert.deepEqual(envelope.contextScope, {
+    inheritedDecisionIds: [],
+    inheritedArtifactIds: []
+  });
+
+  const routingEnvelope = buildEnvelopeFromContextAssembly({
+    session,
+    phase: 'user_message_routing',
+    contextAssembly,
+    identity: {
+      agentId: 'agent-v2', key: 'agent', name: 'Agent', role: 'worker', systemPrompt: 'Work.',
+      profileHash: 'profile-hash', profileRevision: 1, skillBindings: [], requestedToolIds: [],
+      requestedToolKeys: [], capabilityIds: [], knowledgeBaseIds: []
+    },
+    toolCatalogHash: 'catalog-hash'
+  });
+  assert.equal(routingEnvelope.L1.currentUserMessage, '继续');
+  assert.equal('currentUserMessage' in routingEnvelope.L0, false);
 });
 
 test('buildEnvelopeFromContextAssembly preserves a local_bridge workspace authority binding', () => {

@@ -28,6 +28,7 @@ import type {
   RuntimeFileChange,
   RuntimeOutput,
   RuntimeOutputKind,
+  RuntimePreference,
   RuntimeType,
   RuntimeWriteMode,
   ExecutionTermination,
@@ -85,6 +86,11 @@ import { KnowledgeService } from '../rag/knowledge.service.js';
 import { RuntimeService } from '../runtimes/runtime.service.js';
 import { TasksService } from '../tasks/tasks.service.js';
 import { AgentProfileCompilerService } from '../agent-profile/agent-profile-compiler.service.js';
+import {
+  ContextManagementService,
+  type WorkItemContextSlice
+} from '../context-management/context-management.service.js';
+import { SystemAgentRuntimePolicyService } from '../agents/system-agent-runtime-policy.service.js';
 import { buildEnvelopeFromContextAssembly } from '../context-v2/build-envelope-from-context-assembly.js';
 import {
   evaluateGroundedEvidenceGate,
@@ -242,7 +248,9 @@ export class OrchestratorService {
     @Optional() private readonly workspaceBindings?: InvocationWorkspaceBindingsService,
     @Optional() private readonly fileRevisions?: FileRevisionsService,
     @Optional() private readonly workspaceWritebacks?: WorkspaceWritebackService,
-    @Optional() private readonly worktreeExecution?: WorktreeExecutionService
+    @Optional() private readonly worktreeExecution?: WorktreeExecutionService,
+    @Optional() private readonly contextManagement?: ContextManagementService,
+    @Optional() private readonly systemAgentPolicies?: SystemAgentRuntimePolicyService
   ) {
     const persistedBriefs = this.persistence.getCollection<Record<string, TaskBrief[]>>('briefsBySession', {});
     for (const [sessionId, briefs] of Object.entries(persistedBriefs)) {
@@ -458,9 +466,9 @@ export class OrchestratorService {
       'When the Session is FAILED and the message continues the same requirement, set failedExecutionAction=resume for an explicit continue/retry request, or replan when the user asks to change the approach or discuss again. Otherwise set failedExecutionAction=none.',
       'A currently running task must not be interrupted. Set shouldPause=false; execution deferral is controlled by the session queue.'
     ];
+    contextAssembly.currentUserMessage = content;
     contextAssembly.constraints = [
       ...contextAssembly.constraints,
-      `Current user message: ${content}`,
       `Explicitly mentioned agent ids: ${mentionedAgentIds.join(', ') || '(none)'}`
     ];
     contextAssembly.relevantEvents = [
@@ -1979,7 +1987,7 @@ export class OrchestratorService {
       if (!isFileRevisionTask && this.canRetryWithSupplementalContext(code, requestedContext, contextRetryCount)) {
         const novelContext = this.resolveRetryRequest(session, code, requestedContext, contextRetryCount);
         if (novelContext) {
-          const resolution = await this.hydrateSupplementalContext(session, novelContext);
+          const resolution = await this.hydrateSupplementalContext(session, novelContext, { workItemId: task.workItemId ?? session.activeWorkItemId });
           this.recordSupplementalContextRequest(session, task, taskAgent.id, novelContext, resolution);
           if (this.hasUsableSupplementalContext(session, novelContext, resolution)) {
             this.tasks.update(task, { status: 'pending', resultSummary: `Retrying with supplemental context: ${message}` });
@@ -2030,7 +2038,7 @@ export class OrchestratorService {
       if (!isFileRevisionTask && this.canRetryWithSupplementalContext(code, requestedContext, contextRetryCount)) {
         const novelContext = this.resolveRetryRequest(session, code, requestedContext, contextRetryCount);
         if (novelContext) {
-          const resolution = await this.hydrateSupplementalContext(session, novelContext);
+          const resolution = await this.hydrateSupplementalContext(session, novelContext, { workItemId: task.workItemId ?? session.activeWorkItemId });
           this.recordSupplementalContextRequest(session, task, taskAgent.id, novelContext, resolution);
           if (this.hasUsableSupplementalContext(session, novelContext, resolution)) {
             this.tasks.update(task, { status: 'pending', resultSummary: `Retrying with supplemental context: ${output.summary}` });
@@ -2130,6 +2138,7 @@ export class OrchestratorService {
     }
     this.events.create({
       sessionId: session.id,
+      workItemId: task.workItemId,
       type: 'runtime_completed',
       taskId: task.id,
       fromAgentId: taskAgent.id,
@@ -2299,7 +2308,7 @@ export class OrchestratorService {
       if (this.canRetryWithSupplementalContext('CONTEXT_INSUFFICIENT', requestedContext, contextRetryCount)) {
         const novelContext = this.resolveRetryRequest(session, 'CONTEXT_INSUFFICIENT', requestedContext, contextRetryCount);
         if (novelContext) {
-          const resolution = await this.hydrateSupplementalContext(session, novelContext);
+          const resolution = await this.hydrateSupplementalContext(session, novelContext, { workItemId: task.workItemId ?? session.activeWorkItemId });
           this.recordSupplementalContextRequest(session, task, candidate.id, novelContext, resolution);
           if (this.hasUsableSupplementalContext(session, novelContext, resolution)) {
             this.tasks.update(task, {
@@ -2582,6 +2591,7 @@ export class OrchestratorService {
     };
     try {
       const resolution = await this.hydrateSupplementalContext(session, requestedContext, {
+        ...(task.workItemId ?? session.activeWorkItemId ? { workItemId: task.workItemId ?? session.activeWorkItemId } : {}),
         deadlineMs: 1_500,
         maxOperations: 8,
         maxContentBytes: 256 * 1024
@@ -3338,6 +3348,7 @@ export class OrchestratorService {
     this.tasks.update(task, { status: taskStatus, resultSummary: publicMessage });
     this.events.create({
       sessionId,
+      workItemId: task.workItemId,
       type: 'runtime_failed',
       taskId: task.id,
       fromAgentId: agentId,
@@ -3388,6 +3399,7 @@ export class OrchestratorService {
     this.tasks.update(task, { status: 'waiting', resultSummary: message });
     this.events.create({
       sessionId,
+      workItemId: task.workItemId,
       type: 'runtime_failed',
       taskId: task.id,
       fromAgentId: agentId,
@@ -3439,6 +3451,7 @@ export class OrchestratorService {
   ) {
     this.events.create({
       sessionId: session.id,
+      workItemId: task.workItemId,
       type: 'runtime_progress',
       taskId: task.id,
       fromAgentId: agentId,
@@ -4363,6 +4376,17 @@ export class OrchestratorService {
     task?: AgentTask,
     phase: AgentRunPhase = 'discussion'
   ): ContextAssembly {
+    const workItemId = task?.workItemId ?? brief?.workItemId ?? session.activeWorkItemId;
+    const contextSlice = this.createWorkItemContextSlice(session, workItemId);
+    const workItem = contextSlice.workItem;
+    const inheritedDecisionIds = contextSlice.inheritedDecisionIds;
+    const inheritedArtifactIds = contextSlice.inheritedArtifactIds;
+    const decisionRecords = contextSlice.decisions;
+    const decisionSetHash = decisionRecords.length
+      ? crypto.createHash('sha256').update(decisionRecords.map((item) => `${item.id}:${item.revision}:${item.content}`).join('|')).digest('hex')
+      : undefined;
+    const scopedArtifacts = contextSlice.artifacts;
+    const scopedEvents = contextSlice.events;
     const ragSnippets = task
       ? this.searchAgentKnowledge(session, agent, this.taskKnowledgeQuery(session, brief, task))
       : [];
@@ -4372,7 +4396,7 @@ export class OrchestratorService {
         .filter(Boolean)
         .join(' '),
       agent.id
-    );
+    ).filter((memory) => contextSlice.memories.some((item) => item.id === memory.id));
     // task_execution 一直无条件纳入最近 session memory;discussion/brief_generation
     // 阶段也纳入,因为用户对契约的修改内容以 session memory 形式落库,不能只靠
     // 关键词检索命中(检索 query 仍以原始需求为主,新增需求词很容易召不回)。
@@ -4385,7 +4409,11 @@ export class OrchestratorService {
     const recentAgentSessionMemories = includeRecentSessionMemories
       ? this.memories
           .list(session.id)
-          .filter((memory) => memory.scope === 'session' && (!memory.agentId || memory.agentId === agent.id))
+          .filter((memory) =>
+            memory.scope === 'session' &&
+            (!memory.agentId || memory.agentId === agent.id) &&
+            contextSlice.memories.some((item) => item.id === memory.id)
+          )
           .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
           .slice(0, 4)
       : [];
@@ -4396,6 +4424,7 @@ export class OrchestratorService {
     const projectMap = this.projectMap.buildProjectMap(session, workspaceFocus);
     const taskContext = this.contextRouter.route({
       session,
+      currentGoal: workItem?.goal ?? session.originalInput,
       brief,
       task,
       phase,
@@ -4403,11 +4432,11 @@ export class OrchestratorService {
       workspaceFocus,
       relevantMemories,
       ragSnippets,
-      artifacts: this.artifacts.listBySession(session.id),
-      events: this.events.list(session.id),
+      artifacts: scopedArtifacts,
+      events: scopedEvents,
       participatingAgentKeys: this.participatingAgents(session).map((item) => item.key)
     });
-    const summaryMemory = this.createSummaryMemory(session, brief, task, phase);
+    const summaryMemory = this.createSummaryMemory(session, brief, task, phase, contextSlice);
     const compiledIdentity = this.compileAgentIdentity(agent);
     const coverageRule = buildCoverageSystemRule(session.workspaceSnapshot);
     const bootstrapRules = session.workspaceMode === 'bootstrap'
@@ -4427,7 +4456,11 @@ export class OrchestratorService {
         ...bootstrapRules,
         ...(coverageRule ? [coverageRule] : [])
       ],
-      sessionGoal: session.originalInput,
+      sessionGoal: workItem?.goal ?? session.originalInput,
+      workItemId,
+      inheritedDecisionIds,
+      inheritedArtifactIds,
+      decisionSetHash,
       // 契约仍在协商的阶段(discussion/brief_generation/brief_revision)不注入
       // latestContractGoal:此时它还是旧契约的 goal,注入会强化旧目标、阻碍采纳
       // 用户修改。仅在基于已确认契约执行的阶段把它作为当前权威目标注入。
@@ -4442,11 +4475,19 @@ export class OrchestratorService {
           : session.latestContractGoal,
       taskContext,
       summaryMemory,
-      continuationState: this.createContinuationState(session, agent, task, phase, taskContext, summaryMemory),
+      continuationState: this.createContinuationState(
+        session,
+        agent,
+        task,
+        phase,
+        taskContext,
+        summaryMemory,
+        contextSlice
+      ),
       workingDirectory: session.workingDirectory,
       workspaceSnapshot: this.runtimeWorkspaceSnapshot(session.workspaceSnapshot),
       workspaceManifest: buildWorkspaceManifest(session.workspaceSnapshot),
-      selectedEvidenceContents: this.createSelectedEvidenceContents(session, taskContext),
+      selectedEvidenceContents: this.createSelectedEvidenceContents(session, taskContext, workItemId),
       projectMap,
       workspaceFocus,
       taskBrief: brief
@@ -4465,7 +4506,7 @@ export class OrchestratorService {
         : undefined,
       currentTask: task,
       agentProfile: compiledIdentity,
-      relevantEvents: this.events.list(session.id)
+      relevantEvents: scopedEvents
         .filter((event) => {
           const payload = event.metadata?.payload as { code?: unknown; visibility?: unknown } | undefined;
           if (payload?.code === 'RUNTIME_HEARTBEAT') return false;
@@ -4484,14 +4525,17 @@ export class OrchestratorService {
       })),
       relevantMemories,
       ragSnippets,
-      artifacts: this.artifacts.listBySession(session.id).map((artifact) => ({
+      artifacts: scopedArtifacts.map((artifact) => ({
         artifactId: artifact.id,
         type: artifact.type,
         title: artifact.title,
         summary: artifact.contentSummary
       })),
       capabilities: this.capabilities.resolve(agent.capabilityIds),
-      constraints: brief?.constraints ?? [],
+      constraints: [
+        ...(brief?.constraints ?? []),
+        ...decisionRecords.map((decision) => `Confirmed decision (${decision.kind}): ${decision.content}`)
+      ],
       budget: buildBudget(session)
     };
     if (task?.fileRevisionId) {
@@ -4524,11 +4568,61 @@ export class OrchestratorService {
     return contextAssembly;
   }
 
+  private createWorkItemContextSlice(session: SessionDetail, workItemId?: string): WorkItemContextSlice {
+    if (!this.contextManagement ||
+      typeof this.contextManagement.buildWorkItemContextSlice !== 'function' ||
+      typeof this.memories.list !== 'function' ||
+      typeof this.artifacts.listBySession !== 'function' ||
+      typeof this.events.list !== 'function') {
+      if (workItemId) {
+        return {
+          decisions: [],
+          tasks: [],
+          events: [],
+          memories: [],
+          artifacts: [],
+          inheritedDecisionIds: [],
+          inheritedArtifactIds: []
+        };
+      }
+      const tasks = typeof this.tasks.list === 'function' ? this.tasks.list(session.id) : [];
+      const events = typeof this.events.list === 'function' ? this.events.list(session.id) : [];
+      const memories = typeof this.memories.list === 'function' ? this.memories.list(session.id) : [];
+      const artifacts = typeof this.artifacts.listBySession === 'function' ? this.artifacts.listBySession(session.id) : [];
+      return {
+        decisions: [],
+        tasks,
+        events,
+        memories,
+        artifacts,
+        inheritedDecisionIds: [],
+        inheritedArtifactIds: []
+      };
+    }
+    return this.contextManagement.buildWorkItemContextSlice({
+      session,
+      workItemId,
+      tasks: this.tasks.list(session.id),
+      events: this.events.list(session.id),
+      memories: this.memories.list(session.id),
+      artifacts: this.artifacts.listBySession(session.id)
+    });
+  }
+
   async hydrateSupplementalContext(
     session: SessionDetail,
     requestedContext: RuntimeContextRequest,
-    options: { deadlineMs?: number; maxOperations?: number; maxContentBytes?: number } = {}
+    options: { deadlineMs?: number; maxOperations?: number; maxContentBytes?: number; workItemId?: string } = {}
   ): Promise<SupplementalContextResolution> {
+    const contextSlice = this.contextManagement &&
+      typeof this.contextManagement.buildWorkItemContextSlice === 'function' &&
+      typeof this.memories.list === 'function' &&
+      typeof this.artifacts.listBySession === 'function' &&
+      typeof this.events.list === 'function'
+      ? this.createWorkItemContextSlice(session, options.workItemId ?? session.activeWorkItemId)
+      : (options.workItemId ?? session.activeWorkItemId)
+        ? { decisions: [], tasks: [], events: [], memories: [], artifacts: [], inheritedDecisionIds: [], inheritedArtifactIds: [] }
+        : undefined;
     const fileRequests: RuntimeContextFileRequest[] = [
       ...(requestedContext.requestedFiles ?? []),
       ...(requestedContext.requestedPaths ?? []).map((path) => ({ path }))
@@ -4557,7 +4651,7 @@ export class OrchestratorService {
     const failedPaths: SupplementalContextResolution['failedPaths'] = [];
     let contentBytes = 0;
     for (const requestedRef of requestedRefs) {
-      const resolved = this.resolveSupplementalEvidenceRef(session, requestedRef);
+      const resolved = this.resolveSupplementalEvidenceRef(session, requestedRef, contextSlice);
       if ('failure' in resolved) {
         failedRefs.push(resolved.failure);
         continue;
@@ -4857,16 +4951,18 @@ export class OrchestratorService {
   private hasUsableSupplementalContext(
     session: SessionDetail,
     requestedContext: RuntimeContextRequest,
-    resolution: SupplementalContextResolution
+    resolution: SupplementalContextResolution,
+    contextSlice?: WorkItemContextSlice
   ) {
     if (resolution.hydratedPaths.length) return true;
     if (resolution.resolvedRefs) return resolution.resolvedRefs.length > 0;
-    return requestedContext.requestedRefs.some((ref) => Boolean(ref.ref && this.selectedEvidenceContent(session, ref)));
+    return requestedContext.requestedRefs.some((ref) => Boolean(ref.ref && this.selectedEvidenceContent(session, ref, contextSlice)));
   }
 
   private resolveSupplementalEvidenceRef(
     session: SessionDetail,
-    evidence: TaskEvidenceRef
+    evidence: TaskEvidenceRef,
+    contextSlice?: WorkItemContextSlice
   ): { ref: TaskEvidenceRef; contentBytes: number } | { failure: NonNullable<SupplementalContextResolution['failedRefs']>[number] } {
     const failure = (
       code: NonNullable<SupplementalContextResolution['failedRefs']>[number]['code'],
@@ -4874,7 +4970,7 @@ export class OrchestratorService {
       retryable = false
     ) => ({ failure: { type: evidence.type, label: evidence.label, ...(evidence.ref ? { ref: evidence.ref } : {}), code, retryable, message } });
     const measure = (ref: TaskEvidenceRef) => {
-      const content = this.selectedEvidenceContent(session, ref);
+      const content = this.selectedEvidenceContent(session, ref, contextSlice);
       if (!content?.content && !content?.summary) return undefined;
       return { ref, contentBytes: Buffer.byteLength(content.content ?? content.summary ?? '', 'utf8') };
     };
@@ -4887,18 +4983,21 @@ export class OrchestratorService {
     const candidates: TaskEvidenceRef[] = [];
     if (evidence.type === 'artifact' || evidence.type === 'diff') {
       for (const artifact of this.artifacts.listBySession(session.id)) {
+        if (contextSlice && !contextSlice.artifacts.some((item) => item.id === artifact.id)) continue;
         if (artifact.title.trim().toLocaleLowerCase() === normalizedLabel) {
           candidates.push({ ...evidence, ref: artifact.id });
         }
       }
     } else if (evidence.type === 'memory') {
       for (const memory of this.memories.list(session.id)) {
+        if (contextSlice && !contextSlice.memories.some((item) => item.id === memory.id)) continue;
         if (memory.content.trim().toLocaleLowerCase() === normalizedLabel) {
           candidates.push({ ...evidence, ref: memory.id });
         }
       }
     } else if (evidence.type === 'event_log' || evidence.type === 'historical_decision' || evidence.type === 'log') {
       for (const event of this.events.list(session.id)) {
+        if (contextSlice && !contextSlice.events.some((item) => item.id === event.id)) continue;
         const labels = [event.content, event.metadata?.title, event.metadata?.summary]
           .filter((value): value is string => typeof value === 'string')
           .map((value) => value.trim().toLocaleLowerCase());
@@ -4972,10 +5071,11 @@ export class OrchestratorService {
     };
   }
 
-  private createSelectedEvidenceContents(session: SessionDetail, taskContext: TaskContext): ContextAssembly['selectedEvidenceContents'] {
+  private createSelectedEvidenceContents(session: SessionDetail, taskContext: TaskContext, workItemId?: string): ContextAssembly['selectedEvidenceContents'] {
+    const contextSlice = this.createWorkItemContextSlice(session, workItemId ?? session.activeWorkItemId);
     const contents: NonNullable<ContextAssembly['selectedEvidenceContents']> = [];
     for (const evidence of taskContext.evidenceRefs) {
-      const entry = this.selectedEvidenceContent(session, evidence);
+      const entry = this.selectedEvidenceContent(session, evidence, contextSlice);
       if (!entry) continue;
       contents.push({
         ...entry,
@@ -4991,7 +5091,8 @@ export class OrchestratorService {
 
   private selectedEvidenceContent(
     session: SessionDetail,
-    evidence: TaskContext['evidenceRefs'][number]
+    evidence: TaskContext['evidenceRefs'][number],
+    contextSlice?: WorkItemContextSlice
   ): Omit<NonNullable<ContextAssembly['selectedEvidenceContents']>[number], 'type' | 'label' | 'ref' | 'tokenEstimate' | 'selectionReason'> | undefined {
     const ref = evidence.ref;
     if (evidence.type === 'workspace_snapshot') {
@@ -5011,6 +5112,7 @@ export class OrchestratorService {
     }
     if (evidence.type === 'memory' && ref) {
       const memory = this.memories.list(session.id).find((item) => item.id === ref);
+      if (contextSlice && !contextSlice.memories.some((item) => item.id === ref)) return undefined;
       return memory
         ? {
             source: 'memory',
@@ -5034,6 +5136,7 @@ export class OrchestratorService {
     }
     if ((evidence.type === 'artifact' || evidence.type === 'diff') && ref) {
       const artifact = this.artifacts.listBySession(session.id).find((item) => {
+        if (contextSlice && !contextSlice.artifacts.some((candidate) => candidate.id === item.id)) return false;
         const workspaceChanges = this.artifactWorkspaceChanges(item);
         return item.id === ref || workspaceChanges.some((change) =>
           change.operation === 'move'
@@ -5052,6 +5155,7 @@ export class OrchestratorService {
         : undefined;
     }
     if ((evidence.type === 'event_log' || evidence.type === 'historical_decision' || evidence.type === 'log') && ref) {
+      if (contextSlice && !contextSlice.events.some((item) => item.id === ref)) return undefined;
       const event = this.events.list(session.id).find((item) => item.id === ref);
       if (!event || typeof event.content !== 'string' || !event.content.trim()) return undefined;
       return {
@@ -5860,12 +5964,13 @@ export class OrchestratorService {
     task: AgentTask | undefined,
     phase: AgentRunPhase,
     taskContext: TaskContext,
-    summaryMemory: SummaryMemory
+    summaryMemory: SummaryMemory,
+    contextSlice: WorkItemContextSlice
   ): ContextAssembly['continuationState'] {
-    const tasks = this.tasks.list(session.id);
-    const recentEvents = this.events.list(session.id).slice(-12);
-    const recentArtifacts = this.artifacts.listBySession(session.id).slice(-12);
-    const checkpoint = this.latestSummaryMemoryCheckpoint(session.id);
+    const tasks = contextSlice.tasks;
+    const recentEvents = contextSlice.events.slice(-12);
+    const recentArtifacts = contextSlice.artifacts.slice(-12);
+    const checkpoint = this.latestSummaryMemoryCheckpoint(session.id, contextSlice.workItem?.id);
     const pendingTaskIds = tasks
       .filter((item) => ['pending', 'claimed', 'waiting'].includes(item.status))
       .map((item) => item.id);
@@ -5949,13 +6054,14 @@ export class OrchestratorService {
     session: SessionDetail,
     brief: TaskBrief | undefined,
     task: AgentTask | undefined,
-    phase: AgentRunPhase
+    phase: AgentRunPhase,
+    contextSlice: WorkItemContextSlice
   ): SummaryMemory {
-    const prior = this.latestSummaryMemoryCheckpoint(session.id);
-    const tasks = this.tasks.list(session.id);
+    const prior = this.latestSummaryMemoryCheckpoint(session.id, contextSlice.workItem?.id);
+    const tasks = contextSlice.tasks;
     const completed = tasks.filter((item) => item.status === 'completed').map((item) => item.title).slice(0, 6);
-    const recentEvents = this.events.list(session.id).slice(-8);
-    const recentArtifactIds = this.artifacts.listBySession(session.id).slice(-8).map((artifact) => artifact.id);
+    const recentEvents = contextSlice.events.slice(-8);
+    const recentArtifactIds = contextSlice.artifacts.slice(-8).map((artifact) => artifact.id);
     const confirmedFacts = [
       `Session status: ${session.status}`,
       `Current stage: ${phase}`,
@@ -5969,8 +6075,7 @@ export class OrchestratorService {
         ? [`Detected stack: ${(session.workspaceIndex?.detectedStack ?? session.workspaceSnapshot?.detectedStack ?? []).join(', ')}`]
         : [])
     ];
-    const decisions = this.events
-      .list(session.id)
+    const decisions = contextSlice.events
       .filter((event) => event.type === 'brief_created' || event.type === 'brief_confirmed' || event.type === 'post_review_completed')
       .map((event) => event.content)
       .slice(-4);
@@ -5980,7 +6085,8 @@ export class OrchestratorService {
     const isBriefNegotiationPhase =
       phase === 'discussion' || phase === 'brief_generation' || phase === 'brief_revision';
     return {
-      goal: brief?.goal ?? (isBriefNegotiationPhase ? session.originalInput : previous?.goal ?? session.originalInput),
+      goal: brief?.goal ?? contextSlice.workItem?.goal ??
+        (isBriefNegotiationPhase ? session.originalInput : previous?.goal ?? session.originalInput),
       currentState: `${session.status} / ${phase}${task ? ` / ${task.status}: ${task.title}` : ''}`,
       confirmedFacts: this.uniqueStrings([...(previous?.confirmedFacts ?? []), ...confirmedFacts], 12),
       completed: this.uniqueStrings([...(previous?.completed ?? []), ...completed], 12),
@@ -6010,13 +6116,16 @@ export class OrchestratorService {
     brief?: TaskBrief,
     task?: AgentTask
   ) {
+    const workItemId = task?.workItemId ?? brief?.workItemId ?? session.activeWorkItemId;
+    const contextSlice = this.createWorkItemContextSlice(session, workItemId);
     const checkpointId = crypto.randomUUID();
-    const sourceEventIds = this.events.list(session.id).slice(-12).map((event) => event.id);
-    const sourceArtifactIds = this.artifacts.listBySession(session.id).slice(-12).map((artifact) => artifact.id);
-    const summaryMemory = this.createSummaryMemory(session, brief, task, phase);
+    const sourceEventIds = contextSlice.events.slice(-12).map((event) => event.id);
+    const sourceArtifactIds = contextSlice.artifacts.slice(-12).map((artifact) => artifact.id);
+    const summaryMemory = this.createSummaryMemory(session, brief, task, phase, contextSlice);
     const memory = this.memories.create({
       sessionId: session.id,
       agentId: agent.id,
+      workItemId,
       scope: 'session',
       content: this.summaryMemoryCheckpointText(checkpointId, phase, summaryMemory),
       confidence: 0.94
@@ -6025,6 +6134,7 @@ export class OrchestratorService {
       kind: 'summary_memory_checkpoint',
       checkpointId,
       sessionId: session.id,
+      workItemId,
       phase,
       taskId: task?.id,
       agentId: agent.id,
@@ -6042,7 +6152,7 @@ export class OrchestratorService {
     };
     const artifact = this.artifacts.create({
       sessionId: session.id,
-      workItemId: session.activeWorkItemId,
+      workItemId,
       taskId: task?.id,
       agentId: agent.id,
       type: 'json',
@@ -6056,6 +6166,7 @@ export class OrchestratorService {
     });
     this.events.create({
       sessionId: session.id,
+      workItemId,
       type: 'artifact_created',
       taskId: task?.id,
       fromAgentId: agent.id,
@@ -6074,10 +6185,11 @@ export class OrchestratorService {
     return { artifact, memory, checkpoint };
   }
 
-  private latestSummaryMemoryCheckpoint(sessionId: string) {
+  private latestSummaryMemoryCheckpoint(sessionId: string, workItemId?: string) {
     const artifacts = this.artifacts.listBySession(sessionId);
     for (let index = artifacts.length - 1; index >= 0; index -= 1) {
       const artifact = artifacts[index];
+      if (artifact.workItemId !== workItemId) continue;
       const checkpoint = artifact.metadata.summaryMemoryCheckpoint;
       if (this.isSummaryMemoryCheckpoint(checkpoint)) {
         return { artifact, checkpoint };
@@ -6281,14 +6393,15 @@ export class OrchestratorService {
       }
 
       const supplementalStartedAt = Date.now();
-      const resolution = await this.hydrateSupplementalContext(inputSession, novelContext);
+      const task = draft.taskId ? this.tasks.find(inputSession.id, draft.taskId) : undefined;
+      const workItemId = draft.contextAssembly.workItemId ?? task?.workItemId ?? inputSession.activeWorkItemId;
+      const resolution = await this.hydrateSupplementalContext(inputSession, novelContext, { workItemId });
       const supplementalDurationMs = Date.now() - supplementalStartedAt;
       supplementalContextDurationMs += supplementalDurationMs;
       workspaceMetrics.observe('supplemental_context_duration_ms', supplementalDurationMs, { phase: draft.phase });
       workspaceMetrics.increment('supplemental_context_bytes_total', resolution.contentBytes, { phase: draft.phase });
       const unstableCount = resolution.failedPaths.filter((item) => item.code === 'WORKSPACE_REVISION_UNSTABLE').length;
       if (unstableCount) workspaceMetrics.increment('workspace_revision_unstable_total', unstableCount, { phase: draft.phase });
-      const task = draft.taskId ? this.tasks.find(inputSession.id, draft.taskId) : undefined;
       this.recordSupplementalContextRequest(
         inputSession,
         task,
@@ -6306,7 +6419,8 @@ export class OrchestratorService {
       workspaceMetrics.increment('supplemental_context_retry_total', 1, { phase: draft.phase });
       const selectedEvidenceContents = this.createSelectedEvidenceContents(
         inputSession,
-        draft.contextAssembly.taskContext
+        draft.contextAssembly.taskContext,
+        workItemId
       ) ?? [];
       const selectedPaths = new Set(
         selectedEvidenceContents.map((item) => item.ref?.trim() || item.label.trim())
@@ -6314,7 +6428,7 @@ export class OrchestratorService {
       for (const evidenceRef of resolution.resolvedRefs ?? []) {
         const evidenceKey = evidenceRef.ref?.trim() || evidenceRef.label.trim();
         if (selectedPaths.has(evidenceKey)) continue;
-        const evidence = this.selectedEvidenceContent(inputSession, evidenceRef);
+        const evidence = this.selectedEvidenceContent(inputSession, evidenceRef, this.createWorkItemContextSlice(inputSession, workItemId));
         if (!evidence) continue;
         selectedEvidenceContents.push({
           ...evidence,
@@ -6443,7 +6557,7 @@ export class OrchestratorService {
         agent: input.agent,
         taskRequiresCodeChanges: input.contextAssembly.taskContext.requiresCodeChanges,
         workspace: this.invocationWorkspace(inputSession),
-        sessionPreference: inputSession.runtimePreference,
+        sessionPreference: this.runtimePreferenceForAgent(input.agent, inputSession.runtimePreference),
         projectPolicyRuntime: projectPolicyRuntimeType(),
         smartRouterPick: input.runtimeCandidateOverride ?? smartRuntimePick({
           phase: input.phase,
@@ -6465,7 +6579,7 @@ export class OrchestratorService {
       });
       resolvedPlan = {
         ...resolvedPlan,
-        workItemId: inputSession.activeWorkItemId,
+        workItemId: input.contextAssembly.workItemId ?? inputSession.activeWorkItemId,
         attempt: input.attempt
       };
       if (input.writeModeOverride) {
@@ -6531,6 +6645,7 @@ export class OrchestratorService {
 
     this.events.create({
       sessionId: plan.sessionId,
+      workItemId: plan.workItemId,
       type: 'runtime_started',
       taskId: plan.taskId,
       fromAgentId: plan.agent.agentId,
@@ -6591,6 +6706,7 @@ export class OrchestratorService {
           if (shouldSuppressHeartbeat(now, lastVisibleRuntimeActivityAt, RUNTIME_HEARTBEAT_INTERVAL_MS)) return;
           this.events.create({
             sessionId: plan.sessionId,
+            workItemId: plan.workItemId,
             type: 'runtime_progress',
             taskId: plan.taskId,
             fromAgentId: plan.agent.agentId,
@@ -6727,6 +6843,7 @@ export class OrchestratorService {
   ) {
     this.events.create({
       sessionId: session.id,
+      workItemId: input.contextAssembly.workItemId,
       type: 'runtime_progress',
       taskId: input.taskId,
       fromAgentId: input.agent.id,
@@ -6753,6 +6870,7 @@ export class OrchestratorService {
   ) {
     this.events.create({
       sessionId: session.id,
+      workItemId: input.contextAssembly.workItemId,
       type: 'runtime_progress',
       taskId: input.taskId,
       fromAgentId: input.agent.id,
@@ -6791,9 +6909,10 @@ export class OrchestratorService {
 
   private recordRuntimeTermination(input: InvocationPlan, result: AgentRunResult) {
     if (!result.termination) return;
-    this.events.create({
-      sessionId: input.sessionId,
-      type: 'runtime_failed',
+      this.events.create({
+        sessionId: input.sessionId,
+        workItemId: input.workItemId,
+        type: 'runtime_failed',
       taskId: input.taskId,
       fromAgentId: input.agent.agentId,
       content: result.error?.message ?? '运行时执行已终止。',
@@ -6823,6 +6942,7 @@ export class OrchestratorService {
       }
       this.events.create({
         sessionId: input.sessionId,
+        workItemId: input.workItemId,
         type: 'runtime_progress',
         taskId: input.taskId,
         fromAgentId: input.agent.agentId,
@@ -7060,6 +7180,18 @@ export class OrchestratorService {
           }))
         }
       }
+    };
+  }
+
+  private runtimePreferenceForAgent(agent: Agent, sessionPreference?: RuntimePreference) {
+    const role = agent.key === 'coordinator' ? 'coordinator' : undefined;
+    const policy = role ? this.systemAgentPolicies?.get(role) : undefined;
+    if (!policy) return sessionPreference;
+    return {
+      ...sessionPreference,
+      ...(policy.preferredRuntimeType ? { preferredRuntimeType: policy.preferredRuntimeType } : {}),
+      ...(policy.preferredModelId ? { preferredModelId: policy.preferredModelId } : {}),
+      ...(policy.allowedRuntimeTypes ? { allowedRuntimeTypes: [...policy.allowedRuntimeTypes] } : {})
     };
   }
 

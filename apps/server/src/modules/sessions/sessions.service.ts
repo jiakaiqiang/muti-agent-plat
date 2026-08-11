@@ -25,6 +25,7 @@ import type {
   RetryInterruptedFileRevisionInput,
   SaveFileRevisionDraftInput,
   LocalRuntimePermission,
+  PendingConfirmationContext,
   PendingInvocation,
   PostReviewAction,
   RuntimeError,
@@ -53,6 +54,10 @@ import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import { AgentsService } from '../agents/agents.service.js';
 import { EventsService } from '../events/events.service.js';
 import { IntentRecognitionService } from '../intent-recognition/intent-recognition.service.js';
+import {
+  matchExactUserCommand,
+  type ExactCommandMatch
+} from '../intent-recognition/deterministic-command-guard.service.js';
 import { SemanticIntentRouterService } from '../intent-recognition/semantic-intent-router.service.js';
 import { ContextManagementService } from '../context-management/context-management.service.js';
 import { MemoryService } from '../memory/memory.service.js';
@@ -74,6 +79,8 @@ import { CapabilitiesService } from '../capabilities/capabilities.service.js';
 import { FileRevisionsService } from '../file-revisions/file-revisions.service.js';
 import { RouteApplicationService } from '../message-routing/route-application.service.js';
 import { MessageIngressService } from '../message-routing/message-ingress.service.js';
+import { resolveExactCommand } from '../message-routing/command-state-resolver.service.js';
+import { applyExactCommandResolution } from '../message-routing/command-application.service.js';
 
 type CreateSessionInput = {
   input: string;
@@ -106,6 +113,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   >();
   private readonly followUpPlanningRuns = new Map<string, Promise<void>>();
   private readonly intentRoutingRuns = new Map<string, Promise<void>>();
+  private readonly intentRoutingRetryTimers = new Map<string, NodeJS.Timeout>();
+  private readonly intentRoutingWorkerId = `intent-routing:${process.pid}:${crypto.randomUUID()}`;
   private readonly deletingSessionIds = new Set<string>();
   private readonly fileRevisionDispatches = new Set<string>();
   private shuttingDown = false;
@@ -163,6 +172,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
   onModuleDestroy() {
     this.runtimeInterruptSubscription?.unsubscribe();
+    for (const timer of this.intentRoutingRetryTimers.values()) clearTimeout(timer);
+    this.intentRoutingRetryTimers.clear();
   }
 
   beforeApplicationShutdown(signal?: string) {
@@ -307,6 +318,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       currentMessage: followUp.content,
       latestEventSeq: this.events.list(sessionId).length,
       pendingConfirmation: this.pendingConfirmationSummary(sessionId),
+      pendingConfirmationContext: this.pendingConfirmationContext(sessionId),
       failureCheckpoint: this.latestFailurePhase(sessionId)
     });
     await this.contextManagement.updateRoutingRecord(sessionId, routingId, {
@@ -922,11 +934,50 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         const followUp = (session.pendingFollowUpMessages ?? []).find((item) => item.routingId === routing.id) ??
           this.contextManagement.listFollowUps(session.id).find((item) => item.routingId === routing.id);
         if (!followUp) continue;
+        const pendingControlAction = routing.status === 'ROUTED' &&
+          ['pause', 'cancel'].includes(routing.decision?.requestedAction ?? '') &&
+          routing.actionStatus !== 'applied';
+        if (['completed', 'failed', 'cancelled'].includes(followUp.status) && !pendingControlAction) {
+          session.pendingFollowUpMessages = (session.pendingFollowUpMessages ?? []).filter((item) => item.id !== followUp.id);
+          if (session.activeFollowUpMessageId === followUp.id) session.activeFollowUpMessageId = undefined;
+          continue;
+        }
         if (!(session.pendingFollowUpMessages ?? []).some((item) => item.id === followUp.id)) {
           session.pendingFollowUpMessages = [...(session.pendingFollowUpMessages ?? []), followUp];
           this.touchSession(session);
         }
         if (routing.status === 'ROUTED') {
+          const action = routing.decision?.requestedAction;
+          if (action === 'pause' && routing.actionStatus !== 'applied') {
+            await this.applyPersistedRoutingAction(session, routing.id, followUp, 'pause');
+            recovered.push({ sessionId: session.id, routingId: routing.id, action: 'pause_recovered' });
+          } else if (action === 'cancel' && routing.actionStatus !== 'applied') {
+            await this.applyPersistedRoutingAction(session, routing.id, followUp, 'cancel');
+            recovered.push({ sessionId: session.id, routingId: routing.id, action: 'cancel_recovered' });
+          }
+          if (action === 'pause' || action === 'cancel') {
+            if (routing.actionStatus === 'applied' && !['completed', 'failed', 'cancelled'].includes(followUp.status)) {
+              await this.completeFollowUpRouting(
+                session,
+                followUp.id,
+                action === 'cancel' ? 'cancelled' : 'completed'
+              );
+              recovered.push({
+                sessionId: session.id,
+                routingId: routing.id,
+                action: `${action}_completion_recovered`
+              });
+            }
+            continue;
+          }
+          const interruptedFollowUp = ['planning', 'executing'].includes(followUp.status) &&
+            !this.execution.isRunning(session.id) &&
+            !this.followUpPlanningRuns.has(session.id);
+          if (interruptedFollowUp) {
+            followUp.status = 'queued';
+            session.activeFollowUpMessageId = undefined;
+            await this.contextManagement.updateFollowUpStatus(session.id, followUp.id, 'queued');
+          }
           if (!this.hasActiveSessionWork(session) && followUp.status === 'queued') {
             this.scheduleFollowUpPlanning(session.id);
             recovered.push({ sessionId: session.id, routingId: routing.id, action: 'follow_up_rescheduled' });
@@ -935,6 +986,20 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         }
         if (routing.status === 'CLARIFICATION_REQUIRED' || routing.status === 'REJECTED') continue;
         if (routing.status === 'CLASSIFYING' || routing.status === 'VALIDATING' || routing.status === 'APPLYING') {
+          const leaseExpiresAt = Date.parse(routing.leaseExpiresAt ?? '');
+          if (Number.isFinite(leaseExpiresAt) && leaseExpiresAt > Date.now()) {
+            if (routing.snapshotId) {
+              this.scheduleIntentRoutingRetry(
+                session.id,
+                routing.id,
+                routing.snapshotId,
+                followUp.id,
+                followUp.handlingPlan.requirementRelation
+              );
+              recovered.push({ sessionId: session.id, routingId: routing.id, action: 'active_lease_preserved' });
+            }
+            continue;
+          }
           await this.contextManagement.updateRoutingRecord(session.id, routing.id, {
             status: 'PENDING_RETRY',
             reasonCodes: [...routing.reasonCodes, 'RECOVERED_AFTER_RESTART']
@@ -946,6 +1011,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
           currentMessage: followUp.content,
           latestEventSeq: this.events.list(session.id).length,
           pendingConfirmation: this.pendingConfirmationSummary(session.id),
+          pendingConfirmationContext: this.pendingConfirmationContext(session.id),
           failureCheckpoint: this.latestFailurePhase(session.id)
         });
         await this.contextManagement.updateRoutingRecord(session.id, routing.id, {
@@ -1282,14 +1348,16 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     const session = this.get(sessionId);
     const replay = this.findMessageReplay(session, clientMessageId);
     if (replay) return replay;
+    const exactCommand = matchExactUserCommand(content);
+    if (exactCommand) {
+      return this.handleExactCommandMessage(session, content, mentionedAgentIds, clientMessageId, exactCommand);
+    }
     const routingMode = this.intentRoutingMode();
     if (this.shouldEnforceIntentRouting(session, routingMode)) {
       return this.sendMessageWithIntentV2(session, content, mentionedAgentIds, clientMessageId, routingMode);
     }
     const receiverRecognitionPending = session.status === 'PAUSED';
-    const explicitResumeCommand = this.isResumeCommand(content) &&
-      (session.status === 'FAILED' || this.hasFailedWorkflowRun(session));
-    const useLocalIntentRecognition = receiverRecognitionPending || explicitResumeCommand;
+    const useLocalIntentRecognition = receiverRecognitionPending;
     let handlingPlan: UserMessageHandlingPlan = useLocalIntentRecognition
       ? this.intentRecognition.recognizeUserMessage(content, session.status)
       : await this.recognizeFollowUpHandlingPlan(session, content, mentionedAgentIds);
@@ -1318,8 +1386,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       content: receiverRecognitionPending
         ? '会话已停止，消息已加入等待队列；继续后再由接收者进行意图识别和任务拆分。'
         : deferred
-          ? `接收者已完成意图识别。当前任务结束后再进行任务拆分与派发：${handlingPlan.coordinatorInstruction}`
-          : `接收者已完成意图识别，开始进行任务拆分与派发：${handlingPlan.coordinatorInstruction}`,
+          ? '已收到后续消息，将在当前任务结束后处理。'
+          : '已收到消息，正在准备后续处理。',
       metadata: createMetadata('chat_message', {
         messageKind: 'decision',
         handlingPlan,
@@ -1380,6 +1448,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         currentMessage: content,
         latestEventSeq: this.events.list(session.id).length,
         pendingConfirmation: this.pendingConfirmationSummary(session.id),
+        pendingConfirmationContext: this.pendingConfirmationContext(session.id),
         failureCheckpoint: this.latestFailurePhase(session.id)
       });
       followUp.workItemId = workItem.id;
@@ -1469,6 +1538,30 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     });
     const { event, followUp, routing, workItem } = committed;
     if (committed.idempotentReplay) {
+      if (['RECEIVED', 'SNAPSHOT_READY', 'PENDING_RETRY', 'CLASSIFYING', 'VALIDATING', 'APPLYING'].includes(routing.status)) {
+        const snapshot = [...this.contextManagement.listSnapshots(session.id)]
+          .filter((item) => item.sourceEventId === event.id)
+          .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+        if (snapshot) {
+          this.enqueueIntentRouting(session.id, routing.id, snapshot.id, followUp.id, followUp.handlingPlan.requirementRelation);
+        } else {
+          const rebuilt = await this.contextManagement.buildIntentSnapshot({
+            session,
+            sourceEventId: event.id,
+            currentMessage: followUp.content,
+            latestEventSeq: this.events.list(session.id).length,
+            pendingConfirmation: this.pendingConfirmationSummary(session.id),
+            pendingConfirmationContext: this.pendingConfirmationContext(session.id),
+            failureCheckpoint: this.latestFailurePhase(session.id)
+          });
+          await this.contextManagement.updateRoutingRecord(session.id, routing.id, {
+            status: 'SNAPSHOT_READY',
+            snapshotId: rebuilt.id,
+            reasonCodes: [...new Set([...routing.reasonCodes, 'SNAPSHOT_REBUILT_AFTER_REPLAY'])]
+          });
+          this.enqueueIntentRouting(session.id, routing.id, rebuilt.id, followUp.id, followUp.handlingPlan.requirementRelation);
+        }
+      }
       return {
         event,
         handlingPlan: followUp.handlingPlan,
@@ -1479,14 +1572,44 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         idempotentReplay: true as const
       };
     }
-    const snapshot = await this.contextManagement.buildIntentSnapshot({
-      session,
-      sourceEventId: event.id,
-      currentMessage: content,
-      latestEventSeq: this.events.list(session.id).length,
-      pendingConfirmation: this.pendingConfirmationSummary(session.id),
-      failureCheckpoint: this.latestFailurePhase(session.id)
-    });
+    let snapshot;
+    try {
+      snapshot = await this.contextManagement.buildIntentSnapshot({
+        session,
+        sourceEventId: event.id,
+        currentMessage: content,
+        latestEventSeq: this.events.list(session.id).length,
+        pendingConfirmation: this.pendingConfirmationSummary(session.id),
+        pendingConfirmationContext: this.pendingConfirmationContext(session.id),
+        failureCheckpoint: this.latestFailurePhase(session.id)
+      });
+    } catch (error) {
+      await this.contextManagement.updateRoutingRecord(session.id, routing.id, {
+        status: 'PENDING_RETRY',
+        reasonCodes: [...new Set([...routing.reasonCodes, 'SNAPSHOT_BUILD_FAILED'])]
+      });
+      this.events.create({
+        sessionId: session.id,
+        type: 'follow_up_queued',
+        content: 'Message saved; intent recognition will retry after the context snapshot is available.',
+        metadata: createMetadata('system_notice', {
+          routingId: routing.id,
+          followUpMessageId: followUp.id,
+          workItemId: workItem.id,
+          status: 'PENDING_RETRY',
+          error: error instanceof Error ? error.message : String(error)
+        })
+      });
+      return {
+        event,
+        handlingPlan,
+        deferred,
+        followUpMessageId: followUp.id,
+        routingId: routing.id,
+        routingStatus: 'PENDING_RETRY' as const,
+        idempotentReplay: false as const
+      };
+    }
     this.events.create({
       sessionId: session.id,
       type: 'follow_up_queued',
@@ -1523,6 +1646,90 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     };
   }
 
+  private async handleExactCommandMessage(
+    session: SessionDetail,
+    content: string,
+    mentionedAgentIds: string[],
+    clientMessageId: string | undefined,
+    exactCommand: ExactCommandMatch
+  ) {
+    const resolution = resolveExactCommand({
+      command: exactCommand,
+      sessionStatus: session.status,
+      pendingConfirmation: this.pendingConfirmationContext(session.id),
+      hasFailedWorkflowRun: this.hasFailedWorkflowRun(session)
+    });
+    const resumesExecution = resolution.action === 'resume_session' || resolution.action === 'retry_current';
+    const handlingPlan: UserMessageHandlingPlan = {
+      intent: 'command',
+      requirementRelation: 'continuation',
+      failedExecutionAction: resumesExecution ? 'resume' : 'none',
+      priority: ['resume', 'retry', 'pause', 'cancel'].includes(exactCommand.command) ? 'high' : 'normal',
+      shouldPause: resolution.action === 'pause_session',
+      affectedTaskIds: [],
+      affectedAgentIds: [],
+      requiresBriefRevision: false,
+      requiresUserConfirmation: resolution.action === 'clarify',
+      coordinatorInstruction: resolution.message
+    };
+    const event = this.events.create({
+      sessionId: session.id,
+      type: 'user_message',
+      sessionUserId: session.ownerId,
+      userMessageIntent: handlingPlan.intent,
+      priority: handlingPlan.priority,
+      content,
+      toAgentIds: mentionedAgentIds,
+      metadata: {
+        ...createMetadata('chat_message', {
+          text: content,
+          mentionedAgentIds,
+          handlingPlan,
+          exactCommand,
+          commandResolution: resolution
+        }),
+        ...(clientMessageId ? { idempotencyKey: this.messageIdempotencyKey(session.id, clientMessageId) } : {})
+      }
+    });
+
+    await applyExactCommandResolution({
+      resolution,
+      port: {
+        resume: (confirmationId) => this.resume(session.id, resolution.message, confirmationId),
+        retryCurrent: () => this.retryFailedSession(session, event.id, true),
+        pause: () => this.pause(session.id, resolution.message),
+        cancel: () => this.control(session.id, 'CANCELLED', resolution.message)
+      }
+    });
+
+    const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      fromAgentId: coordinator.id,
+      toAgentIds: mentionedAgentIds,
+      content: resolution.message,
+      metadata: createMetadata('chat_message', {
+        messageKind: 'decision',
+        phase: 'exact_command_routing',
+        handlingPlan,
+        exactCommand,
+        commandResolution: resolution
+      })
+    });
+    this.touchSession(session);
+
+    return {
+      event,
+      handlingPlan,
+      deferred: false as const,
+      followUpMessageId: undefined,
+      routingId: undefined,
+      routingStatus: undefined,
+      idempotentReplay: false as const
+    };
+  }
+
   private findMessageReplay(session: SessionDetail, clientMessageId?: string) {
     if (clientMessageId === undefined) return undefined;
     const normalized = clientMessageId.trim();
@@ -1537,9 +1744,12 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     const routing = followUp?.routingId
       ? this.contextManagement?.listRoutingRecords(session.id).find((item) => item.id === followUp.routingId)
       : undefined;
+    const persistedHandlingPlan = (event.metadata.payload as {
+      handlingPlan?: UserMessageHandlingPlan;
+    } | undefined)?.handlingPlan;
     return {
       event,
-      handlingPlan: followUp?.handlingPlan ?? this.pendingIntentHandlingPlan(),
+      handlingPlan: followUp?.handlingPlan ?? persistedHandlingPlan ?? this.pendingIntentHandlingPlan(),
       deferred: Boolean(followUp),
       followUpMessageId: followUp?.id,
       routingId: routing?.id,
@@ -1553,16 +1763,52 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   }
 
   private pendingConfirmationSummary(sessionId: string) {
-    const pending = [...this.events.list(sessionId)].reverse().find((event) =>
-      event.type === 'user_confirmation_requested' || event.type === 'intent_clarification_required'
-    );
-    if (!pending) return undefined;
-    const resolved = this.events.list(sessionId).some((event) =>
-      event.type === 'user_confirmation_resolved' &&
-      (event.metadata.payload as { confirmationId?: string } | undefined)?.confirmationId ===
-        (pending.metadata.payload as { confirmationId?: string } | undefined)?.confirmationId
-    );
-    return resolved ? undefined : pending.content;
+    return this.pendingConfirmationContext(sessionId)?.content;
+  }
+
+  private pendingConfirmationContext(sessionId: string): PendingConfirmationContext | undefined {
+    const events = this.events.list(sessionId);
+    const resolvedIds = new Set(events.flatMap((event) => {
+      if (event.type !== 'user_confirmation_resolved') return [];
+      const confirmationId = (event.metadata.payload as { confirmationId?: unknown } | undefined)?.confirmationId;
+      return typeof confirmationId === 'string' ? [confirmationId] : [];
+    }));
+    const pending: PendingConfirmationContext[] = [];
+    for (const event of [...events].reverse()) {
+      if (event.type !== 'user_confirmation_requested' && event.type !== 'intent_clarification_required') continue;
+      const payload = event.metadata.payload as {
+        confirmationId?: unknown;
+        reason?: unknown;
+        title?: unknown;
+        description?: unknown;
+        options?: unknown;
+        actions?: unknown;
+      } | undefined;
+      if (typeof payload?.confirmationId !== 'string' || resolvedIds.has(payload.confirmationId)) continue;
+      const options: PendingConfirmationContext['options'] = Array.isArray(payload.options)
+        ? payload.options.flatMap((option): PendingConfirmationContext['options'] => {
+            if (!option || typeof option !== 'object') return [];
+            const candidate = option as { key?: unknown; label?: unknown; style?: unknown };
+            if (typeof candidate.key !== 'string' || typeof candidate.label !== 'string') return [];
+            const style: PendingConfirmationContext['options'][number]['style'] =
+              candidate.style === 'primary' || candidate.style === 'default' || candidate.style === 'danger'
+              ? candidate.style
+              : undefined;
+            return [{ key: candidate.key, label: candidate.label, ...(style ? { style } : {}) }];
+          })
+        : [];
+      pending.push({
+        confirmationId: payload.confirmationId,
+        reason: typeof payload.reason === 'string' ? payload.reason : 'unspecified',
+        content: event.content,
+        ...(typeof payload.title === 'string' ? { title: payload.title } : {}),
+        ...(typeof payload.description === 'string' ? { description: payload.description } : {}),
+        options,
+        requiresStructuredAction: Array.isArray(payload.actions) && payload.actions.length > 0,
+        createdAt: event.createdAt
+      });
+    }
+    return pending.length === 1 ? pending[0] : undefined;
   }
 
   private enqueueIntentRouting(
@@ -1575,12 +1821,41 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     const previous = this.intentRoutingRuns.get(sessionId) ?? Promise.resolve();
     const run = previous.catch(() => undefined).then(() =>
       this.processIntentRouting(sessionId, routingId, snapshotId, followUpId, legacyRelation)
-    ).catch((error) => {
+    ).catch(async (error) => {
+      const current = this.contextManagement?.listRoutingRecords(sessionId).find((item) => item.id === routingId);
+      if (current && ['CLASSIFYING', 'VALIDATING', 'APPLYING', 'PENDING_RETRY'].includes(current.status)) {
+        await this.contextManagement?.updateRoutingRecord(sessionId, routingId, {
+          status: 'PENDING_RETRY',
+          reasonCodes: [...new Set([...current.reasonCodes, 'ROUTING_PROCESSING_FAILED'])]
+        }).catch(() => undefined);
+        this.scheduleIntentRoutingRetry(sessionId, routingId, snapshotId, followUpId, legacyRelation);
+      }
       this.logger.warn(`Intent routing failed for session ${sessionId}: ${String(error)}`);
     }).finally(() => {
       if (this.intentRoutingRuns.get(sessionId) === run) this.intentRoutingRuns.delete(sessionId);
     });
     this.intentRoutingRuns.set(sessionId, run);
+  }
+
+  private scheduleIntentRoutingRetry(
+    sessionId: string,
+    routingId: string,
+    snapshotId: string,
+    followUpId: string,
+    legacyRelation?: UserMessageHandlingPlan['requirementRelation']
+  ) {
+    if (this.shuttingDown) return;
+    const key = `${sessionId}:${routingId}`;
+    if (this.intentRoutingRetryTimers.has(key)) return;
+    const retryCount = this.contextManagement?.listRoutingRecords(sessionId)
+      .find((item) => item.id === routingId)?.retryCount ?? 0;
+    const delay = Math.min(5_000, 250 * 2 ** Math.min(retryCount, 4));
+    const timer = setTimeout(() => {
+      this.intentRoutingRetryTimers.delete(key);
+      this.enqueueIntentRouting(sessionId, routingId, snapshotId, followUpId, legacyRelation);
+    }, delay);
+    timer.unref?.();
+    this.intentRoutingRetryTimers.set(key, timer);
   }
 
   private async processIntentRouting(
@@ -1594,9 +1869,34 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     const session = this.sessions.get(sessionId);
     if (!session || this.deletingSessionIds.has(sessionId)) return;
     try {
-      const routing = this.contextManagement?.listRoutingRecords(session.id).find((item) => item.id === routingId);
+      if (!this.contextManagement) return;
+      const claim = await this.contextManagement.claimIntentRouting(
+        session.id,
+        routingId,
+        snapshotId,
+        this.intentRoutingWorkerId
+      );
+      if (claim.state === 'terminal') return;
+      if (claim.state === 'blocked') {
+        const blocking = claim.blockingRouting;
+        if (blocking?.snapshotId) {
+          const blockingFollowUp = this.contextManagement.listFollowUps(session.id)
+            .find((item) => item.routingId === blocking.id);
+          if (blockingFollowUp) {
+            this.scheduleIntentRoutingRetry(
+              sessionId,
+              blocking.id,
+              blocking.snapshotId,
+              blockingFollowUp.id
+            );
+          }
+        }
+        this.scheduleIntentRoutingRetry(sessionId, routingId, snapshotId, followUpId, legacyRelation);
+        return;
+      }
+      const routing = claim.routing;
       const snapshot = this.contextManagement?.listSnapshots(session.id).find((item) => item.id === snapshotId);
-      if (!routing || !snapshot || !this.semanticIntentRouter || !this.contextManagement) return;
+      if (!routing || !snapshot || !this.semanticIntentRouter) return;
       const outcome = await this.semanticIntentRouter.classify(session, routing, snapshot);
       if (
         outcome.validation.errors.includes('SNAPSHOT_STALE') &&
@@ -1612,6 +1912,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
           currentMessage: followUp.content,
           latestEventSeq: this.events.list(session.id).length,
           pendingConfirmation: this.pendingConfirmationSummary(session.id),
+          pendingConfirmationContext: this.pendingConfirmationContext(session.id),
           failureCheckpoint: this.latestFailurePhase(session.id)
         });
         await this.contextManagement.updateRoutingRecord(session.id, routingId, {
@@ -1681,23 +1982,33 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         })
       });
       const action = outcome.decision.requestedAction;
-      if (action === 'pause') {
-        this.completeFollowUpRouting(session, followUp.id);
+      if (action === 'pause' || action === 'cancel') {
+        await this.applyPersistedRoutingAction(session, routingId, followUp, action);
+        return;
+      }
+      /*
+      // legacy pause branch handled by applyPersistedRoutingAction
+      if (Boolean(false) && String(action) === 'pause') {
+        void this.completeFollowUpRouting(session!, followUp!.id);
         await this.pause(session.id, '用户通过意图路由请求暂停会话');
         return;
       }
-      if (action === 'cancel') {
-        this.completeFollowUpRouting(session, followUp.id);
+      // legacy cancel branch handled by applyPersistedRoutingAction
+      if (Boolean(false) && String(action) === 'cancel') {
+        void this.completeFollowUpRouting(session!, followUp!.id);
         this.control(session.id, 'CANCELLED', '用户通过意图路由请求取消会话');
         return;
       }
+      */
       const coordinator = this.pickSessionAgent(session, ['coordinator']);
       this.events.create({
         sessionId: session.id,
         type: 'agent_message',
         fromAgentId: coordinator.id,
         toAgentIds: followUp.mentionedAgentIds,
-        content: `意图识别已完成，开始处理：${applied.handlingPlan.coordinatorInstruction}`,
+        content: applied.handlingPlan.requiresUserConfirmation
+          ? '需要补充信息后才能继续处理当前消息。'
+          : '意图识别已完成，正在处理当前消息。',
         metadata: createMetadata('chat_message', {
           messageKind: 'decision',
           routingId,
@@ -1714,6 +2025,16 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       });
       workspaceMetrics.observe('intent_route_latency_ms', Date.now() - startedAt, { result: 'processing_error' });
       this.logger.warn(`Intent routing processing failed for session ${session.id}: ${String(error)}`);
+      if (this.contextManagement) {
+        const current = this.contextManagement.listRoutingRecords(session.id).find((item) => item.id === routingId);
+        if (current && ['CLASSIFYING', 'VALIDATING', 'APPLYING'].includes(current.status)) {
+          await this.contextManagement.updateRoutingRecord(session.id, routingId, {
+            status: 'PENDING_RETRY',
+            reasonCodes: [...new Set([...current.reasonCodes, 'ROUTING_PROCESSING_FAILED'])]
+          });
+          this.scheduleIntentRoutingRetry(sessionId, routingId, snapshotId, followUpId, legacyRelation);
+        }
+      }
     }
   }
 
@@ -1991,7 +2312,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   async applyQueuedExecutionOutcome(sessionId: string, outcome: ExecutionOutcome) {
     const session = this.sessions.get(sessionId);
     if (session?.activeFollowUpMessageId) {
-      this.applyFollowUpOutcome(sessionId, session.activeFollowUpMessageId, outcome);
+      await this.applyFollowUpOutcome(sessionId, session.activeFollowUpMessageId, outcome);
       return;
     }
     if (await this.workflowRuntime?.acceptExecutionOutcome(sessionId, outcome)) return;
@@ -2307,13 +2628,26 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     if (!session || session.status === 'INTERRUPTED' || session.status === 'PAUSED' || session.activeFollowUpMessageId) return;
     if (
       this.briefGenerationRuns.has(sessionId) ||
-      this.execution.isRunning(sessionId) ||
-      ACTIVE_INVOCATION_SESSION_STATUSES.has(session.status)
+      this.execution.isRunning(sessionId)
     ) {
       return;
     }
     const followUp = session.pendingFollowUpMessages?.find((item) => item.status === 'queued');
     if (!followUp) return;
+    if (followUp.workItemId && followUp.workItemId !== session.activeWorkItemId && this.contextManagement) {
+      const previousWorkItemId = session.activeWorkItemId;
+      const activated = await this.contextManagement.activateWorkItem(session, followUp.workItemId);
+      this.events.create({
+        sessionId,
+        type: 'work_item_activated',
+        content: `Activated task context: ${activated.title}`,
+        metadata: createMetadata('system_notice', {
+          workItemId: activated.id,
+          previousWorkItemId,
+          reason: 'queued_follow_up_started'
+        })
+      });
+    }
     if (followUp.receiverRecognitionPending) {
       followUp.handlingPlan = await this.recognizeFollowUpHandlingPlan(
         session,
@@ -2327,6 +2661,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
     followUp.status = 'planning';
     followUp.startedAt = nowIso();
+    await this.contextManagement?.saveFollowUp(sessionId, followUp);
     session.activeFollowUpMessageId = followUp.id;
 
     if (followUp.handlingPlan.failedExecutionAction === 'resume') {
@@ -2336,7 +2671,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         followUp.sourceEventId,
         this.relevantAgentIds(session, followUp.content, followUp.handlingPlan.affectedAgentIds)
       );
-      this.completeFollowUpRouting(session, followUp.id);
+      await this.completeFollowUpRouting(session, followUp.id);
       this.retryFailedSession(session, followUp.sourceEventId, true);
       return;
     }
@@ -2372,9 +2707,12 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     );
     session.currentTaskBriefId = brief.id;
     followUp.status = 'executing';
+    await this.contextManagement?.saveFollowUp(sessionId, followUp);
     this.setStatus(session, 'EXECUTING');
     this.execution.start(session, brief, tasks, (outcome) => {
-      this.applyFollowUpOutcome(sessionId, followUp.id, outcome);
+      void this.applyFollowUpOutcome(sessionId, followUp.id, outcome).catch((error) => {
+        this.logger.error(`Failed to persist follow-up completion for session ${sessionId}: ${String(error)}`);
+      });
     });
   }
 
@@ -2399,7 +2737,16 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
   }
 
-  private completeFollowUpRouting(session: SessionDetail, followUpMessageId: string) {
+  private async completeFollowUpRouting(
+    session: SessionDetail,
+    followUpMessageId: string,
+    status: 'completed' | 'failed' | 'cancelled' = 'completed'
+  ) {
+    const followUp = (session.pendingFollowUpMessages ?? []).find((item) => item.id === followUpMessageId);
+    if (followUp) followUp.status = status;
+    if (this.contextManagement) {
+      await this.contextManagement.updateFollowUpStatus(session.id, followUpMessageId, status);
+    }
     session.pendingFollowUpMessages = (session.pendingFollowUpMessages ?? []).filter(
       (item) => item.id !== followUpMessageId
     );
@@ -2409,16 +2756,33 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     this.touchSession(session);
   }
 
-  private applyFollowUpOutcome(sessionId: string, followUpMessageId: string, outcome: ExecutionOutcome) {
+  private async applyPersistedRoutingAction(
+    session: SessionDetail,
+    routingId: string,
+    followUp: SessionFollowUpMessage,
+    action: 'pause' | 'cancel'
+  ) {
+    await this.contextManagement?.updateRoutingActionStatus(session.id, routingId, 'applying');
+    const alreadyApplied = action === 'pause'
+      ? session.status === 'PAUSED'
+      : session.status === 'CANCELLED';
+    if (!alreadyApplied && action === 'pause') {
+      await this.pause(session.id, 'pause requested by intent routing');
+    } else if (!alreadyApplied) {
+      this.control(session.id, 'CANCELLED', 'cancel requested by intent routing');
+    }
+    await this.contextManagement?.updateRoutingActionStatus(session.id, routingId, 'applied');
+    await this.completeFollowUpRouting(session, followUp.id, action === 'cancel' ? 'cancelled' : 'completed');
+  }
+
+  private async applyFollowUpOutcome(sessionId: string, followUpMessageId: string, outcome: ExecutionOutcome) {
     const session = this.sessions.get(sessionId);
     if (!session) return;
-    session.pendingFollowUpMessages = (session.pendingFollowUpMessages ?? []).filter(
-      (item) => item.id !== followUpMessageId
+    await this.completeFollowUpRouting(
+      session,
+      followUpMessageId,
+      outcome.kind === 'delivered' ? 'completed' : outcome.kind === 'cancelled' ? 'cancelled' : 'failed'
     );
-    if (session.activeFollowUpMessageId === followUpMessageId) {
-      session.activeFollowUpMessageId = undefined;
-    }
-    this.touchSession(session);
     this.events.create({
       sessionId,
       type: 'session_status_changed',
@@ -2497,6 +2861,12 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       return;
     }
     const hasQueuedFollowUp = session.pendingFollowUpMessages?.some((item) => item.status === 'queued') ?? false;
+    if (outcome.kind === 'delivered' && hasQueuedFollowUp) {
+      // Hand ownership directly to the queued FollowUp without exposing a
+      // terminal Session state between two executions.
+      this.scheduleFollowUpPlanning(sessionId);
+      return;
+    }
     const nextStatus: SessionStatus =
       outcome.kind === 'delivered'
         ? 'COMPLETED'
@@ -2507,19 +2877,16 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
             : 'FAILED';
     this.setStatus(session, nextStatus);
     if (outcome.kind === 'delivered') {
-      this.scheduleFollowUpPlanning(sessionId);
-      if (!hasQueuedFollowUp) {
-        this.events.create({
-          sessionId,
-          type: 'session_status_changed',
-          content: messages.sessionStatusUpdated('COMPLETED'),
-          metadata: createMetadata('system_notice', {
-            status: 'COMPLETED',
-            outcome: outcome.kind,
-            reason: 'execution_delivered'
-          })
-        });
-      }
+      this.events.create({
+        sessionId,
+        type: 'session_status_changed',
+        content: messages.sessionStatusUpdated('COMPLETED'),
+        metadata: createMetadata('system_notice', {
+          status: 'COMPLETED',
+          outcome: outcome.kind,
+          reason: 'execution_delivered'
+        })
+      });
       return;
     }
     const reason = 'reason' in outcome ? outcome.reason : '';
@@ -3572,10 +3939,6 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
   private escapeRegExp(value: string) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
-
-  private isResumeCommand(content: string) {
-    return /^(继续|重试|恢复|resume|retry|continue)$/i.test(content.trim());
   }
 
   private retryFailedSession(session: SessionDetail, sourceEventId: string, resumeCurrentBrief = false) {

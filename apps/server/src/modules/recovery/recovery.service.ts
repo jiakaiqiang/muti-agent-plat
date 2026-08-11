@@ -11,6 +11,7 @@ import { PersistenceService } from '../persistence/persistence.service.js';
 import { WorkdirBriefService } from '../runtimes/streaming/workdir-brief.service.js';
 import { SessionsService } from '../sessions/sessions.service.js';
 import { ContextManagementService } from '../context-management/context-management.service.js';
+import { LegacyWorkItemMigrationService } from './legacy-workitem-migration.service.js';
 
 const INTERRUPT_ON_BOOT_STATUSES = new Set<SessionStatus>([
   'AGENT_DISCUSSING',
@@ -34,7 +35,8 @@ export class RecoveryService implements OnApplicationBootstrap {
     private readonly persistence: PersistenceService,
     @Optional() private readonly workdirBrief?: WorkdirBriefService,
     @Optional() private readonly events?: EventsService,
-    @Optional() private readonly contextManagement?: ContextManagementService
+    @Optional() private readonly contextManagement?: ContextManagementService,
+    @Optional() private readonly legacyMigration?: LegacyWorkItemMigrationService
   ) {}
 
   async onApplicationBootstrap() {
@@ -54,20 +56,25 @@ export class RecoveryService implements OnApplicationBootstrap {
     }
 
     const sessions = filterSessionsForDataEpoch(this.sessions.listRaw(), this.persistence.currentDataEpoch());
-    if ((process.env.AGENT_CLUSTER_WORKITEM_BOOTSTRAP ?? 'true').trim().toLowerCase() !== 'false') {
-      let bootstrapped = 0;
-      for (const session of sessions) {
-        const existing = this.contextManagement?.activeWorkItem(session);
-        if (existing || !this.contextManagement) continue;
-        await this.contextManagement.ensureInitialWorkItem(
-          session,
-          `legacy-bootstrap:${session.id}`,
-          session.originalInput,
-          workItemStatusForSession(session.status)
-        );
-        bootstrapped += 1;
+    if ((process.env.AGENT_CLUSTER_WORKITEM_BOOTSTRAP ?? 'true').trim().toLowerCase() !== 'false' && this.legacyMigration) {
+      const migrationMode = workItemMigrationMode();
+      if (migrationMode === 'apply' && this.contextManagement) {
+        for (const session of sessions) {
+          if (!this.contextManagement.activeWorkItem(session)) {
+            await this.contextManagement.ensureInitialWorkItem(
+              session,
+              `legacy-bootstrap:${session.id}`,
+              session.originalInput,
+              workItemStatusForSession(session.status)
+            );
+          }
+        }
+        const report = await this.legacyMigration.apply(sessions);
+        this.logger.log(`Applied legacy WorkItem ownership migration: sessions=${report.sessionCount}, migrated=${report.migratedRecordCount}, issues=${report.issues.length}.`);
+      } else {
+        const report = this.legacyMigration.report(sessions, migrationMode);
+        this.logger.log(`Legacy WorkItem ownership ${migrationMode}: sessions=${report.sessionCount}, planned=${report.plannedRecordCount}, issues=${report.issues.length}, revision=${report.revision}.`);
       }
-      if (bootstrapped > 0) this.logger.log(`Bootstrapped ${bootstrapped} legacy Session WorkItem context(s).`);
     }
     for (const session of sessions) {
       this.interruptSessionFromPreviousProcess(session);
@@ -149,6 +156,7 @@ export class RecoveryService implements OnApplicationBootstrap {
     const message = safeTerminationMessage(termination);
     this.events.create({
       sessionId,
+      workItemId: started.workItemId,
       type: 'runtime_failed',
       fromAgentId: started.fromAgentId,
       taskId: started.taskId,
@@ -180,4 +188,10 @@ function workItemStatusForSession(status: SessionStatus): 'OPEN' | 'WAITING_USER
       status === 'WAIT_WORKSPACE_CONFLICT_RESOLUTION' || status === 'WAIT_USER_DECISION' || status === 'PAUSED') return 'WAITING_USER';
   if (status === 'EXECUTING' || status === 'AGENT_DISCUSSING' || status === 'REVISING_BRIEF' || status === 'POST_REVIEW' || status === 'REWORKING') return 'EXECUTING';
   return 'OPEN';
+}
+
+function workItemMigrationMode(): 'report' | 'apply' {
+  return (process.env.AGENT_CLUSTER_WORKITEM_MIGRATION_MODE ?? 'report').trim().toLowerCase() === 'apply'
+    ? 'apply'
+    : 'report';
 }

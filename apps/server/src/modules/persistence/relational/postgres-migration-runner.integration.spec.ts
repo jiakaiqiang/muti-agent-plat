@@ -260,6 +260,11 @@ test('relational projections preserve catalog versions, bindings, session progre
     assert.equal(loadedFileRevisions.drafts.find((item) => item.chainId === revisionChain.id)?.contentRef, revisionDraft.contentRef);
     const loadedWritebacks = loaded.workspaceWritebacks as typeof writeback[];
     assert.equal(loadedWritebacks.find((item) => item.id === writeback.id)?.status, 'conflicted');
+    const loadedOutbox = loaded.eventOutbox as Array<{ id: string; status: string; attempts: number; publishedAt?: string }>;
+    const publishedOutbox = loadedOutbox.find((item) => item.id === `outbox:${eventId}`);
+    assert.equal(publishedOutbox?.status, 'published');
+    assert.equal(publishedOutbox?.attempts, 1);
+    assert.ok(publishedOutbox?.publishedAt);
 
     const applyingState = structuredClone(loadedFileRevisions);
     applyingState.chains[0] = { ...applyingState.chains[0], status: 'applying', stateVersion: 3 };

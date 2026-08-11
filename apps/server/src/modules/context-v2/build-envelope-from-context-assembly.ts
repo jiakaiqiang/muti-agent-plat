@@ -83,7 +83,8 @@ export function buildEnvelopeFromContextAssembly(args: {
   const fileRevisionBudgetBytes = Math.max(0, (evidenceTokens - workspaceEvidenceTokens) * 4);
   const revisionEvidence = selectedFileRevisionEvidence(contextAssembly, fileRevisionBudgetBytes);
 
-  return buildContextEnvelopeV2({
+  return {
+    ...buildContextEnvelopeV2({
     phase: toContextPhase(args.phase),
     sessionId: session.id,
     l0: {
@@ -103,6 +104,9 @@ export function buildEnvelopeFromContextAssembly(args: {
       sessionGoal: contextAssembly.sessionGoal,
       ...(contextAssembly.currentContractGoal
         ? { currentContractGoal: contextAssembly.currentContractGoal }
+        : {}),
+      ...(args.phase === 'user_message_routing' && contextAssembly.currentUserMessage !== undefined
+        ? { currentUserMessage: contextAssembly.currentUserMessage }
         : {}),
       phase: args.phase,
       ...(contextAssembly.currentTask
@@ -163,7 +167,15 @@ export function buildEnvelopeFromContextAssembly(args: {
       projectMapTokens: Math.floor(inputTokens * 0.1),
       evidenceTokens
     }
-  });
+    }),
+    contextScope: {
+      ...(contextAssembly.workItemId ? { workItemId: contextAssembly.workItemId } : {}),
+      ...(contextAssembly.contextSnapshotId ? { contextSnapshotId: contextAssembly.contextSnapshotId } : {}),
+      ...(contextAssembly.decisionSetHash ? { decisionSetHash: contextAssembly.decisionSetHash } : {}),
+      inheritedDecisionIds: [...(contextAssembly.inheritedDecisionIds ?? [])],
+      inheritedArtifactIds: [...(contextAssembly.inheritedArtifactIds ?? [])]
+    }
+  };
 }
 
 function includeFileRevisionNavigationEntries(

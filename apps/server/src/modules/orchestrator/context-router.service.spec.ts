@@ -107,6 +107,27 @@ test('architecture analysis routing prioritizes entrypoint, config, service, and
   assert.ok(selectedRefs.has('src/contracts/user.ts'));
 });
 
+test('WorkItem-scoped routing uses the current goal instead of the legacy Session input', () => {
+  const router = new ContextRouterService();
+  const activeSession = session();
+  activeSession.originalInput = '旧任务：分析支付模块的架构';
+  const taskContext = router.route({
+    session: activeSession,
+    currentGoal: '新任务：设计通知中心的数据模型',
+    phase: 'discussion',
+    relevantMemories: [],
+    ragSnippets: [],
+    artifacts: [],
+    events: [],
+    participatingAgentKeys: ['coordinator']
+  });
+
+  assert.equal(taskContext.evidenceSelection.query, '新任务：设计通知中心的数据模型');
+  assert.equal(taskContext.evidenceRefs[0]?.label, 'workItem.goal');
+  assert.equal(taskContext.stagePlan.read[0]?.refs?.[0], 'workItem.goal');
+  assert.doesNotMatch(taskContext.evidenceSelection.query, /支付模块/);
+});
+
 test('architecture routing selects file candidates from the Provider index without a Snapshot', () => {
   const indexedSession: SessionDetail = {
     ...session(),

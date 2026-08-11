@@ -8,6 +8,7 @@ import { deriveActor } from './derive-actor.js';
 
 export type CreateEventInput<TPayload extends Record<string, unknown> = Record<string, unknown>> = {
   sessionId: UUID;
+  workItemId?: UUID;
   type: CollaborationEventType;
   content: string;
   metadata?: EventMetadata<TPayload>;
@@ -24,13 +25,14 @@ export type CreateEventInput<TPayload extends Record<string, unknown> = Record<s
 export class EventsService implements OnModuleDestroy {
   private readonly eventsBySession = new Map<string, CollaborationEvent[]>();
   private readonly subjectsBySession = new Map<string, Subject<CollaborationEvent>>();
+  private readonly outboxWorkerId = `events:${process.pid}:${crypto.randomUUID()}`;
 
   constructor(private readonly persistence: PersistenceService) {
     const persisted = this.persistence.getCollection<Record<string, CollaborationEvent[]>>('eventsBySession', {});
     for (const [sessionId, events] of Object.entries(persisted)) {
       this.eventsBySession.set(sessionId, events);
     }
-    queueMicrotask(() => this.recoverPendingOutbox());
+    queueMicrotask(() => void this.recoverPendingOutbox().catch(() => undefined));
   }
 
   create<TPayload extends Record<string, unknown> = Record<string, unknown>>(
@@ -58,6 +60,7 @@ export class EventsService implements OnModuleDestroy {
     const event: CollaborationEvent<TPayload> = {
       id: crypto.randomUUID(),
       sessionId: input.sessionId,
+      workItemId: input.workItemId,
       type: input.type,
       userMessageIntent: input.userMessageIntent,
       priority: input.priority,
@@ -151,10 +154,9 @@ export class EventsService implements OnModuleDestroy {
     void this.persistence.markEventPublished(event.id);
   }
 
-  private recoverPendingOutbox() {
-    const pending = this.persistence.getCollection<Array<Record<string, unknown>>>('eventOutbox', [])
-      .filter((item) => item.status === 'pending');
-    for (const record of pending) {
+  private async recoverPendingOutbox() {
+    const claimed = await this.persistence.claimPendingEventOutbox(this.outboxWorkerId);
+    for (const record of claimed) {
       const payload = record.payload as { event?: CollaborationEvent } | undefined;
       const event = payload?.event;
       if (!event || !(this.eventsBySession.get(event.sessionId) ?? []).some((item) => item.id === event.id)) continue;
@@ -162,7 +164,7 @@ export class EventsService implements OnModuleDestroy {
         eventType: event.type,
         recovery: 'true'
       });
-      void this.persistence.markEventPublished(event.id);
+      this.publishCommitted(event);
     }
   }
 

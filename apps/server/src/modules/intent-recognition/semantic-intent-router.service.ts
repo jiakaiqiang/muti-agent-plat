@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import {
   validateRuntimeOutput,
   type ContextEnvelopeV2,
@@ -14,8 +14,10 @@ import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import { AgentsService } from '../agents/agents.service.js';
 import { SystemAgentRuntimePolicyService } from '../agents/system-agent-runtime-policy.service.js';
 import { ContextManagementService } from '../context-management/context-management.service.js';
+import { EventsService } from '../events/events.service.js';
 import { RuntimeInvocationService } from '../runtime-invocation/runtime-invocation.service.js';
 import { workspaceProviderKindForDirectory } from '../workspaces/workspace-provider.js';
+import { matchExactUserCommand } from './deterministic-command-guard.service.js';
 
 export type SemanticIntentRoutingOutcome = {
   routing: IntentRoutingRecord;
@@ -30,7 +32,8 @@ export class SemanticIntentRouterService {
     private readonly runtimeInvocation: RuntimeInvocationService,
     private readonly agents: AgentsService,
     private readonly policies: SystemAgentRuntimePolicyService,
-    private readonly context: ContextManagementService
+    private readonly context: ContextManagementService,
+    @Optional() private readonly events?: EventsService
   ) {}
 
   async classify(
@@ -39,10 +42,12 @@ export class SemanticIntentRouterService {
     snapshot: IntentContextSnapshot,
     signal?: AbortSignal
   ): Promise<SemanticIntentRoutingOutcome> {
-    await this.context.updateRoutingRecord(session.id, routing.id, {
-      status: 'SNAPSHOT_READY',
-      snapshotId: snapshot.id
-    });
+    if (routing.status !== 'CLASSIFYING') {
+      await this.context.updateRoutingRecord(session.id, routing.id, {
+        status: 'SNAPSHOT_READY',
+        snapshotId: snapshot.id
+      });
+    }
     const deterministic = this.deterministicDecision(session, snapshot);
     if (deterministic) {
       await this.context.updateRoutingRecord(session.id, routing.id, { status: 'CLASSIFYING' });
@@ -152,7 +157,11 @@ export class SemanticIntentRouterService {
       decision.selectedDecisionIds.every((id) => decisionIds.has(id)) &&
       decision.selectedArtifactIds.every((id) => artifactIds.has(id));
     if (!referencesValid) errors.push('REFERENCE_OUTSIDE_SNAPSHOT');
-    const snapshotCurrent = this.context.isSnapshotCurrent(session, snapshot);
+    const snapshotCurrent = this.context.isSnapshotCurrent(
+      session,
+      snapshot,
+      this.events?.list(session.id).length
+    );
     if (!snapshotCurrent) errors.push('SNAPSHOT_STALE');
     const transitionValid = this.transitionValid(session, snapshot, decision);
     if (!transitionValid) errors.push('STATE_TRANSITION_INVALID');
@@ -196,7 +205,7 @@ export class SemanticIntentRouterService {
       return snapshot.activeWorkItem?.status === 'FAILED' || ['FAILED', 'INTERRUPTED', 'PAUSED'].includes(session.status);
     }
     if (decision.requestedAction === 'confirm' || decision.requestedAction === 'reject') {
-      return Boolean(snapshot.pendingConfirmation);
+      return Boolean(snapshot.pendingConfirmationContext ?? snapshot.pendingConfirmation);
     }
     if (decision.requestedAction === 'create_independent_work_item') {
       return decision.contextPolicy === 'clean_task_context';
@@ -205,7 +214,8 @@ export class SemanticIntentRouterService {
   }
 
   private deterministicDecision(session: SessionDetail, snapshot: IntentContextSnapshot): IntentRoutingDecisionV2 | undefined {
-    const normalized = snapshot.currentMessage.trim().replace(/[。.!！?？]+$/u, '').trim().toLowerCase();
+    const exactCommand = matchExactUserCommand(snapshot.currentMessage);
+    if (!exactCommand) return undefined;
     const activeId = snapshot.activeWorkItemId;
     const base = {
       dialogueAct: 'command' as const,
@@ -218,7 +228,7 @@ export class SemanticIntentRouterService {
       riskLevel: 'low' as const,
       modelConfidence: 1
     };
-    if (/^(继续|继续执行|重试|retry|resume|continue)$/.test(normalized)) {
+    if (exactCommand.command === 'resume' || exactCommand.command === 'retry') {
       return {
         ...base,
         scopeRelation: activeId ? 'same_requirement' : 'ambiguous',
@@ -227,20 +237,20 @@ export class SemanticIntentRouterService {
           ? 'resume'
           : activeId ? 'continue_active_work_item' : 'clarify',
         ambiguityReasons: activeId ? [] : ['NO_ACTIVE_WORK_ITEM'],
-        reasonCodes: ['EXACT_CONTINUE_COMMAND']
+        reasonCodes: [exactCommand.reasonCode]
       };
     }
-    if (/^(暂停|pause)$/.test(normalized)) {
-      return { ...base, scopeRelation: 'same_requirement', contextPolicy: 'inherit_confirmed', requestedAction: 'pause', reasonCodes: ['EXACT_PAUSE_COMMAND'] };
+    if (exactCommand.command === 'pause') {
+      return { ...base, scopeRelation: 'same_requirement', contextPolicy: 'inherit_confirmed', requestedAction: 'pause', reasonCodes: [exactCommand.reasonCode] };
     }
-    if (/^(取消|终止|cancel|stop)$/.test(normalized)) {
-      return { ...base, scopeRelation: 'same_requirement', contextPolicy: 'inherit_confirmed', requestedAction: 'cancel', reasonCodes: ['EXACT_CANCEL_COMMAND'], riskLevel: 'high' };
+    if (exactCommand.command === 'cancel') {
+      return { ...base, scopeRelation: 'same_requirement', contextPolicy: 'inherit_confirmed', requestedAction: 'cancel', reasonCodes: [exactCommand.reasonCode], riskLevel: 'high' };
     }
-    if (/^(确认|同意|通过|confirm|approve)$/.test(normalized)) {
-      return { ...base, scopeRelation: 'same_requirement', contextPolicy: 'inherit_confirmed', requestedAction: 'confirm', reasonCodes: ['EXACT_CONFIRM_COMMAND'] };
+    if (exactCommand.command === 'confirm') {
+      return { ...base, scopeRelation: 'same_requirement', contextPolicy: 'inherit_confirmed', requestedAction: 'confirm', reasonCodes: [exactCommand.reasonCode] };
     }
-    if (/^(拒绝|不同意|reject)$/.test(normalized)) {
-      return { ...base, scopeRelation: 'same_requirement', contextPolicy: 'inherit_confirmed', requestedAction: 'reject', reasonCodes: ['EXACT_REJECT_COMMAND'], riskLevel: 'high' };
+    if (exactCommand.command === 'reject') {
+      return { ...base, scopeRelation: 'same_requirement', contextPolicy: 'inherit_confirmed', requestedAction: 'reject', reasonCodes: [exactCommand.reasonCode], riskLevel: 'high' };
     }
     return undefined;
   }
@@ -304,6 +314,7 @@ export class SemanticIntentRouterService {
         L1: {
           sessionGoal: session.originalInput,
           currentContractGoal: snapshot.activeWorkItem?.goal,
+          currentUserMessage: snapshot.currentMessage,
           phase: 'user_message_routing',
           navigation: { entries: [], truncated: false }
         },
@@ -316,7 +327,7 @@ export class SemanticIntentRouterService {
             `Active WorkItem: ${JSON.stringify(snapshot.activeWorkItem ?? null)}`,
             `Candidate WorkItems: ${JSON.stringify(snapshot.candidateWorkItems)}`,
             `Valid Decisions: ${JSON.stringify(snapshot.validDecisions)}`,
-            `Pending confirmation: ${snapshot.pendingConfirmation ?? '(none)'}`,
+            `Pending confirmation: ${JSON.stringify(snapshot.pendingConfirmationContext ?? snapshot.pendingConfirmation ?? null)}`,
             `Failure checkpoint: ${snapshot.failureCheckpoint ?? '(none)'}`
           ],
           turnCount: 1

@@ -42,6 +42,12 @@ function makeService(options: {
     requirementRelation: 'continuation' | 'new_requirement';
     failedExecutionAction: 'none' | 'resume' | 'replan';
   };
+  routingRecovery?: {
+    routings: Array<Record<string, any>>;
+    followUps: Array<Record<string, any>>;
+    actionStatusUpdates?: string[];
+    followUpStatusUpdates?: string[];
+  };
 } = {}) {
   const persistedSessions: SessionDetail[] = structuredClone(options.initialSessions ?? []);
   const persistedSnapshots: SessionDetail[][] = [];
@@ -374,7 +380,28 @@ function makeService(options: {
       }
     } as never,
     options.fileRevisions as never,
-    options.workspaceWritebacks as never
+    options.workspaceWritebacks as never,
+    options.routingRecovery ? {
+      listRoutingRecords() {
+        return options.routingRecovery!.routings;
+      },
+      listFollowUps() {
+        return options.routingRecovery!.followUps;
+      },
+      async updateRoutingActionStatus(_sessionId: string, routingId: string, status: string) {
+        options.routingRecovery!.actionStatusUpdates?.push(status);
+        const routing = options.routingRecovery!.routings.find((item) => item.id === routingId);
+        if (routing) routing.actionStatus = status;
+        return routing;
+      },
+      async updateFollowUpStatus(_sessionId: string, followUpId: string, status: string) {
+        options.routingRecovery!.followUpStatusUpdates?.push(status);
+        const followUp = options.routingRecovery!.followUps.find((item) => item.id === followUpId);
+        if (followUp) followUp.status = status;
+        return followUp;
+      }
+    } as never : undefined,
+    options.routingRecovery ? {} as never : undefined
   );
   return {
     service,
@@ -1132,7 +1159,7 @@ test('a continuation after failure resumes the previous brief instead of creatin
   assert.equal(failedTask.status, 'pending');
   assert.equal(fixture.executionStarts.length, 1);
   assert.equal(session.currentTaskBriefId, 'brief-existing');
-  assert.deepEqual(session.pendingFollowUpMessages, []);
+  assert.deepEqual(session.pendingFollowUpMessages ?? [], []);
 });
 
 test('an explicit resume command bypasses Receiver misclassification after failure', async () => {
@@ -1167,7 +1194,88 @@ test('an explicit resume command bypasses Receiver misclassification after failu
   assert.equal(fixture.followUpPreparations.length, 0);
   assert.equal(fixture.executionStarts.length, 1);
   assert.equal(session.currentTaskBriefId, 'brief-existing');
-  assert.deepEqual(session.pendingFollowUpMessages, []);
+  assert.deepEqual(session.pendingFollowUpMessages ?? [], []);
+});
+
+test('continue resolves a resumable user decision without invoking Receiver or creating a new brief', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Continue the current implementation' });
+  (fixture.service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
+  session.currentTaskBriefId = 'brief-existing';
+  session.status = 'WAIT_USER_DECISION';
+  fixture.events.push({
+    id: 'confirmation-event-resume-current',
+    sessionId: session.id,
+    type: 'user_confirmation_requested',
+    toAgentIds: [],
+    content: '路由需要用户决定是否继续。',
+    metadata: {
+      payload: {
+        confirmationId: 'confirmation-resume-current',
+        reason: 'coordinator_routing_needs_user_decision',
+        options: [
+          { key: 'resume', label: '继续执行' },
+          { key: 'cancel', label: '取消' }
+        ]
+      }
+    },
+    createdAt: '2026-08-11T00:00:00.000Z'
+  });
+
+  const first = await fixture.service.sendMessage(session.id, '继续', [], 'resume-current-1');
+  const replay = await fixture.service.sendMessage(session.id, '继续', [], 'resume-current-1');
+
+  assert.equal(first.handlingPlan.intent, 'command');
+  assert.equal(first.handlingPlan.failedExecutionAction, 'resume');
+  assert.equal(replay.idempotentReplay, true);
+  assert.equal(replay.handlingPlan.intent, 'command');
+  assert.equal(session.status, 'EXECUTING');
+  assert.deepEqual(fixture.followUpRecognitions, []);
+  assert.equal(fixture.followUpPreparations.length, 0);
+  assert.equal(fixture.executionStarts.length, 1);
+  assert.deepEqual(session.pendingFollowUpMessages ?? [], []);
+  assert.ok(fixture.events.some((event) =>
+    event.type === 'user_confirmation_resolved' &&
+    (event.metadata as { payload?: { confirmationId?: string } }).payload?.confirmationId ===
+      'confirmation-resume-current'
+  ));
+  const exactRoutingMessage = fixture.events.find((event) =>
+    event.type === 'agent_message' &&
+    (event.metadata as { payload?: { phase?: string } }).payload?.phase === 'exact_command_routing'
+  );
+  assert.equal(exactRoutingMessage?.content, '已收到继续指令，正在恢复当前任务。');
+});
+
+test('continue fails closed when more than one unresolved confirmation exists', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Wait for an explicit decision' });
+  (fixture.service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
+  session.currentTaskBriefId = 'brief-existing';
+  session.status = 'WAIT_USER_DECISION';
+  for (const confirmationId of ['confirmation-a', 'confirmation-b']) {
+    fixture.events.push({
+      id: `event-${confirmationId}`,
+      sessionId: session.id,
+      type: 'user_confirmation_requested',
+      toAgentIds: [],
+      content: '请选择下一步。',
+      metadata: {
+        payload: {
+          confirmationId,
+          reason: 'coordinator_routing_needs_user_decision',
+          options: [{ key: 'resume', label: '继续执行' }]
+        }
+      },
+      createdAt: '2026-08-11T00:00:00.000Z'
+    });
+  }
+
+  const result = await fixture.service.sendMessage(session.id, '继续');
+
+  assert.equal(result.handlingPlan.requiresUserConfirmation, true);
+  assert.equal(session.status, 'WAIT_USER_DECISION');
+  assert.equal(fixture.executionStarts.length, 0);
+  assert.equal(fixture.events.filter((event) => event.type === 'user_confirmation_resolved').length, 0);
 });
 
 test('a continuation after workflow failure delegates retry without reopening the failed task record', async () => {
@@ -1860,4 +1968,158 @@ test('Post Review does not resume execution when requested workspace context can
   assert.equal(context.session.status, 'WAIT_USER_DECISION');
   assert.equal(context.executionStarts.length, 0);
   assert.equal(context.session.supplementalContextRequests?.at(-1)?.resolution.failedPaths[0]?.code, 'BROKER_OFFLINE');
+});
+
+function routingRecoveryFixture(input: {
+  sessionStatus: SessionDetail['status'];
+  requestedAction: 'pause' | 'cancel' | 'continue_work_item';
+  actionStatus: 'pending' | 'applying' | 'applied' | 'failed';
+  followUpStatus: 'queued' | 'planning' | 'executing' | 'completed' | 'failed' | 'cancelled';
+  includePendingFollowUp?: boolean;
+  routingStatus?: 'CLASSIFYING' | 'VALIDATING' | 'APPLYING' | 'ROUTED';
+  leaseExpiresAt?: string;
+}) {
+  const sessionId = `session-routing-recovery-${input.requestedAction}-${input.actionStatus}`;
+  const followUp = {
+    id: `follow-up-${sessionId}`,
+    sourceEventId: `event-${sessionId}`,
+    content: 'Recover the persisted routing action.',
+    mentionedAgentIds: [],
+    handlingPlan: {
+      intent: 'command',
+      priority: 'normal',
+      shouldPause: false,
+      affectedTaskIds: [],
+      affectedAgentIds: [],
+      requiresBriefRevision: false,
+      requiresUserConfirmation: false,
+      coordinatorInstruction: 'Recover the action.'
+    },
+    routingId: `routing-${sessionId}`,
+    status: input.followUpStatus,
+    queuedAt: '2026-08-08T00:00:00.000Z'
+  };
+  const session = {
+    id: sessionId,
+    dataEpoch: 'epoch-test',
+    title: 'Routing recovery',
+    originalInput: 'Recover routing state.',
+    status: input.sessionStatus,
+    ownerId: 'local-user',
+    workspaceId: `workspace-${sessionId}`,
+    tokenUsed: 0,
+    participatingAgentIds: ['coordinator'],
+    pendingFollowUpMessages: input.includePendingFollowUp === false ? [] : [structuredClone(followUp)],
+    activeFollowUpMessageId: input.includePendingFollowUp === false ? undefined : followUp.id,
+    createdAt: '2026-08-08T00:00:00.000Z',
+    updatedAt: '2026-08-08T00:00:00.000Z'
+  } as SessionDetail;
+  const routing = {
+    id: followUp.routingId,
+    sessionId,
+    sourceEventId: followUp.sourceEventId,
+    sessionSeq: 1,
+    status: input.routingStatus ?? 'ROUTED',
+    policyVersion: 'intent-v2-test',
+    rolloutMode: 'enforce_new_sessions',
+    decision: { requestedAction: input.requestedAction },
+    actionStatus: input.actionStatus,
+    snapshotId: input.routingStatus && input.routingStatus !== 'ROUTED' ? `snapshot-${sessionId}` : undefined,
+    leaseOwner: input.leaseExpiresAt ? 'other-worker' : undefined,
+    leaseExpiresAt: input.leaseExpiresAt,
+    reasonCodes: [],
+    retryCount: 0,
+    idempotencyKey: `routing:${sessionId}`,
+    createdAt: '2026-08-08T00:00:00.000Z',
+    updatedAt: '2026-08-08T00:00:00.000Z'
+  };
+  const actionStatusUpdates: string[] = [];
+  const followUpStatusUpdates: string[] = [];
+  return {
+    ...makeService({
+      initialSessions: [session],
+      routingRecovery: {
+        routings: [routing],
+        followUps: [followUp],
+        actionStatusUpdates,
+        followUpStatusUpdates
+      }
+    }),
+    session,
+    routing,
+    followUp,
+    actionStatusUpdates,
+    followUpStatusUpdates
+  };
+}
+
+test('intent routing recovery finalizes an applied pause without planning the FollowUp again', async () => {
+  const fixture = routingRecoveryFixture({
+    sessionStatus: 'PAUSED',
+    requestedAction: 'pause',
+    actionStatus: 'applied',
+    followUpStatus: 'queued'
+  });
+
+  const recovered = await fixture.service.recoverIntentRoutings([fixture.session.id]);
+
+  assert.deepEqual(recovered.map((item) => item.action), ['pause_completion_recovered']);
+  assert.deepEqual(fixture.followUpStatusUpdates, ['completed']);
+  assert.equal(fixture.followUp.status, 'completed');
+  assert.deepEqual(fixture.service.get(fixture.session.id).pendingFollowUpMessages, []);
+  assert.equal(fixture.executionStarts.length, 0);
+});
+
+test('intent routing recovery preserves an active worker lease and schedules takeover retry', async () => {
+  const fixture = routingRecoveryFixture({
+    sessionStatus: 'WAIT_USER_DECISION',
+    requestedAction: 'continue_work_item',
+    actionStatus: 'pending',
+    followUpStatus: 'queued',
+    routingStatus: 'CLASSIFYING',
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+  });
+  try {
+    const recovered = await fixture.service.recoverIntentRoutings([fixture.session.id]);
+    assert.deepEqual(recovered.map((item) => item.action), ['active_lease_preserved']);
+    assert.equal(fixture.routing.status, 'CLASSIFYING');
+    assert.equal(fixture.routing.leaseOwner, 'other-worker');
+  } finally {
+    fixture.service.onModuleDestroy();
+  }
+});
+
+test('intent routing recovery treats an already cancelled Session as an idempotently applied action', async () => {
+  const fixture = routingRecoveryFixture({
+    sessionStatus: 'CANCELLED',
+    requestedAction: 'cancel',
+    actionStatus: 'applying',
+    followUpStatus: 'queued'
+  });
+
+  const recovered = await fixture.service.recoverIntentRoutings([fixture.session.id]);
+
+  assert.deepEqual(recovered.map((item) => item.action), ['cancel_recovered']);
+  assert.deepEqual(fixture.actionStatusUpdates, ['applying', 'applied']);
+  assert.deepEqual(fixture.followUpStatusUpdates, ['cancelled']);
+  assert.equal(fixture.routing.actionStatus, 'applied');
+  assert.equal(fixture.followUp.status, 'cancelled');
+  assert.deepEqual(fixture.executionCancels, []);
+});
+
+test('intent routing recovery does not requeue a terminal FollowUp after restart', async () => {
+  const fixture = routingRecoveryFixture({
+    sessionStatus: 'COMPLETED',
+    requestedAction: 'continue_work_item',
+    actionStatus: 'applied',
+    followUpStatus: 'completed',
+    includePendingFollowUp: false
+  });
+
+  const recovered = await fixture.service.recoverIntentRoutings([fixture.session.id]);
+
+  assert.deepEqual(recovered, []);
+  assert.deepEqual(fixture.session.pendingFollowUpMessages, []);
+  assert.deepEqual(fixture.followUpStatusUpdates, []);
+  assert.equal(fixture.executionStarts.length, 0);
 });

@@ -75,6 +75,12 @@ test('recognizes user questions without forcing a pause', () => {
   assert.equal(result.requiresBriefRevision, false);
 });
 
+test('classifies only exact command messages as commands', () => {
+  assert.equal(service.recognizeUserMessage('继续！', 'WAIT_USER_DECISION').intent, 'command');
+  assert.notEqual(service.recognizeUserMessage('不要继续', 'WAIT_USER_DECISION').intent, 'command');
+  assert.notEqual(service.recognizeUserMessage('继续补充审计日志', 'WAIT_USER_DECISION').intent, 'command');
+});
+
 test('classifies explicit new requirements separately from failed-task continuation', () => {
   const newRequirement = service.recognizeUserMessage('这是一个新需求：增加导出能力', 'FAILED');
   const resume = service.recognizeUserMessage('继续完成之前失败的任务', 'FAILED');

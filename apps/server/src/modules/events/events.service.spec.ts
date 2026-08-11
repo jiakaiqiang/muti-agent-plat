@@ -11,6 +11,9 @@ function makeService() {
     setCollection() {
       return Promise.resolve(true);
     },
+    claimPendingEventOutbox() {
+      return Promise.resolve([]);
+    },
     markEventPublished() {
       return Promise.resolve();
     },

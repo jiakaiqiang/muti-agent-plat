@@ -4,9 +4,10 @@ import { RuntimeModule } from '../runtimes/runtime.module.js';
 import { EventsModule } from '../events/events.module.js';
 import { ContextManagementModule } from '../context-management/context-management.module.js';
 import { RecoveryService } from './recovery.service.js';
+import { LegacyWorkItemMigrationService } from './legacy-workitem-migration.service.js';
 
 @Module({
   imports: [SessionsModule, RuntimeModule, EventsModule, ContextManagementModule],
-  providers: [RecoveryService]
+  providers: [RecoveryService, LegacyWorkItemMigrationService]
 })
 export class RecoveryModule {}

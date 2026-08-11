@@ -7,6 +7,7 @@ import type {
   UserMessageIntent,
   WorkspaceSnapshot
 } from '@agent-cluster/shared';
+import { matchExactUserCommand } from './deterministic-command-guard.service.js';
 
 export type TaskIntentClassification = {
   domain: TaskDomain;
@@ -84,7 +85,7 @@ export class IntentRecognitionService {
   }
 
   private detectUserMessageIntent(message: string): UserMessageIntent {
-    if (/暂停|继续|重试|cancel|pause|resume/i.test(message)) {
+    if (matchExactUserCommand(message)) {
       return 'command';
     }
     if (this.constraintPattern().test(message)) {

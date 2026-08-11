@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import type {
   IntentRoutingRolloutMode,
   SessionDetail,
@@ -10,12 +10,14 @@ import { nowIso } from '../../common/time.js';
 import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import { ContextManagementService } from '../context-management/context-management.service.js';
 import { EventsService } from '../events/events.service.js';
+import { AgentsService } from '../agents/agents.service.js';
 
 @Injectable()
 export class MessageIngressService {
   constructor(
     private readonly context: ContextManagementService,
-    private readonly events: EventsService
+    private readonly events: EventsService,
+    private readonly agents: AgentsService
   ) {}
 
   async commit(input: {
@@ -26,7 +28,16 @@ export class MessageIngressService {
     routingMode: IntentRoutingRolloutMode;
     messageIdempotencyKey?: string;
   }) {
-    const mentionedAgentIds = [...new Set(input.mentionedAgentIds)];
+    const mentionedAgentIds = [...new Set(input.mentionedAgentIds)].map((id) => {
+      const agent = this.agents.getForSurface(id, 'mention');
+      if (!input.session.participatingAgentIds.includes(agent.id)) {
+        throw new BadRequestException({
+          code: 'AGENT_NOT_SESSION_PARTICIPANT',
+          message: `Agent is not a participant in this Session: ${agent.key}`
+        });
+      }
+      return agent.id;
+    });
     const event = this.events.createDraft({
       sessionId: input.session.id,
       type: 'user_message',

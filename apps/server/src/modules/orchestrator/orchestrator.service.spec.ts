@@ -518,7 +518,8 @@ test('receiver Runtime recognizes every follow-up intent without requesting inte
   assert.equal(plan.failedExecutionAction, 'none');
   assert.equal(plan.shouldPause, false);
   assert.equal(plan.coordinatorInstruction, 'decompose later');
-  assert.ok(routedContext?.constraints.includes('Current user message: 完成后增加缓存'));
+  assert.equal(routedContext?.currentUserMessage, '完成后增加缓存');
+  assert.equal(routedContext?.constraints.some((item) => item.startsWith('Current user message:')), false);
 });
 
 test('multiple mentioned agents discuss first and receiver decomposition stays within that agent set', async () => {

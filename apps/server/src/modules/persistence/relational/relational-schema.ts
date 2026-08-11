@@ -861,6 +861,8 @@ export const RELATIONAL_SCHEMA_V5_TABLES: RelationalTableDefinition[] = [
     column('decision_payload', "jsonb not null default '{}'::jsonb", '模型返回并经解析的结构化路由建议。'),
     column('validation_payload', "jsonb not null default '{}'::jsonb", '服务端 Schema、引用、状态与风险校验结果。'),
     column('final_action', 'text', '服务端最终应用的路由动作。'),
+    column('lease_owner', 'text', '当前处理该路由记录的 worker 标识。'),
+    column('lease_expires_at', 'timestamptz', '当前路由处理租约的失效时间。'),
     column('reason_codes', "jsonb not null default '[]'::jsonb", '稳定的裁决原因代码。'),
     column('retry_count', 'integer not null default 0', '分类或应用的有限重试次数。'),
     column('idempotency_key', 'text not null unique', '路由流程幂等键。'),
@@ -952,6 +954,23 @@ export const RELATIONAL_SCHEMA_V5_SQL = [
     `comment on column agent_cluster.${tableName}.work_item_id is '该记录所属 WorkItem 内部主键。'`,
     `do $$ begin alter table agent_cluster.${tableName} add constraint ${tableName}_work_item_fk foreign key (work_item_id) references agent_cluster.work_items(id) on delete set null; exception when duplicate_object then null; end $$`
   ])
+].map((statement) => statement.endsWith(';') ? statement : `${statement};`).join('\n\n');
+
+export const RELATIONAL_SCHEMA_V6_SQL = [
+  'alter table agent_cluster.memories add column if not exists work_item_id bigint',
+  "comment on column agent_cluster.memories.work_item_id is 'Memory 所属 WorkItem 的内部主键。'",
+  'do $$ begin alter table agent_cluster.memories add constraint memories_work_item_fk foreign key (work_item_id) references agent_cluster.work_items(id) on delete set null; exception when duplicate_object then null; end $$',
+  'create index if not exists memories_work_item_idx on agent_cluster.memories (work_item_id, created_at desc)',
+  'alter table agent_cluster.intent_routing_records add column if not exists action_status text',
+  "comment on column agent_cluster.intent_routing_records.action_status is '路由最终动作的可恢复提交状态。'"
+].map((statement) => statement.endsWith(';') ? statement : `${statement};`).join('\n\n');
+
+export const RELATIONAL_SCHEMA_V7_SQL = [
+  'alter table agent_cluster.intent_routing_records add column if not exists lease_owner text',
+  "comment on column agent_cluster.intent_routing_records.lease_owner is '当前处理该路由记录的 worker 标识。'",
+  'alter table agent_cluster.intent_routing_records add column if not exists lease_expires_at timestamptz',
+  "comment on column agent_cluster.intent_routing_records.lease_expires_at is '当前路由处理租约的失效时间。'",
+  'create index if not exists intent_routing_lease_idx on agent_cluster.intent_routing_records (status, lease_expires_at)'
 ].map((statement) => statement.endsWith(';') ? statement : `${statement};`).join('\n\n');
 
 export function expectedRelationalComments() {

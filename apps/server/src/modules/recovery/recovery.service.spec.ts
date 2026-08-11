@@ -18,6 +18,12 @@ function makeSession(status: SessionDetail['status']): SessionDetail {
 function makeFixture(sessions: SessionDetail[], events?: {
   list(sessionId: string): Array<Record<string, unknown>>;
   create(input: Record<string, unknown>): unknown;
+}, contextManagement?: {
+  activeWorkItem(session: SessionDetail): { id: string } | undefined;
+  ensureInitialWorkItem(session: SessionDetail): Promise<{ id: string }>;
+}, persistedState: Record<string, unknown> = {}, legacyMigration?: {
+  report(sessions: SessionDetail[], mode?: 'report' | 'apply'): { sessionCount: number; plannedRecordCount: number; issues: unknown[]; revision: string };
+  apply(sessions: SessionDetail[]): Promise<{ sessionCount: number; migratedRecordCount: number; issues: unknown[] }>;
 }) {
   const interruptions: Array<{
     sessionId: string;
@@ -41,13 +47,22 @@ function makeFixture(sessions: SessionDetail[], events?: {
     } as never,
     {
       currentDataEpoch: () => 'epoch-test',
+      stateRevision: () => 1,
+      async mutateStateAtomically(
+        _revision: number,
+        mutator: (draft: Record<string, unknown>) => unknown
+      ) {
+        return mutator(persistedState);
+      },
       releaseWorkspaceSessionLease: async () => undefined,
       reconcileWorkspaceSessionLeases: async () => undefined
     } as never,
     undefined,
-    events as never
+    events as never,
+    contextManagement as never,
+    legacyMigration as never
   );
-  return { service, interruptions };
+  return { service, interruptions, persistedState };
 }
 
 test('records service_shutdown and persists the unmatched invocation as wakeable without re-running it', async () => {
@@ -58,6 +73,7 @@ test('records service_shutdown and persists the unmatched invocation as wakeable
       {
         id: 'runtime-started',
         sessionId: session.id,
+        workItemId: 'work-item-1',
         type: 'runtime_started',
         fromAgentId: 'agent-1',
         toAgentIds: [],
@@ -79,6 +95,7 @@ test('records service_shutdown and persists the unmatched invocation as wakeable
   await service.onApplicationBootstrap();
 
   assert.equal(created.length, 1);
+  assert.equal(created[0].workItemId, 'work-item-1');
   const payload = (created[0].metadata as { payload: Record<string, unknown> }).payload;
   assert.equal((payload.termination as { kind?: string }).kind, 'service_shutdown');
   assert.equal((payload.termination as { graceful?: boolean }).graceful, false);
@@ -87,6 +104,101 @@ test('records service_shutdown and persists the unmatched invocation as wakeable
   assert.equal(interruptions[0]?.invocationId, 'invocation-1');
   assert.equal(interruptions[0]?.graceful, false);
   assert.equal(interruptions[0]?.diagnosticRef, 'recovered_on_boot');
+});
+
+test('migrates legacy Session-owned records to the active WorkItem idempotently on boot', async () => {
+  const previousMode = process.env.AGENT_CLUSTER_WORKITEM_MIGRATION_MODE;
+  process.env.AGENT_CLUSTER_WORKITEM_MIGRATION_MODE = 'apply';
+  try {
+  const session = makeSession('COMPLETED');
+  session.activeWorkItemId = 'work-item-legacy';
+  const state: Record<string, unknown> = {
+    eventsBySession: { [session.id]: [{ id: 'event-1' }] },
+    briefsBySession: { [session.id]: [{ id: 'brief-1' }] },
+    tasksBySession: { [session.id]: [{ id: 'task-1' }] },
+    memoriesBySession: { [session.id]: [{ id: 'memory-1' }] },
+    runtimeInvocationsBySession: { [session.id]: [{ id: 'invocation-1' }] },
+    artifacts: {
+      artifactsById: {
+        'artifact-1': { id: 'artifact-1', sessionId: session.id },
+        'artifact-other': { id: 'artifact-other', sessionId: 'session-other' }
+      }
+    },
+    workflowRuntime: {
+      runs: [
+        { id: 'run-1', sessionId: session.id },
+        { id: 'run-other', sessionId: 'session-other' }
+      ]
+    }
+  };
+  const contextManagement = {
+    activeWorkItem: () => ({ id: 'work-item-legacy' }),
+    async ensureInitialWorkItem() {
+      throw new Error('active WorkItem should be reused');
+    }
+  };
+  const legacyMigration = {
+    report: () => ({ sessionCount: 1, plannedRecordCount: 7, issues: [], revision: '1' }),
+    async apply() {
+      for (const key of ['eventsBySession', 'briefsBySession', 'tasksBySession', 'memoriesBySession', 'runtimeInvocationsBySession']) {
+        const records = (state[key] as Record<string, Array<Record<string, unknown>>>)[session.id] ?? [];
+        for (const item of records) item.workItemId = 'work-item-legacy';
+      }
+      (state.artifacts as { artifactsById: Record<string, Record<string, unknown>> }).artifactsById['artifact-1'].workItemId = 'work-item-legacy';
+      (state.workflowRuntime as { runs: Array<Record<string, unknown>> }).runs[0].workItemId = 'work-item-legacy';
+      return { sessionCount: 1, migratedRecordCount: 7, issues: [] };
+    }
+  };
+  const { service } = makeFixture([session], undefined, contextManagement, state, legacyMigration);
+
+  await service.onApplicationBootstrap();
+  await service.onApplicationBootstrap();
+
+  for (const key of [
+    'eventsBySession',
+    'briefsBySession',
+    'tasksBySession',
+    'memoriesBySession',
+    'runtimeInvocationsBySession'
+  ]) {
+    const grouped = state[key] as Record<string, Array<Record<string, unknown>>>;
+    assert.equal(grouped[session.id]?.[0]?.workItemId, 'work-item-legacy');
+  }
+  const artifacts = state.artifacts as { artifactsById: Record<string, Record<string, unknown>> };
+  assert.equal(artifacts.artifactsById['artifact-1']?.workItemId, 'work-item-legacy');
+  assert.equal(artifacts.artifactsById['artifact-other']?.workItemId, undefined);
+  const workflowRuntime = state.workflowRuntime as { runs: Array<Record<string, unknown>> };
+  assert.equal(workflowRuntime.runs[0]?.workItemId, 'work-item-legacy');
+  assert.equal(workflowRuntime.runs[1]?.workItemId, undefined);
+  } finally {
+    if (previousMode === undefined) delete process.env.AGENT_CLUSTER_WORKITEM_MIGRATION_MODE;
+    else process.env.AGENT_CLUSTER_WORKITEM_MIGRATION_MODE = previousMode;
+  }
+});
+
+test('reports legacy ownership by default without mutating persisted records', async () => {
+  const session = makeSession('COMPLETED');
+  session.activeWorkItemId = 'work-item-legacy';
+  const state = { eventsBySession: { [session.id]: [{ id: 'event-1' }] } } as Record<string, unknown>;
+  let reportMode: string | undefined;
+  const legacyMigration = {
+    report(_sessions: SessionDetail[], mode: 'report' | 'apply' = 'report') {
+      reportMode = mode;
+      return { sessionCount: 1, plannedRecordCount: 1, issues: [], revision: '1' };
+    },
+    async apply() { throw new Error('apply must not be called in report mode'); }
+  };
+  const previousMode = process.env.AGENT_CLUSTER_WORKITEM_MIGRATION_MODE;
+  delete process.env.AGENT_CLUSTER_WORKITEM_MIGRATION_MODE;
+  try {
+    const { service } = makeFixture([session], undefined, undefined, state, legacyMigration);
+    await service.onApplicationBootstrap();
+    assert.equal(reportMode, 'report');
+    assert.equal((state.eventsBySession as Record<string, Array<Record<string, unknown>>>)[session.id][0].workItemId, undefined);
+  } finally {
+    if (previousMode === undefined) delete process.env.AGENT_CLUSTER_WORKITEM_MIGRATION_MODE;
+    else process.env.AGENT_CLUSTER_WORKITEM_MIGRATION_MODE = previousMode;
+  }
 });
 
 test('converts every in-flight Session state to a wakeable interruption on boot', async () => {

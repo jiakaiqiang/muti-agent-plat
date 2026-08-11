@@ -437,11 +437,41 @@ export class RelationalStateStore {
   async markEventPublished(eventExternalId: string): Promise<void> {
     await this.pool.query(
       `update agent_cluster.event_outbox
-          set status='published',published_at=now(),attempt_count=attempt_count+1,
+          set status='published',published_at=now(),
+              attempt_count=attempt_count+case when status='publishing' then 0 else 1 end,
               lease_owner=null,lease_expires_at=null,last_error=null
         where external_id=$1 and status<>'published'`,
       [`outbox:${eventExternalId}`]
     );
+  }
+
+  async claimPendingEventOutbox(
+    workerId: string,
+    limit: number,
+    leaseMs: number
+  ): Promise<Array<Record<string, unknown>>> {
+    const result = await this.pool.query<{ value: Record<string, unknown> }>(
+      `with candidates as (
+         select id
+           from agent_cluster.event_outbox
+          where available_at<=now()
+            and (status='pending' or (status='publishing' and lease_expires_at<=now()))
+          order by id
+          for update skip locked
+          limit $2
+       )
+       update agent_cluster.event_outbox as outbox
+          set status='publishing',
+              attempt_count=outbox.attempt_count+1,
+              lease_owner=$1,
+              lease_expires_at=now()+($3*interval '1 millisecond'),
+              last_error=null
+         from candidates
+        where outbox.id=candidates.id
+       returning ${eventOutboxRecordSql('outbox')} value`,
+      [workerId, Math.max(0, limit), Math.max(1, leaseMs)]
+    );
+    return result.rows.map((row) => row.value);
   }
 
   async acquireWorkspaceSessionLease(workspaceId: string, sessionId: string): Promise<{ acquired: boolean; conflictSessionId?: string }> {
@@ -928,13 +958,14 @@ export class RelationalStateStore {
       for (const item of array(memories).map(record)) {
         await client.query(
           `insert into agent_cluster.memories
-           (external_id,session_id,scope,content,status,source_event_external_id,confirmed_by,confirmed_at,
+           (external_id,session_id,work_item_id,scope,content,status,source_event_external_id,confirmed_by,confirmed_at,
             metadata,created_at,updated_at,deleted_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,null)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,null)
            on conflict (external_id) do update set scope=excluded.scope,content=excluded.content,status=excluded.status,
              confirmed_by=excluded.confirmed_by,confirmed_at=excluded.confirmed_at,metadata=excluded.metadata,
-             updated_at=excluded.updated_at,deleted_at=null`,
-          [text(item.id), sessionId, text(item.scope, 'session'), text(item.content), text(item.status, 'active'),
+             updated_at=excluded.updated_at,work_item_id=excluded.work_item_id,deleted_at=null`,
+          [text(item.id), sessionId, item.workItemId ? await idByExternal(client, 'work_items', text(item.workItemId)) : null,
+            text(item.scope, 'session'), text(item.content), text(item.status, 'active'),
             nullableText(item.sourceEventId), nullableText(item.confirmedBy), nullableDate(item.confirmedAt),
             json({ sourceRecord: item }), date(item.createdAt), date(item.updatedAt)]
         );
@@ -1103,6 +1134,7 @@ export class RelationalStateStore {
         );
       }
     }
+    await this.refreshWorkItemInheritances(client);
   }
 
   private async writeFileRevisions(client: PoolClient, value: Record<string, unknown>) {
@@ -1401,6 +1433,7 @@ export class RelationalStateStore {
   private async writeWorkItems(client: PoolClient, value: Record<string, unknown>) {
     const active = new Set<string>();
     const parentIds = new Map<string, string>();
+    const inheritances = new Map<string, { decisionIds: string[]; artifactIds: string[] }>();
     for (const [sessionExternalId, values] of Object.entries(value)) {
       const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
       if (!sessionId) continue;
@@ -1421,11 +1454,41 @@ export class RelationalStateStore {
           deleted_at: null
         });
         if (item.parentWorkItemId) parentIds.set(workItemId, text(item.parentWorkItemId));
+        inheritances.set(workItemId, {
+          decisionIds: array(item.inheritedDecisionIds).map((id) => text(id)).filter(Boolean),
+          artifactIds: array(item.inheritedArtifactIds).map((id) => text(id)).filter(Boolean)
+        });
       }
     }
     for (const [workItemId, parentExternalId] of parentIds) {
       const parentId = await idByExternal(client, 'work_items', parentExternalId);
       if (parentId) await client.query('update agent_cluster.work_items set parent_work_item_id=$2 where id=$1', [workItemId, parentId]);
+    }
+    for (const [workItemId, inherited] of inheritances) {
+      await client.query('delete from agent_cluster.work_item_decision_inheritances where work_item_id=$1', [workItemId]);
+      for (const externalId of inherited.decisionIds) {
+        await client.query(
+          `insert into agent_cluster.work_item_decision_inheritances (work_item_id,decision_id,source_work_item_id)
+           select $1,d.id,d.work_item_id
+             from agent_cluster.decision_records d
+             join agent_cluster.work_items target on target.id=$1
+            where d.external_id=$2 and d.session_id=target.session_id
+           on conflict (work_item_id,decision_id) do nothing`,
+          [workItemId, externalId]
+        );
+      }
+      await client.query('delete from agent_cluster.work_item_artifact_inheritances where work_item_id=$1', [workItemId]);
+      for (const externalId of inherited.artifactIds) {
+        await client.query(
+          `insert into agent_cluster.work_item_artifact_inheritances (work_item_id,artifact_id,source_work_item_id)
+           select $1,a.id,a.work_item_id
+             from agent_cluster.artifacts a
+             join agent_cluster.work_items target on target.id=$1
+            where a.external_id=$2 and a.session_id=target.session_id and a.work_item_id is not null
+           on conflict (work_item_id,artifact_id) do nothing`,
+          [workItemId, externalId]
+        );
+      }
     }
     await client.query(`
       update agent_cluster.sessions s
@@ -1482,6 +1545,42 @@ export class RelationalStateStore {
       const supersededId = await idByExternal(client, 'decision_records', supersededExternalId);
       if (supersededId) await client.query('update agent_cluster.decision_records set supersedes_decision_id=$2 where id=$1', [decisionId, supersededId]);
     }
+    await this.refreshWorkItemInheritances(client);
+  }
+
+  private async refreshWorkItemInheritances(client: PoolClient) {
+    const workItems = await client.query<{ id: string; source: unknown }>(
+      `select id::text, source_snapshot->'sourceRecord' source
+         from agent_cluster.work_items
+        where deleted_at is null`
+    );
+    for (const row of workItems.rows) {
+      const item = record(row.source);
+      await client.query('delete from agent_cluster.work_item_decision_inheritances where work_item_id=$1', [row.id]);
+      for (const externalId of array(item.inheritedDecisionIds).map((id) => text(id)).filter(Boolean)) {
+        await client.query(
+          `insert into agent_cluster.work_item_decision_inheritances (work_item_id,decision_id,source_work_item_id)
+           select $1,d.id,d.work_item_id
+             from agent_cluster.decision_records d
+             join agent_cluster.work_items target on target.id=$1
+            where d.external_id=$2 and d.session_id=target.session_id
+           on conflict (work_item_id,decision_id) do nothing`,
+          [row.id, externalId]
+        );
+      }
+      await client.query('delete from agent_cluster.work_item_artifact_inheritances where work_item_id=$1', [row.id]);
+      for (const externalId of array(item.inheritedArtifactIds).map((id) => text(id)).filter(Boolean)) {
+        await client.query(
+          `insert into agent_cluster.work_item_artifact_inheritances (work_item_id,artifact_id,source_work_item_id)
+           select $1,a.id,a.work_item_id
+             from agent_cluster.artifacts a
+             join agent_cluster.work_items target on target.id=$1
+            where a.external_id=$2 and a.session_id=target.session_id and a.work_item_id is not null
+           on conflict (work_item_id,artifact_id) do nothing`,
+          [row.id, externalId]
+        );
+      }
+    }
   }
 
   private async writeContextSnapshots(client: PoolClient, value: Record<string, unknown>) {
@@ -1516,15 +1615,17 @@ export class RelationalStateStore {
           `insert into agent_cluster.intent_routing_records
            (external_id,session_id,source_event_external_id,session_seq,status,policy_version,rollout_mode,
             context_snapshot_id,runtime_invocation_external_id,decision_payload,validation_payload,final_action,
-            reason_codes,retry_count,idempotency_key,source_snapshot,created_at,updated_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+             action_status,lease_owner,lease_expires_at,reason_codes,retry_count,idempotency_key,source_snapshot,created_at,updated_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
            on conflict (external_id) do update set status=excluded.status,context_snapshot_id=excluded.context_snapshot_id,
              runtime_invocation_external_id=excluded.runtime_invocation_external_id,decision_payload=excluded.decision_payload,
-             validation_payload=excluded.validation_payload,final_action=excluded.final_action,reason_codes=excluded.reason_codes,
-             retry_count=excluded.retry_count,source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at`,
+              validation_payload=excluded.validation_payload,final_action=excluded.final_action,action_status=excluded.action_status,
+              lease_owner=excluded.lease_owner,lease_expires_at=excluded.lease_expires_at,reason_codes=excluded.reason_codes,
+              retry_count=excluded.retry_count,source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at`,
           [text(item.id), sessionId, text(item.sourceEventId), integer(item.sessionSeq), text(item.status),
             text(item.policyVersion), text(item.rolloutMode), snapshotId, nullableText(item.invocationId), json(item.decision),
-            json(item.validation), nullableText(item.finalAction), json(item.reasonCodes, []), integer(item.retryCount),
+             json(item.validation), nullableText(item.finalAction), nullableText(item.actionStatus), nullableText(item.leaseOwner),
+             nullableDate(item.leaseExpiresAt), json(item.reasonCodes, []), integer(item.retryCount),
             text(item.idempotencyKey), json({ sourceRecord: item }), date(item.createdAt), date(item.updatedAt)]
         );
       }
@@ -1554,11 +1655,15 @@ export class RelationalStateStore {
   private async writeEventOutbox(client: PoolClient, values: unknown[]) {
     for (const item of values.map(record)) {
       await client.query(
-        `insert into agent_cluster.event_outbox
+        `insert into agent_cluster.event_outbox as outbox
          (external_id,aggregate_type,aggregate_external_id,event_type,payload,idempotency_key,status,attempt_count,available_at,created_at,published_at)
          values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-         on conflict (idempotency_key) do update set status=excluded.status,attempt_count=excluded.attempt_count,
-           available_at=excluded.available_at,published_at=excluded.published_at,payload=excluded.payload`,
+         on conflict (idempotency_key) do update set
+           status=case when outbox.status='published' then 'published' else excluded.status end,
+           attempt_count=greatest(outbox.attempt_count,excluded.attempt_count),
+           available_at=excluded.available_at,
+           published_at=coalesce(outbox.published_at,excluded.published_at),
+           payload=excluded.payload`,
         [text(item.id), text(item.aggregateType), text(item.aggregateId), text(item.eventType), json({ sourceRecord: item }),
           text(item.idempotencyKey), text(item.status, 'pending'), integer(item.attempts), date(item.availableAt ?? item.createdAt),
           date(item.createdAt), nullableDate(item.publishedAt)]
@@ -1612,7 +1717,12 @@ export class RelationalStateStore {
     state.contextSnapshotsBySession = await groupedSources(client, `select s.external_id group_id,c.payload->'sourceRecord' value from agent_cluster.context_snapshots c join agent_cluster.sessions s on s.id=c.session_id where s.deleted_at is null order by s.id,c.created_at`);
     state.intentRoutingRecordsBySession = await groupedSources(client, `select s.external_id group_id,r.source_snapshot->'sourceRecord' value from agent_cluster.intent_routing_records r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by s.id,r.session_seq`);
     state.followUpMessagesBySession = await groupedSources(client, `select s.external_id group_id,f.handling_payload->'sourceRecord' value from agent_cluster.session_follow_up_messages f join agent_cluster.sessions s on s.id=f.session_id where s.deleted_at is null order by s.id,f.queued_at`);
-    state.eventOutbox = await sourceRecords(client, `select payload->'sourceRecord' value from agent_cluster.event_outbox where payload ? 'sourceRecord' order by id`);
+    state.eventOutbox = await sourceRecords(
+      client,
+      `select ${eventOutboxRecordSql('outbox')} value
+         from agent_cluster.event_outbox outbox
+        order by id`
+    );
   }
 
   private async loadFileRevisionsWithClient(client: PoolClient) {
@@ -1809,6 +1919,27 @@ function normalizeFileRevisionCollection(value: unknown): Record<string, unknown
 }
 function iso(value: unknown): unknown { return value instanceof Date?value.toISOString():value; }
 function duration(startedAt:string,completedAt?:string):number|null { if(!completedAt)return null; const value=Date.parse(completedAt)-Date.parse(startedAt); return Number.isFinite(value)&&value>=0?value:null; }
+function eventOutboxRecordSql(alias: string): string {
+  return `coalesce(
+    ${alias}.payload->'sourceRecord',
+    jsonb_build_object(
+      'id',${alias}.external_id,
+      'idempotencyKey',${alias}.idempotency_key,
+      'aggregateType',${alias}.aggregate_type,
+      'aggregateId',${alias}.aggregate_external_id,
+      'eventType',${alias}.event_type,
+      'payload',${alias}.payload,
+      'createdAt',to_jsonb(${alias}.created_at)
+    )
+  ) || jsonb_build_object(
+    'status',${alias}.status,
+    'attempts',${alias}.attempt_count,
+    'availableAt',to_jsonb(${alias}.available_at),
+    'leaseOwner',${alias}.lease_owner,
+    'leaseExpiresAt',to_jsonb(${alias}.lease_expires_at),
+    'publishedAt',to_jsonb(${alias}.published_at)
+  )`;
+}
 async function sourceRecords(client:PoolClient,sql:string):Promise<unknown[]>{const r=await client.query<{value:unknown}>(sql);return r.rows.map(x=>x.value).filter(v=>v!==null);}
 async function groupedSources(client:PoolClient,sql:string):Promise<Record<string,unknown[]>>{const r=await client.query<{group_id:string|null;value:unknown}>(sql);return r.rows.reduce<Record<string,unknown[]>>((a,x)=>{if(x.group_id&&x.value!==null)(a[x.group_id]??=[]).push(x.value);return a;},{});}
 async function keyedSources(client:PoolClient,sql:string):Promise<Record<string,unknown>>{const r=await client.query<{external_id:string;value:unknown}>(sql);return Object.fromEntries(r.rows.filter(x=>x.value!==null).map(x=>[x.external_id,x.value]));}

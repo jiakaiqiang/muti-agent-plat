@@ -239,7 +239,14 @@ test('intent snapshots are minimal, revisioned and routing ingress is idempotent
       session: context.session,
       sourceEventId: 'event-3',
       currentMessage: '继续，并保留之前的决定',
-      latestEventSeq: 3
+      latestEventSeq: 3,
+      pendingConfirmationContext: {
+        confirmationId: 'confirmation-resume-1',
+        reason: 'coordinator_routing_needs_user_decision',
+        content: '请选择下一步。',
+        options: [{ key: 'resume', label: '继续执行' }],
+        createdAt: '2026-08-11T00:00:00.000Z'
+      }
     });
     const first = await context.service.createRoutingRecord({
       session: context.session,
@@ -256,11 +263,149 @@ test('intent snapshots are minimal, revisioned and routing ingress is idempotent
 
     assert.equal(snapshot.activeWorkItemId, item.id);
     assert.equal(snapshot.currentMessage, '继续，并保留之前的决定');
+    assert.equal(snapshot.pendingConfirmationContext?.confirmationId, 'confirmation-resume-1');
     assert.equal(snapshot.validDecisionIds.length, 1);
     assert.match(snapshot.snapshotHash, /^[a-f0-9]{64}$/);
     assert.equal('chatHistory' in snapshot, false);
     assert.equal(first.id, duplicate.id);
     assert.equal(context.service.listRoutingRecords(context.session.id).length, 1);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('routing claims enforce persisted sessionSeq ordering and terminal idempotency', async () => {
+  const context = await fixture();
+  try {
+    await context.service.ensureInitialWorkItem(context.session, 'event-1');
+    const first = await context.service.createRoutingRecord({
+      session: context.session,
+      sourceEventId: 'event-routing-1',
+      idempotencyKey: 'routing-claim-1',
+      rolloutMode: 'enforce_all_current_epoch'
+    });
+    const second = await context.service.createRoutingRecord({
+      session: context.session,
+      sourceEventId: 'event-routing-2',
+      idempotencyKey: 'routing-claim-2',
+      rolloutMode: 'enforce_all_current_epoch'
+    });
+
+    const secondBlocked = await context.service.claimIntentRouting(
+      context.session.id, second.id, 'snapshot-2', 'worker-2'
+    );
+    assert.equal(secondBlocked.state, 'blocked');
+    assert.equal(secondBlocked.blockingRouting?.id, first.id);
+    const firstClaim = await context.service.claimIntentRouting(
+      context.session.id, first.id, 'snapshot-1', 'worker-1', 60_000
+    );
+    assert.equal(firstClaim.state, 'claimed');
+    assert.equal(firstClaim.routing.status, 'CLASSIFYING');
+    assert.equal(firstClaim.routing.leaseOwner, 'worker-1');
+    assert.ok(firstClaim.routing.reasonCodes.includes('ROUTING_CLAIMED'));
+    assert.equal((await context.service.claimIntentRouting(
+      context.session.id, first.id, 'snapshot-1', 'worker-2'
+    )).state, 'blocked');
+    await context.service.updateRoutingRecord(context.session.id, first.id, {
+      leaseExpiresAt: '2026-01-01T00:00:00.000Z'
+    });
+    const reclaimed = await context.service.claimIntentRouting(
+      context.session.id, first.id, 'snapshot-1', 'worker-2'
+    );
+    assert.equal(reclaimed.state, 'claimed');
+    assert.equal(reclaimed.routing.leaseOwner, 'worker-2');
+    assert.equal(reclaimed.routing.retryCount, 1);
+    assert.ok(reclaimed.routing.reasonCodes.includes('ROUTING_LEASE_RECLAIMED'));
+    assert.equal((await context.service.claimIntentRouting(
+      context.session.id, second.id, 'snapshot-2', 'worker-2'
+    )).state, 'blocked');
+
+    await context.service.updateRoutingRecord(context.session.id, first.id, { status: 'VALIDATING' });
+    await context.service.updateRoutingRecord(context.session.id, first.id, { status: 'ROUTED' });
+    const secondClaim = await context.service.claimIntentRouting(
+      context.session.id, second.id, 'snapshot-2', 'worker-2'
+    );
+    assert.equal(secondClaim.state, 'claimed');
+    await context.service.updateRoutingRecord(context.session.id, second.id, { status: 'VALIDATING' });
+    await context.service.updateRoutingRecord(context.session.id, second.id, { status: 'ROUTED' });
+    assert.equal((await context.service.claimIntentRouting(
+      context.session.id, second.id, 'snapshot-2', 'worker-2'
+    )).state, 'terminal');
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('route application atomically checkpoints explicit user constraints in the Decision Ledger', async () => {
+  const context = await fixture();
+  try {
+    const workItem = await context.service.ensureInitialWorkItem(context.session, 'event-1');
+    const snapshot = await context.service.buildIntentSnapshot({
+      session: context.session,
+      sourceEventId: 'event-constraint',
+      currentMessage: '必须保持 PostgreSQL 兼容。',
+      latestEventSeq: 1
+    });
+    const routing = await context.service.createRoutingRecord({
+      session: context.session,
+      sourceEventId: 'event-constraint',
+      idempotencyKey: 'route-constraint',
+      rolloutMode: 'enforce_all_current_epoch'
+    });
+    const followUp: SessionFollowUpMessage = {
+      id: 'follow-up-constraint',
+      sourceEventId: 'event-constraint',
+      content: '必须保持 PostgreSQL 兼容。',
+      mentionedAgentIds: [],
+      handlingPlan: {
+        intent: 'constraint', priority: 'high', shouldPause: false,
+        affectedTaskIds: [], affectedAgentIds: [], requiresBriefRevision: false,
+        requiresUserConfirmation: false, coordinatorInstruction: 'apply constraint'
+      },
+      workItemId: workItem.id,
+      routingId: routing.id,
+      status: 'queued',
+      queuedAt: '2026-08-07T00:00:00.000Z'
+    };
+    await context.service.saveFollowUp(context.session.id, followUp);
+    await context.service.updateRoutingRecord(context.session.id, routing.id, { status: 'SNAPSHOT_READY', snapshotId: snapshot.id });
+    await context.service.updateRoutingRecord(context.session.id, routing.id, { status: 'CLASSIFYING' });
+    const decision: IntentRoutingDecisionV2 = {
+      dialogueAct: 'constraint', scopeRelation: 'same_requirement', contextPolicy: 'inherit_confirmed',
+      requestedAction: 'continue_active_work_item', selectedWorkItemId: workItem.id,
+      selectedDecisionIds: [], selectedArtifactIds: [], goalSegments: [], missingFields: [],
+      ambiguityReasons: [], reasonCodes: ['USER_CONSTRAINT'], riskLevel: 'low'
+    };
+    const validation: IntentRoutingValidation = {
+      schemaValid: true, referencesValid: true, transitionValid: true,
+      snapshotCurrent: true, safeToApply: true, serverConfidence: 1, errors: []
+    };
+    await context.service.updateRoutingRecord(context.session.id, routing.id, { status: 'VALIDATING', decision, validation });
+
+    await context.service.applyIntentRoute({
+      session: context.session,
+      routingId: routing.id,
+      snapshotId: snapshot.id,
+      followUpId: followUp.id,
+      decision,
+      validation
+    });
+    await context.service.applyIntentRoute({
+      session: context.session,
+      routingId: routing.id,
+      snapshotId: snapshot.id,
+      followUpId: followUp.id,
+      decision,
+      validation
+    });
+
+    const decisions = context.service.listDecisions(context.session.id);
+    assert.equal(decisions.length, 1);
+    assert.equal(decisions[0]?.kind, 'constraint');
+    assert.equal(decisions[0]?.content, followUp.content);
+    assert.equal(decisions[0]?.workItemId, workItem.id);
+    assert.equal(decisions[0]?.confirmedBy?.id, context.session.ownerId);
+    assert.equal(context.session.decisionLedgerRevision, 1);
   } finally {
     await context.cleanup();
   }
@@ -348,6 +493,11 @@ test('route application creates a related WorkItem with only explicit inheritanc
     assert.equal(applied.followUp.handlingPlan.coordinatorInstruction, 'apply related route');
     assert.equal(applied.committedEvent?.id, 'event-route-applied');
     assert.equal(replay.workItem.id, applied.workItem.id);
+    assert.equal(replay.deferredActivation, applied.deferredActivation);
+    if (applied.deferredActivation) {
+      assert.equal(context.session.activeWorkItemId, first.id);
+      assert.equal(context.persistence.getCollection<SessionDetail[]>('sessions', [])[0]?.activeWorkItemId, first.id);
+    }
     assert.equal(context.service.listWorkItems(context.session.id).length, 2);
     const persistedEvents = context.persistence.getCollection<Record<string, CollaborationEvent[]>>('eventsBySession', {});
     const outbox = context.persistence.getCollection<Array<Record<string, unknown>>>('eventOutbox', []);
@@ -402,6 +552,49 @@ test('independent route creates a clean WorkItem even when the model selects old
     assert.equal(applied.workItem.parentWorkItemId, undefined);
     assert.deepEqual(applied.workItem.inheritedDecisionIds, []);
     assert.deepEqual(applied.workItem.inheritedArtifactIds, []);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('WorkItem context slices exclude unrelated records and retain explicit inheritance', async () => {
+  const context = await fixture();
+  try {
+    const first = await context.service.ensureInitialWorkItem(context.session, 'event-1');
+    const second = await context.service.createWorkItem({
+      session: context.session,
+      sourceEventId: 'event-2',
+      title: 'Related work',
+      goal: 'Related work',
+      parentWorkItemId: first.id,
+      inheritedDecisionIds: [],
+      inheritedArtifactIds: ['artifact-inherited'],
+      activate: false
+    });
+    const tasks = [
+      { id: 'task-first', sessionId: context.session.id, workItemId: first.id, title: 'old', status: 'completed' },
+      { id: 'task-second', sessionId: context.session.id, workItemId: second.id, title: 'new', status: 'pending' }
+    ] as any;
+    const events = [
+      { id: 'event-first', sessionId: context.session.id, workItemId: first.id, type: 'agent_message', content: 'old' },
+      { id: 'event-second', sessionId: context.session.id, workItemId: second.id, type: 'agent_message', content: 'new' }
+    ] as any;
+    const memories = [
+      { id: 'memory-first', sessionId: context.session.id, workItemId: first.id, scope: 'session', content: 'old', confidence: 1 },
+      { id: 'memory-second', sessionId: context.session.id, workItemId: second.id, scope: 'session', content: 'new', confidence: 1 }
+    ] as any;
+    const artifacts = [
+      { id: 'artifact-first', sessionId: context.session.id, workItemId: first.id, type: 'json', title: 'old' },
+      { id: 'artifact-second', sessionId: context.session.id, workItemId: second.id, type: 'json', title: 'new' },
+      { id: 'artifact-inherited', sessionId: context.session.id, workItemId: first.id, type: 'json', title: 'inherited' }
+    ] as any;
+    const slice = context.service.buildWorkItemContextSlice({
+      session: context.session, workItemId: second.id, tasks, events, memories, artifacts
+    });
+    assert.deepEqual(slice.tasks.map((item) => item.id), ['task-second']);
+    assert.deepEqual(slice.events.map((item) => item.id), ['event-second']);
+    assert.deepEqual(slice.memories.map((item) => item.id), ['memory-second']);
+    assert.deepEqual(slice.artifacts.map((item) => item.id).sort(), ['artifact-inherited', 'artifact-second']);
   } finally {
     await context.cleanup();
   }

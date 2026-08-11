@@ -7,7 +7,9 @@ import {
   RELATIONAL_SCHEMA_V2_SQL,
   RELATIONAL_SCHEMA_V3_SQL,
   RELATIONAL_SCHEMA_V4_SQL,
-  RELATIONAL_SCHEMA_V5_SQL
+  RELATIONAL_SCHEMA_V5_SQL,
+  RELATIONAL_SCHEMA_V6_SQL,
+  RELATIONAL_SCHEMA_V7_SQL
 } from './relational-schema.js';
 
 type Migration = {
@@ -41,6 +43,16 @@ const MIGRATIONS: Migration[] = [
     version: 5,
     name: 'work_items_decisions_and_intent_routing',
     sql: RELATIONAL_SCHEMA_V5_SQL
+  },
+  {
+    version: 6,
+    name: 'memory_work_item_ownership',
+    sql: RELATIONAL_SCHEMA_V6_SQL
+  },
+  {
+    version: 7,
+    name: 'intent_routing_worker_leases',
+    sql: RELATIONAL_SCHEMA_V7_SQL
   }
 ];
 

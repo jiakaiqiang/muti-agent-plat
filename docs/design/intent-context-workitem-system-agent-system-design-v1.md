@@ -3,6 +3,7 @@
 > 日期：2026-08-07
 > 状态：系统设计方案，尚未实现
 > 上游目标设计：[`intent-context-workitem-system-agent-target-design-v1.md`](./intent-context-workitem-system-agent-target-design-v1.md)
+> 精确命令专项开发设计：[`exact-command-first-intent-routing-system-development-design-v1.md`](./exact-command-first-intent-routing-system-development-design-v1.md)
 > 适用架构：NestJS 模块化单体、Vue Web、Context Pipeline v2、File/PostgreSQL 双持久化
 
 ## 1. 设计结论

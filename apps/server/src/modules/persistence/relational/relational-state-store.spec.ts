@@ -79,4 +79,25 @@ test('loadState excludes projections owned by soft-deleted sessions', async () =
   assert.match(queryFor('file_revision_records'), /join agent_cluster\.sessions s[\s\S]*s\.deleted_at is null/i);
   assert.match(queryFor('workspace_writebacks'), /join agent_cluster\.sessions s[\s\S]*where s\.deleted_at is null/i);
   assert.match(queryFor('suggested_tasks'), /join agent_cluster\.sessions s[\s\S]*where s\.deleted_at is null/i);
+  assert.match(queryFor('event_outbox'), /coalesce\([\s\S]*payload->'sourceRecord'[\s\S]*jsonb_build_object/i);
+  assert.doesNotMatch(queryFor('event_outbox'), /payload \? 'sourceRecord'/i);
+});
+
+test('outbox claims use a single skip-locked lease update and return canonical records', async () => {
+  const queries: Array<{ sql: string; parameters?: unknown[] }> = [];
+  const pool = {
+    async query(sql: string, parameters?: unknown[]) {
+      queries.push({ sql, parameters });
+      return { rows: [{ value: { id: 'outbox:event-1', status: 'publishing', leaseOwner: 'worker-1' } }] };
+    }
+  };
+  const store = new RelationalStateStore(pool as never, {} as never);
+
+  const claimed = await store.claimPendingEventOutbox('worker-1', 25, 45_000);
+
+  assert.equal(claimed[0]?.id, 'outbox:event-1');
+  assert.match(queries[0]?.sql ?? '', /for update skip locked/i);
+  assert.match(queries[0]?.sql ?? '', /status='publishing'/i);
+  assert.match(queries[0]?.sql ?? '', /lease_expires_at=now\(\)\+\(\$3\*interval '1 millisecond'\)/i);
+  assert.deepEqual(queries[0]?.parameters, ['worker-1', 25, 45_000]);
 });

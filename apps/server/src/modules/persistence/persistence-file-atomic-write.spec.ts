@@ -118,3 +118,38 @@ test('file event persistence writes and publishes an equivalent durable outbox r
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('file outbox claims use a lease and do not double claim an active record', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-cluster-file-outbox-claim-'));
+  const filePath = join(directory, 'state.v3.json');
+  const persistence = new PersistenceService({ backend: 'file', filePath });
+  try {
+    await persistence.initialize();
+    await persistence.setCollection('eventsBySession', {
+      'session-1': [{
+        id: 'event-claim-1', sessionId: 'session-1', type: 'user_message', toAgentIds: [],
+        content: 'claim once', metadata: { schemaVersion: '0.1', payload: {} },
+        actor: { type: 'user', id: 'user-1' }, createdAt: '2026-08-07T00:00:00.000Z'
+      }]
+    });
+
+    const first = await persistence.claimPendingEventOutbox('worker-1', 10, 60_000);
+    const second = await persistence.claimPendingEventOutbox('worker-2', 10, 60_000);
+    assert.equal(first.length, 1);
+    assert.equal(first[0]?.status, 'publishing');
+    assert.equal(first[0]?.leaseOwner, 'worker-1');
+    assert.equal(first[0]?.attempts, 1);
+    assert.equal(second.length, 0);
+
+    await persistence.markEventPublished('event-claim-1');
+    const stored = JSON.parse(readFileSync(filePath, 'utf8')) as {
+      eventOutbox: Array<Record<string, unknown>>;
+    };
+    assert.equal(stored.eventOutbox[0]?.status, 'published');
+    assert.equal(stored.eventOutbox[0]?.attempts, 1);
+    assert.equal(stored.eventOutbox[0]?.leaseOwner, undefined);
+  } finally {
+    await persistence.onModuleDestroy();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

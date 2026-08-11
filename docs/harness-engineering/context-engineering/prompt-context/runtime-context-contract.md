@@ -14,9 +14,15 @@ Top-level fields currently covered by this contract:
 
 | Field | Purpose | Notes |
 | --- | --- | --- |
+| workItemId | Logical WorkItem that owns the invocation context. | Prevents tasks, memories, events, artifacts, and decisions from leaking across unrelated WorkItems in the same Session. |
+| contextSnapshotId | Revisioned intent-context snapshot used to assemble the invocation. | Provides an auditable reference for stale-snapshot validation and route replay. |
+| decisionSetHash | Stable hash of the confirmed decision set included in the context. | Lets dispatch and review verify that the invocation used the intended Decision Ledger revision. |
+| inheritedDecisionIds | Explicitly inherited confirmed decisions for a related WorkItem. | Independent WorkItems receive an empty set; inheritance is never inferred from Session history. |
+| inheritedArtifactIds | Explicitly inherited artifacts for a related WorkItem. | Independent WorkItems receive an empty set; unrelated artifacts stay excluded. |
 | systemRules | Non-negotiable runtime behavior rules. | Must include side-effect and workspace grounding rules. |
 | sessionGoal | User's original or current goal. | Always present. |
 | currentContractGoal | Latest authoritative task-contract goal. | Keeps a revised brief goal distinct from the immutable original Session input. |
+| currentUserMessage | Exact user message that triggered the current routing invocation. | Untrusted invocation input; it is projected to L1 only and must not be reclassified as an authority rule or constraint. |
 | taskContext | Task Context Pack for the current invocation. | Carries task domain/intent, current stage, Project Map or Domain Map, stage plan, evidence selection, evidence refs, validation rules, and Execution/Validation/Review responsibilities. |
 | summaryMemory | Compact continuation memory for long chains. | Carries current goal, current state, confirmed facts, completed work, decisions, open questions, risks, and next steps. |
 | continuationState | Structured runtime continuation state. | Carries current phase/status, active task/agent, task queues, latest checkpoint, handoff refs, source refs, next agents, and resume hints. |
@@ -49,7 +55,7 @@ Top-level fields currently covered by this contract:
 
 ## ContextEnvelopeV2 fields
 
-The Runtime-facing envelope has only these top-level fields: `version`, `createdAt`, `workspaceId`, `sessionId`, `L0`, `L1`, `L2`, `L3`, `L4`, `L5`, `L6`, and `budget`. L0 carries authority and Workspace identity; L1 carries the invocation goal, task, and navigation; L2 carries the Project Map; L3 carries grounded readable evidence; L4 carries tool results; L5 carries bounded history; L6 carries delivery state. Adapters must not receive parallel legacy Workspace fields.
+The Runtime-facing envelope has only these top-level fields: `version`, `createdAt`, `workspaceId`, `sessionId`, `L0`, `L1`, `L2`, `L3`, `L4`, `L5`, `L6`, `budget`, and optional `contextScope`. L0 carries authority and Workspace identity; L1 carries the invocation goal, optional untrusted `currentUserMessage`, task, and navigation; L2 carries the Project Map; L3 carries grounded readable evidence; L4 carries tool results; L5 carries bounded history; L6 carries delivery state. `contextScope` carries the owning WorkItem, source context snapshot, decision-set hash, and explicit decision/artifact inheritance used to build the envelope. Adapters must not receive parallel legacy Workspace fields.
 
 Phase filtering must remain consistent with the grounded-evidence gate. Discussion and delivery may carry bounded L3 when the selected strategy requires evidence; delivery also keeps L1 navigation so every L3 path can be validated against the current Workspace manifest. Phase filtering must never require L3 and then erase it before Runtime dispatch.
 
@@ -65,7 +71,7 @@ Phase filtering must remain consistent with the grounded-evidence gate. Discussi
 | task_execution | taskBrief, currentTask, taskContext, summaryMemory, continuationState, relevantMemories, capabilities, artifacts, constraints, budget, workingDirectory, workspaceManifest, selectedEvidenceContents, workspaceFocus, and task-scoped fileRevisionEvidence when applicable | Other agents' unrelated tasks, full workspace file bodies, or unapproved external side effects. |
 | post_review | taskBrief, taskContext, summaryMemory, continuationState, artifacts, relevantEvents, verification evidence, budget | Unverified guesses or private speculation. |
 | final_delivery | review result, taskContext, summaryMemory, continuationState, artifacts, risks, memory candidates, budget | Private speculation or unconfirmed external send actions. |
-| user_message_routing | current state, user message, taskContext, summaryMemory, continuationState, relevantEvents, constraints | Full history noise or irrelevant workspace contents. |
+| user_message_routing | current state, currentUserMessage, taskContext, summaryMemory, continuationState, relevantEvents, constraints | Full history noise, currentUserMessage in L0/constraints, or irrelevant workspace contents. |
 
 ## Task Context Pack rules
 

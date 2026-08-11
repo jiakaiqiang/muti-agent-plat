@@ -705,6 +705,8 @@ export type ContextL1Invocation = {
    * 讨论/修订后已被确认或最新产出的契约目标。
    */
   currentContractGoal?: string;
+  /** The exact message that triggered this invocation. Never reinterpret it as a constraint. */
+  currentUserMessage?: string;
   phase: AgentRunPhase;
   task?: ContextL1Task;
   navigation: ContextL1NavigationManifest;
@@ -1023,6 +1025,14 @@ export type ContextEnvelopeV2 = {
   L5: ContextL5SummaryMemory;
   L6: ContextL6DeliveryArtifacts;
   budget: ContextEnvelopeV2Budget;
+  /** Runtime context ownership and decision provenance. Optional for persisted v2 envelopes created before WorkItem isolation. */
+  contextScope?: {
+    workItemId?: UUID;
+    contextSnapshotId?: UUID;
+    decisionSetHash?: string;
+    inheritedDecisionIds: UUID[];
+    inheritedArtifactIds: UUID[];
+  };
 };
 
 export type WorkspaceIndexEntryKind = 'file' | 'directory';
@@ -1281,6 +1291,7 @@ export interface ActorRef {
 export type CollaborationEvent<TPayload extends Record<string, unknown> = Record<string, unknown>> = {
   id: UUID;
   sessionId: UUID;
+  workItemId?: UUID;
   type: CollaborationEventType;
   userMessageIntent?: UserMessageIntent;
   priority?: EventPriority;
@@ -1968,6 +1979,21 @@ export type IntentSnapshotRevision = {
   latestEventSeq: number;
 };
 
+export type PendingConfirmationContext = {
+  confirmationId: UUID;
+  reason: string;
+  content: string;
+  title?: string;
+  description?: string;
+  options: Array<{
+    key: string;
+    label: string;
+    style?: 'primary' | 'default' | 'danger';
+  }>;
+  requiresStructuredAction?: boolean;
+  createdAt: ISODateTime;
+};
+
 export type IntentContextSnapshot = {
   id: UUID;
   sessionId: UUID;
@@ -1976,6 +2002,7 @@ export type IntentContextSnapshot = {
   activeWorkItem?: Pick<WorkItem, 'id' | 'title' | 'goal' | 'status' | 'revision'>;
   currentMessage: string;
   pendingConfirmation?: string;
+  pendingConfirmationContext?: PendingConfirmationContext;
   validDecisionIds: UUID[];
   validDecisions: Array<Pick<DecisionRecord, 'id' | 'kind' | 'status' | 'content' | 'revision'>>;
   candidateWorkItemIds: UUID[];
@@ -2025,6 +2052,11 @@ export type IntentRoutingRecord = {
   decision?: IntentRoutingDecisionV2;
   validation?: IntentRoutingValidation;
   finalAction?: IntentRoutingAction;
+  actionStatus?: 'pending' | 'applying' | 'applied' | 'failed';
+  /** Persisted because a replay must not activate a deferred WorkItem early. */
+  deferredActivation?: boolean;
+  leaseOwner?: string;
+  leaseExpiresAt?: ISODateTime;
   reasonCodes: string[];
   retryCount: number;
   idempotencyKey: string;
@@ -2041,7 +2073,7 @@ export type SessionFollowUpMessage = {
   workItemId?: UUID;
   routingId?: UUID;
   receiverRecognitionPending?: boolean;
-  status: 'queued' | 'planning' | 'executing';
+  status: 'queued' | 'planning' | 'executing' | 'completed' | 'failed' | 'cancelled';
   queuedAt: ISODateTime;
   startedAt?: ISODateTime;
 };
@@ -2172,6 +2204,7 @@ export type MemoryItem = {
   id: UUID;
   sessionId: UUID;
   agentId?: UUID;
+  workItemId?: UUID;
   scope: MemoryScope;
   content: string;
   sourceEventId?: UUID;
@@ -2282,6 +2315,7 @@ export type SummaryMemoryCheckpoint = {
   kind: 'summary_memory_checkpoint';
   checkpointId: UUID;
   sessionId: UUID;
+  workItemId?: UUID;
   phase: AgentRunPhase;
   taskId?: UUID;
   agentId?: UUID;
@@ -2328,12 +2362,20 @@ export type TaskContext = {
 export type ContextAssembly = {
   /** Present for v2 sessions. This is the bounded, phase-specific runtime context surface. */
   contextEnvelopeV2?: ContextEnvelopeV2;
+  /** The logical WorkItem that owns this Runtime invocation's context. */
+  workItemId?: UUID;
+  contextSnapshotId?: UUID;
+  decisionSetHash?: string;
+  inheritedDecisionIds?: UUID[];
+  inheritedArtifactIds?: UUID[];
   /** Auditable task/phase execution target chosen for this invocation. */
   resolvedExecutionTarget?: ResolvedExecutionTarget;
   systemRules: string[];
   sessionGoal: string;
   /** 当前契约的最新目标;存在时为本次调用的权威目标,优先于 sessionGoal。 */
   currentContractGoal?: string;
+  /** The exact message that triggered this invocation. */
+  currentUserMessage?: string;
   taskContext: TaskContext;
   summaryMemory: SummaryMemory;
   continuationState: TaskContinuationState;

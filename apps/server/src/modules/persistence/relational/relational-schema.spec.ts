@@ -12,6 +12,8 @@ import {
   RELATIONAL_SCHEMA_V3_SQL,
   RELATIONAL_SCHEMA_V4_SQL,
   RELATIONAL_SCHEMA_V5_SQL,
+  RELATIONAL_SCHEMA_V6_SQL,
+  RELATIONAL_SCHEMA_V7_SQL,
   RELATIONAL_TABLES,
   SCHEMA_MIGRATIONS_TABLE
 } from './relational-schema.js';
@@ -42,11 +44,31 @@ test('every relational table and column has a non-empty Chinese explanation', ()
   }
 });
 test('rendered migration emits COMMENT statements for every declared table and column', () => {
-  const sql = `${RELATIONAL_SCHEMA_BOOTSTRAP_SQL}\n${RELATIONAL_SCHEMA_V1_SQL}\n${RELATIONAL_SCHEMA_V2_SQL}\n${RELATIONAL_SCHEMA_V3_SQL}\n${RELATIONAL_SCHEMA_V4_SQL}\n${RELATIONAL_SCHEMA_V5_SQL}`;
+  const sql = `${RELATIONAL_SCHEMA_BOOTSTRAP_SQL}\n${RELATIONAL_SCHEMA_V1_SQL}\n${RELATIONAL_SCHEMA_V2_SQL}\n${RELATIONAL_SCHEMA_V3_SQL}\n${RELATIONAL_SCHEMA_V4_SQL}\n${RELATIONAL_SCHEMA_V5_SQL}\n${RELATIONAL_SCHEMA_V6_SQL}\n${RELATIONAL_SCHEMA_V7_SQL}`;
   for (const expected of expectedRelationalComments()) {
     const target = expected.column ? `${expected.table}.${expected.column}` : expected.table;
     const prefix = expected.column ? 'comment on column' : 'comment on table';
     assert.ok(sql.includes(`${prefix} agent_cluster.${target} is `), `missing rendered SQL comment: ${target}`);
+  }
+});
+
+test('v6 migration adds WorkItem ownership to memories without rewriting v5', () => {
+  assert.match(RELATIONAL_SCHEMA_V6_SQL, /alter table agent_cluster\.memories add column if not exists work_item_id bigint/);
+  assert.match(RELATIONAL_SCHEMA_V6_SQL, /memories_work_item_fk/);
+  assert.match(RELATIONAL_SCHEMA_V6_SQL, /memories_work_item_idx/);
+});
+
+test('v7 migration adds expiring worker leases to intent routing records', () => {
+  assert.match(RELATIONAL_SCHEMA_V7_SQL, /intent_routing_records add column if not exists lease_owner text/);
+  assert.match(RELATIONAL_SCHEMA_V7_SQL, /intent_routing_records add column if not exists lease_expires_at timestamptz/);
+  assert.match(RELATIONAL_SCHEMA_V7_SQL, /intent_routing_lease_idx/);
+});
+
+test('incremental migrations terminate every statement before concatenation', () => {
+  for (const sql of [RELATIONAL_SCHEMA_V6_SQL, RELATIONAL_SCHEMA_V7_SQL]) {
+    for (const statement of sql.split('\n\n')) {
+      assert.ok(statement.endsWith(';'), `migration statement is missing a terminator: ${statement}`);
+    }
   }
 });
 

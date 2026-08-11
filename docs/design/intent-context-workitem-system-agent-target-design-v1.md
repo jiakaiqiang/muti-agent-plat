@@ -4,6 +4,7 @@
 > 状态：已确认方案，尚未实现
 > 适用范围：当前 `dataEpoch` 内的 v2 Session、用户后续消息、任务续跑与新需求路由
 > 下游系统设计：[`intent-context-workitem-system-agent-system-design-v1.md`](./intent-context-workitem-system-agent-system-design-v1.md)
+> 精确命令专项开发设计：[`exact-command-first-intent-routing-system-development-design-v1.md`](./exact-command-first-intent-routing-system-development-design-v1.md)
 > 相关设计：[`context-router-target-design-v1.md`](./context-router-target-design-v1.md)、[`context-pipeline-v2-only-agent-decoupling-system-design-v1.md`](./context-pipeline-v2-only-agent-decoupling-system-design-v1.md)
 
 ## 1. 文档目的

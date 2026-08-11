@@ -8,26 +8,42 @@ import type {
 } from '@agent-cluster/shared';
 import { createRuntimeArtifactSystemEvidence } from '@agent-cluster/shared';
 import { workspaceMetrics } from '../../common/workspace-metrics.js';
+import { INTENT_ROUTING_GOLDEN_DATASET_V1 } from './intent-routing-golden.dataset.js';
 import { SemanticIntentRouterService } from './semantic-intent-router.service.js';
 
 const now = '2026-08-07T00:00:00.000Z';
 
-function session(): SessionDetail {
+function session(
+  status: SessionDetail['status'] = 'FAILED',
+  hasActiveWorkItem = true
+): SessionDetail {
   return {
     id: 'session-1', dataEpoch: 'epoch-1', revision: 2, decisionLedgerRevision: 0,
-    activeWorkItemId: 'work-1', title: 'Task', originalInput: 'Original task', status: 'FAILED',
+    ...(hasActiveWorkItem ? { activeWorkItemId: 'work-1' } : {}),
+    title: 'Task', originalInput: 'Original task', status,
     ownerId: 'user-1', workspaceId: 'workspace-1', tokenUsed: 0, participatingAgentIds: [],
     createdAt: now, updatedAt: now
   };
 }
 
-function snapshot(message: string): IntentContextSnapshot {
+function snapshot(message: string, hasActiveWorkItem = true): IntentContextSnapshot {
   return {
-    id: 'snapshot-1', sessionId: 'session-1', sourceEventId: 'event-1', activeWorkItemId: 'work-1',
-    activeWorkItem: { id: 'work-1', title: 'Task', goal: 'Original task', status: 'FAILED', revision: 1 },
-    currentMessage: message, validDecisionIds: [], validDecisions: [], candidateWorkItemIds: ['work-1'],
-    candidateWorkItems: [{ id: 'work-1', title: 'Task', goal: 'Original task', status: 'FAILED', revision: 1 }],
-    revision: { sessionRevision: 2, activeWorkItemId: 'work-1', activeWorkItemRevision: 1, decisionLedgerRevision: 0, latestEventSeq: 1 },
+    id: 'snapshot-1', sessionId: 'session-1', sourceEventId: 'event-1',
+    ...(hasActiveWorkItem ? {
+      activeWorkItemId: 'work-1',
+      activeWorkItem: { id: 'work-1', title: 'Task', goal: 'Original task', status: 'FAILED' as const, revision: 1 }
+    } : {}),
+    currentMessage: message, validDecisionIds: [], validDecisions: [],
+    candidateWorkItemIds: hasActiveWorkItem ? ['work-1'] : [],
+    candidateWorkItems: hasActiveWorkItem
+      ? [{ id: 'work-1', title: 'Task', goal: 'Original task', status: 'FAILED', revision: 1 }]
+      : [],
+    revision: {
+      sessionRevision: 2,
+      ...(hasActiveWorkItem ? { activeWorkItemId: 'work-1', activeWorkItemRevision: 1 } : {}),
+      decisionLedgerRevision: 0,
+      latestEventSeq: 1
+    },
     snapshotHash: 'a'.repeat(64), createdAt: now
   };
 }
@@ -48,7 +64,7 @@ function result(output: AgentRunResult['output'], status: AgentRunResult['status
   };
 }
 
-function setup(runtimeResults: AgentRunResult[] = []) {
+function setup(runtimeResults: AgentRunResult[] = [], snapshotCurrent = true) {
   let runtimeCalls = 0;
   const records = new Map([['routing-1', routing()]]);
   const context = {
@@ -57,7 +73,7 @@ function setup(runtimeResults: AgentRunResult[] = []) {
       records.set(routingId, updated);
       return updated;
     },
-    isSnapshotCurrent() { return true; },
+    isSnapshotCurrent() { return snapshotCurrent; },
     getWorkItem() { return { inheritedArtifactIds: [] }; }
   };
   const service = new SemanticIntentRouterService(
@@ -117,4 +133,41 @@ test('two Runtime failures clarify instead of defaulting to continuation', async
     )?.value,
     2
   );
+});
+
+test('golden dataset is evaluated through the SemanticIntentRouter validation path', async () => {
+  for (const item of INTENT_ROUTING_GOLDEN_DATASET_V1) {
+    const runtimeFailure = item.tags.includes('runtime_failure');
+    const staleSnapshot = item.tags.includes('stale_snapshot');
+    const action = item.expected.action;
+    const output = {
+      schemaVersion: '1.0' as const,
+      kind: 'intent_routing_decision' as const,
+      dialogueAct: ['pause', 'cancel', 'resume', 'continue_active_work_item', 'replan', 'confirm', 'reject', 'clarify', 'create_related_work_item', 'create_independent_work_item'].includes(action)
+        ? 'command' as const
+        : 'question' as const,
+      scopeRelation: item.expected.relation,
+      contextPolicy: item.expected.contextPolicy,
+      requestedAction: action,
+      selectedWorkItemId: item.hasActiveWorkItem ? 'work-1' : null,
+      selectedDecisionIds: [],
+      selectedArtifactIds: [],
+      goalSegments: action.includes('work_item') ? ['Golden task segment'] : [],
+      missingFields: [],
+      ambiguityReasons: item.expected.relation === 'ambiguous' ? ['GOLDEN_AMBIGUITY'] : [],
+      reasonCodes: [`GOLDEN_${item.id}`],
+      riskLevel: action === 'cancel' ? 'high' as const : 'low' as const,
+      modelConfidence: 0.99
+    };
+    const fixture = setup(runtimeFailure ? [] : [result(output)], !staleSnapshot);
+    const outcome = await fixture.service.classify(
+      session(item.sessionStatus, item.hasActiveWorkItem),
+      routing(),
+      snapshot(item.message, item.hasActiveWorkItem)
+    );
+    assert.equal(outcome.decision.scopeRelation, item.expected.relation, item.id);
+    assert.equal(outcome.decision.contextPolicy, item.expected.contextPolicy, item.id);
+    assert.equal(outcome.decision.requestedAction, item.expected.action, item.id);
+    assert.equal(outcome.autoApplicable, item.expected.autoApply, item.id);
+  }
 });
