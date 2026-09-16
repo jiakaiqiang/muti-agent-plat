@@ -23,6 +23,7 @@
 | --- | --- | --- |
 | `apps/server/` | NestJS 后端服务 | API、会话、编排、运行时、事件、任务、记忆、RAG、能力治理 |
 | `apps/web/` | Vue 前端工作台 | 页面、组件、状态管理、用户交互、运行时展示 |
+| `apps/desktop/` | Electron Windows 客户端 | 独立 renderer 入口/路由/工作区/CSS，共享 Web 领域逻辑；平台连接、本地助手进程、安装与受控更新；`docs/devops/desktop-application.md`、原工作区四件套 AC17–22 |
 | `packages/shared/` | 前后端共享合同与类型 | 合同、事件类型、Agent 类型、metadata、mock fixtures |
 | `docs/` | 产品、设计、合同、质量、运维、Harness 文档 | 需求分析、设计依据、验收标准、永久知识 |
 | `tests/` | 合同测试、e2e、Harness 验证 | 自动化验证、冒烟测试、工程规程校验 |
@@ -71,6 +72,7 @@
 | --- | --- | --- |
 | 应用壳层、主导航、页面路由 | `apps/web/src/components/AppShell.vue`, `apps/web/src/router/index.ts` | `docs/design/ui-style-guide-v1.md` |
 | 工作台整体布局 | `apps/web/src/components/SessionWorkspace.vue` | `docs/design/ui-style-guide-v1.md` |
+| Codex 式桌面三栏、所选流程、执行历史、只读 Diff | `apps/desktop/renderer/components/workspace/`、`apps/web/src/stores/taskWorkspace.ts`、`apps/web/src/stores/historyDiff.ts`；server `modules/workflows/` | `docs/product/codex-style-multi-agent-workspace-spec-v1.md`、对应 plan/tasks/checklist；`npm run test:e2e:codex-task-workspace`、`npm run test:e2e:client-presentation` |
 | Agent、Skill、知识库、设置、模型、工具、通知管理路由 | `apps/web/src/views/AdminRouteView.vue` | `docs/design/ui-style-guide-v1.md` |
 | 会话侧栏 | `apps/web/src/components/SessionSidebar.vue` | `apps/web/src/stores/session.ts` |
 | 聊天时间线、事件展示 | `apps/web/src/components/ChatTimeline.vue` | `docs/contracts/event-contract-v0.1.md` |
@@ -79,6 +81,8 @@
 | Skill 管理、文件、Agent 绑定、注入预览 | `apps/web/src/components/SkillManager.vue` | `apps/web/src/stores/skill.ts`, `tests/e2e/skill-management-browser-smoke.mjs` |
 | 运行时模型管理 | `apps/web/src/components/RuntimeModelManager.vue` | `apps/web/src/stores/runtimeModel.ts`, `tests/e2e/runtime-model-switch-smoke.mjs` |
 | 运行时过程展示 | `apps/web/src/components/WorkflowRuntimeView.vue`, `DebugRuntimeView.vue` | `docs/contracts/runtime-contract-v0.1.md` |
+| 工作流 Agent 链路三态、脉冲流转、讨论分组 | `apps/web/src/components/WorkflowRuntimeView.vue`, `WorkflowAgentInspector.vue`, `apps/web/src/components/workflowChainModel.ts` | `docs/design/workflow-view-agent-chain-system-design-v1.md` |
+| 协作日志面板 | `apps/web/src/components/CollaborationLogPanel.vue` | `apps/web/src/composables/useActor.ts` |
 | 确认卡片 | `apps/web/src/components/ConfirmationCard.vue` | `tests/e2e/memory-confirm-smoke.mjs` |
 | 样式 | `apps/web/src/styles.css` | `docs/design/ui-style-guide-v1.md` |
 | API 客户端 | `apps/web/src/api/client.ts` | `docs/contracts/api-contract-v0.1.md` |
@@ -109,6 +113,9 @@
 | `docs/design/workspace-index-first-on-demand-context-system-design-v1.md` | 工作目录快速绑定、增量元数据索引和 Context v2 按需取证；其中单活动 Lease 章节已废弃 |
 | `docs/design/workspace-multi-session-isolation-writeback-v1.md` | 同目录多活动 Session、Git/non-Git 隔离、FIFO 自动写回、三方合并和冲突恢复的权威设计 |
 | `docs/design/ui-style-guide-v1.md` | 前端 UI 风格规范 |
+| `docs/product/workflow-view-agent-chain-requirements-v1.md` | 工作流页面 Agent 链路可视化的意图合同与验收标准 |
+| `docs/design/workflow-view-agent-chain-system-design-v1.md` | 上述需求的架构约束、纯函数链路模型与任务边界 |
+| `docs/implementation/workflow-view-agent-chain-development-v1.md` | 工作流页面 Agent 链路的实现记录与验证命令 |
 | `docs/implementation/agent-team-implementation-breakdown-v1.md` | Agent 团队实现拆解 |
 | `docs/analysis/feature-inventory-and-status-v1.md` | 功能清单与当前状态 |
 | `docs/analysis/project-analysis.md` | 项目分析 |
@@ -155,6 +162,8 @@
 | Watchdog 基线分析器 | `npm run test:watchdog-baseline` |
 ## 需求到上下文的路由
 
+主 Agent 主持讨论、动态 @ 协作、版本化需求确认、多会话停止/可恢复删除、长期记忆与 Token/缓存治理，统一进入 [主 Agent 协作分阶段总计划](../roadmap/main-agent-collaboration-roadmap-v1.md)。该计划提供 9 阶段四件套；新增任务待实施，既有能力应复用并重新验证，不依据旧文档中的历史状态重复开发。
+
 | 如果用户说 | 优先读取 |
 | --- | --- |
 | “实现一个功能” | 本文档、Harness 协议、相关 app/package、合同、测试 |
@@ -170,6 +179,15 @@
 | “只问概念/方案” | 只读相关文档，不编辑文件 |
 
 ## 永久记忆维护位置
+
+执行停止状态一致性与重复通知专项（2026-09-15，待实现）：
+
+- 需求与证据：[Spec](../product/runtime-stop-consistency-spec-v1.md)
+- 状态、回执及事务通知设计：[Plan](../design/runtime-stop-consistency-plan-v1.md)
+- 分批实施：[Tasks](../implementation/runtime-stop-consistency-tasks-v1.md)
+- 故障注入及双端验收：[Checklist](../quality/runtime-stop-consistency-checklist-v1.md)
+
+涉及 runtimes、local-runtime、sessions、persistence/events 和双端共享状态。该专项补齐现有持久化恢复方案，文档创建不表示故障已修复。
 
 当前 v2-only 交付基线：
 

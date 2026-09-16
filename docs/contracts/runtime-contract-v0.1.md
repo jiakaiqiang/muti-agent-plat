@@ -1,6 +1,10 @@
-# Runtime Contract：Context v2 + Output Contract 1.0
+# Runtime Contract：Context v2 + Versioned Output Contracts
+
+主 Agent 协作新增身份/策略合同见 [阶段 0 冻结合同](./main-agent-collaboration-contract-v1.md)。ContextEnvelopeV2、InvocationPlan 和 Tool Authority 的现有边界不变；合同资格校验不等于模型调用已获授权。
 
 ## 1. 目标
+
+群聊中断与纠正补充（2026-09-14）：本地 invocation.cancel 后以 CLI 子进程结束后发送的 invocation.result 或受支持的 stopped 回执确认停止；平台等待回执，超时或停止期间断线以 `details.stopUnconfirmed=true` 表达未知，不规范化成“已经停止”。未确认调用登记保留至匹配设备/工作区的结束回执，迟到结果不应用业务内容。契约生成/修订默认总时限 1200000ms，覆盖 Provider 重试；新操作的 0 或无效配置采用有限默认值并记录诊断，不关闭操作总预算。StructuredOutput 纠正按 toolCallId 去重，默认纠正时限 300000ms，并受同一 LogicalOperation 的截止、尝试上限及一次纠正额度限制；达到边界取消当前句柄。流式和最终返回事件共用统计；无法观察的 CLI 内部调用次数仍未知。输出合同错误及停止未确认不触发 Provider 自动重试。
 
 本合同定义 Runtime 的唯一活动输入、路由元数据、执行句柄、输出和审计边界。Runtime 输出的唯一权威源是 `packages/shared/src/runtime-contracts/`；其余 Runtime 类型以 `packages/shared/src/contracts.ts` 为准。
 
@@ -11,7 +15,7 @@
 - Context 只使用 `ContextEnvelopeV2`。
 - Adapter 只暴露 `start()`，事件、结果和取消都属于本次调用句柄。
 - Router 只从 Adapter metadata 获取能力，不在 Orchestrator 维护 Runtime 类型矩阵。
-- 八类 Runtime 输出统一使用 `schemaVersion: "1.0"`，不兼容、不修复 `0.1` 输出。
+- 八类领域 Runtime 输出继续使用 `schemaVersion: "1.0"`；新增协商式 `task_execution_result@2.0` 最小提交。两者均严格校验，不兼容、不修复 `0.1` 输出。
 - TypeScript 类型、JSON Schema、示例、校验器、版本和 hash 必须来自同一注册项。
 
 ## 2. Runtime 输出注册中心
@@ -20,6 +24,7 @@
 
 ```ts
 getRuntimeOutputContract(kind)
+getVersionedRuntimeOutputContract(kind, version)
 listRuntimeOutputContracts()
 validateRuntimeOutput(kind, value)
 assertRuntimeContractsReady()
@@ -33,6 +38,7 @@ assertRuntimeContractsReady()
 | `task_acceptance_decision` | `runtime.output.task_acceptance_decision` | `1.0` |
 | `task_brief` | `runtime.output.task_brief` | `1.0` |
 | `task_execution_result` | `runtime.output.task_execution_result` | `1.0` |
+| `task_execution_result`（协商式最小提交） | `runtime.output.task_execution_result` | `2.0` |
 | `file_revision_candidate` | `runtime.output.file_revision_candidate` | `1.0` |
 | `post_review_report` | `runtime.output.post_review_report` | `1.0` |
 | `final_delivery` | `runtime.output.final_delivery` | `1.0` |
@@ -223,6 +229,28 @@ Provider 内容字段必须是一个可直接 `JSON.parse` 的完整 JSON 对象
 
 Codex Stub 必须模拟这一真实顺序：先发送包含最终 `agentMessage` 的 `item/completed`，再发送允许 `items: []` 的 `turn/completed`。只在 `turn.items` 中伪造完整结果会掩盖真实协议回归。
 
+### 9.2 Workflow 接单与质量决策语义
+
+`task_acceptance_decision@1.0` 的 Schema 保持不变，但所有 Runtime adapter 必须使用同一提示语义：
+
+- Agent 已具备执行当前任务的职责和上下文时必须返回 `accepted`。质量工程师能够执行验收时同样必须先接单，不能用 `rejected` 表达上游成果存在缺陷。
+- `blocked` 只表示接单前缺少完成任务所必需的上下文；`missingContext/requestedContext` 必须描述缺少什么。
+- `rejected` 只表示能力、职责或政策与任务不匹配；它会进入显式改派、跳过或取消决策点。
+- Agent 接单后的运行错误或不完整输出属于执行阶段，不得伪装成接单拒绝。
+
+`robot_approval` 仍通过既有 `task_execution_result@1.0` 返回结果，但 `summary` 必须是一个不带 Markdown 包装的严格 JSON 对象，且只能包含以下四个字段：
+
+```ts
+type WorkflowRobotDecision = {
+  decision: 'approve' | 'revise' | 'reject'
+  reason: string
+  revisionInstruction: string | null
+  evidenceRefs: string[]
+}
+```
+
+四个字段全部必填，不接受额外字段。`revise` 必须携带非空 `revisionInstruction`，表示普通、可修复的质量问题；`approve/reject` 的 `revisionInstruction` 必须为 `null`。`reject` 仅用于不可恢复或政策性拒绝，并会终止整个 Workflow。非法 JSON、错误字段、机器人运行异常或超过返工上限统一转人工确认，不允许 Adapter 或编排器猜测、补写或修复模型决策。
+
 ## 10. Resume
 
 Resume 只允许通过 Plan 中的窄合同表达：
@@ -235,6 +263,8 @@ type RuntimeResumeRequest = {
 ```
 
 仅同 Runtime、同 Workspace 绑定允许 resume。失败或 session mismatch 时最多执行一次 fresh fallback，并记录 `RESUME_FALLBACK`。
+
+Workflow 处于 `pendingAgentSubstitution` 或 `pendingUpstreamRerun` 时不属于 Runtime resume：普通 continue 和服务启动恢复都不得启动新 invocation。只有携带当前 `confirmationId` 的显式改派、跳过、上游重跑、重试当前或取消操作可以解除停车状态。
 
 ## 11. Debug 审计
 
@@ -263,9 +293,9 @@ Provider 已启动后返回的 HTTP/网关错误不得归入 `RUNTIME_INVOCATION
 
 每轮 discussion 在 Agent fan-out 前必须统一刷新一次已配置 Runtime 的 availability，不能让每个 Agent 分别执行相同 preflight。不可用 Adapter 从本轮候选注册表移除，后续轮次检查恢复后可以重新注册。Generic LLM preflight 至少校验当前模型、endpoint 和凭据配置，并可调用非生成式 `/models` 探针确认网络、认证和限流状态；preflight 不应通过额外的计费生成请求验证模型。不支持 `/models`、返回 404/405 的兼容网关不得因此被误判为不可用。
 
-真实调用确认是可重试的 provider 级故障（包括网络/网关失败、限流或服务端错误）时，Orchestrator 默认对同一 Runtime 重试一次，并尊重有上限的 `retryAfterMs`。再次失败后打开 Runtime circuit；只有 Session 的 `allowedRuntimeTypes` 显式列出备用 Runtime 时，才按 allowlist 顺序执行一次 fallback。未授权 Runtime、认证失败和合同错误不得自动降级。默认总 attempt 上限为 3，可通过受控环境变量调节，但不能突破 Session allowlist。
+真实调用确认是可重试的 provider 级故障（包括网络/网关失败、限流或临时服务端错误）时，Orchestrator 默认对同一 Runtime 重试一次。`retryAfterMs` 必须落在剩余操作时间内，否则停止自动尝试。熔断按连接/模型/协议隔离；只有 Session 的 `allowedRuntimeTypes` 显式列出备用 Runtime 时，才允许 fallback。未授权 Runtime、认证失败和合同错误不得自动降级；HTTP 424 仅在已识别结构化故障码下重试。长操作总平台 attempt 上限为 3、短控制操作为 2，环境重试设置不能突破操作预算或 Session allowlist。
 
-每次 retry/fallback 必须使用新的 `invocationId`，并在 RuntimeInvocation 审计记录中保存共同的 `attemptGroupId`、递增的 `attempt`、`retryOfInvocationId`、`fallbackFromRuntimeType` 和 `fallbackReason`。写能力调用必须继续使用按 invocation 隔离的工作区，不能复用失败 attempt 的部分输出。平台必须分别记录 retry、circuit 和 fallback 事件，使 UI 能展示真实阶段与尝试链路，而不是只显示最终错误。
+每次 retry/fallback 必须使用新的 `invocationId`，并在 RuntimeInvocation 审计记录中保存共同的 `attemptGroupId`、递增的 `attempt`、`retryOfInvocationId`、`fallbackFromRuntimeType` 和 `fallbackReason`。写能力调用继续使用按 invocation 隔离的工作区；失败产物仅可经下述可信候选协议恢复，不能直接复用未验证输出。平台分别记录 retry、circuit 和 fallback 事件，使 UI 能展示真实阶段与尝试链路。
 
 不得把身份、目标和工具授权合并成可互相覆盖的 Runtime Profile。
 
@@ -304,10 +334,38 @@ See `docs/design/managed-worktree-execution-v1.md` for lifecycle and limits.
 
 ## 13. Structured Termination
 
-`AgentRunResult.termination` is the authoritative reason for an interrupted or timed-out invocation. The supported kinds are `user_cancelled`, `user_paused`, `frontend_disconnected`, `runtime_disconnected`, `phase_timeout`, `runtime_timeout`, `service_shutdown`, `superseded`, and `maintenance`. `user_paused` is resumable and must preserve the Session workflow checkpoint. `frontend_disconnected` is deprecated and retained only to decode historical persisted results; current browser SSE disconnects never produce this termination. A Local Runtime transport disconnect remains `runtime_disconnected` and interrupts its invocation.
+`AgentRunResult.termination` is the authoritative reason for an interrupted or timed-out invocation. The supported kinds are `user_cancelled`, `user_paused`, `frontend_disconnected`, `runtime_disconnected`, `phase_timeout`, `runtime_timeout`, `service_shutdown`, `superseded`, `maintenance`, and `output_contract_failure`. `user_paused` is resumable and must preserve the Session workflow checkpoint. `frontend_disconnected` is deprecated and retained only to decode historical persisted results; current browser SSE disconnects never produce this termination. A Local Runtime transport disconnect remains `runtime_disconnected` and interrupts its invocation.
 
 Server Codex and Claude Code invocations have lifecycle limits independent of SSE in both streaming and buffered modes: the default absolute deadline is 30 minutes and Worker concurrency defaults to 4. Each isolated platform Worker has a default V8 old-space ceiling of 512 MB; that ceiling does not constrain the RSS or heap of the CLI process spawned by the Worker. Production deployments that require a hard process-tree memory ceiling must add an OS job object, cgroup, or container limit. Deployments may tune the documented limits but must not make browser presence their resource-control mechanism.
 
 Adapters must not infer user intent from native exception text. Upstream cancellation is carried in `AbortSignal.reason`; Runtime-owned watchdogs produce `runtime_timeout`. During compatibility migration, `RuntimeError.termination` is dual-written and existing `RUNTIME_CANCELLED` / `RUNTIME_TIMEOUT` codes remain available.
 
 User-visible event content must use the safe termination message. Native process, provider, or AbortError details belong only in sanitized Debug/Audit data. See `docs/design/execution-termination-model-v1.md`.
+
+## 14. 执行可靠性协议（2026-09-14）
+
+`InvocationPlan.operation` 携带持久化操作的 id、deadlineAt、policyVersion、maxAttempts。系统 RuntimeInvocation 和 Orchestrator 共用 RuntimeService 监督入口，启动前原子预留额度；路由重建、上下文补充、Provider 重试和提交修复不能重置截止。短控制操作 120 秒/2 次，长阶段使用有效配置/3 次，暂停后显式恢复仅使用剩余额度。停止请求后最多等待 15 秒确认；未知停止保留屏障，匹配回执只能清屏障，不能提交迟到业务成功。进程内 mock 的恢复豁免不适用于工程 CLI。
+
+`task_execution_result@2.0` 的严格字段为 kind、schemaVersion、status、summary、artifactRefs、blockers、nextActions。仅支持此版本的 Local Runtime 写任务默认协商启用，`proposal_only` 保持原合同。操作冻结 `outputContractKey`。平台根据实际捕获 ChangeSet 的路径白名单生成领域 v1 结果，不接受伪造产物或测试通过；completed 且存在 blockers 为非法。
+
+共享合同模块导入不得立即触发 Ajv 动态代码编译：最小提交校验器在首次 validate 时初始化并缓存，服务端启动 preflight 仍调用 validate 严格校验。桌面仅导入共享类型/数据时不执行该编译，继续保留 `script-src 'self'`、sandbox 和 contextIsolation；不能通过增加 unsafe-eval 修复白屏。真实 Electron CSP 渲染验证入口为 `npm run test:e2e:desktop-render`。
+
+`recoveryCandidate` 保存进程结束后的 ChangeSet，最大 1 MB、7 天有效，原提交最大 256 KB。恢复前验证 session/workItem/task、授权的 recoveryOriginTaskId、权限 hash、manifest hash、基线及输出版本。`submissionRepair` 只允许已有候选的格式修复；Claude 禁工具和副作用权限，启用 `--safe-mode`，不允许自定义 CLI 参数，并核对修复前后文件 hash；Codex 当前不支持自动格式修复。安全能力缺失或纠正额度耗尽时保留候选并停车，不回退普通开发。候选失效必须明确告知原因。
+
+可观察 StructuredOutput 错误与平台修复共享一次纠正额度；流事件与最终事件去重。调用结果必须等待已知额度记账完成，但不能无限等待已结束进程的损坏事件迭代器。监督读写失败请求取消并返回非重试错误，禁止以成功推进。
+
+Local Runtime 可选握手 `stopReceiptProtocol: 1`：客户端在真实进程结束后持久化 `local_runtime.invocation.stopped`，断线重连/心跳重传，服务端匹配 invocation/device/workspace/runtime 并持久化后返回 `local_runtime.invocation.stop_ack`。回执不含业务产物；客户端最多保留 256 个待确认回执，满额阻止新调用。旧客户端保留 invocation.result 路径，未核实的历史进程不得自动重放。
+
+结束事实与停止通知分离：回执在最新的逻辑操作事务内校验绑定并结束 activeInvocation；只有该操作原先存在 `unconfirmed` / `pauseRequested`，或连接层存在精确匹配的未确认停止，才发布停止确认通知。正常完成只落库与 ack；重复回执保持幂等，不重复提示用户继续，也不能结束后续的新调用。
+
+失败恢复的 HTTP `/sessions/:id/resume` 与明确的“继续”命令使用相同入口。契约生成/修订失败恢复到 AGENT_DISCUSSING；任务执行失败且已有契约时恢复执行。旧版缺失契约后误入用户决策的会话按状态事件证据回到生成阶段。停止未确认时仍拒绝重试；重复已批准的 resume 确认不重复启动，旧确认不能处理当前新的恢复检查点。工作流改派、返工选择和危险动作批准仍必须使用各自的明确操作。
+
+`operationTelemetry` 记录平台准备、首次有效输出时间、可观察工具区间和未分类耗时；queueWaitMs、upstreamWaitMs、billableTokens 无可信来源时为 null。reported_cumulative 用量不等于计费量；未知连接/模型不得推断。规则接单只确认任务可执行，不代表 QA approve。实现及验收边界见 [可靠性计划](../design/agent-execution-reliability-plan-v1.md)。
+
+## 15. 停止状态一致性（2026-09-15）
+
+Runtime 结束路径无条件清理监督句柄、计时器和 Abort 监听器。逻辑操作 `settle` 失败时，原业务结果不得作为成功交付；服务返回 `STOP_STATE_PERSISTENCE_FAILED` 诊断并登记内存待同步屏障。同步按 1/2/5/10/30 秒最多五轮有限退避，耗尽后保持 `stop_state_sync_exhausted`，只有显式核对成功才能解除。
+
+Session 停止先在事务中冻结目标，再向当时监督中的 invocation 发送取消。`result` 与 `local_runtime.invocation.stopped` 共享可信结束入口：必须精确匹配 invocation、device、workspace 和 runtime；先到的 stopped 可以结束 handle 并 ACK，但不应用业务结果或 ChangeSet，后到的 result 只能用于幂等核对，不能翻转终态或更新 workspace revision。
+
+重复回执只返回 ACK。停止通知仅在目标状态实际推进时生成，正常完成保持静默；服务端不得因为发布失败、ACK 丢失或客户端重传而产生第二次用户通知。

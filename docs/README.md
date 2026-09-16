@@ -19,6 +19,8 @@
 
 ## 推荐阅读路径
 
+主 Agent 主持群聊、多会话隔离与长会话治理的分阶段改造，请从 [实施总计划与 9 阶段 SDD 索引](roadmap/main-agent-collaboration-roadmap-v1.md) 开始。该计划含每阶段 spec / plan / tasks / checklist，状态为待实施，不表示功能已上线。
+
 1. 产品与目标：`product/`
 2. 设计与交互：`design/`
 3. 当前状态与问题：`analysis/`

@@ -1,5 +1,7 @@
 # Data Contract v0.1
 
+主 Agent 协作的身份链、文档确认和策略快照见 [阶段 0 冻结合同](./main-agent-collaboration-contract-v1.md)。本阶段仅新增共享合同/纯校验，不改既有必填数据模型；新增集合和 projection 尚待对应阶段迁移。
+
 ## 1. 目标
 
 本契约定义 v1 最小可开发数据模型。后端 migration、前端 mock、测试 fixtures 需要以此为准。
@@ -11,7 +13,7 @@
 截至 `agent-cluster@0.1.0` 当前工作树：
 
 - 默认持久化可使用本地 file JSON 快照。
-- PostgreSQL 后端使用 JSONB collection 单 key upsert 保存集合状态，尚未拆分为本文第 4 节的细粒度关系表。
+- PostgreSQL 后端由版本化关系迁移和集合投影读写，完整记录保留于 source_snapshot；当前迁移与字段以 `modules/persistence/relational/` 为准，本文第 4 节还包含目标模型。
 - RAG 当前使用关键词检索；`knowledge_chunks.embedding` 和 pgvector 属于目标模型和后续迁移范围。
 - `capability_invocations` 的目标表语义当前主要由 capability 审计事件和 Runtime invocation log 承载。
 
@@ -33,10 +35,20 @@ type SystemDataMetadata = {
 - `dataEpoch` 在每次受控 cutover 时重新生成。Session、Queue Job、Runtime Invocation、Artifact、Recovery 与 Local Runtime registration 必须与当前 epoch 完全一致。
 - file backend 的新默认文件为 `state.v3.json`。显式配置其他文件名不改变 schema 门禁。
 - 旧状态必须保留在活动数据根之外的加密只读归档中，供离线审计；Session/Queue/Recovery/Resume 不得读取该归档。
-- Runtime output 另有独立 `schemaVersion: "1.0"`，不能与系统 `dataSchemaVersion: 3` 混用。
+- Runtime output 另有独立 `schemaVersion: "1.0"` 及协商式最小提交 `task_execution_result@2.0`，不能与系统 `dataSchemaVersion: 3` 混用。
 - Runtime Invocation 和 Artifact 加载时若缺少 `dataEpoch`、epoch 不匹配或不满足 v3 必填结构，启动门禁直接失败；不补字段、不清洗 metadata、不读取旧记录。
 - Artifact 顶层分别持久化必填的 `runtimeProposals`、`platformProjections` 与 `systemEvidence`。`metadata` 是平台白名单类型，不接受任意键，也不再包含 `output`、`fileChanges` 或 `validationEvidence`。模型提议不得混入平台投影；待写入投影不得冒充真实 ChangeSet；真实 ChangeSet 与真实测试不得混入 proposal。
 - 启动顺序固定为：加载持久化状态、校验 schema/epoch metadata、完成 Runtime 合同 preflight，然后才允许接收任务。
+
+### 1.3 执行可靠性增量（2026-09-14）
+
+- `logicalOperationsBySession` 保存 LogicalOperation。PostgreSQL V8 新增 `agent_cluster.logical_operations`，关联 Session，source_snapshot 保留完整记录；file 模式保存同名集合。V8 是关系迁移版本，不改变活动 dataSchemaVersion=3。
+- 操作字段包括 id/sessionId/taskId/phase、parentId/previousId/scopeKey、policyVersion、deadlineAt/remainingActiveMs、attemptsUsed/maxAttempts/correctionsUsed、status、stopState、activeInvocationId/invocationIds、ownerId、transport、outputContractKey、pauseRequested、executionKind 和诊断/时间字段。所有额度预留须原子持久化后才启动调用；停止未确认及旧进程所有权不明时禁止替代。
+- `RoutingContextSnapshot.businessFingerprint` 排除心跳、工具日志计数和用量，纳入业务范围与任务状态；`UserMessageRouting.snapshotRebuildCount` 独立持久化，原因标签覆盖不能重置重建额度。旧终态不能因缺少新字段复活。
+- `AgentTask.acceptanceCheckpoint` 保存 inputFingerprint、agentId、decisionSource（rule/model）、decision、invocationId、createdAt。复用前重新检查权限、工具、目标、范围和依赖；接单不等于质量批准。
+- `AgentTask.executionOperationId/previousExecutionOperationId/recoveryOriginTaskId` 关联当前及显式新尝试。`executionCheckpoint` 保存 operationId、invocationId、candidateId/hash、stage、writebackId，并投影到 Workflow NodeRun；当前 stage 为 candidate_captured/submission_validated/writeback_confirmed，不能把没有测试证据的记录标为验证通过。
+- `RuntimeExecutionCandidate` 经调用日志持久化，内容为有界 ChangeSet、基线、manifestHash/permissionHash、session/workItem/task/workspace 归属、outputVersion、创建/过期时间、原始提交及 Schema 错误。不是可任意读取的文件路径，恢复不读取用户临时目录。
+- 向当前 v3 数据新增集合/可选字段，恢复仍停车而非自动重放。旧版本二进制不保证识别新操作/输出；不得通过清空检查点回滚。迁移测试与能力边界见 [可靠性验收](../quality/agent-execution-reliability-checklist-v1.md)。
 
 ## 2. 命名约定
 
@@ -484,7 +496,7 @@ create table artifacts (
 | `eventsBySession` | session-keyed events | `actor` 与旧 `fromAgentId` 双写 |
 | `tasksBySession` | session-keyed tasks | `assignee/assignedBy` 与旧 agentId 双写 |
 | `workflowCatalog` | `{ schemaVersion, workflows, versionsByWorkflowId }` | 可变草稿、三类节点、不可变发布版本和归档状态；兼容期双写旧 `workflows` |
-| `workflowRuntime` | `{ schemaVersion, runs, nodeRunsByRunId, approvalsByRunId, effectsByRunId }` | 运行快照、节点尝试、人工/机器人决策、幂等副作用和恢复状态 |
+| `workflowRuntime` | `{ schemaVersion, runs, nodeRunsByRunId, approvalsByRunId, effectsByRunId }` | 运行快照、节点尝试、人工/机器人决策、显式停车决策、幂等副作用和恢复状态 |
 
 新增 shared 数据结构：
 
@@ -525,6 +537,31 @@ Session 增加 `origin?: 'user' | 'autopilot'` 和 `autopilotRunId?: string`。A
 
 Session 使用 `workflowRunId` 关联独立运行实例；`workflowRun` 仅作为旧版兼容投影，不再是工作流事实源。工作流任务仍存入 `tasksBySession`，并携带 `workflowRunId/workflowNodeId/workflowNodeRunId/workflowAttempt/executionPurpose`。运行事实保存在 `workflowRuntime`，阶段输出和用户确认继续以协作事件形成可审计记录。
 
+Workflow 显式停车状态持久化在对应 `WorkflowRun` 上：
+
+```ts
+type WorkflowPendingAgentSubstitution = {
+  nodeId: string
+  nodeRunId: string
+  taskId: string
+  currentAgentId: string
+  reason: string
+  candidates: Array<{ id: string; key: string; name: string; role: string }>
+  confirmationId: string
+  requestedAt: string
+}
+
+type WorkflowRun = {
+  // ...
+  pendingAgentSubstitution?: WorkflowPendingAgentSubstitution
+  pendingUpstreamRerun?: WorkflowPendingUpstreamRerun
+}
+```
+
+`pendingAgentSubstitution` 存在时必须同时满足 Task=`blocked`、NodeRun=`waiting`、Run=`waiting_human`；Session 投影为 `WAIT_USER_DECISION`。服务重启后必须恢复相同的等待原因、候选、`confirmationId` 和节点 attempt，不能创建新 attempt 或自动调度 Runtime。同一 `runId + taskId` 的确认请求使用固定幂等键，重复恢复只能得到同一张 active confirmation。
+
+改派会清除 pending、将原 Task 改为新 Agent 并恢复当前 NodeRun；跳过会清除 pending、将原 Task 置为终态并将 NodeRun 置为 `skipped`；取消会清除所有 pending 并将 Run/Session 置为取消终态。任何返工或重试都必须追加新 Task 和新 NodeRun attempt，历史记录不得覆盖。
+
 Actor PostgreSQL 回填针对 collection 表执行，默认表名遵循 persistence 配置；`--apply` 前创建时间戳备份表并在事务内更新 `eventsBySession/tasksBySession`。默认仅 dry-run。
 
 ## 10. 用户原文件修订数据
@@ -542,3 +579,21 @@ Run 活动状态为 `submitted/processing/synthesizing/awaiting_confirmation/app
 持久化 collection 的活动结构固定为 `{ schemaVersion: 2, baselines, chains, runs, drafts }`。重启必须恢复待确认候选和草稿；`submitted/processing/synthesizing` 转为可见 `interrupted`，由用户显式重试后根据已持久化 Agent 结果选择 `run_agents` 或 `receiver_only`。`applying` 根据 Workspace Hash 对账为 `applied/awaiting_confirmation/stale`；若写回异常后连 Workspace 也无法读取，则保存 `REVISION_APPLY_OUTCOME_UNKNOWN`，后续显式重试只执行 `apply_reconcile`。删除 Session 时级联清理其修订记录。
 
 候选已经写回但 Run 终态或新基线持久化失败时，只允许保存稳定错误码 `REVISION_APPLY_PERSISTENCE_RECOVERY_REQUIRED` 或 `REVISION_POST_APPLY_BASELINE_FAILED`。Provider、文件系统或数据库的原始错误文本不得进入 Run、协作事件或前端状态。
+
+## Codex 式任务工作区历史合同（2026-09-11）
+
+`SessionListItem` 增加可选 `projectId/workspaceId`，用于真实项目或工作区分组；旧记录缺字段时显示未分组，不猜测目录或项目名。产品新建任务仍创建 Session，旧 WorkItem/sessionId 归属不反转、不迁移。
+
+`WorkflowRun.fileBaseline?: WorkflowFileBaseline` 保存 `{capturedAt,complete,hashes:Record<path,sha256>,reason?}`。在首个节点启动前持久化。基线只保存 Provider 可见文件的哈希，不保存任意本地目录全文。15 秒/512 目录/1024 文件/单文件 2 MiB/总计 32 MiB 的任何缺口都使 complete=false。旧运行没有字段时不可推定存在历史基线。
+
+`WorkflowDeliveryFileDiff` 保存展示结果 `{status:'complete'|'unavailable',source,reason?,files}`；files 为路径、操作与历史 before/after。计算只读取该运行任务关联 Artifact 的 `systemEvidence.workspaceChangeSet`，过滤完成时间之后的产物、去重 ChangeSet ID、校验每步 expectedHash 与开始哈希及前一步目标内容。缺本轮原文、缺任何任务（含取消）的权威证据、断链、只有路径的 move 均明确降级。最终按两端内容对比，create/delete 的存在性与空字符串分开处理；完全撤回的修改不残留。基线扫描不提供文件系统原子快照，对未进入证据的外部修改不作完整性保证。
+
+本轮 Diff 来自保存的 WorkspaceChange；平台生成但尚未写入的内容、报告摘要/正文标为 reference。读取历史不回写文件、不补造旧 baseContent，也不复用 FileRevisionCandidateEditor 的可写操作。
+
+## 11. 会话停止轮次
+
+`sessionStopRequestsBySession` 按 Session 保存 `SessionStopRequest[]`。一次停止轮次具有稳定 `id`、固定 `targetInvocationIds/targets` 和从 1 开始的单调 `version`；未完成轮次上的重复停止复用同一个 `id`，不能重新采样目标。零目标轮次立即进入 `confirmed`。
+
+目标状态仅允许 `waiting/pending_sync/confirmed/unknown`。`confirmed` 必须来自 Adapter 结果或精确匹配的 Local Runtime transport receipt；服务重启后缺失退出证据的活动操作恢复为 unknown，不得按进程内句柄消失推断结束。状态、版本、事件和 outbox 在同一个 `mutateCollections` 事务中提交。
+
+停止轮次与 `logicalOperationsBySession` 共用集合事务锁。存在未确认停止时，新的 operation reserve、Session resume 和 retry 必须 fail closed；禁止删除停止记录、重写目标或重放历史模型调用来解除屏障。

@@ -6,6 +6,7 @@
 
 ## 契约清单
 
+- [main-agent-collaboration-contract-v1.md](./main-agent-collaboration-contract-v1.md)：主 Agent 协作阶段 0 冻结合同；共享纯校验已实现，生命周期/讨论/确认/缓存业务接入按后续阶段实施。
 - [event-contract-v0.1.md](./event-contract-v0.1.md)：协作事件类型、payload、metadata、SSE 推送、前端渲染规则。
 - [api-contract-v0.1.md](./api-contract-v0.1.md)：Session、Event、Agent、Task Brief、Knowledge、Artifact 的核心 API。
 - [data-contract-v0.1.md](./data-contract-v0.1.md)：v1 最小数据模型、枚举、关系和索引。

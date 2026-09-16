@@ -1,5 +1,7 @@
 # 关系型持久化合同 v2
 
+主 Agent 协作后续集合、迁移及旧 writer 准入要求见 [阶段 0 冻结合同](./main-agent-collaboration-contract-v1.md)。阶段 0 无 schema 变更、无迁移执行；在线 scoped mutation 和维护全局 CAS 边界继续有效。
+
 本文档是 `agent_cluster` PostgreSQL 关系模型和会话持久化边界的执行合同。数据库表和字段的中文说明以 `relational-schema.ts` 生成的 `COMMENT ON TABLE/COLUMN` 为准；本文件说明使用边界和迁移方法。
 
 ## 1. 会话数据边界
@@ -126,3 +128,23 @@ npm run migrate:relational -- apply --source .cache/agent-cluster/state.v3.json 
 PostgreSQL 模式写入 `fileRevisions` collection 时必须调用 compare-and-set：事务先取得 `pg_advisory_xact_lock(hashtext('agent_cluster:file-revisions'))`，再读取并规范化当前 `{ schemaVersion:2, baselines, chains, runs, drafts }` 投影，将其 SHA-256 revision 与调用方的已持久化快照比较。只有 revision 相同才允许写入四类 `file_revision_records` 并提交；不一致返回冲突、不得应用本次 mutation，并必须从数据库刷新冲突进程的本地快照，避免后续请求继续基于陈旧状态。
 
 该 CAS 是数据库范围的串行化边界，进程内 keyed mutex 只负责减少同一进程竞争，不能替代数据库事务。PostgreSQL 集成测试必须覆盖 V2 四类投影往返恢复、两个独立 Pool/连接从同一 expected snapshot 并发写入时恰好一个成功一个冲突，以及连接不可用时写入明确失败而不发布内存状态。
+
+## 5. 在线集合事务（2026-09-14）
+
+逻辑操作预留/结束、Runtime 调用日志和 Context 更新使用 `PersistenceService.mutateCollections(keys, mutator)`，不使用全库 revision。事务持有 `agent_cluster:state-mutation` 共享维护锁，再按集合名排序获取 `agent_cluster:collection:<key>` 独占事务锁，在锁内读取最新投影并提交。事件投影会写 outbox，因此隐式包含 eventOutbox 锁。普通集合写入、事件追加、outbox 发布/领取及 workspace lease 采用同一锁顺序；全局 CAS、替换和会话物理删除持有独占维护锁。文件修订继续保留自身严格 CAS。
+
+mutator 只能同步计算和修改声明集合内的数据，禁止模型调用、进程启动、网络或文件副作用；返回 Promise、写入未声明集合、删除整个集合会拒绝提交。SQLSTATE `40001` / `40P01` 最多尝试 3 次，间隔 20/40 ms；业务校验失败和无法判定提交结果的连接故障不自动重试，更不能转为模型重跑。
+
+普通 `setCollection` 使用本地修改前后差量更新数据库最新投影：对象按字段合并；具有唯一稳定 `id` / `invocationId` / `idempotencyKey` 的数组按记录合并，保留数据库并发新增记录和调用方未改字段。此类数组视为记录集合，不支持靠重排表达排序修改；没有稳定 ID 的数组仍按整体值处理。显式删除遵守各集合原有持久化删除规则；不得把这个接口当作新增的通用物理删除 API。
+
+提交后仅更新对应缓存集合，并叠加仍在队列中的本地差量。事件只登记新增记录的待提交差量，避免每个流式事件复制全库历史。正常调用结束回执仍须持久化并 ack；是否向用户发送停止确认提示由实际待停止状态决定。
+
+本版以集合串行为正确性边界，不承诺同集合不同行并行。高频 Runtime、Session、Context 投影使用定向读取；复合目录配置保留原加载器作为兼容回退，后续可进一步优化集合内历史读取和写入量。
+
+验证入口：`node scripts/test-session-persistence-postgres.mjs`。该命令根据本机连接创建独立测试数据库，运行真实并发/恢复测试后仅删除本次创建的数据库，不向业务数据库写测试数据。SDD 与验收记录见 [群聊持久化与恢复 Checklist](../quality/session-persistence-recovery-checklist-v1.md)。
+
+## 6. 停止轮次关系投影（Migration 9）
+
+Migration 9 `session_stop_request_state` 新增 `agent_cluster.session_stop_requests`。`external_id` 是停止轮次稳定标识，`session_id` 关联 Session，`version/status/created_at/updated_at` 提供可查询列，完整固定目标与证据保存在 `source_snapshot.sourceRecord`。`session_stop_requests_one_open_idx` 保证一个 Session 最多存在一个未 confirmed 轮次。
+
+collection `sessionStopRequestsBySession` 必须支持定向读取、全状态恢复、replace-state、V2 cutover seed 和事务写回。它与 `logicalOperationsBySession/eventsBySession/eventOutbox` 按统一集合锁顺序提交，不能先发布事件再补写停止状态。迁移回退仅允许使用切换前导出的完整状态快照；不得通过删除开放停止轮次解除执行屏障。

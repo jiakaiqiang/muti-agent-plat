@@ -1,10 +1,20 @@
 # UI State Contract v0.1
 
+主 Agent 协作的新旧状态兼容规则见 [阶段 0 冻结合同](./main-agent-collaboration-contract-v1.md)。未知控制状态不可默认允许执行；本阶段不接入页面或共享 store，Web/桌面布局不变。
+
 ## 1. 目标
 
 本契约定义前端 v1 最小状态模型、状态流转和事件到 UI 的派生规则。Frontend Team 可基于本契约使用 mock events 开发三栏群聊页面。
 
 ## 2. 页面视图
+
+执行可靠性反馈（2026-09-14）：Web 与桌面共用 `apps/web/src/utils/taskActivity.ts` 和会话事件事实，各自保留页面布局。状态映射必须区分正常执行、模型连接等待有限重试、已保存修改正在修复提交、异常和停止未确认，不能因服务心跳把后四者覆盖成“任务正常”。
+
+停止未确认提示可在 PAUSED/INTERRUPTED 会话中保留，直到服务端可信回执表明所有相关调用停止；断线时不得推断停止已完成。接收 `RUNTIME_STOP_CONFIRMED` 后按实际会话状态恢复展示。点击继续仍由服务端停止屏障和预算校验决定是否执行，客户端提示不能绕过闸口。规则接单也不能在工作流视图中显示 QA 已通过。
+
+阶段信息展示在现有群聊/任务进度区域，不新增第二套工作流或改变所选流程快照；任务记录、滚动、停止控件、文件 Diff 与双端同步继续遵守原合同。
+
+输入区主按钮（2026-09-14）：Web 与桌面共用 `UserInputBox`，发送与停止使用同一个固定尺寸按钮。发送请求进行中或会话可中断时显示停止图标，空草稿仍可停止；停止通过现有会话 pause 链路取消意图识别、Agent 调用及流式执行，不能仅断开页面 SSE 来假装停止。停止中禁用重复点击并显示等待反馈；失败保留错误和重试停止入口。已暂停且无草稿时同一按钮显示继续，有草稿时显示发送（只排队，不隐式恢复）；执行中保留草稿，发送快捷键不绕过停止模式。输入区不再并列展示发送和停止按钮，两端保留各自布局及配色。
 
 ```ts
 type SessionViewMode = 'chat' | 'collaboration_graph' | 'workflow'
@@ -167,6 +177,9 @@ type ConfirmationCardState = {
       | 'confirm_task_brief'
       | 'select_workflow'
       | 'confirm_workflow_step'
+      | 'confirm_workflow_human_gate'
+      | 'workflow_agent_substitution'
+      | 'workflow_upstream_rerun'
     | 'approve_high_risk_capability'
     | 'resolve_contract_conflict'
     | 'confirm_local_report_save'
@@ -178,6 +191,11 @@ type ConfirmationCardState = {
   relatedBriefId?: string
   relatedTaskId?: string
   relatedCapabilityId?: string
+  workflowRunId?: string
+  workflowNodeId?: string
+  workflowNodeRunId?: string
+  candidateAgentIds?: string[]
+  expectedRunRevision?: number
 }
 ```
 
@@ -187,6 +205,10 @@ type ConfirmationCardState = {
 - `WAIT_USER_CONFIRM` 时 active confirmation 通常关联 Task Brief。
 - `WAIT_USER_DECISION` 时 active confirmation 通常关联冲突、预算或高风险能力。
 - `confirm_local_report_save` 必须展示完整报告正文和目标路径；只有用户选择“保存到本地”后才能写入工作区。
+- `workflow_agent_substitution` 显示“等待改派或跳过”，提供候选 Agent、`skip_agent` 和取消操作；不得提供普通继续。
+- `workflow_upstream_rerun` 显示“等待选择返工节点”，提供合法上游节点、`retry_current` 和取消操作。
+- `confirm_workflow_human_gate` 显示“等待人工验收”，不得与接单拒绝或输入不足共用文案。
+- 所有卡片 mutation 必须发送卡片携带的 `confirmationId`，处理中禁用重复提交；SSE 重连只恢复事实，不自动重放决策。
 
 ## 7. Task 状态
 
@@ -227,6 +249,8 @@ type TaskViewState = {
 - `rejected/reworking`：橙色。
 - `completed`：绿色。
 - `failed`：红色。
+
+任务事件文案必须区分来源：`task_rejected` 显示“Agent 拒绝接单”，`task_failed` 显示“任务执行失败”，`task_blocked` 表示接单前缺少上下文，`task_waiting` 表示执行中等待上下文、能力批准或恢复。不得把执行失败渲染成质量不通过或接单拒绝。
 
 Coordinator 中心流转展示规则：
 
@@ -269,6 +293,7 @@ Coordinator 中心流转展示规则：
 - 人工确认节点展示确认说明和允许操作，确认人固定为当前会话发起人。
 - 机器人确认节点选择评审 Agent，配置评审提示、通过标准和最大返工次数；默认最大返工次数为 `2`。
 - 机器人评审异常、格式错误或重试超限时必须显示“转人工确认”的回退行为。
+- Agent 节点配置必须说明它不具备自动质量返工语义；需要自动验收时使用机器人确认节点。机器人确认帮助文案必须说明 `revise` 会带修改要求返回上游并保留历史 attempt，`reject` 会终止整个 Workflow。
 - 未选中节点时展示工作流摘要和发布前校验结果，不保留上一次节点的可编辑表单。
 
 ## 8. Pinia Store 合约
@@ -420,3 +445,21 @@ Review Agent 复盘
 `interrupted` 状态必须显示由用户触发的“重试本轮修订”，请求携带新的 `retryKey` 和当前 `expectedStateVersion`。进入编辑后焦点移到候选文本框；放弃编辑后回到“继续编辑”；状态切换到处理中时焦点回到修订区域，新候选到达时移到候选正文，避免异步替换后键盘焦点丢失。
 
 当当前 Run 为 `REVISION_PARTIAL_AGENT_FAILURE` 时，编辑器只显示“重新执行全部 Agent”“使用已成功结果继续”和“放弃”三种明确操作；没有成功结果时禁用继续选项。选择继续后仍只展示 Receiver 生成的最终候选，不展示 Agent 结果之间或候选之间的 Diff。
+
+## 13. Codex 式任务工作区
+
+本节约束只读执行回看，不改变第 12 节可写文件修订编辑器。工作区新主模式为 `chat/workflow/workflow_details`，由真实运行历史决定三 Tab 是否出现，完成/失败/取消不移除。旧 `collaboration_graph/debug` 保留在“更多视图”，不能当作所选流程图。
+
+`taskWorkspace` 按 sessionId 载入运行、详情、tasks 数组及 artifacts 页，用请求 generation 忽略其他任务的迟到响应。选择 `{runId,nodeId,taskId,nodeRunId}` 按 sessionId 存入 sessionStorage；任务草稿亦按 sessionId 在 sessionStorage 恢复。存储不可用时退化为内存状态。当前 Tab 使用 URL query，同页任务切换恢复各自选择。ChatTimeline 按 sessionId 与中央/右侧区域保存 messageId/offset/top/following 阅读锚点，首次可见时恢复；新消息只在 following=true 时跟随，隐藏区域不覆盖已保存位置。
+
+图使用固定版本节点/边，返工路径只叠加真实 NodeRun 记录；点击节点打开右侧任务列表，再点击任务展开详情，关闭恢复同源只读 ChatTimeline。右侧不挂载 ConfirmationCard/CapabilityApprovalCard 写动作，统一“去处理”导航中央对应 confirmationId。中央计划摘要不再重复挂载需求确认卡。
+
+`historyDiff` 是全局只读查看状态，保存文件内容副本、来源和 sessionId。手动切任务或关闭弹窗递增请求代次，迟到的产物响应不能重新打开。新通知不改 Tab/历史选择、不关闭 Diff。待处理数按未解决 confirmationId 去重，阅读不消除 pending。群聊、Agent/节点任务、产物文件入口复用同一弹窗；支持 split/unified、文件切换与 Esc/焦点恢复。二进制、缺两端和超限按明确说明降级，不读取当前工作目录冒充历史。
+
+## 14. 执行停止摘要
+
+Web 与 Electron desktop 共用 `useSessionStore` 中按 sessionId 隔离的权威 `RuntimeStopSummary`，并在会话工作区渲染同一个 `RuntimeStopStatePanel`。切换会话时先读取 `GET /sessions/:sessionId/stop-state`；读取失败显示 unknown/阻塞状态，不能沿用其他 Session 的摘要或显示可继续。
+
+SSE `RUNTIME_STOP_STATE_CHANGED` 与快照按停止轮次收敛：同 `stopRequestId` 只接受更大 `version`，不同轮次按 `updatedAt` 选择较新事实。`waiting/unknown` 展示确认计数和 blocker；只有 `canResume=true` 才显示停止已确认。详情可展开查看目标，但诊断不得包含凭据、完整业务正文或本地绝对路径。
+
+实时停止状态不堆入 ChatTimeline。历史 `RUNTIME_STOP_CONFIRMED` 的连续折叠只是一种展示压缩，不能改变事件数组、服务端状态、通知次数或恢复判断；展开后必须能看到原始次数和时间。

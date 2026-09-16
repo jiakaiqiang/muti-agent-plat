@@ -133,3 +133,24 @@ PR-05 只有在以下条件全部满足后才可标记完成：
 - provisional 文件为 `.cache/agent-cluster/watchdog-claude-provisional.json` 与 `.cache/agent-cluster/watchdog-claude-provisional.md`。
 - 该结果不得写入生产配置：正式基线仍要求至少 20 个 completed 样本、慢任务/故障注入复核、负责人批准和回滚演练。
 - 当前 20 元费用上限无法安全覆盖约 995,240 tokens 的 20 次同量级采样，因此批量任务保持暂停。
+
+## 9. Local Runtime（本机 CLI）的 idle 超时
+
+上面第 1 节的参数只作用于**服务端**流式 Runtime。走 `local_bridge` 的调用在本机
+CLI 里执行，`packages/local-runtime-cli` 的 `runRuntimeCommand` 没有任何 watchdog，
+所以服务端持有唯一的一口钟：
+
+```dotenv
+LOCAL_RUNTIME_IDLE_TIMEOUT_MS=600000
+```
+
+- 位置：`local-runtime-connection.service.ts` 的 `armInvocationIdleTimer`。
+- 语义是 idle 不是 absolute：每收到一条 `local_runtime.invocation.event` 就重置，
+  只有 CLI **仍然连着但不再出声**时才触发。健康的长任务会持续发事件，不会被误杀。
+- 触发后产出 `RUNTIME_TIMEOUT` + `termination.kind = 'runtime_timeout'`、
+  `timeout.mode = 'idle'`，与服务端适配器同形，编排层按同一条分支处理。
+- 取值范围与回退规则同 `positiveRuntimeTimeoutMs`：1～2,147,483,647 ms 的整数，
+  非法值回退 600,000 ms。**没有关闭开关**——这一层归零就等于回到无人终止的状态。
+- 2026-08-27 之前这一层没有钟，`activeInvocations` 是本服务里唯一不带 timer 的
+  pending 表，群聊 discussion 阶段因此只能靠 CLI 掉线来结束。调参前先读这一条，
+  不要把它当成可选加固。

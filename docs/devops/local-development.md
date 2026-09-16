@@ -163,7 +163,15 @@ redis-server --appendonly yes
 
 ## 应用启动建议
 
-建议使用根目录 supervisor 同时启动前后端：
+需要同时查看 Web 与独立桌面界面时，在仓库根目录执行：
+
+```powershell
+npm run dev
+```
+
+先构建桌面，然后启动后端/Web，后端就绪后自动打开 Electron 并连接当前 `SERVER_PORT`。Web 默认访问 `http://127.0.0.1:8089`。桌面使用独立开发配置，原两端界面不合并；更新与退出方式见 [桌面应用开发说明](./desktop-application.md#开发与生成安装包)。启动失败会保留健康探针或桌面启动错误，后端不就绪时不假装已启动桌面。
+
+建议使用根目录 supervisor 同时启动后端、Web 与桌面：
 
 ```bash
 docker compose up -d postgres redis
@@ -171,7 +179,9 @@ npm install
 npm run dev
 ```
 
-`npm run dev` 会固定启动 8099 后端和 8089 前端，并持续检查 `/api/health`。后端在首次启动超时、已就绪后持续失联，或任一开发子进程异常退出时，supervisor 会关闭整组进程并返回非零退出码，避免只剩前端继续展示过期会话状态。
+`npm run dev` 会构建桌面，启动默认 8099 后端和 8089 前端，并在后端就绪后打开桌面窗口；端口可通过 `.env` 配置。`npm run dev:all` 是同一命令的别名，仅启动后端/Web 使用 `npm run dev:web`。supervisor 在启动阶段通过 `/api/health` 检查 readiness；首次就绪后改用不读取持久化和构建状态的 `/api/live` 检查进程 liveness。探针失败日志会保留探针类型、连续失败次数、HTTP/超时原因和耗时。每次启动前，supervisor 会先结束当前配置的 8099/8089 监听进程，并清理旧后端 launcher lock，然后再启动新的前后端进程组；因此重复执行 `npm run dev` 会自动完成 kill + restart。这里的清理范围只包含这两个开发端口，不会扫描或停止其他端口的服务。
+
+后端在首次启动超时、已就绪后持续失联，或任一开发子进程异常退出时，supervisor 会关闭整组进程并返回非零退出码，避免只剩前端继续展示过期会话状态。
 
 需要单独调试某一侧时，仍可分别执行：
 
@@ -180,7 +190,7 @@ npm run dev --workspace @agent-cluster/server
 npm run dev --workspace @project/web
 ```
 
-单独启动不会提供整组健康托管；若浏览器显示“后端连接已中断”，应先检查 `http://127.0.0.1:8099/api/health`，不要把 WebSocket 重连错误误判为 Agent 自身卡死。
+单独启动不会提供整组健康托管；若浏览器显示“后端连接已中断”，先检查 `http://127.0.0.1:8099/api/live` 判断进程是否可响应，再检查 `http://127.0.0.1:8099/api/health` 核对构建和持久化配置，不要把 WebSocket 重连错误误判为 Agent 自身卡死。本次工作流断连的根因与验收合同见 [工作流执行期间服务断连 SDD](./workflow-service-disconnect-sdd.md)。
 
 后端启动时会从仓库根目录向上查找 `.env` 并加载未设置的变量；前端 Vite 配置也会从仓库根目录读取 `VITE_*` 变量。
 未显式设置 `AGENT_CLUSTER_DATA_DIR` 或 `AGENT_CLUSTER_DATA_FILE` 时，文件持久化目录同样锚定到该 `.env` 所在的仓库根目录，不受 npm workspace 的当前工作目录影响。
@@ -372,7 +382,15 @@ npm run build
 
 ## 稳定后端与手动重启
 
-开发入口 `npm run dev` 启动后端、Web 和 Local Runtime。后端只启动一次，不监听 `apps/server/src`、`packages/shared/src` 或业务工作区；修改任何文件都不会自动重启后端。
+开发入口 `npm run dev`（别名 `npm run dev:all`）构建桌面并启动后端、Web 与独立桌面；`npm run dev:web` 启动后端与 Web，不打开桌面。两个入口都在后端就绪后自动连接已授权且平台地址一致的独立 Local Runtime，保留设备及工作目录绑定。设置 `AGENT_CLUSTER_DEV_AUTO_RUNTIME=false` 可禁用自动连接。默认状态位于 Windows `%LOCALAPPDATA%/agent-runtime/state.json`，支持 `AGENT_RUNTIME_STATE_FILE`；日志位于状态文件同目录的 `dev-runtime.log`。已在线的设备复用，自动启动的 Runtime 使用独立进程和状态文件旁的 `.dev.lock` 防止重复拉起；退出服务不强杀 Runtime，服务恢复后自动重连。后端只启动一次，不监听 `apps/server/src`、`packages/shared/src` 或业务工作区；修改任何文件都不会自动重启后端。
+
+本地助手自动恢复（2026-09-14）：启动器直接使用 `node --import tsx` 运行助手，IPC 回执和 PID 锁属于同一个进程，避免 `tsx` CLI 包装进程导致回执丢失。启动失败后每 30 秒再检查，助手退出后重新拉起；连接期间短暂网络错误每 2 秒重试。状态探测和令牌请求有 10 秒超时，探测失败不会绕过重连循环直接退出。
+
+本地状态仍有设备 ID、但令牌缺失或失效时，仅在地址一致、非生产、本机回环地址且已有开发管理员授权（显式 loopback bypass 或已配置管理员令牌）的环境中调用 `POST /api/local-runtime/device-tokens/resume`。服务端沿用管理员守卫，只恢复已登记、当前所有者名下且 active 的离线设备；已撤销/未知设备拒绝恢复，在线设备返回 409，避免使另一个运行进程的凭据失效。设备 ID、目录绑定和目录权限保持不变，不启动桌面内置助手。未配置恢复授权、无本地设备状态或平台地址不一致时保留配置并提示，仍需完成首次授权。自动恢复不代表重放已中断的任务。
+
+验证：`node --test scripts/dev-local-runtime.spec.mjs scripts/dev-local-runtime-reconnect.spec.mjs scripts/dev-all.spec.mjs`。重连测试使用隔离状态、真实 Node 助手进程和 HTTP/WebSocket fixture，覆盖无令牌启动、服务暂不可用、后端重启和令牌失效恢复、重复启动复用进程；不调用模型。
+
+2026-09-14 验证记录：启动/重启脚本 34 项、真实助手重连 1 项、服务端授权与控制器 16 项、Local Runtime 83 项通过；server/Local Runtime 类型检查及桌面/shared/server 构建通过。实际运行 `npm run dev` 后，原本缺少令牌的既有设备自动在线；再次运行 `npm run dev:restart-server` 后仍自动在线，只有一个对应助手进程。原有 4 个目录绑定及权限摘要在两次重启前后完全一致，Web 返回 200。未执行真实模型任务，未运行整个仓库的完整测试集。
 
 修改后端或 shared 源码后，在另一个终端显式执行：
 
@@ -380,7 +398,7 @@ npm run build
 npm run dev:restart-server
 ```
 
-该命令只重启后端子进程，按需重新构建 shared/server，并等待 `/api/health` 返回新的 `processId`；Web 和 Local Runtime 保持运行。命令超时或构建失败时返回非零退出码。后端重启会中断正在执行的群聊，因此应在当前会话没有执行中任务时运行。
+该命令只重启后端子进程，按需重新构建 shared/server，并等待 `/api/health` 返回新的 `processId`；Web 保持运行。新后端就绪后，自动检查原 Local Runtime：仍在运行则复用并由其重连，已经退出则重新启动，保留原设备及目录授权，无需手动点击连接或启动助手。遵循同一 `AGENT_CLUSTER_DEV_AUTO_RUNTIME=false` 开关。命令超时、构建失败或助手启动失败返回非零退出码；助手失败会明确说明后端已经重启成功。后端重启会中断正在执行的群聊，因此应在当前会话没有执行中任务时运行。
 
 需要脱离开发进程组、单独验证编译产物时，使用：
 
@@ -401,6 +419,8 @@ $runtimeCli = 'packages/local-runtime-cli/dist/local-runtime-cli/src/cli.js'
 node $runtimeCli version
 ```
 
+仓库根目录提供 `npm run agent-runtime -- <command>` 入口。它会先构建 shared 和 Local Runtime CLI，再执行命令；即使 `agent-runtime` 没有安装到系统 PATH，重启后也可以用它手动恢复连接：
+
 本仓库开发环境直接运行：
 
 ```powershell
@@ -410,7 +430,7 @@ npm run dev
 开发 supervisor 只常驻启动 Server 和 Web，Local Runtime CLI 在创建本机会话时按需唤醒。首次使用前需为当前构建注册一次自定义协议：
 
 ```powershell
-node $runtimeCli install --server http://127.0.0.1:8089
+npm run agent-runtime -- install --server http://127.0.0.1:8099
 ```
 
 回环地址启用开发管理员豁免时，被唤醒的 CLI 会自动取得本机设备令牌，不要求开发者先执行 `agent-runtime login`。创建会话并选择“本机 Runtime”后，浏览器先检查在线设备；若离线则通过 `agent-runtime://` 唤醒 CLI，连接成功后探测 Codex 与 Claude Code 是否已安装可用。点击“选择本机目录”会通过已连接的 CLI 打开操作系统目录选择器；目录绝对路径只写入 CLI 本地状态，浏览器和平台后端只接收 `workspaceId` 并自动选中新工作区。
@@ -418,9 +438,9 @@ node $runtimeCli install --server http://127.0.0.1:8089
 单独运行 CLI 或非回环部署仍保留显式设备码绑定流程：
 
 ```powershell
-node $runtimeCli login --server https://agent.example.com
-node $runtimeCli install --server https://agent.example.com
-node $runtimeCli start
+npm run agent-runtime -- login --server https://agent.example.com
+npm run agent-runtime -- install --server https://agent.example.com
+npm run agent-runtime -- start
 ```
 
 `login` 会显示一次性设备码和激活页面。浏览器打开该页面并确认后，CLI 才能取得设备令牌。Windows 下的 `install` 会为当前用户注册 `agent-runtime://` 协议；平台“本地运行”菜单可以据此唤醒已安装的 CLI。协议 URL 只允许连接安装时登记的同一服务器，远程服务器必须使用 HTTPS。生产反向代理必须仅在请求包含 WebSocket Upgrade 时把 `/local-runtime` 转发到后端，普通 HTTP GET 仍交给 Web SPA，保证“本地运行”页面可以直接访问和刷新。开发 supervisor 会在没有显式值时把 `PUBLIC_WEB_URL` 设置为当前 Web 地址；单独启动稳定后端或服务器部署时必须配置实际可访问的前端地址，例如：

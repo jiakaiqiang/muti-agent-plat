@@ -1,10 +1,20 @@
 # API Contract v0.1
 
+主 Agent 协作扩展见 [阶段 0 冻结合同](./main-agent-collaboration-contract-v1.md)：当前 HTTP 行为不变，生命周期查询、可恢复删除/恢复等入口为后续阶段设计，不是已发布 API。
+
 ## 1. 目标
 
 本契约定义 v1 开发所需的最小 REST API 和 SSE API。第一阶段不做多用户权限，但所有接口保留 `ownerId`、`workspaceId`、`projectId` 字段。
 
 ## 2. 通用约定
+
+执行可靠性增量（2026-09-14）：`GET /api/runtimes/operations?sessionId=<id>` 返回标准成功封装中的 `data.items: LogicalOperation[]`；sessionId 缺失或空白返回 400，无记录返回空列表。接口只读，不续期、不重试、不解除停止屏障。字段与状态见 [数据合同 §1.3](data-contract-v0.1.md)。Web 与桌面共用服务端会话/事件/操作事实，不分别维护执行状态机；本次不新增用户认证。
+
+Local Runtime WebSocket 可选停止确认协议见 [Runtime 合同 §14](runtime-contract-v0.1.md)：connected 的 stopReceiptProtocol=1、客户端 invocation.stopped、服务端 invocation.stop_ack。必须匹配注册设备及 invocation/workspace/runtime 绑定，不能将迟到回执作为完成任务的 API。未知停止时继续保留既有 pause/resume 冲突行为。
+
+Local Runtime 自动恢复补充（2026-09-14）：`POST /api/local-runtime/device-tokens/resume` 请求为 `{ deviceId: string }`，返回 `LocalRuntimeTokenResponse`（与 refresh 相同）。沿用 `LocalRuntimeAdminGuard`，仅为当前所有者名下已登记且 active 的设备轮换令牌；未知、已撤销或其他所有者的设备返回 401；已有在线连接返回 409。不会创建设备、重新激活撤销设备、改变目录授权或恢复任务。开发启动器仅在同源本机回环地址、非生产且已有管理员授权的环境中自动调用；普通远程设备仍使用原登录流程。
+
+群聊停止补充（2026-09-14）：`POST /sessions/:sessionId/pause` 保留历史与草稿，当前会话的消息意图识别也纳入取消范围。有待处理路由时允许从原等待确认状态暂停，恢复后保留该等待状态，不隐式批准契约或选择流程。请求发送取消不等同于成功；宽限期内未收到执行结束回执时返回 `SESSION_PAUSE_TIMEOUT`，允许重试停止。存在未确认停止时 `resume` 返回冲突，禁止重复启动。Web 与桌面共用上述端点。
 
 Base URL：
 
@@ -882,6 +892,9 @@ POST   /api/workflows/:workflowId/archive
 DELETE /api/workflows/:workflowId
 
 POST /api/sessions/:sessionId/workflow/select
+POST /api/sessions/:sessionId/workflow/agent-substitution
+POST /api/sessions/:sessionId/workflow/agent-skip
+POST /api/sessions/:sessionId/workflow/upstream-rerun
 GET  /api/workflow-runs/:runId
 GET  /api/workflow-runs/:runId/nodes
 POST /api/workflow-runs/:runId/nodes/:nodeRunId/decision
@@ -910,6 +923,25 @@ type WorkflowHumanDecisionInput = {
   decision: 'approve' | 'revise' | 'cancel'
   instruction?: string
 }
+
+type WorkflowAgentSubstitutionInput = {
+  confirmationId: string
+  taskId: string
+  agentId: string
+}
+
+type WorkflowAgentSkipInput = {
+  confirmationId: string
+  taskId: string
+  reason?: string
+}
+
+type WorkflowUpstreamRerunInput = {
+  confirmationId: string
+  decision?: 'rerun_upstream' | 'retry_current'
+  nodeId?: string
+  instruction?: string
+}
 ```
 
 约束：
@@ -923,6 +955,11 @@ type WorkflowHumanDecisionInput = {
 - Agent 节点完成后自动推进；只有显式 `human_approval` 才进入 `WAIT_WORKFLOW_STEP_CONFIRM`。
 - 机器人确认严格消费 JSON 决策；格式错误、执行异常或超过返工上限时转人工确认。
 - 人工决策必须携带 `runId`、`nodeRunId`、`confirmationId` 和可选 `expectedRunRevision`，重复或过期命令必须幂等拒绝。
+- Agent 接单返回 `blocked/rejected` 后，Session 必须进入 `WAIT_USER_DECISION`，Run 必须进入 `waiting_human`，并产生 `reason='workflow_agent_substitution'` 的 active confirmation。普通 Session continue 不得隐式重试该节点。
+- 改派和跳过请求必须同时匹配当前 active confirmation、Workflow Run 和 Task；改派目标还必须在确认卡的 `candidateAgentIds` 中且属于当前 Session。已解决、过期或不匹配的 `confirmationId` 必须 fail closed。
+- `workflow/upstream-rerun` 只处理 `reason='workflow_upstream_rerun'` 的 active confirmation。`rerun_upstream` 必须提供候选集合中的 `nodeId`；`retry_current` 不得回放上游节点。两种操作都创建新 attempt。
+- 确认卡的 `cancel` 继续使用 Workflow 取消接口；取消后所有显式停车状态进入终态，不允许后续重复决策推进。
+- Workflow Robot 决策中，`revise` 表示可恢复质量缺陷并创建上游新 attempt；`reject` 表示不可恢复拒绝并直接令 Run=`failed`，二者不得互换。
 
 ## 15.1 用户原文件修订 API
 
@@ -1010,3 +1047,26 @@ TOKEN_BUDGET_EXCEEDED
 RUNTIME_INVOCATION_ERROR
 VALIDATION_ERROR
 ```
+
+## Codex 式任务工作区读取接口（2026-09-11）
+
+以下结构均指成功响应中的 `data`。
+
+| 请求 | data | 边界 |
+| --- | --- | --- |
+| `GET /api/workflows/catalog/published` | `{items: WorkflowVersion[], hasMore:false}` | 全部当前已发布且未归档流程的当前发布快照，不返回可变 draft；现阶段没有租户分发过滤 |
+| `GET /api/workflow-runs/session/:sessionId` | `{items: WorkflowRun[], hasMore:false}` | 当前 Session 的历史运行，最新优先 |
+| `GET /api/workflow-runs/:runId` | `{run,nodeRuns,approvals}` | 使用 run.definitionSnapshot；不能拿目录最新版覆盖 |
+| `GET /api/workflow-runs/:runId/file-diff` | `WorkflowDeliveryFileDiff` | 完成运行的证据累计差异；不完整返回 `status:unavailable,reason,files:[]`，不回读当前文件 |
+| `GET /api/sessions/:sessionId/tasks` | `AgentTask[]` | 数组，不是分页对象；界面需按 workflowRunId/nodeId/NodeRun 关联过滤 |
+| `GET /api/sessions/:sessionId/artifacts` | `{items:Artifact[],hasMore:false}` | 按 taskId/sessionId 关联本轮不可变内容 |
+
+`POST /api/sessions/:sessionId/workflow/select` 继续接收 `confirmationId,workflowId,workflowVersion`；必须存在当前已确认 Brief。相同 confirmation 已启动相同版本时返回既有运行；换版本复用确认被拒绝，重复选择不能重跑任务。
+
+流程定义写端点（create/update/draft/publish/archive/delete）统一检查 `assertWorkflowAuthoring`。共享客户端部署须配置 `WORKFLOW_AUTHORING_MODE=token` 和非空 `WORKFLOW_AUTHORING_TOKEN`，作者维护请求携带 `x-workflow-author-token`；客户端目录不发送此头。`read_only` 禁止所有定义写入；token 模式缺令牌配置时拒绝写入。未配置 mode/token 时兼容既有本地 Web 作者部署，**默认不构成客户端权限隔离**。这是部署能力校验，不是完整用户/租户认证，也不能信任客户端传入的 role。Web 作者令牌仅在页面内存保存。
+
+## 执行停止状态查询（2026-09-15）
+
+`GET /api/sessions/:sessionId/stop-state` 返回标准成功封装中的 `data: RuntimeStopSummary`，并设置 `Cache-Control: no-store`。该接口读取服务端权威停止轮次、监督句柄、待同步记录和 Local Runtime 未确认回执；查询不会重试、恢复或启动 Runtime。
+
+`RuntimeStopSummary.status` 为 `idle/requested/waiting/confirmed/unknown`，`canResume` 是客户端唯一可用于展示“已可继续”的聚合判断。`blockers` 必须保留稳定原因码；客户端不得根据 HTTP 成功、连接在线或本地计时器自行推断停止完成。查询或状态合并失败时必须 fail closed，返回/展示 unknown，而不是放行新的执行。
