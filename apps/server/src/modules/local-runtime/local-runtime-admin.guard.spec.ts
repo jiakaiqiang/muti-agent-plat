@@ -88,7 +88,7 @@ test('production configuration fails closed without a strong token or with loopb
 });
 
 test('administrator guard protects approval and management endpoints but not CLI token exchange', () => {
-  for (const method of ['approve', 'devices', 'revoke', 'workspaces'] as const) {
+  for (const method of ['approve', 'devices', 'revoke', 'workspaces', 'resume'] as const) {
     const guards = Reflect.getMetadata(GUARDS_METADATA, LocalRuntimeController.prototype[method]) as unknown[];
     assert.equal(guards.includes(LocalRuntimeAdminGuard), true, `${method} must require administrator authentication`);
   }

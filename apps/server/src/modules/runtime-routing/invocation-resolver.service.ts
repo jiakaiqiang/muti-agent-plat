@@ -49,6 +49,7 @@ export type InvocationRuntimeCandidate = {
 };
 
 export type ResolveInvocationInput = {
+  operationId?: string;
   invocationId: string;
   sessionId: string;
   taskId?: string;
@@ -89,6 +90,11 @@ export class InvocationResolverService {
   ) {}
 
   resolve(input: ResolveInvocationInput): InvocationPlan {
+    if (input.expectedOutput.schemaVersion === '2.0' && (input.expectedOutput.kind !== 'task_execution_result' ||
+      input.phase !== 'task_execution' || input.workspace.providerKind !== 'local_bridge' ||
+      !this.localRuntime?.supportsOutputVersion?.(input.workspace.workspaceId, '2.0'))) {
+      throw new InvocationResolutionError('CAPABILITY_BLOCKED', 'OUTPUT_CONTRACT_VERSION_UNSUPPORTED: task submission v2 requires an advertising local Runtime.');
+    }
     const identity = this.profileCompiler.compileIdentity({ agent: input.agent });
     const allowedToolNames = input.writeModeOverride === 'proposal_only'
       ? new Set<string>(PROPOSAL_ONLY_TOOL_NAMES)
@@ -164,7 +170,10 @@ export class InvocationResolverService {
       executionTarget,
       toolCatalog,
       contextEnvelope,
-      expectedOutput: input.expectedOutput,
+      expectedOutput: input.expectedOutput.kind === 'task_execution_result' && input.phase === 'task_execution' &&
+        input.taskRequiresCodeChanges && input.writeModeOverride !== 'proposal_only' &&
+        input.workspace.providerKind === 'local_bridge' && this.localRuntime?.supportsOutputVersion?.(input.workspace.workspaceId, '2.0')
+        ? { kind: 'task_execution_result', schemaVersion: '2.0' } : input.expectedOutput,
       budget: input.budget,
       ...(pendingApprovals ? { pendingApprovals } : {})
     };
@@ -231,15 +240,23 @@ export class InvocationResolverService {
     const candidates = this.eligibleCandidates(input, requiredCapabilities, requiredToolNames);
 
     if (candidates.length === 0) {
+      // 本机工作区没有任何候选 = CLI 未连接或工作区已注销，属于可恢复的环境故障，
+      // 先给用户一句可执行的结论，再附上路由诊断信息。
+      const offlineLocalBridge =
+        input.workspace.providerKind === 'local_bridge' &&
+        this.runtimeCandidates(input).length === 0;
+      const diagnostics = [
+        `No eligible runtime for phase=${input.phase}`,
+        `providerKind=${input.workspace.providerKind}`,
+        `requiredCapabilities=${requiredCapabilities.join(',') || 'none'}`,
+        `requiredTools=${requiredToolNames.join(',') || 'none'}`,
+        `allowedRuntimeTypes=${input.sessionPreference?.allowedRuntimeTypes?.join(',') || 'any'}`
+      ].join(', ');
       throw new InvocationResolutionError(
         'NO_ELIGIBLE_RUNTIME',
-        [
-          `No eligible runtime for phase=${input.phase}`,
-          `providerKind=${input.workspace.providerKind}`,
-          `requiredCapabilities=${requiredCapabilities.join(',') || 'none'}`,
-          `requiredTools=${requiredToolNames.join(',') || 'none'}`,
-          `allowedRuntimeTypes=${input.sessionPreference?.allowedRuntimeTypes?.join(',') || 'any'}`
-        ].join(', ')
+        offlineLocalBridge
+          ? `本机 Runtime 未连接：当前会话绑定的本机工作目录没有可用 Runtime，请重新启动本机 Runtime 后继续执行。（${diagnostics}）`
+          : diagnostics
       );
     }
 

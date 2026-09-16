@@ -1,0 +1,143 @@
+import assert from 'node:assert/strict';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { api, buildServer, createSessionAndWaitForBrief, listEvents, waitForMatchingEvent, waitForStatus, root } from './smoke-server.mjs';
+import { startBrowserPage, startBrowserSmokeServer, stopBrowserCollaborationSmoke } from './browser-smoke-utils.mjs';
+
+await buildServer();
+let handle;
+const shots = join(root, 'output/playwright/codex-task-workspace');
+await mkdir(shots, { recursive: true });
+try {
+  handle = await startBrowserSmokeServer('codex-task-workspace', { DISCUSSION_AGENT_KEYS: 'requirements,product-manager', DISCUSSION_MAX_ROUNDS: '1', GLOBAL_DEFAULT_RUNTIME_TYPE: 'generic_llm', PROJECT_POLICY_RUNTIME_TYPE: '', WORKFLOW_AUTHORING_MODE: '', WORKFLOW_AUTHORING_TOKEN: '' });
+  const { server, webPort } = handle;
+  const agents = (await api(server.apiBase, '/agents')).data;
+  const requirements = agents.find(agent => agent.key === 'requirements');
+  assert.ok(requirements);
+  const draft = (await api(server.apiBase, '/workflows', { method: 'POST', body: JSON.stringify({ name: '需求开发验证流程', nodes: [
+    { id: 'develop', type: 'agent', name: '需求开发', agentId: requirements.id, order: 0, stageDescription: '分析需求并形成可验证结论。', outputContract: ['分析结果与验证依据'] },
+    { id: 'verify', type: 'human_approval', name: '验证与返工', title: '确认本轮结果', assignee: 'session_owner', allowedDecisions: ['approve', 'revise', 'cancel'], order: 1 }
+  ] }) })).data;
+  const workflow = (await api(server.apiBase, `/workflows/${draft.id}/publish`, { method: 'POST', body: JSON.stringify({ expectedDraftRevision: draft.draftRevision }) })).data;
+  const { sessionId, briefId } = await createSessionAndWaitForBrief(server.apiBase, '分析需求，并独立验证最终结论。', { runtimePreference: { preferredRuntimeType: 'generic_llm', allowedRuntimeTypes: ['generic_llm','code_reader','test_runner'] } });
+  Object.assign(handle, await startBrowserPage(server.apiBase, webPort, { desktop: true }));
+  const { page, web } = handle;
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  page.on('response', response => { if (response.status() >= 400) console.error(`HTTP ${response.status()} ${response.url()}`); });
+  page.on('requestfailed', request => console.error(`Request failed ${request.url()}: ${request.failure()?.errorText}`));
+  await page.goto(`${web.webBase}/workspace/${sessionId}`, { waitUntil: 'domcontentloaded' });
+  await page.locator('.chat-pane .chat-timeline').waitFor();
+  await page.locator('.session-list-item.active').waitFor();
+  assert.equal(await page.getByRole('tab', { name: '流程图', exact: true }).count(), 0);
+  const briefCard = page.locator('.chat-pane .confirmation-card').filter({ hasText: 'confirm_task_brief' });
+  await briefCard.locator('.action-button.primary').click();
+  await waitForStatus(server.apiBase, sessionId, 'WAIT_WORKFLOW_SELECT');
+  await page.locator('.chat-pane .confirmation-card').filter({ hasText: 'select_workflow' }).waitFor();
+  await page.locator('.chat-pane .confirmation-card').filter({ hasText: 'select_workflow' }).getByRole('button', { name: '管理工作流', exact: true }).click();
+  await page.locator('.workflow-catalog nav button').filter({ hasText: '需求开发验证流程' }).click();
+  await page.getByRole('button', { name: '使用此流程', exact: true }).click();
+  const selectionRequest = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/workflow/select'));
+  await page.getByRole('button', { name: '确认启动', exact: true }).click();
+  assert.equal((await selectionRequest).postDataJSON().workflowVersion, workflow.currentPublishedVersion);
+  await waitForStatus(server.apiBase, sessionId, 'WAIT_WORKFLOW_STEP_CONFIRM');
+  await page.getByRole('tab', { name: '流程图', exact: true }).click();
+  await page.locator('.selected-flow .flow-node').first().waitFor();
+  await page.screenshot({ path: join(shots, 'flow-1440.png') });
+  assert.equal(await page.locator('.session-sidebar').isVisible(), true);
+  assert.equal(await page.locator('.workspace-context-panel .confirmation-card').count(), 0);
+  await page.locator('.selected-flow .flow-node').filter({ hasText: '需求开发' }).click();
+  await page.locator('.workspace-context-panel .execution-task').first().click();
+  await page.locator('.workspace-context-panel').getByText('Agent 执行详情', { exact: true }).waitFor();
+  await page.screenshot({ path: join(shots, 'agent-task.png') });
+  await page.locator('.workspace-context-panel').getByRole('button', { name: '关闭', exact: true }).click();
+  await page.locator('.workspace-context-panel .chat-timeline').waitFor();
+  await page.getByRole('tab', { name: '工作流详情', exact: true }).click();
+  await page.getByRole('heading', { name: '工作流详情', exact: true }).waitFor();
+  await page.locator('.run-toolbar').getByRole('button', { name: /去处理/ }).click();
+  await page.locator('.chat-pane').waitFor({ state: 'visible' });
+  const input = page.locator('.user-input-box textarea, .input-box textarea, textarea').last();
+  await input.fill('尚未发送的需求补充');
+  await page.getByRole('tab', { name: '流程图', exact: true }).click();
+  await page.getByRole('tab', { name: /群聊消息/ }).click();
+  assert.equal(await input.inputValue(), '尚未发送的需求补充');
+  let gate = await waitForMatchingEvent(server.apiBase, sessionId, 'user_confirmation_requested', event => event.metadata.payload.reason === 'confirm_workflow_human_gate');
+  const selected = (await api(server.apiBase, `/workflow-runs/${gate.metadata.payload.workflowRunId}`)).data;
+  await api(server.apiBase, `/workflows/${workflow.id}/draft`, { method: 'PATCH', body: JSON.stringify({ name: 'Web 新版流程', expectedDraftRevision: workflow.draftRevision }) });
+  await api(server.apiBase, `/workflows/${workflow.id}/publish`, { method: 'POST', body: JSON.stringify({}) });
+  assert.equal((await api(server.apiBase, `/workflow-runs/${selected.run.id}`)).data.run.definitionSnapshot.name, '需求开发验证流程');
+  const firstConfirmation = gate.metadata.payload.confirmationId;
+  await api(server.apiBase, `/workflow-runs/${selected.run.id}/nodes/${gate.metadata.payload.workflowNodeRunId}/decision`, { method: 'POST', body: JSON.stringify({ confirmationId: firstConfirmation, expectedRunRevision: gate.metadata.payload.expectedRunRevision, decision: 'revise', instruction: '补充验证依据后重新提交。' }) });
+  gate = await waitForMatchingEvent(server.apiBase, sessionId, 'user_confirmation_requested', event => event.metadata.payload.reason === 'confirm_workflow_human_gate' && event.metadata.payload.confirmationId !== firstConfirmation);
+  const reworked = (await api(server.apiBase, `/workflow-runs/${selected.run.id}`)).data;
+  assert.equal(reworked.nodeRuns.filter(node => node.nodeId === 'develop').length, 2);
+  assert.ok(reworked.approvals.some(record => record.confirmationId === firstConfirmation && record.decision === 'revise'));
+  await page.getByRole('tab', { name: '流程图', exact: true }).click();
+  await page.locator('.selected-flow .flow-node').filter({ hasText: '需求开发' }).click();
+  await page.locator('.workspace-context-panel .execution-task').nth(1).waitFor();
+  await page.screenshot({ path: join(shots, 'rework-1440.png') });
+  await page.locator('.workspace-context-panel .execution-task').first().click();
+  await page.locator('.workspace-context-panel').getByText(/第 1 轮/).first().waitFor();
+  await api(server.apiBase, `/workflow-runs/${selected.run.id}/nodes/${gate.metadata.payload.workflowNodeRunId}/decision`, { method: 'POST', body: JSON.stringify({ confirmationId: gate.metadata.payload.confirmationId, expectedRunRevision: gate.metadata.payload.expectedRunRevision, decision: 'approve' }) });
+  await waitForStatus(server.apiBase, sessionId, 'COMPLETED');
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.getByRole('tab', { name: '工作流详情', exact: true }).click();
+  // Deterministic UI-only file fixture; real history composition is covered by server tests.
+  const diffEndpoint = `**/workflow-runs/${selected.run.id}/file-diff`;
+  await page.route(diffEndpoint, route => route.fulfill({ json: { success: true, data: { status: 'complete', source: 'UI 固定历史样本 · 开始 → 交付', files: [
+    { path: 'src/example.ts', operation: 'update', before: 'const answer = 1;\n', after: 'const answer = 2;\n' },
+    { path: 'empty.txt', operation: 'create', before: '', after: '' }
+  ] } } }));
+  const writes = [];
+  const recordWrite = request => { if (['POST', 'PATCH', 'DELETE', 'PUT'].includes(request.method())) writes.push(request.url()); };
+  page.on('request', recordWrite);
+  const openDiff = page.getByRole('button', { name: '查看最终交付文件差异', exact: true });
+  await openDiff.click();
+  const dialog = page.locator('.history-diff-dialog');
+  await dialog.getByText('修改前', { exact: true }).waitFor();
+  await dialog.getByText('行内对比', { exact: true }).click();
+  await dialog.locator('.diff-row.add').first().waitFor();
+  await page.screenshot({ path: join(shots, 'diff-unified.png') });
+  await dialog.getByRole('button', { name: 'empty.txt', exact: true }).click();
+  await dialog.getByText('内容无变化（新增空文件）', { exact: true }).waitFor();
+  await dialog.getByRole('button', { name: 'src/example.ts', exact: true }).click();
+  await dialog.getByText('左右对比', { exact: true }).click();
+  await dialog.getByText('修改前', { exact: true }).waitFor();
+  await page.screenshot({ path: join(shots, 'diff-split.png') });
+  await page.keyboard.press('Escape');
+  await dialog.waitFor({ state: 'hidden' });
+  assert.equal(await openDiff.evaluate(element => element === document.activeElement), true);
+  assert.deepEqual(writes, []);
+  page.off('request', recordWrite);
+  await page.unroute(diffEndpoint);
+  await page.getByRole('tab', { name: /群聊消息/ }).click();
+  const centralTimeline = page.locator('.chat-pane .chat-timeline');
+  await centralTimeline.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.locator('.chat-pane .chat-timeline .timeline-item').last().waitFor();
+  assert.equal(await page.locator('.chat-pane .chat-timeline').evaluate(element => element.scrollTop), 0);
+  assert.equal(await page.locator('textarea').last().inputValue(), '尚未发送的需求补充');
+  await page.getByRole('tab', { name: '流程图', exact: true }).click();
+  await page.locator('.flow-node').first().waitFor();
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.screenshot({ path: join(shots, 'flow-1280.png') });
+  await page.setViewportSize({ width: 1024, height: 720 });
+  await page.getByRole('button', { name: '切换任务列表' }).click();
+  assert.equal(await page.locator('.session-sidebar').isVisible(), true);
+  await page.screenshot({ path: join(shots, 'flow-1024.png') });
+  await page.getByRole('button', { name: '切换任务列表' }).click();
+  await page.setViewportSize({ width: 720, height: 720 });
+  await page.getByRole('button', { name: '切换右侧信息' }).click();
+  assert.equal(await page.locator('.workspace-context-panel').isVisible(), true);
+  await page.screenshot({ path: join(shots, 'flow-720.png') });
+  assert.deepEqual(errors, []);
+  assert.ok((await listEvents(server.apiBase, sessionId)).some(event => event.type === 'workflow_run_completed'));
+  console.log('PASS: real service catalog → confirmed start → snapshot graph → node task → readonly chat → decision navigation → draft preservation → version freeze → terminal reload → responsive panels.');
+  console.log('PASS: fixture-based Diff UI split/unified, file switching, empty files, Escape/focus restoration; zero mutation requests.');
+  console.log('PASS: real human rejection → same-run rework → preserved first and second attempts → reapproval and completion.');
+} catch (error) {
+  if (handle?.page) {
+    await handle.page.screenshot({ path: join(shots, 'failure.png') }).catch(() => {});
+    console.error((await handle.page.locator('body').innerText().catch(() => '')).slice(0, 6000));
+  }
+  throw error;
+} finally { if (handle) await stopBrowserCollaborationSmoke(handle); }

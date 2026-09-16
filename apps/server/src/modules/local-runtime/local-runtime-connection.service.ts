@@ -14,6 +14,7 @@ import type {
   AgentRunResult,
   AgentRuntimeEvent,
   AgentRuntimeRunHandle,
+  CollaborationEvent,
   ExecutionTermination,
   InvocationPlan,
   LocalRuntimeCapabilityRefreshResult,
@@ -34,10 +35,15 @@ import type {
   RuntimeType,
   WorkspaceCapabilityKey
 } from '@agent-cluster/shared';
-import { createAgentMessageOutput } from '@agent-cluster/shared';
+import { createAgentMessageOutput, usefulRuntimeActivity, runtimeActivityKind } from '@agent-cluster/shared';
 import { WebSocket, WebSocketServer } from 'ws';
 import { Subject } from 'rxjs';
-import { createExecutionTermination } from '../../common/execution-termination.js';
+import {
+  createExecutionTermination,
+  normalizeTerminatedResult,
+  safeTerminationMessage
+} from '../../common/execution-termination.js';
+import { positiveRuntimeTimeoutMs } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
 import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import { BrokerGateway, type BrokerClient } from '../workspaces/runtime-broker/broker-gateway.js';
@@ -45,6 +51,7 @@ import { HeartbeatTracker } from '../workspaces/runtime-broker/heartbeat-tracker
 import { PendingRequestRegistry } from '../workspaces/runtime-broker/pending-request-registry.js';
 import { LocalRuntimeAuthService } from './local-runtime-auth.service.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
+import { LogicalOperationStore } from '../runtimes/logical-operation-store.js';
 
 type LocalRuntimeClient = {
   clientId: string;
@@ -79,6 +86,19 @@ type ActiveInvocation = {
   sessionId: string;
   queue: RuntimeEventQueue;
   resolve: (result: AgentRunResult) => void;
+  /**
+   * Idle deadline for a local invocation. Every other pending map in this service
+   * carries a timer; this one did not, so a CLI that stayed connected but stopped
+   * answering left the invocation promise unsettled forever. The local CLI has no
+   * watchdog of its own, unlike the server-side adapters.
+   *
+   * It is an idle timer rather than an absolute one: a healthy run keeps emitting
+   * invocation events, so silence is the failure signal, not elapsed time.
+   */
+  idleTimer?: ReturnType<typeof setTimeout>;
+  toolTimers?: Map<string, ReturnType<typeof setTimeout>>;
+  termination?: ExecutionTermination;
+  cancelTimer?: ReturnType<typeof setTimeout>;
 };
 
 type PendingWorkspaceAuthorization = {
@@ -130,6 +150,71 @@ export class LocalRuntimeConnectionService {
     LocalRuntimeWorkspaceRegistration & { deviceId: string; connectedAt: string }
   >();
   private readonly activeInvocations = new Map<string, ActiveInvocation>();
+  private readonly unconfirmedStops = new Map<string, ActiveInvocation>();
+  private readonly isUsefulActivity = usefulRuntimeActivity();
+  private readonly operationStops?: LogicalOperationStore;
+  private readonly stopConfirmedSubject = new Subject<{ sessionId: string; invocationId: string; event?: CollaborationEvent }>();
+  stopConfirmations() { return this.stopConfirmedSubject.asObservable(); }
+
+  private async confirmStopReceipt(
+    deviceId: string,
+    receipt: { invocationId: string; workspaceId: string; runtimeType: RuntimeType },
+    activeMatched = false,
+    connectionId?: string
+  ) {
+    this.logger.log(JSON.stringify({
+      event: 'local_runtime_stop_receipt_received',
+      invocationId: receipt.invocationId,
+      deviceId,
+      connectionId,
+      workspaceId: receipt.workspaceId,
+      runtimeType: receipt.runtimeType
+    }));
+    const waiting = this.unconfirmedStops.get(receipt.invocationId);
+    const result = await this.operationStops?.confirmTransportReceipt(receipt.invocationId, { deviceId,
+      workspaceId: receipt.workspaceId, runtimeType: receipt.runtimeType });
+    const matches = waiting?.deviceId === deviceId && waiting.workspaceId === receipt.workspaceId && waiting.runtimeType === receipt.runtimeType &&
+      this.unconfirmedStops.get(receipt.invocationId) === waiting;
+    if (matches) this.unconfirmedStops.delete(receipt.invocationId);
+    const sessionId = matches ? waiting.sessionId : result?.sessionId;
+    if (result?.alreadyConfirmed) {
+      workspaceMetrics.increment('runtime_stop_receipt_replay_total', 1, { runtimeType: receipt.runtimeType });
+    }
+    if (sessionId && ((result?.stopConfirmed && !result.alreadyConfirmed) || matches)) this.stopConfirmedSubject.next({
+      sessionId,
+      invocationId: receipt.invocationId,
+      ...(result?.event ? { event: result.event } : {})
+    });
+    const matchedReceipt = Boolean(result?.confirmed || matches || activeMatched);
+    this.logger.log(JSON.stringify({
+      event: !matchedReceipt ? 'local_runtime_stop_receipt_ignored'
+        : result?.alreadyConfirmed ? 'local_runtime_stop_receipt_replayed' : 'local_runtime_stop_receipt_confirmed',
+      sessionId,
+      stopRequestId: result?.stopRequestId,
+      operationId: result?.operationId,
+      invocationId: receipt.invocationId,
+      deviceId,
+      connectionId,
+      workspaceId: receipt.workspaceId,
+      runtimeType: receipt.runtimeType,
+      version: result?.version,
+      matched: matchedReceipt
+    }));
+    return matchedReceipt;
+  }
+
+  retryUnconfirmedStops(sessionId: string) {
+    const pending = [...this.unconfirmedStops.values()].filter(item => item.sessionId === sessionId);
+    for (const item of pending) {
+      const client = this.clientsByDeviceId.get(item.deviceId);
+      if (client && item.termination) this.send(client, { kind: 'local_runtime.invocation.cancel', payload: { invocationId: item.invocationId, termination: item.termination } });
+    }
+    return pending.length;
+  }
+
+  hasUnconfirmedStops(sessionId: string) {
+    return [...this.unconfirmedStops.values()].some(item => item.sessionId === sessionId);
+  }
   private readonly pendingWorkspaceAuthorizations = new Map<string, PendingWorkspaceAuthorization>();
   private readonly pendingWorkspacePermissionGrants = new Map<string, PendingWorkspacePermissionGrant>();
   private readonly pendingProviderConnections = new Map<string, PendingProviderConnection>();
@@ -142,6 +227,12 @@ export class LocalRuntimeConnectionService {
     reason: 'local_runtime_disconnected';
     occurredAt: string;
   }>();
+  /** Fired whenever a local workspace stops being routable, with or without an active invocation. */
+  private readonly workspaceOfflineSubject = new Subject<{
+    workspaceId: string;
+    reason: string;
+    occurredAt: string;
+  }>();
   private attached = false;
 
   constructor(
@@ -152,6 +243,7 @@ export class LocalRuntimeConnectionService {
     @Optional() private readonly persistence?: PersistenceService
   ) {
     this.operationAudits = persistence?.getCollection<LocalRuntimeOperationAudit[]>(OPERATION_AUDIT_COLLECTION, []) ?? [];
+    this.operationStops = persistence ? new LogicalOperationStore(persistence) : undefined;
   }
 
   attach(server: Server): void {
@@ -339,6 +431,10 @@ export class LocalRuntimeConnectionService {
     return this.interruptionSubject.asObservable();
   }
 
+  workspaceOffline() {
+    return this.workspaceOfflineSubject.asObservable();
+  }
+
   listOperationAudits() {
     return structuredClone(this.operationAudits);
   }
@@ -367,6 +463,12 @@ export class LocalRuntimeConnectionService {
       }));
   }
 
+  invocationBinding(plan: InvocationPlan) {
+    const workspaceId = plan.contextEnvelope.L0.workspace.workspaceId;
+    const workspace = this.workspaces.get(workspaceId);
+    return workspace ? { deviceId: workspace.deviceId, workspaceId, runtimeType: plan.executionTarget.runtimeType } : undefined;
+  }
+
   startInvocation(plan: InvocationPlan): AgentRuntimeRunHandle {
     const workspaceId = plan.contextEnvelope.L0.workspace.workspaceId;
     this.assertLocalPlan(plan, workspaceId);
@@ -388,7 +490,7 @@ export class LocalRuntimeConnectionService {
     const result = new Promise<AgentRunResult>((resolve) => {
       resolveResult = resolve;
     });
-    this.activeInvocations.set(plan.invocationId, {
+    const active: ActiveInvocation = {
       invocationId: plan.invocationId,
       deviceId: workspace.deviceId,
       workspaceId,
@@ -396,7 +498,9 @@ export class LocalRuntimeConnectionService {
       sessionId: plan.sessionId,
       queue,
       resolve: resolveResult
-    });
+    };
+    this.activeInvocations.set(plan.invocationId, active);
+    this.armInvocationIdleTimer(active);
     this.send(client, {
       kind: 'local_runtime.invocation.start',
       payload: {
@@ -416,16 +520,15 @@ export class LocalRuntimeConnectionService {
           scope: 'invocation',
           phase: plan.phase
         });
-        this.send(client, {
-          kind: 'local_runtime.invocation.cancel',
-          payload: { invocationId: plan.invocationId, termination: resolvedTermination }
-        });
-        this.finishInvocation(
-          plan.invocationId,
-          this.cancelledResult(plan, resolvedTermination, 'Local Runtime invocation was cancelled.')
-        );
+        this.requestInvocationStop(active, resolvedTermination);
       }
     };
+  }
+
+  supportsOutputVersion(workspaceId: string, version: string) {
+    const workspace = this.workspaces.get(workspaceId);
+    const hello = workspace ? this.clientsByDeviceId.get(workspace.deviceId)?.hello : undefined;
+    return (hello?.outputContractVersions ?? ['1.0']).includes(version);
   }
 
   private attachClient(socket: WebSocket, deviceId: string, ownerId: string) {
@@ -491,6 +594,7 @@ export class LocalRuntimeConnectionService {
         kind: 'local_runtime.connected',
         payload: {
           deviceId: client.deviceId,
+          stopReceiptProtocol: 1,
           compatibility: this.auth.compatibility(device.cliVersion, device.protocolVersion),
           connectedAt: client.connectedAt
         }
@@ -498,6 +602,47 @@ export class LocalRuntimeConnectionService {
       return;
     }
     if (!client.hello) throw new Error('local_runtime.hello must be the first message.');
+    if (message.kind === 'local_runtime.invocation.stopped') {
+      const receipt = message.payload;
+      // A receipt never supplies business results or applies a ChangeSet.
+      void (async () => {
+        const active = this.activeInvocations.get(receipt.invocationId);
+        if (active) {
+          if (active.deviceId !== client.deviceId || active.workspaceId !== receipt.workspaceId ||
+              active.runtimeType !== receipt.runtimeType) throw new Error('Stop receipt does not belong to the active invocation.');
+          const termination = active.termination ?? createExecutionTermination({
+            kind: 'user_cancelled',
+            source: 'runtime',
+            scope: 'invocation',
+            diagnosticRef: 'local_runtime_stopped_without_result'
+          });
+          active.termination = termination;
+          this.finishInvocation(active.invocationId,
+            this.cancelledResultForActive(active, termination, '本地执行已停止，未返回业务结果。'));
+        }
+        const confirmed = await this.confirmStopReceipt(client.deviceId, receipt, Boolean(active), client.clientId);
+        if (confirmed) {
+          this.send(client, { kind: 'local_runtime.invocation.stop_ack', payload: { invocationId: receipt.invocationId } });
+          this.logger.log(JSON.stringify({
+            event: 'local_runtime_stop_ack_sent',
+            invocationId: receipt.invocationId,
+            deviceId: client.deviceId,
+            connectionId: client.clientId,
+            workspaceId: receipt.workspaceId,
+            runtimeType: receipt.runtimeType
+          }));
+        }
+      })().catch(() => this.logger.warn(JSON.stringify({
+        event: 'local_runtime_stop_receipt_persistence_failed',
+        invocationId: receipt.invocationId,
+        deviceId: client.deviceId,
+        connectionId: client.clientId,
+        workspaceId: receipt.workspaceId,
+        runtimeType: receipt.runtimeType,
+        reason: 'STOP_RECEIPT_PERSISTENCE_FAILED'
+      })));
+      return;
+    }
     if (message.kind === 'local_runtime.heartbeat') {
       if (message.payload.deviceId !== client.deviceId) throw new Error('Heartbeat deviceId mismatch.');
       this.auth.touch(client.deviceId);
@@ -554,21 +699,47 @@ export class LocalRuntimeConnectionService {
     }
     if (message.kind === 'local_runtime.invocation.event') {
       const active = this.activeInvocations.get(message.payload.invocationId);
-      if (!active || active.deviceId !== client.deviceId) throw new Error('Invocation event does not belong to this device.');
+      // A reconnected CLI can still flush events for an invocation this side already
+      // interrupted on disconnect. That is a race, not a protocol violation, so it is
+      // dropped with a warning instead of failing the whole connection.
+      if (!active) {
+        this.logger.warn(`Ignored unmatched Local Runtime invocation event: ${message.payload.invocationId}`);
+        return;
+      }
+      if (active.deviceId !== client.deviceId) throw new Error('Invocation event does not belong to this device.');
+      if (active.termination) return;
+      if (this.isUsefulActivity(message.payload) || message.payload.type === 'tool_completed') {
+        this.observeInvocationActivity(active, message.payload);
+      }
       active.queue.push(message.payload);
       return;
     }
     if (message.kind === 'local_runtime.invocation.result') {
       const { result, workspaceId, workspaceRevision } = message.payload;
+      const unconfirmed = this.unconfirmedStops.get(result.invocationId);
+      if (unconfirmed && unconfirmed.deviceId === client.deviceId && unconfirmed.workspaceId === workspaceId) {
+        void this.confirmStopReceipt(client.deviceId, { invocationId: result.invocationId,
+          workspaceId, runtimeType: result.runtimeType }, false, client.clientId).catch(error => this.logger.warn(String(error)));
+        return;
+      }
       const active = this.activeInvocations.get(result.invocationId);
-      if (!active || active.deviceId !== client.deviceId) throw new Error('Invocation result does not belong to this device.');
+      // Same race as the event branch: the local process finished after this side gave
+      // up, so the result arrives with no active invocation to settle.
+      if (!active) {
+        this.logger.warn(`Ignored unmatched Local Runtime invocation result: ${result.invocationId}`);
+        void this.confirmStopReceipt(client.deviceId, { invocationId: result.invocationId,
+          workspaceId, runtimeType: result.runtimeType }, false, client.clientId).catch(error => this.logger.warn(String(error)));
+        return;
+      }
+      if (active.deviceId !== client.deviceId) throw new Error('Invocation result does not belong to this device.');
       if (workspaceId !== active.workspaceId) throw new Error('Invocation result workspace does not match the active invocation.');
       if (result.runtimeType !== active.runtimeType) throw new Error('Invocation result runtime type mismatch.');
       if (!workspaceRevision?.id || !workspaceRevision.observedAt) throw new Error('Invocation result workspace revision is incomplete.');
       const workspace = this.workspaces.get(workspaceId);
       if (!workspace || workspace.deviceId !== client.deviceId) throw new Error('Invocation result workspace does not belong to this device.');
       workspace.revision = structuredClone(workspaceRevision);
-      this.finishInvocation(result.invocationId, result);
+      this.finishInvocation(result.invocationId, active.termination
+        ? normalizeTerminatedResult(result, active.termination) : result);
       return;
     }
     throw new Error('Unsupported Local Runtime message.');
@@ -794,6 +965,7 @@ export class LocalRuntimeConnectionService {
     this.heartbeats.drop(workspaceId);
     this.pendingWorkspaceRequests.rejectByWorkspace(workspaceId, new Error(reason));
     this.interruptInvocations(client.deviceId, reason, workspaceId);
+    this.workspaceOfflineSubject.next({ workspaceId, reason, occurredAt: nowIso() });
   }
 
   private detachClient(client: LocalRuntimeClient) {
@@ -836,12 +1008,23 @@ export class LocalRuntimeConnectionService {
   private interruptInvocations(deviceId: string, message: string, workspaceId?: string) {
     for (const active of [...this.activeInvocations.values()]) {
       if (active.deviceId !== deviceId || (workspaceId && active.workspaceId !== workspaceId)) continue;
+      if (active.termination) {
+        this.unconfirmedStops.set(active.invocationId, active);
+        const result = this.cancelledResultForActive(active, active.termination, '停止过程中本地助手断线，停止状态待确认。');
+        this.finishInvocation(active.invocationId, { ...result, status: 'failed', error: {
+          code: 'RUNTIME_TIMEOUT', message: '停止过程中本地助手断线，停止状态待确认。', retryable: false,
+          details: { stopUnconfirmed: true }, termination: active.termination
+        } });
+        continue;
+      }
       const termination = createExecutionTermination({
         kind: 'runtime_disconnected',
         source: 'runtime',
         scope: 'invocation',
         diagnosticRef: 'local_runtime_disconnected'
       });
+      active.termination = termination;
+      this.unconfirmedStops.set(active.invocationId, active);
       this.interruptionSubject.next({
         sessionId: active.sessionId,
         invocationId: active.invocationId,
@@ -851,7 +1034,9 @@ export class LocalRuntimeConnectionService {
       });
       this.finishInvocation(
         active.invocationId,
-        this.cancelledResultForActive(active, termination, message)
+        { ...this.cancelledResultForActive(active, termination, message), error: {
+          code: 'RUNTIME_CANCELLED', message, retryable: false, termination, details: { stopUnconfirmed: true }
+        } }
       );
     }
   }
@@ -859,9 +1044,79 @@ export class LocalRuntimeConnectionService {
   private finishInvocation(invocationId: string, result: AgentRunResult) {
     const active = this.activeInvocations.get(invocationId);
     if (!active) return;
+    clearTimeout(active.idleTimer);
+    for (const timer of active.toolTimers?.values() ?? []) clearTimeout(timer);
+    clearTimeout(active.cancelTimer);
     this.activeInvocations.delete(invocationId);
     active.queue.close();
     active.resolve(result);
+  }
+
+  private observeInvocationActivity(active: ActiveInvocation, event: AgentRuntimeEvent) {
+    const kind = runtimeActivityKind(event);
+    const key = String(event.metadata?.toolCallId ?? event.metadata?.id ?? event.metadata?.name ?? 'unknown-tool');
+    if (kind === 'tool_started') {
+      const timers = active.toolTimers ??= new Map();
+      if (!timers.has(key)) {
+        const timeoutMs = positiveRuntimeTimeoutMs('LOCAL_RUNTIME_TOOL_TIMEOUT_MS', 900_000);
+        timers.set(key, setTimeout(() => this.requestInvocationStop(active, createExecutionTermination({
+          kind: 'runtime_timeout', source: 'runtime', scope: 'invocation',
+          timeout: { mode: 'deadline', timeoutMs }, diagnosticRef: 'local_runtime_tool_timeout'
+        })), timeoutMs));
+      }
+    } else if (event.type === 'tool_completed') {
+      if (!active.toolTimers?.has(key)) return;
+      clearTimeout(active.toolTimers?.get(key));
+      active.toolTimers?.delete(key);
+    }
+    this.armInvocationIdleTimer(active);
+  }
+
+  /** Useful model output advances idle time; an active tool has its own fixed deadline. */
+  private armInvocationIdleTimer(active: ActiveInvocation) {
+    clearTimeout(active.idleTimer);
+    if (active.toolTimers?.size) return;
+    const timeoutMs = positiveRuntimeTimeoutMs('LOCAL_RUNTIME_IDLE_TIMEOUT_MS', 600_000);
+    active.idleTimer = setTimeout(() => {
+      this.logger.warn(
+        `Local Runtime invocation ${active.invocationId} produced no events for ${timeoutMs}ms; terminating.`
+      );
+      const termination = createExecutionTermination({
+        kind: 'runtime_timeout',
+        source: 'runtime',
+        scope: 'invocation',
+        timeout: { mode: 'idle', timeoutMs },
+        diagnosticRef: 'local_runtime_idle_timeout'
+      });
+      this.requestInvocationStop(active, termination);
+    }, timeoutMs);
+  }
+
+  private requestInvocationStop(active: ActiveInvocation, termination: ExecutionTermination) {
+    if (!this.activeInvocations.has(active.invocationId) || active.termination) return;
+    active.termination = termination;
+    clearTimeout(active.idleTimer);
+    for (const timer of active.toolTimers?.values() ?? []) clearTimeout(timer);
+    const client = this.clientsByDeviceId.get(active.deviceId);
+    if (client) this.send(client, { kind: 'local_runtime.invocation.cancel', payload: { invocationId: active.invocationId, termination } });
+    // The local result is sent after the child process closes. Keep it authoritative.
+    // Outlive the session pause grace period so the API reports an unconfirmed stop.
+    active.cancelTimer = setTimeout(() => {
+      this.unconfirmedStops.set(active.invocationId, active);
+      const result = this.cancelledResultForActive(active, termination, '停止请求已发送，但未收到本地执行结束回执，请检查本地助手。');
+      this.finishInvocation(active.invocationId, { ...result, status: 'failed', error: {
+        code: 'RUNTIME_TIMEOUT', message: '未收到本地执行结束回执，停止状态待确认。', retryable: false,
+        details: { stopUnconfirmed: true }, termination
+      } });
+    }, positiveRuntimeTimeoutMs('LOCAL_RUNTIME_STOP_ACK_TIMEOUT_MS', 15_000));
+  }
+
+  private timedOutResultForActive(active: ActiveInvocation, termination: ExecutionTermination): AgentRunResult {
+    // cancelledResultForActive supplies the invocation-shaped envelope (ids, empty
+    // evidence, zero usage); normalizeTerminatedResult then rewrites status, output and
+    // error into the RUNTIME_TIMEOUT form the orchestrator matches on.
+    const message = safeTerminationMessage(termination);
+    return normalizeTerminatedResult(this.cancelledResultForActive(active, termination, message), termination);
   }
 
   private assertLocalPlan(plan: InvocationPlan, workspaceId: string) {

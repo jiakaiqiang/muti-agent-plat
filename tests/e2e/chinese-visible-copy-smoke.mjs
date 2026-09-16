@@ -7,6 +7,9 @@ const root = fileURLToPath(new URL('../..', import.meta.url));
 const files = [
   'apps/web/src/components/SessionWorkspace.vue',
   'apps/web/src/components/AgentStatusPanel.vue',
+  'apps/web/src/components/WorkflowRuntimeView.vue',
+  'apps/web/src/components/WorkflowAgentInspector.vue',
+  'apps/web/src/components/CollaborationLogPanel.vue',
   'apps/web/src/components/AgentManager.vue',
   'apps/web/src/components/SessionSidebar.vue',
   'apps/web/src/components/UserInputBox.vue',

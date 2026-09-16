@@ -1,10 +1,18 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
+import { devDesktopProfile } from './dev-desktop.mjs';
 import {
   devWebEnv,
+  defaultFetchHealth,
   healthResponseIsUsable,
   healthWatchdogDecision,
+  livenessResponseIsUsable,
+  normalizeHealthProbe,
+  cleanupExistingDevServices,
+  parseNetstatListeningPids,
+  listeningPidsForPort,
   npmWorkspaceInvocation,
   parseEnvFile,
   runDevSupervisor
@@ -14,6 +22,58 @@ test('health response rejects stale or pre-build-id backend processes', () => {
   assert.equal(healthResponseIsUsable({ data: { status: 'ok', buildId: 'build-1', runtimeBuildStale: false } }), true);
   assert.equal(healthResponseIsUsable({ data: { status: 'ok', buildId: 'build-1', runtimeBuildStale: true } }), false);
   assert.equal(healthResponseIsUsable({ data: { status: 'ok' } }), false);
+});
+
+test('liveness response checks only the running server process contract', () => {
+  assert.equal(livenessResponseIsUsable({ data: { status: 'ok', service: 'agent-cluster-server', processId: 42 } }), true);
+  assert.equal(livenessResponseIsUsable({ data: { status: 'ok', service: 'agent-cluster-server' } }), false);
+  assert.equal(normalizeHealthProbe(false).reason, 'probe returned false');
+});
+
+test('health probe preserves HTTP failure diagnostics', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('', { status: 503 });
+  try {
+    const result = await defaultFetchHealth('http://127.0.0.1:8099/api/live', { kind: 'liveness' });
+    assert.equal(result.healthy, false);
+    assert.equal(result.reason, 'HTTP 503');
+    assert.ok(result.durationMs >= 0);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('netstat parser finds only listeners for the requested port', () => {
+  const output = [
+    '  TCP    0.0.0.0:8099       0.0.0.0:0       LISTENING       1234',
+    '  TCP    0.0.0.0:8089       0.0.0.0:0       LISTENING       5678',
+    '  TCP    [::]:8099          [::]:0          LISTENING       1234'
+  ].join('\n');
+  assert.deepEqual(parseNetstatListeningPids(output, 8099), [1234]);
+});
+
+test('startup cleanup stops the old launcher and listeners once per PID', () => {
+  const commands = [];
+  const runCommand = (command, args) => {
+    commands.push([command, args]);
+    if (command === 'netstat.exe') {
+      return { stdout: 'TCP 0.0.0.0:8099 0.0.0.0:0 LISTENING 1234\n' };
+    }
+    return { stdout: '' };
+  };
+  const stopped = cleanupExistingDevServices({
+    ports: [8099, 8089],
+    lockPath: 'dev-server.lock',
+    platform: 'win32',
+    runCommand,
+    readLock: () => ({ pid: 1234 })
+  });
+  assert.deepEqual(stopped, [1234]);
+  assert.equal(commands.filter(([command]) => command === 'taskkill.exe').length, 1);
+});
+
+test('port lookup ignores invalid ports', () => {
+  assert.deepEqual(listeningPidsForPort('not-a-port', { platform: 'win32' }), []);
 });
 
 test('parseEnvFile reads root development ports without overriding syntax noise', () => {
@@ -99,6 +159,103 @@ test('explicit remote Web API traffic bypasses the local Vite proxy', () => {
   );
 });
 
+test('desktop dev profile is local and separated by backend port', () => {
+  assert.notEqual(devDesktopProfile('http://127.0.0.1:8099'), devDesktopProfile('http://127.0.0.1:9099'));
+  assert.match(devDesktopProfile('http://127.0.0.1:8099'), /desktop-dev-8099$/);
+  for (const url of ['https://example.com', 'http://127.0.0.1:8099/api', 'http://user:pass@127.0.0.1:8099']) {
+    assert.throws(() => devDesktopProfile(url));
+  }
+});
+
+test('unified dev opens desktop once after readiness, not during startup or health recovery', async () => {
+  const children = [];
+  const launches = [];
+  const runtimeLaunches = [];
+  let healthy = false;
+  const run = runDevSupervisor({
+    desktop: true, localRuntime: true, cleanupExisting: false, setProcessExitCode: false,
+    healthIntervalMs: 5, npmExecPath: 'C:/npm/npm-cli.js',
+    spawnProcess() {
+      const child = new EventEmitter(); child.exitCode = null; children.push(child); return child;
+    },
+    fetchHealth: async () => healthy,
+    launchDesktop: async input => { launches.push(input); },
+    launchRuntime: async input => { runtimeLaunches.push(input); return { state: 'connected' }; }
+  });
+  try {
+    await delay(25);
+    assert.equal(launches.length, 0);
+    assert.equal(runtimeLaunches.length, 0);
+    healthy = true; await delay(25);
+    assert.equal(launches.length, 1);
+    assert.equal(runtimeLaunches.length, 1);
+    assert.equal(runtimeLaunches[0].serverUrl, 'http://127.0.0.1:8099');
+    assert.equal(launches[0].serverUrl, 'http://127.0.0.1:8099');
+    healthy = false; await delay(15);
+    healthy = true; await delay(15);
+    assert.equal(launches.length, 1);
+    assert.equal(runtimeLaunches.length, 1);
+    assert.equal(children.length, 2, 'desktop must not join force-killed service process group');
+  } finally { children[0].emit('exit', 1, null); await run; }
+});
+
+test('runtime startup failure is retried and the resident worker is checked again', async () => {
+  const children = [];
+  let calls = 0;
+  let active = 0;
+  const run = runDevSupervisor({
+    localRuntime: true, cleanupExisting: false, setProcessExitCode: false,
+    healthIntervalMs: 5, runtimeCheckIntervalMs: 5, npmExecPath: 'C:/npm/npm-cli.js',
+    spawnProcess() { const child = new EventEmitter(); children.push(child); return child; },
+    fetchHealth: async () => true,
+    launchRuntime: async () => {
+      assert.equal(active++, 0, 'startup attempts must not overlap');
+      const attempt = ++calls;
+      await delay(15);
+      active--;
+      if (attempt === 1) throw new Error('temporary startup failure');
+      return { state: 'existing' };
+    }
+  });
+  try {
+    for (let i = 0; i < 100 && calls < 3; i++) await delay(5);
+    assert.ok(calls >= 3);
+  } finally { children[0].emit('exit', 1, null); await run; }
+});
+
+test('desktop launch failure fails unified startup with a nonzero result', async () => {
+  const children = [];
+  const run = runDevSupervisor({
+    desktop: true, cleanupExisting: false, setProcessExitCode: false,
+    healthIntervalMs: 5, npmExecPath: 'C:/npm/npm-cli.js',
+    spawnProcess() {
+      const child = new EventEmitter(); child.exitCode = null; children.push(child); return child;
+    },
+    fetchHealth: async () => true,
+    launchDesktop: async () => { throw new Error('Electron missing'); }
+  });
+  try { await delay(25); assert.equal(await run, 1); }
+  finally { children[0].emit('exit', 1, null); }
+});
+
+test('late readiness cannot open desktop after services have stopped', async () => {
+  const children = [];
+  let resolveProbe;
+  let launches = 0;
+  const run = runDevSupervisor({
+    desktop: true, cleanupExisting: false, setProcessExitCode: false,
+    healthIntervalMs: 5, npmExecPath: 'C:/npm/npm-cli.js',
+    spawnProcess() { const child = new EventEmitter(); children.push(child); return child; },
+    fetchHealth: () => new Promise(resolve => { resolveProbe = resolve; }),
+    launchDesktop: async () => { launches++; }
+  });
+  await delay(8);
+  children[0].emit('exit', 1, null);
+  assert.equal(await run, 1);
+  resolveProbe?.(true); await delay(10);
+  assert.equal(launches, 0);
+});
+
 test('dev supervisor keeps only server and web resident and fails the group when one child exits', async () => {
   const children = [];
   const spawnOptions = [];
@@ -106,6 +263,7 @@ test('dev supervisor keeps only server and web resident and fails the group when
   const previousExitCode = process.exitCode;
   const run = runDevSupervisor({
     setProcessExitCode: false,
+    cleanupExisting: false,
     npmExecPath: 'C:/npm/npm-cli.js',
     spawnProcess(_command, args, options) {
       const child = new EventEmitter();
@@ -140,6 +298,7 @@ test('dev supervisor preserves an explicit public Web URL', async () => {
   try {
     const run = runDevSupervisor({
       setProcessExitCode: false,
+      cleanupExisting: false,
       npmExecPath: 'C:/npm/npm-cli.js',
       spawnProcess(_command, args, options) {
         const child = new EventEmitter();

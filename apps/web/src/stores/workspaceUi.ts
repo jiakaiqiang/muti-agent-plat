@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import type { RuntimeType } from '@/types/contracts'
 
@@ -28,6 +28,25 @@ export const useWorkspaceUiStore = defineStore('workspaceUi', () => {
   const sessionListTab = ref<SessionListTab>('all')
   const sessionSearchQuery = ref('')
   const messageDraft = ref('')
+  const draftsByTask = new Map<string, string>()
+  let draftTaskId = ''
+  function activateTask(taskId: string) {
+    if (draftTaskId === taskId) return
+    if (draftTaskId) draftsByTask.set(draftTaskId, messageDraft.value)
+    draftTaskId = taskId
+    let savedDraft = ''
+    try { savedDraft = sessionStorage.getItem(`task-draft:${taskId}`) ?? '' } catch { /* Storage may be unavailable. */ }
+    messageDraft.value = draftsByTask.get(taskId) ?? savedDraft
+    showAgentPopover.value = false
+  }
+  watch(messageDraft, value => {
+    if (!draftTaskId) return
+    draftsByTask.set(draftTaskId, value)
+    try {
+      if (value) sessionStorage.setItem(`task-draft:${draftTaskId}`, value)
+      else sessionStorage.removeItem(`task-draft:${draftTaskId}`)
+    } catch { /* In-memory drafts remain available. */ }
+  }, { flush: 'sync' })
   const selectedWorkflowStage = ref<WorkflowStageKey>('intake')
 
   const showCreateSessionDialog = ref(false)
@@ -166,6 +185,7 @@ export const useWorkspaceUiStore = defineStore('workspaceUi', () => {
     sessionListTab,
     sessionSearchQuery,
     messageDraft,
+    activateTask,
     selectedWorkflowStage,
     showCreateSessionDialog,
     showCreateConfirmDialog,

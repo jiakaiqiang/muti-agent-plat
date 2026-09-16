@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { localRuntimeErrorMessage, normalizeLocalRuntimeWorkspaces, useLocalRuntimeStore } from './localRuntime'
+import {
+  LOCAL_RUNTIME_WAKE_FAILED_MESSAGE,
+  localRuntimeErrorMessage,
+  normalizeLocalRuntimeWorkspaces,
+  useLocalRuntimeStore
+} from './localRuntime'
 
 describe('normalizeLocalRuntimeWorkspaces', () => {
   it('preserves advertised Runtime types', () => {
@@ -96,6 +101,59 @@ describe('browser-triggered Local Runtime workspace authorization', () => {
     expect(workspace.workspaceId).toBe('workspace-picked')
     expect(store.authorizing).toBe(false)
     expect(store.workspaces).toHaveLength(1)
+  })
+
+  it('fires the wake-up from a cached launch origin without spending a round-trip', async () => {
+    const launch = vi.fn()
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith('/local-runtime/launch-config')) {
+        return jsonResponse({ serverUrl: 'http://127.0.0.1:8089' })
+      }
+      throw new Error(`Unexpected request: ${String(input)}`)
+    }))
+
+    const store = useLocalRuntimeStore()
+    expect(store.wakeLocalRuntime(launch)).toBe(false)
+
+    await store.resolveLaunchServerUrl()
+    expect(store.wakeLocalRuntime(launch)).toBe(true)
+    expect(launch).toHaveBeenCalledOnce()
+    expect(launch.mock.calls[0]?.[0]).toBe(
+      `agent-runtime://connect?server=${encodeURIComponent('http://127.0.0.1:8089')}`
+    )
+  })
+
+  it('reuses the cached launch origin instead of refetching it', async () => {
+    const fetch = vi.fn(async () => jsonResponse({ serverUrl: 'http://127.0.0.1:8089' }))
+    vi.stubGlobal('fetch', fetch)
+
+    const store = useLocalRuntimeStore()
+    await store.resolveLaunchServerUrl()
+    await store.resolveLaunchServerUrl()
+
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it('reports a blocked wake-up as a browser-permission problem, not a missing component', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/local-runtime/devices')) return jsonResponse([])
+      if (url.endsWith('/local-runtime/launch-config')) {
+        return jsonResponse({ serverUrl: 'http://127.0.0.1:8089' })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    }))
+
+    const store = useLocalRuntimeStore()
+    await expect(store.ensureConnected({
+      launch: () => undefined,
+      pollIntervalMs: 1,
+      timeoutMs: 5,
+      wait: async () => undefined
+    })).rejects.toThrow(LOCAL_RUNTIME_WAKE_FAILED_MESSAGE)
+
+    expect(store.connectionState).toBe('failed')
+    expect(store.connectionError).toContain('浏览器可能拦截了唤醒请求')
   })
 
   it('wakes an offline helper once, waits for connection, then refreshes CLI capabilities', async () => {

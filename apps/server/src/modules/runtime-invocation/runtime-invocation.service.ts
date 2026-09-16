@@ -12,7 +12,11 @@ export class RuntimeInvocationService {
   ) {}
 
   async invoke(input: ResolveInvocationInput, signal?: AbortSignal): Promise<AgentRunResult> {
+    let operation = await this.runtime.operations.begin({ id: input.operationId ?? input.invocationId,
+      sessionId: input.sessionId, taskId: input.taskId, phase: input.phase });
+    if (operation.status === 'paused') operation = await this.runtime.operations.resume(input.sessionId, operation.id);
     const plan = this.resolver.resolve(input);
+    plan.operation = operation;
     if (plan.pendingApprovals?.length) {
       throw new BadRequestException('System Runtime invocation cannot wait for Tool approval.');
     }

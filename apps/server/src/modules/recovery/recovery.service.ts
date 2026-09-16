@@ -78,6 +78,7 @@ export class RecoveryService implements OnApplicationBootstrap {
     }
     for (const session of sessions) {
       this.interruptSessionFromPreviousProcess(session);
+      await this.sessions.reconcileRecoveryStateOnBoot?.(session.id);
     }
 
     const routingRecoveries = await this.sessions.recoverIntentRoutings?.(sessions.map((session) => session.id)) ?? [];
@@ -182,10 +183,14 @@ export class RecoveryService implements OnApplicationBootstrap {
 
 function workItemStatusForSession(status: SessionStatus): 'OPEN' | 'WAITING_USER' | 'EXECUTING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' {
   if (status === 'COMPLETED') return 'COMPLETED';
-  if (status === 'FAILED' || status === 'INTERRUPTED') return 'FAILED';
+  if (status === 'FAILED') return 'FAILED';
   if (status === 'CANCELLED') return 'CANCELLED';
+  // INTERRUPTED 归 WAITING_USER 而非 FAILED：它等的是用户决定是否续接，与
+  // sessions.service.ts 的 workItemStatusForSessionStatus 对齐，避免两侧对同一
+  // 会话给出互斥的 WorkItem 状态。
   if (status === 'WAIT_USER_CONFIRM' || status === 'WAIT_WORKFLOW_SELECT' || status === 'WAIT_WORKFLOW_STEP_CONFIRM' ||
-      status === 'WAIT_WORKSPACE_CONFLICT_RESOLUTION' || status === 'WAIT_USER_DECISION' || status === 'PAUSED') return 'WAITING_USER';
+      status === 'WAIT_WORKSPACE_CONFLICT_RESOLUTION' || status === 'WAIT_USER_DECISION' || status === 'PAUSED' ||
+      status === 'INTERRUPTED') return 'WAITING_USER';
   if (status === 'EXECUTING' || status === 'AGENT_DISCUSSING' || status === 'REVISING_BRIEF' || status === 'POST_REVIEW' || status === 'REWORKING') return 'EXECUTING';
   return 'OPEN';
 }

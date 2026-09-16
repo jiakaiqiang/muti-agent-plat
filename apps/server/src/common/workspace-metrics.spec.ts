@@ -24,11 +24,15 @@ test('workspace metrics expose counters, gauges and bounded duration aggregates 
   assert.equal(duration?.sum, 20);
   assert.equal(duration?.min, 8);
   assert.equal(duration?.max, 12);
-  assert.equal(WORKSPACE_METRIC_NAMES.length, 31);
+  assert.equal(WORKSPACE_METRIC_NAMES.length, 35);
   for (const metric of [
     'routing_idempotency_replay_total',
     'decision_inheritance_total',
-    'event_outbox_lag_ms'
+    'event_outbox_lag_ms',
+    'runtime_stop_pending_sync_count',
+    'runtime_stop_pending_sync_oldest_ms',
+    'runtime_stop_receipt_replay_total',
+    'runtime_stop_event_idempotency_conflict_total'
   ]) {
     assert.ok(WORKSPACE_METRIC_NAMES.includes(metric as typeof WORKSPACE_METRIC_NAMES[number]));
   }

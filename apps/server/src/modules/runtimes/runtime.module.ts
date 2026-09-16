@@ -27,9 +27,10 @@ import { WorktreeExecutionModule } from '../worktree-execution/worktree-executio
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { CAPABILITY_TOOL_MAPPING } from '../tools/capability-tool-mapping.js';
 import { ServerRuntimeWorkerService } from './server-runtime-worker.service.js';
+import { EventsModule } from '../events/events.module.js';
 
 @Module({
-  imports: [AgentsModule, AgentProfileModule, CapabilitiesModule, WorktreeExecutionModule],
+  imports: [AgentsModule, AgentProfileModule, CapabilitiesModule, WorktreeExecutionModule, EventsModule],
   controllers: [RuntimeController],
   providers: [
     RuntimeService,

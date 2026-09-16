@@ -99,6 +99,9 @@ import {
 import { ContextRouterService } from './context-router.service.js';
 import { ProjectMapService } from './project-map.service.js';
 import { consumeRuntimeEvents } from './runtime-stream-consumer.js';
+import { structuredOutputGuard } from './structured-output-guard.js';
+import { acceptanceFingerprint, explicitTaskPreflight } from './task-acceptance-preflight.js';
+import { boundedConsultations, consultationConcurrency } from './bounded-consultation.js';
 import { shouldEmitHeartbeat, shouldSuppressHeartbeat } from './runtime-heartbeat-policy.js';
 import { smartRuntimePick } from './smart-runtime-pick.js';
 import { buildCoverageSystemRule, buildWorkspaceManifest } from './workspace-manifest.js';
@@ -131,6 +134,7 @@ export type ExecutionOutcome =
       reason: string;
       actions?: PostReviewAction[];
       workflowAgentSubstitution?: WorkflowAgentSubstitutionRequest;
+      workflowUpstreamIncomplete?: WorkflowUpstreamIncompleteSignal;
     }
   | { kind: 'approval_required'; reason: string }
   | { kind: 'workflow_step_completed'; taskId: string; resultSummary: string }
@@ -158,7 +162,22 @@ type TaskRunOutcome =
       retryable?: boolean;
       error?: RuntimeError;
       workflowAgentSubstitution?: WorkflowAgentSubstitutionRequest;
+      workflowUpstreamIncomplete?: WorkflowUpstreamIncompleteSignal;
     };
+
+/**
+ * Raised when a workflow Agent node ran but could not finish because the input it
+ * needed from an earlier stage is missing. Only the blocked node and its own
+ * reason are reported here; the Workflow Runtime owns the definition graph and
+ * resolves which upstream nodes can be re-run.
+ */
+export type WorkflowUpstreamIncompleteSignal = {
+  taskId: string;
+  workflowRunId: string;
+  workflowNodeId?: string;
+  reason: string;
+  missingInputs: string[];
+};
 
 export type WorkflowAgentSubstitutionRequest = {
   taskId: string;
@@ -169,6 +188,9 @@ export type WorkflowAgentSubstitutionRequest = {
 };
 
 type RuntimeInvocationDraft = {
+  recoveryCandidate?: InvocationPlan['recoveryCandidate'];
+  submissionRepair?: boolean;
+  operation?: InvocationPlan['operation'];
   invocationId: string;
   sessionId: string;
   taskId?: string;
@@ -1704,6 +1726,13 @@ export class OrchestratorService {
             workflowAgentSubstitution: failedTask.result.workflowAgentSubstitution
           };
         }
+        if (failedTask.result.workflowUpstreamIncomplete) {
+          return {
+            kind: 'ask_user',
+            reason: `${messages.taskFailed(failedTask.task.title)}: ${failedTask.result.message}`,
+            workflowUpstreamIncomplete: failedTask.result.workflowUpstreamIncomplete
+          };
+        }
         if (this.isInfrastructureTaskFailure(failedTask.result)) {
           return {
             kind: 'failed',
@@ -1934,6 +1963,7 @@ export class OrchestratorService {
       sessionId: session.id,
       taskId: task.id,
       phase: 'task_execution',
+      ...(this.runtime.operations ? { operation: await this.taskExecutionOperation(session, task, invocationId) } : {}),
       agent: taskAgent,
       contextAssembly,
       expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' },
@@ -1941,6 +1971,10 @@ export class OrchestratorService {
       ...(isFileRevisionTask ? { writeModeOverride: 'proposal_only' as const } : {})
     }, signal);
     const executionRuntimeType = result.runtimeType;
+    if (result.executionCandidate) this.tasks.update(task, { executionCheckpoint: {
+      operationId: task.executionOperationId, invocationId: result.invocationId,
+      candidateId: result.executionCandidate.id, candidateHash: result.executionCandidate.manifestHash,
+      stage: result.executionCandidate.stage } });
 
     if (signal?.aborted) {
       const message = messages.cancelled;
@@ -2070,6 +2104,31 @@ export class OrchestratorService {
           this.emitSupplementalContextRejected(session, task, taskAgent.id, requestedContext, 'duplicate_request');
         }
       }
+      // A workflow Agent node that executed and then reported blocked has read its
+      // inputs and found them insufficient. That is the downstream node detecting
+      // that an earlier stage did not actually finish, so it is offered an
+      // upstream re-run instead of a generic "confirm next step" card. Auto
+      // supplemental-context recovery above has already been exhausted.
+      if (
+        output.status === 'blocked' &&
+        !isFileRevisionTask &&
+        task.workflowRunId &&
+        task.workflowNodeType === 'agent'
+      ) {
+        return {
+          ok: false,
+          message: output.summary,
+          code,
+          retryable: false,
+          workflowUpstreamIncomplete: {
+            taskId: task.id,
+            workflowRunId: task.workflowRunId,
+            ...(task.workflowNodeId ? { workflowNodeId: task.workflowNodeId } : {}),
+            reason: output.summary,
+            missingInputs: this.upstreamMissingInputs(task, requestedContext)
+          }
+        };
+      }
       return { ok: false, message: output.summary, code, retryable: false };
     }
 
@@ -2094,6 +2153,9 @@ export class OrchestratorService {
         this.worktreeExecution?.releaseWriteLease(result.workspaceExecution.changeSet.id);
       }
       result.workspaceExecution.writeback = writeback;
+      if (writeback.status === 'applied') this.tasks.update(task, { executionCheckpoint: {
+        ...task.executionCheckpoint, operationId: task.executionOperationId, invocationId: result.invocationId,
+        stage: 'writeback_confirmed', writebackId: writeback.id } });
       session.workspaceWritebacks = this.workspaceWritebacks.list(session.id);
       const hasBlockingWriteback = session.workspaceWritebacks.some(
         (item) => item.status === 'conflicted' || item.status === 'failed'
@@ -2259,8 +2321,49 @@ export class OrchestratorService {
       attemptedAgentIds.add(candidate.id);
     }
     const invocationId = crypto.randomUUID();
-    const contextAssembly = this.createContextAssembly(session, candidate, brief, task, 'task_acceptance');
+    const assembled = this.createContextAssembly(session, candidate, brief, task, 'task_acceptance');
+    const contextAssembly = { ...assembled, systemRules: [...assembled.systemRules ?? [],
+      'Make only a concise acceptance decision for the assigned responsibility and supplied evidence. Do not implement or test the task.'],
+      budget: { ...assembled.budget, maxOutputTokens: Math.min(assembled.budget?.maxOutputTokens ?? 800, 800) } };
     const isFileRevisionTask = task.executionPurpose === 'file_revision' || task.executionPurpose === 'revision_synthesis';
+    let inputFingerprint: string | undefined;
+    if (this.invocationResolver && candidate.status === 'active') {
+      try {
+        const plan = this.invocationResolver.resolve({ invocationId, sessionId: session.id, taskId: task.id,
+          taskKind: contextAssembly.taskContext.intent, phase: 'task_execution', agent: candidate,
+          taskRequiresCodeChanges: contextAssembly.taskContext.requiresCodeChanges,
+          workspace: this.invocationWorkspace(session),
+          sessionPreference: this.runtimePreferenceForAgent(candidate, session.runtimePreference),
+          projectPolicyRuntime: projectPolicyRuntimeType(), globalDefaultRuntime: globalDefaultRuntimeType(),
+          smartRouterPick: smartRuntimePick({ phase: 'task_execution', requiresCodeChanges: contextAssembly.taskContext.requiresCodeChanges }),
+          contextEnvelopeFactory: ({ identity, toolCatalog }) => buildEnvelopeFromContextAssembly({ session,
+            phase: 'task_execution', contextAssembly, identity, toolCatalogHash: toolCatalog.catalogHash }),
+          expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' }, budget: contextAssembly.budget,
+          ...(isFileRevisionTask ? { writeModeOverride: 'proposal_only' as const } : {}) });
+        inputFingerprint = acceptanceFingerprint(task, plan, this.taskDependencyArtifacts(session, task));
+        const checkpoint = task.acceptanceCheckpoint;
+        if (!plan.pendingApprovals?.length && checkpoint?.inputFingerprint === inputFingerprint &&
+          checkpoint.agentId === candidate.id && checkpoint.decision.status === 'accepted') {
+          return { ok: true, agent: candidate, decision: checkpoint.decision, invocationId: checkpoint.invocationId };
+        }
+        const grounded = evaluateGroundedEvidenceGate({ envelope: plan.contextEnvelope,
+          requiresEvidence: session.workspaceMode !== 'bootstrap' && requiresGroundedRuntimeEvidence('task_execution',
+            contextAssembly.taskContext.requiresCodeChanges, contextAssembly.taskContext.evidenceSelection.strategy) });
+        const dependenciesReady = task.dependsOnTaskIds.every(id => this.tasks.find(session.id, id)?.status === 'completed');
+        const decision = grounded.ok && !isFileRevisionTask && checkpoint?.decision.status !== 'blocked' && checkpoint?.decision.status !== 'rejected'
+          ? explicitTaskPreflight(task, plan, dependenciesReady) : undefined;
+        if (decision) {
+          this.tasks.update(task, { acceptanceCheckpoint: { inputFingerprint, agentId: candidate.id,
+            decisionSource: 'rule', decision, invocationId, createdAt: nowIso() } });
+          this.emitTaskAcceptanceDecisionEvent(session, task, candidate, coordinator, decision, invocationId, plan.executionTarget.runtimeType);
+          return { ok: true, agent: candidate, decision, invocationId };
+        }
+      } catch (error) {
+        if (error instanceof InvocationResolutionError) return { ok: false, message: error.message,
+          error: { code: 'CAPABILITY_BLOCKED', message: error.message, retryable: false } };
+        throw error;
+      }
+    }
     const result = await this.runRuntime(
       session,
       {
@@ -2352,6 +2455,8 @@ export class OrchestratorService {
       result,
       'task_acceptance_decision'
     );
+    if (inputFingerprint) this.tasks.update(task, { acceptanceCheckpoint: { inputFingerprint,
+      agentId: candidate.id, decisionSource: 'model', decision, invocationId, createdAt: nowIso() } });
 
     if (!isFileRevisionTask) {
       this.emitTaskAcceptanceDecisionEvent(session, task, candidate, coordinator, decision, invocationId, result.runtimeType);
@@ -2518,6 +2623,7 @@ export class OrchestratorService {
         relatedTaskIds: [task.id],
         mentionedAgentIds: alternativeAgentIds.length ? alternativeAgentIds : [coordinator.id],
         acceptanceDecision: decision,
+        decisionSource: task.acceptanceCheckpoint?.decisionSource ?? 'model',
         handoffSuggestion: decision.handoffSuggestion,
         runtimeInvocationId: invocationId,
         runtimeType
@@ -2535,11 +2641,13 @@ export class OrchestratorService {
     const isFileRevisionTask = task.executionPurpose === 'file_revision' || task.executionPurpose === 'revision_synthesis';
     this.events.create({
       sessionId: session.id,
-      type: 'task_blocked',
+      type: decision.status === 'rejected' ? 'task_rejected' : 'task_blocked',
       taskId: task.id,
       fromAgentId: candidate.id,
       toAgentIds: [coordinator.id],
-      content: `${candidate.name} 无法继续任务：${task.title}`,
+      content: decision.status === 'rejected'
+        ? `${candidate.name} 拒绝接单：${task.title}`
+        : `${candidate.name} 暂时无法接单：${task.title}`,
       metadata: createMetadata('task_card', {
         taskId: task.id,
         title: task.title,
@@ -3160,9 +3268,7 @@ export class OrchestratorService {
     signal?: AbortSignal
   ) {
     await this.runtime.refreshRuntimeAvailability?.();
-    for (const agent of participants) {
-      throwIfAborted(signal);
-      const invocationId = crypto.randomUUID();
+    const consultations = participants.map(agent => {
       const contextAssembly = this.createContextAssembly(session, agent, undefined, undefined, 'discussion');
       contextAssembly.systemRules = [
         ...contextAssembly.systemRules,
@@ -3170,8 +3276,15 @@ export class OrchestratorService {
         'Do not execute the task in the discussion phase.'
       ];
       contextAssembly.constraints = [...contextAssembly.constraints, `Follow-up requirement: ${content}`];
-      const result = await this.runDiscussionRuntime(session, agent, invocationId, contextAssembly, signal);
+      return { agent, invocationId: crypto.randomUUID(), contextAssembly };
+    });
+    const results = await boundedConsultations(consultations, consultationConcurrency(),
+      item => this.runDiscussionRuntime(session, item.agent, item.invocationId, item.contextAssembly, signal),
+      result => result.status !== 'completed' || !usableAgentMessageOutput(result.output), signal);
+    for (const [index, { agent, invocationId }] of consultations.entries()) {
       throwIfAborted(signal);
+      const result = results[index];
+      if (!result) break;
       const output =
         result.status === 'completed' && usableAgentMessageOutput(result.output)
           ? result.output
@@ -3194,6 +3307,9 @@ export class OrchestratorService {
           runtimeError: result.error
         })
       });
+      if (result.status !== 'completed' || !usableAgentMessageOutput(result.output)) {
+        throw new Error(`Required discussion by ${agent.name} did not complete: ${result.error?.message ?? result.status}`);
+      }
     }
     this.events.create({
       sessionId: session.id,
@@ -3215,10 +3331,10 @@ export class OrchestratorService {
     const participants = this.discussionParticipants(session, coordinator);
     const rounds = this.discussionMaxRounds();
     for (let round = 1; round <= rounds; round += 1) {
-      for (const agent of participants) {
+      const consultations = participants.map(agent => ({ agent, invocationId: crypto.randomUUID(),
+        contextAssembly: this.createContextAssembly(session, agent, undefined, undefined, 'discussion') }));
+      const results = await boundedConsultations(consultations, consultationConcurrency(), async ({ agent, invocationId, contextAssembly }) => {
         throwIfAborted(signal);
-        const invocationId = crypto.randomUUID();
-        const contextAssembly = this.createContextAssembly(session, agent, undefined, undefined, 'discussion');
         this.events.create({
           sessionId: session.id,
           type: 'agent_status_changed',
@@ -3232,8 +3348,12 @@ export class OrchestratorService {
             waitingFor: [coordinator.id]
           })
         });
-        const result = await this.runDiscussionRuntime(session, agent, invocationId, contextAssembly, signal);
+        return this.runDiscussionRuntime(session, agent, invocationId, contextAssembly, signal);
+      }, result => result.status !== 'completed' || !usableAgentMessageOutput(result.output), signal);
+      for (const [index, { agent, invocationId }] of consultations.entries()) {
         throwIfAborted(signal);
+        const result = results[index];
+        if (!result) break;
         const timedOut = result.error?.code === 'RUNTIME_TIMEOUT';
         const discussionRuntimeError: RuntimeError | undefined = result.error ?? (
           result.status === 'completed' && !usableAgentMessageOutput(result.output)
@@ -3296,12 +3416,13 @@ export class OrchestratorService {
             round
           })
         });
-        if (discussionRuntimeError && this.isFatalDiscussionRuntimeError(discussionRuntimeError)) {
+        if (discussionRuntimeError) {
           throw Object.assign(new Error(discussionRuntimeError.message), {
             cause: discussionRuntimeError,
             runtimeError: discussionRuntimeError
           });
         }
+        if (discussionFailed) throw new Error(`Required discussion did not complete: ${agent.name}`);
       }
     }
   }
@@ -3312,6 +3433,11 @@ export class OrchestratorService {
     contextAssembly: ContextAssembly,
     signal?: AbortSignal
   ) {
+    contextAssembly = { ...contextAssembly,
+      systemRules: [...contextAssembly.systemRules ?? [],
+        'Read-only consultation: identify unresolved requirements, constraints and risks for your assigned role.',
+        'Refer to supplied upstream evidence instead of repeating it. Do not implement code or repeat other roles. Keep the recommendation concise.'],
+      budget: { ...contextAssembly.budget, maxOutputTokens: Math.min(contextAssembly.budget.maxOutputTokens ?? 1200, 1200) } };
     return this.runRuntime(session, {
       invocationId,
       sessionId: session.id,
@@ -3451,7 +3577,7 @@ export class OrchestratorService {
     });
     this.events.create({
       sessionId,
-      type: needsMoreContext ? 'task_waiting' : 'task_rejected',
+      type: needsMoreContext ? 'task_waiting' : 'task_failed',
       taskId: task.id,
       fromAgentId: agentId,
       content: needsMoreContext ? `Task is waiting for more context: ${task.title}` : messages.taskFailed(task.title),
@@ -3511,10 +3637,19 @@ export class OrchestratorService {
     });
   }
 
+  private async taskExecutionOperation(session: SessionDetail, task: AgentTask, invocationId: string) {
+    let operation = await this.runtime.operations.begin({ id: task.executionOperationId ?? invocationId,
+      sessionId: session.id, taskId: task.id, phase: 'task_execution', previousId: task.previousExecutionOperationId });
+    if (operation.status === 'paused') operation = await this.runtime.operations.resume(session.id, operation.id);
+    if (!task.executionOperationId) this.tasks.update(task, { executionOperationId: operation.id });
+    return operation;
+  }
+
   private canRetryRuntimeTimeout(error: AgentRunResult['error'] | undefined, runtimeRetryCount: number) {
     return error?.code === 'RUNTIME_TIMEOUT' &&
       error.retryable === true &&
       error.details?.providerFailure !== true &&
+      !error.details?.operationFailure && !error.details?.stopUnconfirmed &&
       runtimeRetryCount < 1;
   }
 
@@ -6459,12 +6594,36 @@ export class OrchestratorService {
   }
 
   private async runRuntime(inputSession: SessionDetail, input: RuntimeInvocationDraft, signal?: AbortSignal) {
+    if (!input.operation && this.runtime.operations) {
+      const scopeKey = JSON.stringify([input.phase, input.agent.id, input.contextAssembly.workItemId ?? inputSession.activeWorkItemId,
+        input.taskId, input.contextAssembly.currentContractGoal ?? input.contextAssembly.sessionGoal]);
+      const paused = this.runtime.operations.list(input.sessionId).find(item => item.status === 'paused' && item.scopeKey === scopeKey);
+      const operation = paused ? await this.runtime.operations.resume(input.sessionId, paused.id)
+        : await this.runtime.operations.begin({ id: input.invocationId,
+          sessionId: input.sessionId, taskId: input.taskId, phase: input.phase, scopeKey });
+      input = { ...input, operation };
+    }
     let contextRetryCount = 0;
     let supplementalContextDurationMs = 0;
     let draft = input;
     while (true) {
       const result = await this.runRuntimeProviderAttempts(inputSession, draft, signal);
       if (result.status === 'completed' || result.status === 'cancelled' || signal?.aborted) return result;
+      if (!draft.submissionRepair && draft.phase === 'task_execution' && draft.writeModeOverride !== 'proposal_only' &&
+        result.error?.code === 'RUNTIME_OUTPUT_CONTRACT_VIOLATION' && result.executionCandidate?.schemaErrors?.length &&
+        !result.error.details?.stopUnconfirmed && result.runtimeType === 'claude_code' &&
+        result.executionCandidate.originalSubmission && result.executionCandidate.outputVersion === '2.0') {
+        if (!draft.operation || !this.runtime.operations ||
+          !await this.runtime.operations.reserveCorrection(inputSession.id, draft.operation.id)) return result;
+        this.events.create({ sessionId: inputSession.id, type: 'runtime_progress',
+          fromAgentId: draft.agent.id, toAgentIds: [], content: '已保存修改，正在修复结果提交格式。',
+          metadata: createMetadata('system_notice', { code: 'SUBMISSION_REPAIR_STARTED',
+            operationId: draft.operation?.id, runtimeInvocationId: draft.invocationId,
+            candidateId: result.executionCandidate.id, phase: draft.phase }) });
+        draft = { ...draft, invocationId: crypto.randomUUID(), submissionRepair: true,
+          recoveryCandidate: result.executionCandidate };
+        continue;
+      }
       const requestedContext = result.error?.requestedContext;
       const novelContext = this.resolveRetryRequest(
         inputSession,
@@ -6558,10 +6717,27 @@ export class OrchestratorService {
   }
 
   private async runRuntimeProviderAttempts(inputSession: SessionDetail, input: RuntimeInvocationDraft, signal?: AbortSignal) {
+    const timeoutMs = input.operation ? Math.max(1, Date.parse(input.operation.deadlineAt) - Date.now()) : phaseTimeoutMs(input.phase);
+    const controller = new AbortController();
+    const forwardAbort = () => controller.abort(signal?.reason);
+    if (signal?.aborted) forwardAbort();
+    else signal?.addEventListener('abort', forwardAbort, { once: true });
+    const timer = timeoutMs > 0 ? setTimeout(() => abortWithTermination(controller, createExecutionTermination({
+      kind: 'phase_timeout', source: 'orchestrator', scope: 'phase', phase: input.phase,
+      timeout: { mode: 'deadline', timeoutMs }
+    })), timeoutMs) : undefined;
+    try {
+      return await this.runRuntimeProviderAttemptsWithinDeadline(inputSession, input, controller.signal);
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', forwardAbort);
+    }
+  }
+
+  private async runRuntimeProviderAttemptsWithinDeadline(inputSession: SessionDetail, input: RuntimeInvocationDraft, signal?: AbortSignal) {
     const attemptGroupId = input.invocationId;
     const excludedRuntimeTypes = new Set<RuntimeType>([
-      ...(input.excludedRuntimeTypes ?? []),
-      ...this.activeRuntimeProviderCircuits()
+      ...(input.excludedRuntimeTypes ?? [])
     ]);
     let retryOfInvocationId: string | undefined;
     const preferredRuntimeType = inputSession.runtimePreference?.preferredRuntimeType;
@@ -6599,12 +6775,16 @@ export class OrchestratorService {
       }, signal);
       lastResult = result;
       if (result.status === 'completed' || result.status === 'cancelled' || signal?.aborted) return result;
-      if (!this.isRetryableProviderFailure(result.error)) return result;
+      if (result.error?.details?.stopUnconfirmed || result.error?.details?.structuredOutputGuard || !this.isRetryableProviderFailure(result.error)) return result;
 
       if (!sameRuntimeRetried) {
         sameRuntimeRetried = true;
         retryOfInvocationId = invocationId;
         const delayMs = this.runtimeProviderRetryDelayMs(result.error);
+        if (input.operation && delayMs >= Date.parse(input.operation.deadlineAt) - Date.now()) {
+          return { ...result, error: { ...result.error!, retryable: false,
+            details: { ...result.error?.details, operationFailure: 'OPERATION_BACKOFF_EXCEEDS_BUDGET' } } };
+        }
         this.recordRuntimeProviderRetry(inputSession, input, result, attemptGroupId, attempt + 1, delayMs);
         await this.backoffRuntimeProviderRetry(delayMs, signal);
         if (signal?.aborted) return result;
@@ -6644,7 +6824,7 @@ export class OrchestratorService {
         agent: input.agent,
         taskRequiresCodeChanges: input.contextAssembly.taskContext.requiresCodeChanges,
         workspace: this.invocationWorkspace(inputSession),
-        sessionPreference: this.runtimePreferenceForAgent(input.agent, inputSession.runtimePreference),
+        sessionPreference: this.runtimePreferenceForAgent(input.agent, inputSession.runtimePreference, input.phase),
         projectPolicyRuntime: projectPolicyRuntimeType(),
         smartRouterPick: input.runtimeCandidateOverride ?? smartRuntimePick({
           phase: input.phase,
@@ -6666,9 +6846,39 @@ export class OrchestratorService {
       });
       resolvedPlan = {
         ...resolvedPlan,
+        operation: input.operation,
+        recoveryCandidate: input.recoveryCandidate,
+        submissionRepair: input.submissionRepair,
         workItemId: input.contextAssembly.workItemId ?? inputSession.activeWorkItemId,
         attempt: input.attempt
       };
+      if (input.taskId && input.phase === 'task_execution' && !resolvedPlan.recoveryCandidate) {
+        const task = this.tasks.find(inputSession.id, input.taskId);
+        resolvedPlan.recoveryOriginTaskId = task?.recoveryOriginTaskId;
+        resolvedPlan.recoveryCandidate = this.runtime.findExecutionCandidate?.(resolvedPlan);
+        const candidate = resolvedPlan.recoveryCandidate;
+        if (candidate?.schemaErrors?.length) {
+          if (!candidate.originalSubmission || candidate.outputVersion !== '2.0' ||
+            resolvedPlan.executionTarget.runtimeType !== 'claude_code' || !resolvedPlan.operation ||
+            !await this.runtime.operations?.reserveCorrection(inputSession.id, resolvedPlan.operation.id)) {
+            const blocked = this.runtimeRoutingBlockedResult(inputSession, input,
+              '已保留上一次修改，但当前不支持安全修复或修复额度已耗尽。任务已停止，未重新执行开发。');
+            blocked.executionCandidate = candidate;
+            blocked.error!.details = { ...blocked.error!.details, operationId: resolvedPlan.operation?.id,
+              operationFailure: 'OPERATION_SUBMISSION_REPAIR_BLOCKED', candidateId: candidate.id };
+            return blocked;
+          }
+          resolvedPlan.submissionRepair = true;
+          this.events.create({ sessionId: inputSession.id, taskId: input.taskId, type: 'runtime_progress',
+            fromAgentId: input.agent.id, content: '已恢复上一次修改，仅重新提交结果。',
+            metadata: createMetadata('system_notice', { code: 'SUBMISSION_REPAIR_STARTED',
+              operationId: resolvedPlan.operation.id, runtimeInvocationId: resolvedPlan.invocationId, candidateId: candidate.id }) });
+        } else if (!candidate && (task?.recoveryOriginTaskId || task?.executionCheckpoint?.candidateId)) {
+          this.events.create({ sessionId: inputSession.id, taskId: input.taskId, type: 'runtime_progress',
+            fromAgentId: input.agent.id, content: '上一候选不存在或基线、版本已变化，本次按当前工作目录重新执行。',
+            metadata: createMetadata('system_notice', { code: 'EXECUTION_CANDIDATE_UNAVAILABLE', operationId: resolvedPlan.operation?.id }) });
+        }
+      }
       if (input.writeModeOverride) {
         resolvedPlan = applyRuntimeWriteModeOverride(resolvedPlan, input.writeModeOverride);
       }
@@ -6739,6 +6949,9 @@ export class OrchestratorService {
       content: messages.runtimeStarted(plan.agent.name, runtimeModeLabel(plan.executionTarget.runtimeType)),
       metadata: createMetadata('system_notice', {
         runtimeInvocationId: plan.invocationId,
+        operationId: plan.operation?.id,
+        policyVersion: plan.operation?.policyVersion,
+        remainingMs: plan.operation ? Math.max(0, Date.parse(plan.operation.deadlineAt) - Date.now()) : undefined,
         runtimeType: plan.executionTarget.runtimeType,
         phase: plan.phase,
         executionTarget: plan.executionTarget,
@@ -6750,7 +6963,8 @@ export class OrchestratorService {
     const adapter = this.runtime.getAdapter(plan.executionTarget.runtimeType);
     const heartbeatStartedAt = Date.now();
     let lastVisibleRuntimeActivityAt = heartbeatStartedAt;
-    const timeoutMs = phaseTimeoutMs(plan.phase);
+    plan.operation = input.operation;
+    const timeoutMs = input.operation ? 0 : phaseTimeoutMs(plan.phase);
     const phaseController = timeoutMs > 0 ? new AbortController() : undefined;
     const onParentAbort = phaseController
       ? () => {
@@ -6787,6 +7001,18 @@ export class OrchestratorService {
         }, timeoutMs)
       : undefined;
     const execution = this.runtime.start(plan, phaseController?.signal ?? signal);
+    let outputGuardError: RuntimeError | undefined;
+    const outputGuard = structuredOutputGuard({
+      maxCorrections: plan.submissionRepair ? 0 : Math.max(0, Math.min(1, Number(process.env.STRUCTURED_OUTPUT_MAX_CORRECTIONS ?? 1) || 0)),
+      timeoutMs: Math.max(1000, Number(process.env.STRUCTURED_OUTPUT_CORRECTION_TIMEOUT_MS ?? 300_000) || 300_000),
+      fail: (error) => {
+        outputGuardError = error;
+        void execution.cancel(createExecutionTermination({
+          kind: error.code === 'RUNTIME_TIMEOUT' ? 'runtime_timeout' : 'output_contract_failure', source: 'orchestrator', scope: 'invocation', phase: plan.phase,
+          diagnosticRef: 'structured_output_guard'
+        })).catch(() => undefined);
+      }
+    });
     const heartbeatTimer = shouldEmitHeartbeat(adapter, execution.hasStreamingEvents)
       ? setInterval(() => {
           const now = Date.now();
@@ -6816,20 +7042,26 @@ export class OrchestratorService {
       ? consumeRuntimeEvents(execution.events, plan, {
           events: this.events,
           createMetadata,
-          onPublished: () => {
+          onPublished: (frame) => {
+            outputGuard.observe(frame);
             lastVisibleRuntimeActivityAt = Date.now();
           }
         })
       : Promise.resolve();
 
     try {
-      const result = await execution.result;
+      let result = await execution.result;
       await streamConsumer;
+      if (outputGuardError && !signal?.aborted && !result.error?.details?.stopUnconfirmed) {
+        result = { ...result, status: 'failed', error: { ...outputGuardError,
+          details: { ...outputGuardError.details, phase: plan.phase } } };
+      }
       if (!execution.hasStreamingEvents) this.recordRuntimeResultDiagnostics(plan, result);
       this.recordRuntimeTermination(plan, result);
       this.recordTokenUsage(inputSession, result);
       return result;
     } finally {
+      outputGuard.dispose();
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       if (phaseTimer) clearTimeout(phaseTimer);
       if (signal && onParentAbort) signal.removeEventListener('abort', onParentAbort);
@@ -6903,7 +7135,8 @@ export class OrchestratorService {
     const reported = Number(error?.details?.retryAfterMs ?? 1_000);
     const configuredCap = Number(process.env.RUNTIME_PROVIDER_RETRY_MAX_DELAY_MS ?? 120_000);
     const cap = Number.isFinite(configuredCap) ? Math.max(0, Math.min(configuredCap, 10 * 60_000)) : 120_000;
-    return Number.isFinite(reported) ? Math.max(0, Math.min(reported, cap)) : Math.min(1_000, cap);
+    // Retry-After is a lower bound; never send an earlier retry by clipping it.
+    return Number.isFinite(reported) ? Math.max(0, reported) : Math.min(1_000, cap);
   }
 
   private openRuntimeProviderCircuit(runtimeType: RuntimeType, error: RuntimeError | undefined) {
@@ -6911,7 +7144,7 @@ export class OrchestratorService {
     const configured = Number(process.env.RUNTIME_PROVIDER_CIRCUIT_TTL_MS ?? 120_000);
     const configuredTtl = Number.isFinite(configured) ? Math.max(1_000, configured) : 120_000;
     const ttlMs = Math.min(Math.max(Number.isFinite(reported) ? reported : 0, configuredTtl), 10 * 60_000);
-    this.runtimeProviderCircuits.set(runtimeType, Date.now() + ttlMs);
+    // RuntimeService owns isolation by connection/model/protocol. This value is only retry-event metadata.
     return ttlMs;
   }
 
@@ -6937,6 +7170,8 @@ export class OrchestratorService {
       content: `${input.agent.name} 的模型网关暂时不可用，将在 ${Math.ceil(delayMs / 1_000)} 秒后自动重试。`,
       metadata: createMetadata('system_notice', {
         code: 'RUNTIME_PROVIDER_RETRY_SCHEDULED',
+        operationId: input.operation?.id,
+        policyVersion: input.operation?.policyVersion,
         runtimeInvocationId: result.invocationId,
         runtimeType: result.runtimeType,
         attemptGroupId,
@@ -7270,8 +7505,8 @@ export class OrchestratorService {
     };
   }
 
-  private runtimePreferenceForAgent(agent: Agent, sessionPreference?: RuntimePreference) {
-    const role = agent.key === 'coordinator' ? 'coordinator' : undefined;
+  private runtimePreferenceForAgent(agent: Agent, sessionPreference?: RuntimePreference, phase?: AgentRunPhase) {
+    const role = agent.key === 'coordinator' || phase === 'task_acceptance' ? 'coordinator' : undefined;
     const policy = role ? this.systemAgentPolicies?.get(role) : undefined;
     if (!policy) return sessionPreference;
     return {
@@ -7417,6 +7652,19 @@ export class OrchestratorService {
       new Error(messages.runtimeError(result.runtimeType, phase, result.error?.message ?? result.status)),
       { cause: result.error, runtimeError: result.error }
     );
+  }
+
+  /**
+   * What the blocked node says it was missing, preferring its own context request
+   * over the stage input contract so the card shows the Agent's actual words.
+   */
+  private upstreamMissingInputs(task: AgentTask, requestedContext?: RuntimeContextRequest) {
+    const requested = [
+      ...(requestedContext?.requestedRefs ?? []).map((ref) => ref.label || ref.ref),
+      ...(requestedContext?.requestedPaths ?? [])
+    ].filter((item): item is string => Boolean(item && item.trim()));
+    const fallback = (task.contextRequirements ?? []).filter((item) => item !== '已确认任务契约');
+    return [...new Set(requested.length ? requested : fallback)].slice(0, 8);
   }
 
   private isInfrastructureTaskFailure(result: TaskRunOutcome) {

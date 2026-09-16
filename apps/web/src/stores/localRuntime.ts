@@ -23,6 +23,20 @@ type EnsureLocalRuntimeOptions = {
   wait?: (durationMs: number) => Promise<void>
 }
 
+/** The repository-local entry point remains available when the preview CLI is not installed globally. */
+export const LOCAL_RUNTIME_MANUAL_START_COMMAND = 'npm run agent-runtime -- start'
+
+/**
+ * A wake-up that never produces a connection is far more often the browser
+ * silently dropping the `agent-runtime://` launch than a missing CLI, so the copy
+ * has to name both causes and give a way out that does not depend on the browser.
+ */
+export const LOCAL_RUNTIME_WAKE_FAILED_MESSAGE =
+  (typeof window !== 'undefined' && window.agentClusterDesktop)
+    ? '本地助手尚未连接，请打开“连接与更新”，检查助手状态并完成设备授权。'
+    : '未检测到本地助手。浏览器可能拦截了唤醒请求：请在地址栏的弹窗中允许打开 agent-runtime 链接，'
+  + `或在仓库根目录运行 ${LOCAL_RUNTIME_MANUAL_START_COMMAND} 后重新检测。若从未注册协议，请先运行页面下方的安装命令。`
+
 const adminTokenStorageKey = 'agent-cluster.local-runtime-admin-token'
 const authorizationControllers = new Map<string, AbortController>()
 const authorizationPromises = new Map<string, Promise<LocalRuntimeWorkspaceSummary>>()
@@ -91,6 +105,7 @@ export const useLocalRuntimeStore = defineStore('localRuntime', {
     connectionState: 'idle' as LocalRuntimeConnectionState,
     connectionError: '',
     runtimeCapabilities: [] as LocalRuntimeCapabilityStatus[],
+    launchServerUrl: '',
     error: ''
   }),
   getters: {
@@ -126,6 +141,28 @@ export const useLocalRuntimeStore = defineStore('localRuntime', {
       this.devices = await apiGet<LocalRuntimeDeviceView[]>('/local-runtime/devices', adminRequest())
       return this.devices
     },
+    /**
+     * The CLI rejects launch URLs whose origin differs from the one registered by
+     * `install --server`, so the server origin must always come from the backend
+     * instead of the page origin. Cached so a wake-up can be fired straight from a
+     * click handler without spending the browser's transient user activation on a
+     * network round-trip.
+     */
+    async resolveLaunchServerUrl() {
+      if (typeof window !== 'undefined' && window.agentClusterDesktop) {
+        this.launchServerUrl = (await window.agentClusterDesktop.status()).serverUrl
+        return this.launchServerUrl
+      }
+      if (this.launchServerUrl) return this.launchServerUrl
+      const config = await apiGet<{ serverUrl: string }>('/local-runtime/launch-config')
+      this.launchServerUrl = config.serverUrl
+      return this.launchServerUrl
+    },
+    wakeLocalRuntime(launch: (launchUrl: string) => void = requestLocalRuntimeLaunch) {
+      if (!this.launchServerUrl) return false
+      launch(createLocalRuntimeLaunchUrl(this.launchServerUrl))
+      return true
+    },
     async refreshCapabilities() {
       this.connectionState = 'probing'
       const capabilities = await apiPost<LocalRuntimeCapabilityStatus[]>(
@@ -156,14 +193,18 @@ export const useLocalRuntimeStore = defineStore('localRuntime', {
         this.connectionError = ''
         this.error = ''
         try {
-          await this.loadDevices()
+          // Resolved together so the wake-up fires right after the device probe.
+          // A second sequential round-trip here would push the protocol launch
+          // outside the browser's transient user activation window.
+          const [, launchServerUrl] = await Promise.all([
+            this.loadDevices(),
+            this.resolveLaunchServerUrl().catch(() => '')
+          ])
           assertActive()
           if (!this.isConnected) {
-            const config = await apiGet<{ serverUrl: string }>('/local-runtime/launch-config')
-            assertActive()
+            if (!launchServerUrl) throw new Error('无法读取本地助手唤醒地址，请稍后重新检测。')
             this.connectionState = 'waking'
-            const launchUrl = createLocalRuntimeLaunchUrl(config.serverUrl)
-            ;(options.launch ?? requestLocalRuntimeLaunch)(launchUrl)
+            this.wakeLocalRuntime(options.launch)
             const deadline = Date.now() + timeoutMs
             while (Date.now() < deadline) {
               await wait(pollIntervalMs)
@@ -174,7 +215,7 @@ export const useLocalRuntimeStore = defineStore('localRuntime', {
           }
           assertActive()
           if (!this.isConnected) {
-            throw new Error('未检测到本地助手，请确认已安装本地桥接组件，然后重新检测。')
+            throw new Error(LOCAL_RUNTIME_WAKE_FAILED_MESSAGE)
           }
           await this.refreshCapabilities()
           assertActive()

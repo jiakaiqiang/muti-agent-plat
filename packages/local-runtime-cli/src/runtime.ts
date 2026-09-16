@@ -15,11 +15,13 @@ import type {
   WorkspaceChange,
   WorkspaceChangeSet
 } from '@agent-cluster/shared';
-import { createAgentMessageOutput, isSensitiveWorkspacePath } from '@agent-cluster/shared';
+import { createAgentMessageOutput, isSensitiveWorkspacePath, materializeTaskSubmission } from '@agent-cluster/shared';
 import { getLocalRuntimeAdapter } from './adapters/registry.js';
 export { buildRuntimeProcessEnv } from './runtime-process.js';
 import { extractLocalRuntimeError } from './runtime-error.js';
 import { LocalWorkspace } from './workspace.js';
+import { captureExecutionCandidate, validateExecutionCandidate } from './execution-candidate.js';
+import { SubmissionError } from './adapters/submission-error.js';
 
 const ignoredDirectories = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.cache', 'coverage']);
 const maximumChangeSetTextBytes = 1_000_000;
@@ -41,7 +43,11 @@ export async function executeLocalInvocation(
 ): Promise<AgentRunResult> {
   const { plan } = request;
   const startedAt = new Date().toISOString();
-  let stagingRoot: string | undefined;
+  let stagingContainer: string | undefined;
+  let captureState: { stagingRoot: string; before: Map<string, WorkspaceFileSnapshot>; revision: import('@agent-cluster/shared').WorkspaceRevision;
+    permissions: LocalRuntimePermissionPolicy } | undefined;
+  let executionCandidate: AgentRunResult['executionCandidate'];
+  let repairBaseline: Map<string, WorkspaceFileSnapshot> | undefined;
   try {
     if (providerConnectionError) throw new Error(providerConnectionError);
     if (request.workspaceId !== workspace.state.workspaceId) throw new Error('Invocation workspaceId mismatch.');
@@ -52,8 +58,25 @@ export async function executeLocalInvocation(
     const effectivePermissions = intersectPermissionPolicies(request.permissions, localPermissions);
     assertInvocationPermissions(plan, effectivePermissions);
     const before = await snapshotWorkspaceFiles(workspace.state.rootPath, false);
-    stagingRoot = await mkdtemp(join(tmpdir(), 'agent-runtime-invocation-'));
+    stagingContainer = await mkdtemp(join(tmpdir(), 'agent-runtime-invocation-'));
+    // fs.cp(errorOnExist) in the desktop's Node runtime also rejects an existing
+    // destination directory. Keep the private container, copy into a new child.
+    const stagingRoot = join(stagingContainer, 'workspace');
     await copyAuthorizedWorkspace(workspace.state.rootPath, stagingRoot);
+    captureState = { stagingRoot, before, revision: currentRevision, permissions: effectivePermissions };
+    if (plan.recoveryCandidate) {
+      validateExecutionCandidate(plan, plan.recoveryCandidate, effectivePermissions);
+      if (plan.recoveryCandidate.baseRevision.id !== currentRevision.id) throw new Error('CANDIDATE_BASELINE_CHANGED');
+      const stagingWorkspace = new LocalWorkspace({ ...workspace.state, rootPath: stagingRoot }, { watch: false, index: false });
+      try {
+        const restored = await stagingWorkspace.applyChangeSet(plan.recoveryCandidate.changeSet, effectivePermissions);
+        if (!restored.ok) throw new Error('CANDIDATE_RESTORE_CONFLICT');
+      } finally { stagingWorkspace.close(); }
+    }
+    if (plan.submissionRepair) {
+      if (!plan.recoveryCandidate) throw new Error('CANDIDATE_REQUIRED_FOR_REPAIR');
+      repairBaseline = await snapshotWorkspaceFiles(stagingRoot, false);
+    }
     const started: AgentRuntimeEvent = {
       invocationId: plan.invocationId,
       type: 'runtime_started',
@@ -63,17 +86,36 @@ export async function executeLocalInvocation(
       createdAt: startedAt
     };
     emit(started);
+    const executionPlan = plan.submissionRepair ? { ...plan,
+      toolCatalog: { tools: [], decisions: [], catalogHash: 'submission-repair-no-tools' },
+      executionTarget: { ...plan.executionTarget, writeMode: 'none' as const, requiredCapabilities: [], requiredToolIds: [] },
+      contextEnvelope: { ...plan.contextEnvelope, L2: { source: 'generated' as const, modules: [] },
+        L3: { files: [], fileRevisions: [], totalByteLength: 0, truncated: false }, L4: { calls: [] },
+        L5: { bullets: ['Repair only the supplied submission shape. Do not develop, run tests, or invent missing facts.',
+          JSON.stringify({ originalSubmission: plan.recoveryCandidate?.originalSubmission,
+            schemaErrors: plan.recoveryCandidate?.schemaErrors,
+            artifactRefs: plan.recoveryCandidate?.changeSet.changes.map(change => change.operation === 'move' ? change.toPath : change.path) })], turnCount: 1 } }
+    } : plan;
     const adapterResult = await getLocalRuntimeAdapter(plan.executionTarget.runtimeType).execute({
-      plan,
+      plan: executionPlan,
       cwd: stagingRoot,
       signal,
-      permissions: effectivePermissions,
+      permissions: plan.submissionRepair ? { workspace_read: 'deny', workspace_write: 'deny', workspace_delete: 'deny',
+        command_execute: 'deny', test_execute: 'deny', dependency_install: 'deny' } : effectivePermissions,
       emit,
       ...(providerConnection ? { providerConnection } : {})
     });
-    const output = adapterResult.output;
     const after = await snapshotWorkspaceFiles(stagingRoot, true);
+    if (repairBaseline && (repairBaseline.size !== after.size ||
+      [...repairBaseline].some(([path, snapshot]) => snapshot.hash.value !== after.get(path)?.hash.value))) {
+      throw new Error('CANDIDATE_REPAIR_SIDE_EFFECT_DETECTED');
+    }
     const changeSet = buildChangeSet(currentRevision, before, after);
+    if (changeSet) executionCandidate = captureExecutionCandidate(plan, changeSet, effectivePermissions);
+    const output = adapterResult.output.schemaVersion === '2.0'
+      ? materializeTaskSubmission(adapterResult.output, (changeSet?.changes ?? []).flatMap(change =>
+        change.operation === 'move' ? [change.fromPath, change.toPath] : [change.path]))
+      : adapterResult.output;
     if (changeSet?.changes.some((change) => change.operation === 'delete' || change.operation === 'move')) {
       const permission = effectivePermissions.workspace_delete;
       if (permission !== 'allow') {
@@ -89,7 +131,9 @@ export async function executeLocalInvocation(
       createdAt: new Date().toISOString()
     };
     emit(completed);
+    if (executionCandidate) executionCandidate.stage = 'submission_validated';
     return {
+      executionCandidate,
       invocationId: plan.invocationId,
       runtimeType: plan.executionTarget.runtimeType,
       status: 'completed',
@@ -104,7 +148,7 @@ export async function executeLocalInvocation(
       },
       usage: adapterResult.usage,
       runtimeSession: adapterResult.runtimeSession,
-      ...(changeSet && shouldApplyStagedChangeSet(plan.executionTarget.writeMode)
+      ...(changeSet && (plan.submissionRepair || shouldApplyStagedChangeSet(plan.executionTarget.writeMode))
         ? {
             workspaceExecution: {
               mode: 'staging_copy' as const,
@@ -117,8 +161,24 @@ export async function executeLocalInvocation(
         : {})
     };
   } catch (error) {
+    if (String(error).includes('CANDIDATE_REPAIR_SIDE_EFFECT')) executionCandidate = undefined;
+    // Adapter execution resolves/rejects only after its process closes. Preserve bounded text evidence before staging cleanup.
+    if (captureState && !String(error).includes('CANDIDATE_')) {
+      try {
+        const after = await snapshotWorkspaceFiles(captureState.stagingRoot, true);
+        const changeSet = buildChangeSet(captureState.revision, captureState.before, after);
+        if (changeSet) executionCandidate = captureExecutionCandidate(plan, changeSet, captureState.permissions);
+      } catch { /* Unsupported or incomplete snapshots cannot be advertised as recoverable. */ }
+    }
+    if (executionCandidate && error instanceof SubmissionError) {
+      const encoded = JSON.stringify(error.originalSubmission);
+      if (encoded && Buffer.byteLength(encoded, 'utf8') <= 256_000) executionCandidate.originalSubmission = error.originalSubmission;
+      executionCandidate.schemaErrors = error.schemaErrors.slice(0, 32);
+    }
     const cancelled = signal.aborted;
-    const preservedRuntimeError = extractLocalRuntimeError(error);
+    const preservedRuntimeError = error instanceof SubmissionError
+      ? { code: 'RUNTIME_OUTPUT_CONTRACT_VIOLATION' as const, message: error.message, retryable: false }
+      : extractLocalRuntimeError(error);
     const message = preservedRuntimeError?.message ?? (error instanceof Error ? error.message : String(error));
     const confirmationPermission = localConfirmationPermission(message);
     const runtimeError = cancelled
@@ -146,6 +206,7 @@ export async function executeLocalInvocation(
     };
     emit(event);
     return {
+      executionCandidate,
       invocationId: plan.invocationId,
       runtimeType: plan.executionTarget.runtimeType,
       status: cancelled ? 'cancelled' : 'failed',
@@ -153,7 +214,7 @@ export async function executeLocalInvocation(
       events: [event],
       artifacts: [],
       systemEvidence: {
-        workspaceChangeSet: null,
+        workspaceChangeSet: executionCandidate?.changeSet ?? null,
         verifiedTestResults: [],
         capturedAt: new Date().toISOString(),
         invocationId: plan.invocationId
@@ -167,7 +228,7 @@ export async function executeLocalInvocation(
       error: runtimeError
     };
   } finally {
-    if (stagingRoot) await rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined);
+    if (stagingContainer) await rm(stagingContainer, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 

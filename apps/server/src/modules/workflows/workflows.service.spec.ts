@@ -250,3 +250,16 @@ test('WorkflowsController exposes workflow CRUD', () => {
   assert.equal((controller.detail(created.data.id) as { data: { name: string } }).data.name, 'Controller flow');
   assert.equal((controller.remove(created.data.id) as { data: { removed: boolean } }).data.removed, true);
 });
+
+test('consumer catalog uses published snapshots and excludes drafts/archives', () => {
+  const { service } = setup();
+  service.create({ name: 'Draft only' });
+  const workflow = service.create({ name: 'Visible', nodes: [{ id: 'n', type: 'agent', agentId: 'frontend', order: 0, stageDescription: 'Develop', outputContract: ['Result'] }] });
+  service.publish(workflow.id);
+  service.update(workflow.id, { name: 'Unpublished rename' });
+  const catalog = service.catalog();
+  assert.equal(catalog.length, 1); assert.equal(catalog[0].name, 'Visible');
+  catalog[0].nodes.length = 0;
+  assert.equal(service.getVersion(workflow.id).nodes.length, 1);
+  service.archive(workflow.id); assert.deepEqual(service.catalog(), []);
+});

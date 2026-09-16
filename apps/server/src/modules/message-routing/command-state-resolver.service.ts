@@ -28,7 +28,10 @@ const CANCELLABLE_STATUSES = new Set<SessionStatus>([
 
 const CHAT_RESUMABLE_CONFIRMATIONS = new Set([
   'coordinator_routing_needs_user_decision',
-  'resolve_contract_conflict'
+  'resolve_contract_conflict',
+  'reconnect_local_runtime',
+  'recover_interrupted_execution',
+  'retry_failed_execution'
 ]);
 
 export function resolveExactCommand(input: {
@@ -56,10 +59,18 @@ export function resolveExactCommand(input: {
       return { action: 'resume_session', message: '已收到继续指令，正在恢复当前任务。' };
     }
     if (sessionStatus === 'FAILED' || sessionStatus === 'INTERRUPTED') {
-      return { action: 'retry_current', message: '已收到继续指令，正在重试当前任务。' };
+      return {
+        action: 'retry_current',
+        message: '已收到继续指令，正在重试当前任务。',
+        confirmationId: pendingConfirmation?.confirmationId
+      };
     }
     if (sessionStatus === 'WAIT_USER_DECISION' && hasFailedWorkflowRun) {
-      return { action: 'retry_current', message: '已收到继续指令，正在重试失败的工作流阶段。' };
+      return {
+        action: 'retry_current',
+        message: '已收到继续指令，正在重试失败的工作流阶段。',
+        confirmationId: pendingConfirmation?.confirmationId
+      };
     }
     if (ACTIVE_STATUSES.has(sessionStatus)) {
       return { action: 'acknowledge', message: '当前任务已在执行，无需重复恢复。' };

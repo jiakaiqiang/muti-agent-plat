@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import 'reflect-metadata';
 import { OpsController } from './ops.controller.js';
+import { SKIP_PERSISTENCE_COMMIT } from '../persistence/skip-persistence-commit.js';
 
 function withEnv(values: Record<string, string | undefined>, fn: () => void) {
   const previous = new Map(Object.keys(values).map((key) => [key, process.env[key]]));
@@ -48,4 +50,30 @@ test('health exposes build time, commit and effective pipeline version', () => {
       assert.equal(response.data.persistenceLocation, 'C:\\data\\state.v3.json');
     }
   );
+});
+
+test('probes skip the global persistence commit so a write backlog cannot make them time out', () => {
+  // 全局 PersistenceCommitInterceptor 会在响应前 await flush()，也就是等整条
+  // pendingPostgresWrites 队列排空。工作流启动时那一批整块 setCollection 能把
+  // 队列堆到数秒，探活一旦排在队尾就会超过前端 5s 超时，前端随即清空会话，
+  // 症状是「选完工作流后整页访问不到后端」。探活不写库，必须豁免。
+  for (const handler of [OpsController.prototype.health, OpsController.prototype.live]) {
+    assert.equal(
+      Reflect.getMetadata(SKIP_PERSISTENCE_COMMIT, handler),
+      true,
+      `${handler.name} must be marked @SkipPersistenceCommit()`
+    );
+  }
+});
+
+test('live reports process liveness without reading readiness dependencies', () => {
+  const response = new OpsController(
+    new Proxy({}, { get() { throw new Error('liveness must not read persistence'); } }) as never,
+    { current: () => undefined } as never
+  ).live();
+
+  assert.equal(response.data.status, 'ok');
+  assert.equal(response.data.service, 'agent-cluster-server');
+  assert.equal(response.data.processId, process.pid);
+  assert.match(response.data.startedAt, /^\d{4}-\d{2}-\d{2}T/);
 });

@@ -16,7 +16,7 @@ import type {
   VerifiedTestResult,
   UUID
 } from '@agent-cluster/shared';
-import { createAgentMessageOutput } from '@agent-cluster/shared';
+import { buildStructuredOutputInstructions, createAgentMessageOutput } from '@agent-cluster/shared';
 import {
   runtimeStreamingMode,
   optionalRuntimeTimeoutMs,
@@ -167,6 +167,7 @@ function parseClaudeBufferedOutputWithRuntimeError(
     throw Object.assign(new Error(message), { cause: runtimeError, runtimeError });
   }
 }
+
 const ignoredDirectories = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.cache', 'coverage']);
 const textExtensions = new Set(['.css', '.html', '.js', '.json', '.jsx', '.md', '.mjs', '.cjs', '.ts', '.tsx', '.vue', '.yml', '.yaml', '.txt']);
 const configFileNames = new Set(['AGENTS.md', 'CLAUDE.md', 'README.md', 'package.json', 'tsconfig.json', 'vite.config.ts', 'vite.config.js', 'nest-cli.json']);
@@ -457,6 +458,7 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
         `Act as the ${input.agent.role} agent for the current task.`,
         `Read the workdir CLAUDE.md block and task sidecar at: ${taskSidecarPath}`,
         `Return exactly one JSON object of kind ${input.expectedOutput.kind} without markdown fences.`,
+        buildStructuredOutputInstructions(input.expectedOutput.kind, { submissionToolName: 'StructuredOutput' }),
         input.expectedOutput.kind === 'task_brief'
           ? 'For every suggestedTasks item, routingMode must be exactly "coordinator_controlled", "agent_suggested", "agent_delegated", or null. Copy the underscore-separated spelling exactly.'
           : '',
@@ -472,13 +474,13 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
       'Work inside the allowed server_local directory only.',
       'Return one JSON object and no markdown fences.',
       `Required output kind: ${input.expectedOutput.kind}.`,
+      buildStructuredOutputInstructions(input.expectedOutput.kind, { submissionToolName: 'StructuredOutput' }),
       'Use ContextEnvelopeV2 L1/L2 for navigation and L3 for readable evidence.',
       'If selected evidence is insufficient, return a blocked task_execution_result or runtime error with code CONTEXT_INSUFFICIENT and requestedContext; do not fabricate unread file contents, APIs, logs, or test results.',
-      'For task_acceptance_decision, decide whether this assigned agent can execute the currentTask. Return status accepted, blocked, or rejected; reason; optional missingContext; optional handoffSuggestion { targetAgentKey or targetAgentId, reason, riskLevel }; optional confidence; optional alternativeAgentKeys/alternativeAgentIds; and optional agentMessages. Do not reassign the task yourself.',
-      'For task_acceptance_decision, return status, reason, optional confidence, optional alternativeAgentKeys/alternativeAgentIds, optional handoffSuggestion, and optional agentMessages. Do not reassign the task yourself.',
+      'For task_acceptance_decision, return the schema fields directly and do not reassign the task yourself.',
       'For task_execution_result, include changedArtifacts with metadata.fileChanges for every file you changed or propose to change.',
       'For validation task_execution_result, include a test_report changedArtifact with metadata.validationEvidence mapping each taskContext.validationRules item to verdict status, evidenceRefs, notes, and missingEvidence, plus validatorAgentKey, validatorAgentId, and independentFromAgentKeys from taskContext.agentResponsibilities.',
-      'For task_execution_result, include optional agentMessages when you need to communicate progress, risks, questions, or handoffs to other agents. Use targetAgentKeys such as coordinator, frontend, backend, test, review.',
+      'For task_execution_result, use agentMessages when you need to communicate progress, risks, questions, or handoffs to other agents. The field is required and must be [] when there are no messages. Use targetAgentKeys such as coordinator, frontend, backend, test, review.',
       input.expectedOutput.kind === 'post_review_report' ? POST_REVIEW_CONTEXT_ACTION_INSTRUCTION : '',
       'If you run tests, include the test result summary in completedItems or risks.',
       input.expectedOutput.kind === 'task_brief'

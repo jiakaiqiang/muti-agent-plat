@@ -65,25 +65,24 @@ try {
   }
 
   const workflowRunStarts = events.filter((event) => event.type === 'workflow_run_started');
-  if (workflowRunStarts.length < 2) {
-    throw new Error(`Expected at least 2 workflow runs across rework, got ${workflowRunStarts.length}`);
+  if (workflowRunStarts.length !== 1) {
+    throw new Error(`Rework must remain in one auditable workflow run, got ${workflowRunStarts.length}`);
   }
-  for (const runStarted of workflowRunStarts) {
-    const workflowRunId = runStarted.metadata.payload?.workflowRunId;
-    const nodeStarted = events.find(
-      (event) =>
-        event.type === 'workflow_node_started' && event.metadata.payload?.workflowRunId === workflowRunId
+  const workflowRunId = workflowRunStarts[0]?.metadata.payload?.workflowRunId;
+  const nodeStarts = events.filter(
+    (event) => event.type === 'workflow_node_started' && event.metadata.payload?.workflowRunId === workflowRunId
+  );
+  const nodeRunIds = new Set(nodeStarts.map((event) => event.metadata.payload?.workflowNodeRunId).filter(Boolean));
+  const attempts = new Set(nodeStarts.map((event) => event.metadata.payload?.attempt).filter(Number.isInteger));
+  const taskStarts = events.filter(
+    (event) =>
+      event.type === 'task_started' &&
+      (event.metadata.payload?.workflowRunId === workflowRunId || event.taskId?.startsWith(`wf-task:${workflowRunId}:`))
+  );
+  if (!workflowRunId || nodeRunIds.size < 2 || !attempts.has(1) || !attempts.has(2) || taskStarts.length < 2) {
+    throw new Error(
+      `Rework must append a new node attempt in the same run: ${JSON.stringify({ workflowRunId, nodeStarts, taskStarts })}`
     );
-    const taskStarted = events.find(
-      (event) =>
-        event.type === 'task_started' &&
-        (event.metadata.payload?.workflowRunId === workflowRunId || event.taskId?.startsWith(`wf-task:${workflowRunId}:`))
-    );
-    if (!workflowRunId || !nodeStarted || !taskStarted) {
-      throw new Error(
-        `Each rework workflow run must start a node and task: ${JSON.stringify({ workflowRunId, nodeStarted, taskStarted })}`
-      );
-    }
   }
 
   if (events.some((event) => event.type === 'final_delivery_created')) {

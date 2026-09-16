@@ -40,7 +40,7 @@ export class EventsService implements OnModuleDestroy {
   ): CollaborationEvent<TPayload> {
     const event = this.createDraft(input);
     this.appendToMemory(event as CollaborationEvent);
-    const committed = this.persist();
+    const committed = this.persistence.appendEvent(event as CollaborationEvent);
     void committed.then((success) => {
       if (success) this.publishCommitted(event as CollaborationEvent);
     });
@@ -121,7 +121,7 @@ export class EventsService implements OnModuleDestroy {
     const subject = this.subjectsBySession.get(sessionId);
     subject?.complete();
     this.subjectsBySession.delete(sessionId);
-    void this.persist();
+    void this.persistAll();
   }
 
   private subjectFor(sessionId: string) {
@@ -159,7 +159,11 @@ export class EventsService implements OnModuleDestroy {
     for (const record of claimed) {
       const payload = record.payload as { event?: CollaborationEvent } | undefined;
       const event = payload?.event;
-      if (!event || !(this.eventsBySession.get(event.sessionId) ?? []).some((item) => item.id === event.id)) continue;
+      const eventId = event?.id ?? String(record.id ?? '').replace(/^outbox:/, '');
+      if (!event || !(this.eventsBySession.get(event.sessionId) ?? []).some((item) => item.id === event.id)) {
+        if (eventId) await this.persistence.discardEventOutbox(eventId, 'event is not visible in an active session');
+        continue;
+      }
       workspaceMetrics.observe('event_outbox_lag_ms', Math.max(0, Date.now() - Date.parse(event.createdAt)), {
         eventType: event.type,
         recovery: 'true'
@@ -168,7 +172,7 @@ export class EventsService implements OnModuleDestroy {
     }
   }
 
-  private persist() {
+  private persistAll() {
     return this.persistence.setCollection('eventsBySession', Object.fromEntries(this.eventsBySession));
   }
 }

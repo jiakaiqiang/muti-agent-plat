@@ -30,6 +30,7 @@ import type {
   PostReviewAction,
   RuntimeError,
   SessionDetail,
+  SessionRecoveryCheckpoint,
   SessionFollowUpMessage,
   IntentRoutingRolloutMode,
   SessionStatus,
@@ -38,7 +39,8 @@ import type {
   SessionWorkspaceContext,
   TaskBrief,
   UserMessageHandlingPlan,
-  WorkspaceWritebackRecord
+  WorkspaceWritebackRecord,
+  WorkItem
 } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
 import { messages } from '../../common/messages.js';
@@ -56,7 +58,11 @@ import { EventsService } from '../events/events.service.js';
 import { IntentRecognitionService } from '../intent-recognition/intent-recognition.service.js';
 import {
   matchExactUserCommand,
-  type ExactCommandMatch
+  matchWorkflowAgentDirective,
+  matchWorkflowAgentSkipCommand,
+  type ExactCommandMatch,
+  type WorkflowAgentDirectiveMatch,
+  type WorkflowAgentSkipCommandMatch
 } from '../intent-recognition/deterministic-command-guard.service.js';
 import { SemanticIntentRouterService } from '../intent-recognition/semantic-intent-router.service.js';
 import { ContextManagementService } from '../context-management/context-management.service.js';
@@ -76,6 +82,7 @@ import { WorkspaceProviderResolver } from '../workspaces/workspace-provider-reso
 import { WorkspaceWritebackService } from '../workspaces/workspace-writeback.service.js';
 import { validateServerLocalWorkspace } from '../workspaces/validate-server-local-workspace.js';
 import { CapabilitiesService } from '../capabilities/capabilities.service.js';
+import { ArtifactsService } from '../artifacts/artifacts.service.js';
 import { FileRevisionsService } from '../file-revisions/file-revisions.service.js';
 import { RouteApplicationService } from '../message-routing/route-application.service.js';
 import { MessageIngressService } from '../message-routing/message-ingress.service.js';
@@ -102,6 +109,71 @@ const ACTIVE_INVOCATION_SESSION_STATUSES = new Set<SessionStatus>([
   'REWORKING'
 ]);
 
+/**
+ * Interruptions emit `session_status_changed`, not a failure event, so
+ * `latestFailurePhase()` can never derive a phase for them. Recording the phase
+ * at interruption time is the only reliable source. The vocabulary matches the
+ * failure phases consumed by `retryFailedSession`, so both origins share one
+ * brief-retry decision.
+ */
+const INTERRUPTION_PHASE_BY_STATUS: Partial<Record<SessionStatus, string>> = {
+  AGENT_DISCUSSING: 'discussion',
+  REVISING_BRIEF: 'brief_revision',
+  EXECUTING: 'task_execution',
+  POST_REVIEW: 'task_execution',
+  REWORKING: 'task_execution'
+};
+
+/**
+ * Cards whose pending state gives a typed Agent directive a deterministic meaning.
+ * Outside these, "让前端工程师执行" is an ordinary requirement and stays on the
+ * semantic router.
+ */
+const WORKFLOW_DIRECTIVE_CARD_REASONS = new Set([
+  'workflow_agent_substitution',
+  'workflow_upstream_rerun'
+]);
+
+/** Statuses where the Session is parked on the user and will need its Runtime again to move on. */
+const WAITING_USER_SESSION_STATUSES = new Set<SessionStatus>([
+  'WAIT_USER_CONFIRM',
+  'WAIT_WORKFLOW_SELECT',
+  'WAIT_WORKFLOW_STEP_CONFIRM',
+  'WAIT_WORKSPACE_CONFLICT_RESOLUTION',
+  'WAIT_USER_DECISION',
+  'PAUSED'
+]);
+
+function normalizeDirectiveAlias(value: string) {
+  return value.normalize('NFKC').toLowerCase().replace(/[\s\-_·、,，.。]/gu, '');
+}
+
+/**
+ * Resolves operator text against a closed candidate set. Returns the single match,
+ * `'ambiguous'` when several candidates match, or undefined when none do, so the
+ * caller can ask back rather than picking a target the user did not name.
+ */
+export function matchSingleByAliases(
+  target: string,
+  candidates: Array<{ value: string; aliases: string[] }>
+): string | 'ambiguous' | undefined {
+  const needle = normalizeDirectiveAlias(target);
+  if (needle.length < 2) return undefined;
+  const exact = new Set<string>();
+  const partial = new Set<string>();
+  for (const candidate of candidates) {
+    for (const alias of candidate.aliases) {
+      const normalized = normalizeDirectiveAlias(alias ?? '');
+      if (normalized.length < 2) continue;
+      if (normalized === needle) exact.add(candidate.value);
+      else if (normalized.includes(needle) || needle.includes(normalized)) partial.add(candidate.value);
+    }
+  }
+  const resolved = exact.size ? exact : partial;
+  if (resolved.size === 1) return [...resolved][0];
+  return resolved.size > 1 ? 'ambiguous' : undefined;
+}
+
 @Injectable()
 export class SessionsService implements BeforeApplicationShutdown, OnModuleDestroy {
   private readonly logger = new Logger(SessionsService.name);
@@ -113,6 +185,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   >();
   private readonly followUpPlanningRuns = new Map<string, Promise<void>>();
   private readonly intentRoutingRuns = new Map<string, Promise<void>>();
+  private readonly intentRoutingControllers = new Map<string, AbortController>();
   private readonly intentRoutingRetryTimers = new Map<string, NodeJS.Timeout>();
   private readonly intentRoutingWorkerId = `intent-routing:${process.pid}:${crypto.randomUUID()}`;
   private readonly deletingSessionIds = new Set<string>();
@@ -120,6 +193,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   private shuttingDown = false;
   private readonly runtimeInterruptingSessions = new Set<string>();
   private readonly runtimeInterruptSubscription?: Subscription;
+  private readonly workspaceOfflineSubscription?: Subscription;
+  private readonly runtimeStopSubscription?: Subscription;
 
   constructor(
     private readonly agents: AgentsService,
@@ -143,7 +218,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     @Optional() private readonly contextManagement?: ContextManagementService,
     @Optional() private readonly semanticIntentRouter?: SemanticIntentRouterService,
     @Optional() private readonly routeApplication?: RouteApplicationService,
-    @Optional() private readonly messageIngress?: MessageIngressService
+    @Optional() private readonly messageIngress?: MessageIngressService,
+    @Optional() private readonly artifacts?: ArtifactsService
   ) {
     const persisted = this.persistence.getCollection<SessionDetail[]>('sessions', []);
     let recoveredWorkspaceWriteback = false;
@@ -168,10 +244,36 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         this.logger.error(`Failed to interrupt session ${interruption.sessionId} after Runtime disconnect: ${String(error)}`);
       });
     });
+    this.workspaceOfflineSubscription = this.localRuntime?.workspaceOffline?.().subscribe((offline) => {
+      this.notifyLocalRuntimeOffline(offline.workspaceId);
+    });
+    this.runtimeStopSubscription = this.localRuntime?.stopConfirmations?.().subscribe(receipt => {
+      if (!this.sessions.has(receipt.sessionId)) return;
+      if (receipt.event) {
+        this.events.acceptCommitted(receipt.event);
+        return;
+      }
+      const summary = this.runtime?.getStopSummary(receipt.sessionId);
+      if (!summary?.stopRequestId) return;
+      this.events.createOnce(`runtime-stop:${summary.stopRequestId}:${summary.version}`, {
+        sessionId: receipt.sessionId,
+        type: 'runtime_progress',
+        content: summary.canResume ? '执行已停止。' : `已确认 ${summary.confirmedCount}/${summary.requestedCount} 个停止目标。`,
+        metadata: createMetadata('system_notice', {
+          code: 'RUNTIME_STOP_STATE_CHANGED',
+          runtimeInvocationId: receipt.invocationId,
+          stopRequestId: summary.stopRequestId,
+          version: summary.version,
+          stopSummary: summary
+        })
+      });
+    });
   }
 
   onModuleDestroy() {
     this.runtimeInterruptSubscription?.unsubscribe();
+    this.workspaceOfflineSubscription?.unsubscribe();
+    this.runtimeStopSubscription?.unsubscribe();
     for (const timer of this.intentRoutingRetryTimers.values()) clearTimeout(timer);
     this.intentRoutingRetryTimers.clear();
   }
@@ -195,6 +297,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       .map((session) => ({
         id: session.id,
         title: session.title,
+        projectId: session.projectId,
+        workspaceId: session.workspaceId,
         status: session.status,
         tokenBudget: session.tokenBudget,
         tokenUsed: session.tokenUsed,
@@ -494,6 +598,111 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
   listRaw() {
     return [...this.sessions.values()];
+  }
+
+  /**
+   * Reconciles user-action state after a process restart. This only mutates the
+   * durable checkpoint and confirmation audit; it never starts execution.
+   */
+  async reconcileRecoveryStateOnBoot(sessionId: string) {
+    const session = this.get(sessionId);
+    const events = this.events.list(sessionId);
+    const resolvedIds = new Set(events
+      .filter((event) => event.type === 'user_confirmation_resolved')
+      .map((event) => (event.metadata.payload as { confirmationId?: unknown } | undefined)?.confirmationId)
+      .filter((value): value is string => typeof value === 'string'));
+    if (session.activeRecoveryCheckpoint && resolvedIds.has(session.activeRecoveryCheckpoint.confirmationId)) {
+      session.activeRecoveryCheckpoint = undefined;
+      this.persist();
+    }
+
+    const unresolvedRequests = events.filter((event) => {
+      if (event.type !== 'user_confirmation_requested' && event.type !== 'intent_clarification_required') return false;
+      const id = (event.metadata.payload as { confirmationId?: unknown } | undefined)?.confirmationId;
+      return typeof id === 'string' && !resolvedIds.has(id);
+    });
+    const latestUnresolvedRequest = unresolvedRequests.at(-1);
+    const structuredCurrent = session.status === 'WAIT_USER_DECISION' && latestUnresolvedRequest
+      ? [latestUnresolvedRequest].find((event) => {
+          const payload = event.metadata.payload as { actions?: unknown; reason?: unknown } | undefined;
+          return (Array.isArray(payload?.actions) && payload.actions.length > 0) ||
+            ['approve_local_runtime_permission', 'workflow_agent_substitution', 'confirm_workflow_step', 'confirm_workflow_human_gate'].includes(String(payload?.reason));
+        })
+      : undefined;
+    if (
+      structuredCurrent &&
+      session.activeRecoveryCheckpoint &&
+      (structuredCurrent.metadata.payload as { confirmationId?: unknown } | undefined)?.confirmationId !==
+        session.activeRecoveryCheckpoint.confirmationId
+    ) {
+      session.activeRecoveryCheckpoint = undefined;
+      this.persist();
+    }
+    for (const event of unresolvedRequests) {
+      const id = (event.metadata.payload as { confirmationId?: unknown } | undefined)?.confirmationId;
+      if (
+        typeof id !== 'string' ||
+        id === session.activeRecoveryCheckpoint?.confirmationId ||
+        event.id === structuredCurrent?.id
+      ) continue;
+      const payload = event.metadata.payload as { reason?: unknown } | undefined;
+      const shouldExpire = session.status === 'FAILED' || session.status === 'INTERRUPTED' ||
+        session.status === 'WAIT_USER_DECISION';
+      if (!shouldExpire) continue;
+      this.events.createOnce(`recovery-expire-confirmation:${session.id}:${id}`, {
+        sessionId,
+        type: 'user_confirmation_resolved',
+        content: '服务重启后该确认已过期，系统已创建新的恢复检查点。',
+        metadata: createMetadata('system_notice', {
+          confirmationId: id,
+          status: 'expired',
+          resolution: 'expired',
+          reason: typeof payload?.reason === 'string' ? payload.reason : 'stale_confirmation',
+          selectedOptionKey: 'expired_on_recovery'
+        })
+      });
+    }
+
+    const recoveryStatus = session.status;
+    if (!session.activeRecoveryCheckpoint && (recoveryStatus === 'FAILED' || recoveryStatus === 'INTERRUPTED' || (recoveryStatus === 'WAIT_USER_DECISION' && !structuredCurrent))) {
+      const reason = recoveryStatus === 'FAILED' ? 'retry_failed_execution' :
+        recoveryStatus === 'INTERRUPTED' ? 'recover_interrupted_execution' :
+          'coordinator_routing_needs_user_decision';
+      if (recoveryStatus === 'WAIT_USER_DECISION' && session.workflowRunId && this.workflowRuntime) {
+        try {
+          this.workflowRuntime.checkpointInterruptedExecution?.(session.workflowRunId, {
+            code: 'RECOVERY_STATE_REBUILT',
+            message: '服务重启后重建用户决策恢复检查点。'
+          });
+        } catch (error) {
+          this.logger.warn(`Failed to checkpoint stale workflow ${session.workflowRunId} during recovery: ${String(error)}`);
+        }
+      }
+      const checkpoint = this.createRecoveryCheckpoint(session, reason);
+      this.createRecoveryConfirmation(session, checkpoint, {
+        content: recoveryStatus === 'FAILED'
+          ? '服务重启后发现一个可重试的失败执行。'
+          : recoveryStatus === 'INTERRUPTED'
+            ? '服务重启后发现一个可恢复的中断执行。'
+            : '当前工作流需要确认下一步，历史确认已过期。',
+        title: recoveryStatus === 'FAILED' ? '重试失败执行' : '恢复当前执行',
+        description: '会话上下文已保留。点击继续或发送“继续”后，将从当前检查点创建新的执行尝试。'
+      });
+    } else if (session.activeRecoveryCheckpoint && !unresolvedRequests.some((event) =>
+      (event.metadata.payload as { confirmationId?: unknown } | undefined)?.confirmationId ===
+        session.activeRecoveryCheckpoint?.confirmationId
+    )) {
+      this.createRecoveryConfirmation(session, session.activeRecoveryCheckpoint, {
+        content: '服务重启后已恢复当前执行检查点。',
+        title: '恢复当前执行',
+        description: '会话上下文已保留。点击继续或发送“继续”后，将从当前检查点创建新的执行尝试。'
+      });
+    }
+    this.persist();
+    const workItemStatus = this.workItemStatusForSessionStatus(session.status);
+    if (workItemStatus) {
+      await this.retryActiveWorkItemStatus(session, workItemStatus);
+    }
   }
 
   fileRevisionState(sessionId: string) {
@@ -934,7 +1143,12 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         const followUp = (session.pendingFollowUpMessages ?? []).find((item) => item.routingId === routing.id) ??
           this.contextManagement.listFollowUps(session.id).find((item) => item.routingId === routing.id);
         if (!followUp) continue;
+        // `finish()` 把 shadow 下 autoApplicable 的判定也记成 ROUTED，所以没有这道
+        // 门禁时，重启恢复会把从未打算执行的 pause/cancel 补跑一遍。判据是记录自身的
+        // rolloutMode 而非当前进程的 rollout：动作该不该执行，由它被判定时的模式决定。
+        const mayApplyControlAction = routing.rolloutMode !== 'shadow';
         const pendingControlAction = routing.status === 'ROUTED' &&
+          mayApplyControlAction &&
           ['pause', 'cancel'].includes(routing.decision?.requestedAction ?? '') &&
           routing.actionStatus !== 'applied';
         if (['completed', 'failed', 'cancelled'].includes(followUp.status) && !pendingControlAction) {
@@ -948,10 +1162,10 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         }
         if (routing.status === 'ROUTED') {
           const action = routing.decision?.requestedAction;
-          if (action === 'pause' && routing.actionStatus !== 'applied') {
+          if (action === 'pause' && mayApplyControlAction && routing.actionStatus !== 'applied') {
             await this.applyPersistedRoutingAction(session, routing.id, followUp, 'pause');
             recovered.push({ sessionId: session.id, routingId: routing.id, action: 'pause_recovered' });
-          } else if (action === 'cancel' && routing.actionStatus !== 'applied') {
+          } else if (action === 'cancel' && mayApplyControlAction && routing.actionStatus !== 'applied') {
             await this.applyPersistedRoutingAction(session, routing.id, followUp, 'cancel');
             recovered.push({ sessionId: session.id, routingId: routing.id, action: 'cancel_recovered' });
           }
@@ -978,7 +1192,14 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
             session.activeFollowUpMessageId = undefined;
             await this.contextManagement.updateFollowUpStatus(session.id, followUp.id, 'queued');
           }
-          if (!this.hasActiveSessionWork(session) && followUp.status === 'queued') {
+          // 启动路径保持保守：INTERRUPTED 从 hasActiveSessionWork 移出后，这里会开始
+          // 自动重排任务，违反 recovery.service 的"运行时调用绝不自动重驱"边界（会重复
+          // 执行命令、重复写文件）。只有用户真的发消息才唤醒。
+          if (
+            session.status !== 'INTERRUPTED' &&
+            !this.hasActiveSessionWork(session) &&
+            followUp.status === 'queued'
+          ) {
             this.scheduleFollowUpPlanning(session.id);
             recovered.push({ sessionId: session.id, routingId: routing.id, action: 'follow_up_rescheduled' });
           }
@@ -1056,18 +1277,22 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         sessionId,
         (this.briefGenerationSeqBySession.get(sessionId) ?? 0) + 1
       );
+      // Drop pending retries before terminating: a timer that fires mid-deletion
+      // re-enqueues intent routing for a session that is about to be erased.
+      this.cancelIntentRoutingRetries(sessionId);
       const briefRun = this.briefGenerationRuns.get(sessionId);
       if (briefRun) abortWithTermination(briefRun.controller, termination);
       const workflowCancellation = session.workflowRunId && this.workflowRuntime
         ? this.workflowRuntime.cancel(session.workflowRunId, '会话删除前终止工作流。')
         : Promise.resolve();
-      const executionCancellation = this.execution.cancelAndWait(sessionId, termination);
-      const runtimeCancellation = this.runtime?.cancelSessionAndWait(sessionId, termination) ??
-        Promise.resolve({ requested: 0, completed: 0, timedOut: false });
-      const briefStopped = briefRun ? await settlesWithin(briefRun.done, 10_000) : true;
-      const [executionStopped, runtimeStopped] = await Promise.all([
-        executionCancellation,
-        runtimeCancellation,
+      // Every Agent still running for this session is torn down in one shared
+      // grace window. Awaiting the brief separately made the worst case two
+      // windows (20s), which is exactly the frontend request timeout.
+      const [briefStopped, executionStopped, runtimeStopped] = await Promise.all([
+        briefRun ? settlesWithin(briefRun.done, 10_000) : Promise.resolve(true),
+        this.execution.cancelAndWait(sessionId, termination),
+        this.runtime?.cancelSessionAndWait(sessionId, termination) ??
+          Promise.resolve({ requested: 0, completed: 0, timedOut: false }),
         workflowCancellation
       ]);
       if (!briefStopped || executionStopped.timedOut || runtimeStopped.timedOut) {
@@ -1075,19 +1300,45 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
           `Session runtime did not stop within the deletion grace period: ${sessionId}`
         );
       }
+      this.logger.log(
+        `Session ${sessionId} deletion interrupted agents: execution ${executionStopped.completed}/${executionStopped.requested}, runtime ${runtimeStopped.completed}/${runtimeStopped.requested}`
+      );
 
       await this.worktreeExecution?.deleteSessionDirectory(sessionId);
       this.workdirBrief?.deleteSessionDirectory(sessionId);
-      this.sessions.delete(sessionId);
-      this.briefGenerationSeqBySession.delete(sessionId);
-      this.briefGenerationRuns.delete(sessionId);
+      // Each subsystem rewrite is scoped by the sessions collection, so the
+      // session has to stay in the map until they have all run. Dropping it
+      // first is what used to leave their rows behind, neither written nor
+      // soft-deleted.
       this.tasks.deleteSession(sessionId);
       this.memories.deleteSession(sessionId);
       this.events.deleteSession(sessionId);
       this.orchestrator.deleteSession(sessionId);
+      this.artifacts?.deleteSession(sessionId);
       await this.contextManagement?.deleteSession(sessionId);
       await this.fileRevisions?.deleteSession(sessionId);
+      this.sessions.delete(sessionId);
+      this.briefGenerationSeqBySession.delete(sessionId);
+      this.briefGenerationRuns.delete(sessionId);
+      this.intentRoutingRuns.delete(sessionId);
+      this.followUpPlanningRuns.delete(sessionId);
       this.persist();
+      await this.persistence
+        .releaseWorkspaceSessionLease(session.workspaceId, session.id)
+        .catch((error) => {
+          this.logger.error(
+            `Failed to release workspace session lease for ${session.workspaceId}: ${String(error)}`
+          );
+        });
+      // The rewrites above only soft-delete. This physically removes the session
+      // row plus the child rows whose FK is `on delete set null` and would
+      // otherwise survive as orphans.
+      const purged = await this.persistence.deleteSessionData(sessionId);
+      if (!purged) {
+        throw new ConflictException(
+          `会话记录未能完全清除，请重启后端后重试删除：${sessionId}`
+        );
+      }
       return { deleted: true, sessionId: session.id };
     } finally {
       this.deletingSessionIds.delete(sessionId);
@@ -1348,6 +1599,31 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     const session = this.get(sessionId);
     const replay = this.findMessageReplay(session, clientMessageId);
     if (replay) return replay;
+    const pendingConfirmation = this.pendingConfirmationContext(session.id);
+    const workflowAgentSkip = matchWorkflowAgentSkipCommand(content);
+    if (workflowAgentSkip && pendingConfirmation?.reason === 'workflow_agent_substitution') {
+      return this.handleWorkflowAgentSkipMessage(
+        session,
+        content,
+        mentionedAgentIds,
+        clientMessageId,
+        pendingConfirmation.confirmationId,
+        workflowAgentSkip
+      );
+    }
+    const workflowDirective = pendingConfirmation && WORKFLOW_DIRECTIVE_CARD_REASONS.has(pendingConfirmation.reason)
+      ? matchWorkflowAgentDirective(content)
+      : undefined;
+    if (workflowDirective) {
+      return this.handleWorkflowAgentDirectiveMessage(
+        session,
+        content,
+        mentionedAgentIds,
+        clientMessageId,
+        pendingConfirmation!,
+        workflowDirective
+      );
+    }
     const exactCommand = matchExactUserCommand(content);
     if (exactCommand) {
       return this.handleExactCommandMessage(session, content, mentionedAgentIds, clientMessageId, exactCommand);
@@ -1696,7 +1972,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       resolution,
       port: {
         resume: (confirmationId) => this.resume(session.id, resolution.message, confirmationId),
-        retryCurrent: () => this.retryFailedSession(session, event.id, true),
+        retryCurrent: (confirmationId) => this.resume(session.id, resolution.message, confirmationId),
         pause: () => this.pause(session.id, resolution.message),
         cancel: () => this.control(session.id, 'CANCELLED', resolution.message)
       }
@@ -1728,6 +2004,268 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       routingStatus: undefined,
       idempotentReplay: false as const
     };
+  }
+
+  private async handleWorkflowAgentSkipMessage(
+    session: SessionDetail,
+    content: string,
+    mentionedAgentIds: string[],
+    clientMessageId: string | undefined,
+    confirmationId: string,
+    directive: WorkflowAgentSkipCommandMatch
+  ) {
+    if (session.status !== 'WAIT_USER_DECISION' || !this.workflowRuntime || !session.workflowRunId) {
+      throw new BadRequestException('当前没有可跳过的工作流 Agent。');
+    }
+    const request = this.assertPendingConfirmation(session.id, confirmationId, 'workflow_agent_substitution');
+    const payload = request.metadata.payload as {
+      relatedTaskId?: string;
+      workflowRunId?: string;
+    } | undefined;
+    if (!payload?.relatedTaskId || payload.workflowRunId !== session.workflowRunId) {
+      throw new BadRequestException('待跳过的工作流 Agent 与当前运行不匹配。');
+    }
+    const handlingPlan: UserMessageHandlingPlan = {
+      intent: 'command',
+      requirementRelation: 'continuation',
+      failedExecutionAction: 'none',
+      priority: 'high',
+      shouldPause: false,
+      affectedTaskIds: [payload.relatedTaskId],
+      affectedAgentIds: [],
+      requiresBriefRevision: false,
+      requiresUserConfirmation: false,
+      coordinatorInstruction: '跳过当前工作流 Agent，并从下一节点继续执行。'
+    };
+    const event = this.events.create({
+      sessionId: session.id,
+      type: 'user_message',
+      sessionUserId: session.ownerId,
+      userMessageIntent: 'command',
+      priority: 'high',
+      content,
+      toAgentIds: mentionedAgentIds,
+      metadata: {
+        ...createMetadata('chat_message', {
+          text: content,
+          mentionedAgentIds,
+          handlingPlan,
+          workflowAgentSkip: directive
+        }),
+        ...(clientMessageId ? { idempotencyKey: this.messageIdempotencyKey(session.id, clientMessageId) } : {})
+      }
+    });
+
+    await this.workflowRuntime.skipCurrentAgent({
+      runId: session.workflowRunId,
+      taskId: payload.relatedTaskId,
+      reason: content,
+      confirmationId
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'user_confirmation_resolved',
+      priority: 'high',
+      content: '用户已跳过当前工作流 Agent，工作流从下一节点继续执行。',
+      metadata: createMetadata('system_notice', {
+        confirmationId,
+        status: 'approved',
+        selectedOptionKey: 'skip_agent',
+        relatedTaskId: payload.relatedTaskId,
+        workflowRunId: session.workflowRunId
+      })
+    });
+    this.setStatus(session, 'EXECUTING');
+    this.touchSession(session);
+    return {
+      event,
+      handlingPlan,
+      deferred: false as const,
+      followUpMessageId: undefined,
+      routingId: undefined,
+      routingStatus: undefined,
+      idempotentReplay: false as const
+    };
+  }
+
+  /**
+   * Applies a typed workflow directive that names an Agent or an upstream node,
+   * so "让前端工程师执行" and "退回架构设计节点重新执行" resolve the pending card
+   * without clicking. The target is matched against the card's own candidate list,
+   * so an unknown or ambiguous name asks back instead of guessing.
+   */
+  private async handleWorkflowAgentDirectiveMessage(
+    session: SessionDetail,
+    content: string,
+    mentionedAgentIds: string[],
+    clientMessageId: string | undefined,
+    pendingConfirmation: PendingConfirmationContext,
+    directive: WorkflowAgentDirectiveMatch
+  ) {
+    const resolution = this.resolveWorkflowDirectiveTarget(session, pendingConfirmation, directive);
+    const handlingPlan: UserMessageHandlingPlan = {
+      intent: 'command',
+      requirementRelation: 'continuation',
+      failedExecutionAction: 'none',
+      priority: 'high',
+      shouldPause: false,
+      affectedTaskIds: [],
+      affectedAgentIds: resolution.kind === 'assign_agent' ? [resolution.agentId] : [],
+      requiresBriefRevision: false,
+      requiresUserConfirmation: resolution.kind === 'clarify',
+      coordinatorInstruction: resolution.kind === 'clarify'
+        ? resolution.message
+        : directive.kind === 'assign_agent'
+          ? '按用户指定的 Agent 改派当前工作流节点。'
+          : '按用户指定的上游节点退回重新执行。'
+    };
+    const event = this.events.create({
+      sessionId: session.id,
+      type: 'user_message',
+      sessionUserId: session.ownerId,
+      userMessageIntent: 'command',
+      priority: 'high',
+      content,
+      toAgentIds: mentionedAgentIds,
+      metadata: {
+        ...createMetadata('chat_message', {
+          text: content,
+          mentionedAgentIds,
+          handlingPlan,
+          workflowDirective: directive,
+          directiveResolution: resolution.kind
+        }),
+        ...(clientMessageId ? { idempotencyKey: this.messageIdempotencyKey(session.id, clientMessageId) } : {})
+      }
+    });
+
+    if (resolution.kind === 'clarify') {
+      const coordinator = this.pickSessionAgent(session, ['coordinator']);
+      this.events.create({
+        sessionId: session.id,
+        type: 'agent_message',
+        fromAgentId: coordinator.id,
+        content: resolution.message,
+        metadata: createMetadata('chat_message', {
+          messageKind: 'decision',
+          phase: 'workflow_directive_routing',
+          handlingPlan,
+          workflowDirective: directive,
+          candidates: resolution.candidates
+        })
+      });
+      this.touchSession(session);
+      return {
+        event,
+        handlingPlan,
+        deferred: false as const,
+        followUpMessageId: undefined,
+        routingId: undefined,
+        routingStatus: undefined,
+        idempotentReplay: false as const
+      };
+    }
+
+    if (resolution.kind === 'assign_agent') {
+      await this.resolveWorkflowAgentSubstitution(session.id, {
+        confirmationId: pendingConfirmation.confirmationId,
+        taskId: resolution.taskId,
+        agentId: resolution.agentId
+      });
+    } else {
+      await this.resolveWorkflowUpstreamRerun(session.id, {
+        confirmationId: pendingConfirmation.confirmationId,
+        decision: 'rerun_upstream',
+        nodeId: resolution.nodeId,
+        instruction: content
+      });
+    }
+    return {
+      event,
+      handlingPlan,
+      deferred: false as const,
+      followUpMessageId: undefined,
+      routingId: undefined,
+      routingStatus: undefined,
+      idempotentReplay: false as const
+    };
+  }
+
+  private resolveWorkflowDirectiveTarget(
+    session: SessionDetail,
+    pendingConfirmation: PendingConfirmationContext,
+    directive: WorkflowAgentDirectiveMatch
+  ):
+    | { kind: 'assign_agent'; agentId: string; taskId: string }
+    | { kind: 'rerun_upstream'; nodeId: string }
+    | { kind: 'clarify'; message: string; candidates: string[] } {
+    if (pendingConfirmation.reason === 'workflow_upstream_rerun') {
+      const pending = session.workflowRunId
+        ? this.workflowRuntime?.pendingUpstreamRerun(session.workflowRunId)
+        : undefined;
+      const candidates = pending?.candidates ?? [];
+      const labels = candidates.map((candidate) => `${candidate.nodeName}（${candidate.agentName}）`);
+      // On this card both phrasings mean the same thing: the named stage re-runs.
+      const matched = matchSingleByAliases(directive.targetText, candidates.map((candidate) => ({
+        value: candidate.nodeId,
+        aliases: [candidate.nodeName, candidate.agentName, candidate.agentId]
+      })));
+      if (matched === 'ambiguous' || !matched) {
+        return {
+          kind: 'clarify',
+          message: matched === 'ambiguous'
+            ? `「${directive.targetText}」同时匹配到多个上游节点，请直接点击卡片中的节点，或写明唯一名称。可选：${labels.join('、') || '无'}`
+            : `没有匹配到名为「${directive.targetText}」的上游节点。可退回的节点：${labels.join('、') || '无'}`,
+          candidates: labels
+        };
+      }
+      return { kind: 'rerun_upstream', nodeId: matched };
+    }
+
+    const payload = this.pendingConfirmationPayload(session.id, pendingConfirmation.confirmationId);
+    const candidateAgentIds = Array.isArray(payload?.candidateAgentIds)
+      ? payload.candidateAgentIds.filter((id): id is string => typeof id === 'string')
+      : [];
+    const taskId = typeof payload?.relatedTaskId === 'string' ? payload.relatedTaskId : undefined;
+    const candidates = candidateAgentIds.flatMap((agentId) => {
+      try {
+        const agent = this.agents.getForSurface(agentId, 'workflow');
+        return [{ value: agent.id, aliases: [agent.name, agent.key, agent.role ?? ''], label: agent.name }];
+      } catch {
+        return [];
+      }
+    });
+    const labels = candidates.map((candidate) => candidate.label);
+    if (!taskId || !candidates.length) {
+      return {
+        kind: 'clarify',
+        message: '当前改派卡没有可用的候选 Agent，请直接在卡片中选择操作。',
+        candidates: labels
+      };
+    }
+    const matched = matchSingleByAliases(directive.targetText, candidates);
+    if (matched === 'ambiguous' || !matched) {
+      return {
+        kind: 'clarify',
+        message: matched === 'ambiguous'
+          ? `「${directive.targetText}」同时匹配到多个 Agent，请写明唯一名称。可选：${labels.join('、')}`
+          : `没有匹配到名为「${directive.targetText}」的候选 Agent。可选：${labels.join('、')}`,
+        candidates: labels
+      };
+    }
+    return { kind: 'assign_agent', agentId: matched, taskId };
+  }
+
+  private pendingConfirmationPayload(sessionId: string, confirmationId: string) {
+    const request = this.events.list(sessionId).find(
+      (event) =>
+        event.type === 'user_confirmation_requested' &&
+        (event.metadata.payload as { confirmationId?: string } | undefined)?.confirmationId === confirmationId
+    );
+    return request?.metadata.payload as {
+      relatedTaskId?: unknown;
+      candidateAgentIds?: unknown[];
+    } | undefined;
   }
 
   private findMessageReplay(session: SessionDetail, clientMessageId?: string) {
@@ -1773,42 +2311,60 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       const confirmationId = (event.metadata.payload as { confirmationId?: unknown } | undefined)?.confirmationId;
       return typeof confirmationId === 'string' ? [confirmationId] : [];
     }));
+    const activeCheckpoint = this.sessions.get(sessionId)?.activeRecoveryCheckpoint;
+    if (activeCheckpoint && !resolvedIds.has(activeCheckpoint.confirmationId)) {
+      const activeRequest = [...events].reverse().find((event) => {
+        if (event.type !== 'user_confirmation_requested' && event.type !== 'intent_clarification_required') return false;
+        return (event.metadata.payload as { confirmationId?: unknown } | undefined)?.confirmationId ===
+          activeCheckpoint.confirmationId;
+      });
+      const activeContext = activeRequest
+        ? this.confirmationContextFromEvent(activeRequest)
+        : undefined;
+      if (activeContext) return activeContext;
+    }
     const pending: PendingConfirmationContext[] = [];
     for (const event of [...events].reverse()) {
       if (event.type !== 'user_confirmation_requested' && event.type !== 'intent_clarification_required') continue;
-      const payload = event.metadata.payload as {
-        confirmationId?: unknown;
-        reason?: unknown;
-        title?: unknown;
-        description?: unknown;
-        options?: unknown;
-        actions?: unknown;
-      } | undefined;
-      if (typeof payload?.confirmationId !== 'string' || resolvedIds.has(payload.confirmationId)) continue;
-      const options: PendingConfirmationContext['options'] = Array.isArray(payload.options)
-        ? payload.options.flatMap((option): PendingConfirmationContext['options'] => {
-            if (!option || typeof option !== 'object') return [];
-            const candidate = option as { key?: unknown; label?: unknown; style?: unknown };
-            if (typeof candidate.key !== 'string' || typeof candidate.label !== 'string') return [];
-            const style: PendingConfirmationContext['options'][number]['style'] =
-              candidate.style === 'primary' || candidate.style === 'default' || candidate.style === 'danger'
-              ? candidate.style
-              : undefined;
-            return [{ key: candidate.key, label: candidate.label, ...(style ? { style } : {}) }];
-          })
-        : [];
-      pending.push({
-        confirmationId: payload.confirmationId,
-        reason: typeof payload.reason === 'string' ? payload.reason : 'unspecified',
-        content: event.content,
-        ...(typeof payload.title === 'string' ? { title: payload.title } : {}),
-        ...(typeof payload.description === 'string' ? { description: payload.description } : {}),
-        options,
-        requiresStructuredAction: Array.isArray(payload.actions) && payload.actions.length > 0,
-        createdAt: event.createdAt
-      });
+      const context = this.confirmationContextFromEvent(event);
+      if (!context || resolvedIds.has(context.confirmationId)) continue;
+      pending.push(context);
     }
     return pending.length === 1 ? pending[0] : undefined;
+  }
+
+  private confirmationContextFromEvent(event: CollaborationEvent): PendingConfirmationContext | undefined {
+    const payload = event.metadata.payload as {
+      confirmationId?: unknown;
+      reason?: unknown;
+      title?: unknown;
+      description?: unknown;
+      options?: unknown;
+      actions?: unknown;
+    } | undefined;
+    if (typeof payload?.confirmationId !== 'string') return undefined;
+    const options: PendingConfirmationContext['options'] = Array.isArray(payload.options)
+      ? payload.options.flatMap((option): PendingConfirmationContext['options'] => {
+          if (!option || typeof option !== 'object') return [];
+          const candidate = option as { key?: unknown; label?: unknown; style?: unknown };
+          if (typeof candidate.key !== 'string' || typeof candidate.label !== 'string') return [];
+          const style: PendingConfirmationContext['options'][number]['style'] =
+            candidate.style === 'primary' || candidate.style === 'default' || candidate.style === 'danger'
+              ? candidate.style
+              : undefined;
+          return [{ key: candidate.key, label: candidate.label, ...(style ? { style } : {}) }];
+        })
+      : [];
+    return {
+      confirmationId: payload.confirmationId,
+      reason: typeof payload.reason === 'string' ? payload.reason : 'unspecified',
+      content: event.content,
+      ...(typeof payload.title === 'string' ? { title: payload.title } : {}),
+      ...(typeof payload.description === 'string' ? { description: payload.description } : {}),
+      options,
+      requiresStructuredAction: Array.isArray(payload.actions) && payload.actions.length > 0,
+      createdAt: event.createdAt
+    };
   }
 
   private enqueueIntentRouting(
@@ -1822,6 +2378,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     const run = previous.catch(() => undefined).then(() =>
       this.processIntentRouting(sessionId, routingId, snapshotId, followUpId, legacyRelation)
     ).catch(async (error) => {
+      if (String(error).includes('ROUTING_LEASE_LOST')) return;
       const current = this.contextManagement?.listRoutingRecords(sessionId).find((item) => item.id === routingId);
       if (current && ['CLASSIFYING', 'VALIDATING', 'APPLYING', 'PENDING_RETRY'].includes(current.status)) {
         await this.contextManagement?.updateRoutingRecord(sessionId, routingId, {
@@ -1844,7 +2401,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     followUpId: string,
     legacyRelation?: UserMessageHandlingPlan['requirementRelation']
   ) {
-    if (this.shuttingDown) return;
+    if (this.shuttingDown || this.sessions.get(sessionId)?.status === 'PAUSED') return;
     const key = `${sessionId}:${routingId}`;
     if (this.intentRoutingRetryTimers.has(key)) return;
     const retryCount = this.contextManagement?.listRoutingRecords(sessionId)
@@ -1858,6 +2415,16 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     this.intentRoutingRetryTimers.set(key, timer);
   }
 
+  /** Drops every pending intent routing retry owned by one session. */
+  private cancelIntentRoutingRetries(sessionId: string) {
+    const prefix = `${sessionId}:`;
+    for (const [key, timer] of this.intentRoutingRetryTimers) {
+      if (!key.startsWith(prefix)) continue;
+      clearTimeout(timer);
+      this.intentRoutingRetryTimers.delete(key);
+    }
+  }
+
   private async processIntentRouting(
     sessionId: string,
     routingId: string,
@@ -1867,14 +2434,17 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   ) {
     const startedAt = Date.now();
     const session = this.sessions.get(sessionId);
-    if (!session || this.deletingSessionIds.has(sessionId)) return;
+    if (!session || this.deletingSessionIds.has(sessionId) || session.status === 'PAUSED') return;
+    const routingController = new AbortController();
+    this.intentRoutingControllers.set(sessionId, routingController);
     try {
       if (!this.contextManagement) return;
       const claim = await this.contextManagement.claimIntentRouting(
         session.id,
         routingId,
         snapshotId,
-        this.intentRoutingWorkerId
+        `${this.intentRoutingWorkerId}:${crypto.randomUUID()}`,
+        150_000
       );
       if (claim.state === 'terminal') return;
       if (claim.state === 'blocked') {
@@ -1897,10 +2467,11 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       const routing = claim.routing;
       const snapshot = this.contextManagement?.listSnapshots(session.id).find((item) => item.id === snapshotId);
       if (!routing || !snapshot || !this.semanticIntentRouter) return;
-      const outcome = await this.semanticIntentRouter.classify(session, routing, snapshot);
+      const outcome = await this.semanticIntentRouter.classify(session, routing, snapshot, routingController.signal);
+      if (routingController.signal.aborted || String(session.status) === 'PAUSED') return;
       if (
         outcome.validation.errors.includes('SNAPSHOT_STALE') &&
-        outcome.routing.reasonCodes.filter((code) => code === 'SNAPSHOT_REBUILT').length < 1
+        await this.contextManagement.reserveRoutingRebuild(sessionId, routingId)
       ) {
         workspaceMetrics.increment('intent_route_stale_snapshot_total');
         const followUp = session.pendingFollowUpMessages?.find((item) => item.id === followUpId) ??
@@ -1920,7 +2491,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
           snapshotId: rebuilt.id,
           reasonCodes: [...new Set([...outcome.routing.reasonCodes, 'SNAPSHOT_REBUILT'])]
         });
-        await this.processIntentRouting(sessionId, routingId, rebuilt.id, followUpId, legacyRelation);
+        this.enqueueIntentRouting(sessionId, routingId, rebuilt.id, followUpId, legacyRelation);
         return;
       }
       if (routing.rolloutMode === 'shadow') {
@@ -1959,6 +2530,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       }
       if (!this.routeApplication) throw new ServiceUnavailableException('Route application service is unavailable.');
       const applied = await this.routeApplication.apply({ session, snapshot, followUp, outcome });
+      if (routingController.signal.aborted || String(session.status) === 'PAUSED') return;
       workspaceMetrics.increment('intent_route_total', 1, {
         relation: outcome.decision.scopeRelation,
         action: outcome.decision.requestedAction,
@@ -2025,6 +2597,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       });
       workspaceMetrics.observe('intent_route_latency_ms', Date.now() - startedAt, { result: 'processing_error' });
       this.logger.warn(`Intent routing processing failed for session ${session.id}: ${String(error)}`);
+      if (String(error).includes('ROUTING_LEASE_LOST')) return;
       if (this.contextManagement) {
         const current = this.contextManagement.listRoutingRecords(session.id).find((item) => item.id === routingId);
         if (current && ['CLASSIFYING', 'VALIDATING', 'APPLYING'].includes(current.status)) {
@@ -2035,7 +2608,23 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
           this.scheduleIntentRoutingRetry(sessionId, routingId, snapshotId, followUpId, legacyRelation);
         }
       }
+    } finally {
+      if (this.intentRoutingControllers.get(sessionId) === routingController) this.intentRoutingControllers.delete(sessionId);
     }
+  }
+
+  stopState(sessionId: string) {
+    this.get(sessionId);
+    return this.runtime?.getStopSummary(sessionId) ?? {
+      sessionId,
+      version: 0,
+      status: 'unknown' as const,
+      requestedCount: 0,
+      confirmedCount: 0,
+      targets: [],
+      blockers: [{ reason: 'state_query_failed' as const, message: 'Runtime 停止状态服务不可用。' }],
+      canResume: false
+    };
   }
 
   private emitIntentClarification(
@@ -2079,11 +2668,20 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
   }
 
-  async confirmBrief(sessionId: string, briefId: string) {
+  async confirmBrief(sessionId: string, briefId: string, confirmationId?: string) {
     const session = this.get(sessionId);
     if (session.currentTaskBriefId !== briefId) {
       throw new BadRequestException(`Brief is not current: ${briefId}`);
     }
+    const resolvedConfirmationId = confirmationId ?? this.findPendingConfirmationId(
+      sessionId,
+      'confirm_task_brief',
+      (payload) => payload.relatedBriefId === briefId
+    );
+    if (!resolvedConfirmationId) {
+      throw new BadRequestException(`Task Brief confirmation is missing: ${briefId}`);
+    }
+    this.assertPendingConfirmation(sessionId, resolvedConfirmationId, 'confirm_task_brief');
     const brief = this.orchestrator.confirmBrief(session, briefId);
     session.currentTaskBriefId = brief.id;
     if (this.contextManagement) {
@@ -2098,6 +2696,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         sessionUserId: session.ownerId,
         content: '任务契约已确认并写入决策账本。',
         metadata: createMetadata('system_notice', {
+          confirmationId: resolvedConfirmationId,
           relatedBriefId: brief.id,
           workItemId: activeWorkItem.id,
           status: 'approved',
@@ -2117,6 +2716,19 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         ]
       });
       this.events.acceptCommitted(confirmationEvent);
+    } else {
+      this.events.create({
+        sessionId,
+        type: 'user_confirmation_resolved',
+        sessionUserId: session.ownerId,
+        content: '任务契约已确认。',
+        metadata: createMetadata('system_notice', {
+          confirmationId: resolvedConfirmationId,
+          relatedBriefId: brief.id,
+          status: 'approved',
+          reason: 'confirm_task_brief'
+        })
+      });
     }
     const availableWorkflows = this.workflows?.list().filter((workflow) => workflow.status === 'published') ?? [];
     this.setStatus(session, 'WAIT_WORKFLOW_SELECT');
@@ -2132,14 +2744,14 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         relatedBriefId: brief.id
       })
     });
-    const confirmationId = crypto.randomUUID();
+    const workflowConfirmationId = crypto.randomUUID();
     this.events.create({
       sessionId,
       type: 'user_confirmation_requested',
       priority: 'high',
       content: '请选择工作流后开始执行。',
       metadata: createMetadata('confirmation_card', {
-        confirmationId,
+        confirmationId: workflowConfirmationId,
         reason: 'select_workflow',
         title: '选择执行工作流',
         description: '任务契约已确认，工作流确定 Agent 的执行顺序。',
@@ -2159,7 +2771,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
           : [{ key: 'manage_workflows', label: '创建工作流', style: 'primary' }]
       })
     });
-    return { accepted: true, sessionId: session.id, status: session.status, confirmationId };
+    return { accepted: true, sessionId: session.id, status: session.status, confirmationId: workflowConfirmationId };
   }
 
   async selectWorkflow(
@@ -2167,6 +2779,13 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     input: { workflowId: string; workflowVersion?: number; confirmationId: string }
   ) {
     const session = this.get(sessionId);
+    const previousRun = this.workflowRuntime?.findBySession(sessionId);
+    if (previousRun?.startIdempotencyKey === `${sessionId}:${input.confirmationId}`) {
+      if (previousRun.workflowId !== input.workflowId || (input.workflowVersion !== undefined && previousRun.workflowVersion !== input.workflowVersion)) {
+        throw new BadRequestException('Confirmation already started a different workflow version.');
+      }
+      return { session, workflow: this.workflows!.get(previousRun.workflowId), workflowRun: previousRun, createdTasks: this.tasks.list(sessionId).filter(task => task.workflowRunId === previousRun.id) };
+    }
     if (session.status !== 'WAIT_WORKFLOW_SELECT') {
       throw new BadRequestException(`Workflow selection requires WAIT_WORKFLOW_SELECT: ${session.status}`);
     }
@@ -2176,7 +2795,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     if (workflow.status !== 'published') throw new BadRequestException('Only published workflows can be executed.');
     const briefId = session.currentTaskBriefId;
     const brief = briefId ? this.orchestrator.getBrief(session.id, briefId) : undefined;
-    if (!brief) throw new BadRequestException('Current confirmed brief is missing.');
+    if (!brief || !brief.confirmedByUser) throw new BadRequestException('Current confirmed brief is missing.');
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
     const version = this.workflows.getVersion(workflow.id, input.workflowVersion);
     session.participatingAgentIds = Array.from(new Set([...session.participatingAgentIds, ...version.involvedAgentIds]));
@@ -2579,15 +3198,35 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   }
 
   private hasActiveSessionWork(session: SessionDetail) {
+    // INTERRUPTED 不算"有活儿在跑"：中断意味着服务端已经丢了执行所有权，会话在等用户。
+    // 把它算作在跑会让新消息被判 deferred，永远进不了调度——这是中断会话没有出口的一半原因。
+    // 另一半在 processNextFollowUp 的早退，两处必须同批改。
     return Boolean(
-      session.status === 'INTERRUPTED' ||
       session.status === 'PAUSED' ||
       session.activeFollowUpMessageId ||
       this.followUpPlanningRuns.has(session.id) ||
       this.briefGenerationRuns.has(session.id) ||
       this.execution.isRunning(session.id) ||
-      ACTIVE_INVOCATION_SESSION_STATUSES.has(session.status)
+      ACTIVE_INVOCATION_SESSION_STATUSES.has(session.status) ||
+      this.hasLiveWorkflowRun(session)
     );
+  }
+
+  /**
+   * A non-terminal workflow run still owns the main chain even while the Session
+   * is parked on the user (e.g. WAIT_USER_DECISION for an Agent substitution).
+   * Without this, the execution slot is already free and a plain chat message
+   * would start a second brief + discussion + execution alongside the workflow.
+   */
+  private hasLiveWorkflowRun(session: SessionDetail) {
+    if (!session.workflowRunId || !this.workflowRuntime) return false;
+    try {
+      return !['completed', 'failed', 'cancelled'].includes(
+        this.workflowRuntime.get(session.workflowRunId).status
+      );
+    } catch {
+      return false;
+    }
   }
 
   private scheduleFollowUpPlanning(sessionId: string) {
@@ -2625,7 +3264,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
   private async processNextFollowUp(sessionId: string) {
     const session = this.sessions.get(sessionId);
-    if (!session || session.status === 'INTERRUPTED' || session.status === 'PAUSED' || session.activeFollowUpMessageId) return;
+    if (!session || session.status === 'PAUSED' || session.activeFollowUpMessageId) return;
     if (
       this.briefGenerationRuns.has(sessionId) ||
       this.execution.isRunning(sessionId)
@@ -2672,22 +3311,30 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         this.relevantAgentIds(session, followUp.content, followUp.handlingPlan.affectedAgentIds)
       );
       await this.completeFollowUpRouting(session, followUp.id);
-      this.retryFailedSession(session, followUp.sourceEventId, true);
+      this.retryFailedSession(session, followUp.sourceEventId);
       return;
     }
 
-    this.setStatus(session, 'AGENT_DISCUSSING');
+    const discussionRequired =
+      followUp.mentionedAgentIds.length > 1 ||
+      followUp.handlingPlan.requirementRelation === 'new_requirement' ||
+      followUp.handlingPlan.failedExecutionAction === 'replan';
+    this.setStatus(session, discussionRequired ? 'AGENT_DISCUSSING' : 'EXECUTING');
     this.events.create({
       sessionId,
       type: 'session_status_changed',
-      content: followUp.mentionedAgentIds.length > 1
-        ? '被 @ 的多个 Agent 开始讨论，随后由接收者拆分任务。'
-        : '接收者开始拆分后续需求并准备任务派发。',
+      content: discussionRequired
+        ? followUp.mentionedAgentIds.length > 1
+          ? '被 @ 的多个 Agent 开始讨论，随后由接收者拆分任务。'
+          : '新需求或重规划已进入 Agent 讨论。'
+        : '正在应用同一任务的补充指令并准备继续执行。',
       metadata: createMetadata('system_notice', {
-        status: 'AGENT_DISCUSSING',
-        reason: followUp.mentionedAgentIds.length > 1
-          ? 'follow_up_multi_agent_discussion_started'
-          : 'follow_up_decomposition_started',
+        status: discussionRequired ? 'AGENT_DISCUSSING' : 'EXECUTING',
+        reason: discussionRequired
+          ? followUp.mentionedAgentIds.length > 1
+            ? 'follow_up_multi_agent_discussion_started'
+            : 'follow_up_discussion_started'
+          : 'follow_up_continuation_planning_started',
         followUpMessageId: followUp.id,
         mentionedAgentIds: followUp.mentionedAgentIds
       })
@@ -2699,9 +3346,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       followUp.sourceEventId,
       followUp.mentionedAgentIds,
       {
-        discussionRequired:
-          followUp.handlingPlan.requirementRelation === 'new_requirement' ||
-          followUp.handlingPlan.failedExecutionAction === 'replan',
+        discussionRequired,
         requirementRelation: followUp.handlingPlan.requirementRelation
       }
     );
@@ -2721,9 +3366,15 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     plan: UserMessageHandlingPlan
   ): UserMessageHandlingPlan {
     const requirementRelation = plan.requirementRelation ?? 'continuation';
-    const resumableFailure = session.status === 'FAILED' || this.hasFailedWorkflowRun(session);
+    // 中断会话强制走 replan：带内容的消息按定义有新内容要吸收，而 resume 那条路
+    // （retryFailedSession -> generateBriefInBackground）不接收 followUp 内容，
+    // 会静默丢掉用户新说的需求。replan 则落到 AGENT_DISCUSSING，由
+    // prepareFollowUpExecution 带 requirementRelation 合并旧契约。
+    // 裸「继续」不经此处：它在 sendMessage 就被精确命令词拦走。
+    const interrupted = session.status === 'INTERRUPTED';
+    const resumableFailure = session.status === 'FAILED' || interrupted || this.hasFailedWorkflowRun(session);
     const failedExecutionAction = resumableFailure && requirementRelation === 'continuation'
-      ? plan.failedExecutionAction === 'replan' ? 'replan' : 'resume'
+      ? interrupted || plan.failedExecutionAction === 'replan' ? 'replan' : 'resume'
       : 'none';
     return { ...plan, requirementRelation, failedExecutionAction };
   }
@@ -2806,11 +3457,14 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       !session ||
       session.status === 'CANCELLED' ||
       session.status === 'COMPLETED' ||
-      session.status === 'PAUSED' ||
-      session.status === 'INTERRUPTED'
+      session.status === 'PAUSED'
     ) {
       return;
     }
+    // 中断意味着服务端丢了这次调用的所有权：迟到的 failed / rework 不该盖掉中断标记
+    // 和恢复卡（用户还要靠它决定怎么办）。但 delivered 是产物真的落地了，继续挂在
+    // INTERRUPTED 会让一个已完成的任务永远卡在恢复卡后面。
+    if (session.status === 'INTERRUPTED' && outcome.kind !== 'delivered') return;
     if (outcome.kind === 'workflow_step_completed') {
       this.pauseForWorkflowStepConfirmation(session, outcome.taskId, outcome.resultSummary);
       return;
@@ -2910,15 +3564,44 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     });
     if (outcome.kind === 'ask_user') {
       const substitution = outcome.workflowAgentSubstitution;
-      this.events.create({
+      if (!substitution && session.workflowRunId && this.workflowRuntime) {
+        this.workflowRuntime.checkpointInterruptedExecution?.(session.workflowRunId, {
+          code: 'WORKFLOW_USER_RECOVERY_REQUIRED',
+          message: reason || 'Workflow execution requires an explicit user recovery action.'
+        });
+      }
+      const checkpoint = substitution
+        ? undefined
+        : this.createRecoveryCheckpoint(session, 'coordinator_routing_needs_user_decision', {
+            phase: 'coordinator_routing'
+          });
+      // 同一个工作流节点只保留一张改派卡：confirmationId 每次都新生成，会让
+      // pendingConfirmationContext 因为存在多张未解决确认而返回 undefined，
+      // 用户既点不动卡，也没法用「继续」命令推进。
+      const substitutionConfirmationId = substitution
+        ? `workflow-agent-substitution:${substitution.workflowRunId}:${substitution.taskId}`
+        : undefined;
+      if (substitution && substitutionConfirmationId && session.workflowRunId && this.workflowRuntime) {
+        void this.workflowRuntime.requestAgentSubstitution?.({
+          ...substitution,
+          reason,
+          confirmationId: substitutionConfirmationId
+        }).catch((error: unknown) => this.failSession(session, error, 'workflow_agent_substitution'));
+      }
+      const confirmationId = substitutionConfirmationId ?? checkpoint?.confirmationId ?? crypto.randomUUID();
+      this.events.createOnce(
+        substitution
+          ? `workflow-agent-substitution-confirmation:${substitution.workflowRunId}:${substitution.taskId}`
+          : `confirmation-request:${confirmationId}`,
+        {
         sessionId,
-        type: 'user_confirmation_requested',
-        priority: 'high',
+        type: 'user_confirmation_requested' as const,
+        priority: 'high' as const,
         content: substitution
           ? '当前工作流 Agent 无法继续，请明确选择是否改派。'
           : 'Coordinator 自动处理未能继续推进，请确认下一步。',
         metadata: createMetadata('confirmation_card', {
-          confirmationId: crypto.randomUUID(),
+          confirmationId,
           reason: substitution ? 'workflow_agent_substitution' : 'coordinator_routing_needs_user_decision',
           title: substitution ? '选择替代工作流 Agent' : '需要用户确认下一步',
           description: substitution
@@ -2936,6 +3619,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
                   label: `改派给 ${agent.name}`,
                   style: index === 0 ? 'primary' as const : 'default' as const
                 })),
+                { key: 'skip_agent', label: '跳过当前 Agent', style: 'default' as const },
                 { key: 'cancel', label: messages.reworkCancel, style: 'danger' as const }
               ]
             : [
@@ -3155,7 +3839,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
 
     if (session.workflowRunId && this.workflowRuntime) {
-      const previousRun = this.workflowRuntime.get(session.workflowRunId);
+      const workflowRun = this.workflowRuntime.get(session.workflowRunId);
       const coordinator = this.pickSessionAgent(session, ['coordinator']);
       this.events.create({
         sessionId: session.id,
@@ -3167,17 +3851,27 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
           reworkRound: reworkRounds,
           maxReworkRounds: maxRounds,
           reason,
-          previousWorkflowRunId: previousRun.id
+          workflowRunId: workflowRun.id
         })
       });
-      void this.workflowRuntime.start({
-        session,
-        brief,
-        coordinatorId: coordinator.id,
-        workflowId: previousRun.workflowId,
-        workflowVersion: previousRun.workflowVersion,
-        confirmationId: `workflow-rework:${session.id}:${reworkRounds}`
-      }).catch((error) => this.failSession(session, error, 'workflow_rework'));
+      // 只返工最后一个 Agent 节点，不重放整条工作流定义：重新 start 会新建 run
+      // 并从第一个节点跑起，把已通过的上游节点连同群聊全部重复一遍。
+      void this.workflowRuntime
+        .reworkLastAgentNode(workflowRun.id, reason || '复盘要求返工，请修正本阶段输出。', {
+          session,
+          brief,
+          coordinatorId: coordinator.id
+        })
+        .then((reworked) => {
+          if (!reworked) {
+            this.failSession(
+              session,
+              new Error('当前工作流没有可返工的 Agent 节点，无法自动返工。'),
+              'workflow_rework'
+            );
+          }
+        })
+        .catch((error) => this.failSession(session, error, 'workflow_rework'));
       return;
     }
 
@@ -3233,7 +3927,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     await this.workflowRuntime.substituteCurrentAgent({
       runId: session.workflowRunId,
       taskId: input.taskId,
-      agentId: agent.id
+      agentId: agent.id,
+      confirmationId: input.confirmationId
     });
     this.events.create({
       sessionId,
@@ -3254,11 +3949,134 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     return { session };
   }
 
+  /**
+   * Skips the workflow Agent that declined the current node and advances to the
+   * next node. This is the card-driven counterpart of the typed skip command:
+   * the substitution card must stay resolvable when every candidate Agent has
+   * already been attempted, otherwise cancelling the run is the only exit.
+   */
+  async resolveWorkflowAgentSkip(
+    sessionId: string,
+    input: { confirmationId: string; taskId: string; reason?: string }
+  ) {
+    const session = this.get(sessionId);
+    if (session.status !== 'WAIT_USER_DECISION') {
+      throw new BadRequestException(`Workflow Agent skip is not active: ${session.status}`);
+    }
+    if (!this.workflowRuntime || !session.workflowRunId) {
+      throw new ServiceUnavailableException('Workflow Runtime is unavailable.');
+    }
+    const request = this.assertPendingConfirmation(sessionId, input.confirmationId, 'workflow_agent_substitution');
+    const payload = request.metadata.payload as {
+      relatedTaskId?: string;
+      workflowRunId?: string;
+    } | undefined;
+    if (payload?.relatedTaskId !== input.taskId || payload.workflowRunId !== session.workflowRunId) {
+      throw new BadRequestException('Workflow Agent skip target does not match the pending confirmation.');
+    }
+    const reason = input.reason?.trim() || '用户跳过当前工作流 Agent，并从下一节点继续执行。';
+    await this.workflowRuntime.skipCurrentAgent({
+      runId: session.workflowRunId,
+      taskId: input.taskId,
+      reason,
+      confirmationId: input.confirmationId
+    });
+    this.events.create({
+      sessionId,
+      type: 'user_confirmation_resolved',
+      priority: 'high',
+      content: '用户已跳过当前工作流 Agent，工作流从下一节点继续执行。',
+      metadata: createMetadata('system_notice', {
+        confirmationId: input.confirmationId,
+        status: 'approved',
+        selectedOptionKey: 'skip_agent',
+        relatedTaskId: input.taskId,
+        workflowRunId: session.workflowRunId
+      })
+    });
+    this.setStatus(session, 'EXECUTING');
+    this.touchSession(session);
+    return { session };
+  }
+
+  /**
+   * Sends a parked workflow node back to an upstream node the user picked, or
+   * retries the parked node itself. Both are resolutions of the one
+   * `workflow_upstream_rerun` card the Workflow Runtime emitted.
+   */
+  async resolveWorkflowUpstreamRerun(
+    sessionId: string,
+    input: { confirmationId: string; nodeId?: string; decision?: 'rerun_upstream' | 'retry_current'; instruction?: string }
+  ) {
+    const session = this.get(sessionId);
+    if (!this.workflowRuntime || !session.workflowRunId) {
+      throw new ServiceUnavailableException('Workflow Runtime is unavailable.');
+    }
+    const pending = this.workflowRuntime.pendingUpstreamRerun(session.workflowRunId);
+    if (!pending) throw new BadRequestException('当前没有等待选择上游节点的工作流节点。');
+    this.assertPendingConfirmation(sessionId, input.confirmationId, 'workflow_upstream_rerun');
+    const decision = input.decision ?? (input.nodeId ? 'rerun_upstream' : 'retry_current');
+
+    if (decision === 'retry_current') {
+      await this.workflowRuntime.retryParkedNode({
+        runId: session.workflowRunId,
+        confirmationId: input.confirmationId
+      });
+      this.events.create({
+        sessionId,
+        type: 'user_confirmation_resolved',
+        priority: 'high',
+        content: '用户选择不退回上游节点，直接重试当前工作流节点。',
+        metadata: createMetadata('system_notice', {
+          confirmationId: input.confirmationId,
+          status: 'approved',
+          selectedOptionKey: 'retry_current',
+          workflowRunId: session.workflowRunId,
+          workflowNodeId: pending.nodeId
+        })
+      });
+      this.setStatus(session, 'EXECUTING');
+      this.touchSession(session);
+      return { session };
+    }
+
+    const target = pending.candidates.find((candidate) => candidate.nodeId === input.nodeId);
+    if (!target) {
+      throw new BadRequestException(`上游节点不在可退回的候选列表中：${input.nodeId ?? '(未指定)'}`);
+    }
+    await this.workflowRuntime.rerunUpstreamNode({
+      runId: session.workflowRunId,
+      confirmationId: input.confirmationId,
+      nodeId: target.nodeId,
+      ...(input.instruction ? { instruction: input.instruction } : {})
+    });
+    this.events.create({
+      sessionId,
+      type: 'user_confirmation_resolved',
+      priority: 'high',
+      content: `用户选择退回上游节点「${target.nodeName}」重新执行。`,
+      metadata: createMetadata('system_notice', {
+        confirmationId: input.confirmationId,
+        status: 'approved',
+        selectedOptionKey: `node:${target.nodeId}`,
+        workflowRunId: session.workflowRunId,
+        workflowNodeId: target.nodeId,
+        agentId: target.agentId,
+        parkedNodeId: pending.nodeId
+      })
+    });
+    this.setStatus(session, 'EXECUTING');
+    this.touchSession(session);
+    return { session };
+  }
+
   async pause(sessionId: string, reason = '用户已停止会话', confirmationId?: string) {
     const session = this.get(sessionId);
     const alreadyPaused = session.status === 'PAUSED';
     if (!alreadyPaused) {
-      this.assertControlTransition(session.status, 'PAUSED');
+      const pendingRouting = this.contextManagement?.listRoutingRecords(sessionId)
+        .some(item => ['RECEIVED', 'SNAPSHOT_READY', 'CLASSIFYING', 'VALIDATING', 'APPLYING', 'PENDING_RETRY'].includes(item.status));
+      if (!pendingRouting) this.assertControlTransition(session.status, 'PAUSED');
       session.pauseState = {
         previousStatus: session.status,
         pausedAt: nowIso(),
@@ -3273,6 +4091,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       scope: 'session',
       diagnosticRef: 'session_paused'
     });
+    this.cancelIntentRoutingRetries(sessionId);
+    this.intentRoutingControllers.get(sessionId)?.abort(termination);
     this.briefGenerationSeqBySession.set(
       sessionId,
       (this.briefGenerationSeqBySession.get(sessionId) ?? 0) + 1
@@ -3329,17 +4149,79 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
   resume(sessionId: string, reason = '用户已继续会话', confirmationId?: string) {
     const session = this.get(sessionId);
+    const history = this.events.list(sessionId);
+    const pending = this.pendingConfirmationContext(sessionId);
+    if (confirmationId) {
+      if ((session.activeRecoveryCheckpoint && session.activeRecoveryCheckpoint.confirmationId !== confirmationId) ||
+          (pending && pending.confirmationId !== confirmationId)) {
+        throw new ConflictException('该确认已过期，请使用当前会话的确认卡片。');
+      }
+      const resolved = history.find(event => event.type === 'user_confirmation_resolved' &&
+        (event.metadata.payload as { confirmationId?: string })?.confirmationId === confirmationId);
+      if (resolved) {
+        const payload = resolved.metadata.payload as { status?: string; selectedOptionKey?: string };
+        if (payload.status !== 'approved' || payload.selectedOptionKey !== 'resume') {
+          throw new ConflictException('该确认已结束，不能再次继续执行。');
+        }
+        return { session, event: resolved, confirmationEvent: resolved };
+      }
+      if (pending?.confirmationId !== confirmationId || !pending.options.some(option => option.key === 'resume')) {
+        throw new ConflictException('当前确认不允许通过继续按钮执行，请使用对应的决策操作。');
+      }
+    }
+    if (['AGENT_DISCUSSING', 'REVISING_BRIEF', 'EXECUTING', 'REWORKING', 'COMPLETED'].includes(session.status)) {
+      return { session, event: history.at(-1), confirmationEvent: undefined };
+    }
+    if (this.runtime?.hasUnconfirmedStops?.(sessionId)) {
+      throw new ConflictException('本地执行停止状态尚未确认，请先重试停止或检查本地助手。');
+    }
+    if (
+      session.status === 'WAIT_USER_DECISION' &&
+      session.workflowRunId &&
+      this.workflowRuntime &&
+      (this.workflowRuntime.awaitsAgentSubstitution?.(session.workflowRunId) ||
+        this.workflowRuntime.awaitsUpstreamRerun?.(session.workflowRunId))
+    ) {
+      const event = this.events.create({
+        sessionId,
+        type: 'session_status_changed',
+        priority: 'high',
+        content: '当前工作流仍在等待明确的用户决策，请选择改派、跳过、返工节点或取消。',
+        metadata: createMetadata('system_notice', {
+          status: 'WAIT_USER_DECISION',
+          requestedStatus: 'EXECUTING',
+          reason: 'workflow_decision_required'
+        })
+      });
+      return { session, event, confirmationEvent: undefined };
+    }
+    const missingBriefRecovery = session.status === 'WAIT_USER_DECISION' && !session.currentTaskBriefId &&
+      [...history].reverse().find(event => event.type === 'session_status_changed')?.metadata.payload?.reason === messages.resumeBriefMissing;
+    if (session.status === 'FAILED' || session.status === 'INTERRUPTED' || missingBriefRecovery) {
+      const effectiveConfirmationId = confirmationId ?? session.activeRecoveryCheckpoint?.confirmationId;
+      this.retryFailedSession(session, history.at(-1)?.id ?? session.id, effectiveConfirmationId);
+      const updated = this.events.list(sessionId);
+      return { session, event: updated.at(-1), confirmationEvent: updated.find(event =>
+        event.type === 'user_confirmation_resolved' &&
+        (event.metadata.payload as { confirmationId?: string })?.confirmationId === effectiveConfirmationId) };
+    }
     if (session.status !== 'PAUSED') {
+      if (pending && (pending.requiresStructuredAction || !pending.options.some(option => option.key === 'resume'))) {
+        throw new ConflictException('当前会话需要明确的用户决策，请使用对应的确认操作。');
+      }
+      if (!session.currentTaskBriefId) throw new ConflictException('当前任务契约尚未生成，请先完成当前需求确认或从失败阶段重试。');
       return this.control(sessionId, 'EXECUTING', reason, confirmationId);
     }
     this.assertControlTransition(session.status, 'EXECUTING');
     const previousStatus = session.pauseState?.previousStatus ?? 'EXECUTING';
     session.pauseState = undefined;
+    session.interruption = undefined;
     const nextStatus = this.hasFinalDelivery(sessionId)
       ? 'COMPLETED'
       : previousStatus === 'AGENT_DISCUSSING' || previousStatus === 'REVISING_BRIEF'
         ? 'AGENT_DISCUSSING'
-        : 'EXECUTING';
+        : previousStatus.startsWith('WAIT_') || previousStatus === 'FAILED' || previousStatus === 'COMPLETED'
+          ? previousStatus : !session.currentTaskBriefId ? 'AGENT_DISCUSSING' : 'EXECUTING';
     this.setStatus(session, nextStatus);
     const event = this.events.create({
       sessionId,
@@ -3365,6 +4247,12 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
           })
         })
       : undefined;
+    const pendingRoutes = this.contextManagement?.listRoutingRecords(sessionId)
+      .filter(item => item.snapshotId && ['SNAPSHOT_READY', 'PENDING_RETRY'].includes(item.status)) ?? [];
+    for (const routing of pendingRoutes) {
+      const followUp = this.contextManagement?.listFollowUps(sessionId).find(item => item.routingId === routing.id);
+      if (followUp) this.enqueueIntentRouting(sessionId, routing.id, routing.snapshotId!, followUp.id);
+    }
     if (nextStatus === 'AGENT_DISCUSSING') this.generateBriefInBackground(session);
     else if (nextStatus === 'EXECUTING') this.resumeExecution(session);
     return { session, event, confirmationEvent };
@@ -3374,6 +4262,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     const session = this.get(sessionId);
     this.assertControlTransition(session.status, status);
     const nextStatus = status === 'EXECUTING' && this.hasFinalDelivery(sessionId) ? 'COMPLETED' : status;
+    if (nextStatus === 'EXECUTING') session.interruption = undefined;
     this.setStatus(session, nextStatus);
     if (nextStatus === 'WAIT_USER_DECISION' || nextStatus === 'CANCELLED') {
       this.execution.cancel(
@@ -3396,13 +4285,19 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       content: reason ?? messages.sessionStatusUpdated(nextStatus),
       metadata: createMetadata('system_notice', { status: nextStatus, requestedStatus: status, reason })
     });
-    const confirmationEvent = confirmationId
+    const effectiveConfirmationId = confirmationId ?? session.activeRecoveryCheckpoint?.confirmationId;
+    const recoveryResolved = effectiveConfirmationId && this.resolveRecoveryCheckpoint(
+      session,
+      effectiveConfirmationId,
+      status === 'CANCELLED' ? 'cancel' : 'resume'
+    );
+    const confirmationEvent = effectiveConfirmationId && !recoveryResolved
       ? this.events.create({
           sessionId,
           type: 'user_confirmation_resolved',
           content: status === 'CANCELLED' ? messages.userSelectedCancel : messages.userSelectedResume,
           metadata: createMetadata('system_notice', {
-            confirmationId,
+            confirmationId: effectiveConfirmationId,
             status: status === 'CANCELLED' ? 'rejected' : 'approved',
             selectedOptionKey: status === 'CANCELLED' ? 'cancel' : 'resume'
           })
@@ -3555,7 +4450,13 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
     if (['COMPLETED', 'FAILED', 'CANCELLED', 'PAUSED', 'INTERRUPTED'].includes(session.status)) return;
     if (update.status === 'waiting_human') {
-      this.setStatus(session, 'WAIT_WORKFLOW_STEP_CONFIRM');
+      const run = this.workflowRuntime?.get(update.workflowRunId);
+      this.setStatus(
+        session,
+        run?.pendingAgentSubstitution || run?.pendingUpstreamRerun
+          ? 'WAIT_USER_DECISION'
+          : 'WAIT_WORKFLOW_STEP_CONFIRM'
+      );
       return;
     }
     if (update.status === 'failed') {
@@ -3578,9 +4479,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
     const workItemStatus = this.workItemStatusForSessionStatus(status);
     if (workItemStatus) {
-      void this.contextManagement?.updateActiveWorkItemStatus(session, workItemStatus).catch((error) => {
-        this.logger.error(`Failed to update active WorkItem status for ${session.id}: ${String(error)}`);
-      });
+      void this.retryActiveWorkItemStatus(session, workItemStatus);
     }
 
     const terminalStatuses: SessionStatus[] = ['COMPLETED', 'FAILED', 'CANCELLED'];
@@ -3588,6 +4487,28 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       void this.persistence.releaseWorkspaceSessionLease(session.workspaceId, session.id).catch((error) => {
         this.logger.error(`Failed to release workspace session lease for ${session.workspaceId}: ${String(error)}`);
       });
+    }
+  }
+
+  private async retryActiveWorkItemStatus(session: SessionDetail, status: WorkItem['status']) {
+    if (!this.contextManagement) return;
+    const maxAttempts = 4;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      if (this.workItemStatusForSessionStatus(session.status) !== status) return;
+      try {
+        await this.contextManagement.updateActiveWorkItemStatus(session, status);
+        return;
+      } catch (error) {
+        const retryable = String(error).includes('PERSISTENCE_REVISION_CONFLICT');
+        if (!retryable || attempt === maxAttempts) {
+          this.logger.error(`Failed to update active WorkItem status for ${session.id}: ${String(error)}`);
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 100 * attempt);
+          timer.unref?.();
+        });
+      }
     }
   }
 
@@ -3619,18 +4540,11 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         `${subject} 已断开，本次调用已中断且不会自动续跑。会话上下文已保留，可在后续唤醒功能中继续。`
       );
 
-      const workflowCancellation = session.workflowRunId && this.workflowRuntime
-        ? this.workflowRuntime.cancel(
-          session.workflowRunId,
-          `${subject} disconnected; the invocation will not resume automatically.`
-        )
-        : Promise.resolve();
       const runtimeCancellation = this.runtime?.cancelSessionAndWait(sessionId, termination) ??
         Promise.resolve({ requested: 0, completed: 0, timedOut: false });
       await Promise.all([
         this.execution.cancelAndWait(sessionId, termination),
-        runtimeCancellation,
-        workflowCancellation
+        runtimeCancellation
       ]);
       return true;
     } finally {
@@ -3651,11 +4565,30 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     taskReason: string,
     eventContent: string
   ) {
+    // Capture the pre-interruption status before anything below can move it.
+    const previousStatus = session.status;
+    if (session.workflowRunId && this.workflowRuntime) {
+      this.workflowRuntime.checkpointInterruptedExecution?.(session.workflowRunId, {
+        code: interruption.reason === 'local_runtime_disconnected'
+          ? 'LOCAL_RUNTIME_DISCONNECTED'
+          : 'SERVICE_SHUTDOWN',
+        message: taskReason
+      });
+    }
+    const checkpointReason = interruption.reason === 'local_runtime_disconnected'
+      ? 'reconnect_local_runtime' as const
+      : 'recover_interrupted_execution' as const;
+    const checkpoint = this.createRecoveryCheckpoint(session, checkpointReason, {
+      phase: 'execution_interrupted'
+    });
     session.interruption = {
       reason: interruption.reason,
       invocationId: interruption.invocationId,
       occurredAt: interruption.occurredAt,
-      wakeable: true
+      wakeable: true,
+      previousStatus,
+      workItemId: session.activeWorkItemId,
+      phase: INTERRUPTION_PHASE_BY_STATUS[previousStatus]
     };
     // Persist metadata and status in the same Session snapshot.
     this.setStatus(session, 'INTERRUPTED');
@@ -3679,6 +4612,17 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         wakeable: true,
         termination
       })
+    });
+    this.createRecoveryConfirmation(session, checkpoint, {
+      content: interruption.reason === 'local_runtime_disconnected'
+        ? '本机 Runtime 已断开，请重新连接后继续当前任务。'
+        : '服务重启已中断当前执行，请确认是否继续。',
+      title: interruption.reason === 'local_runtime_disconnected'
+        ? '本机 Runtime 已断开'
+        : '执行已中断',
+      description: interruption.reason === 'local_runtime_disconnected'
+        ? '会话与工作流检查点已保留。重新启动本机 Runtime 后可继续执行。'
+        : '会话与工作流检查点已保留，继续时会从当前节点创建新的执行尝试。'
     });
   }
 
@@ -3709,6 +4653,12 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         message,
         runtimeError
       })
+    });
+    const checkpoint = this.createRecoveryCheckpoint(session, 'retry_failed_execution', { phase });
+    this.createRecoveryConfirmation(session, checkpoint, {
+      content: '当前执行失败，可以从保留的检查点重试。',
+      title: '执行失败',
+      description: `${message}\n继续时会重试当前阶段，不会重放已经完成的步骤。`
     });
   }
 
@@ -3750,6 +4700,12 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         runtimeError
       })
     });
+    const checkpoint = this.createRecoveryCheckpoint(session, 'retry_failed_execution', { phase: effectivePhase });
+    this.createRecoveryConfirmation(session, checkpoint, {
+      content: '当前执行失败，可以从保留的检查点重试。',
+      title: '执行失败',
+      description: `${fullMessage}\n继续时会重试当前阶段，不会重放已经完成的步骤。`
+    });
   }
 
   private assertControlTransition(current: SessionStatus, next: SessionStatus) {
@@ -3764,8 +4720,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       REWORKING: ['WAIT_USER_DECISION', 'PAUSED', 'CANCELLED', 'EXECUTING'],
       WAIT_USER_DECISION: ['EXECUTING', 'CANCELLED'],
       PAUSED: ['EXECUTING', 'CANCELLED'],
+      INTERRUPTED: ['EXECUTING', 'AGENT_DISCUSSING', 'CANCELLED'],
       COMPLETED: [],
-      FAILED: [],
+      FAILED: ['EXECUTING', 'CANCELLED'],
       CANCELLED: []
     };
     if (!(allowed[current] ?? []).includes(next)) {
@@ -4010,11 +4967,48 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  private retryFailedSession(session: SessionDetail, sourceEventId: string, resumeCurrentBrief = false) {
-    const failurePhase = this.latestFailurePhase(session.id);
+  private retryFailedSession(
+    session: SessionDetail,
+    sourceEventId: string,
+    confirmationId?: string
+  ) {
+    if (this.runtime?.hasUnconfirmedStops?.(session.id)) throw new ConflictException('上一次执行是否结束尚未确认，暂不能重新尝试。');
+    this.resolveRecoveryCheckpoint(session, confirmationId);
+    // 中断不写失败事件，`latestFailurePhase()` 对它恒返回 undefined，所以中断记下的
+    // 阶段是唯一可靠来源。必须在清空 `interruption` 之前取出。
+    const interruptedPhase = session.interruption?.phase;
+    session.interruption = undefined;
+    // 本机 Runtime 可能在会话失败之后才退出。此时直接重试只会在路由阶段硬失败,
+    // 所以先停在用户决策上,等用户重启本机 Runtime 后再继续。
+    if (this.localBridgeRuntimeOffline(session)) {
+      this.requestLocalRuntimeReconnectDecision(session, 'failed_session_retry', sourceEventId);
+      this.logger.warn(
+        `[Session ${session.id}] Local Runtime is offline; retry waits for reconnect instead of rerunning the failed phase`
+      );
+      return;
+    }
+    // 崩溃前已入队的消息 + 用户重启后只打「继续」：直接 resume 会静默忽略那条排队消息。
+    // 把控制权交给队列，由 processNextFollowUp 决定怎么处理（方案 A 下会重建契约）。
+    const hasQueuedFollowUp = session.pendingFollowUpMessages?.some((item) => item.status === 'queued') ?? false;
+    if (hasQueuedFollowUp) {
+      this.events.create({
+        sessionId: session.id,
+        type: 'session_status_changed',
+        priority: 'high',
+        content: '收到继续指令，正在处理等待中的后续需求。',
+        metadata: createMetadata('system_notice', {
+          status: session.status,
+          reason: 'resume_hands_over_to_queued_follow_up',
+          sourceEventId
+        })
+      });
+      this.scheduleFollowUpPlanning(session.id);
+      return;
+    }
+    const failurePhase = interruptedPhase ?? this.latestFailurePhase(session.id);
     const shouldRetryBrief =
       !session.currentTaskBriefId ||
-      (!resumeCurrentBrief && ['discussion', 'brief_generation', 'brief_revision'].includes(failurePhase ?? ''));
+      ['discussion', 'brief_generation', 'brief_revision'].includes(failurePhase ?? '');
     if (shouldRetryBrief) {
       this.setStatus(session, 'AGENT_DISCUSSING');
       this.events.create({
@@ -4035,7 +5029,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     if (!session.workflowRunId || !this.workflowRuntime) {
       for (const task of this.tasks.list(session.id)) {
         if (task.status === 'failed') {
-          this.tasks.update(task, { status: 'pending', resultSummary: undefined });
+          this.tasks.update(task, { status: 'pending', resultSummary: undefined,
+            previousExecutionOperationId: task.executionOperationId, executionOperationId: undefined });
         }
       }
     }
@@ -4163,10 +5158,15 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         })
         .then((resumed) => {
           if (!resumed) {
-            this.applyOutcome(session.id, {
-              kind: 'ask_user',
-              reason: '当前工作流没有可恢复的运行中节点。'
-            });
+            // 这里不能再走 ask_user：ask_user 会重新发一张
+            // coordinator_routing_needs_user_decision 确认卡，而用户点「继续执行」
+            // 又会回到 resumeExecution，形成同一张卡无限重复。没有可恢复节点是
+            // 确定性的终态，直接报错让用户看到真实原因。
+            this.failSession(
+              session,
+              new Error('当前工作流没有可恢复的运行中节点，无法继续执行。'),
+              'workflow_resume'
+            );
           }
         })
         .catch((error) => this.failSession(session, error, 'workflow_resume'));
@@ -4433,6 +5433,16 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       const task = this.tasks.find(sessionId, inv.taskId);
       if (task) this.tasks.update(task, { status: 'pending', resultSummary: undefined });
       this.resolveSupersededCapabilityRoutingConfirmations(sessionId);
+      // 等待授权期间本机 Runtime 可能已经退出。此时恢复执行只会在路由阶段硬失败，
+      // 所以先停在用户决策上，等用户重启本机 Runtime 后再继续。
+      if (this.localBridgeRuntimeOffline(session)) {
+        this.persist();
+        this.requestLocalRuntimeReconnectDecision(session, 'capability_approved');
+        this.logger.warn(
+          `[Session ${sessionId}] Local Runtime is offline; invocation ${inv.invocationId} waits for reconnect instead of resuming`
+        );
+        continue;
+      }
       this.setStatus(session, 'EXECUTING');
       this.persist();
 
@@ -4447,8 +5457,172 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
   }
 
+  /**
+   * Mirrors the runtime router's local_bridge eligibility rule: the workspace must still be
+   * registered by a connected CLI, and at least one allowed Runtime must be detected on it.
+   */
+  private localBridgeRuntimeOffline(session: SessionDetail) {
+    if (session.workingDirectory?.kind !== 'local_bridge' || !this.localRuntime) return false;
+    const candidates = this.localRuntime.listRuntimeCandidates(session.workingDirectory.id);
+    const allowed = session.runtimePreference?.allowedRuntimeTypes;
+    const usable = allowed?.length
+      ? candidates.filter((candidate) => allowed.includes(candidate.runtimeType))
+      : candidates;
+    return usable.length === 0;
+  }
+
+  private requestLocalRuntimeReconnectDecision(
+    session: SessionDetail,
+    trigger: 'capability_approved' | 'failed_session_retry',
+    sourceEventId?: string
+  ) {
+    const workspaceName = session.workingDirectory?.name ?? session.workspaceId;
+    this.setStatus(session, 'WAIT_USER_DECISION');
+    const checkpoint = this.createRecoveryCheckpoint(session, 'reconnect_local_runtime', {
+      phase: trigger,
+      ...(sourceEventId ? { sourceEventId } : {})
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'user_confirmation_requested',
+      priority: 'high',
+      content: '本机 Runtime 已断开，无法继续执行，请重新启动本机 Runtime。',
+      metadata: createMetadata('confirmation_card', {
+        confirmationId: checkpoint.confirmationId,
+        reason: 'reconnect_local_runtime',
+        title: '本机 Runtime 已断开',
+        description:
+          `本机工作目录「${workspaceName}」当前没有可用 Runtime，` +
+          (trigger === 'capability_approved'
+            ? '能力授权已记录但任务无法继续。'
+            : '无法重试上一次失败的执行。') +
+          '请重新启动本机 Runtime，连接成功后点击「继续执行」。',
+        options: [
+          { key: 'resume', label: '继续执行', style: 'primary' },
+          { key: 'cancel', label: '取消会话', style: 'default' }
+        ],
+        workspaceId: session.workingDirectory?.id ?? session.workspaceId,
+        trigger
+      })
+    });
+    this.persist();
+  }
+
+  /** Tells parked Sessions their local workspace went away, instead of letting them find out on resume. */
+  private notifyLocalRuntimeOffline(workspaceId: string) {
+    for (const session of this.sessions.values()) {
+      if (session.workingDirectory?.kind !== 'local_bridge') continue;
+      if (session.workingDirectory.id !== workspaceId) continue;
+      if (!WAITING_USER_SESSION_STATUSES.has(session.status)) continue;
+      this.events.create({
+        sessionId: session.id,
+        type: 'session_status_changed',
+        priority: 'high',
+        content: '本机 Runtime 已断开：重新启动本机 Runtime 后才能继续执行本会话。',
+        metadata: createMetadata('system_notice', {
+          status: session.status,
+          reason: 'local_runtime_disconnected',
+          workspaceId
+        })
+      });
+    }
+  }
+
   private persist() {
     this.persistence.setCollection('sessions', [...this.sessions.values()]);
+  }
+
+  private createRecoveryCheckpoint(
+    session: SessionDetail,
+    reason: SessionRecoveryCheckpoint['reason'],
+    input: Pick<SessionRecoveryCheckpoint, 'phase' | 'sourceEventId'> = {}
+  ): SessionRecoveryCheckpoint {
+    const checkpoint: SessionRecoveryCheckpoint = {
+      confirmationId: crypto.randomUUID(),
+      reason,
+      retryable: true,
+      createdAt: nowIso(),
+      ...(session.workflowRunId ? { workflowRunId: session.workflowRunId } : {}),
+      ...(input.phase ? { phase: input.phase } : {}),
+      ...(input.sourceEventId ? { sourceEventId: input.sourceEventId } : {})
+    };
+    session.activeRecoveryCheckpoint = checkpoint;
+    this.persist();
+    return checkpoint;
+  }
+
+  private createRecoveryConfirmation(
+    session: SessionDetail,
+    checkpoint: SessionRecoveryCheckpoint,
+    input: { content: string; title: string; description: string }
+  ) {
+    this.events.createOnce(`recovery-confirmation:${session.id}:${checkpoint.confirmationId}`, {
+      sessionId: session.id,
+      type: 'user_confirmation_requested',
+      priority: 'high',
+      content: input.content,
+      metadata: createMetadata('confirmation_card', {
+        confirmationId: checkpoint.confirmationId,
+        reason: checkpoint.reason,
+        title: input.title,
+        description: input.description,
+        workflowRunId: checkpoint.workflowRunId,
+        options: [
+          { key: 'resume', label: '继续执行', style: 'primary' },
+          { key: 'cancel', label: '取消会话', style: 'default' }
+        ]
+      })
+    });
+  }
+
+  private resolveRecoveryCheckpoint(
+    session: SessionDetail,
+    confirmationId?: string,
+    selectedOptionKey: 'resume' | 'cancel' = 'resume'
+  ) {
+    const checkpoint = session.activeRecoveryCheckpoint;
+    if (!checkpoint || (confirmationId && checkpoint.confirmationId !== confirmationId)) return false;
+    const events = this.events.list(session.id);
+    const resolved = events.some((event) => event.type === 'user_confirmation_resolved' &&
+      (event.metadata.payload as { confirmationId?: unknown } | undefined)?.confirmationId === checkpoint.confirmationId);
+    if (!resolved) {
+      this.events.create({
+        sessionId: session.id,
+        type: 'user_confirmation_resolved',
+        content: selectedOptionKey === 'cancel'
+          ? '用户已取消当前恢复执行。'
+          : '用户已选择继续恢复当前执行。',
+        metadata: createMetadata('system_notice', {
+          confirmationId: checkpoint.confirmationId,
+          status: selectedOptionKey === 'cancel' ? 'rejected' : 'approved',
+          selectedOptionKey
+        })
+      });
+    }
+    session.activeRecoveryCheckpoint = undefined;
+    this.persist();
+    return true;
+  }
+
+  private findPendingConfirmationId(
+    sessionId: string,
+    reason: string,
+    predicate?: (payload: { relatedBriefId?: string }) => boolean
+  ) {
+    const events = this.events.list(sessionId);
+    const resolvedIds = new Set(events
+      .filter((event) => event.type === 'user_confirmation_resolved')
+      .map((event) => (event.metadata.payload as { confirmationId?: unknown } | undefined)?.confirmationId)
+      .filter((value): value is string => typeof value === 'string'));
+    const requests = events.filter((event) => {
+      if (event.type !== 'user_confirmation_requested') return false;
+      const payload = event.metadata.payload as { confirmationId?: unknown; reason?: unknown; relatedBriefId?: unknown } | undefined;
+      if (typeof payload?.confirmationId !== 'string' || payload.reason !== reason || resolvedIds.has(payload.confirmationId)) return false;
+      return !predicate || predicate({ relatedBriefId: typeof payload.relatedBriefId === 'string' ? payload.relatedBriefId : undefined });
+    });
+    return requests.length === 1
+      ? (requests[0]?.metadata.payload as { confirmationId: string }).confirmationId
+      : undefined;
   }
 
   private resolveSupersededCapabilityRoutingConfirmations(sessionId: string) {

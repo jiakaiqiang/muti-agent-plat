@@ -28,3 +28,17 @@ test('does not mutate domain state for acknowledgement or clarification', async 
   await applyExactCommandResolution({ resolution: { action: 'clarify', message: 'clarify' }, port });
   assert.deepEqual(calls, []);
 });
+
+test('passes the recovery confirmation id to retry-current', async () => {
+  const calls: string[] = [];
+  await applyExactCommandResolution({
+    resolution: { action: 'retry_current', message: 'retry', confirmationId: 'recovery-1' },
+    port: {
+      resume: () => calls.push('resume'),
+      retryCurrent: (confirmationId) => calls.push(`retry:${confirmationId}`),
+      pause: () => calls.push('pause'),
+      cancel: () => calls.push('cancel')
+    }
+  });
+  assert.deepEqual(calls, ['retry:recovery-1']);
+});

@@ -95,6 +95,30 @@ test('tool_completed truncates output previews to 200 characters', async () => {
   assert.equal(String(metadata.payload.outputPreview).length, 200);
 });
 
+test('failed StructuredOutput completion is visible as schema validation failure', async () => {
+  const events = makeEventsSpy();
+  await consumeRuntimeEvents(frames([
+    event({
+      type: 'tool_completed',
+      content: '调用工具 StructuredOutput 完成',
+      metadata: {
+        toolCallId: 'structured-1',
+        name: 'StructuredOutput',
+        isError: true,
+        output: "Output does not match required schema: missing requestedContext"
+      }
+    })
+  ]), plan() as never, { events: events as never, createMetadata: makeMetadata });
+
+  assert.equal(events.created.length, 1);
+  assert.match(String(events.created[0].content), /结构化输出校验失败/);
+  assert.match(String(events.created[0].content), /missing requestedContext/);
+  assert.doesNotMatch(String(events.created[0].content), /完成/);
+  const metadata = events.created[0].metadata as { payload: Record<string, unknown> };
+  assert.equal(metadata.payload.isError, true);
+  assert.equal(metadata.payload.outputPreview, 'Output does not match required schema: missing requestedContext');
+});
+
 test('terminal Runtime frames are not duplicated into collaboration events', async () => {
   const events = makeEventsSpy();
   await consumeRuntimeEvents(frames([
@@ -103,6 +127,15 @@ test('terminal Runtime frames are not duplicated into collaboration events', asy
     event({ type: 'runtime_failed' })
   ]), plan() as never, { events: events as never, createMetadata: makeMetadata });
   assert.deepEqual(events.created, []);
+});
+
+test('schema field errors survive the preview limit without including arbitrary tool output', async () => {
+  const events = makeEventsSpy();
+  await consumeRuntimeEvents(frames([event({ type: 'tool_completed', metadata: {
+    name: 'StructuredOutput', isError: true, output: 'x'.repeat(220) + '/scope: must be array, /openQuestions: must be array'
+  } })]), plan() as never, { events: events as never, createMetadata: makeMetadata });
+  const payload = (events.created[0].metadata as { payload: Record<string, unknown> }).payload;
+  assert.deepEqual(payload.validationErrors, ['/scope: must be array', '/openQuestions: must be array']);
 });
 
 test('debug visibility and raw system diagnostics never enter collaboration events', async () => {

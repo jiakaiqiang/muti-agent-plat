@@ -422,7 +422,34 @@ test('local bridge never falls back to a server Runtime when the Local Runtime h
       error instanceof InvocationResolutionError &&
       error.code === 'NO_ELIGIBLE_RUNTIME' &&
       error.message.includes('providerKind=local_bridge') &&
-      error.message.includes('requiredTools=none')
+      error.message.includes('requiredTools=none') &&
+      error.message.includes('本机 Runtime 未连接')
+  );
+});
+
+test('local bridge routing failures with live candidates stay on the diagnostic message', () => {
+  const { resolver } = setup({
+    localRuntimeCandidates: [candidate('codex', {
+      supportedWorkspaceProviderKinds: ['local_bridge'],
+      supportedWorkspaceCapabilities: []
+    })],
+    compiledIdentity: toolFreeIdentity
+  });
+
+  assert.throws(
+    () => resolve(resolver, {
+      phase: 'task_execution',
+      taskRequiresCodeChanges: true,
+      workspace: {
+        workspaceId: 'local-workspace',
+        providerKind: 'local_bridge',
+        capabilities: { read: true, write: true, command: true, test: true }
+      }
+    }),
+    (error: unknown) =>
+      error instanceof InvocationResolutionError &&
+      error.code === 'NO_ELIGIBLE_RUNTIME' &&
+      !error.message.includes('本机 Runtime 未连接')
   );
 });
 

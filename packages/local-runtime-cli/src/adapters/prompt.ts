@@ -1,11 +1,22 @@
-import { getRuntimeOutputContract, type InvocationPlan, type LocalRuntimePermissionPolicy } from '@agent-cluster/shared';
+import {
+  buildStructuredOutputInstructions,
+  getVersionedRuntimeOutputContract,
+  type InvocationPlan,
+  type LocalRuntimePermissionPolicy
+} from '@agent-cluster/shared';
+
+export type LocalRuntimePromptOptions = {
+  /** Provider tool that receives the root object. Omit when the Runtime prints the JSON directly. */
+  submissionToolName?: string;
+};
 
 export function buildLocalRuntimePrompt(
   providerName: string,
   plan: InvocationPlan,
-  permissions: LocalRuntimePermissionPolicy
+  permissions: LocalRuntimePermissionPolicy,
+  options: LocalRuntimePromptOptions = {}
 ) {
-  const outputContract = getRuntimeOutputContract(plan.expectedOutput.kind);
+  const outputContract = getVersionedRuntimeOutputContract(plan.expectedOutput.kind, plan.expectedOutput.schemaVersion);
   return [
     `You are running as an Agent Cluster local ${providerName} Runtime.`,
     'Operate only inside the current authorized working directory.',
@@ -14,6 +25,11 @@ export function buildLocalRuntimePrompt(
     `Effective local permissions: ${JSON.stringify(permissions)}.`,
     'Return exactly one JSON object matching the required output contract, with no markdown fences.',
     `Required output kind: ${plan.expectedOutput.kind}.`,
+    plan.expectedOutput.schemaVersion === '2.0'
+      ? 'Submit status, summary, artifactRefs (changed relative paths), blockers and nextActions only. File identities and test verdicts are supplied by the system. Do not invent test evidence.'
+      : buildStructuredOutputInstructions(plan.expectedOutput.kind, {
+      submissionToolName: options.submissionToolName
+    }),
     'Output JSON Schema:',
     JSON.stringify(outputContract.schema),
     'Output JSON example:',

@@ -28,6 +28,23 @@ try {
     ['requirements']
   );
 
+  // Stop while the group chat is still generating its first brief, before a workflow exists.
+  const chat = await api(server.apiBase, '/sessions', { method: 'POST', body: JSON.stringify({
+    input: '分析群聊停止和继续的交互并输出方案',
+    runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] }
+  }) });
+  const chatId = chat.data.session.id;
+  await waitForEvent(server.apiBase, chatId, 'runtime_started');
+  await api(server.apiBase, `/sessions/${chatId}/pause`, { method: 'POST', body: JSON.stringify({ reason: '停止当前群聊' }) });
+  await waitForStatus(server.apiBase, chatId, 'PAUSED');
+  await new Promise(resolve => setTimeout(resolve, 1800));
+  const stoppedEvents = await listEvents(server.apiBase, chatId);
+  if (stoppedEvents.some(event => event.type === 'brief_created')) throw new Error('A late brief was created after stopping chat');
+  await api(server.apiBase, `/sessions/${chatId}/resume`, { method: 'POST', body: '{}' });
+  await waitForStatus(server.apiBase, chatId, 'WAIT_USER_CONFIRM', 30_000);
+  const resumedEvents = await listEvents(server.apiBase, chatId);
+  if (resumedEvents.filter(event => event.type === 'brief_created').length !== 1) throw new Error('Chat resume must create exactly one brief');
+
   const { sessionId, briefId } = await createSessionAndWaitForBrief(
     server.apiBase,
     '分析执行中暂停与恢复的状态语义并输出结论',

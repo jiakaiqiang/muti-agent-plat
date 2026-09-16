@@ -32,7 +32,10 @@ export type {
   RuntimeContextRequestOutput,
   RuntimeHandoffSuggestion
 } from './output-contracts.js';
+export { buildStructuredOutputInstructions } from './structured-output-instructions.js';
+export type { StructuredOutputInstructionOptions } from './structured-output-instructions.js';
 export * from './preflight.js';
 export * from './registry.js';
+export * from './minimal-submission.js';
 export * from './event-policy.js';
 export * from './factories.js';

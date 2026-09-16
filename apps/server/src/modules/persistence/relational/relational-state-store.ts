@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { CollaborationEvent } from '@agent-cluster/shared';
 import type { Pool, PoolClient } from 'pg';
 import { computePersistenceRevision } from '../postgres-cutover-transaction.js';
 import { ContentReferenceCodec } from '../content-reference-codec.js';
@@ -9,6 +10,8 @@ import {
   RELATIONAL_SCHEMA_V3_TABLES,
   RELATIONAL_SCHEMA_V4_TABLES,
   RELATIONAL_SCHEMA_V5_TABLES,
+  RELATIONAL_SCHEMA_V8_TABLES,
+  RELATIONAL_SCHEMA_V9_TABLES,
   RELATIONAL_TABLES
 } from './relational-schema.js';
 
@@ -60,7 +63,30 @@ export type McpObservationRecord = {
   errorMessage?: string;
 };
 
+/**
+ * Exported so the non-relational projection in `PersistenceService` can drop
+ * session-owned collections with exactly the same key set the relational store
+ * persists. Keeping one source of truth prevents the two from drifting apart:
+ * a key missing here is a session remnant that cannot be forgotten locally.
+ */
+export const SESSION_KEYED_COLLECTIONS = [
+  'logicalOperationsBySession',
+  'sessionStopRequestsBySession',
+  'eventsBySession',
+  'briefsBySession',
+  'tasksBySession',
+  'memoriesBySession',
+  'runtimeInvocationsBySession',
+  'workItemsBySession',
+  'decisionRecordsBySession',
+  'contextSnapshotsBySession',
+  'intentRoutingRecordsBySession',
+  'followUpMessagesBySession'
+] as const;
+
 const KNOWN_COLLECTIONS = new Set([
+  'logicalOperationsBySession',
+  'sessionStopRequestsBySession',
   'systemDataMetadata',
   'agents',
   'skills',
@@ -101,7 +127,9 @@ const REPLACEABLE_RELATIONAL_TABLES = [
   ...RELATIONAL_SCHEMA_V2_TABLES,
   ...RELATIONAL_SCHEMA_V3_TABLES,
   ...RELATIONAL_SCHEMA_V4_TABLES,
-  ...RELATIONAL_SCHEMA_V5_TABLES
+  ...RELATIONAL_SCHEMA_V5_TABLES,
+  ...RELATIONAL_SCHEMA_V8_TABLES,
+  ...RELATIONAL_SCHEMA_V9_TABLES
 ]
   .map((definition) => definition.name)
   .filter((name) => !RETAINED_OPERATIONAL_TABLES.has(name))
@@ -158,17 +186,123 @@ export class RelationalStateStore {
     }
   }
 
+  private async lockCollections(client: PoolClient, keys: string[]) {
+    await client.query('select pg_advisory_xact_lock_shared(hashtext($1))', ['agent_cluster:state-mutation']);
+    // Event projection writes also insert outbox rows.
+    for (const key of [...new Set([...keys, ...(keys.includes('eventsBySession') ? ['eventOutbox'] : [])])].sort()) {
+      if (!KNOWN_COLLECTIONS.has(key)) throw new Error(`RELATIONAL_COLLECTION_UNMAPPED: ${key}`);
+      await client.query('select pg_advisory_xact_lock(hashtext($1))', [`agent_cluster:collection:${key}`]);
+    }
+  }
+
+  async mutateCollections<T>(keys: string[], mutator: (draft: PersistedState) => T): Promise<{ result: T; state: PersistedState }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      await this.lockCollections(client, keys);
+      const loaded = await this.loadCollectionsWithClient(client, keys);
+      const state = Object.fromEntries(keys.filter(key => loaded[key] !== undefined).map(key => [key, loaded[key]]));
+      const draft = structuredClone(state);
+      const result = mutator(draft);
+      if (result && typeof (result as { then?: unknown }).then === 'function') throw new Error('ATOMIC_MUTATOR_MUST_BE_SYNCHRONOUS');
+      const changes = Object.fromEntries(Object.entries(draft).filter(([key, value]) => {
+        if (!keys.includes(key)) throw new Error(`ATOMIC_MUTATION_OUTSIDE_SCOPE: ${key}`);
+        return JSON.stringify(value) !== JSON.stringify(state[key]);
+      }));
+      for (const key of Object.keys(state)) if (!(key in draft)) throw new Error(`ATOMIC_COLLECTION_DELETE_UNSUPPORTED: ${key}`);
+      const externalized = this.codec.externalize(changes);
+      await this.registerContents(client, externalized.contents);
+      for (const key of collectionWriteOrder(externalized.value)) await this.writeCollectionWithClient(client, key, externalized.value[key]);
+      await client.query('commit');
+      return { result, state: draft };
+    } catch (error) {
+      await client.query('rollback').catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  }
+
+  private async withCollectionLocks<T>(keys: string[], operation: (client: PoolClient) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      await this.lockCollections(client, keys);
+      const result = await operation(client);
+      await client.query('commit');
+      return result;
+    } catch (error) {
+      await client.query('rollback').catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  }
+
   async writeCollection(key: string, value: unknown): Promise<void> {
     if (!KNOWN_COLLECTIONS.has(key)) throw new Error(`RELATIONAL_COLLECTION_UNMAPPED: ${key}`);
     const client = await this.pool.connect();
     try {
       await client.query('begin');
+      await this.lockCollections(client, [key]);
       const externalized = this.codec.externalize(value);
       await this.registerContents(client, externalized.contents);
       await this.writeCollectionWithClient(client, key, externalized.value);
       await client.query('commit');
     } catch (error) {
       await client.query('rollback');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async appendEvent(event: CollaborationEvent): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      await this.lockCollections(client, ['eventsBySession', 'eventOutbox']);
+      const externalized = this.codec.externalize(event);
+      await this.registerContents(client, externalized.contents);
+      const item = record(externalized.value);
+      const sessionExternalId = text(item.sessionId);
+      const session = await client.query<{ id: string }>(
+        `select id::text id
+           from agent_cluster.sessions
+          where external_id=$1 and deleted_at is null
+          for update`,
+        [sessionExternalId]
+      );
+      const sessionId = session.rows[0]?.id;
+      if (!sessionId) {
+        throw new Error(`RELATIONAL_EVENT_SESSION_NOT_FOUND: ${sessionExternalId}`);
+      }
+      const sequence = await client.query<{ next_sequence: string }>(
+        `select (coalesce(max(session_seq),0)+1)::text next_sequence
+           from agent_cluster.collaboration_events
+          where session_id=$1`,
+        [sessionId]
+      );
+      const eventExternalId = text(item.id);
+      const actor = record(item.actor);
+      await client.query(
+        `insert into agent_cluster.collaboration_events
+         (external_id,session_id,session_seq,event_type,actor_type,actor_external_id,actor_display_name,
+          content,payload,correlation_id,causation_id,created_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         on conflict (external_id) do nothing`,
+        [eventExternalId, sessionId, sequence.rows[0]?.next_sequence ?? '1', text(item.type),
+          text(actor.type, item.fromAgentId ? 'agent' : 'system'), nullableText(actor.id ?? item.fromAgentId),
+          nullableText(actor.displayName), nullableText(item.content), json({ sourceRecord: item }),
+          nullableText(item.correlationId), nullableText(item.causationId), date(item.createdAt)]
+      );
+      await client.query(
+        `insert into agent_cluster.event_outbox
+         (external_id,aggregate_type,aggregate_external_id,event_type,payload,idempotency_key,status,created_at)
+         values ($1,'session',$2,$3,$4,$5,'pending',$6)
+         on conflict (idempotency_key) do nothing`,
+        [`outbox:${eventExternalId}`, sessionExternalId, text(item.type), json({ event: item }),
+          `session:${sessionExternalId}:event:${eventExternalId}`, date(item.createdAt)]
+      );
+      await client.query('commit');
+    } catch (error) {
+      await client.query('rollback').catch(() => undefined);
       throw error;
     } finally {
       client.release();
@@ -182,6 +316,7 @@ export class RelationalStateStore {
     const client = await this.pool.connect();
     try {
       await client.query('begin');
+      await this.lockCollections(client, [key]);
       await client.query('select pg_advisory_xact_lock(hashtext($1))', ['agent_cluster:file-revisions']);
       const current = await this.loadFileRevisionsWithClient(client);
       if (collectionRevision(current) !== collectionRevision(expected)) {
@@ -233,6 +368,7 @@ export class RelationalStateStore {
     try {
       await client.query('begin');
       const externalized = this.codec.externalize(state);
+      await client.query('select pg_advisory_xact_lock(hashtext($1))', ['agent_cluster:state-mutation']);
       await client.query(REPLACE_RELATIONAL_STATE_SQL);
       await this.registerContents(client, externalized.contents);
       for (const key of collectionWriteOrder(externalized.value)) {
@@ -247,6 +383,88 @@ export class RelationalStateStore {
       client.release();
     }
   }
+
+  private async loadCollectionsWithClient(client: PoolClient, keys: string[]): Promise<PersistedState> {
+    const state: PersistedState = {};
+    for (const key of keys) {
+      switch (key) {
+        case 'agents':
+          state.agents = await sourceRecords(client, `select av.configuration->'sourceRecord' value from agent_cluster.agents a join agent_cluster.agent_versions av on av.id=a.current_version_id where a.deleted_at is null order by a.id`);
+          break;
+        case 'skills':
+          state.skills = await sourceRecords(client, `select sv.configuration->'sourceRecord' value from agent_cluster.skills s join agent_cluster.skill_versions sv on sv.id=s.current_version_id where s.deleted_at is null order by s.id`);
+          break;
+        case 'sessions':
+          state.sessions = await sourceRecords(client, `select metadata->'sourceRecord' value from agent_cluster.sessions where deleted_at is null order by created_at`);
+          break;
+        case 'eventsBySession':
+          state.eventsBySession = await groupedSources(client, `select s.external_id group_id,e.payload->'sourceRecord' value from agent_cluster.collaboration_events e join agent_cluster.sessions s on s.id=e.session_id where s.deleted_at is null order by s.id,e.session_seq`);
+          break;
+        case 'briefsBySession':
+          state.briefsBySession = await groupedSources(client, `select s.external_id group_id,b.source_snapshot->'sourceRecord' value from agent_cluster.briefs b join agent_cluster.sessions s on s.id=b.session_id where s.deleted_at is null order by s.id,b.created_at`);
+          break;
+        case 'suggestedTasksByBriefId':
+          state.suggestedTasksByBriefId = await groupedSources(client, `select b.external_id group_id,t.source_snapshot->'sourceRecord' value from agent_cluster.suggested_tasks t join agent_cluster.briefs b on b.id=t.brief_id join agent_cluster.sessions s on s.id=b.session_id where s.deleted_at is null order by b.external_id,t.id`);
+          break;
+        case 'tasksBySession':
+          state.tasksBySession = await groupedSources(client, `select s.external_id group_id,t.source_snapshot->'sourceRecord' value from agent_cluster.tasks t join agent_cluster.sessions s on s.id=t.session_id where s.deleted_at is null and t.deleted_at is null order by s.id,t.created_at`);
+          break;
+        case 'memoriesBySession':
+          state.memoriesBySession = await groupedSources(client, `select s.external_id group_id,m.metadata->'sourceRecord' value from agent_cluster.memories m join agent_cluster.sessions s on s.id=m.session_id where s.deleted_at is null and m.deleted_at is null order by s.id,m.created_at`);
+          break;
+        case 'workItemsBySession':
+          state.workItemsBySession = await groupedSources(client, `select s.external_id group_id,w.source_snapshot->'sourceRecord' value from agent_cluster.work_items w join agent_cluster.sessions s on s.id=w.session_id where s.deleted_at is null and w.deleted_at is null order by s.id,w.created_at`);
+          break;
+        case 'decisionRecordsBySession':
+          state.decisionRecordsBySession = await groupedSources(client, `select s.external_id group_id,d.source_snapshot->'sourceRecord' value from agent_cluster.decision_records d join agent_cluster.sessions s on s.id=d.session_id where s.deleted_at is null order by s.id,d.created_at`);
+          break;
+        case 'contextSnapshotsBySession':
+          state.contextSnapshotsBySession = await groupedSources(client, `select s.external_id group_id,c.payload->'sourceRecord' value from agent_cluster.context_snapshots c join agent_cluster.sessions s on s.id=c.session_id where s.deleted_at is null order by s.id,c.created_at`);
+          break;
+        case 'intentRoutingRecordsBySession':
+          state.intentRoutingRecordsBySession = await groupedSources(client, `select s.external_id group_id,r.source_snapshot->'sourceRecord' value from agent_cluster.intent_routing_records r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by s.id,r.session_seq`);
+          break;
+        case 'followUpMessagesBySession':
+          state.followUpMessagesBySession = await groupedSources(client, `select s.external_id group_id,f.handling_payload->'sourceRecord' value from agent_cluster.session_follow_up_messages f join agent_cluster.sessions s on s.id=f.session_id where s.deleted_at is null order by s.id,f.queued_at`);
+          break;
+        case 'runtimeInvocationsBySession':
+          state.runtimeInvocationsBySession = await groupedSources(client, `select s.external_id group_id,r.profile_snapshot->'sourceRecord' value from agent_cluster.runtime_invocations r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by r.started_at`);
+          break;
+        case 'logicalOperationsBySession':
+          state.logicalOperationsBySession = await groupedSources(client, `select s.external_id group_id,o.source_snapshot->'sourceRecord' value from agent_cluster.logical_operations o join agent_cluster.sessions s on s.id=o.session_id where s.deleted_at is null order by o.external_id`);
+          break;
+        case 'sessionStopRequestsBySession':
+          state.sessionStopRequestsBySession = await groupedSources(client, `select s.external_id group_id,r.source_snapshot->'sourceRecord' value from agent_cluster.session_stop_requests r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by r.created_at,r.external_id`);
+          break;
+        case 'localRuntimeDevices':
+          state.localRuntimeDevices = await sourceRecords(client, `select source_snapshot->'sourceRecord' value from agent_cluster.local_runtime_devices order by id`);
+          break;
+        case 'localRuntimeOperationAudits':
+          state.localRuntimeOperationAudits = await sourceRecords(client, `select source_snapshot->'sourceRecord' value from agent_cluster.local_runtime_operation_audits order by requested_at,id`);
+          break;
+        case 'autopilots':
+          state.autopilots = await sourceRecords(client, `select configuration->'sourceRecord' value from agent_cluster.autopilots where deleted_at is null order by id`);
+          break;
+        case 'autopilotRuns':
+          state.autopilotRuns = await sourceRecords(client, `select source_snapshot->'sourceRecord' value from agent_cluster.autopilot_runs order by id`);
+          break;
+        case 'cutoverAudits':
+          state.cutoverAudits = await sourceRecords(client, `select summary->'sourceRecord' value from agent_cluster.cutover_audits order by id`);
+          break;
+        case 'eventOutbox':
+          state.eventOutbox = await sourceRecords(client, `select ${eventOutboxRecordSql('outbox')} value from agent_cluster.event_outbox outbox order by id`);
+          break;
+        default: {
+          // Composite catalog projections retain their established loader.
+          const full = await this.loadStateWithClient(client);
+          for (const requested of keys) if (full[requested] !== undefined) state[requested] = full[requested];
+          return state;
+        }
+      }
+    }
+    return this.codec.hydrate(state);
+  }
+
 
   private async loadStateWithClient(client: PoolClient): Promise<PersistedState> {
     const state: PersistedState = {};
@@ -265,6 +483,7 @@ export class RelationalStateStore {
     const client = await this.pool.connect();
     try {
       await client.query('begin');
+      await this.lockCollections(client, []);
       const externalized = this.codec.externalize({ arguments: input.arguments, result: input.result });
       await this.registerContents(client, externalized.contents);
       const { toolVersionId } = await resolveInvocationTool(client, input);
@@ -311,6 +530,7 @@ export class RelationalStateStore {
     const client = await this.pool.connect();
     try {
       await client.query('begin');
+      await this.lockCollections(client, []);
       for (const definition of definitions) {
         const externalId = `tool:${definition.provider ?? 'agent-cluster'}:${definition.name}`;
         const toolId = await upsertId(client, 'tools', externalId, {
@@ -367,6 +587,7 @@ export class RelationalStateStore {
     const client = await this.pool.connect();
     try {
       await client.query('begin');
+      await this.lockCollections(client, []);
       const serverId = await upsertId(client, 'mcp_servers', input.serverExternalId, {
         server_key: input.serverExternalId,
         name: input.serverName ?? input.serverExternalId,
@@ -435,14 +656,23 @@ export class RelationalStateStore {
   }
 
   async markEventPublished(eventExternalId: string): Promise<void> {
-    await this.pool.query(
+    await this.withCollectionLocks(['eventOutbox'], client => client.query(
       `update agent_cluster.event_outbox
           set status='published',published_at=now(),
               attempt_count=attempt_count+case when status='publishing' then 0 else 1 end,
               lease_owner=null,lease_expires_at=null,last_error=null
         where external_id=$1 and status<>'published'`,
       [`outbox:${eventExternalId}`]
-    );
+    ));
+  }
+
+  async discardEventOutbox(eventExternalId: string, reason: string): Promise<void> {
+    await this.withCollectionLocks(['eventOutbox'], client => client.query(
+      `update agent_cluster.event_outbox
+          set status='discarded',lease_owner=null,lease_expires_at=null,last_error=$2
+        where external_id=$1 and status<>'published'`,
+      [`outbox:${eventExternalId}`, reason]
+    ));
   }
 
   async claimPendingEventOutbox(
@@ -450,7 +680,7 @@ export class RelationalStateStore {
     limit: number,
     leaseMs: number
   ): Promise<Array<Record<string, unknown>>> {
-    const result = await this.pool.query<{ value: Record<string, unknown> }>(
+    const result = await this.withCollectionLocks(['eventOutbox'], client => client.query<{ value: Record<string, unknown> }>(
       `with candidates as (
          select id
            from agent_cluster.event_outbox
@@ -470,39 +700,40 @@ export class RelationalStateStore {
         where outbox.id=candidates.id
        returning ${eventOutboxRecordSql('outbox')} value`,
       [workerId, Math.max(0, limit), Math.max(1, leaseMs)]
-    );
+    ));
     return result.rows.map((row) => row.value);
   }
 
   async acquireWorkspaceSessionLease(workspaceId: string, sessionId: string): Promise<{ acquired: boolean; conflictSessionId?: string }> {
-    const result = await this.pool.query<{ session_id: string }>(
-      `insert into agent_cluster.workspace_session_leases (workspace_id, session_id, acquired_at)
-       values ($1, $2, now())
-       on conflict (workspace_id) do nothing
-       returning session_id`,
-      [workspaceId, sessionId]
-    );
-    if (result.rows.length > 0) {
-      return { acquired: true };
-    }
-    const existing = await this.pool.query<{ session_id: string }>(
-      `select session_id from agent_cluster.workspace_session_leases where workspace_id=$1`,
-      [workspaceId]
-    );
-    return { acquired: false, conflictSessionId: existing.rows[0]?.session_id };
+    return this.withCollectionLocks(['workspaceSessionLeases'], async client => {
+      const result = await client.query<{ session_id: string }>(
+        `insert into agent_cluster.workspace_session_leases (workspace_id, session_id, acquired_at)
+         values ($1, $2, now())
+         on conflict (workspace_id) do nothing
+         returning session_id`,
+        [workspaceId, sessionId]
+      );
+      if (result.rows.length > 0) return { acquired: true };
+      const existing = await client.query<{ session_id: string }>(
+        `select session_id from agent_cluster.workspace_session_leases where workspace_id=$1`,
+        [workspaceId]
+      );
+      return { acquired: false, conflictSessionId: existing.rows[0]?.session_id };
+    });
   }
 
   async releaseWorkspaceSessionLease(workspaceId: string, sessionId: string): Promise<void> {
-    await this.pool.query(
+    await this.withCollectionLocks(['workspaceSessionLeases'], client => client.query(
       `delete from agent_cluster.workspace_session_leases where workspace_id=$1 and session_id=$2`,
       [workspaceId, sessionId]
-    );
+    ));
   }
 
   async reconcileWorkspaceSessionLeases(activeSessions: Array<{ workspaceId: string; sessionId: string }>): Promise<void> {
     const client = await this.pool.connect();
     try {
       await client.query('begin');
+      await this.lockCollections(client, ['workspaceSessionLeases']);
       const activeMap = new Map(activeSessions.map(s => [s.workspaceId, s.sessionId]));
       const leases = await client.query<{ workspace_id: string; session_id: string }>(
         `select workspace_id, session_id from agent_cluster.workspace_session_leases`
@@ -521,8 +752,69 @@ export class RelationalStateStore {
     }
   }
 
+  /**
+   * Physically removes one session and everything it owns.
+   *
+   * Tables whose session_id is declared `on delete set null` must be deleted
+   * explicitly first, otherwise the rows survive as untraceable orphans with a
+   * null session_id. `capability_approvals` is the sharpest case: an approval
+   * scoped to one session would otherwise read as an unscoped grant.
+   * Everything declared `on delete cascade` is left to the foreign key.
+   */
+  async deleteSessionCascade(sessionExternalId: string): Promise<{ deleted: boolean }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      await client.query('select pg_advisory_xact_lock(hashtext($1))', ['agent_cluster:state-mutation']);
+      const found = await client.query<{ id: string }>(
+        'select id::text from agent_cluster.sessions where external_id=$1',
+        [sessionExternalId]
+      );
+      const sessionId = found.rows[0]?.id;
+      if (!sessionId) {
+        await client.query('commit');
+        return { deleted: false };
+      }
+      // Ordered child-before-parent so each delete keeps its own cascade intact.
+      await client.query(
+        `delete from agent_cluster.tool_invocations
+          where session_id=$1
+             or runtime_invocation_id in (
+                  select id from agent_cluster.runtime_invocations where session_id=$1
+                )`,
+        [sessionId]
+      );
+      await client.query('delete from agent_cluster.capability_approvals where session_id=$1', [sessionId]);
+      await client.query('delete from agent_cluster.artifacts where session_id=$1', [sessionId]);
+      await client.query('delete from agent_cluster.workflow_runs where session_id=$1', [sessionId]);
+      await client.query('delete from agent_cluster.autopilot_runs where session_id=$1', [sessionId]);
+      await client.query('delete from agent_cluster.runtime_invocations where session_id=$1', [sessionId]);
+      // sessions.active_work_item_id references work_items; clear it before the
+      // cascade so the parent row can be removed.
+      await client.query('update agent_cluster.sessions set active_work_item_id=null where id=$1', [sessionId]);
+      await client.query('delete from agent_cluster.sessions where id=$1', [sessionId]);
+      await client.query(
+        'delete from agent_cluster.workspace_session_leases where session_id=$1',
+        [sessionExternalId]
+      );
+      await client.query(
+        'delete from agent_cluster.workspace_writebacks where session_external_id=$1',
+        [sessionExternalId]
+      );
+      await client.query('commit');
+      return { deleted: true };
+    } catch (error) {
+      await client.query('rollback').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   private async writeCollectionWithClient(client: PoolClient, key: string, value: unknown): Promise<void> {
     switch (key) {
+      case 'logicalOperationsBySession': return this.writeLogicalOperations(client, record(value));
+      case 'sessionStopRequestsBySession': return this.writeSessionStopRequests(client, record(value));
       case 'systemDataMetadata': return this.writeMetadata(client, record(value));
       case 'agents': return this.writeAgents(client, array(value));
       case 'skills': return this.writeSkills(client, array(value));
@@ -556,6 +848,40 @@ export class RelationalStateStore {
       case 'eventOutbox': return this.writeEventOutbox(client, array(value));
       case 'systemAgentRuntimePolicies': return this.writeSystemAgentRuntimePolicies(client, record(value));
       default: throw new Error(`RELATIONAL_COLLECTION_UNMAPPED: ${key}`);
+    }
+  }
+
+  private async writeLogicalOperations(client: PoolClient, value: Record<string, unknown>) {
+    for (const [sessionExternalId, operations] of Object.entries(value)) {
+      const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
+      if (!sessionId) throw new Error('OPERATION_SESSION_NOT_FOUND');
+      for (const operation of array(operations).map(record)) {
+        await client.query(`insert into agent_cluster.logical_operations (external_id,session_id,source_snapshot)
+          values ($1,$2,$3) on conflict (external_id) do update set source_snapshot=excluded.source_snapshot
+          where logical_operations.session_id=excluded.session_id`,
+        [text(operation.id), sessionId, json({ sourceRecord: operation })]);
+      }
+    }
+  }
+
+  private async writeSessionStopRequests(client: PoolClient, value: Record<string, unknown>) {
+    for (const [sessionExternalId, requests] of Object.entries(value)) {
+      const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
+      if (!sessionId) throw new Error('STOP_REQUEST_SESSION_NOT_FOUND');
+      for (const request of array(requests).map(record)) {
+        await client.query(
+          `insert into agent_cluster.session_stop_requests
+             (external_id,session_id,version,status,source_snapshot,created_at,updated_at)
+           values ($1,$2,$3,$4,$5,$6,$7)
+           on conflict (external_id) do update set
+             version=excluded.version,status=excluded.status,source_snapshot=excluded.source_snapshot,
+             updated_at=excluded.updated_at
+           where session_stop_requests.session_id=excluded.session_id
+             and session_stop_requests.version <= excluded.version`,
+          [text(request.id), sessionId, integer(request.version, 1), text(request.status),
+            json({ sourceRecord: request }), date(request.createdAt), date(request.updatedAt)]
+        );
+      }
     }
   }
 
@@ -1657,7 +1983,7 @@ export class RelationalStateStore {
       await client.query(
         `insert into agent_cluster.event_outbox as outbox
          (external_id,aggregate_type,aggregate_external_id,event_type,payload,idempotency_key,status,attempt_count,available_at,created_at,published_at)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,coalesce($9,now()),$10,$11)
          on conflict (idempotency_key) do update set
            status=case when outbox.status='published' then 'published' else excluded.status end,
            attempt_count=greatest(outbox.attempt_count,excluded.attempt_count),
@@ -1665,7 +1991,7 @@ export class RelationalStateStore {
            published_at=coalesce(outbox.published_at,excluded.published_at),
            payload=excluded.payload`,
         [text(item.id), text(item.aggregateType), text(item.aggregateId), text(item.eventType), json({ sourceRecord: item }),
-          text(item.idempotencyKey), text(item.status, 'pending'), integer(item.attempts), date(item.availableAt ?? item.createdAt),
+          text(item.idempotencyKey), text(item.status, 'pending'), integer(item.attempts), nullableDate(item.availableAt),
           date(item.createdAt), nullableDate(item.publishedAt)]
       );
     }
@@ -1754,6 +2080,8 @@ export class RelationalStateStore {
 
   private async loadRuntime(client: PoolClient, state: PersistedState) {
     state.runtimeInvocationsBySession = await groupedSources(client, `select s.external_id group_id,r.profile_snapshot->'sourceRecord' value from agent_cluster.runtime_invocations r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by r.started_at`);
+    state.logicalOperationsBySession = await groupedSources(client, `select s.external_id group_id,o.source_snapshot->'sourceRecord' value from agent_cluster.logical_operations o join agent_cluster.sessions s on s.id=o.session_id where s.deleted_at is null order by o.external_id`);
+    state.sessionStopRequestsBySession = await groupedSources(client, `select s.external_id group_id,r.source_snapshot->'sourceRecord' value from agent_cluster.session_stop_requests r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by r.created_at,r.external_id`);
     const model = await client.query<{ value: unknown }>(`select configuration->'sourceRecord' value from agent_cluster.runtime_model_configs where deleted_at is null order by id limit 1`);
     state.runtimeModelConfig = model.rows[0]?.value ?? {};
     state.localRuntimeDevices = await sourceRecords(client, `select source_snapshot->'sourceRecord' value from agent_cluster.local_runtime_devices order by id`);
@@ -1789,6 +2117,7 @@ export class RelationalStateStore {
 
 function collectionWriteOrder(state: PersistedState): string[] {
   const order = ['systemDataMetadata','agents','systemAgentRuntimePolicies','skills','capabilities','workflowCatalog','workflows','sessions','workItemsBySession','decisionRecordsBySession','contextSnapshotsBySession','intentRoutingRecordsBySession','followUpMessagesBySession','fileRevisions','workspaceWritebacks','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','localRuntimeDevices','localRuntimeOperationAudits','eventOutbox','cutoverAudits'];
+  order.push('logicalOperationsBySession', 'sessionStopRequestsBySession');
   return order.filter((key) => Object.prototype.hasOwnProperty.call(state, key));
 }
 

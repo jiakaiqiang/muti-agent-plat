@@ -51,6 +51,13 @@ function createService(
     listAll: () => adapters
   };
   const persistence = {
+    stateRevision() { return 'test-revision'; },
+    async mutateCollections(_keys: string[], mutate: (state: Record<string, unknown>) => unknown) {
+      const state = structuredClone(Object.fromEntries(persisted));
+      const result = mutate(state);
+      for (const [key, value] of Object.entries(state)) persisted.set(key, value);
+      return result;
+    },
     currentDataEpoch() {
       return 'epoch-test';
     },
@@ -101,6 +108,182 @@ test('dispatches by InvocationPlan.executionTarget', async () => {
   assert.equal(result.runtimeType, 'codex');
 });
 
+test('a completed process cannot be held open by an unfinished event iterator', async () => {
+  const selected = adapter('mock');
+  selected.start = plan => ({
+    result: Promise.resolve(completed(plan)),
+    events: (async function* () { await new Promise(() => {}); })(),
+    async cancel() {}
+  });
+  const { service } = createService([selected]);
+  const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'mock' } });
+  const result = await service.run(plan);
+  assert.equal(result.status, 'completed');
+  assert.equal(service.listInvocations(plan.sessionId).length, 1);
+  assert.equal(result.operationTelemetry?.billableTokens, null);
+  assert.equal(service.operations.list(plan.sessionId)[0].attemptsUsed, 1);
+});
+
+function submissionFailure(plan: InvocationPlan, toolCallId: string): AgentRuntimeEvent {
+  return { invocationId: plan.invocationId, type: 'tool_completed', visibility: 'debug',
+    content: 'Invalid submission', createdAt: new Date().toISOString(),
+    metadata: { toolCallId, name: 'StructuredOutput', isError: true } };
+}
+
+test('buffered submission errors share the durable correction limit and duplicate events do not spend twice', async () => {
+  const selected = adapter('mock', async plan => {
+    const error = submissionFailure(plan, 'first');
+    return { ...completed(plan), events: [error, error] };
+  });
+  const { service } = createService([selected]);
+  const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'mock' } });
+  assert.equal((await service.run(plan)).status, 'completed');
+  assert.equal(service.operations.list(plan.sessionId)[0].correctionsUsed, 1);
+  const next = { ...plan, invocationId: 'second-invocation' };
+  const result = await service.run(next);
+  assert.notEqual(result.status, 'completed');
+  assert.equal(result.termination?.kind, 'output_contract_failure');
+});
+
+test('correction persistence failure cancels a live process and cannot become success', async () => {
+  let cancelCount = 0;
+  const selected = adapter('mock');
+  selected.start = plan => {
+    let finish!: (result: AgentRunResult) => void;
+    return {
+      events: (async function* () { yield submissionFailure(plan, 'invalid'); })(),
+      result: new Promise(resolve => { finish = resolve; }),
+      async cancel() { cancelCount++; finish(completed(plan)); }
+    };
+  };
+  const { service } = createService([selected]);
+  service.operations.reserveCorrection = async () => { throw new Error('isolated persistence failure'); };
+  const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'mock' } });
+  const result = await service.run(plan);
+  assert.equal(cancelCount, 1);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.details?.operationFailure, 'OPERATION_SUPERVISION_FAILED');
+  assert.equal(service.listInvocations(plan.sessionId)[0].status, 'failed');
+});
+
+test('settle persistence failure keeps admission closed after retries exhaust until explicit reconciliation succeeds', async () => {
+  const selected = adapter('mock');
+  let starts = 0;
+  const originalStart = selected.start.bind(selected);
+  selected.start = plan => {
+    starts += 1;
+    return originalStart(plan);
+  };
+  const { service } = createService([selected]);
+  const originalSettle = service.operations.settle.bind(service.operations);
+  let failSettle = true;
+  service.operations.settle = async (...args) => {
+    if (failSettle) throw new Error('isolated settle persistence failure');
+    return originalSettle(...args);
+  };
+  const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'mock' } });
+
+  const result = await service.run(plan);
+
+  assert.equal(service.activeInvocationCount(plan.sessionId), 0);
+  assert.equal(service.hasUnconfirmedStops(plan.sessionId), true);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.details?.reason, 'STOP_STATE_PERSISTENCE_FAILED');
+  assert.equal(starts, 1);
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await service.reconcilePendingStopStates(plan.sessionId);
+  }
+  assert.equal(service.getStopSummary(plan.sessionId).blockers[0]?.reason, 'stop_state_sync_exhausted');
+
+  const blockedStart = await service.start({ ...plan, invocationId: 'blocked-start', operation: undefined }).result;
+  assert.equal(blockedStart.error?.details?.operationFailure, 'OPERATION_STOP_UNCONFIRMED');
+  const blockedRun = await service.run({ ...plan, invocationId: 'blocked-run', operation: undefined });
+  assert.equal(blockedRun.error?.details?.operationFailure, 'OPERATION_STOP_UNCONFIRMED');
+  assert.equal(starts, 1);
+
+  failSettle = false;
+  await service.reconcilePendingStopStates(plan.sessionId);
+  assert.equal(service.hasUnconfirmedStops(plan.sessionId), false);
+
+  const recovered = await service.run({ ...plan, invocationId: 'recovered', operation: undefined });
+  assert.equal(recovered.status, 'completed');
+  assert.equal(starts, 2);
+});
+
+test('a previous confirmed stop round cannot hide a current Local Runtime stop barrier', async () => {
+  const selected = adapter('mock');
+  let starts = 0;
+  const originalStart = selected.start.bind(selected);
+  selected.start = plan => {
+    starts += 1;
+    return originalStart(plan);
+  };
+  let localStopUnknown = true;
+  const { service } = createService([selected], [selected], {
+    localRuntime: { hasUnconfirmedStops: () => localStopUnknown }
+  });
+  const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'mock' } });
+  await service.stopStates.request(plan.sessionId, 'previous_zero_target_stop');
+
+  const blocked = await service.run(plan);
+  assert.equal(blocked.error?.details?.operationFailure, 'OPERATION_STOP_UNCONFIRMED');
+  assert.equal(starts, 0);
+
+  localStopUnknown = false;
+  const recovered = await service.run({ ...plan, invocationId: 'local-barrier-recovered', operation: undefined });
+  assert.equal(recovered.status, 'completed');
+  assert.equal(starts, 1);
+});
+
+test('a result waits for known correction bookkeeping without waiting for the event iterator', async () => {
+  let commit!: () => void;
+  const selected = adapter('mock', async plan => ({ ...completed(plan), events: [submissionFailure(plan, 'pending')] }));
+  const { service } = createService([selected]);
+  const original = service.operations.reserveCorrection.bind(service.operations);
+  service.operations.reserveCorrection = async (...args) => {
+    await new Promise<void>(resolve => { commit = resolve; });
+    return original(...args);
+  };
+  const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'mock' } });
+  let delivered = false;
+  const result = service.run(plan).then(value => { delivered = true; return value; });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(delivered, false);
+  assert.equal(service.listInvocations(plan.sessionId).length, 0);
+  commit();
+  assert.equal((await result).status, 'completed');
+  assert.equal(service.operations.list(plan.sessionId)[0].correctionsUsed, 1);
+});
+
+test('supervisor keeps an unconfirmed stop barrier until the late process exit and never republishes success', async () => {
+  let finish!: (result: AgentRunResult) => void;
+  let starts = 0;
+  const selected = adapter('codex');
+  selected.start = plan => {
+    starts++;
+    return { events: (async function* () {})(),
+      result: new Promise(resolve => { finish = resolve; }), async cancel() {} };
+  };
+  const { service } = createService([selected]);
+  const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'codex' } });
+  const running = service.start(plan);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  await running.cancel(createExecutionTermination({ kind: 'user_paused', source: 'user', scope: 'session' }));
+  const stopped = await running.result;
+  assert.equal(stopped.error?.details?.stopUnconfirmed, true);
+  assert.equal(service.operations.hasUnknownStop(plan.sessionId), true);
+  const replacement = await service.run({ ...plan, invocationId: 'replacement', operation: undefined });
+  assert.equal(replacement.error?.details?.operationFailure, 'OPERATION_STOP_UNCONFIRMED');
+  assert.equal(starts, 1);
+  finish(completed(plan));
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(service.operations.hasUnknownStop(plan.sessionId), false);
+  assert.equal(service.operations.list(plan.sessionId)[0].status, 'paused');
+  assert.equal(service.listInvocations(plan.sessionId).length, 2);
+  assert.ok(service.listInvocations(plan.sessionId).every(entry => entry.status !== 'completed'));
+});
+
 test('cancels every active invocation belonging to a Session and waits for results', async () => {
   const resolvers = new Map<string, (result: AgentRunResult) => void>();
   let cancelCount = 0;
@@ -123,6 +306,7 @@ test('cancels every active invocation belonging to a Session and waits for resul
   const first = service.start(makeInvocationPlan({ sessionId: 'delete-me', invocationId: 'inv-1', executionTarget: { runtimeType: 'codex' } }));
   const second = service.start(makeInvocationPlan({ sessionId: 'delete-me', invocationId: 'inv-2', executionTarget: { runtimeType: 'codex' } }));
   assert.equal(service.activeInvocationCount('delete-me'), 2);
+  await new Promise<void>(resolve => setImmediate(resolve));
 
   const stopped = await service.cancelSessionAndWait(
     'delete-me',
@@ -164,6 +348,7 @@ test('forwards a parent abort to a Local Runtime handle exactly once', async () 
     }
   });
   const execution = service.start(plan, controller.signal);
+  await new Promise<void>(resolve => setImmediate(resolve));
   const termination = createExecutionTermination({
     kind: 'user_paused',
     source: 'user',
@@ -301,9 +486,9 @@ test('persists execution target, tool catalog, and ContextEnvelope together', as
   const { service } = createService([adapter('mock')]);
   await service.run(plan);
   const [log] = service.listInvocations(plan.sessionId);
-  assert.equal(log.executionTarget, plan.executionTarget);
-  assert.equal(log.toolCatalog, plan.toolCatalog);
-  assert.equal(log.contextEnvelope, plan.contextEnvelope);
+  assert.deepEqual(log.executionTarget, plan.executionTarget);
+  assert.deepEqual(log.toolCatalog, plan.toolCatalog);
+  assert.deepEqual(log.contextEnvelope, plan.contextEnvelope);
   assert.equal(log.workspaceIndexGeneration, 4);
   assert.equal(log.workspaceIndexStatus, 'building');
   assert.equal(log.workspaceIndexComplete, false);
@@ -418,7 +603,7 @@ test('keeps a successful resumed CLI session without retrying', async () => {
   assert.equal(calls[0], plan);
 });
 
-test('falls back once without resume when the resumed session id mismatches', async () => {
+test('does not replay completed work when the resumed CLI session id mismatches', async () => {
   const calls: InvocationPlan[] = [];
   const codex = adapter('codex', async (plan) => {
     calls.push(plan);
@@ -437,11 +622,10 @@ test('falls back once without resume when the resumed session id mismatches', as
   })();
   const result = await handle.result;
   await consume;
-  assert.equal(result.runtimeSession?.cliSessionId, 'new-session');
-  assert.equal(calls.length, 2);
+  assert.equal(result.runtimeSession?.cliSessionId, 'unexpected-session');
+  assert.equal(calls.length, 1);
   assert.equal(calls[0].resume?.cliSessionId, 'expired-session');
-  assert.equal(calls[1].resume, undefined);
-  assert.equal(events.filter((event) => event.metadata?.code === 'RESUME_FALLBACK').length, 1);
+  assert.equal(events.filter((event) => event.metadata?.code === 'RESUME_FALLBACK').length, 0);
 });
 
 test('does not fall back when a resumed Runtime invocation is rejected before execution', async () => {

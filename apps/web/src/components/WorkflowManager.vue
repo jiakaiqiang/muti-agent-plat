@@ -273,6 +273,7 @@ function messageOf(error: unknown, fallback: string) {
 
 <template>
   <section class="workflow-manager" aria-label="工作流管理">
+    <details class="workflow-author-access"><summary>流程维护授权</summary><label>维护令牌 <input v-model="workflowStore.authorToken" type="password" autocomplete="off" placeholder="服务端启用授权时填写" /></label><small>仅在当前页面会话中使用，不写入本地存储。</small></details>
     <template v-if="view === 'list'">
       <header class="list-heading">
         <div><p>流程管理 <span>/</span> <strong>工作流列表</strong></p><small>管理工作流并编排 Agent、人工确认和机器人确认节点</small></div>

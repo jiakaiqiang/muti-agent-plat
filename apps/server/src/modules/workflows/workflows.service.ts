@@ -68,6 +68,13 @@ export class WorkflowsService {
     );
   }
 
+  /** Consumer catalog contains published snapshots, never mutable drafts. */
+  catalog() {
+    return this.list()
+      .filter((workflow) => workflow.status === 'published' && workflow.currentPublishedVersion)
+      .map((workflow) => this.cloneVersion(this.getVersion(workflow.id)));
+  }
+
   get(workflowId: string) {
     const workflow = this.workflows.get(workflowId);
     if (!workflow) throw new NotFoundException(`Workflow not found: ${workflowId}`);

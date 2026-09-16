@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed } from 'vue'
+import ChatScrollArea from './ChatScrollArea.vue'
 import { useAgentStore } from '@/stores/agent'
 import { actorAgentId } from '@/composables/useActor'
 import type {
@@ -14,6 +15,7 @@ import type {
   SupplementalContextResolution,
   TaskEventPayload,
   ToolEventPayload,
+  SessionStatus,
   WorkspaceSnapshot
 } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
@@ -23,18 +25,20 @@ import { observedArtifactFileChanges, platformArtifactProjections } from './arti
 
 const props = defineProps<{
   messages: ChatMessage[]
+  sessionId?: string
+  status?: SessionStatus
+  disconnected?: boolean
   workspaceSnapshot?: WorkspaceSnapshot
   capabilityApprovalBusy?: boolean
 }>()
 
 const emit = defineEmits<{
-  resolveConfirmation: [optionKey: string]
+  resolveConfirmation: [optionKey: string, confirmationId: string]
   approveCapability: [sessionId: string, capabilityIds: string[], agentId?: string]
 }>()
 
 const agentStore = useAgentStore()
 const timeline = computed(() => collapseDuplicateFailureMessages(props.messages))
-const timelineEl = ref<HTMLElement | null>(null)
 
 function collapseDuplicateFailureMessages(messages: ChatMessage[]) {
   const seenFailureKeys = new Set<string>()
@@ -87,31 +91,6 @@ function canonicalRuntimeFailureText(text: string) {
   const runtimeText = runtimeStart >= 0 ? compact.slice(runtimeStart) : compact
   return /HTTP\s+(?:408|504|524)|RUNTIME_TIMEOUT|timed out/i.test(runtimeText) ? runtimeText : undefined
 }
-
-function scrollToLatest(behavior: ScrollBehavior = 'auto') {
-  void nextTick(() => {
-    requestAnimationFrame(() => {
-      const element = timelineEl.value
-      if (!element) return
-      element.scrollTo({
-        top: element.scrollHeight,
-        behavior
-      })
-    })
-  })
-}
-
-onMounted(() => {
-  scrollToLatest()
-})
-
-watch(
-  () => [props.messages.length, props.messages.at(-1)?.id ?? ''],
-  () => {
-    scrollToLatest()
-  },
-  { flush: 'post', immediate: true }
-)
 
 function senderLabel(message: ChatMessage) {
   if (message.senderType === 'user') return '你'
@@ -739,10 +718,11 @@ function yesNo(value?: boolean) {
 </script>
 
 <template>
-  <main ref="timelineEl" class="chat-timeline">
+  <ChatScrollArea :reading-key="`web-task-reading:${sessionId ?? messages[0]?.sessionId ?? ''}`" :message-count="messages.length" :status="status" :disconnected="disconnected">
     <article
       v-for="message in timeline"
       :key="message.id"
+      :data-message-id="message.id"
       class="timeline-item"
       :class="[message.senderType, message.messageType]"
     >
@@ -757,7 +737,7 @@ function yesNo(value?: boolean) {
           v-if="confirmationFromMessage(message)"
           :confirmation="confirmationFromMessage(message)!"
           compact
-          @resolve="emit('resolveConfirmation', $event)"
+          @resolve="emit('resolveConfirmation', $event, confirmationFromMessage(message)!.confirmationId)"
         />
 
         <CapabilityApprovalCard
@@ -800,6 +780,19 @@ function yesNo(value?: boolean) {
             </section>
           </div>
 
+          <details v-if="Number(message.payload?.collapsedStopReceiptCount) > 1" class="stop-receipt-history">
+            <summary>查看 {{ message.payload?.collapsedStopReceiptCount }} 次停止回执时间</summary>
+            <ul>
+              <li v-for="time in (message.payload?.collapsedStopReceiptTimes as string[])" :key="time">
+                {{ new Date(time).toLocaleString() }}
+              </li>
+            </ul>
+          </details>
+
+            <details v-if="Array.isArray(message.payload?.validationErrors)">
+              <summary>查看完整校验原因</summary>
+              <ul><li v-for="detail in message.payload.validationErrors" :key="String(detail)">{{ detail }}</li></ul>
+            </details>
           <div v-if="workspaceAnalysisPayload(message)" class="structured-block workspace-analysis-block">
             <div class="structured-block__heading">
               <h3>工作区分析</h3>
@@ -1188,5 +1181,5 @@ function yesNo(value?: boolean) {
         </template>
       </div>
     </article>
-  </main>
+  </ChatScrollArea>
 </template>

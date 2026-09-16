@@ -62,6 +62,7 @@ function toggleDecision(decision: 'approve' | 'revise' | 'cancel', checked: bool
           <section><h3>Agent 描述</h3><p>{{ selectedAgent?.description || selectedAgent?.role || '暂无描述' }}</p></section>
           <section><h3>标签</h3><div class="detail-tags"><span v-for="tag in selectedAgent?.tags || []" :key="tag">{{ tag }}</span><small v-if="!selectedAgent?.tags.length">暂无标签</small></div></section>
           <section><h3>阶段职责</h3><p>{{ node.stageDescription || '尚未配置阶段说明。' }}</p></section>
+          <section><h3>质量验收</h3><p>普通 Agent 节点只执行任务，不会自动把质量问题退回上游。需要自动验收与返工时，请在其后配置机器人确认节点。</p></section>
         </template>
         <template v-else-if="node.type === 'human_approval'">
           <section><h3>确认方式</h3><p>工作流在此节点暂停，由当前会话发起人完成决策。</p></section>
@@ -133,6 +134,7 @@ function toggleDecision(decision: 'approve' | 'revise' | 'cancel', checked: bool
             <input type="number" min="0" max="10" :value="node.maxRevisionAttempts" @input="updateNode({ maxRevisionAttempts: Number(($event.target as HTMLInputElement).value) })" />
           </label>
           <p class="form-note warning"><UiIcon name="sparkles" :size="14" />输出格式无效、执行异常或超过返工上限时自动转人工确认。</p>
+          <p class="form-note warning"><UiIcon name="sparkles" :size="14" />可修复缺陷使用 revise 并填写修改说明；reject 会立即终止整个工作流，仅用于不可恢复问题。</p>
         </template>
       </div>
 
@@ -147,7 +149,7 @@ function toggleDecision(decision: 'approve' | 'revise' | 'cancel', checked: bool
         </template>
         <template v-else>
           <section class="contract-block"><h3>输入</h3><p>上游 Agent 输出、评审提示词和逐条评审标准。</p></section>
-          <section class="contract-block"><h3>严格 JSON 输出</h3><code>{ "decision": "approve|revise|reject", "reason": "...", "revisionInstruction": "...", "evidenceRefs": [] }</code></section>
+          <section class="contract-block"><h3>严格 JSON 输出</h3><code>{ "decision": "approve|revise|reject", "reason": "...", "revisionInstruction": "...或null", "evidenceRefs": [] }</code><p>revise 必须提供非空修改说明；approve/reject 使用 null。</p></section>
         </template>
       </div>
 

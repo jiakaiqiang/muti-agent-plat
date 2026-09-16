@@ -8,6 +8,7 @@ test('RuntimeInvocationService resolves, starts and drains a generic invocation'
   const service = new RuntimeInvocationService(
     { resolve: () => plan } as never,
     {
+      operations: { async begin() { events.push('reserved-operation'); return { id: 'operation' }; } },
       start() {
         return {
           hasStreamingEvents: true,
@@ -20,5 +21,5 @@ test('RuntimeInvocationService resolves, starts and drains a generic invocation'
 
   const result = await service.invoke({} as never);
   assert.equal(result.status, 'completed');
-  assert.deepEqual(events, ['drained']);
+  assert.deepEqual(events, ['reserved-operation', 'drained']);
 });

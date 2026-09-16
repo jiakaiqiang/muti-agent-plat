@@ -11,7 +11,7 @@ describe('Session event connection lifecycle', () => {
       source.indexOf('function requestDeleteSession')
     )
 
-    expect(connectionBlock).toContain("['INTERRUPTED', 'COMPLETED', 'FAILED', 'CANCELLED']")
+    expect(connectionBlock).toContain("['COMPLETED', 'FAILED', 'CANCELLED']")
     expect(connectionBlock).toContain('eventStore.finalizeSessionEvents(sessionId)')
     expect(connectionBlock).toContain('eventStore.ensureConnectedAndReconcile(sessionId)')
   })
@@ -23,5 +23,15 @@ describe('Session event connection lifecycle', () => {
     expect(source).toContain("title: '实时更新暂不可用'")
     expect(source).toContain("backendReachability.value === 'unreachable'")
     expect(source).not.toContain("eventStore.sseConnectionState === 'disconnected'")
+  })
+
+  it('treats an interrupted Session as writable while a truly unreachable backend stays disabled', () => {
+    expect(source).toContain('const backendUnreachable = computed')
+    expect(source).toContain('const sessionInterrupted = computed')
+    expect(source).not.toContain('const backendDisconnected')
+    expect(source).toContain(':disabled="backendUnreachable"')
+    expect(source).toContain("backendUnreachable ? '后端离线，恢复连接后可继续发送'")
+    expect(source).toContain('可以直接输入新需求或补充说明')
+    expect(source).not.toContain('系统不会自动重新连接或续跑')
   })
 })

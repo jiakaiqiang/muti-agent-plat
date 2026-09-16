@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Headers, Param, Post, Res, ServiceUnavailableException, UseGuards } from '@nestjs/common';
+import { Body, ConflictException, Controller, Delete, Get, Headers, Param, Post, Res, ServiceUnavailableException, UseGuards } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { ServerResponse } from 'node:http';
 import type { CreateLocalRuntimeDeviceCodeRequest, LocalRuntimeProviderConnectionInput } from '@agent-cluster/shared';
@@ -20,7 +20,7 @@ export class LocalRuntimeController {
     @Headers('x-forwarded-proto') forwardedProto?: string,
     @Headers('host') host?: string
   ) {
-    return ok({ serverUrl: publicServerOrigin(forwardedProto, host) });
+    return ok({ serverUrl: localRuntimeConnectOrigin(forwardedProto, host) });
   }
 
   @Post('device-codes')
@@ -48,6 +48,15 @@ export class LocalRuntimeController {
   @UseGuards(LocalRuntimeAdminGuard)
   authorizeLoopback(@Body() body: CreateLocalRuntimeDeviceCodeRequest) {
     return this.auth.authorizeTrustedDevice(body);
+  }
+
+  @Post('device-tokens/resume')
+  @UseGuards(LocalRuntimeAdminGuard)
+  resume(@Body() body: { deviceId?: string }) {
+    if (this.connections.isDeviceConnected(body.deviceId ?? '')) {
+      throw new ConflictException('Local Runtime is already connected; keep the existing worker.');
+    }
+    return this.auth.resumeTrustedDevice(body.deviceId ?? '');
   }
 
   @Post('device-tokens/refresh')
@@ -171,4 +180,26 @@ function publicServerOrigin(forwardedProto?: string, host?: string) {
   } catch {
     throw new ServiceUnavailableException('PUBLIC_WEB_URL must be a valid HTTP or HTTPS origin.');
   }
+}
+
+/**
+ * Returns the origin the CLI uses to connect its WebSocket and API calls.
+ * In development, this can differ from PUBLIC_WEB_URL (the browser-facing web
+ * origin) when the CLI should bypass the Vite dev proxy and connect directly
+ * to the backend. Set LOCAL_RUNTIME_CONNECT_URL to the backend origin (e.g.
+ * http://127.0.0.1:8099) to avoid routing the CLI WebSocket through the dev
+ * server, which drops all connections whenever Vite restarts.
+ * Falls back to PUBLIC_WEB_URL when the variable is absent or invalid.
+ */
+function localRuntimeConnectOrigin(forwardedProto?: string, host?: string) {
+  const dedicated = process.env.LOCAL_RUNTIME_CONNECT_URL?.trim();
+  if (dedicated) {
+    try {
+      const url = new URL(dedicated);
+      if (['http:', 'https:'].includes(url.protocol) && !url.username && !url.password) {
+        return url.origin;
+      }
+    } catch { /* fall through to PUBLIC_WEB_URL */ }
+  }
+  return publicServerOrigin(forwardedProto, host);
 }

@@ -31,6 +31,8 @@ export type LocalRuntimeState = {
   tokens?: LocalRuntimeTokenResponse;
   workspaces: LocalWorkspaceState[];
   providerConnections: LocalRuntimeProviderConnectionSummary[];
+  /** End receipts contain no output; replaying them can only release a stop barrier. */
+  pendingStopReceipts?: import('@agent-cluster/shared').LocalRuntimeStopReceipt[];
 };
 
 export function defaultState(serverUrl = 'http://127.0.0.1:8099'): LocalRuntimeState {

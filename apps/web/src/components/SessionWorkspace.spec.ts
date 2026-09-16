@@ -63,6 +63,19 @@ describe('SessionWorkspace Session stop controls', () => {
   })
 })
 
+describe('SessionWorkspace generic confirmation decisions', () => {
+  const source = readFileSync(resolve(process.cwd(), 'src/components/SessionWorkspace.vue'), 'utf8')
+
+  it('sends resume/cancel confirmations to the server instead of only appending a local event', () => {
+    expect(source).toMatch(
+      /if \(optionKey === 'resume' \|\| optionKey === 'cancel'\) \{[\s\S]*?await sessionStore\.resumeSession\(sessionId, confirmationId\)[\s\S]*?await sessionStore\.cancelSession\(sessionId, confirmationId\)/
+    )
+    // The generic branch must run before the local-only fallback event.
+    expect(source.indexOf("if (optionKey === 'resume' || optionKey === 'cancel')"))
+      .toBeLessThan(source.indexOf('id: `evt-local-${Date.now()}`'))
+  })
+})
+
 describe('SessionWorkspace workflow Agent substitution', () => {
   const source = readFileSync(resolve(process.cwd(), 'src/components/SessionWorkspace.vue'), 'utf8')
 
@@ -70,6 +83,21 @@ describe('SessionWorkspace workflow Agent substitution', () => {
     expect(source).toContain("activeConfirmation.value.reason === 'workflow_agent_substitution'")
     expect(source).toContain("optionKey.startsWith('agent:')")
     expect(source).toContain('await sessionStore.resolveWorkflowAgentSubstitution(sessionId')
+    expect(source).toContain("if (optionKey === 'skip_agent')")
+    expect(source).toContain('await sessionStore.resolveWorkflowAgentSkip(sessionId')
+  })
+})
+
+describe('SessionWorkspace workflow runtime preflight', () => {
+  const source = readFileSync(resolve(process.cwd(), 'src/components/SessionWorkspace.vue'), 'utf8')
+
+  it('reconnects a local workspace before committing workflow selection', () => {
+    expect(source).toContain('async function ensureWorkflowRuntimeReady()')
+    expect(source).toContain('if (!localRuntimeStore.isConnected) localRuntimeStore.wakeLocalRuntime()')
+    expect(source).toContain('await localRuntimeStore.ensureWorkspaceConnected(workingDirectory.id)')
+    expect(source).toMatch(
+      /if \(\!\(await ensureWorkflowRuntimeReady\(\)\)\) return[\s\S]*?appendOptimisticConfirmationResolution\(sessionId, confirmationId, optionKey\)/
+    )
   })
 })
 

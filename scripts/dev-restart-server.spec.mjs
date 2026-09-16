@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { healthIndicatesCompletedRestart } from './dev-restart-server.mjs';
+import { healthIndicatesCompletedRestart, restartDevServer } from './dev-restart-server.mjs';
 
 const requestedAtMs = Date.parse('2026-08-05T00:00:00.000Z');
 const healthy = {
@@ -37,4 +37,52 @@ test('manual restart completion rejects unhealthy or stale builds', () => {
     ),
     false
   );
+});
+
+function restartFixture(launchRuntime) {
+  let probes = 0;
+  let requested = false;
+  return {
+    timeoutMs: 1000, pollIntervalMs: 1,
+    readLauncher: () => ({ pid: process.pid }),
+    writeRestartRequest: () => { requested = true; },
+    fetchHealth: async () => {
+      probes++;
+      if (probes > 1) assert.equal(requested, true);
+      return { data: { ...healthy.data, processId: probes < 3 ? 101 : 202 } };
+    },
+    launchRuntime: async input => {
+      assert.equal(probes, 3, 'old healthy backend must not trigger Runtime startup');
+      return launchRuntime(input);
+    }
+  };
+}
+
+test('backend restart automatically starts a stopped saved Runtime after new backend readiness', async () => {
+  const calls = [];
+  const result = await restartDevServer(restartFixture(async input => {
+    calls.push(input);
+    assert.equal(new URL(input.serverUrl).hostname, '127.0.0.1');
+    return { state: 'connected' };
+  }));
+  assert.equal(result.processId, 202);
+  assert.equal(calls.length, 1);
+});
+
+test('backend restart reuses an existing Runtime without failing the restart', async () => {
+  const result = await restartDevServer(restartFixture(async () => ({ state: 'existing' })));
+  assert.equal(result.processId, 202);
+});
+
+test('auto-connect failure is reported separately from successful backend restart', async () => {
+  await assert.rejects(restartDevServer(restartFixture(async () => {
+    throw new Error('fixture startup failed');
+  })), /Backend restarted successfully, but Local Runtime auto-connect failed: fixture startup failed/);
+});
+
+test('a restart that never becomes ready must not launch Runtime', async () => {
+  const options = restartFixture(async () => assert.fail('must not launch'));
+  options.timeoutMs = 5;
+  options.fetchHealth = async () => undefined;
+  await assert.rejects(restartDevServer(options), /Backend did not become healthy/);
 });

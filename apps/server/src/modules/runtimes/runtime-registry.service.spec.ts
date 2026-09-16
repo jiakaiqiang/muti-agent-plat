@@ -57,6 +57,13 @@ function makeAdapter(
 function makePersistence() {
   const collections = new Map<string, unknown>();
   return {
+    stateRevision() { return 'test'; },
+    async mutateCollections(_keys: string[], mutate: (draft: Record<string, unknown>) => unknown) {
+      const draft = structuredClone(Object.fromEntries(collections));
+      const result = mutate(draft);
+      for (const [key, value] of Object.entries(draft)) collections.set(key, value);
+      return result;
+    },
     currentDataEpoch() {
       return 'epoch-test';
     },

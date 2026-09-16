@@ -6,6 +6,15 @@ import type { LocalRuntimeAuthService } from './local-runtime-auth.service.js';
 import { LocalRuntimeController } from './local-runtime.controller.js';
 import type { LocalRuntimeConnectionService } from './local-runtime-connection.service.js';
 
+test('recovery keeps an already connected worker and cannot rotate its credentials', () => {
+  const controller = new LocalRuntimeController({
+    resumeTrustedDevice: () => assert.fail('must not invalidate an online worker')
+  } as unknown as LocalRuntimeAuthService, {
+    isDeviceConnected: () => true
+  } as unknown as LocalRuntimeConnectionService);
+  assert.throws(() => controller.resume({ deviceId: 'online' }), /already connected/);
+});
+
 test('browser connection close cancels the exact pending workspace authorization', async () => {
   let rejectAuthorization!: (error: Error) => void;
   const cancellations: string[] = [];
@@ -47,6 +56,48 @@ test('launch config exposes the public web origin used by the browser and Runtim
   } finally {
     if (previousPublicWebUrl === undefined) delete process.env.PUBLIC_WEB_URL;
     else process.env.PUBLIC_WEB_URL = previousPublicWebUrl;
+  }
+});
+
+test('launch config prefers LOCAL_RUNTIME_CONNECT_URL over PUBLIC_WEB_URL when set', () => {
+  const previousPublicWebUrl = process.env.PUBLIC_WEB_URL;
+  const previousConnectUrl = process.env.LOCAL_RUNTIME_CONNECT_URL;
+  process.env.PUBLIC_WEB_URL = 'http://127.0.0.1:8089';
+  process.env.LOCAL_RUNTIME_CONNECT_URL = 'http://127.0.0.1:8099';
+  try {
+    const controller = new LocalRuntimeController(
+      {} as LocalRuntimeAuthService,
+      {} as LocalRuntimeConnectionService
+    );
+    const result = controller.launchConfig('http', '127.0.0.1:8089');
+    assert.equal(result.data.serverUrl, 'http://127.0.0.1:8099');
+    assert.ok(result.requestId);
+  } finally {
+    if (previousPublicWebUrl === undefined) delete process.env.PUBLIC_WEB_URL;
+    else process.env.PUBLIC_WEB_URL = previousPublicWebUrl;
+    if (previousConnectUrl === undefined) delete process.env.LOCAL_RUNTIME_CONNECT_URL;
+    else process.env.LOCAL_RUNTIME_CONNECT_URL = previousConnectUrl;
+  }
+});
+
+test('launch config falls back to PUBLIC_WEB_URL when LOCAL_RUNTIME_CONNECT_URL is absent', () => {
+  const previousPublicWebUrl = process.env.PUBLIC_WEB_URL;
+  const previousConnectUrl = process.env.LOCAL_RUNTIME_CONNECT_URL;
+  process.env.PUBLIC_WEB_URL = 'http://127.0.0.1:8089';
+  delete process.env.LOCAL_RUNTIME_CONNECT_URL;
+  try {
+    const controller = new LocalRuntimeController(
+      {} as LocalRuntimeAuthService,
+      {} as LocalRuntimeConnectionService
+    );
+    const result = controller.launchConfig('http', '127.0.0.1:8089');
+    assert.equal(result.data.serverUrl, 'http://127.0.0.1:8089');
+    assert.ok(result.requestId);
+  } finally {
+    if (previousPublicWebUrl === undefined) delete process.env.PUBLIC_WEB_URL;
+    else process.env.PUBLIC_WEB_URL = previousPublicWebUrl;
+    if (previousConnectUrl === undefined) delete process.env.LOCAL_RUNTIME_CONNECT_URL;
+    else process.env.LOCAL_RUNTIME_CONNECT_URL = previousConnectUrl;
   }
 });
 

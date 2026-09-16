@@ -61,7 +61,7 @@ function fixture(nodes: WorkflowVersion['nodes'], edges?: WorkflowVersion['edges
   const cancelCalls: any[][] = [];
   const updates: any[] = [];
   let executionRunning = false;
-  const runtime = new WorkflowRuntimeService(
+  const createRuntime = () => new WorkflowRuntimeService(
     {
       get: () => ({ id: 'workflow-1', status: 'published' }),
       getVersion: () => version
@@ -114,18 +114,66 @@ function fixture(nodes: WorkflowVersion['nodes'], edges?: WorkflowVersion['edges
       isRunning: () => executionRunning
     } as never,
     {
-      getCollection: (_key: string, fallback: unknown) => fallback,
+      getCollection: (key: string, fallback: unknown) => structuredClone(collections.get(key) ?? fallback),
       setCollection: (key: string, value: unknown) => collections.set(key, structuredClone(value))
     } as never
   );
+  const runtime = createRuntime();
   runtime.updates().subscribe((update) => updates.push(update));
-  return { runtime, session, brief, taskItems, eventItems, callbacks, cancelCalls, updates, collections, executionTaskBatches };
+  return {
+    runtime,
+    createRuntime,
+    session,
+    brief,
+    taskItems,
+    eventItems,
+    callbacks,
+    cancelCalls,
+    updates,
+    collections,
+    executionTaskBatches
+  };
 }
 
 async function settle() {
   await new Promise<void>((resolve) => setImmediate(resolve));
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
+
+test('reliability flow preserves requirements and architecture across development, QA revise, retest and delivery handoff', async () => {
+  const setup = fixture([
+    { id: 'requirements', type: 'agent', agentId: 'requirements', order: 0 },
+    { id: 'architecture', type: 'agent', agentId: 'architect', order: 1 },
+    { id: 'development', type: 'agent', agentId: 'frontend', order: 2 },
+    { id: 'quality', type: 'robot_approval', reviewerAgentId: 'reviewer', reviewPrompt: 'Check the implementation.',
+      criteria: ['Tests pass.'], maxRevisionAttempts: 2, fallback: 'human_approval', order: 3 }
+  ]);
+  const run = await setup.runtime.start({ session: setup.session, brief: setup.brief, coordinatorId: 'coordinator',
+    workflowId: 'workflow-1', confirmationId: 'reliability-full-flow' });
+  const frozen = JSON.stringify(run.definitionSnapshot);
+  const finish = async (index: number, summary: string) => {
+    setup.taskItems[index].status = 'completed';
+    setup.callbacks[index]({ kind: 'workflow_step_completed', taskId: setup.taskItems[index].id, resultSummary: summary });
+    await settle();
+  };
+  await finish(0, 'Requirement confirmed');
+  await finish(1, 'Architecture complete');
+  await finish(2, 'Development complete');
+  await finish(3, JSON.stringify({ decision: 'revise', reason: 'One test fails.', revisionInstruction: 'Fix the failed test.', evidenceRefs: [] }));
+  assert.equal(setup.taskItems[4].workflowNodeId, 'development');
+  await finish(4, 'Fixed and tested');
+  await finish(5, JSON.stringify({ decision: 'approve', reason: 'Retest passed.', revisionInstruction: null, evidenceRefs: [] }));
+  assert.equal(run.status, 'completed');
+  assert.equal(setup.taskItems.filter(task => task.workflowNodeId === 'requirements').length, 1);
+  assert.equal(setup.taskItems.filter(task => task.workflowNodeId === 'architecture').length, 1);
+  assert.equal(setup.taskItems.filter(task => task.workflowNodeId === 'development').length, 2);
+  assert.deepEqual(setup.runtime.listApprovals(run.id).map(item => item.decision), ['revise', 'approve']);
+  assert.equal(JSON.stringify(run.definitionSnapshot), frozen);
+  const count = setup.taskItems.length;
+  setup.callbacks[5]({ kind: 'workflow_step_completed', taskId: setup.taskItems[5].id, resultSummary: 'late duplicate' });
+  await settle();
+  assert.equal(setup.taskItems.length, count);
+});
 
 test('WorkflowRuntimeService pauses only at an explicit human approval node', async () => {
   const setup = fixture([
@@ -296,6 +344,7 @@ test('WorkflowRuntimeService sends only the latest successful upstream attempt a
     resultSummary: JSON.stringify({
       decision: 'approve',
       reason: 'The revised architecture is complete.',
+      revisionInstruction: null,
       evidenceRefs: []
     })
   });
@@ -420,6 +469,358 @@ test('WorkflowRuntimeService applies an explicit Agent substitution without rest
   assert.equal(setup.eventItems.filter((item) => item.type === 'task_reassigned').length, 1);
 });
 
+test('WorkflowRuntimeService persists an explicit Agent substitution park and validates its confirmation', async () => {
+  const setup = fixture([{ id: 'backend-node', type: 'agent', agentId: 'requirements', order: 0 }]);
+  setup.session.participatingAgentIds.push('frontend');
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-persisted-substitution'
+  });
+  const task = setup.taskItems[0]!;
+  task.status = 'blocked';
+  setup.callbacks[0]!({ kind: 'ask_user', reason: 'Assigned Agent cannot accept this stage.' });
+  await settle();
+
+  const confirmationId = `workflow-agent-substitution:${run.id}:${task.id}`;
+  await setup.runtime.requestAgentSubstitution({
+    taskId: task.id,
+    workflowRunId: run.id,
+    workflowNodeId: 'backend-node',
+    currentAgentId: 'requirements',
+    candidates: [{ id: 'frontend', key: 'frontend', name: 'frontend', role: 'frontend' }],
+    reason: 'Assigned Agent cannot accept this stage.',
+    confirmationId
+  });
+
+  const parked = setup.runtime.get(run.id);
+  assert.equal(parked.status, 'waiting_human');
+  assert.equal(parked.pendingAgentSubstitution?.confirmationId, confirmationId);
+  assert.equal(setup.runtime.listNodeRuns(run.id)[0]?.status, 'waiting');
+  task.status = 'failed';
+  assert.equal(setup.runtime.awaitsAgentSubstitution(run.id), true);
+  assert.equal(await setup.runtime.resumeCurrentExecution(run.id), false);
+  const persisted = setup.collections.get('workflowRuntime') as { runs?: Array<{ pendingAgentSubstitution?: unknown }> };
+  assert.ok(persisted.runs?.[0]?.pendingAgentSubstitution);
+
+  await assert.rejects(
+    setup.runtime.substituteCurrentAgent({
+      runId: run.id,
+      taskId: task.id,
+      agentId: 'frontend',
+      confirmationId: 'stale-confirmation'
+    }),
+    /Bad Request/
+  );
+  await setup.runtime.substituteCurrentAgent({
+    runId: run.id,
+    taskId: task.id,
+    agentId: 'frontend',
+    confirmationId
+  });
+  assert.equal(setup.runtime.get(run.id).pendingAgentSubstitution, undefined);
+  assert.equal(setup.runtime.listNodeRuns(run.id)[0]?.status, 'running');
+  await assert.rejects(
+    setup.runtime.substituteCurrentAgent({ runId: run.id, taskId: task.id, agentId: 'frontend', confirmationId }),
+    /Bad Request/
+  );
+  assert.equal(setup.executionTaskBatches.length, 2);
+});
+
+test('WorkflowRuntimeService restores one pending Agent substitution without scheduling a new attempt', async () => {
+  const setup = fixture([{ id: 'backend-node', type: 'agent', agentId: 'requirements', order: 0 }]);
+  setup.session.participatingAgentIds.push('frontend');
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-restored-substitution'
+  });
+  const task = setup.taskItems[0]!;
+  task.status = 'blocked';
+  setup.callbacks[0]!({ kind: 'ask_user', reason: 'Assigned Agent cannot accept this stage.' });
+  await settle();
+
+  const confirmationId = `workflow-agent-substitution:${run.id}:${task.id}`;
+  await setup.runtime.requestAgentSubstitution({
+    taskId: task.id,
+    workflowRunId: run.id,
+    workflowNodeId: 'backend-node',
+    currentAgentId: 'requirements',
+    candidates: [{ id: 'frontend', key: 'frontend', name: 'frontend', role: 'frontend' }],
+    reason: 'Assigned Agent cannot accept this stage.',
+    confirmationId
+  });
+  const confirmationKey = `workflow-agent-substitution-confirmation:${run.id}:${task.id}`;
+  const taskCountBeforeRecovery = setup.taskItems.length;
+  const callbackCountBeforeRecovery = setup.callbacks.length;
+
+  const restoredRuntime = setup.createRuntime();
+  const restored = await restoredRuntime.recover(setup.session, setup.brief, 'coordinator');
+
+  assert.equal(restored?.id, run.id);
+  assert.equal(restored?.status, 'waiting_human');
+  assert.equal(restored?.pendingAgentSubstitution?.confirmationId, confirmationId);
+  assert.deepEqual(restored?.pendingAgentSubstitution?.candidates.map((agent) => agent.id), ['frontend']);
+  assert.equal(restoredRuntime.listNodeRuns(run.id)[0]?.status, 'waiting');
+  assert.equal(restoredRuntime.listNodeRuns(run.id)[0]?.attempt, 1);
+  assert.equal(await restoredRuntime.resumeCurrentExecution(run.id), false);
+  assert.equal(setup.taskItems.length, taskCountBeforeRecovery);
+  assert.equal(setup.callbacks.length, callbackCountBeforeRecovery);
+  assert.equal(setup.eventItems.filter((event) => event.idempotencyKey === confirmationKey).length, 1);
+});
+
+test('WorkflowRuntimeService skips the blocked current Agent and advances without reopening discussion', async () => {
+  const setup = fixture([
+    { id: 'backend-node', type: 'agent', agentId: 'requirements', order: 0 },
+    { id: 'frontend-node', type: 'agent', agentId: 'frontend', order: 1 }
+  ]);
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-skip'
+  });
+  const skippedTask = setup.taskItems[0]!;
+  skippedTask.status = 'blocked';
+  setup.callbacks[0]({
+    kind: 'cancelled',
+    reason: 'Waiting for user selection.',
+    termination: {
+      schemaVersion: '1.0',
+      terminationId: 'workflow-skip-wait',
+      kind: 'user_cancelled',
+      source: 'user',
+      scope: 'invocation',
+      occurredAt: now
+    }
+  });
+  await settle();
+
+  await setup.runtime.skipCurrentAgent({
+    runId: run.id,
+    taskId: skippedTask.id,
+    reason: '跳过当前 Agent，继续执行'
+  });
+
+  const skippedNodeRun = setup.runtime.listNodeRuns(run.id).find((item) => item.relatedTaskId === skippedTask.id);
+  assert.equal(skippedTask.status, 'cancelled');
+  assert.equal(skippedNodeRun?.status, 'skipped');
+  assert.equal(run.currentNodeId, 'frontend-node');
+  assert.equal(setup.executionTaskBatches.at(-1)?.[0]?.workflowNodeId, 'frontend-node');
+  const completedEvent = setup.eventItems.find((item) =>
+    item.type === 'workflow_node_completed' && item.taskId === skippedTask.id
+  );
+  assert.equal((completedEvent?.metadata as { payload?: { status?: string } })?.payload?.status, 'skipped');
+});
+
+test('WorkflowRuntimeService parks a node that reports incomplete upstream input', async () => {
+  const setup = fixture([
+    { id: 'architect-node', type: 'agent', agentId: 'architect', order: 0 },
+    { id: 'frontend-node', type: 'agent', agentId: 'frontend', order: 1 }
+  ]);
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-upstream'
+  });
+  const architectTask = setup.taskItems[0]!;
+  architectTask.status = 'completed';
+  setup.callbacks[0]({ kind: 'workflow_step_completed', taskId: architectTask.id, resultSummary: '架构完成' });
+  await settle();
+
+  const frontendTask = setup.taskItems[1]!;
+  frontendTask.status = 'failed';
+  setup.callbacks[1]({
+    kind: 'ask_user',
+    reason: '上游没有交付 API 合同，无法实现前端。',
+    workflowUpstreamIncomplete: {
+      taskId: frontendTask.id,
+      workflowRunId: run.id,
+      workflowNodeId: 'frontend-node',
+      reason: '上游没有交付 API 合同，无法实现前端。',
+      missingInputs: ['API 合同']
+    }
+  });
+  await settle();
+
+  const parked = setup.runtime.pendingUpstreamRerun(run.id);
+  assert.equal(setup.runtime.awaitsUpstreamRerun(run.id), true);
+  assert.equal(parked?.nodeId, 'frontend-node');
+  assert.deepEqual(parked?.missingInputs, ['API 合同']);
+  assert.deepEqual(parked?.candidates.map((item) => item.nodeId), ['architect-node']);
+  assert.equal(setup.runtime.get(run.id).status, 'waiting_human');
+
+  const card = setup.eventItems.find((item) =>
+    item.type === 'user_confirmation_requested' &&
+    (item.metadata as { payload?: { reason?: string } })?.payload?.reason === 'workflow_upstream_rerun'
+  );
+  assert.ok(card);
+  const options = (card?.metadata as { payload?: { options?: Array<{ key: string }> } })?.payload?.options ?? [];
+  assert.deepEqual(options.map((option) => option.key), ['node:architect-node', 'retry_current', 'cancel']);
+
+  // A parked run must never resume implicitly: that would replay the same node
+  // against the same missing upstream output.
+  assert.equal(await setup.runtime.resumeCurrentExecution(run.id), false);
+  assert.equal(setup.runtime.checkpointInterruptedExecution(run.id, { code: 'X', message: 'y' }), false);
+  // The park is not an approval gate even though it also sits at waiting_human.
+  const gateAttempt = setup.runtime.decideHuman({
+    runId: run.id,
+    nodeRunId: parked!.nodeRunId,
+    confirmationId: `workflow-upstream-rerun:${run.id}:${parked!.nodeRunId}`,
+    userId: 'local-user',
+    decision: 'approve'
+  }).then(() => 'resolved', (error: Error) => error.message);
+  assert.match(String(await gateAttempt), /Bad Request/);
+  await settle();
+});
+
+test('WorkflowRuntimeService re-runs the chosen upstream node and walks forward again', async () => {
+  const setup = fixture([
+    { id: 'architect-node', type: 'agent', agentId: 'architect', order: 0 },
+    { id: 'frontend-node', type: 'agent', agentId: 'frontend', order: 1 }
+  ]);
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-upstream-rerun'
+  });
+  const architectTask = setup.taskItems[0]!;
+  architectTask.status = 'completed';
+  setup.callbacks[0]({ kind: 'workflow_step_completed', taskId: architectTask.id, resultSummary: '架构完成' });
+  await settle();
+  const parkedTask = setup.taskItems[1]!;
+  parkedTask.status = 'failed';
+  setup.callbacks[1]({
+    kind: 'ask_user',
+    reason: '缺少数据库结构。',
+    workflowUpstreamIncomplete: {
+      taskId: parkedTask.id,
+      workflowRunId: run.id,
+      workflowNodeId: 'frontend-node',
+      reason: '缺少数据库结构。',
+      missingInputs: ['数据库结构']
+    }
+  });
+  await settle();
+  const parked = setup.runtime.pendingUpstreamRerun(run.id)!;
+
+  await setup.runtime.rerunUpstreamNode({
+    runId: run.id,
+    confirmationId: `workflow-upstream-rerun:${run.id}:${parked.nodeRunId}`,
+    nodeId: 'architect-node'
+  });
+
+  assert.equal(setup.runtime.awaitsUpstreamRerun(run.id), false);
+  assert.equal(setup.runtime.get(run.id).currentNodeId, 'architect-node');
+  // The parked task must be terminal, otherwise Post Review re-drives it.
+  assert.ok(['failed', 'cancelled'].includes(parkedTask.status));
+  assert.match(parkedTask.resultSummary ?? '', /退回上游节点重新执行/);
+  const parkedNodeRun = setup.runtime.listNodeRuns(run.id).find((item) => item.id === parked.nodeRunId);
+  assert.equal(parkedNodeRun?.status, 'revision_requested');
+  assert.ok(setup.eventItems.some((item) => item.type === 'workflow_node_revision_requested'));
+
+  const architectRetry = setup.taskItems.at(-1)!;
+  assert.equal(architectRetry.workflowNodeId, 'architect-node');
+  assert.equal(architectRetry.workflowAttempt, 2);
+
+  architectRetry.status = 'completed';
+  setup.callbacks.at(-1)!({
+    kind: 'workflow_step_completed',
+    taskId: architectRetry.id,
+    resultSummary: '补齐数据库结构'
+  });
+  await settle();
+
+  // Forward walk reaches the parked node again as a fresh attempt fed by the new output.
+  const frontendRetry = setup.taskItems.at(-1)!;
+  assert.equal(frontendRetry.workflowNodeId, 'frontend-node');
+  assert.equal(frontendRetry.workflowAttempt, 2);
+  assert.deepEqual(frontendRetry.dependsOnTaskIds, [architectRetry.id]);
+});
+
+test('WorkflowRuntimeService retries the parked node itself without re-running upstream', async () => {
+  const setup = fixture([
+    { id: 'architect-node', type: 'agent', agentId: 'architect', order: 0 },
+    { id: 'frontend-node', type: 'agent', agentId: 'frontend', order: 1 }
+  ]);
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-retry-parked'
+  });
+  setup.taskItems[0]!.status = 'completed';
+  setup.callbacks[0]({ kind: 'workflow_step_completed', taskId: setup.taskItems[0]!.id, resultSummary: '架构完成' });
+  await settle();
+  const parkedTask = setup.taskItems[1]!;
+  parkedTask.status = 'failed';
+  setup.callbacks[1]({
+    kind: 'ask_user',
+    reason: '缺少接口定义。',
+    workflowUpstreamIncomplete: {
+      taskId: parkedTask.id,
+      workflowRunId: run.id,
+      workflowNodeId: 'frontend-node',
+      reason: '缺少接口定义。',
+      missingInputs: []
+    }
+  });
+  await settle();
+  const parked = setup.runtime.pendingUpstreamRerun(run.id)!;
+
+  await setup.runtime.retryParkedNode({
+    runId: run.id,
+    confirmationId: `workflow-upstream-rerun:${run.id}:${parked.nodeRunId}`
+  });
+
+  assert.equal(setup.runtime.awaitsUpstreamRerun(run.id), false);
+  assert.equal(setup.runtime.get(run.id).status, 'running');
+  assert.equal(setup.runtime.get(run.id).currentNodeId, 'frontend-node');
+  const retry = setup.taskItems.at(-1)!;
+  assert.equal(retry.workflowNodeId, 'frontend-node');
+  assert.equal(retry.workflowAttempt, 2);
+});
+
+test('WorkflowRuntimeService forwards ask_user unchanged when there is no upstream Agent node', async () => {
+  const setup = fixture([
+    { id: 'architect-node', type: 'agent', agentId: 'architect', order: 0 }
+  ]);
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-no-upstream'
+  });
+  const task = setup.taskItems[0]!;
+  task.status = 'failed';
+  setup.callbacks[0]({
+    kind: 'ask_user',
+    reason: '读不到工作区文件。',
+    workflowUpstreamIncomplete: {
+      taskId: task.id,
+      workflowRunId: run.id,
+      workflowNodeId: 'architect-node',
+      reason: '读不到工作区文件。',
+      missingInputs: ['src/main.ts']
+    }
+  });
+  await settle();
+
+  assert.equal(setup.runtime.awaitsUpstreamRerun(run.id), false);
+  assert.ok(setup.updates.some((item) => item.kind === 'session_outcome' && item.outcome.kind === 'ask_user'));
+});
+
 test('WorkflowRuntimeService falls back to human approval for invalid robot output', async () => {
   const setup = fixture([
     { id: 'requirements-node', type: 'agent', agentId: 'requirements', order: 0 },
@@ -455,6 +856,89 @@ test('WorkflowRuntimeService falls back to human approval for invalid robot outp
   assert.equal(fallback?.nodeType, 'human_approval');
   assert.equal(fallback?.fallbackFromRobot, true);
   assert.ok(fallback?.confirmationId);
+});
+
+test('WorkflowRuntimeService sends incomplete or extended robot decisions to one human fallback', async () => {
+  for (const resultSummary of [
+    JSON.stringify({ decision: 'revise', reason: 'Needs changes.', revisionInstruction: null, evidenceRefs: [] }),
+    JSON.stringify({ decision: 'approve', reason: 'Looks good.', revisionInstruction: null, evidenceRefs: [], extra: true })
+  ]) {
+    const setup = fixture([
+      { id: 'frontend-node', type: 'agent', agentId: 'frontend', order: 0 },
+      {
+        id: 'robot-node',
+        type: 'robot_approval',
+        reviewerAgentId: 'reviewer',
+        reviewPrompt: 'Review the frontend.',
+        criteria: ['The UI is correct.'],
+        maxRevisionAttempts: 2,
+        fallback: 'human_approval',
+        order: 1
+      }
+    ]);
+    const run = await setup.runtime.start({
+      session: setup.session,
+      brief: setup.brief,
+      coordinatorId: 'coordinator',
+      workflowId: 'workflow-1',
+      confirmationId: `select-invalid-${resultSummary.length}`
+    });
+    setup.taskItems[0]!.status = 'completed';
+    setup.callbacks[0]!({ kind: 'workflow_step_completed', taskId: setup.taskItems[0]!.id, resultSummary: 'Frontend done.' });
+    await settle();
+    setup.taskItems[1]!.status = 'completed';
+    setup.callbacks[1]!({ kind: 'workflow_step_completed', taskId: setup.taskItems[1]!.id, resultSummary });
+    await settle();
+    setup.callbacks[1]!({ kind: 'workflow_step_completed', taskId: setup.taskItems[1]!.id, resultSummary });
+    await settle();
+
+    assert.equal(setup.runtime.get(run.id).status, 'waiting_human');
+    assert.equal(setup.runtime.listNodeRuns(run.id).filter((item) => item.fallbackFromRobot).length, 1);
+    assert.equal(setup.runtime.listApprovals(run.id).length, 0);
+  }
+});
+
+test('WorkflowRuntimeService treats strict robot reject as terminal without creating a rework attempt', async () => {
+  const setup = fixture([
+    { id: 'frontend-node', type: 'agent', agentId: 'frontend', order: 0 },
+    {
+      id: 'robot-node',
+      type: 'robot_approval',
+      reviewerAgentId: 'reviewer',
+      reviewPrompt: 'Review the frontend.',
+      criteria: ['The result is policy compliant.'],
+      maxRevisionAttempts: 2,
+      fallback: 'human_approval',
+      order: 1
+    }
+  ]);
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-terminal-reject'
+  });
+  setup.taskItems[0]!.status = 'completed';
+  setup.callbacks[0]!({ kind: 'workflow_step_completed', taskId: setup.taskItems[0]!.id, resultSummary: 'Frontend done.' });
+  await settle();
+  setup.taskItems[1]!.status = 'completed';
+  setup.callbacks[1]!({
+    kind: 'workflow_step_completed',
+    taskId: setup.taskItems[1]!.id,
+    resultSummary: JSON.stringify({
+      decision: 'reject',
+      reason: 'The result violates a non-negotiable policy.',
+      revisionInstruction: null,
+      evidenceRefs: ['policy:1']
+    })
+  });
+  await settle();
+
+  assert.equal(setup.runtime.get(run.id).status, 'failed');
+  assert.equal(setup.runtime.get(run.id).failure?.code, 'WORKFLOW_ROBOT_REJECTED');
+  assert.equal(setup.taskItems.filter((task) => task.workflowNodeId === 'frontend-node').length, 1);
+  assert.equal(setup.runtime.listApprovals(run.id).at(-1)?.decision, 'reject');
 });
 
 test('WorkflowRuntimeService reschedules a superseded current node without cancelling the workflow', async () => {
@@ -535,6 +1019,7 @@ test('WorkflowRuntimeService retries a failed workflow node as a new auditable a
   });
   const firstTask = setup.taskItems[0]!;
   const firstNodeRun = setup.runtime.listNodeRuns(run.id)[0]!;
+
   firstTask.status = 'failed';
   setup.callbacks[0]({ kind: 'failed', reason: 'Runtime failed.' });
   await settle();
@@ -565,6 +1050,122 @@ test('WorkflowRuntimeService retries a failed workflow node as a new auditable a
   assert.equal(run.status, 'failed');
   assert.equal(secondNodeRun.status, 'failed');
   assert.equal(setup.eventItems.filter((item) => item.type === 'workflow_run_failed').length, 2);
+});
+
+test('WorkflowRuntimeService checkpoints an interrupted node and resumes it as a new attempt', async () => {
+  const setup = fixture([{ id: 'requirements-node', type: 'agent', agentId: 'requirements', order: 0 }]);
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-interruption-recovery'
+  });
+  const firstTask = setup.taskItems[0]!;
+  const firstNodeRun = setup.runtime.listNodeRuns(run.id)[0]!;
+
+  firstTask.executionOperationId = 'operation-interrupted';
+  firstTask.executionCheckpoint = { operationId: 'operation-interrupted', invocationId: 'invocation-interrupted',
+    candidateId: 'candidate-interrupted', candidateHash: 'hash', stage: 'candidate_captured' };
+  assert.equal(setup.runtime.checkpointInterruptedExecution(run.id, {
+    code: 'SERVICE_SHUTDOWN',
+    message: 'Backend stopped during execution.'
+  }), true);
+  assert.equal(run.status, 'failed');
+  assert.equal(firstNodeRun.status, 'failed');
+  assert.equal(firstTask.status, 'failed');
+  setup.callbacks[0]({ kind: 'cancelled', reason: 'Backend stopped during execution.' });
+  await settle();
+
+  assert.equal(await setup.runtime.resumeCurrentExecution(run.id, {
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator'
+  }), true);
+  assert.equal(run.status, 'running');
+  assert.equal(setup.runtime.listNodeRuns(run.id)[1]?.attempt, 2);
+  assert.equal(setup.taskItems[1]?.status, 'assigned');
+  assert.equal(firstNodeRun.executionCheckpoint?.candidateId, 'candidate-interrupted');
+  assert.equal(setup.taskItems[1]?.recoveryOriginTaskId, firstTask.id);
+  assert.equal(setup.taskItems[1]?.previousExecutionOperationId, 'operation-interrupted');
+});
+
+test('WorkflowRuntimeService reworks only the last agent node instead of replaying the whole definition', async () => {
+  const setup = fixture([
+    { id: 'requirements-node', type: 'agent', agentId: 'requirements', order: 0 },
+    { id: 'frontend-node', type: 'agent', agentId: 'frontend', order: 1 }
+  ]);
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-rework-last-node'
+  });
+
+  setup.taskItems[0]!.status = 'completed';
+  setup.callbacks[0]!({ kind: 'workflow_step_completed', taskId: setup.taskItems[0]!.id, resultSummary: '需求完成' });
+  await settle();
+  setup.taskItems[1]!.status = 'completed';
+  setup.callbacks[1]!({ kind: 'workflow_step_completed', taskId: setup.taskItems[1]!.id, resultSummary: '前端完成' });
+  await settle();
+  assert.equal(setup.runtime.get(run.id).status, 'completed');
+  assert.equal(setup.taskItems.length, 2);
+
+  // Completing the last node starts the post review, which holds the execution
+  // slot. Rework is only requested once that review reports back.
+  assert.equal(setup.callbacks.length, 3);
+  setup.callbacks[2]!({ kind: 'rework', reason: '复盘要求返工。' });
+  await settle();
+
+  const reworked = await setup.runtime.reworkLastAgentNode(run.id, '复盘要求返工。', {
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator'
+  });
+
+  assert.equal(reworked, true);
+  assert.equal(setup.runtime.get(run.id).id, run.id);
+  assert.equal(setup.runtime.get(run.id).status, 'running');
+  assert.equal(setup.runtime.get(run.id).currentNodeId, 'frontend-node');
+  // Only the last agent node runs again: the approved upstream node keeps its
+  // single task and never re-enters execution.
+  assert.equal(setup.taskItems.length, 3);
+  assert.equal(setup.taskItems[2]!.workflowNodeId, 'frontend-node');
+  assert.equal(setup.taskItems.filter((item) => item.workflowNodeId === 'requirements-node').length, 1);
+  assert.equal(setup.executionTaskBatches.length, 4);
+  // The approved upstream task still travels along as context, but only the
+  // frontend node is assigned again.
+  assert.deepEqual(
+    setup.executionTaskBatches[3]!.filter((item) => item.status === 'assigned').map((item) => item.workflowNodeId),
+    ['frontend-node']
+  );
+});
+
+test('WorkflowRuntimeService refuses to resume a node parked on an agent that declined', async () => {
+  const setup = fixture([{ id: 'requirements-node', type: 'agent', agentId: 'requirements', order: 0 }]);
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'select-awaits-substitution'
+  });
+  const nodeRun = setup.runtime.listNodeRuns(run.id)[0]!;
+  setup.taskItems[0]!.status = 'blocked';
+
+  setup.callbacks[0]!({ kind: 'ask_user', reason: 'Agent 拒绝该任务。' });
+  await settle();
+
+  assert.equal(setup.runtime.get(run.id).status, 'running');
+  assert.equal(nodeRun.status, 'running');
+  assert.equal(setup.runtime.awaitsAgentSubstitution(run.id), true);
+  assert.equal(await setup.runtime.resumeCurrentExecution(run.id, {
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator'
+  }), false);
+  assert.equal(setup.callbacks.length, 1);
 });
 
 test('WorkflowRuntimeService refuses to resume a run owned by a different active WorkItem', async () => {

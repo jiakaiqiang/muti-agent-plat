@@ -44,18 +44,20 @@ async function waitForWeb(url) {
   throw lastError ?? new Error(`Web preview did not become ready: ${url}`);
 }
 
-export async function startWebPreview(apiBase, port) {
+export async function startWebPreview(apiBase, port, { desktop = false } = {}) {
   const webBase = `http://127.0.0.1:${port}`;
   const env = {
     VITE_API_BASE_URL: apiBase,
-    VITE_SSE_BASE_URL: apiBase
+    VITE_SSE_BASE_URL: apiBase,
+    AGENT_CLUSTER_DEV_API_PROXY_TARGET: new URL(apiBase).origin
   };
 
-  await runNpm(['run', 'build', '-w', '@project/web'], env);
+  await runNpm(desktop ? ['run', 'desktop:build'] : ['run', 'build', '-w', '@project/web'], env);
 
   const preview = spawn(
     process.execPath,
-    [join(root, 'node_modules', 'vite', 'bin', 'vite.js'), 'preview', '--host', '127.0.0.1', '--port', port],
+    [join(root, 'node_modules', 'vite', 'bin', 'vite.js'), 'preview', '--host', '127.0.0.1', '--port', port,
+      ...(desktop ? ['--config', join(root, 'apps/desktop/vite.renderer.config.mjs'), '--outDir', join(root, 'apps/desktop/dist/renderer')] : [])],
     {
       cwd: join(root, 'apps', 'web'),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -118,8 +120,8 @@ export async function startBrowserSmokeServer(name, serverEnv = {}) {
   return { server, webPort };
 }
 
-export async function startBrowserPage(apiBase, webPort) {
-  const web = await startWebPreview(apiBase, webPort);
+export async function startBrowserPage(apiBase, webPort, options) {
+  const web = await startWebPreview(apiBase, webPort, options);
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
   return { browser, page, web };

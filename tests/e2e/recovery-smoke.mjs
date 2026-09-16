@@ -31,7 +31,14 @@ try {
     method: 'POST',
     body: JSON.stringify({
       name: 'Recovery smoke workflow',
-      nodes: [{ id: 'recovery-smoke-node', type: 'agent', agentId: taskAgent.id, order: 0 }]
+      nodes: [{
+        id: 'recovery-smoke-node',
+        type: 'agent',
+        agentId: taskAgent.id,
+        stageDescription: 'Execute the recovery smoke stage and produce a deterministic result.',
+        outputContract: ['Produce an accepted recovery smoke stage result.'],
+        order: 0
+      }]
     })
   })).data;
   const workflow = (await api(firstServer.apiBase, `/workflows/${workflowDraft.id}/publish`, {
@@ -42,7 +49,10 @@ try {
   const { sessionId, briefId } = await createSessionAndWaitForBrief(
     firstServer.apiBase,
     '验证服务崩溃后任务只进入可唤醒中断状态',
-    { runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] } }
+    {
+      agentIds: ['requirements', 'architect', 'backend', 'test', 'review', 'notification'],
+      runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] }
+    }
   );
   await api(firstServer.apiBase, `/sessions/${sessionId}/briefs/${briefId}/confirm`, { method: 'POST' });
   await waitForStatus(firstServer.apiBase, sessionId, 'WAIT_WORKFLOW_SELECT');
@@ -96,11 +106,41 @@ try {
   }
 
   const tasks = (await api(secondServer.apiBase, `/sessions/${sessionId}/tasks`)).data;
-  if (tasks.some((task) => task.status !== 'waiting')) {
-    throw new Error(`Expected interrupted tasks to wait, got ${tasks.map((task) => `${task.id}:${task.status}`).join(', ')}`);
+  if (!tasks.some((task) => task.status === 'failed')) {
+    throw new Error(`Expected the interrupted workflow attempt to be failed and retryable, got ${tasks.map((task) => `${task.id}:${task.status}`).join(', ')}`);
   }
 
-  console.log('recovery smoke passed: crashed execution became wakeable and did not auto-run');
+  const recoveryConfirmation = events.find(
+    (event) =>
+      event.type === 'user_confirmation_requested' &&
+      ['recover_interrupted_execution', 'retry_failed_execution'].includes(event.metadata?.payload?.reason)
+  );
+  if (!recoveryConfirmation) {
+    throw new Error('Expected restart recovery to create one durable recovery confirmation');
+  }
+  await api(secondServer.apiBase, `/sessions/${sessionId}/messages`, {
+    method: 'POST',
+    body: JSON.stringify({ content: '继续' })
+  });
+  const resumedTask = await waitForMatchingEvent(
+    secondServer.apiBase,
+    sessionId,
+    'workflow_node_started',
+    (event) => Number(event.metadata?.payload?.attempt ?? 0) >= 2
+  );
+  if (Number(resumedTask.metadata?.payload?.attempt ?? 0) < 2) {
+    throw new Error(`Expected a new workflow attempt after restart, got ${JSON.stringify(resumedTask.metadata?.payload)}`);
+  }
+  const recoveryResolved = (await listEvents(secondServer.apiBase, sessionId)).find(
+    (event) =>
+      event.type === 'user_confirmation_resolved' &&
+      event.metadata?.payload?.confirmationId === recoveryConfirmation.metadata.payload.confirmationId
+  );
+  if (!recoveryResolved) {
+    throw new Error('Expected continue to close the durable recovery confirmation');
+  }
+
+  console.log('recovery smoke passed: crashed execution stayed parked, then continued as a new workflow attempt');
 
   thirdServer = await startSmokeServer('recovery-smoke-discussing', {
     DISCUSSION_MAX_ROUNDS: '1',
@@ -111,7 +151,7 @@ try {
     method: 'POST',
     body: JSON.stringify({
       input: '验证讨论阶段崩溃后不会自动重新生成任务契约',
-      agentIds: ['coordinator', 'requirements', 'architect', 'backend', 'test', 'review', 'notification'],
+      agentIds: ['requirements', 'architect', 'backend', 'test', 'review', 'notification'],
       runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] }
     })
   });

@@ -18,6 +18,7 @@ import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import { bullMqEnabled, bullMqPrefix, redisConnectionOptions } from '../../common/redis.js';
 import { MaintenanceCoordinatorService } from '../persistence/maintenance-coordinator.service.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
+import { SkipPersistenceCommit } from '../persistence/skip-persistence-commit.js';
 
 const queueNames = [
   'agent-discussion-queue',
@@ -39,7 +40,13 @@ export class OpsController {
     private readonly maintenance: MaintenanceCoordinatorService
   ) {}
 
+  /**
+   * 探活只读内存字段，不产生写入，所以不能等全局持久化写队列排空。
+   * 否则工作流启动那一批整块 setCollection 会把探活也排到队尾，
+   * 前端 5s 超时后判定「后端不可达」并清空会话，表现为整页失联。
+   */
   @Get('health')
+  @SkipPersistenceCommit()
   health() {
     const health: OpsHealth = {
       status: 'ok',
@@ -60,6 +67,18 @@ export class OpsController {
       timestamp: new Date().toISOString()
     };
     return ok(health);
+  }
+
+  @Get('live')
+  @SkipPersistenceCommit()
+  live() {
+    return ok({
+      status: 'ok' as const,
+      service: 'agent-cluster-server',
+      processId: process.pid,
+      startedAt: processStartedAt,
+      timestamp: new Date().toISOString()
+    });
   }
 
   @Get('ops/maintenance')

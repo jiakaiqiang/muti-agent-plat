@@ -20,7 +20,12 @@ function makeFixture(sessions: SessionDetail[], events?: {
   create(input: Record<string, unknown>): unknown;
 }, contextManagement?: {
   activeWorkItem(session: SessionDetail): { id: string } | undefined;
-  ensureInitialWorkItem(session: SessionDetail): Promise<{ id: string }>;
+  ensureInitialWorkItem(
+    session: SessionDetail,
+    idempotencyKey: string,
+    input: string | undefined,
+    workItemStatus: string | undefined
+  ): Promise<{ id: string }>;
 }, persistedState: Record<string, unknown> = {}, legacyMigration?: {
   report(sessions: SessionDetail[], mode?: 'report' | 'apply'): { sessionCount: number; plannedRecordCount: number; issues: unknown[]; revision: string };
   apply(sessions: SessionDetail[]): Promise<{ sessionCount: number; migratedRecordCount: number; issues: unknown[] }>;
@@ -32,6 +37,7 @@ function makeFixture(sessions: SessionDetail[], events?: {
     graceful: boolean;
     diagnosticRef?: string;
   }> = [];
+  const reconciledSessions: string[] = [];
   const service = new RecoveryService(
     {
       listRaw: () => sessions,
@@ -43,6 +49,9 @@ function makeFixture(sessions: SessionDetail[], events?: {
         const session = sessions.find((candidate) => candidate.id === input.sessionId);
         if (session) session.status = 'INTERRUPTED';
         return Boolean(session);
+      },
+      reconcileRecoveryStateOnBoot(sessionId: string) {
+        reconciledSessions.push(sessionId);
       }
     } as never,
     {
@@ -62,7 +71,7 @@ function makeFixture(sessions: SessionDetail[], events?: {
     contextManagement as never,
     legacyMigration as never
   );
-  return { service, interruptions, persistedState };
+  return { service, interruptions, reconciledSessions, persistedState };
 }
 
 test('records service_shutdown and persists the unmatched invocation as wakeable without re-running it', async () => {
@@ -210,13 +219,14 @@ test('converts every in-flight Session state to a wakeable interruption on boot'
     'REWORKING'
   ];
   const sessions = activeStatuses.map(makeSession);
-  const { service, interruptions } = makeFixture(sessions);
+  const { service, interruptions, reconciledSessions } = makeFixture(sessions);
 
   await service.onApplicationBootstrap();
 
   assert.deepEqual(interruptions.map((item) => item.sessionId), sessions.map((session) => session.id));
   assert.ok(interruptions.every((item) => item.graceful === false));
   assert.ok(sessions.every((session) => session.status === 'INTERRUPTED'));
+  assert.deepEqual(reconciledSessions, sessions.map((session) => session.id));
 });
 
 test('leaves user-waiting and terminal Sessions untouched on boot', async () => {
@@ -236,6 +246,41 @@ test('leaves user-waiting and terminal Sessions untouched on boot', async () => 
   await service.onApplicationBootstrap();
 
   assert.deepEqual(interruptions, []);
+});
+
+test('bootstraps an interrupted Session WorkItem as WAITING_USER rather than FAILED', async () => {
+  const previousMode = process.env.AGENT_CLUSTER_WORKITEM_MIGRATION_MODE;
+  process.env.AGENT_CLUSTER_WORKITEM_MIGRATION_MODE = 'apply';
+  try {
+    const session = makeSession('INTERRUPTED');
+    const observedStatuses: Array<string | undefined> = [];
+    const contextManagement = {
+      activeWorkItem: () => undefined,
+      async ensureInitialWorkItem(
+        _session: SessionDetail,
+        _idempotencyKey: string,
+        _input: string | undefined,
+        workItemStatus: string | undefined
+      ) {
+        observedStatuses.push(workItemStatus);
+        return { id: 'work-item-bootstrapped' };
+      }
+    };
+    const legacyMigration = {
+      report: () => ({ sessionCount: 1, plannedRecordCount: 0, issues: [], revision: '1' }),
+      async apply() {
+        return { sessionCount: 1, migratedRecordCount: 0, issues: [] };
+      }
+    };
+    const { service } = makeFixture([session], undefined, contextManagement, {}, legacyMigration);
+
+    await service.onApplicationBootstrap();
+
+    assert.deepEqual(observedStatuses, ['WAITING_USER']);
+  } finally {
+    if (previousMode === undefined) delete process.env.AGENT_CLUSTER_WORKITEM_MIGRATION_MODE;
+    else process.env.AGENT_CLUSTER_WORKITEM_MIGRATION_MODE = previousMode;
+  }
 });
 
 test('honors the explicit startup interruption disable switch', async () => {

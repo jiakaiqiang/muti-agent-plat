@@ -83,6 +83,7 @@ export async function fetchDeviceStatus(state: LocalRuntimeState) {
   if (!state.tokens) return [];
   await ensureAccessToken(state);
   const device = await apiJson<Record<string, unknown>>(state.serverUrl, '/api/local-runtime/device-tokens/current', {
+    signal: AbortSignal.timeout(10_000),
     headers: { authorization: `Bearer ${state.tokens.accessToken}` }
   });
   return [device];
@@ -97,19 +98,44 @@ export async function revokeDevice(state: LocalRuntimeState) {
   });
 }
 
-export async function runBridge(state: LocalRuntimeState, cliVersion: string, signal: AbortSignal) {
+/** Optional desktop lifecycle; the standalone CLI keeps its existing behavior. */
+export type BridgeLifecycle = {
+  isDraining?: () => boolean;
+  onActivityChange?: (count: number) => void;
+  onConnectionChange?: (connected: boolean) => void;
+  onConnectionError?: (error: unknown) => void;
+  stopOnAuthorizationFailure?: boolean;
+  /** Explicit recovery policy supplied by the local development launcher. */
+  authorizeMissingTokens?: () => Promise<unknown>;
+};
+
+export async function runBridge(state: LocalRuntimeState, cliVersion: string, signal: AbortSignal, lifecycle: BridgeLifecycle = {}) {
   const writebackAuthorizations = new LocalWritebackAuthorizationStore();
+  const activityByConnection = new Map<object, number>();
   while (!signal.aborted) {
     try {
       if (state.tokens) await ensureAccessToken(state);
+      else if (lifecycle.authorizeMissingTokens) await lifecycle.authorizeMissingTokens();
       else await authorizeLoopbackDevice(state, cliVersion);
-      await runBridgeConnection(state, cliVersion, signal, writebackAuthorizations);
+      if (signal.aborted) break;
+      const connectionKey = {};
+      await runBridgeConnection(state, cliVersion, signal, writebackAuthorizations, {
+        ...lifecycle,
+        onActivityChange(count) {
+          if (count) activityByConnection.set(connectionKey, count);
+          else activityByConnection.delete(connectionKey);
+          lifecycle.onActivityChange?.([...activityByConnection.values()].reduce((sum, value) => sum + value, 0));
+        }
+      });
     } catch (error) {
       if (signal.aborted) break;
+      const canRecover = Boolean(state.tokens && lifecycle.authorizeMissingTokens);
       if (isAuthorizationFailure(error) && state.tokens) {
         delete state.tokens;
         await saveState(state);
       }
+      if (isAuthorizationFailure(error) && lifecycle.stopOnAuthorizationFailure && !canRecover) throw error;
+      lifecycle.onConnectionError?.(error);
       process.stderr.write(`Local Runtime connection failed: ${error instanceof Error ? error.message : String(error)}\n`);
     }
     if (!signal.aborted) await abortableDelay(2_000, signal).catch(() => undefined);
@@ -120,14 +146,17 @@ async function runBridgeConnection(
   state: LocalRuntimeState,
   cliVersion: string,
   signal: AbortSignal,
-  writebackAuthorizations: LocalWritebackAuthorizationStore
+  writebackAuthorizations: LocalWritebackAuthorizationStore,
+  lifecycle: BridgeLifecycle
 ) {
   const accessToken = state.tokens?.accessToken;
   if (!accessToken) throw new Error('Local Runtime access token is unavailable.');
   const socketUrl = new URL('/local-runtime', state.serverUrl);
   socketUrl.protocol = socketUrl.protocol === 'https:' ? 'wss:' : 'ws:';
-  const socket = new WebSocket(socketUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+  const socket = new WebSocket(socketUrl, { handshakeTimeout: 10_000, headers: { Authorization: `Bearer ${accessToken}` } });
   const active = new Map<string, AbortController>();
+  let pendingMessages = 0;
+  const reportActivity = () => lifecycle.onActivityChange?.(pendingMessages + active.size);
   const workspaceAuthorizations = new Map<string, AbortController>();
   const workspaceInitializations = new Map<string, Promise<void>>();
   const secrets = new LocalSecretStore();
@@ -137,7 +166,9 @@ async function runBridgeConnection(
     new LocalWorkspace(workspace, { onIndexUpdated: indexPersistence.onIndexUpdated })
   ]));
   let heartbeat: NodeJS.Timeout | undefined;
+  let stopReceiptProtocol = false;
   const send = (message: LocalRuntimeClientMessage) => {
+    if (message.kind === 'local_runtime.invocation.stopped' && !stopReceiptProtocol) return;
     if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
   };
   const watchedStatePath = stateFilePath();
@@ -164,34 +195,63 @@ async function runBridgeConnection(
     let opened = false;
     socket.on('open', async () => {
       opened = true;
-      const capabilities = await probeLocalRuntimeCapabilities();
-      const runtimes = runtimesFromCapabilities(capabilities);
-      send({
-        kind: 'local_runtime.hello',
-        payload: {
-          deviceId: state.deviceId,
-          cliVersion,
-          protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
-          runtimes,
-          capabilities
+      if (signal.aborted || lifecycle.isDraining?.()) { socket.close(); return; }
+      pendingMessages++;
+      reportActivity();
+      try {
+        const capabilities = await probeLocalRuntimeCapabilities();
+        if (signal.aborted) return;
+        const runtimes = runtimesFromCapabilities(capabilities);
+        send({
+          kind: 'local_runtime.hello',
+          payload: {
+            outputContractVersions: ['1.0', '2.0'],
+            deviceId: state.deviceId,
+            cliVersion,
+            protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+            runtimes,
+            capabilities
+          }
+        });
+        for (const workspace of workspaces.values()) {
+          send({
+            kind: 'local_runtime.workspace.register',
+            payload: await workspaceRegistration(workspace)
+          });
         }
-      });
-      for (const workspace of workspaces.values()) {
-        send({
-          kind: 'local_runtime.workspace.register',
-          payload: await workspaceRegistration(workspace)
-        });
+        heartbeat = setInterval(() => {
+          for (const receipt of state.pendingStopReceipts ?? []) {
+            send({ kind: 'local_runtime.invocation.stopped', payload: receipt });
+          }
+          send({
+            kind: 'local_runtime.heartbeat',
+            payload: { deviceId: state.deviceId, sentAt: new Date().toISOString() }
+          });
+        }, 15_000);
+      } catch (error) {
+        reject(error);
+        socket.close();
+      } finally {
+        pendingMessages--;
+        reportActivity();
       }
-      heartbeat = setInterval(() => {
-        send({
-          kind: 'local_runtime.heartbeat',
-          payload: { deviceId: state.deviceId, sentAt: new Date().toISOString() }
-        });
-      }, 15_000);
     });
     socket.on('message', (data) => {
+      if (signal.aborted || lifecycle.isDraining?.()) return;
+      let message: LocalRuntimeServerMessage;
+      try { message = JSON.parse(data.toString()) as LocalRuntimeServerMessage; }
+      catch { socket.close(1002, 'invalid_json'); return; }
+      if (message.kind === 'local_runtime.connected') {
+        stopReceiptProtocol = message.payload.stopReceiptProtocol === 1;
+        lifecycle.onConnectionChange?.(true);
+        for (const receipt of state.pendingStopReceipts ?? []) {
+          send({ kind: 'local_runtime.invocation.stopped', payload: receipt });
+        }
+      }
+      pendingMessages++;
+      reportActivity();
       void handleServerMessage(
-        JSON.parse(data.toString()) as LocalRuntimeServerMessage,
+        message,
         state,
         workspaces,
         active,
@@ -200,21 +260,26 @@ async function runBridgeConnection(
         writebackAuthorizations,
         secrets,
         indexPersistence,
-        send
+        send,
+        reportActivity
       )
-        .catch((error) => process.stderr.write(`Local Runtime request failed: ${error instanceof Error ? error.message : String(error)}\n`));
+        .catch((error) => process.stderr.write(`Local Runtime request failed: ${error instanceof Error ? error.message : String(error)}\n`))
+        .finally(() => { pendingMessages--; reportActivity(); });
     });
     socket.on('unexpected-response', (_, response) => reject(new Error(`WebSocket upgrade rejected with HTTP ${response.statusCode}.`)));
     socket.on('error', (error) => { if (!opened) reject(error); });
     socket.on('close', () => {
+      lifecycle.onConnectionChange?.(false);
       if (heartbeat) clearInterval(heartbeat);
       for (const controller of active.values()) controller.abort(new Error('Local Runtime connection closed.'));
-      active.clear();
+      // Keep invocation activity until execution and its result persistence settle.
+      // Clearing here could allow an updater to kill work still unwinding after disconnect.
       for (const controller of workspaceAuthorizations.values()) controller.abort(new Error('Local Runtime connection closed.'));
       workspaceAuthorizations.clear();
       resolve();
     });
   }).finally(async () => {
+    if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
     unwatchFile(watchedStatePath, syncWorkspaceRevocations);
     await workspaceRevocationSync;
     signal.removeEventListener('abort', closeForAbort);
@@ -234,7 +299,8 @@ async function handleServerMessage(
   writebackAuthorizations: LocalWritebackAuthorizationStore,
   secrets: LocalSecretStore,
   indexPersistence: WorkspaceIndexPersistence,
-  send: (message: LocalRuntimeClientMessage) => void
+  send: (message: LocalRuntimeClientMessage) => void,
+  reportActivity: () => void = () => undefined
 ) {
   if (message.kind === 'local_runtime.capabilities.request') {
     const capabilities = await probeLocalRuntimeCapabilities();
@@ -429,11 +495,13 @@ async function handleServerMessage(
     const workspace = workspaces.get(workspaceId);
     if (!workspace) throw new Error(`Unregistered local workspace: ${workspaceId}`);
     if (active.has(plan.invocationId)) throw new Error(`Duplicate invocation: ${plan.invocationId}`);
+    if ((state.pendingStopReceipts?.length ?? 0) >= 256) throw new Error('STOP_RECEIPT_BACKLOG: reconnect before starting more work.');
     const localPermissions = workspace.permissionPolicy();
     const consumedPermissions = workspace.consumeOneTimePermissions();
     if (consumedPermissions.length) await saveState(state);
     const controller = new AbortController();
     active.set(plan.invocationId, controller);
+    reportActivity();
     const emit = (event: Parameters<typeof send>[0] extends never ? never : import('@agent-cluster/shared').AgentRuntimeEvent) => {
       send({ kind: 'local_runtime.invocation.event', payload: event });
     };
@@ -452,6 +520,10 @@ async function handleServerMessage(
       providerConnectionError
     )
       .then(async (result) => {
+        const receipt = { invocationId: plan.invocationId, workspaceId, runtimeType: result.runtimeType };
+        state.pendingStopReceipts = [...(state.pendingStopReceipts ?? []).filter(item => item.invocationId !== plan.invocationId), receipt];
+        // Persist before sending. A disconnect must not lose the process-exit receipt.
+        await saveState(state);
         const changeSet = result.workspaceExecution?.changeSet;
         if (
           changeSet &&
@@ -469,16 +541,23 @@ async function handleServerMessage(
             workspaceRevision
           }
         });
+        send({ kind: 'local_runtime.invocation.stopped', payload: receipt });
         send({
           kind: 'local_runtime.workspace.register',
           payload: { ...await workspaceRegistration(workspace), revision: workspaceRevision }
         });
       })
-      .finally(() => active.delete(plan.invocationId));
+      .catch((error) => process.stderr.write(`Local Runtime invocation failed: ${error instanceof Error ? error.message : String(error)}\n`))
+      .finally(() => { active.delete(plan.invocationId); reportActivity(); });
     return;
   }
   if (message.kind === 'local_runtime.invocation.cancel') {
     active.get(message.payload.invocationId)?.abort(message.payload.termination);
+    return;
+  }
+  if (message.kind === 'local_runtime.invocation.stop_ack') {
+    state.pendingStopReceipts = (state.pendingStopReceipts ?? []).filter(item => item.invocationId !== message.payload.invocationId);
+    await saveState(state);
     return;
   }
   if (message.kind === 'local_runtime.protocol.error') {
@@ -815,6 +894,7 @@ async function ensureAccessToken(state: LocalRuntimeState) {
   if (state.tokens && Date.parse(state.tokens.accessTokenExpiresAt) > Date.now() + 60_000) return;
   if (!state.tokens?.refreshToken) throw new Error('Local Runtime refresh token is unavailable.');
   state.tokens = await apiJson<LocalRuntimeTokenResponse>(state.serverUrl, '/api/local-runtime/device-tokens/refresh', {
+    signal: AbortSignal.timeout(10_000),
     method: 'POST',
     body: JSON.stringify({ refreshToken: state.tokens.refreshToken })
   });
@@ -823,7 +903,7 @@ async function ensureAccessToken(state: LocalRuntimeState) {
 
 function isAuthorizationFailure(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
-  return /HTTP 401|HTTP 403|access token is invalid|refresh token is invalid/i.test(message);
+  return /HTTP 401|HTTP 403|access token is invalid|refresh token is (invalid|unavailable)/i.test(message);
 }
 
 async function apiJson<T>(serverUrl: string, path: string, init: RequestInit = {}): Promise<T> {
@@ -861,9 +941,21 @@ function apiErrorMessage(body: unknown): string | undefined {
   return undefined;
 }
 
-function abortableDelay(ms: number, signal: AbortSignal) {
+export function abortableDelay(ms: number, signal: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
   });
 }

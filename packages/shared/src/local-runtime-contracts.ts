@@ -204,6 +204,7 @@ export type LocalRuntimeTokenPendingResponse = {
 };
 
 export type LocalRuntimeHello = {
+  outputContractVersions?: readonly string[];
   deviceId: UUID;
   cliVersion: string;
   protocolVersion: number;
@@ -231,6 +232,12 @@ export type LocalRuntimeWorkspaceOperationRequest = import('./contracts.js').Wor
   permissions: LocalRuntimePermissionPolicy;
 };
 
+export type LocalRuntimeStopReceipt = {
+  invocationId: UUID;
+  workspaceId: UUID;
+  runtimeType: RuntimeType;
+};
+
 export type LocalRuntimeClientMessage =
   | { kind: 'local_runtime.hello'; payload: LocalRuntimeHello }
   | { kind: 'local_runtime.heartbeat'; payload: { deviceId: UUID; sentAt: ISODateTime } }
@@ -246,13 +253,15 @@ export type LocalRuntimeClientMessage =
   | { kind: 'local_runtime.provider_connection.result'; payload: LocalRuntimeProviderConnectionResult }
   | { kind: 'local_runtime.workspace.operation.result'; payload: import('./contracts.js').WorkspaceOperationResult }
   | { kind: 'local_runtime.invocation.event'; payload: AgentRuntimeEvent }
-  | { kind: 'local_runtime.invocation.result'; payload: LocalRuntimeInvocationResult };
+  | { kind: 'local_runtime.invocation.result'; payload: LocalRuntimeInvocationResult }
+  | { kind: 'local_runtime.invocation.stopped'; payload: LocalRuntimeStopReceipt };
 
 export type LocalRuntimeServerMessage =
   | {
       kind: 'local_runtime.connected';
-      payload: { deviceId: UUID; compatibility: LocalRuntimeCompatibility; connectedAt: ISODateTime };
+      payload: { deviceId: UUID; compatibility: LocalRuntimeCompatibility; connectedAt: ISODateTime; stopReceiptProtocol?: 1 };
     }
+  | { kind: 'local_runtime.invocation.stop_ack'; payload: { invocationId: UUID } }
   | { kind: 'local_runtime.workspace.registered'; payload: LocalRuntimeWorkspaceRegistration }
   | { kind: 'local_runtime.workspace.registration_rejected'; payload: { workspaceId: UUID; code: string; message: string } }
   | { kind: 'local_runtime.workspace.authorization.request'; payload: LocalRuntimeWorkspaceAuthorizationRequest }

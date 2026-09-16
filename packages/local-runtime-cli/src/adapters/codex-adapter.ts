@@ -1,11 +1,12 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { RuntimeOutput } from '@agent-cluster/shared';
-import { getRuntimeOutputContract, validateRuntimeOutput } from '@agent-cluster/shared';
+import type { RuntimeOutput, MinimalTaskSubmission } from '@agent-cluster/shared';
+import { getVersionedRuntimeOutputContract, validateRuntimeOutput } from '@agent-cluster/shared';
 import { detectRuntimeVersion, parseConfiguredArgs, runRuntimeCommand } from '../runtime-process.js';
 import type { LocalRuntimeAdapter } from './adapter.js';
 import { buildLocalRuntimePrompt } from './prompt.js';
+import { SubmissionError } from './submission-error.js';
 
 export class CodexLocalRuntimeAdapter implements LocalRuntimeAdapter {
   readonly runtimeType = 'codex' as const;
@@ -24,7 +25,7 @@ export class CodexLocalRuntimeAdapter implements LocalRuntimeAdapter {
     const configuredArgs = process.env.AGENT_RUNTIME_CODEX_ARGS_JSON?.trim();
     const baseArgs = configuredArgs
       ? parseConfiguredArgs(configuredArgs, 'AGENT_RUNTIME_CODEX_ARGS_JSON')
-      : buildCodexArgs();
+      : buildCodexArgs(plan.submissionRepair);
     if (providerConnection && providerConnection.provider !== 'openai-compatible') {
       throw new Error('MODEL_PROTOCOL_MISMATCH: Codex requires an OpenAI-compatible connection.');
     }
@@ -32,7 +33,7 @@ export class CodexLocalRuntimeAdapter implements LocalRuntimeAdapter {
     const schemaPath = join(schemaDirectory, 'runtime-output.schema.json');
     await writeFile(
       schemaPath,
-      JSON.stringify(getRuntimeOutputContract(plan.expectedOutput.kind).schema),
+      JSON.stringify(getVersionedRuntimeOutputContract(plan.expectedOutput.kind, plan.expectedOutput.schemaVersion).schema),
       'utf8'
     );
 
@@ -51,7 +52,7 @@ export class CodexLocalRuntimeAdapter implements LocalRuntimeAdapter {
         } : undefined
       });
       if (exitCode !== 0) throw new Error(formatCodexProcessFailure(stdout, stderr, exitCode));
-      const output = parseCodexOutput(stdout, plan.expectedOutput.kind);
+      const output = parseCodexOutput(stdout, plan.expectedOutput.kind, plan.expectedOutput.schemaVersion);
       return {
         output,
         usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: plan.executionTarget.modelId ?? 'codex' }
@@ -62,8 +63,8 @@ export class CodexLocalRuntimeAdapter implements LocalRuntimeAdapter {
   }
 }
 
-export function buildCodexArgs() {
-  return ['exec', '--json', '--sandbox', 'workspace-write', '--skip-git-repo-check', '-'];
+export function buildCodexArgs(readOnly = false) {
+  return ['exec', '--json', '--sandbox', readOnly ? 'read-only' : 'workspace-write', '--skip-git-repo-check', '-'];
 }
 
 /**
@@ -146,7 +147,7 @@ export function withCodexOutputSchema(args: string[], schemaPath: string) {
   ];
 }
 
-export function parseCodexOutput(stdout: string, expectedKind: Parameters<typeof validateRuntimeOutput>[0]): RuntimeOutput {
+export function parseCodexOutput(stdout: string, expectedKind: Parameters<typeof validateRuntimeOutput>[0], version = '1.0'): RuntimeOutput | MinimalTaskSubmission {
   const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   let candidate: unknown;
   for (const line of lines) {
@@ -163,11 +164,9 @@ export function parseCodexOutput(stdout: string, expectedKind: Parameters<typeof
   if (!candidate) {
     try { candidate = JSON.parse(stdout.trim()); } catch { /* handled below */ }
   }
-  const validation = validateRuntimeOutput(expectedKind, candidate);
+  const validation = getVersionedRuntimeOutputContract(expectedKind, version).validate(candidate);
   if (!validation.valid) {
-    throw new Error(
-      `RUNTIME_OUTPUT_CONTRACT_VIOLATION: expected output kind ${expectedKind}: ${validation.errors.join('; ')}`
-    );
+    throw new SubmissionError(candidate, validation.errors);
   }
   return validation.value;
 }

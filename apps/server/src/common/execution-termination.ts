@@ -25,6 +25,7 @@ export type CreateExecutionTerminationInput = {
 };
 
 const safeMessages: Record<ExecutionTerminationKind, string> = {
+  output_contract_failure: '输出格式纠正额度已耗尽，本次调用已停止。',
   user_cancelled: '执行已由用户取消。',
   user_paused: '执行已由用户暂停，可以稍后继续。',
   frontend_disconnected: '前端连接已断开，会话执行已停止。',
@@ -60,7 +61,7 @@ export function isExecutionTermination(value: unknown): value is ExecutionTermin
     candidate.schemaVersion === '1.0' &&
     typeof candidate.terminationId === 'string' &&
     typeof candidate.occurredAt === 'string' &&
-    ['user_cancelled', 'user_paused', 'frontend_disconnected', 'runtime_disconnected', 'phase_timeout', 'runtime_timeout', 'service_shutdown', 'superseded', 'maintenance'].includes(
+    ['output_contract_failure', 'user_cancelled', 'user_paused', 'frontend_disconnected', 'runtime_disconnected', 'phase_timeout', 'runtime_timeout', 'service_shutdown', 'superseded', 'maintenance'].includes(
       candidate.kind ?? ''
     ) &&
     ['user', 'orchestrator', 'runtime', 'system', 'operator'].includes(candidate.source ?? '') &&
@@ -100,13 +101,14 @@ export function terminationDisposition(termination: ExecutionTermination): Execu
     termination.kind === 'frontend_disconnected' ||
     termination.kind === 'runtime_disconnected' ||
     termination.kind === 'service_shutdown' ||
-    termination.kind === 'maintenance'
+    termination.kind === 'maintenance' || termination.kind === 'output_contract_failure'
   ) return 'stop';
   if (termination.kind === 'superseded') return 'replace';
   return 'retry';
 }
 
 export function terminationErrorCode(termination: ExecutionTermination): RuntimeError['code'] {
+  if (termination.kind === 'output_contract_failure') return 'RUNTIME_OUTPUT_CONTRACT_VIOLATION';
   return termination.kind === 'phase_timeout' || termination.kind === 'runtime_timeout'
     ? 'RUNTIME_TIMEOUT'
     : 'RUNTIME_CANCELLED';
@@ -120,12 +122,13 @@ export function normalizeTerminatedResult(
   result: AgentRunResult,
   termination: ExecutionTermination
 ): AgentRunResult {
+  if (result.error?.details?.stopUnconfirmed) return result;
   const message = safeTerminationMessage(termination);
   const retryable = terminationRetryable(termination);
   const code = terminationErrorCode(termination);
   return {
     ...result,
-    status: code === 'RUNTIME_TIMEOUT' ? 'failed' : 'cancelled',
+    status: code === 'RUNTIME_TIMEOUT' || code === 'RUNTIME_OUTPUT_CONTRACT_VIOLATION' ? 'failed' : 'cancelled',
     output: createAgentMessageOutput({ messageKind: 'risk', content: message }),
     termination,
     error: {

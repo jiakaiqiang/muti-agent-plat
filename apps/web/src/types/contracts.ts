@@ -40,6 +40,7 @@ import type {
   RuntimeInvocationStatus,
   RuntimeInvocationProfileSnapshot,
   RuntimePreference,
+  RuntimeStopSummary,
   ResolvedToolCatalog,
   ResolvedExecutionTarget,
   HandoffSuggestion,
@@ -118,6 +119,7 @@ export type {
   RuntimeInvocationStatus,
   RuntimeInvocationProfileSnapshot,
   RuntimePreference,
+  RuntimeStopSummary,
   ResolvedExecutionTarget,
   ResolvedToolCatalog,
   HandoffSuggestion,
@@ -161,7 +163,7 @@ export type {
 
 export { DEFAULT_CONTEXT_PIPELINE_VERSION, SUPPORTED_CONTEXT_PIPELINE_VERSIONS } from '@agent-cluster/shared'
 
-export type SessionViewMode = 'chat' | 'collaboration_graph' | 'workflow' | 'debug'
+export type SessionViewMode = 'chat' | 'collaboration_graph' | 'workflow' | 'workflow_details' | 'debug'
 
 export type ConfirmationReason =
   | 'confirm_task_brief'
@@ -170,9 +172,14 @@ export type ConfirmationReason =
   | 'confirm_workflow_step'
   | 'confirm_workflow_human_gate'
   | 'workflow_agent_substitution'
+  | 'workflow_upstream_rerun'
   | 'approve_high_risk_capability'
   | 'approve_capability'
   | 'approve_local_runtime_permission'
+  | 'reconnect_local_runtime'
+  | 'recover_interrupted_execution'
+  | 'retry_failed_execution'
+  | 'coordinator_routing_needs_user_decision'
   | 'resolve_contract_conflict'
   | 'confirm_memory_write'
   | 'confirm_local_report_save'

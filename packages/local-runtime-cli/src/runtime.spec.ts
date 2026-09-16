@@ -14,6 +14,8 @@ import {
   shouldApplyStagedChangeSet
 } from './runtime.js';
 import { createWorkspaceState, LocalWorkspace } from './workspace.js';
+import { getLocalRuntimeAdapter } from './adapters/registry.js';
+import { SubmissionError } from './adapters/submission-error.js';
 
 test('proposal_only keeps staged edits as evidence without applying them to the user workspace', () => {
   assert.equal(shouldApplyStagedChangeSet('proposal_only'), false);
@@ -808,7 +810,7 @@ async function invocationRequest(
       requiredCapabilities: ['read', 'write', 'command'],
       writeMode: 'propose_changes'
     },
-    contextEnvelope: {},
+    contextEnvelope: { L0: { workspace: { workspaceId: workspace.state.workspaceId } }, L1: {}, L2: {}, L3: {}, L4: {}, L5: {} },
     toolCatalog: { decisions: [] },
     expectedOutput: { kind: 'agent_message', schemaVersion: '1.0' }
   } as unknown as InvocationPlan;
@@ -819,3 +821,87 @@ async function invocationRequest(
     permissions: workspace.state.permissions
   };
 }
+
+test('failed submission preserves a candidate, repairs without development tools and rejects cross-task reuse', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'candidate-recovery-test-'));
+  const state = await createWorkspaceState(root, 'candidate-test');
+  state.permissions = { ...state.permissions, command_execute: 'allow' };
+  const workspace = new LocalWorkspace(state, { watch: false, index: false });
+  const adapter = getLocalRuntimeAdapter('claude_code');
+  const previousExecute = adapter.execute;
+  let developmentCalls = 0;
+  let adapterCalls = 0;
+  try {
+    await writeFile(join(root, 'README.md'), 'original', 'utf8');
+    const request = await invocationRequest(workspace, 'claude_code');
+    request.plan.taskId = 'task-one';
+    request.plan.expectedOutput = { kind: 'task_execution_result', schemaVersion: '2.0' };
+    adapter.execute = async ({ cwd, plan, permissions }) => {
+      adapterCalls++;
+      if (!plan.submissionRepair) {
+        developmentCalls++;
+        await writeFile(join(cwd, 'README.md'), 'implemented', 'utf8');
+        throw new SubmissionError({ status: 'completed', summary: 'Updated README', artifactRefs: ['README.md'] }, ['blockers missing']);
+      }
+      assert.deepEqual(plan.toolCatalog.tools, []);
+      assert.equal(permissions.workspace_write, 'deny');
+      assert.equal(permissions.command_execute, 'deny');
+      assert.equal(permissions.test_execute, 'deny');
+      const args = buildClaudeArgs(plan, permissions);
+      assert.ok(args.includes('--safe-mode'));
+      assert.equal(args[args.indexOf('--tools') + 1], '');
+      assert.equal(await readFile(join(cwd, 'README.md'), 'utf8'), 'implemented');
+      return { output: { kind: 'task_execution_result', schemaVersion: '2.0', status: 'completed',
+        summary: 'Updated README', artifactRefs: ['README.md'], blockers: [], nextActions: [] },
+      usage: { model: 'test-stub', inputTokens: 1, outputTokens: 1, totalTokens: 2 } };
+    };
+    const failed = await executeLocalInvocation(request, workspace, new AbortController().signal, () => {});
+    assert.equal(failed.error?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
+    assert.ok(failed.executionCandidate);
+    const candidate = JSON.parse(JSON.stringify(failed.executionCandidate));
+    assert.equal(await readFile(join(root, 'README.md'), 'utf8'), 'original');
+    const repair = { ...request, plan: { ...request.plan, invocationId: 'repair', submissionRepair: true, recoveryCandidate: candidate } };
+    const repaired = await executeLocalInvocation(repair, workspace, new AbortController().signal, () => {});
+    assert.equal(repaired.status, 'completed', repaired.error?.message);
+    assert.equal(repaired.executionCandidate?.stage, 'submission_validated');
+    assert.equal(developmentCalls, 1);
+    assert.equal(await readFile(join(root, 'README.md'), 'utf8'), 'original');
+    const foreign = await executeLocalInvocation({ ...repair, plan: { ...repair.plan, taskId: 'task-two' } }, workspace, new AbortController().signal, () => {});
+    assert.match(foreign.error?.message ?? '', /CANDIDATE_SCOPE_MISMATCH/);
+    const revoked = await executeLocalInvocation(repair, workspace, new AbortController().signal, () => {}, { ...state.permissions, workspace_write: 'deny' });
+    assert.equal(revoked.status, 'failed');
+    const callsBeforeInvalidCandidates = adapterCalls;
+    for (const [changes, expected] of [
+      [{ sessionId: 'foreign-session' }, 'CANDIDATE_SCOPE_MISMATCH'],
+      [{ workItemId: 'foreign-work-item' }, 'CANDIDATE_SCOPE_MISMATCH'],
+      [{ workspaceId: 'foreign-workspace' }, 'CANDIDATE_SCOPE_MISMATCH'],
+      [{ expiresAt: '2000-01-01T00:00:00.000Z' }, 'CANDIDATE_EXPIRED'],
+      [{ expiresAt: 'invalid' }, 'CANDIDATE_EXPIRED'],
+      [{ outputVersion: '1.0' }, 'CANDIDATE_OUTPUT_VERSION_CHANGED'],
+      [{ manifestHash: 'tampered' }, 'CANDIDATE_HASH_MISMATCH'],
+      [{ permissionHash: 'revoked' }, 'CANDIDATE_PERMISSIONS_CHANGED'],
+      [{ baseRevision: { ...candidate.baseRevision, id: 'stale-baseline' } }, 'CANDIDATE_BASELINE_CHANGED']
+    ] as const) {
+      const invalid = await executeLocalInvocation({ ...repair, plan: { ...repair.plan,
+        recoveryCandidate: { ...candidate, ...changes } } }, workspace, new AbortController().signal, () => {});
+      assert.ok(invalid.error?.message.includes(expected), `${expected}: ${invalid.error?.message}`);
+      assert.equal(invalid.workspaceExecution, undefined);
+    }
+    assert.equal(adapterCalls, callsBeforeInvalidCandidates, 'invalid recovery must fail before invoking any adapter');
+    const authorized = await executeLocalInvocation({ ...repair, plan: { ...repair.plan,
+      taskId: 'explicit-new-attempt', recoveryOriginTaskId: 'task-one' } }, workspace, new AbortController().signal, () => {});
+    assert.equal(authorized.status, 'completed');
+    assert.equal(developmentCalls, 1);
+    const validRepair = adapter.execute;
+    adapter.execute = async input => {
+      const result = await validRepair(input);
+      await writeFile(join(input.cwd, 'README.md'), 'unexpected second development', 'utf8');
+      return result;
+    };
+    const mutated = await executeLocalInvocation(repair, workspace, new AbortController().signal, () => {});
+    assert.match(mutated.error?.message ?? '', /CANDIDATE_REPAIR_SIDE_EFFECT_DETECTED/);
+    assert.equal(mutated.executionCandidate, undefined);
+    assert.equal(mutated.workspaceExecution, undefined);
+    assert.equal(await readFile(join(root, 'README.md'), 'utf8'), 'original');
+  } finally { adapter.execute = previousExecute; workspace.close(); await rm(root, { recursive: true, force: true }); }
+});

@@ -122,9 +122,10 @@ export async function apiPut<T>(path: string, body?: unknown, init?: ApiRequestI
   ).data
 }
 
-export async function apiPatch<T>(path: string, body?: unknown) {
+export async function apiPatch<T>(path: string, body?: unknown, init?: ApiRequestInit) {
   return (
     await request<T>(path, {
+      ...init,
       method: 'PATCH',
       body: body === undefined ? undefined : JSON.stringify(body)
     })

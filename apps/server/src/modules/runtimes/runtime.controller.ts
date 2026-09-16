@@ -30,6 +30,12 @@ export class RuntimeController {
     return ok({ items: await this.runtime.listRuntimeAvailability() });
   }
 
+  @Get('operations')
+  operations(@Query('sessionId') sessionId?: string) {
+    if (!sessionId?.trim()) throw new BadRequestException('sessionId is required.');
+    return ok({ items: this.runtime.operations.list(sessionId) });
+  }
+
   @Post('model-config/switch')
   async switchModel(@Body() body?: { model?: string }) {
     return ok(await this.modelConfig.switchModel(body?.model ?? ''));

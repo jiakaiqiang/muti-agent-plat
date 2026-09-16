@@ -584,6 +584,12 @@ export type ExecutionTargetSource =
 export type RuntimeExecutionLocation = 'local' | 'server';
 
 export type ResolvedExecutionTarget = {
+  providerIdentity?: {
+    connectionId: string;
+    modelId: string;
+    protocol: string;
+    source: 'configured_connection' | 'unknown';
+  };
   runtimeType: RuntimeType;
   modelId?: string;
   source: ExecutionTargetSource;
@@ -1210,6 +1216,7 @@ export type CollaborationEventType =
   | 'task_waiting'
   | 'task_completed'
   | 'task_dependency_reconciled'
+  | 'task_failed'
   | 'task_rejected'
   | 'task_reworked'
   | 'runtime_started'
@@ -1365,6 +1372,11 @@ export type SessionDetail = {
     reason?: string;
   };
   /**
+   * Durable pointer to the one user action that can recover the current execution.
+   * Historical confirmation events remain audit records and are not used as control state.
+   */
+  activeRecoveryCheckpoint?: SessionRecoveryCheckpoint;
+  /**
    * Invocations that are paused waiting for capability approval.
    * After user approves, these are automatically retried.
    */
@@ -1387,7 +1399,32 @@ export type SessionDetail = {
     invocationId?: UUID;
     occurredAt: ISODateTime;
     wakeable: true;
+    /** Status held when the interruption happened, captured before the switch to INTERRUPTED. */
+    previousStatus?: SessionStatus;
+    /** WorkItem that owned the interrupted execution. */
+    workItemId?: UUID;
+    /**
+     * Phase derived from previousStatus, in the same vocabulary as failure phases
+     * (discussion / brief_revision / task_execution). Interruptions emit no failure
+     * event, so this is the only reliable phase source for resume decisions.
+     */
+    phase?: string;
   };
+};
+
+export type SessionRecoveryCheckpoint = {
+  confirmationId: UUID;
+  reason:
+    | 'coordinator_routing_needs_user_decision'
+    | 'reconnect_local_runtime'
+    | 'recover_interrupted_execution'
+    | 'retry_failed_execution';
+  workflowRunId?: UUID;
+  workflowNodeRunId?: UUID;
+  phase?: string;
+  sourceEventId?: UUID;
+  retryable: true;
+  createdAt: ISODateTime;
 };
 
 export type SessionListItem = Pick<
@@ -1397,6 +1434,8 @@ export type SessionListItem = Pick<
   agentCount: number;
   requiresUserAction: boolean;
   latestEventSummary?: string;
+  projectId?: UUID;
+  workspaceId?: string;
 };
 
 export type RuntimePreference = {
@@ -1528,6 +1567,7 @@ export type WorkflowNodeRunStatus =
   | 'skipped';
 
 export type WorkflowNodeRun = {
+  executionCheckpoint?: AgentTask['executionCheckpoint'];
   id: UUID;
   workflowRunId: UUID;
   nodeId: UUID;
@@ -1562,6 +1602,45 @@ export type WorkflowApprovalRecord = {
   createdAt: ISODateTime;
 };
 
+/**
+ * One previously executed Agent node a blocked downstream node can be sent back
+ * to. Only Agent nodes are offered: approval gates carry no re-executable work.
+ */
+export type WorkflowUpstreamRerunCandidate = {
+  nodeId: UUID;
+  nodeName: string;
+  agentId: UUID;
+  agentName: string;
+  lastOutputSummary?: string;
+};
+
+/**
+ * Parks a run whose current Agent node reported that its upstream input is
+ * incomplete. While this is set the run must never resume implicitly: doing so
+ * would re-run the same node against the same missing upstream output.
+ */
+export type WorkflowPendingUpstreamRerun = {
+  nodeId: UUID;
+  nodeRunId: UUID;
+  taskId: UUID;
+  reason: string;
+  missingInputs: string[];
+  candidates: WorkflowUpstreamRerunCandidate[];
+  requestedAt: ISODateTime;
+};
+
+/** Durable user-decision point for an Agent that cannot accept its assignment. */
+export type WorkflowPendingAgentSubstitution = {
+  nodeId: UUID;
+  nodeRunId: UUID;
+  taskId: UUID;
+  currentAgentId: UUID;
+  reason: string;
+  candidates: Array<{ id: UUID; key: string; name: string; role: string }>;
+  confirmationId: string;
+  requestedAt: ISODateTime;
+};
+
 export type WorkflowEffectType =
   | 'create_agent_task'
   | 'execute_agent_task'
@@ -1592,9 +1671,13 @@ export type WorkflowRun = {
   definitionSnapshot: WorkflowVersion;
   status: WorkflowRunStatus;
   currentNodeId?: UUID;
+  pendingAgentSubstitution?: WorkflowPendingAgentSubstitution;
+  pendingUpstreamRerun?: WorkflowPendingUpstreamRerun;
   revision: number;
   runtimeVersion: 'v2';
   startIdempotencyKey: string;
+  /** Read-only hash manifest captured before the first node; no current-file fallback. */
+  fileBaseline?: WorkflowFileBaseline;
   createdAt: ISODateTime;
   updatedAt: ISODateTime;
   completedAt?: ISODateTime;
@@ -1603,6 +1686,26 @@ export type WorkflowRun = {
     message: string;
     nodeId?: UUID;
   };
+};
+
+export type WorkflowFileBaseline = {
+  capturedAt: ISODateTime;
+  complete: boolean;
+  hashes: Record<string, string>;
+  reason?: string;
+};
+
+export type WorkflowDeliveryFileDiff = {
+  status: 'complete' | 'unavailable';
+  source: string;
+  reason?: string;
+  files: Array<{
+    path: string;
+    operation: 'create' | 'update' | 'delete' | 'move';
+    previousPath?: string;
+    before?: string;
+    after?: string;
+  }>;
 };
 
 export type WorkflowRunState = {
@@ -1794,6 +1897,25 @@ export type TaskBrief = {
 };
 
 export type AgentTask = {
+  recoveryOriginTaskId?: UUID;
+  previousExecutionOperationId?: UUID;
+  executionCheckpoint?: {
+    operationId?: string;
+    invocationId: string;
+    candidateId?: string;
+    candidateHash?: string;
+    stage: 'candidate_captured' | 'submission_validated' | 'writeback_confirmed';
+    writebackId?: string;
+  };
+  executionOperationId?: UUID;
+  acceptanceCheckpoint?: {
+    inputFingerprint: string;
+    agentId: UUID;
+    decisionSource: 'rule' | 'model';
+    decision: TaskAcceptanceDecisionOutput;
+    invocationId: UUID;
+    createdAt: ISODateTime;
+  };
   id: UUID;
   sessionId: UUID;
   workItemId?: UUID;
@@ -1997,6 +2119,8 @@ export type PendingConfirmationContext = {
 };
 
 export type IntentContextSnapshot = {
+  /** Business inputs only; progress and heartbeat events never invalidate routing. */
+  businessFingerprint?: string;
   id: UUID;
   sessionId: UUID;
   sourceEventId: UUID;
@@ -2042,6 +2166,8 @@ export type IntentRoutingValidation = {
 };
 
 export type IntentRoutingRecord = {
+  /** Durable monotonic allowance, independent from diagnostic reasonCodes. */
+  snapshotRebuildCount?: number;
   id: UUID;
   sessionId: UUID;
   sourceEventId: UUID;
@@ -2488,7 +2614,100 @@ export type PendingInvocation = {
   createdAt: ISODateTime;
 };
 
+export type LogicalOperation = {
+  scopeKey?: string;
+  diagnostics?: string[];
+  correctionsUsed?: number;
+  pauseRequested?: boolean;
+  executionKind?: 'internal' | 'process';
+  previousId?: UUID;
+  id: UUID;
+  sessionId: UUID;
+  parentId?: UUID;
+  taskId?: UUID;
+  phase: AgentRunPhase;
+  policyVersion: 'execution-reliability-v1';
+  status: 'ready' | 'running' | 'paused' | 'interrupted' | 'exhausted';
+  deadlineAt: ISODateTime;
+  remainingActiveMs: number;
+  maxAttempts: number;
+  attemptsUsed: number;
+  stopState: 'none' | 'requested' | 'confirmed' | 'unconfirmed';
+  activeInvocationId?: UUID;
+  transport?: { deviceId: string; workspaceId: string; runtimeType: RuntimeType };
+  outputContractKey?: string;
+  ownerId?: string;
+  invocationIds: UUID[];
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+};
+
+export type SessionStopTargetState = 'waiting' | 'pending_sync' | 'confirmed' | 'unknown';
+
+export type SessionStopTarget = {
+  invocationId: UUID;
+  operationId?: UUID;
+  state: SessionStopTargetState;
+  evidence?: 'adapter_result' | 'transport_receipt';
+  diagnostic?: string;
+  updatedAt: ISODateTime;
+};
+
+export type SessionStopRequest = {
+  id: UUID;
+  sessionId: UUID;
+  reason: string;
+  targetInvocationIds: UUID[];
+  targets: SessionStopTarget[];
+  version: number;
+  status: 'requested' | 'waiting' | 'confirmed';
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+};
+
+export type RuntimeStopBlocker = {
+  invocationId?: UUID;
+  operationId?: UUID;
+  reason: 'process_running' | 'process_exit_unknown' | 'stop_state_pending_sync' | 'stop_state_sync_exhausted' | 'state_query_failed';
+  message: string;
+};
+
+export type RuntimeStopSummary = {
+  sessionId: UUID;
+  stopRequestId?: UUID;
+  version: number;
+  status: 'idle' | 'requested' | 'waiting' | 'confirmed' | 'unknown';
+  requestedCount: number;
+  confirmedCount: number;
+  targets: SessionStopTarget[];
+  blockers: RuntimeStopBlocker[];
+  canResume: boolean;
+  updatedAt?: ISODateTime;
+};
+
+export type RuntimeExecutionCandidate = {
+  id: string;
+  invocationId: string;
+  sessionId: string;
+  taskId?: string;
+  workItemId?: string;
+  workspaceId: string;
+  baseRevision: WorkspaceRevision;
+  changeSet: WorkspaceChangeSet;
+  manifestHash: string;
+  permissionHash: string;
+  outputVersion: '1.0' | '2.0';
+  createdAt: ISODateTime;
+  expiresAt: ISODateTime;
+  stage: 'candidate_captured' | 'submission_validated';
+  originalSubmission?: unknown;
+  schemaErrors?: string[];
+};
+
 export type InvocationPlan = {
+  recoveryOriginTaskId?: UUID;
+  recoveryCandidate?: RuntimeExecutionCandidate;
+  submissionRepair?: boolean;
   invocationId: UUID;
   sessionId: UUID;
   workItemId?: UUID;
@@ -2503,6 +2722,7 @@ export type InvocationPlan = {
   attempt?: RuntimeAttemptTrace;
   resume?: RuntimeResumeRequest;
   pendingApprovals?: PendingApprovalInfo[];
+  operation?: Pick<LogicalOperation, 'id' | 'deadlineAt' | 'policyVersion' | 'maxAttempts'>;
 };
 
 export type RuntimeAttemptTrace = {
@@ -2547,7 +2767,7 @@ export type ValidationEvidenceReport = {
 
 export type ExpectedRuntimeOutput = {
   kind: RuntimeOutputKind;
-  schemaVersion: '1.0';
+  schemaVersion: '1.0' | '2.0';
 };
 
 export type RuntimeArtifactOutput = RegisteredRuntimeArtifactOutput;
@@ -2646,6 +2866,7 @@ export type SupplementalContextResolution = {
 };
 
 export type ExecutionTerminationKind =
+  | 'output_contract_failure'
   | 'user_cancelled'
   | 'user_paused'
   | 'frontend_disconnected'
@@ -2743,6 +2964,26 @@ export type RuntimeStreamMetrics = {
 };
 
 export type AgentRunResult<TOutput = RuntimeOutput> = {
+  operationTelemetry?: {
+    operationId: string;
+    policyVersion: string;
+    startedAt: ISODateTime;
+    adapterStartedAt?: ISODateTime;
+    firstUsefulOutputAt?: ISODateTime;
+    preparationMs?: number;
+    observedToolMs?: number;
+    unclassifiedMs?: number;
+    queueWaitMs?: null;
+    initialEvidenceBytes?: number;
+    completedAt: ISODateTime;
+    elapsedMs: number;
+    remainingMs: number;
+    stopState: LogicalOperation['stopState'];
+    upstreamWaitMs: null;
+    usageScope: 'reported_cumulative';
+    billableTokens: null;
+  };
+  executionCandidate?: RuntimeExecutionCandidate;
   invocationId: UUID;
   runtimeType: RuntimeType;
   status: RuntimeInvocationStatus;

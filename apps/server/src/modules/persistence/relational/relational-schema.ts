@@ -973,6 +973,31 @@ export const RELATIONAL_SCHEMA_V7_SQL = [
   'create index if not exists intent_routing_lease_idx on agent_cluster.intent_routing_records (status, lease_expires_at)'
 ].map((statement) => statement.endsWith(';') ? statement : `${statement};`).join('\n\n');
 
+export const RELATIONAL_SCHEMA_V8_TABLES: RelationalTableDefinition[] = [
+  table('logical_operations', '持久化调用额度与停止确认，进程启动前原子预留。', [
+    column('external_id', 'text primary key', '逻辑操作标识。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '所属会话。'),
+    column('source_snapshot', 'jsonb not null', '版本化预算、调用记录及停止状态。')
+  ], [], ['create index if not exists logical_operations_session_idx on agent_cluster.logical_operations(session_id)'])
+];
+export const RELATIONAL_SCHEMA_V8_SQL = renderTables(RELATIONAL_SCHEMA_V8_TABLES);
+
+export const RELATIONAL_SCHEMA_V9_TABLES: RelationalTableDefinition[] = [
+  table('session_stop_requests', '保存会话停止轮次的固定目标、单调版本和可信确认状态。', [
+    column('external_id', 'text primary key', '停止请求的稳定外部标识。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '停止请求所属会话。'),
+    column('version', 'integer not null check (version > 0)', '停止聚合状态的单调版本。'),
+    column('status', 'text not null', '停止请求的聚合状态。'),
+    column('source_snapshot', 'jsonb not null', '固定目标、结束证据引用和兼容字段快照。'),
+    column('created_at', 'timestamptz not null', '停止请求创建时间。'),
+    column('updated_at', 'timestamptz not null', '停止状态最后更新时间。')
+  ], [], [
+    'create index if not exists session_stop_requests_session_idx on agent_cluster.session_stop_requests(session_id, created_at)',
+    "create unique index if not exists session_stop_requests_one_open_idx on agent_cluster.session_stop_requests(session_id) where status <> 'confirmed'"
+  ])
+];
+export const RELATIONAL_SCHEMA_V9_SQL = renderTables(RELATIONAL_SCHEMA_V9_TABLES);
+
 export function expectedRelationalComments() {
   return [
     SCHEMA_MIGRATIONS_TABLE,
@@ -980,7 +1005,9 @@ export function expectedRelationalComments() {
     ...RELATIONAL_SCHEMA_V2_TABLES,
     ...RELATIONAL_SCHEMA_V3_TABLES,
     ...RELATIONAL_SCHEMA_V4_TABLES,
-    ...RELATIONAL_SCHEMA_V5_TABLES
+    ...RELATIONAL_SCHEMA_V5_TABLES,
+    ...RELATIONAL_SCHEMA_V8_TABLES,
+    ...RELATIONAL_SCHEMA_V9_TABLES
   ].flatMap((definition) => [
     { table: definition.name, column: null, comment: definition.comment },
     ...definition.columns.map((item) => ({ table: definition.name, column: item.name, comment: item.comment }))

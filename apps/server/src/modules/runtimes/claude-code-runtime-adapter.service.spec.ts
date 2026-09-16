@@ -359,6 +359,26 @@ test('Claude task brief prompts make the routingMode enum explicit', () => {
   }
 });
 
+test('Claude task execution prompts require direct complete StructuredOutput root arguments', () => {
+  const adapter = new ClaudeCodeRuntimeAdapterService({ resolveServerRoot: () => process.cwd() } as never);
+  const promptFor = (taskSidecarPath?: string) => (adapter as unknown as {
+    prompt(input: ReturnType<typeof makeInvocationPlan>, taskSidecarPath?: string): string;
+  }).prompt(makeInvocationPlan({
+    executionTarget: { runtimeType: 'claude_code' },
+    expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' }
+  }), taskSidecarPath);
+
+  for (const prompt of [promptFor(), promptFor('task-brief.json')]) {
+    assert.match(prompt, /directly as the root arguments to StructuredOutput/i);
+    assert.match(prompt, /Never wrap the result in content, output, result, payload, artifact, or metadata/i);
+    assert.match(prompt, /requestedContext is required; use null/i);
+    assert.match(prompt, /agentMessages is required; use \[\]/i);
+    assert.match(prompt, /nextSuggestedActions is required; use \[\]/i);
+    assert.match(prompt, /changedArtifacts must be an array of artifact objects/i);
+    assert.match(prompt, /Do not JSON-encode changedArtifacts or an artifact as a string/i);
+  }
+});
+
 test('Claude buffered output rejects missing fields, extra fields, old versions, and wrong kinds', () => {
   const valid = runtimeOutputExamples.agent_message;
   const missing = { ...valid } as Record<string, unknown>;

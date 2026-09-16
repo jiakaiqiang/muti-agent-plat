@@ -3,6 +3,7 @@ import type {
   InvocationPlan,
   LocalRuntimePermissionPolicy,
   RuntimeOutput,
+  MinimalTaskSubmission,
   RuntimeUsage,
   UUID
 } from '@agent-cluster/shared';
@@ -11,6 +12,7 @@ import {
   classifyClaudeProviderFailure,
   frameToRuntimeEvent,
   getRuntimeOutputContract,
+  getVersionedRuntimeOutputContract,
   validateRuntimeOutput
 } from '@agent-cluster/shared';
 import { detectRuntimeVersion, parseConfiguredArgs, runRuntimeCommand } from '../runtime-process.js';
@@ -18,9 +20,10 @@ import { localRuntimeError } from '../runtime-error.js';
 import type { LocalRuntimeAdapter } from './adapter.js';
 import { resolveClaudeCommand } from './claude-command.js';
 import { buildLocalRuntimePrompt } from './prompt.js';
+import { SubmissionError } from './submission-error.js';
 
 type ClaudeResultFrame = {
-  output: RuntimeOutput;
+  output: RuntimeOutput | MinimalTaskSubmission;
   usage: RuntimeUsage;
   cliSessionId?: string;
 };
@@ -48,10 +51,13 @@ export class ClaudeCodeLocalRuntimeAdapter implements LocalRuntimeAdapter {
   async execute({ plan, cwd, signal, permissions, providerConnection, emit }: Parameters<LocalRuntimeAdapter['execute']>[0]) {
     const command = resolveClaudeCommand();
     const configuredArgs = process.env.AGENT_RUNTIME_CLAUDE_ARGS_JSON?.trim();
+    if (plan.submissionRepair && configuredArgs) throw new Error('SUBMISSION_REPAIR_UNSAFE_CUSTOM_ARGS');
     const args = configuredArgs
       ? parseConfiguredArgs(configuredArgs, 'AGENT_RUNTIME_CLAUDE_ARGS_JSON')
       : buildClaudeArgs(plan, permissions);
-    const prompt = buildLocalRuntimePrompt('Claude Code', plan, permissions);
+    const prompt = buildLocalRuntimePrompt('Claude Code', plan, permissions, {
+      submissionToolName: 'StructuredOutput'
+    });
     if (providerConnection && providerConnection.provider !== 'anthropic-compatible') {
       throw new Error('MODEL_PROTOCOL_MISMATCH: Claude Code requires an Anthropic-compatible connection.');
     }
@@ -87,7 +93,7 @@ export class ClaudeCodeLocalRuntimeAdapter implements LocalRuntimeAdapter {
       }
       throw new Error(processFailure);
     }
-    const result = parseClaudeOutput(stdout, plan.expectedOutput.kind);
+    const result = parseClaudeOutput(stdout, plan.expectedOutput.kind, plan.expectedOutput.schemaVersion);
     return {
       output: result.output,
       usage: { ...result.usage, model: plan.executionTarget.modelId ?? result.usage.model ?? 'claude_code' },
@@ -127,7 +133,7 @@ function isToolCallParseFailure(message: string) {
 }
 
 export function buildClaudeArgs(plan: InvocationPlan, permissions: LocalRuntimePermissionPolicy) {
-  const schema = getRuntimeOutputContract(plan.expectedOutput.kind).schema;
+  const schema = getVersionedRuntimeOutputContract(plan.expectedOutput.kind, plan.expectedOutput.schemaVersion).schema;
   const tools = resolveClaudeTools(plan, permissions);
   const maxBudget = process.env.AGENT_RUNTIME_CLAUDE_MAX_BUDGET_USD?.trim();
   return [
@@ -136,6 +142,9 @@ export function buildClaudeArgs(plan: InvocationPlan, permissions: LocalRuntimeP
     '--input-format', 'stream-json',
     '--verbose',
     '--strict-mcp-config',
+    // Safe mode disables hooks/plugins/custom commands without replacing configured auth.
+    // Older CLIs reject this flag and fail closed instead of attempting an unsafe repair.
+    ...(plan.submissionRepair ? ['--safe-mode'] : []),
     '--setting-sources', 'user',
     '--permission-mode', permissions.workspace_write === 'allow' ? 'acceptEdits' : 'plan',
     '--tools', tools.join(','),
@@ -146,6 +155,7 @@ export function buildClaudeArgs(plan: InvocationPlan, permissions: LocalRuntimeP
 }
 
 function resolveClaudeTools(plan: InvocationPlan, permissions: LocalRuntimePermissionPolicy) {
+  if (plan.submissionRepair) return [];
   const tools = new Set(['Read', 'Grep', 'Glob']);
   const allowedToolNames = new Set(
     plan.toolCatalog.decisions
@@ -180,7 +190,8 @@ function encodeClaudeUserMessage(prompt: string) {
 
 function parseClaudeOutput(
   stdout: string,
-  expectedKind: Parameters<typeof validateRuntimeOutput>[0]
+  expectedKind: Parameters<typeof validateRuntimeOutput>[0],
+  version = '1.0'
 ): ClaudeResultFrame {
   let terminal: Record<string, unknown> | undefined;
   for (const line of stdout.split(/\r?\n/)) {
@@ -201,11 +212,9 @@ function parseClaudeOutput(
     throw new Error(`Claude Code result reported an error${reportedError ? `: ${reportedError}` : '.'}`);
   }
   const candidate = parseClaudeResultPayload(terminal.structured_output ?? terminal.result);
-  const validation = validateRuntimeOutput(expectedKind, candidate);
+  const validation = getVersionedRuntimeOutputContract(expectedKind, version).validate(candidate);
   if (!validation.valid) {
-    throw new Error(
-      `RUNTIME_OUTPUT_CONTRACT_VIOLATION: expected output kind ${expectedKind}: ${validation.errors.join('; ')}`
-    );
+    throw new SubmissionError(candidate, validation.errors);
   }
   const usage = asRecord(terminal.usage);
   const inputTokens = numericValue(usage.input_tokens);

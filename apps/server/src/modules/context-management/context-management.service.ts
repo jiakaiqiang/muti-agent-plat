@@ -163,14 +163,19 @@ export class ContextManagementService {
   }
 
   isSnapshotCurrent(session: SessionDetail, snapshot: IntentContextSnapshot, latestEventSeq?: number) {
-    const active = this.activeWorkItem(session);
-    return snapshot.revision.sessionRevision === (session.revision ?? 1) &&
-      snapshot.revision.activeWorkItemId === active?.id &&
-      snapshot.revision.activeWorkItemRevision === active?.revision &&
-      snapshot.revision.decisionLedgerRevision === (session.decisionLedgerRevision ?? 0) &&
-      snapshot.revision.workflowRunId === session.workflowRunId &&
-      snapshot.revision.workflowRevision === session.workflowRun?.currentStepIndex &&
-      (latestEventSeq === undefined || snapshot.revision.latestEventSeq === latestEventSeq);
+    return snapshotMatchesProjection(session, this.listWorkItems(session.id), snapshot,
+      this.collection<CollaborationEvent>('eventsBySession')[session.id] ?? [],
+      this.collection<AgentTask>('tasksBySession')[session.id] ?? []);
+  }
+
+  async reserveRoutingRebuild(sessionId: string, routingId: string): Promise<boolean> {
+    return this.serialized(sessionId, () => this.mutate((draft) => {
+      const route = collectionFromDraft<IntentRoutingRecord>(draft, 'intentRoutingRecordsBySession')[sessionId]
+        ?.find(item => item.id === routingId);
+      if (!route || ['ROUTED', 'REJECTED'].includes(route.status) || (route.snapshotRebuildCount ?? 0) >= 1) return false;
+      route.snapshotRebuildCount = 1;
+      return true;
+    }, sessionId));
   }
 
   async ensureInitialWorkItem(
@@ -429,6 +434,9 @@ export class ContextManagementService {
       const snapshot: IntentContextSnapshot = {
         id: crypto.randomUUID(),
         ...payload,
+        businessFingerprint: routingBusinessFingerprint(input.session, workItems,
+          this.collection<CollaborationEvent>('eventsBySession')[input.session.id] ?? [],
+          this.collection<AgentTask>('tasksBySession')[input.session.id] ?? []),
         snapshotHash: createHash('sha256').update(stableJson(payload)).digest('hex'),
         createdAt: new Date().toISOString()
       };
@@ -615,6 +623,7 @@ export class ContextManagementService {
     followUpId: string;
     decision: IntentRoutingDecisionV2;
     validation: IntentRoutingValidation;
+    expectedLeaseOwner?: string;
     handlingPlan?: SessionFollowUpMessage['handlingPlan'];
     routeEventFactory?: (route: Omit<AppliedIntentRoute, 'committedEvent' | 'committedEvents' | 'followUp'>) => CollaborationEvent;
     additionalEvents?: CollaborationEvent[];
@@ -653,7 +662,10 @@ export class ContextManagementService {
         if (routing.status !== 'VALIDATING' || !input.validation.safeToApply) {
           throw new BadRequestException(`Intent route is not safe to apply from state ${routing.status}.`);
         }
-        if (!snapshotMatchesProjection(projectedSession, sessionWorkItems, snapshot)) {
+        assertRoutingLease(routing, input.expectedLeaseOwner);
+        if (!snapshotMatchesProjection(projectedSession, sessionWorkItems, snapshot,
+          collectionFromDraft<CollaborationEvent>(draft, 'eventsBySession')[input.session.id] ?? [],
+          collectionFromDraft<AgentTask>(draft, 'tasksBySession')[input.session.id] ?? [])) {
           routing.status = 'PENDING_RETRY';
           routing.reasonCodes = [...new Set([...routing.reasonCodes, 'SNAPSHOT_STALE'])];
           routing.updatedAt = new Date().toISOString();
@@ -798,7 +810,8 @@ export class ContextManagementService {
     routingId: string,
     patch: Partial<Pick<IntentRoutingRecord,
       'status' | 'snapshotId' | 'invocationId' | 'decision' | 'validation' | 'finalAction' | 'actionStatus' |
-      'leaseOwner' | 'leaseExpiresAt' | 'reasonCodes' | 'retryCount'>>
+      'leaseOwner' | 'leaseExpiresAt' | 'reasonCodes' | 'retryCount'>>,
+    expectedLeaseOwner?: string
   ) {
     return this.serialized(sessionId, async () => {
       const current = this.listRoutingRecords(sessionId).find((record) => record.id === routingId);
@@ -827,7 +840,12 @@ export class ContextManagementService {
         const routings = collectionFromDraft<IntentRoutingRecord>(draft, 'intentRoutingRecordsBySession');
         const index = (routings[sessionId] ?? []).findIndex((record) => record.id === routingId);
         if (index < 0) throw new NotFoundException(`IntentRoutingRecord not found during mutation: ${routingId}`);
-        routings[sessionId][index] = updated;
+        const fresh = routings[sessionId][index];
+        if (expectedLeaseOwner) assertRoutingLease(fresh, expectedLeaseOwner);
+        if (fresh.updatedAt !== current.updatedAt || fresh.status !== current.status || fresh.leaseOwner !== current.leaseOwner) {
+          throw new BadRequestException('ROUTING_LEASE_LOST: routing changed during update.');
+        }
+        routings[sessionId][index] = { ...updated, snapshotRebuildCount: fresh.snapshotRebuildCount };
         draft.intentRoutingRecordsBySession = routings;
       }, sessionId);
       return updated;
@@ -932,15 +950,11 @@ export class ContextManagementService {
   }
 
   private async mutate<T>(mutator: (draft: PersistedState) => T, sessionId?: string): Promise<T> {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const revision = this.persistence.stateRevision();
-      try {
-        return await this.persistence.mutateStateAtomically(revision, mutator, sessionId ? { lockKey: `session:${sessionId}` } : undefined);
-      } catch (error) {
-        if (!String(error).includes('PERSISTENCE_REVISION_CONFLICT') || attempt === 2) throw error;
-      }
-    }
-    throw new Error('PERSISTENCE_REVISION_CONFLICT: atomic context mutation retries exhausted.');
+    return this.persistence.mutateCollections([
+      'workItemsBySession', 'decisionRecordsBySession', 'contextSnapshotsBySession',
+      'intentRoutingRecordsBySession', 'followUpMessagesBySession', 'sessions',
+      'tasksBySession', 'eventsBySession', 'eventOutbox'
+    ], mutator);
   }
 
   private serialized<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
@@ -1037,8 +1051,11 @@ function stableJson(value: unknown): string {
 function snapshotMatchesProjection(
   session: SessionDetail,
   workItems: WorkItem[],
-  snapshot: IntentContextSnapshot
+  snapshot: IntentContextSnapshot,
+  events: CollaborationEvent[] = [],
+  tasks: AgentTask[] = []
 ) {
+  if (snapshot.businessFingerprint) return snapshot.businessFingerprint === routingBusinessFingerprint(session, workItems, events, tasks);
   const active = workItems.find((item) => item.id === session.activeWorkItemId);
   return snapshot.revision.sessionRevision === (session.revision ?? 1) &&
     snapshot.revision.activeWorkItemId === active?.id &&
@@ -1046,6 +1063,30 @@ function snapshotMatchesProjection(
     snapshot.revision.decisionLedgerRevision === (session.decisionLedgerRevision ?? 0) &&
     snapshot.revision.workflowRunId === session.workflowRunId &&
     snapshot.revision.workflowRevision === session.workflowRun?.currentStepIndex;
+}
+
+function routingBusinessFingerprint(session: SessionDetail, workItems: WorkItem[], events: CollaborationEvent[], tasks: AgentTask[]) {
+  const businessEvents = new Set(['user_message', 'user_confirmation_requested', 'user_confirmation_resolved',
+    'intent_clarification_required', 'brief_confirmed', 'brief_revised']);
+  return createHash('sha256').update(stableJson({
+    sessionRevision: session.revision ?? 1, status: session.status, goal: session.originalInput,
+    contractGoal: session.latestContractGoal, activeWorkItemId: session.activeWorkItemId,
+    decisionLedgerRevision: session.decisionLedgerRevision ?? 0,
+    workflowRunId: session.workflowRunId, workflowStep: session.workflowRun?.currentStepIndex,
+    tasks: tasks.map(task => ({ id: task.id, workItemId: task.workItemId, status: task.status,
+      assignee: task.assignee, description: task.description, acceptanceCriteria: task.acceptanceCriteria,
+      dependsOnTaskIds: task.dependsOnTaskIds, requiresUserConfirmation: task.requiresUserConfirmation })),
+    workItems: workItems.map(workItemSummary),
+    businessEvents: events.filter(event => businessEvents.has(event.type)).map(event => event.id)
+  })).digest('hex');
+}
+
+function assertRoutingLease(routing: IntentRoutingRecord, expectedLeaseOwner?: string) {
+  if ((routing.leaseOwner || expectedLeaseOwner) &&
+    (!expectedLeaseOwner || routing.leaseOwner !== expectedLeaseOwner ||
+      !(Date.parse(routing.leaseExpiresAt ?? '') > Date.now()))) {
+    throw new BadRequestException('ROUTING_LEASE_LOST: stale classifier cannot update or apply this route.');
+  }
 }
 
 function allowedRoutingTransitions(status: IntentRoutingRecord['status']): IntentRoutingRecord['status'][] {

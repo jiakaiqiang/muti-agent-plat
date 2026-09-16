@@ -101,6 +101,14 @@ test('exact continue command is state-validated without invoking the model', asy
   assert.equal(outcome.routing.status, 'ROUTED');
 });
 
+test('a paused message never invokes the model or falls back to clarification', async () => {
+  const fixture = setup();
+  const controller = new AbortController();
+  controller.abort(new Error('paused'));
+  await assert.rejects(fixture.service.classify({ id: 'session-1' } as never, routing(), {} as never, controller.signal), /paused/);
+  assert.equal(fixture.runtimeCalls(), 0);
+});
+
 test('model-created WorkItem references fail closed and request clarification', async () => {
   const fixture = setup([result({
     schemaVersion: '1.0', kind: 'intent_routing_decision', dialogueAct: 'question',

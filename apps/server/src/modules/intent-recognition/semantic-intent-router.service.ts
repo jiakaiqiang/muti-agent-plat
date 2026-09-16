@@ -42,33 +42,48 @@ export class SemanticIntentRouterService {
     snapshot: IntentContextSnapshot,
     signal?: AbortSignal
   ): Promise<SemanticIntentRoutingOutcome> {
+    signal?.throwIfAborted();
     if (routing.status !== 'CLASSIFYING') {
       await this.context.updateRoutingRecord(session.id, routing.id, {
         status: 'SNAPSHOT_READY',
         snapshotId: snapshot.id
-      });
+      }, routing.leaseOwner);
     }
     const deterministic = this.deterministicDecision(session, snapshot);
     if (deterministic) {
-      await this.context.updateRoutingRecord(session.id, routing.id, { status: 'CLASSIFYING' });
-      await this.context.updateRoutingRecord(session.id, routing.id, { status: 'VALIDATING' });
-      return this.finish(session, routing.id, routing.rolloutMode, snapshot, deterministic, true);
+      await this.context.updateRoutingRecord(session.id, routing.id, { status: 'CLASSIFYING' }, routing.leaseOwner);
+      await this.context.updateRoutingRecord(session.id, routing.id, { status: 'VALIDATING' }, routing.leaseOwner);
+      return this.finish(session, routing.id, routing.rolloutMode, snapshot, deterministic, true, routing.leaseOwner);
     }
 
     let lastError = 'INTENT_RUNTIME_UNAVAILABLE';
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      signal?.throwIfAborted();
       await this.context.updateRoutingRecord(session.id, routing.id, {
         status: 'CLASSIFYING',
         retryCount: attempt
-      });
+      }, routing.leaseOwner);
       const invocationId = crypto.randomUUID();
       try {
         const result = await this.runtimeInvocation.invoke(
-          this.runtimeInput(session, snapshot, invocationId),
+          { ...this.runtimeInput(session, snapshot, invocationId), operationId: routing.id },
           signal
         );
+        signal?.throwIfAborted();
         if (result.status !== 'completed') {
           lastError = result.error?.code ?? 'INTENT_RUNTIME_FAILED';
+          if (result.error?.details?.operationFailure || result.error?.details?.stopUnconfirmed) break;
+          if (result.error?.retryable === false) break;
+          const retryAfterMs = Number(result.error?.details?.retryAfterMs ?? 0);
+          if (retryAfterMs > 0) {
+            if (retryAfterMs >= (result.operationTelemetry?.remainingMs ?? 0)) break;
+            await new Promise<void>((resolve, reject) => {
+              const onAbort = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); reject(signal?.reason); };
+              const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, retryAfterMs);
+              if (signal?.aborted) onAbort();
+              else signal?.addEventListener('abort', onAbort, { once: true });
+            });
+          }
           throw new Error(lastError);
         }
         const parsed = validateRuntimeOutput('intent_routing_decision', result.output);
@@ -80,9 +95,11 @@ export class SemanticIntentRouterService {
           status: 'VALIDATING',
           invocationId,
           retryCount: attempt
-        });
-        return this.finish(session, routing.id, routing.rolloutMode, snapshot, this.toDecision(parsed.value), false);
+        }, routing.leaseOwner);
+        return this.finish(session, routing.id, routing.rolloutMode, snapshot, this.toDecision(parsed.value), false, routing.leaseOwner);
       } catch (error) {
+        signal?.throwIfAborted();
+        if (String(error).includes('ROUTING_LEASE_LOST')) throw error;
         lastError = stableErrorCode(error, lastError);
         workspaceMetrics.increment('intent_route_runtime_failure_total', 1, {
           code: intentFailureMetricCode(lastError)
@@ -95,7 +112,7 @@ export class SemanticIntentRouterService {
           invocationId,
           retryCount: attempt + 1,
           reasonCodes: [lastError]
-        });
+        }, routing.leaseOwner);
       }
     }
 
@@ -112,7 +129,7 @@ export class SemanticIntentRouterService {
       reasonCodes: [lastError, 'USER_CHOICE_REQUIRED'],
       riskLevel: 'low'
     };
-    return this.finish(session, routing.id, routing.rolloutMode, snapshot, decision, false);
+    return this.finish(session, routing.id, routing.rolloutMode, snapshot, decision, false, routing.leaseOwner);
   }
 
   private async finish(
@@ -121,7 +138,8 @@ export class SemanticIntentRouterService {
     rolloutMode: IntentRoutingRecord['rolloutMode'],
     snapshot: IntentContextSnapshot,
     decision: IntentRoutingDecisionV2,
-    deterministic: boolean
+    deterministic: boolean,
+    expectedLeaseOwner?: string
   ): Promise<SemanticIntentRoutingOutcome> {
     const validation = this.validate(session, snapshot, decision, deterministic);
     const autoApplicable = validation.safeToApply && decision.requestedAction !== 'clarify';
@@ -136,7 +154,7 @@ export class SemanticIntentRouterService {
       validation,
       finalAction: status === 'ROUTED' ? decision.requestedAction : status === 'CLARIFICATION_REQUIRED' ? 'clarify' : undefined,
       reasonCodes: [...new Set([...decision.reasonCodes, ...validation.errors])]
-    });
+    }, expectedLeaseOwner);
     return { routing, decision, validation, autoApplicable };
   }
 

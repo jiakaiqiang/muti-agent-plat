@@ -105,6 +105,74 @@ describe('timeline runtime diagnostics boundary', () => {
       }
     })).toBe(false)
   })
+
+  it('keeps live stop-state updates out of the chat timeline', () => {
+    const base = eventWithoutContent()
+    expect(shouldRenderInTimeline({
+      ...base,
+      type: 'runtime_progress',
+      content: '执行已停止。',
+      metadata: { ...base.metadata, payload: { code: 'RUNTIME_STOP_STATE_CHANGED' } }
+    })).toBe(false)
+  })
+
+  it('folds only adjacent legacy receipts for the same invocation and state', () => {
+    setActivePinia(createPinia())
+    const store = useEventStore()
+    const receipt = (id: string, invocationId: string, createdAt: string): CollaborationEvent => ({
+      ...eventWithoutContent(),
+      id,
+      type: 'runtime_progress',
+      content: '已确认上一次执行停止，可以继续会话。',
+      metadata: {
+        schemaVersion: '0.1',
+        renderAs: 'system_notice',
+        payload: { code: 'RUNTIME_STOP_CONFIRMED', runtimeInvocationId: invocationId, stopState: 'confirmed' }
+      },
+      createdAt
+    } as CollaborationEvent)
+    store.appendEvent(receipt('stop-1', 'invocation-1', '2026-09-14T10:52:08.000Z'))
+    store.appendEvent(receipt('stop-2', 'invocation-1', '2026-09-14T10:52:11.000Z'))
+    store.appendEvent({ ...eventWithoutContent({ message: '业务失败原因' }), id: 'business', content: '业务失败原因' })
+    store.appendEvent(receipt('stop-3', 'invocation-1', '2026-09-14T10:52:14.000Z'))
+    store.appendEvent(receipt('stop-4', 'invocation-2', '2026-09-14T10:52:17.000Z'))
+
+    const messages = store.chatMessages('session-1')
+    expect(messages).toHaveLength(4)
+    expect(messages[0]?.payload?.collapsedStopReceiptCount).toBe(2)
+    expect(messages[0]?.payload?.collapsedStopReceiptTimes).toHaveLength(2)
+    expect(messages[1]?.content).toBe('业务失败原因')
+  })
+
+  it('folds the 43 historical receipts while preserving every original event and timestamp', () => {
+    setActivePinia(createPinia())
+    const store = useEventStore()
+    const startedAt = Date.parse('2026-09-14T10:52:08.000Z')
+    for (let index = 0; index < 43; index += 1) {
+      store.appendEvent({
+        ...eventWithoutContent(),
+        id: `historical-stop-${index + 1}`,
+        type: 'runtime_progress',
+        content: '已确认上一次执行停止，可以继续会话。',
+        metadata: {
+          schemaVersion: '0.1',
+          renderAs: 'system_notice',
+          payload: {
+            code: 'RUNTIME_STOP_CONFIRMED',
+            runtimeInvocationId: 'historical-invocation',
+            stopState: 'confirmed'
+          }
+        },
+        createdAt: new Date(startedAt + index * 3_000).toISOString()
+      } as CollaborationEvent)
+    }
+
+    const messages = store.chatMessages('session-1')
+    expect(messages).toHaveLength(1)
+    expect(messages[0]?.payload?.collapsedStopReceiptCount).toBe(43)
+    expect(messages[0]?.payload?.collapsedStopReceiptTimes).toHaveLength(43)
+    expect(store.eventsForSession('session-1')).toHaveLength(43)
+  })
 })
 
 describe('intent clarification projection', () => {

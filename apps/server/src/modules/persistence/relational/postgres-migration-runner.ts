@@ -9,7 +9,9 @@ import {
   RELATIONAL_SCHEMA_V4_SQL,
   RELATIONAL_SCHEMA_V5_SQL,
   RELATIONAL_SCHEMA_V6_SQL,
-  RELATIONAL_SCHEMA_V7_SQL
+  RELATIONAL_SCHEMA_V7_SQL,
+  RELATIONAL_SCHEMA_V8_SQL,
+  RELATIONAL_SCHEMA_V9_SQL
 } from './relational-schema.js';
 
 type Migration = {
@@ -53,6 +55,16 @@ const MIGRATIONS: Migration[] = [
     version: 7,
     name: 'intent_routing_worker_leases',
     sql: RELATIONAL_SCHEMA_V7_SQL
+  },
+  {
+    version: 8,
+    name: 'logical_operation_budgets',
+    sql: RELATIONAL_SCHEMA_V8_SQL
+  },
+  {
+    version: 9,
+    name: 'session_stop_request_state',
+    sql: RELATIONAL_SCHEMA_V9_SQL
   }
 ];
 

@@ -14,6 +14,7 @@ import { ApiRequestError, isAbortError } from '@/api/client'
 import {
   sessionStatusLabel,
   type BriefEventPayload,
+  type ConfirmationCardState,
   type PostReviewAction,
   type RuntimeType,
   type SessionStatus,
@@ -32,8 +33,11 @@ import DebugRuntimeView from './DebugRuntimeView.vue'
 import FileRevisionCandidateEditor from './FileRevisionCandidateEditor.vue'
 import SessionSidebar from './SessionSidebar.vue'
 import TokenUsageIndicator from './TokenUsageIndicator.vue'
+import RuntimeStopStatePanel from './RuntimeStopStatePanel.vue'
 import UiIcon from './UiIcon.vue'
 import UserInputBox from './UserInputBox.vue'
+import { useWorkspaceSync } from '@/composables/useWorkspaceSync'
+import { latestSessionStatusEvent, resolveSessionStatus } from '@/utils/sessionStatus'
 import WorkflowRuntimeView from './WorkflowRuntimeView.vue'
 import { findLatestBriefPayload } from './briefEventPayload'
 import { resolveSessionWorkspacePostReviewAction } from './session-workspace-post-review-action'
@@ -50,7 +54,10 @@ const router = useRouter()
 const { deletingSessionIds } = storeToRefs(sessionStore)
 const pendingDeleteSessionId = ref<string>()
 const deleteSessionError = ref('')
-const isSessionControlBusy = ref(false)
+const sessionControls = ref<Record<string, 'stop' | 'resume'>>({})
+const sessionControlErrors = ref<Record<string, string>>({})
+const isSessionControlBusy = computed(() => Boolean(sessionControls.value[currentSessionId.value]))
+const sessionControlError = computed(() => sessionControlErrors.value[currentSessionId.value] ?? '')
 const backendReachability = ref<'unknown' | 'reachable' | 'unreachable'>('unknown')
 const {
   isSendingMessage,
@@ -163,6 +170,7 @@ function viewModeLabel(mode: SessionViewMode) {
       chat: '对话',
       collaboration_graph: '协同看板',
       workflow: '工作流',
+      workflow_details: '工作流详情',
       debug: '审计'
     } satisfies Record<SessionViewMode, string>
   )[mode]
@@ -174,6 +182,7 @@ function viewModeIcon(mode: SessionViewMode) {
       chat: 'message',
       collaboration_graph: 'graph',
       workflow: 'workflow',
+      workflow_details: 'folder',
       debug: 'debug'
     } satisfies Record<SessionViewMode, string>
   )[mode]
@@ -200,6 +209,7 @@ async function switchWorkspaceView(mode: SessionViewMode) {
 onMounted(async () => {
   window.addEventListener('beforeunload', cancelLocalRuntimeAuthorizationOnPageExit)
   window.addEventListener('pagehide', cancelLocalRuntimeAuthorizationOnPageExit)
+  void localRuntimeStore.resolveLaunchServerUrl().catch(() => undefined)
   const view = routeViewMode()
   if (view) {
     sessionStore.switchViewMode(view)
@@ -273,17 +283,41 @@ function showErrorMessage(error: unknown, fallback: string) {
   showMessage(error instanceof Error ? error.message : fallback, 'error')
 }
 
+async function ensureWorkflowRuntimeReady() {
+  const session = sessionStore.currentSession
+  const workingDirectory = session?.workingDirectory
+  if (!session || workingDirectory?.kind !== 'local_bridge') return true
+
+  // The brief can take long enough for the Local Runtime CLI to go idle. Fire the
+  // protocol while this click still has user activation, then let the store poll
+  // until the exact workspace is registered again.
+  if (!localRuntimeStore.isConnected) localRuntimeStore.wakeLocalRuntime()
+  try {
+    await localRuntimeStore.ensureWorkspaceConnected(workingDirectory.id)
+    return true
+  } catch (error) {
+    if (isAbortError(error)) return false
+    showErrorMessage(error, '本地 Runtime 未就绪，无法开始工作流')
+    return false
+  }
+}
+
 const currentSessionId = computed(() => sessionStore.currentSession?.id ?? '')
-const backendDisconnected = computed(() => Boolean(currentSessionId.value) && (
-  sessionStore.currentSession?.status === 'INTERRUPTED' || backendReachability.value === 'unreachable'
-))
+// 后端探测不可达与会话被中断是两件事：前者意味着消息送不出去，必须禁用输入；
+// 后者只是服务端丢了执行所有权，用户仍可继续输入来续接会话。
+const backendUnreachable = computed(() =>
+  Boolean(currentSessionId.value) && backendReachability.value === 'unreachable'
+)
+const sessionInterrupted = computed(() =>
+  Boolean(currentSessionId.value) && sessionStore.currentSession?.status === 'INTERRUPTED'
+)
 const backendConnectionNotice = computed(() => {
   if (!currentSessionId.value) return undefined
-  if (sessionStore.currentSession?.status === 'INTERRUPTED') {
+  if (sessionInterrupted.value) {
     return {
-      tone: 'failed',
+      tone: 'warning',
       title: '会话已中断',
-      detail: '系统不会自动重新连接或续跑；手动连接与会话唤醒将在后续计划中提供。'
+      detail: '可以直接输入新需求或补充说明，系统会接上原有上下文继续；只说“继续”则从中断点恢复。'
     }
   }
   if (eventStore.sseConnectionState === 'connecting') {
@@ -310,11 +344,20 @@ const backendConnectionNotice = computed(() => {
 })
 const events = computed(() => eventStore.eventsForSession(currentSessionId.value))
 const messages = computed(() => eventStore.chatMessages(currentSessionId.value))
+const pendingMessages = computed(() => {
+  const unique = new Map<string, typeof messages.value[number]>()
+  for (const message of messages.value) {
+    if (message.messageType === 'confirmation' && (message.payload?.status ?? 'pending') === 'pending' && typeof message.payload?.confirmationId === 'string') unique.set(message.payload.confirmationId, message)
+  }
+  return [...unique.values()]
+})
 const agents = computed(() =>
   eventStore.agentCards(currentSessionId.value, sessionStore.currentSession?.participatingAgentIds)
 )
 const tasks = computed(() => eventStore.taskStates(currentSessionId.value))
-const activeConfirmation = computed(() => eventStore.activeConfirmation(currentSessionId.value))
+const confirmationBeingHandled = ref<ConfirmationCardState>()
+const confirmationSessionId = ref('')
+const activeConfirmation = computed(() => (confirmationSessionId.value === currentSessionId.value ? confirmationBeingHandled.value : undefined) ?? eventStore.activeConfirmation(currentSessionId.value))
 const activeWorkItem = computed(() => sessionStore.activeWorkItem)
 const pendingIntentRoutingCount = computed(() =>
   currentSessionId.value ? sessionStore.pendingIntentRoutingCount(currentSessionId.value) : 0
@@ -403,17 +446,13 @@ const activeBriefPayload = computed(() => {
 })
 
 const latestBriefPayload = computed(() => findLatestBriefPayload(eventStore.eventsForSession(currentSessionId.value)))
-const terminalSessionStatuses = new Set<SessionStatus>(['INTERRUPTED', 'COMPLETED', 'FAILED', 'CANCELLED'])
+// INTERRUPTED 不在此集合内：它会让 watcher 调 finalizeSessionEvents，而后者的 finally
+// 直接 disconnectSse()，于是用户在中断会话里发了新消息也看不到任何回流。
+// 中断会话仍要保持连接，续接产生的事件才能到达界面。
+const terminalSessionStatuses = new Set<SessionStatus>(['COMPLETED', 'FAILED', 'CANCELLED'])
 
-const derivedStatus = computed(() => {
-  const statusEvent = [...eventStore.eventsForSession(currentSessionId.value)]
-    .reverse()
-    .find((event) => (
-      event.type === 'session_status_changed' ||
-      (event.type === 'error_reported' && terminalSessionStatuses.has(event.metadata.payload?.status as SessionStatus))
-    ))
-  return (statusEvent?.metadata.payload?.status as SessionStatus | undefined) ?? sessionStore.currentSession?.status
-})
+const derivedStatus = computed(() => resolveSessionStatus(sessionStore.currentSession, events.value))
+useWorkspaceSync({ syncEvents: syncSessionEventConnection })
 const stoppableSessionStatuses = new Set<SessionStatus>([
   'AGENT_DISCUSSING',
   'REVISING_BRIEF',
@@ -421,12 +460,20 @@ const stoppableSessionStatuses = new Set<SessionStatus>([
   'POST_REVIEW',
   'REWORKING'
 ])
-const canStopSession = computed(() => Boolean(
-  currentSessionId.value && derivedStatus.value && stoppableSessionStatuses.has(derivedStatus.value)
+const canStopSession = computed(() => sessionControls.value[currentSessionId.value]
+  ? sessionControls.value[currentSessionId.value] === 'stop'
+  : Boolean(
+  currentSessionId.value && derivedStatus.value && (stoppableSessionStatuses.has(derivedStatus.value) ||
+    ((isSendingMessage.value || pendingIntentRoutingCount.value > 0) && derivedStatus.value !== 'PAUSED') || Boolean(sessionControlError.value))
 ))
-const canResumeStoppedSession = computed(() => Boolean(
-  currentSessionId.value && derivedStatus.value === 'PAUSED'
+const canResumeStoppedSession = computed(() => sessionControls.value[currentSessionId.value]
+  ? sessionControls.value[currentSessionId.value] === 'resume'
+  : Boolean(
+  currentSessionId.value && derivedStatus.value === 'PAUSED' &&
+    (sessionStore.stopStatesBySession[currentSessionId.value]?.canResume ?? false)
 ))
+const runtimeStopSummary = computed(() => sessionStore.stopStatesBySession[currentSessionId.value])
+const runtimeStopStateError = computed(() => sessionStore.stopStateErrorsBySession[currentSessionId.value])
 
 watch(
   () => [eventStore.sseConnectionState, eventStore.lastSseErrorAt] as const,
@@ -441,8 +488,11 @@ watch(
 
 watch(derivedStatus, (status, previousStatus) => {
   const sessionId = currentSessionId.value
-  if (!sessionId || !status || status === previousStatus || !terminalSessionStatuses.has(status)) return
-  sessionStore.setCurrentStatus(sessionId, status)
+  if (!sessionId || !status || status === previousStatus) return
+  const event = latestSessionStatusEvent(sessionId, events.value)
+  const updatedAt = [event?.createdAt, sessionStore.currentSession?.updatedAt].filter(Boolean).sort().at(-1)
+  sessionStore.setCurrentStatus(sessionId, status, updatedAt)
+  if (!terminalSessionStatuses.has(status)) return
   void eventStore.finalizeSessionEvents(sessionId).catch(() => undefined)
 })
 
@@ -456,7 +506,9 @@ const progressPercent = computed(() => {
 async function selectSession(sessionId: string, navigate = true) {
   try {
     await sessionStore.loadSession(sessionId)
+    if (sessionStore.currentSession?.id !== sessionId) return
     await sessionStore.loadFileRevisions(sessionId)
+    if (sessionStore.currentSession?.id !== sessionId) return
     backendReachability.value = 'reachable'
     await syncSessionEventConnection(sessionId, sessionStore.currentSession?.status)
     if (navigate) {
@@ -506,6 +558,10 @@ watch(
   () => events.value.at(-1)?.id,
   () => {
     const latest = events.value.at(-1)
+    const stopSummary = latest?.metadata.payload?.stopSummary
+    if (stopSummary && typeof stopSummary === 'object') {
+      sessionStore.applyStopState(stopSummary as import('@/types/contracts').RuntimeStopSummary)
+    }
     if (!latest || (!latest.type.startsWith('file_revision_') && latest.type !== 'user_confirmation_requested')) return
     const sessionId = currentSessionId.value
     if (!sessionId) return
@@ -529,30 +585,34 @@ async function reconcileSessionEvents(sessionId: string) {
 async function stopCurrentSession() {
   const sessionId = currentSessionId.value
   if (!sessionId || !canStopSession.value || isSessionControlBusy.value) return
-  isSessionControlBusy.value = true
+  sessionControls.value[sessionId] = 'stop'
+  delete sessionControlErrors.value[sessionId]
   try {
     await sessionStore.pauseSession(sessionId)
+    if (currentSessionId.value !== sessionId) return
     await reconcileSessionEvents(sessionId)
     showMessage('会话已停止，可以稍后继续', 'success')
   } catch (error) {
+    sessionControlErrors.value[sessionId] = error instanceof Error ? error.message : '停止未确认，请重试停止'
     showErrorMessage(error, '停止会话失败')
   } finally {
-    isSessionControlBusy.value = false
+    delete sessionControls.value[sessionId]
   }
 }
 
 async function resumeStoppedSession() {
   const sessionId = currentSessionId.value
   if (!sessionId || !canResumeStoppedSession.value || isSessionControlBusy.value) return
-  isSessionControlBusy.value = true
+  sessionControls.value[sessionId] = 'resume'
   try {
     await sessionStore.resumeSession(sessionId)
+    if (currentSessionId.value !== sessionId) return
     await reconcileSessionEvents(sessionId)
     showMessage('会话已继续执行', 'success')
   } catch (error) {
     showErrorMessage(error, '继续会话失败')
   } finally {
-    isSessionControlBusy.value = false
+    delete sessionControls.value[sessionId]
   }
 }
 
@@ -1116,7 +1176,21 @@ async function retryActiveInterruptedFileRevision() {
   }
 }
 
-async function resolveConfirmation(optionKey: string) {
+const decisionBusy = ref(false)
+async function resolveConfirmation(optionKey: string, confirmationId?: string) {
+  if (decisionBusy.value) return
+  confirmationSessionId.value = currentSessionId.value
+  if (confirmationId) {
+    const message = pendingMessages.value.find(item => item.payload?.confirmationId === confirmationId)
+    if (!message) { showMessage('该确认已处理或已失效，请刷新群聊。', 'warning'); return }
+    confirmationBeingHandled.value = { ...message.payload, status: 'pending' } as ConfirmationCardState
+  }
+  decisionBusy.value = true
+  try { await resolveConfirmationAction(optionKey) }
+  catch (error) { showErrorMessage(error, '处理确认失败，请重试') }
+  finally { decisionBusy.value = false; confirmationBeingHandled.value = undefined }
+}
+async function resolveConfirmationAction(optionKey: string) {
   if (!sessionStore.currentSession || !activeConfirmation.value) return
   const sessionId = sessionStore.currentSession.id
   if (
@@ -1176,6 +1250,7 @@ async function resolveConfirmation(optionKey: string) {
     if (optionKey.startsWith('workflow:')) {
       const [, workflowId, versionText] = optionKey.split(':')
       const confirmationId = activeConfirmation.value.confirmationId
+      if (!(await ensureWorkflowRuntimeReady())) return
       const optimisticEventId = appendOptimisticConfirmationResolution(sessionId, confirmationId, optionKey)
       try {
         await sessionStore.selectWorkflow(sessionId, {
@@ -1208,8 +1283,42 @@ async function resolveConfirmation(optionKey: string) {
       await reconcileSessionEvents(sessionId)
       return
     }
+    if (optionKey === 'skip_agent') {
+      await sessionStore.resolveWorkflowAgentSkip(sessionId, {
+        confirmationId: activeConfirmation.value.confirmationId,
+        taskId: activeConfirmation.value.relatedTaskId
+      })
+      await reconcileSessionEvents(sessionId)
+      return
+    }
     if (optionKey === 'cancel') {
       await sessionStore.cancelSession(sessionId, activeConfirmation.value.confirmationId)
+      await reconcileSessionEvents(sessionId)
+      return
+    }
+  }
+
+  if (activeConfirmation.value.reason === 'workflow_upstream_rerun') {
+    const confirmationId = activeConfirmation.value.confirmationId
+    if (optionKey.startsWith('node:')) {
+      await sessionStore.resolveWorkflowUpstreamRerun(sessionId, {
+        confirmationId,
+        decision: 'rerun_upstream',
+        nodeId: optionKey.slice('node:'.length)
+      })
+      await reconcileSessionEvents(sessionId)
+      return
+    }
+    if (optionKey === 'retry_current') {
+      await sessionStore.resolveWorkflowUpstreamRerun(sessionId, {
+        confirmationId,
+        decision: 'retry_current'
+      })
+      await reconcileSessionEvents(sessionId)
+      return
+    }
+    if (optionKey === 'cancel') {
+      await sessionStore.cancelSession(sessionId, confirmationId)
       await reconcileSessionEvents(sessionId)
       return
     }
@@ -1277,7 +1386,11 @@ async function resolveConfirmation(optionKey: string) {
     }
   }
   if (optionKey === 'approve' && activeConfirmation.value.relatedBriefId) {
-    await sessionStore.confirmBrief(sessionId, activeConfirmation.value.relatedBriefId)
+    await sessionStore.confirmBrief(
+      sessionId,
+      activeConfirmation.value.relatedBriefId,
+      activeConfirmation.value.confirmationId
+    )
     await reconcileSessionEvents(sessionId)
     return
   }
@@ -1335,6 +1448,21 @@ async function resolveConfirmation(optionKey: string) {
       await reconcileSessionEvents(sessionId)
       return
     }
+  }
+
+  // 继续/取消是通用决策项：没有专属处理器的确认卡也必须真正落到后端，
+  // 否则用户点了「继续执行」只会看到一条本地事件，会话仍然停在等待状态。
+  if (optionKey === 'resume' || optionKey === 'cancel') {
+    const confirmationId = activeConfirmation.value.confirmationId
+    try {
+      if (optionKey === 'resume') await sessionStore.resumeSession(sessionId, confirmationId)
+      else await sessionStore.cancelSession(sessionId, confirmationId)
+    } catch (error) {
+      showErrorMessage(error, optionKey === 'resume' ? '继续会话失败' : '取消会话失败')
+      return
+    }
+    await reconcileSessionEvents(sessionId)
+    return
   }
 
   eventStore.appendEvent({
@@ -1726,7 +1854,11 @@ async function submitWorkflowStepRevision() {
             @resolve-confirmation="resolveConfirmation"
           />
           <TokenUsageIndicator :session-id="currentSessionId" />
+          <RuntimeStopStatePanel :summary="runtimeStopSummary" :query-error="runtimeStopStateError" />
           <ChatTimeline
+            :session-id="currentSessionId"
+            :status="derivedStatus"
+            :disconnected="backendUnreachable"
             :messages="messages"
             :workspace-snapshot="sessionStore.currentSession?.workspaceSnapshot"
             :capability-approval-busy="capabilityApprovalBusy"
@@ -1734,9 +1866,15 @@ async function submitWorkflowStepRevision() {
             @approve-capability="approveCapability"
           />
           <UserInputBox
+            :can-stop="canStopSession"
+            :can-resume="canResumeStoppedSession"
+            :control-busy="isSessionControlBusy"
+            :control-error="sessionControlError"
+            @stop="stopCurrentSession"
+            @resume="resumeStoppedSession"
             :busy="isSendingMessage"
-            :disabled="backendDisconnected"
-            :placeholder="backendDisconnected ? '后端离线，恢复连接后可继续发送' : undefined"
+            :disabled="backendUnreachable"
+            :placeholder="backendUnreachable ? '后端离线，恢复连接后可继续发送' : undefined"
             @send="sendUserMessage"
           />
         </div>

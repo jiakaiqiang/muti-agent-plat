@@ -1,0 +1,22 @@
+{
+  "extends": "../../web/tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "../../web/src/*"
+      ],
+      "@agent-cluster/shared": [
+        "../../../packages/shared/src/index.ts"
+      ]
+    }
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.vue",
+    "../../web/src/types/**/*.d.ts"
+  ],
+  "exclude": [
+    "**/*.spec.ts"
+  ]
+}

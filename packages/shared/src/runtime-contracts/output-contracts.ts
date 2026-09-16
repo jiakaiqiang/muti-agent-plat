@@ -122,7 +122,7 @@ export const FileRevisionCandidateOutputSchema = strictObject({
   evidenceHash: Type.String({ pattern: '^[a-f0-9]{64}$' }),
   content: Type.String(),
   summary: NonEmptyString,
-  incorporatedAgentResultIds: Type.Array(NonEmptyString, { minItems: 1, uniqueItems: true }),
+  incorporatedAgentResultIds: Type.Array(NonEmptyString, { minItems: 1 }),
   unresolvedConflicts: Type.Array(strictObject({
     agentResultIds: StringArray,
     description: NonEmptyString
@@ -133,15 +133,15 @@ const PostReviewActionSchema = Type.Union([
   strictObject({
     action: Type.Literal('request_workspace_context'),
     reason: NonEmptyString,
-    missingPaths: Type.Array(NonEmptyString, { minItems: 1, uniqueItems: true })
+    missingPaths: Type.Array(NonEmptyString, { minItems: 1 })
   }),
   strictObject({
     action: Type.Literal('deliver_with_limitations'),
-    limitations: Type.Array(NonEmptyString, { minItems: 1, uniqueItems: true })
+    limitations: Type.Array(NonEmptyString, { minItems: 1 })
   }),
   strictObject({
     action: Type.Literal('save_progress'),
-    artifactIds: Type.Array(NonEmptyString, { uniqueItems: true })
+    artifactIds: Type.Array(NonEmptyString)
   }),
   strictObject({
     action: Type.Literal('cancel'),

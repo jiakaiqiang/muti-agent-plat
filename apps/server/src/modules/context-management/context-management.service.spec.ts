@@ -46,6 +46,68 @@ async function fixture() {
   };
 }
 
+test('routing snapshots ignore progress noise but reject business changes', async () => {
+  const context = await fixture();
+  try {
+    await context.service.ensureInitialWorkItem(context.session, 'initial');
+    const snapshot = await context.service.buildIntentSnapshot({
+      session: context.session, sourceEventId: 'message', currentMessage: '继续', latestEventSeq: 1
+    });
+    const noise: CollaborationEvent[] = Array.from({ length: 100 }, (_, index) => ({
+      id: `progress-${index}`, sessionId: context.session.id, type: 'runtime_progress',
+      content: 'heartbeat', toAgentIds: [], actor: { type: 'system', id: 'runtime' },
+      metadata: createMetadata('system_notice', { code: 'RUNTIME_HEARTBEAT' }), createdAt: new Date().toISOString()
+    }));
+    await context.persistence.setCollection('eventsBySession', { [context.session.id]: noise });
+    assert.equal(context.service.isSnapshotCurrent(context.session, snapshot, 101), true);
+    context.session.tokenUsed += 100;
+    context.session.updatedAt = new Date().toISOString();
+    assert.equal(context.service.isSnapshotCurrent(context.session, snapshot, 102), true);
+    context.session.status = 'WAIT_USER_DECISION';
+    assert.equal(context.service.isSnapshotCurrent(context.session, snapshot, 102), false);
+    context.session.status = 'AGENT_DISCUSSING';
+    await context.persistence.setCollection('tasksBySession', { [context.session.id]: [{
+      id: 'task-changing-target', sessionId: context.session.id, status: 'waiting', assignee: { type: 'agent', id: 'worker' }
+    }] });
+    assert.equal(context.service.isSnapshotCurrent(context.session, snapshot), false, 'task changes must invalidate legal-action context');
+    await context.persistence.setCollection('tasksBySession', { [context.session.id]: [] });
+    await context.persistence.setCollection('eventsBySession', { [context.session.id]: [
+      ...noise, { ...noise[0], id: 'new-requirement', type: 'user_message', content: '新需求' }
+    ] });
+    assert.equal(context.service.isSnapshotCurrent(context.session, snapshot, 102), false);
+  } finally { await context.cleanup(); }
+});
+
+test('routing rebuild allowance survives reason replacement and service reconstruction', async () => {
+  const context = await fixture();
+  try {
+    const route = await context.service.createRoutingRecord({ session: context.session,
+      sourceEventId: 'message', idempotencyKey: 'rebuild-test', rolloutMode: 'enforce_all_current_epoch' });
+    const reserved = await Promise.all([context.service.reserveRoutingRebuild(context.session.id, route.id),
+      context.service.reserveRoutingRebuild(context.session.id, route.id)]);
+    assert.deepEqual(reserved.sort(), [false, true]);
+    await context.service.updateRoutingRecord(context.session.id, route.id, { reasonCodes: ['MODEL_DECISION'] });
+    const restored = new ContextManagementService(context.persistence);
+    assert.equal(await restored.reserveRoutingRebuild(context.session.id, route.id), false);
+    assert.equal(restored.listRoutingRecords(context.session.id)[0].snapshotRebuildCount, 1);
+  } finally { await context.cleanup(); }
+});
+
+test('a late classifier cannot overwrite a reclaimed routing lease', async () => {
+  const context = await fixture();
+  try {
+    const route = await context.service.createRoutingRecord({ session: context.session,
+      sourceEventId: 'message', idempotencyKey: 'lease-test', rolloutMode: 'enforce_all_current_epoch' });
+    await context.service.claimIntentRouting(context.session.id, route.id, 'snapshot', 'old-worker');
+    await context.service.updateRoutingRecord(context.session.id, route.id, { leaseExpiresAt: new Date(0).toISOString() });
+    const claimed = await context.service.claimIntentRouting(context.session.id, route.id, 'snapshot', 'new-worker');
+    assert.equal(claimed.state, 'claimed');
+    await assert.rejects(context.service.updateRoutingRecord(context.session.id, route.id,
+      { status: 'VALIDATING', reasonCodes: ['LATE_RESULT'] }, 'old-worker'), /ROUTING_LEASE_LOST/);
+    assert.equal(context.service.listRoutingRecords(context.session.id)[0].leaseOwner, 'new-worker');
+  } finally { await context.cleanup(); }
+});
+
 test('creates an initial WorkItem and atomically projects it as the active Session context', async () => {
   const context = await fixture();
   try {

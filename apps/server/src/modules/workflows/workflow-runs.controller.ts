@@ -1,10 +1,21 @@
 import { Body, Controller, Get, Param, Post } from '@nestjs/common';
 import { ok } from '../../common/api-response.js';
 import { WorkflowRuntimeService } from './workflow-runtime.service.js';
+import { WorkflowFileHistoryService } from './workflow-file-history.service.js';
 
 @Controller('workflow-runs')
 export class WorkflowRunsController {
-  constructor(private readonly runtime: WorkflowRuntimeService) {}
+  constructor(private readonly runtime: WorkflowRuntimeService, private readonly fileHistory: WorkflowFileHistoryService) {}
+
+  @Get(':runId/file-diff')
+  fileDiff(@Param('runId') runId: string) {
+    return ok(this.fileHistory.delivery(this.runtime.get(runId)));
+  }
+
+  @Get('session/:sessionId')
+  history(@Param('sessionId') sessionId: string) {
+    return ok({ items: this.runtime.listBySession(sessionId), hasMore: false });
+  }
 
   @Get(':runId')
   detail(@Param('runId') runId: string) {

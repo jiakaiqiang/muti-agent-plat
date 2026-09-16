@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { SessionDetail, WorkflowRun } from '@agent-cluster/shared';
 import { SessionsService } from './sessions.service.js';
 
-function setup(emptyWorkspace = false) {
+function setup(emptyWorkspace = false, confirmedByUser = true) {
   const session: SessionDetail = {
     id: 'session-workflow', dataEpoch: 'epoch-test', title: 'Workflow session', originalInput: 'Implement and verify the requirement.',
     status: 'WAIT_WORKFLOW_SELECT', ownerId: 'local-user', workspaceId: 'workspace', tokenUsed: 0,
@@ -52,7 +52,7 @@ function setup(emptyWorkspace = false) {
     {} as never,
     {} as never,
     {
-      getBrief: () => ({ id: 'brief-1', sessionId: session.id, acceptanceCriteria: ['Each stage is reviewable.'] }),
+      getBrief: () => ({ id: 'brief-1', sessionId: session.id, confirmedByUser, acceptanceCriteria: ['Each stage is reviewable.'] }),
       ensureArchitectureReportSaveConfirmation() {},
       registerSavePendingInvocationCallback() {},
       deleteSession() {}
@@ -70,6 +70,8 @@ function setup(emptyWorkspace = false) {
     } as never,
     {
       updates: () => ({ subscribe(callback: (update: Record<string, unknown>) => void) { runtimeSubscriber = callback; } }),
+      findBySession: () => starts.length ? run : undefined,
+      get: () => run,
       async start(input: Record<string, unknown>) { starts.push(input); return run; }
     } as never
   );
@@ -111,6 +113,23 @@ test('empty workspace pauses workflow selection until bootstrap is explicitly ap
   assert.equal(session.workspaceMode, 'bootstrap');
   assert.equal(session.status, 'EXECUTING');
   assert.equal(starts.length, 1);
+});
+
+test('workflow selection replays one confirmation once and rejects switching its version', async () => {
+  const { service, session, starts, run } = setup();
+  const input = { workflowId: 'workflow-1', workflowVersion: 2, confirmationId: 'confirm-workflow' };
+  await service.selectWorkflow(session.id, input);
+  const replay = await service.selectWorkflow(session.id, input);
+  assert.equal(replay.workflowRun?.id, run.id);
+  assert.equal(starts.length, 1);
+  await assert.rejects(service.selectWorkflow(session.id, { ...input, workflowVersion: 3 }), /different workflow version/);
+  assert.equal(starts.length, 1);
+});
+
+test('an unconfirmed revised brief cannot start a selected workflow', async () => {
+  const { service, session, starts } = setup(false, false);
+  await assert.rejects(service.selectWorkflow(session.id, { workflowId: 'workflow-1', workflowVersion: 2, confirmationId: 'confirm-workflow' }), /confirmed brief is missing/);
+  assert.equal(starts.length, 0);
 });
 
 test('completed empty Provider index pauses workflow selection without a legacy Snapshot', async () => {

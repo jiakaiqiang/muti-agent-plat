@@ -86,16 +86,26 @@ function frameToEventArg(
     case 'tool_completed': {
       const md = (frame.metadata ?? {}) as Record<string, unknown>;
       const output = typeof md.output === 'string' ? md.output : safeJson(md.output);
+      const outputPreview = output.slice(0, TOOL_OUTPUT_PREVIEW_CHARS);
+      const toolName = asString(md.name) || 'unknown';
+      const isError = md.isError === true;
+      const validationErrors = isError && toolName === 'StructuredOutput'
+        ? output.match(/\/[a-zA-Z0-9_/-]+: must be [a-zA-Z ]+/g)?.slice(0, 30) : undefined;
       return {
         ...base,
         type: 'tool_completed',
-        content: frame.content || `Tool ${asString(md.name) || 'unknown'} completed`,
+        content: isError
+          ? validationErrors?.length
+            ? `工具 ${toolName} 结构化输出校验失败：${validationErrors.length} 个字段格式不符合要求，可展开查看原因。`
+            : toolFailureContent(toolName, outputPreview)
+          : frame.content || `Tool ${toolName} completed`,
         metadata: deps.createMetadata('tool_card', {
           runtimeInvocationId: plan.invocationId,
           toolCallId: md.toolCallId,
           name: md.name,
-          isError: md.isError === true,
-          outputPreview: output.slice(0, TOOL_OUTPUT_PREVIEW_CHARS)
+          isError,
+          outputPreview,
+          ...(validationErrors?.length ? { validationErrors } : {})
         })
       };
     }
@@ -130,6 +140,14 @@ function frameToEventArg(
     default:
       return undefined;
   }
+}
+
+function toolFailureContent(name: string, outputPreview: string) {
+  const label =
+    name === 'StructuredOutput'
+      ? `工具 ${name} 结构化输出校验失败`
+      : `工具 ${name} 执行失败`;
+  return outputPreview ? `${label}：${outputPreview}` : `${label}。`;
 }
 
 function asString(value: unknown): string {

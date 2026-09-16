@@ -17,7 +17,7 @@ import type {
   UserMessageHandlingPlanOutput
 } from '@agent-cluster/shared';
 import { createAgentMessageOutput, createRuntimeArtifactSystemEvidence } from '@agent-cluster/shared';
-import { modelProviderSupportsRuntime } from '@agent-cluster/shared';
+import { buildStructuredOutputInstructions, modelProviderSupportsRuntime } from '@agent-cluster/shared';
 import {
   genericLlmMockFallbackEnabled,
   llmDiagnosticPreviewChars,
@@ -998,7 +998,11 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
    */
   private buildLocalSystemPrompt(input: InvocationPlan): string {
     // Keep local-model output instructions concise to avoid triggering reasoning mode.
-    const parts = ['Return only valid JSON.', `Output kind: ${input.expectedOutput.kind}`];
+    const parts = [
+      'Return only valid JSON.',
+      `Output kind: ${input.expectedOutput.kind}`,
+      buildStructuredOutputInstructions(input.expectedOutput.kind)
+    ];
 
     if (input.expectedOutput.kind === 'task_brief') {
       parts.push('Include: goal, scope, constraints, acceptanceCriteria.');
@@ -1037,6 +1041,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       input.expectedOutput.kind === 'task_acceptance_decision'
         ? 'For task_acceptance_decision, status must be exactly one of: accepted, blocked, rejected.'
         : 'When task_execution_result has a status field, status must be exactly one of: completed, failed, blocked, needs_review.',
+      buildStructuredOutputInstructions(input.expectedOutput.kind),
       'Do not call tools, modify files, or perform external side effects.',
       'Use ContextEnvelopeV2 L1 for the task and navigation, L2 for the project map, and L3 for grounded evidence.',
       'Treat taskContext.evidenceSelection.omittedRefs as intentionally excluded context; ask for more evidence instead of inventing details when selected evidence is insufficient.',
@@ -1053,7 +1058,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         ? 'For agent_message, the "content" field must be one plain-text string (never an object or array). Write a detailed Chinese response with 3-6 concise paragraphs or bullets covering understanding, concerns, and recommendations.'
         : '',
       input.expectedOutput.kind === 'task_acceptance_decision'
-        ? 'For task_acceptance_decision, decide whether this assigned agent can execute the currentTask. Return status accepted, blocked, or rejected; reason; optional missingContext; optional requestedContext { reason, requestedRefs, requestedPaths, requestedDirectories, requestedSearches, requestedCommands, followUpInstruction } when evidence is insufficient; optional handoffSuggestion { targetAgentKey or targetAgentId, reason, riskLevel }; optional confidence; optional alternativeAgentKeys/alternativeAgentIds; and optional agentMessages. Do not reassign the task yourself.'
+        ? 'Return the task_acceptance_decision fields required by the schema, including requestedContext when evidence is insufficient.'
         : '',
       input.expectedOutput.kind === 'task_execution_result'
         ? 'For task_execution_result, include changedArtifacts. If this is a validation task or the agent is the Validation Agent, include a test_report artifact with metadata.validationEvidence mapping each taskContext.validationRules item to verdicts and taskContext.evidenceRefs, plus validatorAgentKey, validatorAgentId, and independentFromAgentKeys from taskContext.agentResponsibilities. If workspaceManifest is present, analyze the impact surface from manifest paths, but ground content-specific changes only in selectedEvidenceContents. Do not collapse a multi-file requirement into one file. Use agent-output only for auxiliary summaries. Include optional agentMessages when progress, risks, questions, or handoffs should be sent to other agents; target them with targetAgentKeys such as coordinator, frontend, backend, test, review.'

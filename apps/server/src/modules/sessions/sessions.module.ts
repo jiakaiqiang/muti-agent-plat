@@ -1,5 +1,6 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { AgentsModule } from '../agents/agents.module.js';
+import { ArtifactsModule } from '../artifacts/artifacts.module.js';
 import { EventsModule } from '../events/events.module.js';
 import { MemoryModule } from '../memory/memory.module.js';
 import { ExecutionModule } from '../execution/execution.module.js';
@@ -18,6 +19,7 @@ import { MessageRoutingModule } from '../message-routing/message-routing.module.
 @Module({
   imports: [
     AgentsModule,
+    ArtifactsModule,
     EventsModule,
     MemoryModule,
     ContextManagementModule,

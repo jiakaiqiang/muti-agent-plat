@@ -142,6 +142,14 @@ export class LocalRuntimeAuthService {
     return this.issueTokens(device);
   }
 
+  resumeTrustedDevice(deviceId: string, ownerId = 'local-user'): LocalRuntimeTokenResponse {
+    const device = this.devices.get(deviceId);
+    if (!device || device.ownerId !== ownerId || device.status !== 'active') {
+      throw new UnauthorizedException('Only an existing active Local Runtime device can be resumed.');
+    }
+    return this.issueTokens(device);
+  }
+
   refresh(refreshToken: string): LocalRuntimeTokenResponse {
     const tokenHash = hash(refreshToken);
     const device = [...this.devices.values()].find((candidate) => candidate.refreshTokenHash === tokenHash);

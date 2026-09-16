@@ -2,11 +2,20 @@
 import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { actorAgentId } from '@/composables/useActor'
+import { useAgentStore } from '@/stores/agent'
 import { useWorkspaceUiStore, type WorkflowStageKey } from '@/stores/workspaceUi'
 import { applicableArtifactFileChanges } from './artifactFileChangeModel'
+import {
+  buildWorkflowChain,
+  discussionRounds,
+  workflowChainEdges,
+  type WorkflowChainEdgeInput,
+  type WorkflowChainState
+} from './workflowChainModel'
 import type { ActorRef, AgentCardState, ArtifactEventPayload, CollaborationEvent, ConfirmationCardState, SessionStatus, TaskViewState } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
 import UiIcon from './UiIcon.vue'
+import WorkflowAgentInspector from './WorkflowAgentInspector.vue'
 
 const props = defineProps<{
   events: CollaborationEvent[]
@@ -32,25 +41,14 @@ type WorkflowStage = {
   successEventTypes: CollaborationEvent['type'][]
 }
 
-type WorkflowAgentEdge = {
-  id: string
-  fromAgentId: string
-  toAgentId: string
-  phase?: string
-  kind?: string
-}
 type GraphPoint = { x: number; y: number }
-type DragTarget =
-  | { kind: 'node'; agentId: string }
-  | { kind: 'edge'; edgeId: string; endpoint: 'from' | 'to' }
-  | { kind: 'edge-line'; edgeId: string; origin: { from: GraphPoint; to: GraphPoint; pointer: GraphPoint } }
 
+const agentStore = useAgentStore()
 const workspaceUiStore = useWorkspaceUiStore()
 const { selectedWorkflowStage: selectedStageKey } = storeToRefs(workspaceUiStore)
 const workflowScale = ref(1)
 const workflowNodePositions = ref<Record<string, GraphPoint>>({})
-const workflowEdgePositions = ref<Record<string, { from?: GraphPoint; to?: GraphPoint }>>({})
-const workflowDragTarget = ref<DragTarget | undefined>()
+const draggingAgentId = ref<string | undefined>()
 const workflowZoomStyle = computed(() => ({
   transform: `scale(${workflowScale.value})`
 }))
@@ -95,7 +93,7 @@ const stages: WorkflowStage[] = [
     title: '分发接受',
     agent: 'Assigned Agents',
     points: ['创建任务池', 'Agent 接受任务', '依赖就绪后启动'],
-    eventTypes: ['task_created', 'task_assigned', 'task_accepted', 'task_claimed', 'task_blocked', 'task_reassigned', 'task_started', 'task_waiting', 'agent_message'],
+    eventTypes: ['task_created', 'task_assigned', 'task_accepted', 'task_claimed', 'task_blocked', 'task_reassigned', 'task_started', 'task_waiting', 'task_rejected', 'agent_message'],
     eventPhases: ['task_acceptance', 'task_acceptance_decision', 'task_acceptance_blocked', 'task_handoff'],
     successEventTypes: ['task_accepted', 'task_claimed', 'task_started']
   },
@@ -109,6 +107,7 @@ const stages: WorkflowStage[] = [
       'runtime_progress',
       'runtime_completed',
       'runtime_failed',
+      'task_failed',
       'artifact_created',
       'tool_called',
       'tool_completed',
@@ -130,67 +129,88 @@ const stages: WorkflowStage[] = [
   }
 ]
 
-const visibleAgents = computed(() => props.agents.filter((agent) => agent.status !== 'disabled'))
 const completedTaskCount = computed(() => props.tasks.filter((task) => task.status === 'completed').length)
 const progressPercent = computed(() => {
   if (!props.tasks.length) return props.status === 'COMPLETED' ? 100 : 0
   return Math.round((completedTaskCount.value / props.tasks.length) * 100)
 })
 const selectedStage = computed(() => stages.find((stage) => stage.key === selectedStageKey.value) ?? stages[0])
-const agentTasksById = computed(() => {
-  const tasks = new Map<string, TaskViewState[]>()
-  for (const task of props.tasks) {
-    const assigneeId = actorAgentId(task.assignee)
-    if (!assigneeId) continue
-    tasks.set(assigneeId, [...(tasks.get(assigneeId) ?? []), task])
-  }
-  return tasks
-})
-const workflowAgentNodes = computed(() =>
-  visibleAgents.value.map((agent, index, agents) => {
-    const assignedTasks = agentTasksById.value.get(agent.agentId) ?? []
-    return {
-      agent,
-      index,
-      tone: stageTone(index),
-      position: workflowNodePositions.value[agent.agentId] ?? workflowNodePosition(index, agents.length),
-      assignedTasks,
-      completedTasks: assignedTasks.filter((task) => task.status === 'completed').length,
-      latestTask: assignedTasks.at(-1)
-    }
+
+const systemAgentIds = computed(() =>
+  agentStore.agents.filter((agent) => agent.management?.systemRole).map((agent) => agent.id)
+)
+
+/**
+ * The ordered Agent chain. All state derivation lives in workflowChainModel so it
+ * stays testable and this component only lays out and renders.
+ */
+const chain = computed(() =>
+  buildWorkflowChain({
+    events: props.events,
+    tasks: props.tasks,
+    agents: props.agents.filter((agent) => agent.status !== 'disabled'),
+    resolveName: (agentId: string) => {
+      const name = agentStore.agentName(agentId)
+      return name === agentId ? '' : name
+    },
+    systemAgentIds: systemAgentIds.value
   })
 )
-const outputTitle = computed(() => {
-  const delivery = [...props.events].reverse().find((event) => event.type === 'final_delivery_created')
-  return delivery?.content ?? 'Awaiting final delivery'
-})
-const outputSummary = computed(() => {
-  const delivery = [...props.events].reverse().find((event) => event.type === 'final_delivery_created')
-  const payload = delivery?.metadata.payload as { summary?: string; completedItems?: string[] } | undefined
-  return payload?.summary ?? payload?.completedItems?.join(' / ') ?? 'No delivery artifact has been created yet.'
-})
 
-function stageTone(index: number) {
-  return ((index % 5) + 1) as 1 | 2 | 3 | 4 | 5
+const chainNodes = computed(() =>
+  chain.value.map((node, index, nodes) => ({
+    ...node,
+    index,
+    position: workflowNodePositions.value[node.agentId] ?? workflowNodePosition(index, nodes.length)
+  }))
+)
+
+const selectedAgentId = ref('')
+const selectedNode = computed(() => chainNodes.value.find((node) => node.agentId === selectedAgentId.value))
+
+function selectChainNode(agentId: string) {
+  selectedAgentId.value = selectedAgentId.value === agentId ? '' : agentId
 }
+
+function stateLabel(state: WorkflowChainState) {
+  return { done: '已执行', active: '执行中', pending: '未执行' }[state]
+}
+
+/**
+ * Discussion content shown below the canvas, grouped by round.
+ *
+ * Keyed on `round` rather than `phase`: the orchestrator emits discussion
+ * agent_message without a phase, so a phase-based filter renders nothing.
+ */
+const discussion = computed(() =>
+  discussionRounds(props.events, (agentId: string) => {
+    const name = agentStore.agentName(agentId)
+    return name === agentId ? '' : name
+  })
+)
+const discussionMessageCount = computed(() =>
+  discussion.value.reduce((total, round) => total + round.messages.length, 0)
+)
 
 function eventPhase(event: CollaborationEvent) {
   const payload = event.metadata.payload as { phase?: string } | undefined
   return payload?.phase
 }
 
-const workflowAgentEdges = computed<WorkflowAgentEdge[]>(() => {
-  const agentIds = new Set(workflowAgentNodes.value.map((node) => node.agent.agentId))
+/** Raw edge candidates. Pulse eligibility is decided by the model, not here. */
+const edgeCandidates = computed<WorkflowChainEdgeInput[]>(() => {
+  const agentIds = new Set(chainNodes.value.map((node) => node.agentId))
   const messageEdges = props.events
-    .filter((event) => event.type === 'agent_message' && event.fromAgentId)
+    .filter((event) => event.type === 'agent_message' && actorAgentId(event.actor))
     .flatMap((event) => {
+      const fromAgentId = actorAgentId(event.actor)!
       const payload = event.metadata.payload as { mentionedAgentIds?: string[]; phase?: string } | undefined
       const targets = Array.from(new Set([...(event.toAgentIds ?? []), ...(payload?.mentionedAgentIds ?? [])]))
       return targets
-        .filter((targetId) => targetId && targetId !== event.fromAgentId && agentIds.has(targetId) && agentIds.has(event.fromAgentId!))
+        .filter((targetId) => targetId && targetId !== fromAgentId && agentIds.has(targetId) && agentIds.has(fromAgentId))
         .map((targetId) => ({
           id: `${event.id}:${targetId}`,
-          fromAgentId: event.fromAgentId!,
+          fromAgentId,
           toAgentId: targetId,
           phase: payload?.phase,
           kind: 'message'
@@ -199,8 +219,8 @@ const workflowAgentEdges = computed<WorkflowAgentEdge[]>(() => {
     .slice(-24)
 
   const taskOwnerById = new Map<string, string>()
-  const taskEdges: WorkflowAgentEdge[] = []
-  const coordinatorId = workflowAgentNodes.value[0]?.agent.agentId
+  const taskEdges: WorkflowChainEdgeInput[] = []
+  const headAgentId = chainNodes.value[0]?.agentId
   for (const event of props.events) {
     const payload = event.metadata.payload as { taskId?: string; assignee?: ActorRef; dependsOnTaskIds?: string[] } | undefined
     const taskId = payload?.taskId ?? event.taskId
@@ -208,13 +228,13 @@ const workflowAgentEdges = computed<WorkflowAgentEdge[]>(() => {
     if (!taskId || !assigneeId || !agentIds.has(assigneeId)) continue
     taskOwnerById.set(taskId, assigneeId)
     if (
-      coordinatorId &&
-      coordinatorId !== assigneeId &&
+      headAgentId &&
+      headAgentId !== assigneeId &&
       ['task_created', 'task_assigned', 'task_accepted', 'task_claimed', 'task_blocked', 'task_reassigned', 'task_started', 'task_waiting'].includes(event.type)
     ) {
       taskEdges.push({
-        id: `${event.id}:${coordinatorId}:${assigneeId}`,
-        fromAgentId: coordinatorId,
+        id: `${event.id}:${headAgentId}:${assigneeId}`,
+        fromAgentId: headAgentId,
         toAgentId: assigneeId,
         phase: event.type === 'task_created' || event.type === 'task_assigned' ? 'task_acceptance' : 'task_handoff',
         kind: 'task'
@@ -233,23 +253,30 @@ const workflowAgentEdges = computed<WorkflowAgentEdge[]>(() => {
     }
   }
 
-  const edges = [...messageEdges, ...taskEdges]
-  const deduped = new Map<string, WorkflowAgentEdge>()
-  for (const edge of edges) deduped.set(edge.id, edge)
+  const deduped = new Map<string, WorkflowChainEdgeInput>()
+  for (const edge of [...messageEdges, ...taskEdges]) deduped.set(edge.id, edge)
   const selected = [...deduped.values()]
+  if (!selected.length && chainNodes.value.length < 2) return selected
+
+  // Layout-only links so an Agent with no real traffic still hangs off the chain.
+  // The model refuses to pulse these, so they never imply flow that never happened.
   const connected = new Set(selected.flatMap((edge) => [edge.fromAgentId, edge.toAgentId]))
-  if (!selected.length && workflowAgentNodes.value.length < 2) return selected
-  const fallback = workflowAgentNodes.value
-    .slice(1)
-    .filter((node) => !connected.has(node.agent.agentId))
-    .map((node) => ({
-    id: `fallback:${workflowAgentNodes.value[0].agent.agentId}:${node.agent.agentId}`,
-    fromAgentId: workflowAgentNodes.value[0].agent.agentId,
-    toAgentId: node.agent.agentId,
-    kind: 'fallback'
-  }))
+  const head = chainNodes.value[0]
+  const fallback = head
+    ? chainNodes.value
+        .slice(1)
+        .filter((node) => !connected.has(node.agentId))
+        .map((node) => ({
+          id: `fallback:${head.agentId}:${node.agentId}`,
+          fromAgentId: head.agentId,
+          toAgentId: node.agentId,
+          kind: 'fallback'
+        }))
+    : []
   return [...selected, ...fallback]
 })
+
+const chainEdges = computed(() => workflowChainEdges(chain.value, edgeCandidates.value))
 
 function workflowNodePosition(index: number, total: number) {
   if (total <= 1) return { x: 50, y: 42 }
@@ -262,22 +289,19 @@ function workflowNodePosition(index: number, total: number) {
   }
 }
 
-function workflowNodeStyle(index: number, total: number) {
-  const agent = workflowAgentNodes.value.find((node) => node.index === index)?.agent
-  const position = agent ? (workflowNodePositions.value[agent.agentId] ?? workflowNodePosition(index, total)) : workflowNodePosition(index, total)
+function workflowNodeStyle(agentId: string, index: number, total: number) {
+  const position = workflowNodePositions.value[agentId] ?? workflowNodePosition(index, total)
   return {
     left: `${position.x}%`,
     top: `${position.y}%`
   }
 }
 
-function workflowEdgePath(edge: WorkflowAgentEdge) {
-  const from =
-    workflowEdgePositions.value[edge.id]?.from ?? workflowAgentNodes.value.find((node) => node.agent.agentId === edge.fromAgentId)?.position
-  const to =
-    workflowEdgePositions.value[edge.id]?.to ?? workflowAgentNodes.value.find((node) => node.agent.agentId === edge.toAgentId)?.position
+function workflowEdgePath(edge: { fromAgentId: string; toAgentId: string }) {
+  const from = chainNodes.value.find((node) => node.agentId === edge.fromAgentId)?.position
+  const to = chainNodes.value.find((node) => node.agentId === edge.toAgentId)?.position
   if (!from || !to) return undefined
-  return { ...from, x2: to.x, y2: to.y }
+  return { x: from.x, y: from.y, x2: to.x, y2: to.y }
 }
 
 function workflowPointFromPointer(event: PointerEvent): GraphPoint | undefined {
@@ -292,80 +316,32 @@ function workflowPointFromPointer(event: PointerEvent): GraphPoint | undefined {
 }
 
 function moveWorkflowDragTarget(event: PointerEvent) {
-  if (!workflowDragTarget.value) return
+  const agentId = draggingAgentId.value
+  if (!agentId) return
   const point = workflowPointFromPointer(event)
   if (!point) return
-  if (workflowDragTarget.value.kind === 'node') {
-    workflowNodePositions.value = { ...workflowNodePositions.value, [workflowDragTarget.value.agentId]: point }
-    return
-  }
-  if (workflowDragTarget.value.kind === 'edge') {
-    workflowEdgePositions.value = {
-      ...workflowEdgePositions.value,
-      [workflowDragTarget.value.edgeId]: {
-        ...workflowEdgePositions.value[workflowDragTarget.value.edgeId],
-        [workflowDragTarget.value.endpoint]: point
-      }
-    }
-    return
-  }
-  if (workflowDragTarget.value.kind === 'edge-line') {
-    const { edgeId, origin } = workflowDragTarget.value
-    const deltaX = point.x - origin.pointer.x
-    const deltaY = point.y - origin.pointer.y
-    workflowEdgePositions.value = {
-      ...workflowEdgePositions.value,
-      [edgeId]: {
-        from: {
-          x: Math.min(96, Math.max(4, origin.from.x + deltaX)),
-          y: Math.min(94, Math.max(6, origin.from.y + deltaY))
-        },
-        to: {
-          x: Math.min(96, Math.max(4, origin.to.x + deltaX)),
-          y: Math.min(94, Math.max(6, origin.to.y + deltaY))
-        }
-      }
-    }
-  }
+  workflowNodePositions.value = { ...workflowNodePositions.value, [agentId]: point }
 }
 
 function startWorkflowNodeDrag(event: PointerEvent, agentId: string) {
-  workflowDragTarget.value = { kind: 'node', agentId }
+  draggingAgentId.value = agentId
   ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
   moveWorkflowDragTarget(event)
 }
 
-function startWorkflowEdgeDrag(event: PointerEvent, edgeId: string, endpoint: 'from' | 'to') {
-  workflowDragTarget.value = { kind: 'edge', edgeId, endpoint }
-  ;(event.currentTarget as SVGCircleElement).setPointerCapture(event.pointerId)
-  moveWorkflowDragTarget(event)
-}
-
-function startWorkflowEdgeLineDrag(event: PointerEvent, edge: WorkflowAgentEdge) {
-  const path = workflowEdgePath(edge)
-  const point = workflowPointFromPointer(event)
-  if (!path || !point) return
-  workflowDragTarget.value = {
-    kind: 'edge-line',
-    edgeId: edge.id,
-    origin: {
-      from: { x: path.x, y: path.y },
-      to: { x: path.x2, y: path.y2 },
-      pointer: point
-    }
-  }
-  ;(event.currentTarget as SVGLineElement).setPointerCapture(event.pointerId)
-}
-
 function stopWorkflowDrag() {
-  workflowDragTarget.value = undefined
+  draggingAgentId.value = undefined
 }
 
 function stageEvents(stage: WorkflowStage) {
   return props.events.filter((event) => {
     if (!stage.eventTypes.includes(event.type)) return false
     if (event.type !== 'agent_message') return true
-    return !stage.eventPhases?.length || stage.eventPhases.includes(eventPhase(event) ?? '')
+    if (!stage.eventPhases?.length) return true
+    const payload = event.metadata.payload as { round?: number } | undefined
+    // Discussion messages carry round but no phase, so a phase-only test drops them.
+    if (stage.key === 'intake' && typeof payload?.round === 'number') return true
+    return stage.eventPhases.includes(eventPhase(event) ?? '')
   })
 }
 
@@ -393,38 +369,35 @@ const finalOutputCompleted = computed(() =>
 )
 
 const selectedStageEvents = computed(() => [...stageEvents(selectedStage.value)].reverse())
-const workflowKeySignals = computed(() => {
-  const counts = {
-    claim: 0,
-    decline: 0,
-    routing: 0,
-    communication: 0,
-    fileChanges: 0,
-    delivery: 0
-  }
-  for (const event of props.events) {
-    const phase = eventPhase(event)
-    const payload = event.metadata.payload
-    if (phase === 'task_acceptance_decision' || phase === 'task_acceptance') counts.claim += 1
-    if (phase === 'task_acceptance_blocked' || phase === 'task_claim_declined') counts.decline += 1
-    if (phase === 'user_message_routing') counts.routing += 1
-    if (phase === 'agent_runtime_communication') counts.communication += 1
-    if (event.type === 'artifact_created') {
-      counts.fileChanges += applicableArtifactFileChanges(payload as ArtifactEventPayload | undefined).length
-    }
-    if (event.type === 'final_delivery_created') counts.delivery += 1
-  }
-  return [
-    { key: 'claim', label: '接受', value: counts.claim },
-    { key: 'decline', label: '受阻改派', value: counts.decline },
-    { key: 'routing', label: '补充路由', value: counts.routing },
-    { key: 'communication', label: 'Agent 通信', value: counts.communication },
-    { key: 'fileChanges', label: '文件变更', value: counts.fileChanges },
-    { key: 'delivery', label: '最终交付', value: counts.delivery }
-  ]
+
+const sessionStateLabel = computed(() => {
+  if (props.activeConfirmation?.reason === 'workflow_agent_substitution') return '等待改派或跳过'
+  if (props.activeConfirmation?.reason === 'workflow_upstream_rerun') return '等待选择返工节点'
+  if (props.activeConfirmation?.reason === 'confirm_workflow_human_gate') return '等待人工验收'
+  if (props.status === 'COMPLETED') return '已完成'
+  if (props.status === 'PAUSED') return '已暂停'
+  if (props.status === 'FAILED') return '已失败'
+  if (props.status === 'CANCELLED') return '已取消'
+  if (props.status === 'WAIT_USER_DECISION') return '等待用户决策'
+  if (props.status === 'WAIT_WORKFLOW_STEP_CONFIRM') return '等待人工验收'
+  return props.events.length ? '运行中' : '等待开始'
+})
+
+/** Real elapsed span between the first and last event, replacing the old fixed clock. */
+const runtimeDuration = computed(() => {
+  if (props.events.length < 2) return ''
+  const timestamps = props.events.map((event) => new Date(event.createdAt).getTime()).filter((value) => !Number.isNaN(value))
+  if (timestamps.length < 2) return ''
+  const totalSeconds = Math.max(0, Math.round((Math.max(...timestamps) - Math.min(...timestamps)) / 1000))
+  const hours = String(Math.floor(totalSeconds / 3600)).padStart(2, '0')
+  const minutes = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, '0')
+  const seconds = String(totalSeconds % 60).padStart(2, '0')
+  return `${hours}:${minutes}:${seconds}`
 })
 
 function workflowEventTitle(event: CollaborationEvent) {
+  if (event.type === 'task_failed') return '任务执行失败'
+  if (event.type === 'task_rejected') return 'Agent 拒绝接单'
   const phase = eventPhase(event)
   return phase ? `${event.type} / ${phase}` : event.type
 }
@@ -439,25 +412,12 @@ function workflowEventMeta(event: CollaborationEvent) {
   const fileChangeCount = event.type === 'artifact_created'
     ? applicableArtifactFileChanges(payload as ArtifactEventPayload | undefined).length
     : 0
-  if (fileChangeCount) items.push(`${fileChangeCount} file changes`)
+  if (fileChangeCount) items.push(`${fileChangeCount} 个文件变更`)
   return items
 }
 
-function statusLabel(status?: string) {
-  return (
-    {
-      idle: '等待中',
-      running: '正在执行',
-      thinking: '正在执行',
-      discussing: '正在执行',
-      waiting: '等待中',
-      reviewing: '正在执行',
-      reworking: '正在执行',
-      completed: '已完成',
-      failed: '阻塞中',
-      disabled: '等待中'
-    }[status ?? ''] ?? '等待中'
-  )
+function agentTone(index: number) {
+  return ((index % 5) + 1) as 1 | 2 | 3 | 4 | 5
 }
 
 const modeTabs: Array<{ mode: 'chat' | 'collaboration_graph' | 'workflow' | 'debug'; label: string; icon: string }> = [
@@ -484,36 +444,36 @@ const modeTabs: Array<{ mode: 'chat' | 'collaboration_graph' | 'workflow' | 'deb
           {{ mode.label }}
         </button>
       </div>
-      <span class="project-chip">会话：{{ sessionTitle ?? 'No active session' }}</span>
+      <span class="project-chip">会话：{{ sessionTitle ?? '暂无进行中的会话' }}</span>
       <span class="progress-chip">
         整体进度
         <strong>{{ progressPercent }}%</strong>
         <span><i :style="{ width: `${progressPercent}%` }"></i></span>
       </span>
-      <span class="session-state online">运行中</span>
-      <span class="graph-clock">运行时长 00:18:42</span>
+      <span class="session-state" :class="{ online: sessionStateLabel === '运行中' }">{{ sessionStateLabel }}</span>
+      <span v-if="runtimeDuration" class="graph-clock">运行时长 {{ runtimeDuration }}</span>
     </header>
 
     <div class="workflow-layout">
       <aside class="workflow-agent-rail" aria-label="Agents">
         <h3>Agents</h3>
         <button
-          v-for="(agent, index) in visibleAgents"
-          :key="agent.agentId"
+          v-for="node in chainNodes"
+          :key="node.agentId"
           type="button"
-          :class="['workflow-agent-card', `agent-tone-${stageTone(index)}`, { selected: index === 0 }]"
+          :class="['workflow-agent-card', `agent-tone-${agentTone(node.index)}`, { selected: node.agentId === selectedAgentId }]"
+          @click="selectChainNode(node.agentId)"
         >
-          <AgentPortrait :tone="stageTone(index)" :label="agent.name" size="md" />
-          <strong><span>{{ String(index + 1).padStart(2, '0') }}</span>{{ stages[index]?.title ?? agent.name }}</strong>
-          <small>{{ statusLabel(agent.status) }}</small>
+          <AgentPortrait :tone="agentTone(node.index)" :label="node.name" size="md" />
+          <strong><span>{{ String(node.index + 1).padStart(2, '0') }}</span>{{ node.name }}</strong>
+          <small>{{ stateLabel(node.state) }}</small>
         </button>
 
         <section class="workflow-status-legend">
           <h3>状态说明</h3>
-          <span><i class="dot-blue"></i>正在执行</span>
-          <span><i class="dot-wait"></i>等待中</span>
-          <span><i class="dot-green"></i>已完成</span>
-          <span><i class="dot-red"></i>阻塞中</span>
+          <span><i class="dot-chain-done"></i>已执行</span>
+          <span><i class="dot-chain-active"></i>执行中</span>
+          <span><i class="dot-chain-pending"></i>未执行</span>
         </section>
       </aside>
 
@@ -529,83 +489,46 @@ const modeTabs: Array<{ mode: 'chat' | 'collaboration_graph' | 'workflow' | 'deb
           </div>
         </header>
 
-        <div class="workflow-map zoom-viewport" @wheel.prevent="handleWorkflowWheel" @pointermove.prevent="moveWorkflowDragTarget" @pointerup="stopWorkflowDrag" @pointercancel="stopWorkflowDrag" @pointerleave="stopWorkflowDrag">
+        <div
+          class="workflow-map zoom-viewport"
+          @wheel.prevent="handleWorkflowWheel"
+          @pointermove.prevent="moveWorkflowDragTarget"
+          @pointerup="stopWorkflowDrag"
+          @pointercancel="stopWorkflowDrag"
+          @pointerleave="stopWorkflowDrag"
+        >
           <div class="zoom-content" :style="workflowZoomStyle">
-            <article
-            v-for="node in workflowAgentNodes"
-            :key="node.agent.agentId"
-            :class="['workflow-node', 'workflow-agent-node', `agent-tone-${node.tone}`, node.agent.status]"
-            :style="workflowNodeStyle(node.index, workflowAgentNodes.length)"
-            @pointerdown.prevent="startWorkflowNodeDrag($event, node.agent.agentId)"
-            >
-            <header>
-              <AgentPortrait :tone="node.tone" :label="node.agent.name" size="sm" />
-              <span>{{ node.index + 1 }}</span>
-              <div>
-                <h4>{{ node.agent.name }}</h4>
-                <p>{{ statusLabel(node.agent.status) }}</p>
-              </div>
-            </header>
-            <ul>
-              <li>{{ node.latestTask?.title ?? node.agent.currentTaskTitle ?? node.agent.actionSummary ?? '等待任务分配' }}</li>
-              <li>任务 {{ node.completedTasks }}/{{ node.assignedTasks.length }}</li>
-              <li>{{ node.agent.recentLogs[0] ?? node.agent.role }}</li>
-            </ul>
-            </article>
-
-            <svg class="workflow-agent-links editable-links" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-              <template v-for="edge in workflowAgentEdges" :key="edge.id">
+            <svg class="workflow-agent-links" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+              <template v-for="edge in chainEdges" :key="edge.id">
                 <line
                   v-if="workflowEdgePath(edge)"
                   :x1="workflowEdgePath(edge)?.x"
                   :y1="workflowEdgePath(edge)?.y"
                   :x2="workflowEdgePath(edge)?.x2"
                   :y2="workflowEdgePath(edge)?.y2"
-                  :class="['edge-drag-line', { highlighted: edge.phase === 'agent_runtime_communication' || edge.phase === 'user_message_routing' }]"
-                  @pointerdown.stop.prevent="startWorkflowEdgeLineDrag($event, edge)"
-                />
-                <circle
-                  v-if="workflowEdgePath(edge)"
-                  class="edge-drag-handle"
-                  :cx="workflowEdgePath(edge)?.x"
-                  :cy="workflowEdgePath(edge)?.y"
-                  r="1.5"
-                  @pointerdown.stop.prevent="startWorkflowEdgeDrag($event, edge.id, 'from')"
-                  @pointermove.prevent="moveWorkflowDragTarget"
-                  @pointerup="stopWorkflowDrag"
-                  @pointercancel="stopWorkflowDrag"
-                />
-                <circle
-                  v-if="workflowEdgePath(edge)"
-                  class="edge-drag-handle"
-                  :cx="workflowEdgePath(edge)?.x2"
-                  :cy="workflowEdgePath(edge)?.y2"
-                  r="1.5"
-                  @pointerdown.stop.prevent="startWorkflowEdgeDrag($event, edge.id, 'to')"
-                  @pointermove.prevent="moveWorkflowDragTarget"
-                  @pointerup="stopWorkflowDrag"
-                  @pointercancel="stopWorkflowDrag"
+                  :class="['workflow-chain-link', { pulsing: edge.pulsing, fallback: edge.kind === 'fallback' }]"
                 />
               </template>
             </svg>
 
-            <article class="workflow-hub">
-            <span class="brand-mark mini" aria-hidden="true"><i v-for="index in 6" :key="index"></i></span>
-            <strong>协同中</strong>
-            <small>实时通信</small>
-            </article>
-
-            <article class="workflow-output">
-            <span class="check-mark"></span>
-            <h4>{{ outputTitle }}</h4>
-            <p>{{ outputSummary }}</p>
-            </article>
-
-            <span class="workflow-arrow arrow-1"></span>
-            <span class="workflow-arrow arrow-2"></span>
-            <span class="workflow-arrow arrow-3"></span>
-            <span class="workflow-arrow arrow-4"></span>
-            <span class="workflow-arrow arrow-5"></span>
+            <button
+              v-for="node in chainNodes"
+              :key="node.agentId"
+              type="button"
+              :class="[
+                'workflow-chain-node',
+                `is-${node.state}`,
+                { 'is-system': node.kind === 'system', selected: node.agentId === selectedAgentId }
+              ]"
+              :style="workflowNodeStyle(node.agentId, node.index, chainNodes.length)"
+              :aria-pressed="node.agentId === selectedAgentId"
+              @pointerdown.prevent="startWorkflowNodeDrag($event, node.agentId)"
+              @click="selectChainNode(node.agentId)"
+            >
+              <span class="workflow-chain-node__index">{{ node.index + 1 }}</span>
+              <strong class="workflow-chain-node__name">{{ node.name }}</strong>
+              <small class="workflow-chain-node__state">{{ stateLabel(node.state) }}</small>
+            </button>
           </div>
         </div>
 
@@ -629,11 +552,33 @@ const modeTabs: Array<{ mode: 'chat' | 'collaboration_graph' | 'workflow' | 'deb
           </button>
         </section>
 
-        <section class="workflow-signal-strip">
-          <article v-for="signal in workflowKeySignals" :key="signal.key">
-            <span>{{ signal.label }}</span>
-            <strong>{{ signal.value }}</strong>
+        <WorkflowAgentInspector
+          v-if="selectedNode"
+          :node="selectedNode"
+          :tone="agentTone(selectedNode.index)"
+        />
+
+        <section class="workflow-discussion" aria-label="Agent 讨论">
+          <header>
+            <h3>Agent 讨论</h3>
+            <span>{{ discussionMessageCount }} 条</span>
+          </header>
+          <article
+            v-for="round in discussion"
+            :key="round.round"
+            class="workflow-discussion-round"
+          >
+            <h4>第 {{ round.round }} 轮</h4>
+            <div
+              v-for="message in round.messages"
+              :key="message.eventId"
+              class="workflow-discussion-message"
+            >
+              <strong>{{ message.agentName }}</strong>
+              <p>{{ message.content }}</p>
+            </div>
           </article>
+          <p v-if="!discussion.length">本次会话还没有 Agent 讨论内容。</p>
         </section>
 
         <section class="workflow-stage-events">

@@ -61,6 +61,36 @@ test('all declared contracts reject missing fields, old versions, wrong kinds, a
   }
 });
 
+test('validation errors name the offending property', () => {
+  const contract = getRuntimeOutputContract('task_execution_result');
+  const valid = structuredClone(contract.example) as Record<string, unknown>;
+
+  // 2026-08-26 的真实失败：模型把 changedArtifacts[0] 的 type/title 复制到了根对象。
+  // 两条违规的 message 完全相同，字段名只在 params 里。
+  const extra = contract.validate({ ...valid, type: 'code_diff', title: 'x' });
+  assert.equal(extra.valid, false);
+  assert.deepEqual(extra.errors, [
+    '/ must NOT have additional properties: type',
+    '/ must NOT have additional properties: title'
+  ]);
+
+  const missing = structuredClone(valid);
+  delete missing.summary;
+  delete missing.risks;
+  assert.deepEqual(getRuntimeOutputContract('task_execution_result').validate(missing).errors, [
+    "/ must have required property: summary",
+    "/ must have required property: risks"
+  ]);
+
+  const nested = structuredClone(valid) as { changedArtifacts: unknown[] };
+  nested.changedArtifacts = [{ type: 'code_diff', title: 't', content: 'c', uri: null, summary: null }];
+  const nestedErrors = contract.validate(nested).errors;
+  assert.ok(
+    nestedErrors.some((error) => error === '/changedArtifacts/0 must have required property: metadata'),
+    `nested path and property name must both survive: ${nestedErrors.join('; ')}`
+  );
+});
+
 test('strict preflight rejects const without type', () => {
   assert.throws(
     () =>

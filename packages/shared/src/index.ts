@@ -1,4 +1,5 @@
 export * from './contracts.js';
+export * from './collaboration-contracts.js';
 export * from './time.js';
 export * from './metadata.js';
 export * from './default-agents.js';
@@ -7,6 +8,8 @@ export * from './system-agents.js';
 export * from './workspace-ignore.js';
 export * from './local-runtime-contracts.js';
 export * from './claude-provider-error.js';
+export * from './provider-failure.js';
+export * from './runtime-activity.js';
 export * from './workspace-path-safety.js';
 export * from './workspace-three-way-merge.js';
 export * from './runtime-contracts/index.js';

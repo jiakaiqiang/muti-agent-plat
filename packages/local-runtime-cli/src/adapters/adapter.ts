@@ -4,6 +4,7 @@ import type {
   InvocationPlan,
   LocalRuntimePermissionPolicy,
   RuntimeOutput,
+  MinimalTaskSubmission,
   RuntimeType,
   RuntimeUsage
 } from '@agent-cluster/shared';
@@ -25,7 +26,7 @@ export type LocalRuntimeAdapterContext = {
 };
 
 export type LocalRuntimeAdapterResult = {
-  output: RuntimeOutput;
+  output: RuntimeOutput | MinimalTaskSubmission;
   usage: RuntimeUsage;
   runtimeSession?: AgentRunResult['runtimeSession'];
 };

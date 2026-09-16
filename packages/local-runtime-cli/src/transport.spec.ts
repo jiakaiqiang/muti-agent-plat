@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { getEventListeners } from 'node:events';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
+  abortableDelay,
   authorizeLoopbackDevice,
   createWorkspaceIndexPersistence,
   initializeSelectedWorkspace,
@@ -14,6 +16,18 @@ import {
 import { defaultState } from './state.js';
 import { LocalWorkspace } from './workspace.js';
 import { probeLocalRuntimeCapabilities } from './adapters/registry.js';
+
+test('reconnect delay removes abort listeners after successful waits', async () => {
+  const controller = new AbortController();
+  for (let index = 0; index < 12; index += 1) await abortableDelay(0, controller.signal);
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+});
+
+test('reconnect delay rejects immediately when already aborted', async () => {
+  const controller = new AbortController();
+  controller.abort(new Error('stopped'));
+  await assert.rejects(() => abortableDelay(1, controller.signal), /stopped/);
+});
 
 test('Runtime capability probe reports each installed CLI without starting a model process', async () => {
   const previousCodexVersion = process.env.AGENT_RUNTIME_CODEX_VERSION;

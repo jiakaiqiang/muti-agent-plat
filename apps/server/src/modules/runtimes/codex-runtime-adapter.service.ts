@@ -16,7 +16,7 @@ import type {
   VerifiedTestResult,
   UUID
 } from '@agent-cluster/shared';
-import { createAgentMessageOutput } from '@agent-cluster/shared';
+import { buildStructuredOutputInstructions, createAgentMessageOutput } from '@agent-cluster/shared';
 import {
   runtimeStreamingMode,
   positiveRuntimeTimeoutMs
@@ -421,6 +421,7 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
         `Act as the ${input.agent.role} agent for the current task.`,
         `Read the workdir AGENTS.md block and task sidecar at: ${taskSidecarPath}`,
         `Return exactly one JSON object of kind ${input.expectedOutput.kind}.`,
+        buildStructuredOutputInstructions(input.expectedOutput.kind),
         input.expectedOutput.kind === 'post_review_report' ? POST_REVIEW_CONTEXT_ACTION_INSTRUCTION : ''
       ].filter(Boolean).join('\n');
     }
@@ -429,10 +430,10 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
       'Work inside the allowed server_local directory only.',
       'Return one JSON object and no markdown fences.',
       `Required output kind: ${input.expectedOutput.kind}.`,
+      buildStructuredOutputInstructions(input.expectedOutput.kind),
       'Use ContextEnvelopeV2 L1/L2 for navigation and L3 for readable evidence.',
       'If selected evidence is insufficient, return a blocked task_execution_result or runtime error with code CONTEXT_INSUFFICIENT and requestedContext; do not fabricate unread file contents, APIs, logs, or test results.',
-      'For task_acceptance_decision, decide whether this assigned agent can execute the currentTask. Return status accepted, blocked, or rejected; reason; optional missingContext; optional handoffSuggestion { targetAgentKey or targetAgentId, reason, riskLevel }; optional confidence; optional alternativeAgentKeys/alternativeAgentIds; and optional agentMessages. Do not reassign the task yourself.',
-      'For task_acceptance_decision, return status, reason, optional confidence, optional alternativeAgentKeys/alternativeAgentIds, optional handoffSuggestion, and optional agentMessages. Do not reassign the task yourself.',
+      'For task_acceptance_decision, return the schema fields directly and do not reassign the task yourself.',
       'For task_execution_result, include changedArtifacts with metadata.fileChanges for every file you changed or propose to change.',
       'For validation task_execution_result, include a test_report changedArtifact with metadata.validationEvidence mapping each taskContext.validationRules item to verdict status, evidenceRefs, notes, and missingEvidence, plus validatorAgentKey, validatorAgentId, and independentFromAgentKeys from taskContext.agentResponsibilities.',
       'For task_execution_result, include optional agentMessages when you need to communicate progress, risks, questions, or handoffs to other agents. Use targetAgentKeys such as coordinator, frontend, backend, test, review.',

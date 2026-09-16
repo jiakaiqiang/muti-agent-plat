@@ -9,6 +9,23 @@ function setup() {
   return new LocalRuntimeAuthService(persistence);
 }
 
+test('automatic recovery only rotates credentials for an existing active device owned by the caller', () => {
+  const service = setup();
+  assert.throws(() => service.resumeTrustedDevice('unknown'), /existing active/);
+  const tokens = service.authorizeTrustedDevice({ deviceId: 'saved', displayName: 'original',
+    cliVersion: '0.1.0', protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION, runtimes: {} });
+  const original = service.listDevices()[0]!;
+  const recovered = service.resumeTrustedDevice('saved');
+  assert.notEqual(recovered.accessToken, tokens.accessToken);
+  assert.equal(service.authenticate(recovered.accessToken).deviceId, 'saved');
+  assert.equal(service.listDevices()[0]!.createdAt, original.createdAt);
+  assert.equal(service.listDevices()[0]!.displayName, original.displayName);
+  assert.throws(() => service.resumeTrustedDevice('saved', 'other-owner'), /existing active/);
+  service.revokeDevice('saved');
+  assert.throws(() => service.resumeTrustedDevice('saved'), /existing active/);
+  assert.equal(service.listDevices()[0]!.status, 'revoked');
+});
+
 test('device-code flow requires approval, issues rotatable tokens, and supports revocation', () => {
   const service = setup();
   const code = service.createDeviceCode({

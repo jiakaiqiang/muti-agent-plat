@@ -33,6 +33,7 @@ export class RouteApplicationService {
     const applied = await this.context.applyIntentRoute({
       session: input.session,
       routingId: input.outcome.routing.id,
+      expectedLeaseOwner: input.outcome.routing.leaseOwner,
       snapshotId: input.snapshot.id,
       followUpId: input.followUp.id,
       decision: input.outcome.decision,

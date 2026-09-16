@@ -3,8 +3,82 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentTask, SessionDetail, WorkspaceWritebackRecord } from '@agent-cluster/shared';
+import type { AgentTask, SessionDetail, UserMessageHandlingPlan, WorkspaceWritebackRecord } from '@agent-cluster/shared';
 import { SessionsService } from './sessions.service.js';
+
+test('failed brief resumes at generation, consumes its confirmation once and rejects a stale confirmation', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Recover failed brief' });
+  const service = fixture.service as any;
+  let generations = 0;
+  let executions = 0;
+  service.generateBriefInBackground = () => { generations++; };
+  service.resumeExecution = () => { executions++; };
+  service.failSession(session, new Error('PERSISTENCE_REVISION_CONFLICT'), 'brief_generation');
+  const confirmationId = session.activeRecoveryCheckpoint!.confirmationId;
+  fixture.service.resume(session.id, 'retry', confirmationId);
+  fixture.service.resume(session.id, 'duplicate', confirmationId);
+  fixture.service.resume(session.id);
+  assert.equal(session.status, 'AGENT_DISCUSSING');
+  assert.equal(generations, 1);
+  assert.equal(executions, 0);
+  service.failSession(session, new Error('new failure'), 'brief_generation');
+  assert.throws(() => fixture.service.resume(session.id, 'old card', confirmationId), /已过期/);
+  assert.equal(session.status, 'FAILED');
+  assert.equal(generations, 1);
+});
+
+test('failed task with a brief resumes execution while an unconfirmed stop remains a barrier', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Recover execution' });
+  const service = fixture.service as any;
+  session.currentTaskBriefId = 'existing-brief';
+  let executions = 0;
+  service.resumeExecution = () => { executions++; };
+  service.generateBriefInBackground = () => { throw new Error('must not regenerate'); };
+  service.failSession(session, new Error('task failed'), 'task_execution');
+  const confirmationId = session.activeRecoveryCheckpoint!.confirmationId;
+  service.runtime = { hasUnconfirmedStops: () => true };
+  assert.throws(() => fixture.service.resume(session.id, 'retry', confirmationId), /停止状态尚未确认/);
+  assert.equal(session.activeRecoveryCheckpoint!.confirmationId, confirmationId);
+  service.runtime.hasUnconfirmedStops = () => false;
+  fixture.service.resume(session.id, 'retry', confirmationId);
+  fixture.service.resume(session.id, 'duplicate', confirmationId);
+  assert.equal(session.status, 'EXECUTING');
+  assert.equal(executions, 1);
+});
+
+test('an exact continue command retries a failed brief revision even when the previous brief exists', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Revise existing brief' });
+  const service = fixture.service as any;
+  service.briefGenerationRuns.delete(session.id);
+  session.currentTaskBriefId = 'previous-brief';
+  let generations = 0;
+  service.generateBriefInBackground = () => { generations++; };
+  service.resumeExecution = () => { throw new Error('must not execute an obsolete brief'); };
+  service.failSession(session, new Error('brief revision failed'), 'brief_revision');
+  await fixture.service.sendMessage(session.id, '继续');
+  assert.equal(generations, 1);
+  assert.equal(session.status, 'AGENT_DISCUSSING');
+});
+
+test('legacy missing-brief dead end recovers generation without bypassing ordinary requirement confirmation', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Recover missing brief' });
+  const service = fixture.service as any;
+  service.failSession(session, new Error('brief failure'), 'brief_generation');
+  service.resumeExecution(session);
+  assert.equal(session.status, 'WAIT_USER_DECISION');
+  let generations = 0;
+  service.generateBriefInBackground = () => { generations++; };
+  fixture.service.resume(session.id, 'retry', session.activeRecoveryCheckpoint!.confirmationId);
+  assert.equal(session.status, 'AGENT_DISCUSSING');
+  assert.equal(generations, 1);
+  session.status = 'WAIT_USER_CONFIRM';
+  assert.throws(() => fixture.service.resume(session.id), /任务契约尚未生成/);
+  assert.equal(session.status, 'WAIT_USER_CONFIRM');
+});
 
 async function waitFor(predicate: () => boolean, timeoutMs = 1_000) {
   const deadline = Date.now() + timeoutMs;
@@ -17,6 +91,8 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_000) {
 function makeService(options: {
   failHydration?: boolean;
   cleanupCalls?: string[];
+  /** Makes the physical record purge report failure so the deletion path can be asserted. */
+  sessionPurgeFails?: boolean;
   runtimeCalls?: string[];
   permissionGrants?: string[];
   executionRunning?: boolean;
@@ -26,6 +102,8 @@ function makeService(options: {
     displayName: string;
     files?: Record<string, string>;
     runtimeTypes?: Array<'codex' | 'claude_code'>;
+    /** Runtimes the CLI still reports for routing; defaults to runtimeTypes. Empty = CLI offline. */
+    connectedRuntimeTypes?: Array<'codex' | 'claude_code'>;
   };
   fileRevisions?: unknown;
   fileRevisionDispatches?: string[];
@@ -38,7 +116,8 @@ function makeService(options: {
   };
   capabilityChecks?: Record<string, boolean>;
   workflowResumeCalls?: string[];
-  workflowSubstitutionCalls?: Array<{ runId: string; taskId: string; agentId: string }>;
+  workflowSubstitutionCalls?: Array<{ runId: string; taskId: string; agentId: string; confirmationId?: string }>;
+  workflowSkipCalls?: Array<{ runId: string; taskId: string; reason: string; confirmationId?: string }>;
   followUpHandlingPlan?: {
     requirementRelation: 'continuation' | 'new_requirement';
     failedExecutionAction: 'none' | 'resume' | 'replan';
@@ -61,6 +140,7 @@ function makeService(options: {
   const discussionStarts: string[] = [];
   const followUpRecognitions: string[] = [];
   const followUpPreparations: Array<{ content: string; mentionedAgentIds: string[] }> = [];
+  const workspaceOfflineEmitters: Array<(value: { workspaceId: string; reason: string; occurredAt: string }) => void> = [];
   const eventOnceKeys = new Set<string>();
   const findAgentById = (id: string) => {
     if (id === 'coordinator' && options.receiverAvailable === false) return undefined;
@@ -214,6 +294,22 @@ function makeService(options: {
           createdAt: '2026-07-11T00:00:00.000Z'
         };
       },
+      confirmBrief(session: SessionDetail, briefId: string) {
+        return {
+          id: briefId,
+          sessionId: session.id,
+          version: 1,
+          goal: 'Review with explicit user action routing.',
+          scope: [],
+          outOfScope: [],
+          constraints: [],
+          acceptanceCriteria: [],
+          risks: [],
+          openQuestions: [],
+          confirmedByUser: true,
+          createdAt: '2026-07-11T00:00:00.000Z'
+        };
+      },
       async hydrateSupplementalContext(_session: SessionDetail, requestedContext: { requestedFiles?: Array<{ path: string }> }) {
         const requestedFiles = requestedContext.requestedFiles ?? [];
         const requestedPaths = requestedFiles.map((item) => item.path);
@@ -309,6 +405,10 @@ function makeService(options: {
         return true;
       },
       async releaseWorkspaceSessionLease() {},
+      async deleteSessionData(sessionId: string) {
+        options.cleanupCalls?.push(`purge:${sessionId}`);
+        return !options.sessionPurgeFails;
+      },
       setCollection(_key: string, value: SessionDetail[]) {
         persistedSnapshots.push(structuredClone(value));
         persistedSessions.splice(0, persistedSessions.length, ...value);
@@ -321,7 +421,7 @@ function makeService(options: {
       registerApprovalListener() {}
     } as never,
     undefined,
-    options.workflowResumeCalls || options.workflowSubstitutionCalls ? {
+    options.workflowResumeCalls || options.workflowSubstitutionCalls || options.workflowSkipCalls ? {
       updates() {
         return { subscribe() { return { unsubscribe() {} }; } };
       },
@@ -329,12 +429,16 @@ function makeService(options: {
         options.workflowResumeCalls?.push(runId);
         return true;
       },
-      async substituteCurrentAgent(input: { runId: string; taskId: string; agentId: string }) {
+      async substituteCurrentAgent(input: { runId: string; taskId: string; agentId: string; confirmationId?: string }) {
         options.workflowSubstitutionCalls?.push(input);
         return input;
       },
+      async skipCurrentAgent(input: { runId: string; taskId: string; reason: string; confirmationId?: string }) {
+        options.workflowSkipCalls?.push(input);
+        return input;
+      },
       get() {
-        return { status: 'failed' };
+        return { status: options.workflowSkipCalls ? 'running' : 'failed' };
       }
     } as never : undefined,
     options.cleanupCalls ? { async deleteSessionDirectory(sessionId: string) { options.cleanupCalls!.push(`worktree:${sessionId}`); } } as never : undefined,
@@ -363,8 +467,29 @@ function makeService(options: {
         options.permissionGrants?.push(`${workspaceId}:${permission}`);
         return { workspaceId, displayName: options.localWorkspace?.displayName };
       },
+      listRuntimeCandidates(workspaceId: string) {
+        if (workspaceId !== options.localWorkspace?.workspaceId) return [];
+        const runtimeTypes = options.localWorkspace.connectedRuntimeTypes
+          ?? options.localWorkspace.runtimeTypes
+          ?? ['codex'];
+        return runtimeTypes.map((runtimeType) => ({
+          runtimeType,
+          available: true,
+          supportedWorkspaceCapabilities: ['read', 'write', 'command', 'test'],
+          supportedWorkspaceProviderKinds: ['local_bridge'],
+          supportedToolNames: ['read_file', 'search_code', 'write_file', 'run_test']
+        }));
+      },
       interruptions() {
         return { subscribe() { return { unsubscribe() {} }; } };
+      },
+      workspaceOffline() {
+        return {
+          subscribe(observer: (value: { workspaceId: string; reason: string; occurredAt: string }) => void) {
+            workspaceOfflineEmitters.push(observer);
+            return { unsubscribe() {} };
+          }
+        };
       }
     } as never : undefined,
     {
@@ -409,7 +534,14 @@ function makeService(options: {
         return followUp;
       }
     } as never : undefined,
-    options.routingRecovery ? {} as never : undefined
+    options.routingRecovery ? {} as never : undefined,
+    undefined,
+    undefined,
+    {
+      deleteSession(sessionId: string) {
+        options.cleanupCalls?.push(`artifacts:${sessionId}`);
+      }
+    } as never
   );
   return {
     service,
@@ -423,9 +555,115 @@ function makeService(options: {
     followUpPreparations,
     followUpRecognitions,
     discussionTerminations,
-    cancelledTasks
+    cancelledTasks,
+    emitWorkspaceOffline(workspaceId: string) {
+      for (const emit of workspaceOfflineEmitters) {
+        emit({ workspaceId, reason: 'local runtime disconnected', occurredAt: '2026-08-11T10:13:43.000Z' });
+      }
+    }
   };
 }
+
+test('confirming a Task Brief closes the exact confirmation request', async () => {
+  const session: SessionDetail = {
+    id: 'session-brief-confirmation-id',
+    dataEpoch: 'epoch-test',
+    title: 'Brief confirmation id',
+    originalInput: 'Confirm the current brief.',
+    status: 'WAIT_USER_CONFIRM',
+    ownerId: 'local-user',
+    workspaceId: 'workspace-brief-confirmation-id',
+    tokenUsed: 0,
+    currentTaskBriefId: 'brief-confirmation-id',
+    participatingAgentIds: ['coordinator'],
+    createdAt: '2026-08-12T00:00:00.000Z',
+    updatedAt: '2026-08-12T00:00:00.000Z'
+  };
+  const fixture = makeService({ initialSessions: [session] });
+  fixture.events.push({
+    id: 'brief-confirmation-request',
+    sessionId: session.id,
+    type: 'user_confirmation_requested',
+    content: 'Confirm the brief.',
+    toAgentIds: [],
+    metadata: {
+      schemaVersion: '0.1',
+      payload: {
+        confirmationId: 'brief-confirmation-1',
+        reason: 'confirm_task_brief',
+        relatedBriefId: session.currentTaskBriefId,
+        options: [{ key: 'approve', label: 'Approve' }]
+      }
+    },
+    createdAt: '2026-08-12T00:00:00.000Z'
+  });
+
+  await fixture.service.confirmBrief(session.id, session.currentTaskBriefId!, 'brief-confirmation-1');
+
+  const resolved = fixture.events.find((event) => event.type === 'user_confirmation_resolved');
+  assert.equal((resolved?.metadata as { payload?: { confirmationId?: string } })?.payload?.confirmationId, 'brief-confirmation-1');
+  assert.equal(fixture.service.get(session.id).status, 'WAIT_WORKFLOW_SELECT');
+});
+
+test('boot recovery expires stale confirmations and exact continue consumes one durable checkpoint', async () => {
+  const workflowResumeCalls: string[] = [];
+  const session: SessionDetail = {
+    id: 'session-recovery-checkpoint',
+    dataEpoch: 'epoch-test',
+    title: 'Recovery checkpoint',
+    originalInput: 'Resume the failed workflow.',
+    status: 'WAIT_USER_DECISION',
+    ownerId: 'local-user',
+    workspaceId: 'workspace-recovery-checkpoint',
+    tokenUsed: 0,
+    currentTaskBriefId: 'brief-recovery-checkpoint',
+    workflowRunId: 'workflow-run-recovery-checkpoint',
+    participatingAgentIds: ['coordinator'],
+    createdAt: '2026-08-12T00:00:00.000Z',
+    updatedAt: '2026-08-12T00:00:00.000Z'
+  };
+  const fixture = makeService({ initialSessions: [session], workflowResumeCalls });
+  for (const [index, reason] of ['confirm_task_brief', 'coordinator_routing_needs_user_decision'].entries()) {
+    fixture.events.push({
+      id: `stale-confirmation-event-${index}`,
+      sessionId: session.id,
+      type: 'user_confirmation_requested',
+      content: `Stale confirmation ${index}`,
+      toAgentIds: [],
+      metadata: {
+        schemaVersion: '0.1',
+        payload: {
+          confirmationId: `stale-confirmation-${index}`,
+          reason,
+          options: [{ key: 'resume', label: 'Resume' }, { key: 'cancel', label: 'Cancel' }]
+        }
+      },
+      createdAt: `2026-08-12T00:00:0${index}.000Z`
+    });
+  }
+
+  await fixture.service.reconcileRecoveryStateOnBoot(session.id);
+
+  const checkpoint = fixture.service.get(session.id).activeRecoveryCheckpoint;
+  assert.ok(checkpoint);
+  assert.equal(checkpoint.reason, 'coordinator_routing_needs_user_decision');
+  const expiredIds = fixture.events
+    .filter((event) => event.type === 'user_confirmation_resolved')
+    .filter((event) => (event.metadata as { payload?: { status?: string } })?.payload?.status === 'expired')
+    .map((event) => (event.metadata as { payload?: { confirmationId?: string } })?.payload?.confirmationId);
+  assert.deepEqual(expiredIds, ['stale-confirmation-0', 'stale-confirmation-1']);
+
+  await fixture.service.sendMessage(session.id, '继续');
+
+  assert.equal(fixture.service.get(session.id).activeRecoveryCheckpoint, undefined);
+  assert.equal(fixture.service.get(session.id).status, 'EXECUTING');
+  assert.deepEqual(workflowResumeCalls, ['workflow-run-recovery-checkpoint']);
+  const recoveryResolution = fixture.events.find((event) =>
+    event.type === 'user_confirmation_resolved' &&
+    (event.metadata as { payload?: { confirmationId?: string } })?.payload?.confirmationId === checkpoint.confirmationId
+  );
+  assert.ok(recoveryResolution);
+});
 
 test('completed capability approvals resume the waiting task through the execution pipeline', async () => {
   const session: SessionDetail = {
@@ -494,6 +732,172 @@ test('completed capability approvals resume the waiting task through the executi
   assert.equal(task.status, 'pending');
   assert.equal(fixture.executionStarts.length, 1);
   assert.deepEqual(fixture.executionStarts[0], { sessionId: session.id, taskCount: 1 });
+});
+
+test('capability approval waits for a reconnect when the local Runtime went offline while parked', async () => {
+  const session: SessionDetail = {
+    id: 'session-capability-offline',
+    dataEpoch: 'epoch-test',
+    title: 'Capability resume without local Runtime',
+    originalInput: 'Write implementation files.',
+    status: 'WAIT_USER_DECISION',
+    ownerId: 'local-user',
+    workspaceId: 'workspace-local-offline',
+    tokenUsed: 0,
+    currentTaskBriefId: 'brief-capability-offline',
+    participatingAgentIds: ['backend'],
+    workingDirectory: {
+      kind: 'local_bridge',
+      id: 'workspace-local-offline',
+      name: 'offline-workspace',
+      selectedAt: '2026-08-11T09:08:16.091Z'
+    },
+    runtimePreference: { preferredRuntimeType: 'claude_code', allowedRuntimeTypes: ['claude_code', 'codex'] },
+    pendingInvocations: [{
+      invocationId: 'invocation-capability-offline',
+      sessionId: 'session-capability-offline',
+      taskId: 'task-capability-offline',
+      agentId: 'backend',
+      phase: 'task_acceptance',
+      pendingApprovals: [{
+        toolId: 'cap-file-write',
+        toolKey: 'tool.file_write',
+        approvalId: 'approval-write',
+        reasons: ['HUMAN_APPROVAL_REQUIRED']
+      }],
+      createdAt: '2026-08-11T09:56:49.000Z'
+    }],
+    createdAt: '2026-08-11T09:08:16.659Z',
+    updatedAt: '2026-08-11T09:56:49.000Z'
+  };
+  const task: AgentTask = {
+    id: 'task-capability-offline',
+    sessionId: session.id,
+    title: 'Write implementation files',
+    description: 'Use file tools.',
+    status: 'waiting',
+    assignee: { type: 'agent', id: 'backend' },
+    dependsOnTaskIds: [],
+    acceptanceCriteria: [],
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt
+  };
+  const fixture = makeService({
+    initialSessions: [session],
+    taskItems: [task],
+    capabilityChecks: { 'cap-file-write': true },
+    localWorkspace: {
+      workspaceId: 'workspace-local-offline',
+      displayName: 'offline-workspace',
+      runtimeTypes: ['claude_code', 'codex'],
+      connectedRuntimeTypes: []
+    }
+  });
+
+  await fixture.service.retryPendingApprovalTasks(session.id, 'cap-file-write');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const parked = fixture.service.get(session.id);
+  assert.deepEqual(parked.pendingInvocations, []);
+  assert.equal(parked.status, 'WAIT_USER_DECISION');
+  assert.equal(fixture.executionStarts.length, 0);
+  const request = fixture.events.find((event) => event.type === 'user_confirmation_requested');
+  const payload = (request?.metadata as { payload?: { reason?: string; options?: Array<{ key: string }> } } | undefined)?.payload;
+  assert.equal(payload?.reason, 'reconnect_local_runtime');
+  assert.deepEqual(payload?.options?.map((option) => option.key), ['resume', 'cancel']);
+});
+
+test('retrying a failed Session waits for a reconnect when the local Runtime is offline', async () => {
+  const session: SessionDetail = {
+    id: 'session-retry-offline',
+    dataEpoch: 'epoch-test',
+    title: 'Retry without local Runtime',
+    originalInput: 'Add ranking and sound effects to the snake game.',
+    status: 'FAILED',
+    ownerId: 'local-user',
+    workspaceId: 'workspace-retry-offline',
+    tokenUsed: 0,
+    participatingAgentIds: ['backend'],
+    workingDirectory: {
+      kind: 'local_bridge',
+      id: 'workspace-retry-offline',
+      name: 'offline-workspace',
+      selectedAt: '2026-08-28T13:00:00.000Z'
+    },
+    runtimePreference: { preferredRuntimeType: 'claude_code', allowedRuntimeTypes: ['claude_code', 'codex'] },
+    createdAt: '2026-08-28T13:00:00.000Z',
+    updatedAt: '2026-08-28T13:27:40.000Z'
+  };
+  const fixture = makeService({
+    initialSessions: [session],
+    localWorkspace: {
+      workspaceId: 'workspace-retry-offline',
+      displayName: 'offline-workspace',
+      runtimeTypes: ['claude_code', 'codex'],
+      connectedRuntimeTypes: []
+    }
+  });
+
+  const retry = fixture.service as unknown as {
+    retryFailedSession(session: SessionDetail, sourceEventId: string): void;
+  };
+  retry.retryFailedSession(fixture.service.get(session.id), 'event-retry-offline');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const parked = fixture.service.get(session.id);
+  assert.equal(parked.status, 'WAIT_USER_DECISION');
+  const request = fixture.events.find((event) => event.type === 'user_confirmation_requested');
+  const payload = (request?.metadata as {
+    payload?: { reason?: string; trigger?: string; options?: Array<{ key: string }> };
+  } | undefined)?.payload;
+  assert.equal(payload?.reason, 'reconnect_local_runtime');
+  assert.equal(payload?.trigger, 'failed_session_retry');
+  assert.deepEqual(payload?.options?.map((option) => option.key), ['resume', 'cancel']);
+  const rediscussed = fixture.events.some((event) =>
+    (event.metadata as { payload?: { reason?: string } } | undefined)?.payload?.reason ===
+      'failed_brief_generation_user_retry'
+  );
+  assert.equal(rediscussed, false, 'offline retry must not restart the discussion phase');
+});
+
+test('a local workspace going offline notifies Sessions parked on the user', () => {
+  const session: SessionDetail = {
+    id: 'session-parked-offline-notice',
+    dataEpoch: 'epoch-test',
+    title: 'Parked session',
+    originalInput: 'Write implementation files.',
+    status: 'WAIT_USER_DECISION',
+    ownerId: 'local-user',
+    workspaceId: 'workspace-parked-offline',
+    tokenUsed: 0,
+    participatingAgentIds: ['backend'],
+    workingDirectory: {
+      kind: 'local_bridge',
+      id: 'workspace-parked-offline',
+      name: 'parked-workspace',
+      selectedAt: '2026-08-11T09:08:16.091Z'
+    },
+    createdAt: '2026-08-11T09:08:16.659Z',
+    updatedAt: '2026-08-11T09:56:49.000Z'
+  };
+  const fixture = makeService({
+    initialSessions: [session],
+    localWorkspace: {
+      workspaceId: 'workspace-parked-offline',
+      displayName: 'parked-workspace',
+      runtimeTypes: ['claude_code']
+    }
+  });
+
+  fixture.emitWorkspaceOffline('workspace-parked-offline');
+
+  const notice = fixture.events.find((event) =>
+    event.type === 'session_status_changed' &&
+    (event.metadata as { payload?: { reason?: string } } | undefined)?.payload?.reason === 'local_runtime_disconnected'
+  );
+  assert.ok(notice, 'expected a local_runtime_disconnected notice for the parked Session');
+  assert.equal(notice?.sessionId, session.id);
+  assert.equal(fixture.service.get(session.id).status, 'WAIT_USER_DECISION');
 });
 
 test('file revision background dispatch is single-flight per revision id', async () => {
@@ -772,7 +1176,10 @@ test('Local Runtime disconnect interrupts the invocation and persists a wakeable
     reason: 'local_runtime_disconnected',
     invocationId: 'invocation-1',
     occurredAt: '2026-07-24T00:00:00.000Z',
-    wakeable: true
+    wakeable: true,
+    previousStatus: 'AGENT_DISCUSSING',
+    workItemId: session.activeWorkItemId,
+    phase: 'discussion'
   });
   assert.deepEqual(fixture.persistedSnapshots.at(-1)?.[0]?.interruption, session.interruption);
   assert.deepEqual(fixture.executionCancels, [session.id]);
@@ -811,7 +1218,10 @@ test('backend shutdown persists active work as wakeable and ignores late executi
     reason: 'service_shutdown',
     invocationId: undefined,
     occurredAt: session.interruption?.occurredAt,
-    wakeable: true
+    wakeable: true,
+    previousStatus: 'AGENT_DISCUSSING',
+    workItemId: session.activeWorkItemId,
+    phase: 'discussion'
   });
   assert.deepEqual(fixture.persistedSnapshots.at(-1)?.[0]?.interruption, session.interruption);
   assert.equal((fixture.discussionTerminations[0] as { kind?: string })?.kind, 'service_shutdown');
@@ -834,8 +1244,146 @@ test('backend shutdown persists active work as wakeable and ignores late executi
     true
   );
 
+  // delivered 是产物真的落地的权威终态，允许它把中断会话推到 COMPLETED；
+  // 迟到的 failed / rework 仍被吞，保留中断标记和恢复卡供用户决策。
   fixture.service.applyOutcome(session.id, { kind: 'delivered' });
+  assert.equal(session.status, 'COMPLETED');
+});
+
+test('an interrupted Session still swallows a late failure so the recovery card survives', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Keep the recovery card after a late failure' });
+
+  fixture.service.beforeApplicationShutdown('SIGTERM');
   assert.equal(session.status, 'INTERRUPTED');
+  assert.equal(session.interruption?.reason, 'service_shutdown');
+  assert.ok(session.activeRecoveryCheckpoint);
+
+  fixture.service.applyOutcome(session.id, { kind: 'failed', reason: 'late runtime failure' });
+
+  assert.equal(session.status, 'INTERRUPTED');
+  assert.equal(session.interruption?.reason, 'service_shutdown');
+  assert.ok(session.activeRecoveryCheckpoint);
+});
+
+test('an interrupted Session normalises a continuation follow-up into a replan', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Normalise a follow-up while interrupted' });
+  session.status = 'INTERRUPTED';
+  const normalize = fixture.service as unknown as {
+    normalizeFollowUpHandlingPlan(session: SessionDetail, plan: UserMessageHandlingPlan): UserMessageHandlingPlan;
+  };
+
+  const plan = normalize.normalizeFollowUpHandlingPlan(session, {
+    intent: 'constraint',
+    requirementRelation: 'continuation',
+    failedExecutionAction: 'none',
+    priority: 'normal',
+    shouldPause: false,
+    affectedTaskIds: [],
+    affectedAgentIds: [],
+    requiresBriefRevision: false,
+    requiresUserConfirmation: false,
+    coordinatorInstruction: ''
+  });
+
+  // replan 让 processNextFollowUp 走 AGENT_DISCUSSING 并合并旧契约；resume 会丢内容。
+  assert.equal(plan.failedExecutionAction, 'replan');
+  assert.equal(plan.requirementRelation, 'continuation');
+});
+
+test('a failed Session keeps resuming a continuation follow-up rather than replanning', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Keep the failed-session behaviour intact' });
+  session.status = 'FAILED';
+  const normalize = fixture.service as unknown as {
+    normalizeFollowUpHandlingPlan(session: SessionDetail, plan: UserMessageHandlingPlan): UserMessageHandlingPlan;
+  };
+
+  const plan = normalize.normalizeFollowUpHandlingPlan(session, {
+    intent: 'constraint',
+    requirementRelation: 'continuation',
+    failedExecutionAction: 'none',
+    priority: 'normal',
+    shouldPause: false,
+    affectedTaskIds: [],
+    affectedAgentIds: [],
+    requiresBriefRevision: false,
+    requiresUserConfirmation: false,
+    coordinatorInstruction: ''
+  });
+
+  assert.equal(plan.failedExecutionAction, 'resume');
+});
+
+test('an interrupted Session can be moved to discussion by an explicit control request', async () => {
+  // 方案 A 下补充需求会把中断会话带回讨论态，所以这条转移必须在状态机里合法。
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Move an interrupted Session back to discussion' });
+  session.status = 'EXECUTING';
+  fixture.service.beforeApplicationShutdown('SIGTERM');
+  assert.equal(session.status, 'INTERRUPTED');
+
+  fixture.service.control(session.id, 'AGENT_DISCUSSING', '补充需求需要重新生成契约');
+
+  assert.equal(fixture.service.get(session.id).status, 'AGENT_DISCUSSING');
+});
+
+test('interruption records the phase of the status it interrupted', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Record the interrupted phase for later recovery' });
+  session.status = 'EXECUTING';
+
+  fixture.service.beforeApplicationShutdown('SIGTERM');
+
+  assert.equal(session.status, 'INTERRUPTED');
+  assert.equal(session.interruption?.previousStatus, 'EXECUTING');
+  assert.equal(session.interruption?.phase, 'task_execution');
+});
+
+test('retry after a discussion-phase interruption regenerates the contract instead of resuming a draft', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Interrupt while the contract is still being discussed' });
+  // A brief id exists but the contract was never finalised, so only the recorded
+  // phase can tell retry to rebuild it rather than resume it.
+  session.currentTaskBriefId = 'brief-draft';
+  session.status = 'AGENT_DISCUSSING';
+
+  fixture.service.beforeApplicationShutdown('SIGTERM');
+  assert.equal(session.interruption?.phase, 'discussion');
+
+  const retry = fixture.service as unknown as {
+    retryFailedSession(session: SessionDetail, sourceEventId: string): void;
+  };
+  retry.retryFailedSession(fixture.service.get(session.id), 'event-retry-interrupted');
+
+  const resumed = fixture.service.get(session.id);
+  assert.equal(resumed.status, 'AGENT_DISCUSSING');
+  assert.equal(resumed.interruption, undefined);
+  assert.ok(fixture.events.some((event) =>
+    (event.metadata as { payload?: { reason?: string } } | undefined)?.payload?.reason ===
+      'failed_brief_generation_user_retry'
+  ));
+});
+
+test('retry falls back to the latest failure phase when no interruption phase was recorded', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Retry a failed brief revision without an interruption' });
+  const service = fixture.service as any;
+  let generations = 0;
+  service.generateBriefInBackground = () => { generations++; };
+  session.currentTaskBriefId = 'brief-existing';
+  // No interruption ever happened, so the phase must come from the failure event.
+  service.failSession(session, new Error('revision failed'), 'brief_revision');
+  assert.equal(session.interruption, undefined);
+
+  const retry = fixture.service as unknown as {
+    retryFailedSession(session: SessionDetail, sourceEventId: string): void;
+  };
+  retry.retryFailedSession(fixture.service.get(session.id), 'event-retry-fallback');
+
+  assert.equal(fixture.service.get(session.id).status, 'AGENT_DISCUSSING');
+  assert.equal(generations, 1);
 });
 
 test('pause stops Session execution and Runtime work while preserving a resumable checkpoint', async () => {
@@ -861,6 +1409,35 @@ test('pause stops Session execution and Runtime work while preserving a resumabl
   assert.equal((fixture.executionTerminations[1] as { scope?: string })?.scope, 'session');
 });
 
+test('pause cancels in-flight chat intent recognition without retrying or leaving the confirmation state on resume', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Pause a chat message during intent recognition' });
+  session.status = 'WAIT_USER_CONFIRM';
+  const service = fixture.service as any;
+  const route = { id: 'route-paused', status: 'CLASSIFYING', reasonCodes: [] as string[], snapshotId: 'snap' };
+  let started = false;
+  let calls = 0;
+  service.contextManagement = {
+    listRoutingRecords: () => [route], listSnapshots: () => [{ id: 'snap' }], listFollowUps: () => [],
+    claimIntentRouting: async () => ({ state: 'claimed', routing: route }),
+    updateRoutingRecord: async (_session: string, _id: string, patch: object) => Object.assign(route, patch)
+  };
+  service.semanticIntentRouter = { classify: async (_s: unknown, _r: unknown, _p: unknown, signal: AbortSignal) => {
+    calls++; started = true;
+    return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  } };
+  const processing = service.processIntentRouting(session.id, route.id, 'snap', 'followup');
+  await waitFor(() => started);
+  await fixture.service.pause(session.id);
+  await processing;
+  assert.equal(session.status, 'PAUSED');
+  assert.equal(route.status, 'PENDING_RETRY');
+  assert.equal(service.intentRoutingRetryTimers.size, 0);
+  fixture.service.resume(session.id);
+  assert.equal(session.status, 'WAIT_USER_CONFIRM');
+  assert.equal(calls, 1);
+});
+
 test('deleting a Session also stops Runtime-owned invocations', async () => {
   const runtimeCalls: string[] = [];
   const { service } = makeService({ runtimeCalls });
@@ -881,7 +1458,9 @@ test('deleting a Session clears all corresponding runtime directories before per
   assert.deepEqual(cleanupCalls, [
     `terminate:${session.id}`,
     `worktree:${session.id}`,
-    `brief:${session.id}`
+    `brief:${session.id}`,
+    `artifacts:${session.id}`,
+    `purge:${session.id}`
   ]);
   assert.deepEqual(result, { deleted: true, sessionId: session.id });
   assert.equal(persistedSessions.length, 0);
@@ -897,6 +1476,46 @@ test('rejects Session deletion after backend shutdown starts without removing pe
   await assert.rejects(service.delete(session.id), /后端正在关闭/);
   assert.equal(persistedSessions.length, 1);
   assert.deepEqual(cleanupCalls, []);
+});
+
+test('a failed physical record purge surfaces as an error instead of reporting a successful deletion', async () => {
+  const cleanupCalls: string[] = [];
+  const { service } = makeService({ cleanupCalls, sessionPurgeFails: true });
+  const { session } = await service.create({ input: 'Fail the record purge for this Session' });
+
+  await assert.rejects(service.delete(session.id), /会话记录未能完全清除/);
+
+  assert.deepEqual(cleanupCalls, [
+    `terminate:${session.id}`,
+    `worktree:${session.id}`,
+    `brief:${session.id}`,
+    `artifacts:${session.id}`,
+    `purge:${session.id}`
+  ]);
+  // The in-flight guard has to be released even on failure, otherwise the Session
+  // would stay permanently undeletable behind an "already in progress" conflict.
+  assert.equal(
+    (service as unknown as { deletingSessionIds: Set<string> }).deletingSessionIds.has(session.id),
+    false
+  );
+});
+
+test('deleting a Session drops only its own pending intent routing retries', async () => {
+  const { service } = makeService();
+  const { session } = await service.create({ input: 'Delete while a routing retry is pending' });
+  const survivor = await service.create({ input: 'Keep this Session and its pending retry' });
+  const internals = service as unknown as { intentRoutingRetryTimers: Map<string, NodeJS.Timeout> };
+  const fired: string[] = [];
+  const keys = [`${session.id}:routing-1`, `${session.id}:routing-2`, `${survivor.session.id}:routing-1`];
+  for (const key of keys) {
+    internals.intentRoutingRetryTimers.set(key, setTimeout(() => fired.push(key), 20));
+  }
+
+  await service.delete(session.id);
+
+  assert.deepEqual([...internals.intentRoutingRetryTimers.keys()], [`${survivor.session.id}:routing-1`]);
+  await new Promise<void>((resolve) => setTimeout(resolve, 60));
+  assert.deepEqual(fired, [`${survivor.session.id}:routing-1`]);
 });
 
 test('new SessionDetail stores only the normalized Runtime preference routing input', async () => {
@@ -1046,10 +1665,11 @@ test('brief workflow failures surface the actual Runtime phase from structured e
 });
 
 test('an idle existing Session routes a new message through receiver decomposition and starts execution', async () => {
-  const { service, executionStarts, followUpPreparations } = makeService();
+  const { service, executionStarts, followUpPreparations, events } = makeService();
   const { session } = await service.create({ input: 'Analyze the workspace' });
   (service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
   session.status = 'COMPLETED';
+  const eventCountBeforeFollowUp = events.length;
 
   const result = await service.sendMessage(session.id, '继续补充实现审计日志', ['backend']);
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1061,6 +1681,17 @@ test('an idle existing Session routes a new message through receiver decompositi
   assert.equal(executionStarts.length, 1);
   assert.equal(session.status, 'EXECUTING');
   assert.equal(session.pendingFollowUpMessages?.[0]?.status, 'executing');
+  const followUpEvents = events.slice(eventCountBeforeFollowUp);
+  assert.ok(followUpEvents.some((event) =>
+    event.type === 'session_status_changed' &&
+    (event.metadata as { payload?: { reason?: string; status?: string } }).payload?.reason ===
+      'follow_up_continuation_planning_started' &&
+    (event.metadata as { payload?: { reason?: string; status?: string } }).payload?.status === 'EXECUTING'
+  ));
+  assert.equal(followUpEvents.some((event) =>
+    event.type === 'session_status_changed' &&
+    (event.metadata as { payload?: { status?: string } }).payload?.status === 'AGENT_DISCUSSING'
+  ), false);
 });
 
 test('a message received during execution is recognized immediately but deferred without interrupting the task', async () => {
@@ -1079,6 +1710,131 @@ test('a message received during execution is recognized immediately but deferred
     (event.metadata as { payload?: { reason?: string } }).payload?.reason ===
       'follow_up_deferred_until_current_task_finishes'
   ));
+});
+
+test('a content message in an interrupted Session drains the queue into discussion', async () => {
+  // 双锁解开前：hasActiveSessionWork 判 deferred，processNextFollowUp 又早退，五个出队
+  // 触发点全死，用户在中断会话里说什么都不会被消费。
+  // 用 Runtime 断开造中断态：beforeApplicationShutdown 会把 shuttingDown 永久置真，
+  // 而真实重启后是新进程实例，该标志为假。用它会让调度被 shuttingDown 挡住而测不到本意。
+  const { service, followUpPreparations, events } = makeService();
+  const { session } = await service.create({ input: 'Continue an interrupted Session with new content' });
+  (service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
+  session.status = 'EXECUTING';
+  await service.interruptForRuntimeDisconnect({
+    sessionId: session.id,
+    invocationId: 'invocation-interrupted-continuation',
+    reason: 'local_runtime_disconnected',
+    occurredAt: '2026-09-15T00:00:00.000Z'
+  });
+  assert.equal(session.status, 'INTERRUPTED');
+
+  const result = await service.sendMessage(session.id, '登录页再加一个记住密码功能', ['backend']);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(result.deferred, false);
+  assert.equal(followUpPreparations.length, 1);
+  // 方案 A：补充需求先回讨论态重新生成契约（AGENT_DISCUSSING 是中间态，prepare 之后
+  // processNextFollowUp 会推到 EXECUTING），所以断言事件流里出现过讨论阶段。
+  assert.ok(events.some((event) =>
+    event.type === 'session_status_changed' &&
+    (event.metadata as { payload?: { reason?: string } }).payload?.reason === 'follow_up_discussion_started'
+  ));
+});
+
+test('a bare resume hands control to a message queued before the crash', async () => {
+  const { service, followUpPreparations, events } = makeService();
+  const { session } = await service.create({ input: 'Resume with a message already queued' });
+  (service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
+  session.status = 'EXECUTING';
+  session.currentTaskBriefId = 'brief-existing';
+  await service.interruptForRuntimeDisconnect({
+    sessionId: session.id,
+    invocationId: 'invocation-queued-before-crash',
+    reason: 'local_runtime_disconnected',
+    occurredAt: '2026-09-15T00:00:00.000Z'
+  });
+  // 崩溃前已入队但从未被消费的消息。
+  session.pendingFollowUpMessages = [{
+    id: 'follow-up-queued-before-crash',
+    sourceEventId: 'event-queued-before-crash',
+    content: '顺便把登录失败的提示文案也改掉',
+    mentionedAgentIds: [],
+    handlingPlan: {
+      intent: 'constraint',
+      requirementRelation: 'continuation',
+      failedExecutionAction: 'none',
+      priority: 'normal',
+      shouldPause: false,
+      affectedTaskIds: [],
+      affectedAgentIds: [],
+      requiresBriefRevision: false,
+      requiresUserConfirmation: false,
+      coordinatorInstruction: ''
+    },
+    status: 'queued',
+    queuedAt: '2026-09-15T00:00:00.000Z'
+  }] as never;
+
+  const retry = service as unknown as {
+    retryFailedSession(session: SessionDetail, sourceEventId: string): void;
+  };
+  retry.retryFailedSession(service.get(session.id), 'event-bare-resume');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  // 排队消息被消费，而不是被静默忽略。
+  assert.equal(followUpPreparations.length, 1);
+  assert.ok(events.some((event) =>
+    (event.metadata as { payload?: { reason?: string } }).payload?.reason ===
+      'resume_hands_over_to_queued_follow_up'
+  ));
+});
+
+test('a bare resume without queued messages still recovers from the checkpoint', async () => {
+  const { service, followUpPreparations } = makeService();
+  const { session } = await service.create({ input: 'Resume from the checkpoint with an empty queue' });
+  const svc = service as any;
+  let executions = 0;
+  svc.resumeExecution = () => { executions++; };
+  (service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
+  session.status = 'EXECUTING';
+  session.currentTaskBriefId = 'brief-existing';
+  await service.interruptForRuntimeDisconnect({
+    sessionId: session.id,
+    invocationId: 'invocation-empty-queue',
+    reason: 'local_runtime_disconnected',
+    occurredAt: '2026-09-15T00:00:00.000Z'
+  });
+  session.pendingFollowUpMessages = [];
+
+  const retry = service as unknown as {
+    retryFailedSession(session: SessionDetail, sourceEventId: string): void;
+  };
+  retry.retryFailedSession(service.get(session.id), 'event-bare-resume-empty');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  // 裸「继续」在没有排队消息时仍走检查点恢复，不重建契约。
+  assert.equal(followUpPreparations.length, 0);
+  assert.equal(executions, 1);
+});
+
+test('restart recovery leaves an interrupted Session queued instead of redriving it', async () => {
+  // recovery.service 的边界：运行时调用绝不自动重驱（会重复执行命令、重复写文件）。
+  // 双锁解开后这条门禁必须显式挡住 INTERRUPTED，否则启动即自动重排。
+  const fixture = routingRecoveryFixture({
+    sessionStatus: 'INTERRUPTED',
+    requestedAction: 'continue_work_item',
+    actionStatus: 'pending',
+    followUpStatus: 'queued'
+  });
+
+  const recovered = await fixture.service.recoverIntentRoutings([fixture.session.id]);
+
+  assert.equal(recovered.some((item) => item.action === 'follow_up_rescheduled'), false);
+  assert.equal(fixture.followUp.status, 'queued');
+  assert.equal(fixture.executionStarts.length, 0);
 });
 
 test('a message received while paused remains queued without invoking the Receiver Runtime', async () => {
@@ -1898,7 +2654,7 @@ test('ask_user confirmation payload preserves structured Post Review actions', a
 });
 
 test('workflow Agent substitution requires an explicit candidate selection', async () => {
-  const workflowSubstitutionCalls: Array<{ runId: string; taskId: string; agentId: string }> = [];
+  const workflowSubstitutionCalls: Array<{ runId: string; taskId: string; agentId: string; confirmationId?: string }> = [];
   const { service, events } = makeService({ workflowSubstitutionCalls });
   const { session } = await service.create({ input: 'Run a backend workflow stage.' });
   session.workflowRunId = 'workflow-run-substitution';
@@ -1927,7 +2683,7 @@ test('workflow Agent substitution requires an explicit candidate selection', asy
     : undefined;
   assert.equal(payload?.reason, 'workflow_agent_substitution');
   assert.deepEqual(payload?.candidateAgentIds, ['test']);
-  assert.deepEqual(payload?.options?.map((option: { key: string }) => option.key), ['agent:test', 'cancel']);
+  assert.deepEqual(payload?.options?.map((option: { key: string }) => option.key), ['agent:test', 'skip_agent', 'cancel']);
   const confirmationId = payload?.confirmationId;
   assert.ok(confirmationId);
 
@@ -1949,10 +2705,132 @@ test('workflow Agent substitution requires an explicit candidate selection', asy
   assert.deepEqual(workflowSubstitutionCalls, [{
     runId: 'workflow-run-substitution',
     taskId: 'workflow-task-substitution',
-    agentId: 'test'
+    agentId: 'test',
+    confirmationId
   }]);
   assert.equal(session.status, 'EXECUTING');
   assert.ok(events.some((event) => event.type === 'user_confirmation_resolved'));
+});
+
+test('ordinary resume keeps a parked workflow Agent substitution waiting for an explicit decision', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Run a backend workflow stage.' });
+  session.workflowRunId = 'workflow-run-resume-guard';
+  session.status = 'WAIT_USER_DECISION';
+  (fixture.service as unknown as { workflowRuntime: unknown }).workflowRuntime = {
+    awaitsAgentSubstitution: (runId: string) => runId === session.workflowRunId,
+    awaitsUpstreamRerun: () => false
+  } as never;
+
+  const result = fixture.service.resume(session.id, '继续执行');
+
+  assert.equal(result.session.status, 'WAIT_USER_DECISION');
+  assert.equal(result.event?.metadata.payload?.status, 'WAIT_USER_DECISION');
+  assert.equal(result.event?.metadata.payload?.requestedStatus, 'EXECUTING');
+  assert.equal(result.confirmationEvent, undefined);
+});
+
+test('chat skip-current-Agent command resolves workflow substitution without creating a follow-up brief', async () => {
+  const workflowSkipCalls: Array<{ runId: string; taskId: string; reason: string; confirmationId?: string }> = [];
+  const fixture = makeService({ workflowSkipCalls });
+  const { session } = await fixture.service.create({ input: 'Run a backend workflow stage.' });
+  (fixture.service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
+  session.workflowRunId = 'workflow-run-skip';
+  session.participatingAgentIds = ['coordinator', 'backend', 'test'];
+
+  fixture.service.applyOutcome(session.id, {
+    kind: 'ask_user',
+    reason: 'Backend Agent rejected the current stage.',
+    workflowAgentSubstitution: {
+      taskId: 'workflow-task-skip',
+      workflowRunId: session.workflowRunId,
+      workflowNodeId: 'backend-node',
+      currentAgentId: 'backend',
+      candidates: [{ id: 'test', key: 'test', name: 'test', role: 'test' }]
+    }
+  });
+  const eventCountBeforeCommand = fixture.events.length;
+
+  const result = await fixture.service.sendMessage(session.id, '跳过这个 Agent，继续执行');
+
+  assert.equal(result.handlingPlan.intent, 'command');
+  assert.equal(result.followUpMessageId, undefined);
+  assert.deepEqual(workflowSkipCalls, [{
+    runId: 'workflow-run-skip',
+    taskId: 'workflow-task-skip',
+    reason: '跳过这个 Agent，继续执行',
+    confirmationId: 'workflow-agent-substitution:workflow-run-skip:workflow-task-skip'
+  }]);
+  assert.equal(fixture.followUpPreparations.length, 0);
+  assert.equal(session.pendingFollowUpMessages?.length ?? 0, 0);
+  assert.equal(session.status, 'EXECUTING');
+  const commandEvents = fixture.events.slice(eventCountBeforeCommand);
+  assert.ok(commandEvents.some((event) => event.type === 'user_confirmation_resolved'));
+  assert.equal(commandEvents.some((event) =>
+    event.type === 'session_status_changed' &&
+    (event.metadata as { payload?: { status?: string } }).payload?.status === 'AGENT_DISCUSSING'
+  ), false);
+});
+
+async function substitutionDirectiveFixture() {
+  const workflowSubstitutionCalls: Array<{ runId: string; taskId: string; agentId: string; confirmationId?: string }> = [];
+  const fixture = makeService({ workflowSubstitutionCalls });
+  const { session } = await fixture.service.create({ input: 'Run a backend workflow stage.' });
+  (fixture.service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
+  session.workflowRunId = 'workflow-run-directive';
+  session.participatingAgentIds = ['coordinator', 'backend', 'test', 'frontend'];
+  fixture.service.applyOutcome(session.id, {
+    kind: 'ask_user',
+    reason: 'Backend Agent rejected the current stage.',
+    workflowAgentSubstitution: {
+      taskId: 'workflow-task-directive',
+      workflowRunId: session.workflowRunId,
+      workflowNodeId: 'backend-node',
+      currentAgentId: 'backend',
+      candidates: [
+        { id: 'test', key: 'test', name: 'test', role: 'test' },
+        { id: 'frontend', key: 'frontend', name: 'frontend', role: 'frontend' }
+      ]
+    }
+  });
+  return { fixture, session, workflowSubstitutionCalls };
+}
+
+test('chat Agent directive reassigns the workflow node to the named candidate', async () => {
+  const { fixture, session, workflowSubstitutionCalls } = await substitutionDirectiveFixture();
+
+  const result = await fixture.service.sendMessage(session.id, '让 frontend 执行');
+
+  assert.equal(result.handlingPlan.intent, 'command');
+  assert.equal(result.followUpMessageId, undefined);
+  assert.deepEqual(workflowSubstitutionCalls, [{
+    runId: 'workflow-run-directive',
+    taskId: 'workflow-task-directive',
+    agentId: 'frontend',
+    confirmationId: 'workflow-agent-substitution:workflow-run-directive:workflow-task-directive'
+  }]);
+  assert.equal(session.status, 'EXECUTING');
+  assert.equal(fixture.followUpPreparations.length, 0);
+});
+
+test('chat Agent directive asks back instead of guessing an unknown or ambiguous target', async () => {
+  const unknown = await substitutionDirectiveFixture();
+  const unknownResult = await unknown.fixture.service.sendMessage(unknown.session.id, '让数据库工程师执行');
+  assert.equal(unknownResult.handlingPlan.requiresUserConfirmation, true);
+  assert.deepEqual(unknown.workflowSubstitutionCalls, []);
+  assert.equal(unknown.session.status, 'WAIT_USER_DECISION');
+  assert.ok(unknown.fixture.events.some((event) =>
+    event.type === 'agent_message' && String(event.content).includes('没有匹配到')
+  ));
+
+  const ordinary = await substitutionDirectiveFixture();
+  const ordinaryResult = await ordinary.fixture.service.sendMessage(
+    ordinary.session.id,
+    '让登录页面支持记住密码'
+  );
+  // An ordinary requirement must stay on the normal routing path even while the card is open.
+  assert.deepEqual(ordinary.workflowSubstitutionCalls, []);
+  assert.notEqual(ordinaryResult.handlingPlan.coordinatorInstruction, '按用户指定的 Agent 改派当前工作流节点。');
 });
 
 async function postReviewActionFixture(action: {
@@ -2044,6 +2922,7 @@ function routingRecoveryFixture(input: {
   includePendingFollowUp?: boolean;
   routingStatus?: 'CLASSIFYING' | 'VALIDATING' | 'APPLYING' | 'ROUTED';
   leaseExpiresAt?: string;
+  rolloutMode?: 'shadow' | 'enforce_new_sessions';
 }) {
   const sessionId = `session-routing-recovery-${input.requestedAction}-${input.actionStatus}`;
   const followUp = {
@@ -2087,7 +2966,7 @@ function routingRecoveryFixture(input: {
     sessionSeq: 1,
     status: input.routingStatus ?? 'ROUTED',
     policyVersion: 'intent-v2-test',
-    rolloutMode: 'enforce_new_sessions',
+    rolloutMode: input.rolloutMode ?? 'enforce_new_sessions',
     decision: { requestedAction: input.requestedAction },
     actionStatus: input.actionStatus,
     snapshotId: input.routingStatus && input.routingStatus !== 'ROUTED' ? `snapshot-${sessionId}` : undefined,
@@ -2188,4 +3067,38 @@ test('intent routing recovery does not requeue a terminal FollowUp after restart
   assert.deepEqual(fixture.session.pendingFollowUpMessages, []);
   assert.deepEqual(fixture.followUpStatusUpdates, []);
   assert.equal(fixture.executionStarts.length, 0);
+});
+
+test('intent routing recovery does not apply a shadow-mode pause after restart', async () => {
+  // `finish()` records shadow decisions as ROUTED too, so without the rollout gate
+  // a pause that was never meant to run would be applied on the next boot.
+  const fixture = routingRecoveryFixture({
+    sessionStatus: 'EXECUTING',
+    requestedAction: 'pause',
+    actionStatus: 'pending',
+    followUpStatus: 'queued',
+    rolloutMode: 'shadow'
+  });
+
+  const recovered = await fixture.service.recoverIntentRoutings([fixture.session.id]);
+
+  assert.equal(fixture.service.get(fixture.session.id).status, 'EXECUTING');
+  assert.equal(recovered.some((item) => item.action === 'pause_recovered'), false);
+  assert.deepEqual(fixture.actionStatusUpdates, []);
+});
+
+test('intent routing recovery does not apply a shadow-mode cancel after restart', async () => {
+  const fixture = routingRecoveryFixture({
+    sessionStatus: 'EXECUTING',
+    requestedAction: 'cancel',
+    actionStatus: 'pending',
+    followUpStatus: 'queued',
+    rolloutMode: 'shadow'
+  });
+
+  const recovered = await fixture.service.recoverIntentRoutings([fixture.session.id]);
+
+  assert.equal(fixture.service.get(fixture.session.id).status, 'EXECUTING');
+  assert.equal(recovered.some((item) => item.action === 'cancel_recovered'), false);
+  assert.deepEqual(fixture.actionStatusUpdates, []);
 });

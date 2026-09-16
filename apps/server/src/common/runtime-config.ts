@@ -154,6 +154,7 @@ export function phaseTimeoutMs(phase: AgentRunPhase) {
     const parsed = Number(configured);
     return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;
   }
+  if (phase === 'brief_generation' || phase === 'brief_revision') return 1_200_000;
   return phase === 'discussion' ? discussionTimeoutMs() : 0;
 }
 

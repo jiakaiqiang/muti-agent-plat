@@ -12,15 +12,14 @@ import {
   WarningFilled
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { apiBaseUrl } from '@/config/runtime'
-import { useLocalRuntimeStore } from '@/stores/localRuntime'
 import {
-  createLocalRuntimeLaunchUrl,
-  requestLocalRuntimeLaunch,
-  resolveLocalRuntimeServerUrl
-} from '@/utils/localRuntimeLauncher'
+  LOCAL_RUNTIME_MANUAL_START_COMMAND,
+  LOCAL_RUNTIME_WAKE_FAILED_MESSAGE,
+  useLocalRuntimeStore
+} from '@/stores/localRuntime'
 
 const router = useRouter()
+const isDesktop = Boolean(window.agentClusterDesktop)
 const localRuntimeStore = useLocalRuntimeStore()
 const refreshing = ref(false)
 const waking = ref(false)
@@ -29,9 +28,16 @@ let disposed = false
 
 const connectedDevices = computed(() => localRuntimeStore.devices.filter((device) => device.connected))
 const isConnected = computed(() => connectedDevices.value.length > 0)
-const serverUrl = computed(() => resolveLocalRuntimeServerUrl(apiBaseUrl, window.location.origin))
-const launchUrl = computed(() => createLocalRuntimeLaunchUrl(serverUrl.value))
-const installCommand = computed(() => `agent-runtime install --server ${serverUrl.value}`)
+// Must match the origin the CLI registered via `install --server`; deriving it from
+// the page origin makes localhost and 127.0.0.1 diverge and the CLI then exits
+// with "launch URL does not match the installed server" and no visible console.
+const serverUrl = computed(() => localRuntimeStore.launchServerUrl)
+const installCommand = computed(() =>
+  serverUrl.value
+    ? `npm run agent-runtime -- install --server ${serverUrl.value}`
+    : 'npm run agent-runtime -- install'
+)
+const startCommand = LOCAL_RUNTIME_MANUAL_START_COMMAND
 
 function runtimeLabels(runtimes: Readonly<Record<string, string | undefined>>) {
   return Object.keys(runtimes).filter((runtime) => runtimes[runtime]).join('、') || '未探测到 Runtime'
@@ -53,7 +59,9 @@ async function refreshStatus(silent = false) {
   pageError.value = ''
   const results = await Promise.allSettled([
     localRuntimeStore.loadDevices(),
-    localRuntimeStore.loadWorkspaces()
+    localRuntimeStore.loadWorkspaces(),
+    // Prefetched so the wake-up button can launch the protocol synchronously.
+    localRuntimeStore.resolveLaunchServerUrl()
   ])
   const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
   if (rejected) {
@@ -66,7 +74,18 @@ async function refreshStatus(silent = false) {
 async function wakeLocalRuntime() {
   pageError.value = ''
   waking.value = true
-  requestLocalRuntimeLaunch(launchUrl.value)
+  // Fired before any await: browsers only honour a custom-protocol launch while the
+  // click still carries transient user activation.
+  if (!localRuntimeStore.wakeLocalRuntime()) {
+    try {
+      await localRuntimeStore.resolveLaunchServerUrl()
+      localRuntimeStore.wakeLocalRuntime()
+    } catch (error) {
+      waking.value = false
+      pageError.value = error instanceof Error ? error.message : '无法读取本地助手唤醒地址。'
+      return
+    }
+  }
 
   for (let attempt = 0; attempt < 16 && !disposed; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, 1_000))
@@ -79,7 +98,7 @@ async function wakeLocalRuntime() {
 
   if (!disposed) {
     waking.value = false
-    pageError.value = '未检测到本地助手。请确认已安装并注册唤醒协议，然后重试。'
+    pageError.value = LOCAL_RUNTIME_WAKE_FAILED_MESSAGE
   }
 }
 
@@ -93,9 +112,9 @@ async function authorizeWorkspace() {
   }
 }
 
-async function copyInstallCommand() {
-  await navigator.clipboard.writeText(installCommand.value)
-  ElMessage.success('安装命令已复制')
+async function copyCommand(command: string, label: string) {
+  await navigator.clipboard.writeText(command)
+  ElMessage.success(`${label}已复制`)
 }
 
 onMounted(() => {
@@ -231,13 +250,34 @@ onBeforeUnmount(() => {
       </section>
     </div>
 
-    <section v-if="!isConnected" class="runtime-install-band">
-      <div>
-        <h2>本地助手注册</h2>
-        <code>{{ installCommand }}</code>
+    <section v-if="!isConnected && isDesktop" class="runtime-install-band">
+      <p>本地助手已内置，请在连接设置中启动并完成设备授权。</p>
+      <el-button type="primary" @click="router.push('/desktop')">打开连接设置</el-button>
+    </section>
+    <section v-if="!isConnected && !isDesktop" class="runtime-install-band">
+      <div class="runtime-install-band__commands">
+        <div>
+          <h2>本地助手注册</h2>
+          <code>{{ installCommand }}</code>
+        </div>
+        <div>
+          <h2>手动启动</h2>
+          <code>{{ startCommand }}</code>
+        </div>
       </div>
-      <el-tooltip content="复制安装命令" placement="top">
-        <el-button :icon="CopyDocument" aria-label="复制安装命令" @click="copyInstallCommand" />
+      <el-tooltip content="复制命令" placement="top">
+        <el-button-group>
+          <el-button
+            :icon="CopyDocument"
+            aria-label="复制安装命令"
+            @click="copyCommand(installCommand, '安装命令')"
+          />
+          <el-button
+            :icon="CopyDocument"
+            aria-label="复制启动命令"
+            @click="copyCommand(startCommand, '启动命令')"
+          />
+        </el-button-group>
       </el-tooltip>
     </section>
   </main>
@@ -442,6 +482,10 @@ onBeforeUnmount(() => {
   display: grid;
   min-width: 0;
   gap: 8px;
+}
+
+.runtime-install-band__commands {
+  gap: 12px !important;
 }
 
 .runtime-install-band code {

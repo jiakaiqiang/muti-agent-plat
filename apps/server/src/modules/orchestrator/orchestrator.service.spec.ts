@@ -43,6 +43,71 @@ import {
   usableAgentMessageOutput
 } from './orchestrator.service.js';
 import { makeInvocationPlan } from '../runtimes/invocation-plan.fixture.js';
+import { InvocationResolutionError } from '../runtime-routing/invocation-resolver.service.js';
+
+test('task retries reuse acceptance but recheck permissions and changed scope before execution', async () => {
+  const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+  const service = makeService([], recorder) as any;
+  const activeSession = { ...session(), workspaceMode: 'bootstrap', status: 'EXECUTING' };
+  const task = { id: 'explicit-task', sessionId: activeSession.id, workflowNodeRunId: 'node-1',
+    title: 'Implementation', description: 'Implement the approved scope', status: 'assigned',
+    assignee: { type: 'agent', id: 'backend' }, acceptanceCriteria: ['Check changes'], dependsOnTaskIds: [],
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } as AgentTask;
+  let permitted = true;
+  let resolutions = 0;
+  service.invocationWorkspace = () => ({});
+  service.createContextAssembly = () => ({ taskContext: { intent: 'implementation', requiresCodeChanges: true },
+    systemRules: [], budget: { maxInputTokens: 1000, maxOutputTokens: 800, maxTotalTokens: 1800 } });
+  service.invocationResolver = { resolve() {
+    resolutions++;
+    if (!permitted) throw new InvocationResolutionError('CAPABILITY_BLOCKED', 'workspace permission revoked');
+    return makeInvocationPlan({ agent: { agentId: 'backend' } });
+  } };
+  service.taskDependencyArtifacts = () => [];
+  service.runRuntime = () => { throw new Error('explicit workflow acceptance must not call a model'); };
+  const claim = () => service.resolveTaskClaim(activeSession, {}, task, agent('backend'), agent('coordinator'), undefined, new Set());
+  const first = await claim();
+  assert.equal(first.ok, true);
+  task.status = 'running';
+  task.updatedAt = new Date().toISOString();
+  const retry = await claim();
+  assert.equal(retry.invocationId, first.invocationId);
+  assert.equal(resolutions, 2, 'reuse must still recheck current capabilities');
+  task.description = 'Revised implementation scope';
+  const revised = await claim();
+  assert.notEqual(revised.invocationId, first.invocationId);
+  permitted = false;
+  const revoked = await claim();
+  assert.equal(revoked.ok, false);
+  assert.equal(revoked.error.code, 'CAPABILITY_BLOCKED');
+  assert.equal(task.acceptanceCheckpoint?.decisionSource, 'rule');
+});
+
+test('recovery with a failed submission never replays development when safe repair is unavailable or exhausted', async () => {
+  for (const runtimeType of ['claude_code', 'codex'] as const) {
+    const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+    const service = makeService([], recorder) as any;
+    const activeSession = { ...session(), workspaceMode: 'bootstrap', status: 'EXECUTING' };
+    const candidate = { id: 'saved-candidate', schemaErrors: ['blockers missing'], originalSubmission: { summary: 'done' }, outputVersion: '2.0' };
+    service.refreshWorkspaceIndex = async () => {};
+    service.invocationWorkspace = () => ({});
+    service.invocationResolver = { resolve: () => makeInvocationPlan({ executionTarget: { runtimeType } }) };
+    service.tasks.find = () => ({ recoveryOriginTaskId: 'prior-task' });
+    service.runtime.findExecutionCandidate = () => candidate;
+    service.runtime.operations = { reserveCorrection: async () => false };
+    service.runtime.start = () => { throw new Error('must not launch development'); };
+    const result = await service.runRuntimeAttempt(activeSession, {
+      invocationId: 'recovery', sessionId: activeSession.id, taskId: 'task', phase: 'task_execution',
+      agent: agent('backend'), contextAssembly: { taskContext: { intent: 'implementation', requiresCodeChanges: true } },
+      operation: { id: 'operation' }, expectedOutput: { kind: 'task_execution_result', schemaVersion: '2.0' }, budget: {}
+    });
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error.details.operationFailure, 'OPERATION_SUBMISSION_REPAIR_BLOCKED');
+    assert.equal(result.executionCandidate.id, candidate.id);
+    assert.equal(recorder.runtimeCalls, 0);
+    assert.equal(recorder.events.some(event => event.metadata?.payload?.code === 'SUBMISSION_REPAIR_STARTED'), false);
+  }
+});
 
 function agent(key: string): Agent {
   return {
@@ -727,6 +792,9 @@ test('retryable provider failures retry once and then fall back inside the sessi
     excludedRuntimeTypes?: string[];
     attempt?: InvocationPlan['attempt'];
   }> = [];
+  (service as unknown as { backoffRuntimeProviderRetry(ms: number): Promise<void> }).backoffRuntimeProviderRetry = async (ms) => {
+    assert.equal(ms, 120_000);
+  };
   service.runRuntimeAttempt = async (_inputSession, input) => {
     calls.push(input);
     if (calls.length < 3) {
@@ -2237,12 +2305,43 @@ test('file revision blocked or rejected acceptance stores only stable public sta
     assert.equal(outcome.ok, false);
     assert.equal(outcome.message, 'File revision task acceptance was blocked.');
     assert.doesNotMatch(JSON.stringify({ events: recorder.events, updates: recorder.taskUpdates }), new RegExp(secret));
-    const blockedEvent = recorder.events.find((event) => event.type === 'task_blocked');
+    const blockedEvent = recorder.events.find((event) =>
+      event.type === (status === 'rejected' ? 'task_rejected' : 'task_blocked')
+    );
     assert.equal(
       (blockedEvent?.metadata.payload as { resultSummary?: string } | undefined)?.resultSummary,
       'File revision task acceptance was blocked.'
     );
   }
+});
+
+test('ordinary execution failure emits task_failed and never impersonates an intake rejection', async () => {
+  const { recorder, service, activeSession, task, brief } = taskExecutionHarness(
+    runtimeOutputExamples.task_execution_result
+  );
+  service.runRuntime = async (_session, input) => ({
+    invocationId: input.invocationId,
+    runtimeType: 'mock',
+    status: input.phase === 'task_acceptance' ? 'completed' : 'failed',
+    output: input.phase === 'task_acceptance'
+      ? runtimeOutputExamples.task_acceptance_decision
+      : runtimeOutputExamples.task_execution_result,
+    events: [],
+    artifacts: [],
+    systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+    usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, model: 'mock' },
+    ...(input.phase === 'task_acceptance' ? {} : {
+      error: { code: 'MODEL_ERROR' as const, message: 'Execution failed.', retryable: false }
+    })
+  });
+
+  const outcome = await service.runOneTask(activeSession, brief, task);
+
+  assert.equal(outcome.ok, false);
+  assert.equal(task.status, 'failed');
+  assert.ok(recorder.events.some((event) => event.type === 'runtime_failed'));
+  assert.ok(recorder.events.some((event) => event.type === 'task_failed'));
+  assert.equal(recorder.events.some((event) => event.type === 'task_rejected'), false);
 });
 
 test('file revision task acceptance Runtime failure omits raw error context and details', async () => {
@@ -3109,4 +3208,27 @@ test('normalizes a discussion-owned abort as a timeout without leaking the nativ
   assert.equal(result.termination?.kind, 'phase_timeout');
   assert.equal(result.error?.termination?.terminationId, result.termination?.terminationId);
   assert.deepEqual(result.error?.details?.timeout, { mode: 'deadline', timeoutMs: 60_000 });
+});
+
+test('brief deadline is shared by provider attempts and is cleaned up after completion', async () => {
+  const service = makeService() as any;
+  const old = process.env.PHASE_TIMEOUT_BRIEF_GENERATION_MS;
+  process.env.PHASE_TIMEOUT_BRIEF_GENERATION_MS = '25';
+  let reason: any;
+  service.runRuntimeProviderAttemptsWithinDeadline = async (_s: unknown, _i: unknown, signal: AbortSignal) => {
+    await new Promise<void>(resolve => signal.addEventListener('abort', () => { reason = signal.reason; resolve(); }, { once: true }));
+    return { status: 'failed' };
+  };
+  try {
+    await service.runRuntimeProviderAttempts({}, { phase: 'brief_generation' });
+    assert.equal(reason.kind, 'phase_timeout');
+    let completedSignal: AbortSignal | undefined;
+    service.runRuntimeProviderAttemptsWithinDeadline = async (_s: unknown, _i: unknown, signal: AbortSignal) => { completedSignal = signal; return { status: 'completed' }; };
+    await service.runRuntimeProviderAttempts({}, { phase: 'brief_generation' });
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(completedSignal?.aborted, false);
+  } finally {
+    if (old === undefined) delete process.env.PHASE_TIMEOUT_BRIEF_GENERATION_MS;
+    else process.env.PHASE_TIMEOUT_BRIEF_GENERATION_MS = old;
+  }
 });

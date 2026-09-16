@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { Subject } from 'rxjs';
 import type {
   AgentTask,
@@ -9,7 +9,9 @@ import type {
   WorkflowNode,
   WorkflowNodeRun,
   WorkflowRun,
-  WorkflowRunStatus
+  WorkflowRunStatus,
+  WorkflowPendingAgentSubstitution,
+  WorkflowUpstreamRerunCandidate
 } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
 import { createExecutionTermination } from '../../common/execution-termination.js';
@@ -21,6 +23,7 @@ import type { ExecutionOutcome } from '../orchestrator/orchestrator.service.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { TasksService } from '../tasks/tasks.service.js';
 import { WorkflowsService } from './workflows.service.js';
+import { WorkflowFileHistoryService } from './workflow-file-history.service.js';
 
 const RUNTIME_KEY = 'workflowRuntime';
 
@@ -76,6 +79,44 @@ export type WorkflowAgentSubstitutionInput = {
   runId: string;
   taskId: string;
   agentId: string;
+  confirmationId?: string;
+};
+
+export type WorkflowAgentSkipInput = {
+  runId: string;
+  taskId: string;
+  reason: string;
+  confirmationId?: string;
+};
+
+export type WorkflowAgentSubstitutionRequest = {
+  taskId: string;
+  workflowRunId: string;
+  workflowNodeId?: string;
+  currentAgentId: string;
+  candidates: Array<{ id: string; key: string; name: string; role: string }>;
+  reason: string;
+  confirmationId: string;
+};
+
+export type WorkflowUpstreamRerunRequest = {
+  taskId: string;
+  workflowRunId: string;
+  workflowNodeId?: string;
+  reason: string;
+  missingInputs: string[];
+};
+
+export type WorkflowUpstreamRerunInput = {
+  runId: string;
+  confirmationId: string;
+  nodeId: string;
+  instruction?: string;
+};
+
+export type WorkflowParkedNodeRetryInput = {
+  runId: string;
+  confirmationId: string;
 };
 
 @Injectable()
@@ -95,7 +136,8 @@ export class WorkflowRuntimeService {
     private readonly tasks: TasksService,
     private readonly events: EventsService,
     private readonly execution: ExecutionService,
-    private readonly persistence: PersistenceService
+    private readonly persistence: PersistenceService,
+    @Optional() private readonly fileHistory?: WorkflowFileHistoryService
   ) {
     const state = this.persistence.getCollection<WorkflowRuntimeState>(RUNTIME_KEY, {
       schemaVersion: 2,
@@ -124,6 +166,12 @@ export class WorkflowRuntimeService {
     return [...this.runs.values()]
       .filter((run) => run.sessionId === sessionId)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+  }
+
+  listBySession(sessionId: string) {
+    return [...this.runs.values()]
+      .filter((run) => run.sessionId === sessionId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
   listNodeRuns(runId: string) {
@@ -173,6 +221,11 @@ export class WorkflowRuntimeService {
     input.session.workflowRunId = run.id;
     this.persist();
 
+    if (this.fileHistory) {
+      run.fileBaseline = await this.fileHistory.captureBaseline(input.session);
+      this.persist();
+    }
+
     await this.runEffect(run, 'emit_event', 'run-started', { confirmationId: input.confirmationId }, () => {
       this.events.createOnce(`workflow-run-started:${run.id}`, {
         sessionId: run.sessionId,
@@ -209,8 +262,16 @@ export class WorkflowRuntimeService {
       this.assertMutable(run, input.expectedRunRevision);
       if (run.status !== 'waiting_human') throw new BadRequestException(`Workflow run is not waiting for human: ${run.status}`);
       if (run.ownerId !== input.userId) throw new BadRequestException({ code: 'WORKFLOW_CONFIRMATION_FORBIDDEN' });
+      // An upstream-rerun park also sits at waiting_human, but it is not an
+      // approval gate: it must be resolved through rerunUpstreamNode.
+      if (run.pendingUpstreamRerun) throw new BadRequestException({ code: 'WORKFLOW_UPSTREAM_RERUN_PENDING' });
       const nodeRun = this.listNodeRuns(run.id).find((item) => item.id === input.nodeRunId);
-      if (!nodeRun || nodeRun.status !== 'waiting' || nodeRun.confirmationId !== input.confirmationId) {
+      if (
+        !nodeRun ||
+        nodeRun.nodeType !== 'human_approval' ||
+        nodeRun.status !== 'waiting' ||
+        nodeRun.confirmationId !== input.confirmationId
+      ) {
         throw new BadRequestException({ code: 'WORKFLOW_CONFIRMATION_ALREADY_RESOLVED' });
       }
       const existing = this.listApprovals(run.id).find((item) => item.confirmationId === input.confirmationId);
@@ -288,6 +349,52 @@ export class WorkflowRuntimeService {
     });
   }
 
+  /**
+   * True when the current node is parked on an Agent that declined the task and
+   * is waiting for an explicit user substitution or skip. Resuming such a run
+   * implicitly would restore the node default Agent and reproduce the refusal.
+   */
+  awaitsAgentSubstitution(runId: string) {
+    const run = this.runs.get(runId);
+    if (!run || this.isTerminal(run.status)) return false;
+    if (run.pendingAgentSubstitution) return true;
+    const nodeRun = this.currentNodeRun(run);
+    if (!nodeRun || !['running', 'waiting'].includes(nodeRun.status) || !nodeRun.relatedTaskId) return false;
+    return this.tasks.find(run.sessionId, nodeRun.relatedTaskId)?.status === 'blocked';
+  }
+
+  /** Persist the explicit decision point created by an intake rejection. */
+  async requestAgentSubstitution(request: WorkflowAgentSubstitutionRequest) {
+    return this.serialize(request.workflowRunId, async () => {
+      const run = this.get(request.workflowRunId);
+      if (this.isTerminal(run.status)) return run.pendingAgentSubstitution;
+      if (run.pendingAgentSubstitution) return run.pendingAgentSubstitution;
+      const nodeRun = this.currentNodeRun(run);
+      if (!nodeRun || nodeRun.relatedTaskId !== request.taskId) return undefined;
+      const node = run.definitionSnapshot.nodes.find((item) => item.id === nodeRun.nodeId);
+      if (node?.type !== 'agent') return undefined;
+      const pending: WorkflowPendingAgentSubstitution = {
+        nodeId: node.id,
+        nodeRunId: nodeRun.id,
+        taskId: request.taskId,
+        currentAgentId: request.currentAgentId,
+        reason: request.reason,
+        candidates: request.candidates,
+        confirmationId: request.confirmationId,
+        requestedAt: nowIso()
+      };
+      nodeRun.status = 'waiting';
+      run.pendingAgentSubstitution = pending;
+      run.status = 'waiting_human';
+      run.revision += 1;
+      run.updatedAt = nowIso();
+      this.persist();
+      this.ensureAgentSubstitutionConfirmation(run, pending);
+      await this.publishProjection(run);
+      return pending;
+    });
+  }
+
   async resumeCurrentExecution(
     runId: string,
     recoveryContext?: { session: SessionDetail; brief: TaskBrief; coordinatorId: string }
@@ -295,6 +402,8 @@ export class WorkflowRuntimeService {
     return this.serialize(runId, async () => {
       const run = this.get(runId);
       if (this.execution.isRunning(run.sessionId)) return false;
+      if (this.awaitsAgentSubstitution(run.id)) return false;
+      if (this.awaitsUpstreamRerun(run.id)) return false;
       if (
         recoveryContext &&
         run.workItemId &&
@@ -328,17 +437,67 @@ export class WorkflowRuntimeService {
     });
   }
 
+  /**
+   * Persists an interrupted node as a retryable failure without starting work.
+   * The next explicit resume creates a fresh node attempt through the existing
+   * failed-run recovery path.
+   */
+  checkpointInterruptedExecution(
+    runId: string,
+    failure: { code: string; message: string }
+  ) {
+    const run = this.get(runId);
+    if (this.isTerminal(run.status)) return false;
+    // A parked upstream-rerun is already a durable user-decision point; failing it
+    // here would drop the candidate list and the card that resolves it.
+    if (run.pendingUpstreamRerun || run.pendingAgentSubstitution) return false;
+    const nodeId = run.currentNodeId ?? this.currentNodeRun(run)?.nodeId;
+    this.failCurrentNodeRun(run, { ...failure, nodeId });
+    const interruptedNodeRun = this.currentNodeRun(run);
+    const interruptedTask = interruptedNodeRun?.relatedTaskId
+      ? this.tasks.find(run.sessionId, interruptedNodeRun.relatedTaskId)
+      : undefined;
+    if (interruptedTask) {
+      if (interruptedNodeRun) interruptedNodeRun.executionCheckpoint = interruptedTask.executionCheckpoint;
+      this.tasks.update(interruptedTask, { status: 'failed', resultSummary: failure.message });
+    }
+    run.status = 'failed';
+    run.failure = { ...failure, ...(nodeId ? { nodeId } : {}) };
+    run.revision += 1;
+    run.updatedAt = nowIso();
+    run.completedAt = nowIso();
+    this.persist();
+    this.updatesSubject.next({
+      kind: 'projection',
+      sessionId: run.sessionId,
+      workflowRunId: run.id,
+      status: run.status,
+      revision: run.revision
+    });
+    return true;
+  }
+
   async substituteCurrentAgent(input: WorkflowAgentSubstitutionInput) {
     return this.serialize(input.runId, async () => {
       const run = this.get(input.runId);
       if (this.isTerminal(run.status)) throw new ConflictException(`Workflow run is terminal: ${run.status}`);
+      const pending = run.pendingAgentSubstitution;
+      if (input.confirmationId && !pending) {
+        throw new BadRequestException({ code: 'WORKFLOW_AGENT_SUBSTITUTION_ALREADY_RESOLVED' });
+      }
+      if (pending && input.confirmationId && pending.confirmationId !== input.confirmationId) {
+        throw new BadRequestException({ code: 'WORKFLOW_AGENT_SUBSTITUTION_CONFIRMATION_MISMATCH' });
+      }
+      if (pending && (pending.taskId !== input.taskId || pending.candidates.every((agent) => agent.id !== input.agentId))) {
+        throw new BadRequestException({ code: 'WORKFLOW_AGENT_SUBSTITUTION_TARGET_INVALID' });
+      }
       if (this.execution.isRunning(run.sessionId)) {
         throw new ConflictException('Workflow execution is still running.');
       }
       const context = this.context(run.id);
       const node = this.currentNode(run);
       const nodeRun = this.currentNodeRun(run);
-      if (node?.type !== 'agent' || !nodeRun || nodeRun.status !== 'running' || nodeRun.relatedTaskId !== input.taskId) {
+      if (node?.type !== 'agent' || !nodeRun || !['running', 'waiting'].includes(nodeRun.status) || nodeRun.relatedTaskId !== input.taskId) {
         throw new BadRequestException(`Workflow Agent task is not current: ${input.taskId}`);
       }
       const task = this.tasks.find(run.sessionId, input.taskId);
@@ -350,6 +509,12 @@ export class WorkflowRuntimeService {
         throw new BadRequestException(`Agent is not part of this session: ${agent.id}`);
       }
       const previousAssignee = task.assignee;
+      run.pendingAgentSubstitution = undefined;
+      run.status = 'running';
+      nodeRun.status = 'running';
+      run.revision += 1;
+      run.updatedAt = nowIso();
+      this.persist();
       this.tasks.update(task, {
         status: 'pending',
         assignee: { type: 'agent', id: agent.id },
@@ -384,12 +549,318 @@ export class WorkflowRuntimeService {
     });
   }
 
+  async skipCurrentAgent(input: WorkflowAgentSkipInput) {
+    return this.serialize(input.runId, async () => {
+      const run = this.get(input.runId);
+      if (this.isTerminal(run.status)) throw new ConflictException(`Workflow run is terminal: ${run.status}`);
+      const pending = run.pendingAgentSubstitution;
+      if (input.confirmationId && !pending) {
+        throw new BadRequestException({ code: 'WORKFLOW_AGENT_SUBSTITUTION_ALREADY_RESOLVED' });
+      }
+      if (pending && input.confirmationId && pending.confirmationId !== input.confirmationId) {
+        throw new BadRequestException({ code: 'WORKFLOW_AGENT_SUBSTITUTION_CONFIRMATION_MISMATCH' });
+      }
+      if (pending && pending.taskId !== input.taskId) {
+        throw new BadRequestException({ code: 'WORKFLOW_AGENT_SUBSTITUTION_TARGET_INVALID' });
+      }
+      if (this.execution.isRunning(run.sessionId)) {
+        throw new ConflictException('Workflow execution is still running.');
+      }
+      const node = this.currentNode(run);
+      const nodeRun = this.currentNodeRun(run);
+      if (node?.type !== 'agent' || !nodeRun || !['running', 'waiting'].includes(nodeRun.status) || nodeRun.relatedTaskId !== input.taskId) {
+        throw new BadRequestException(`Workflow Agent task is not current: ${input.taskId}`);
+      }
+      const task = this.tasks.find(run.sessionId, input.taskId);
+      if (!task || task.workflowRunId !== run.id || task.workflowNodeId !== node.id) {
+        throw new BadRequestException(`Workflow task does not belong to the current node: ${input.taskId}`);
+      }
+
+      const reason = input.reason.trim() || '用户要求跳过当前工作流 Agent 并继续执行。';
+      this.tasks.update(task, { status: 'cancelled', resultSummary: reason });
+      run.pendingAgentSubstitution = undefined;
+      run.status = 'running';
+      nodeRun.status = 'skipped';
+      nodeRun.outputSummary = reason;
+      nodeRun.outputRefs = [];
+      nodeRun.completedAt = nowIso();
+      run.revision += 1;
+      run.updatedAt = nowIso();
+      this.persist();
+      await this.emitNodeCompleted(run, nodeRun);
+      await this.advanceAfterNode(run, node.id);
+      return { run, task, nodeRun };
+    });
+  }
+
+  /**
+   * True while the current node reported incomplete upstream input and is waiting
+   * for the user to pick an upstream node to re-run. Resuming implicitly would
+   * re-run the same node against the same missing output.
+   */
+  awaitsUpstreamRerun(runId: string) {
+    const run = this.runs.get(runId);
+    return Boolean(run && !this.isTerminal(run.status) && run.pendingUpstreamRerun);
+  }
+
+  pendingUpstreamRerun(runId: string) {
+    return this.runs.get(runId)?.pendingUpstreamRerun;
+  }
+
+  /**
+   * Previously executed Agent nodes the given node can be sent back to. Approval
+   * gates are excluded: they hold no re-executable work of their own.
+   */
+  upstreamRerunCandidates(runId: string, nodeId?: string): WorkflowUpstreamRerunCandidate[] {
+    const run = this.runs.get(runId);
+    const targetNodeId = nodeId ?? run?.currentNodeId;
+    if (!run || !targetNodeId) return [];
+    const nodes = run.definitionSnapshot.nodes;
+    const graphUpstream = this.upstreamNodeIds(run, targetNodeId);
+    // Definition order is the fallback because advanceAfterNode itself walks the
+    // node array; a published version with no edges still has a real predecessor.
+    const targetIndex = nodes.findIndex((node) => node.id === targetNodeId);
+    const eligible = nodes.filter((node, index) =>
+      node.type === 'agent' &&
+      node.id !== targetNodeId &&
+      (graphUpstream.has(node.id) || (graphUpstream.size === 0 && targetIndex >= 0 && index < targetIndex)));
+    const nodeRuns = this.listNodeRuns(run.id);
+    return eligible.map((node) => {
+      const agentNode = node as Extract<WorkflowNode, { type: 'agent' }>;
+      let agentName = agentNode.agentId;
+      try {
+        agentName = this.agents.getByIdOrKey(agentNode.agentId).name;
+      } catch {
+        // A published snapshot can outlive the Agent; the node stays selectable.
+      }
+      const lastRun = [...nodeRuns].reverse().find((item) => item.nodeId === node.id);
+      return {
+        nodeId: node.id,
+        nodeName: node.name?.trim() || agentName,
+        agentId: agentNode.agentId,
+        agentName,
+        ...(lastRun?.outputSummary ? { lastOutputSummary: lastRun.outputSummary } : {})
+      };
+    });
+  }
+
+  /**
+   * Parks the current Agent node because it reported that its upstream input is
+   * incomplete, and records the upstream nodes the user can send it back to.
+   * Returns undefined when there is no upstream Agent node to offer, so the
+   * caller can fall back to the generic recovery card.
+   */
+  async requestUpstreamRerun(request: WorkflowUpstreamRerunRequest) {
+    return this.serialize(request.workflowRunId, async () => {
+      const run = this.get(request.workflowRunId);
+      if (this.isTerminal(run.status)) return undefined;
+      const nodeRun = this.currentNodeRun(run);
+      if (!nodeRun || nodeRun.relatedTaskId !== request.taskId) return undefined;
+      return this.parkForUpstreamRerun(run, nodeRun, request);
+    });
+  }
+
+  private async parkForUpstreamRerun(
+    run: WorkflowRun,
+    nodeRun: WorkflowNodeRun,
+    request: WorkflowUpstreamRerunRequest
+  ) {
+    if (run.pendingUpstreamRerun) return run.pendingUpstreamRerun;
+    const candidates = this.upstreamRerunCandidates(run.id, nodeRun.nodeId);
+    if (!candidates.length) return undefined;
+
+    const confirmationId = `workflow-upstream-rerun:${run.id}:${nodeRun.id}`;
+    run.pendingUpstreamRerun = {
+      nodeId: nodeRun.nodeId,
+      nodeRunId: nodeRun.id,
+      taskId: request.taskId,
+      reason: request.reason,
+      missingInputs: request.missingInputs,
+      candidates,
+      requestedAt: nowIso()
+    };
+    run.status = 'waiting_human';
+    run.revision += 1;
+    run.updatedAt = nowIso();
+    this.persist();
+    const node = run.definitionSnapshot.nodes.find((item) => item.id === nodeRun.nodeId);
+    const nodeLabel = node?.name?.trim() || nodeRun.nodeId;
+    await this.runEffect(run, 'emit_event', `${nodeRun.id}:upstream-rerun`, { confirmationId }, () => {
+      this.events.createOnce(`workflow-upstream-rerun-gate:${nodeRun.id}`, {
+        sessionId: run.sessionId,
+        type: 'workflow_gate_requested',
+        priority: 'high',
+        content: `节点「${nodeLabel}」报告上游产物不完整，已暂停等待用户选择返回哪个上游节点。`,
+        metadata: createMetadata('system_notice', {
+          ...this.eventRefs(run, nodeRun),
+          reason: request.reason,
+          missingInputs: request.missingInputs
+        })
+      });
+      this.events.createOnce(`workflow-upstream-rerun-confirmation:${nodeRun.id}`, {
+        sessionId: run.sessionId,
+        type: 'user_confirmation_requested',
+        priority: 'high',
+        content: `「${nodeLabel}」无法继续：上一环节的产物不完整。请选择要重新执行的上游节点。`,
+        metadata: createMetadata('confirmation_card', {
+          confirmationId,
+          reason: 'workflow_upstream_rerun',
+          title: '选择要重新执行的上游节点',
+          description: [
+            request.reason,
+            request.missingInputs.length ? `缺少的上游输入：${request.missingInputs.join('；')}` : undefined,
+            '选择一个上游节点后，工作流会从该节点重新执行，并在其完成后重新走到当前节点。'
+          ].filter(Boolean).join('\n'),
+          workflowId: run.workflowId,
+          workflowRunId: run.id,
+          workflowNodeId: nodeRun.nodeId,
+          workflowNodeRunId: nodeRun.id,
+          relatedTaskId: request.taskId,
+          expectedRunRevision: run.revision,
+          missingInputs: request.missingInputs,
+          candidateNodeIds: candidates.map((candidate) => candidate.nodeId),
+          options: [
+            ...candidates.map((candidate, index) => ({
+              key: `node:${candidate.nodeId}`,
+              label: `退回「${candidate.nodeName}」重新执行`,
+              style: index === 0 ? 'primary' as const : 'default' as const
+            })),
+            { key: 'retry_current', label: '不退回，重试当前节点', style: 'default' as const },
+            { key: 'cancel', label: '终止工作流', style: 'danger' as const }
+          ]
+        })
+      });
+    });
+    await this.publishProjection(run);
+    return run.pendingUpstreamRerun;
+  }
+
+  /**
+   * Sends a parked node back to a chosen upstream Agent node. The parked node run
+   * is closed as revision_requested and its task cancelled, so the forward walk
+   * creates a fresh attempt once the upstream node completes.
+   */
+  async rerunUpstreamNode(input: WorkflowUpstreamRerunInput) {
+    return this.serialize(input.runId, async () => {
+      const run = this.get(input.runId);
+      const pending = run.pendingUpstreamRerun;
+      if (!pending || pending.candidates.every((candidate) => candidate.nodeId !== input.nodeId)) {
+        throw new BadRequestException({ code: 'WORKFLOW_UPSTREAM_RERUN_TARGET_INVALID' });
+      }
+      if (`workflow-upstream-rerun:${run.id}:${pending.nodeRunId}` !== input.confirmationId) {
+        throw new BadRequestException({ code: 'WORKFLOW_UPSTREAM_RERUN_CONFIRMATION_MISMATCH' });
+      }
+      if (this.execution.isRunning(run.sessionId)) {
+        throw new ConflictException('Workflow execution is still running.');
+      }
+      this.closeParkedNodeRun(run, pending.nodeRunId, '用户选择退回上游节点重新执行。');
+      run.pendingUpstreamRerun = undefined;
+      run.failure = undefined;
+      run.completedAt = undefined;
+      this.persist();
+      const instruction = input.instruction?.trim() ||
+        `下游节点报告上游产物不完整：${pending.reason}${pending.missingInputs.length ? ` 缺少：${pending.missingInputs.join('；')}` : ''} 请补齐本阶段产物。`;
+      await this.revisePreviousAgent(run, instruction, input.nodeId);
+      return run;
+    });
+  }
+
+  /** Retries the parked node itself without re-running any upstream node. */
+  async retryParkedNode(input: WorkflowParkedNodeRetryInput) {
+    return this.serialize(input.runId, async () => {
+      const run = this.get(input.runId);
+      const pending = run.pendingUpstreamRerun;
+      if (!pending) throw new BadRequestException({ code: 'WORKFLOW_UPSTREAM_RERUN_NOT_PENDING' });
+      if (`workflow-upstream-rerun:${run.id}:${pending.nodeRunId}` !== input.confirmationId) {
+        throw new BadRequestException({ code: 'WORKFLOW_UPSTREAM_RERUN_CONFIRMATION_MISMATCH' });
+      }
+      if (this.execution.isRunning(run.sessionId)) {
+        throw new ConflictException('Workflow execution is still running.');
+      }
+      this.closeParkedNodeRun(run, pending.nodeRunId, '用户选择重试当前节点。');
+      run.pendingUpstreamRerun = undefined;
+      run.status = 'running';
+      run.currentNodeId = pending.nodeId;
+      run.failure = undefined;
+      run.completedAt = undefined;
+      run.revision += 1;
+      run.updatedAt = nowIso();
+      this.persist();
+      await this.publishProjection(run);
+      await this.activateCurrentNode(run.id);
+      return run;
+    });
+  }
+
+  /**
+   * Closes a parked node run and cancels its task. The task must reach a terminal
+   * status: Post Review re-drives every non-terminal workflow task, so a task
+   * left blocked would be picked up again after the run finishes.
+   */
+  private closeParkedNodeRun(run: WorkflowRun, nodeRunId: string, reason: string) {
+    const nodeRun = this.listNodeRuns(run.id).find((item) => item.id === nodeRunId);
+    if (!nodeRun) return;
+    if (nodeRun.status === 'running' || nodeRun.status === 'waiting') {
+      nodeRun.status = 'revision_requested';
+      nodeRun.completedAt = nowIso();
+    }
+    const task = nodeRun.relatedTaskId ? this.tasks.find(run.sessionId, nodeRun.relatedTaskId) : undefined;
+    if (!task) return;
+    if (['completed', 'cancelled', 'failed', 'rejected'].includes(task.status)) {
+      // Already terminal (markTaskFailed ran when the node reported blocked), so
+      // Post Review will not re-drive it. Keep the original failure text and just
+      // append why the node was closed.
+      this.tasks.update(task, {
+        resultSummary: task.resultSummary ? `${task.resultSummary} ${reason}` : reason
+      });
+      return;
+    }
+    this.tasks.update(task, { status: 'cancelled', resultSummary: reason });
+  }
+
+  /**
+   * Re-drives a post-review rework inside the existing run instead of starting a
+   * new one. Only the last executed Agent node is retried; already approved
+   * upstream nodes keep their outputs and are never replayed.
+   */
+  async reworkLastAgentNode(
+    runId: string,
+    instruction: string,
+    recoveryContext?: RuntimeContext
+  ) {
+    return this.serialize(runId, async () => {
+      const run = this.get(runId);
+      if (recoveryContext) this.contexts.set(run.id, recoveryContext);
+      if (!this.contexts.has(run.id)) return false;
+      if (this.execution.isRunning(run.sessionId)) return false;
+      const target = [...this.listNodeRuns(run.id)]
+        .reverse()
+        .find((item) => item.nodeType === 'agent' &&
+          run.definitionSnapshot.nodes.some((node) => node.id === item.nodeId && node.type === 'agent'));
+      if (!target) return false;
+      run.status = 'running';
+      run.currentNodeId = target.nodeId;
+      run.failure = undefined;
+      run.completedAt = undefined;
+      run.revision += 1;
+      run.updatedAt = nowIso();
+      this.persist();
+      await this.publishProjection(run);
+      await this.revisePreviousAgent(run, instruction, target.nodeId);
+      return true;
+    });
+  }
+
   async recover(session: SessionDetail, brief: TaskBrief, coordinatorId: string) {
     const run = this.findBySession(session.id);
     if (!run || this.isTerminal(run.status)) return run;
     this.contexts.set(run.id, { session, brief, coordinatorId });
     session.workflowRunId = run.id;
+    if (run.pendingAgentSubstitution) this.ensureAgentSubstitutionConfirmation(run, run.pendingAgentSubstitution);
     await this.publishProjection(run);
+    // A parked upstream-rerun keeps its card as the only way forward. Re-activating
+    // the node here would replay it against the same incomplete upstream output.
+    if (run.pendingUpstreamRerun || run.pendingAgentSubstitution) return run;
     if (run.status === 'waiting_human') {
       const waiting = this.currentNodeRun(run)?.status === 'waiting';
       if (!waiting) await this.serialize(run.id, () => this.activateCurrentNode(run.id));
@@ -455,12 +926,19 @@ export class WorkflowRuntimeService {
     };
     this.appendNodeRun(nodeRun);
     const agent = this.agents.getByIdOrKey(node.agentId);
+    const previousNodeRun = this.listNodeRuns(run.id).filter(item => item.nodeId === node.id && item.attempt < attempt)
+      .sort((left, right) => right.attempt - left.attempt)[0];
+    const previousTask = previousNodeRun?.status === 'failed' && previousNodeRun.relatedTaskId
+      ? this.tasks.find(run.sessionId, previousNodeRun.relatedTaskId) : undefined;
+    const recoveryTask = previousTask?.assignee?.id === agent.id ? previousTask : undefined;
     const taskId = `wf-task:${run.id}:${node.id}:${attempt}`;
     const stageAcceptanceCriteria = node.outputContract?.length
       ? [...node.outputContract]
       : this.defaultStageOutputContract(agent);
     const task: AgentTask = {
       id: taskId,
+      recoveryOriginTaskId: recoveryTask?.id,
+      previousExecutionOperationId: recoveryTask?.executionOperationId,
       sessionId: run.sessionId,
       workItemId: run.workItemId,
       title: node.name?.trim() || `工作流阶段 · ${agent.name}`,
@@ -524,7 +1002,10 @@ export class WorkflowRuntimeService {
       description: [
         node.reviewPrompt,
         `通过标准：${node.criteria.join('；')}`,
-        '只返回 JSON：{"decision":"approve|revise|reject","reason":"...","revisionInstruction":"...","evidenceRefs":[]}'
+        '只返回 JSON：{"decision":"approve|revise|reject","reason":"...","revisionInstruction":"...或null","evidenceRefs":[]}',
+        '可修复的质量问题必须使用 revise，并提供明确的返工说明。',
+        'decision=revise 时 revisionInstruction 必须是非空修改说明；approve/reject 时必须为 null。',
+        'reject 表示问题不可恢复并会立即终止整个工作流，只能用于违反不可突破边界或继续返工也无法满足目标的情况。'
       ].join('\n'),
       status: 'assigned',
       assignedBy: { type: 'agent', id: context.coordinatorId },
@@ -668,6 +1149,8 @@ export class WorkflowRuntimeService {
     if (this.isTerminal(run.status)) return;
     const nodeRun = this.listNodeRuns(run.id).find((item) => item.id === nodeRunId);
     if (!nodeRun || nodeRun.status !== 'running') return;
+    nodeRun.executionCheckpoint = nodeRun.relatedTaskId
+      ? this.tasks.find(run.sessionId, nodeRun.relatedTaskId)?.executionCheckpoint : undefined;
     if (outcome.kind === 'workflow_step_completed') {
       await this.completeExecutedNode(run.id, nodeRun.id, outcome.resultSummary);
       return;
@@ -706,6 +1189,14 @@ export class WorkflowRuntimeService {
       return;
     }
     if (outcome.kind === 'ask_user') {
+      // The node ran and reported that an earlier stage did not deliver what it
+      // needed. Park on an upstream-rerun card instead of the generic recovery
+      // card, which can only resume the same node against the same input.
+      const upstream = outcome.workflowUpstreamIncomplete;
+      if (upstream && upstream.workflowRunId === run.id && upstream.taskId === nodeRun.relatedTaskId) {
+        const parked = await this.parkForUpstreamRerun(run, nodeRun, upstream);
+        if (parked) return;
+      }
       this.updatesSubject.next({
         kind: 'session_outcome',
         sessionId: run.sessionId,
@@ -743,6 +1234,8 @@ export class WorkflowRuntimeService {
     const nodeRun = this.listNodeRuns(run.id).find((item) => item.id === nodeRunId);
     if (!nodeRun || nodeRun.status !== 'running') return;
     nodeRun.outputSummary = resultSummary;
+    nodeRun.executionCheckpoint = nodeRun.relatedTaskId
+      ? this.tasks.find(run.sessionId, nodeRun.relatedTaskId)?.executionCheckpoint : undefined;
     nodeRun.outputRefs = nodeRun.relatedTaskId ? [`task:${nodeRun.relatedTaskId}`] : [];
     nodeRun.completedAt = nowIso();
     const definitionNode = run.definitionSnapshot.nodes.find((node) => node.id === nodeRun.nodeId);
@@ -821,9 +1314,11 @@ export class WorkflowRuntimeService {
     await this.revisePreviousAgent(run, parsed.revisionInstruction || parsed.reason);
   }
 
-  private async revisePreviousAgent(run: WorkflowRun, instruction: string) {
+  private async revisePreviousAgent(run: WorkflowRun, instruction: string, targetNodeId?: string) {
     const currentIndex = run.definitionSnapshot.nodes.findIndex((node) => node.id === run.currentNodeId);
-    const previous = run.definitionSnapshot.nodes.slice(0, currentIndex).reverse().find((node) => node.type === 'agent');
+    const previous = targetNodeId
+      ? run.definitionSnapshot.nodes.find((node) => node.id === targetNodeId && node.type === 'agent')
+      : run.definitionSnapshot.nodes.slice(0, currentIndex).reverse().find((node) => node.type === 'agent');
     if (!previous) {
       await this.finishRun(run, 'failed', {
         code: 'WORKFLOW_REVISION_TARGET_NOT_FOUND',
@@ -881,6 +1376,8 @@ export class WorkflowRuntimeService {
     if (status === 'failed') this.failCurrentNodeRun(run, failure);
     run.status = status;
     run.currentNodeId = undefined;
+    run.pendingAgentSubstitution = undefined;
+    run.pendingUpstreamRerun = undefined;
     run.failure = failure;
     run.revision += 1;
     run.updatedAt = nowIso();
@@ -930,7 +1427,9 @@ export class WorkflowRuntimeService {
       createdAt: run.createdAt,
       updatedAt: nowIso()
     };
-    await this.runEffect(run, 'start_post_review', 'post-review', { taskIds }, () => {
+    // The key carries the revision so each rework round gets its own post review
+    // instead of being swallowed by the first round's completed effect.
+    await this.runEffect(run, 'start_post_review', `post-review:${run.revision}`, { taskIds }, () => {
       this.execution.start(context.session, context.brief, workflowTasks, (outcome) => {
         this.updatesSubject.next({ kind: 'session_outcome', sessionId: run.sessionId, workflowRunId: run.id, outcome });
       });
@@ -956,7 +1455,11 @@ export class WorkflowRuntimeService {
         type: 'workflow_node_completed',
         taskId: nodeRun.relatedTaskId,
         content: nodeRun.outputSummary || '工作流节点已完成。',
-        metadata: createMetadata('system_notice', { ...this.eventRefs(run, nodeRun), outputSummary: nodeRun.outputSummary })
+        metadata: createMetadata('system_notice', {
+          ...this.eventRefs(run, nodeRun),
+          status: nodeRun.status,
+          outputSummary: nodeRun.outputSummary
+        })
       });
     });
   }
@@ -988,6 +1491,39 @@ export class WorkflowRuntimeService {
           })
         });
       }
+    });
+  }
+
+  private ensureAgentSubstitutionConfirmation(
+    run: WorkflowRun,
+    pending: WorkflowPendingAgentSubstitution
+  ) {
+    this.events.createOnce(`workflow-agent-substitution-confirmation:${run.id}:${pending.taskId}`, {
+      sessionId: run.sessionId,
+      type: 'user_confirmation_requested',
+      priority: 'high',
+      content: '当前工作流 Agent 无法接单，请选择改派、跳过或取消。',
+      metadata: createMetadata('confirmation_card', {
+        confirmationId: pending.confirmationId,
+        reason: 'workflow_agent_substitution',
+        title: '等待改派或跳过当前 Agent',
+        description: `${pending.reason}\n系统不会自动跨角色改派。请选择一个候选 Agent、跳过当前节点或终止工作流。`,
+        relatedTaskId: pending.taskId,
+        workflowRunId: run.id,
+        workflowNodeId: pending.nodeId,
+        workflowNodeRunId: pending.nodeRunId,
+        candidateAgentIds: pending.candidates.map((agent) => agent.id),
+        expectedRunRevision: run.revision,
+        options: [
+          ...pending.candidates.map((agent, index) => ({
+            key: `agent:${agent.id}`,
+            label: `改派给 ${agent.name}`,
+            style: index === 0 ? 'primary' as const : 'default' as const
+          })),
+          { key: 'skip_agent', label: '跳过当前 Agent', style: 'default' as const },
+          { key: 'cancel', label: '终止工作流', style: 'danger' as const }
+        ]
+      })
     });
   }
 
@@ -1219,15 +1755,26 @@ export class WorkflowRuntimeService {
     evidenceRefs: string[];
   } | undefined {
     try {
-      const parsed = JSON.parse(value) as Record<string, unknown>;
+      const parsedValue: unknown = JSON.parse(value);
+      if (!parsedValue || typeof parsedValue !== 'object' || Array.isArray(parsedValue)) return undefined;
+      const parsed = parsedValue as Record<string, unknown>;
+      const allowedKeys = new Set(['decision', 'reason', 'revisionInstruction', 'evidenceRefs']);
+      if (Object.keys(parsed).length !== allowedKeys.size || [...allowedKeys].some((key) => !(key in parsed))) return undefined;
+      if (Object.keys(parsed).some((key) => !allowedKeys.has(key))) return undefined;
       if (!['approve', 'revise', 'reject'].includes(String(parsed.decision))) return undefined;
       if (typeof parsed.reason !== 'string' || !parsed.reason.trim()) return undefined;
       if (!Array.isArray(parsed.evidenceRefs) || !parsed.evidenceRefs.every((item) => typeof item === 'string')) return undefined;
-      if (parsed.revisionInstruction !== undefined && typeof parsed.revisionInstruction !== 'string') return undefined;
+      if (parsed.revisionInstruction !== null && typeof parsed.revisionInstruction !== 'string') return undefined;
+      const decision = parsed.decision as 'approve' | 'revise' | 'reject';
+      const revisionInstruction = typeof parsed.revisionInstruction === 'string'
+        ? parsed.revisionInstruction.trim()
+        : undefined;
+      if (decision === 'revise' && !revisionInstruction) return undefined;
+      if (decision !== 'revise' && parsed.revisionInstruction !== null) return undefined;
       return {
-        decision: parsed.decision as 'approve' | 'revise' | 'reject',
+        decision,
         reason: parsed.reason.trim(),
-        revisionInstruction: typeof parsed.revisionInstruction === 'string' ? parsed.revisionInstruction.trim() || undefined : undefined,
+        revisionInstruction: revisionInstruction || undefined,
         evidenceRefs: parsed.evidenceRefs as string[]
       };
     } catch {
@@ -1249,7 +1796,11 @@ export class WorkflowRuntimeService {
   private serialize<T>(runId: string, command: () => Promise<T>): Promise<T> {
     const previous = this.commandTails.get(runId) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(command);
-    const tail = next.finally(() => {
+    // The tail only exists to order the next command, so it must absorb the
+    // rejection. The caller owns `next`; leaving the tail rejected would surface
+    // every rejected command (a rejected user confirmation included) as an
+    // unhandledRejection on top of the caller's own error.
+    const tail = next.catch(() => undefined).finally(() => {
       if (this.commandTails.get(runId) === tail) this.commandTails.delete(runId);
     });
     this.commandTails.set(runId, tail);

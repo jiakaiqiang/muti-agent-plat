@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { launchDevLocalRuntime } from './dev-local-runtime.mjs';
 import {
   applyEnvFile,
   isProcessAlive,
@@ -34,7 +35,7 @@ export async function restartDevServer(options = {}) {
   const serverPort = positivePort(process.env.SERVER_PORT ?? process.env.PORT);
   const healthUrl = `http://127.0.0.1:${serverPort}/api/health`;
   const lockPath = join(workspaceRoot, '.cache', 'agent-cluster', `dev-server-${serverPort}.lock`);
-  const launcher = readLauncher(lockPath);
+  const launcher = (options.readLauncher ?? readLauncher)(lockPath);
   if (!launcher?.pid || !isProcessAlive(launcher.pid)) {
     throw new Error('The development backend launcher is not running. Start it with npm run dev first.');
   }
@@ -50,7 +51,7 @@ export async function restartDevServer(options = {}) {
     requestedAt: new Date(requestedAtMs).toISOString(),
     launcherPid: launcher.pid
   };
-  writeDevServerRestartRequest(devServerRestartRequestPath(workspaceRoot, serverPort), request);
+  (options.writeRestartRequest ?? writeDevServerRestartRequest)(devServerRestartRequestPath(workspaceRoot, serverPort), request);
   console.log(`[dev-server] restart requested id=${request.requestId}; waiting for backend health`);
 
   const deadline = requestedAtMs + (options.timeoutMs ?? RESTART_TIMEOUT_MS);
@@ -61,6 +62,14 @@ export async function restartDevServer(options = {}) {
       console.log(
         `[dev-server] restart complete processId=${health.data.processId} buildId=${health.data.buildId}`
       );
+      try {
+        const runtime = await (options.launchRuntime ?? launchDevLocalRuntime)({
+          serverUrl: `http://127.0.0.1:${serverPort}`, env: process.env
+        });
+        console.log(`[dev-server] local Runtime: ${runtime.state}${runtime.reason ? `; ${runtime.reason}` : ''}${runtime.logPath ? `; log: ${runtime.logPath}` : ''}`);
+      } catch (error) {
+        throw new Error(`Backend restarted successfully, but Local Runtime auto-connect failed: ${error.message}`);
+      }
       return health.data;
     }
   }

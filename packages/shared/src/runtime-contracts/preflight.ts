@@ -11,7 +11,6 @@ const ALLOWED_SCHEMA_KEYWORDS = new Set([
   'items',
   'minItems',
   'maxItems',
-  'uniqueItems',
   'minLength',
   'maxLength',
   'minimum',
@@ -23,6 +22,24 @@ const ALLOWED_SCHEMA_KEYWORDS = new Set([
 
 export function assertStrictJsonSchema(schema: unknown, root = '$'): void {
   visitSchema(schema, root);
+}
+
+export function stableSchemaHash(schema: unknown): string {
+  const canonical = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+    if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonical(record[key])}`).join(',')}}`;
+    }
+    return JSON.stringify(value);
+  };
+  const input = canonical(schema);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < input.length; index++) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `fnv1a32:${hash.toString(16).padStart(8, '0')}`;
 }
 
 function visitSchema(schema: unknown, path: string): void {

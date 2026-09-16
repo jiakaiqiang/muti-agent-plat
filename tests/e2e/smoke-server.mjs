@@ -299,7 +299,6 @@ export async function createSessionAndWaitForBrief(apiBase, input, extra = {}) {
     method: 'POST',
     body: JSON.stringify({
       input,
-      agentIds: ['coordinator', 'requirements', 'architect', 'backend', 'test', 'review', 'notification'],
       ...extra
     })
   });

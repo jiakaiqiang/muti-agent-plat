@@ -18,12 +18,14 @@ import { computePersistenceRevision } from './postgres-cutover-transaction.js';
 import { runPostgresMigrations } from './relational/postgres-migration-runner.js';
 import {
   RelationalStateStore,
+  SESSION_KEYED_COLLECTIONS,
   type McpObservationRecord,
   type ToolDefinitionRecord,
   type ToolInvocationAuditRecord
 } from './relational/relational-state-store.js';
 import { ContentReferenceCodec } from './content-reference-codec.js';
 import { LocalContentStore } from './local-content-store.js';
+import { applyStateDelta } from './state-delta.js';
 
 export type PersistedState = Record<string, unknown>;
 export type PersistenceBackend = 'file' | 'postgres';
@@ -55,6 +57,7 @@ export class PersistenceService implements OnModuleDestroy {
   private relationalStore?: RelationalStateStore;
   private pendingPostgresWrites = Promise.resolve();
   private pendingPostgresWriteError?: Error;
+  private readonly pendingCollectionDeltas = new Map<symbol, Array<{ key: string; base: unknown; value: unknown }>>();
   private state: PersistedState = {};
   private loadedFromLegacyPostgres = false;
   private maintenanceMode: boolean;
@@ -126,14 +129,44 @@ export class PersistenceService implements OnModuleDestroy {
       return Promise.resolve(true);
     }
     this.assertWritable();
+    const baseline = structuredClone(this.state[key]);
     this.state[key] = this.clone(value);
     if (this.backend === 'postgres') {
-      return this.writePostgresCollection(key, this.state[key]);
+      return this.writePostgresCollection(key, baseline, this.state[key]);
     } else {
       if (key === 'eventsBySession') this.mergeFileEventOutbox(this.state[key]);
       this.writeFileState();
       return Promise.resolve(true);
     }
+  }
+
+  appendEvent(event: CollaborationEvent): Promise<boolean> {
+    if (!this.enabled) return Promise.resolve(true);
+    this.assertWritable();
+    const eventsBySession = this.state.eventsBySession && typeof this.state.eventsBySession === 'object' &&
+      !Array.isArray(this.state.eventsBySession)
+      ? this.state.eventsBySession as Record<string, CollaborationEvent[]>
+      : {};
+    const events = Array.isArray(eventsBySession[event.sessionId]) ? eventsBySession[event.sessionId] : [];
+    if (!events.some((item) => item.id === event.id)) events.push(this.clone(event));
+    eventsBySession[event.sessionId] = events;
+    this.state.eventsBySession = eventsBySession;
+    this.appendLocalEventOutbox(event);
+
+    if (this.backend === 'file') {
+      this.writeFileState();
+      return Promise.resolve(true);
+    }
+    const token = Symbol();
+    this.pendingCollectionDeltas.set(token, [
+      { key: 'eventsBySession', base: {}, value: { [event.sessionId]: [this.clone(event)] } },
+      { key: 'eventOutbox', base: [], value: structuredClone((this.state.eventOutbox as Array<{ id: string }>).filter(item => item.id === `outbox:${event.id}`)) }
+    ]);
+    return this.enqueuePostgresWrite(`event-append:${event.id}`, async () => {
+      if (!this.relationalStore) throw new Error('RELATIONAL_PERSISTENCE_UNAVAILABLE: relational state store is not initialized.');
+      try { return await this.relationalStore.appendEvent(event); }
+      finally { this.pendingCollectionDeltas.delete(token); }
+    });
   }
 
   async compareAndSetCollection<T>(key: string, expected: T, value: T): Promise<CollectionCompareAndSetResult> {
@@ -183,13 +216,64 @@ export class PersistenceService implements OnModuleDestroy {
     return settled;
   }
 
+  /** Online transactions accept only synchronous, side-effect-free data mutations.
+   * A SQL serialization failure may run the callback again; never call a model here. */
+  async mutateCollections<T>(keys: string[], mutator: (draft: PersistedState) => T): Promise<T> {
+    this.assertWritable();
+    const run = async () => {
+      if (!this.enabled || this.backend === 'file') {
+        const draft = structuredClone(Object.fromEntries(keys.filter(key => this.state[key] !== undefined).map(key => [key, this.state[key]])));
+        const result = mutator(draft);
+        if (result && typeof (result as { then?: unknown }).then === 'function') throw new Error('ATOMIC_MUTATOR_MUST_BE_SYNCHRONOUS');
+        for (const key of Object.keys(draft)) if (!keys.includes(key)) throw new Error(`ATOMIC_MUTATION_OUTSIDE_SCOPE: ${key}`);
+        for (const key of keys) if (key in this.state && !(key in draft)) throw new Error(`ATOMIC_COLLECTION_DELETE_UNSUPPORTED: ${key}`);
+        const next = { ...this.state, ...draft };
+        if (this.enabled) this.writeFileState(next);
+        this.state = next;
+        return result;
+      }
+      if (!this.relationalStore) throw new Error('RELATIONAL_PERSISTENCE_UNAVAILABLE: relational state store is not initialized.');
+      const committed = await this.retryCollectionTransaction(keys, () => this.relationalStore!.mutateCollections(keys, mutator));
+      for (const key of keys) {
+        if (key in committed.state || key in this.state) {
+          this.state[key] = this.overlayPendingChanges(key, committed.state[key]);
+        }
+      }
+      return committed.result;
+    };
+    const operation = this.pendingPostgresWrites.then(run);
+    this.pendingPostgresWrites = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  private async retryCollectionTransaction<T>(keys: string[], operation: () => Promise<T>): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try { return await operation(); }
+      catch (error) {
+        const code = (error as { code?: string })?.code;
+        if (!['40001', '40P01'].includes(code ?? '') || attempt >= 3) throw error;
+        this.logger.warn(`Collection transaction retry: ${keys.join(',')}; code=${code}; attempt=${attempt}`);
+        await new Promise(resolve => setTimeout(resolve, attempt * 20));
+      }
+    }
+  }
+
+  private overlayPendingChanges(key: string, committed: unknown): unknown {
+    let value = structuredClone(committed);
+    for (const changes of this.pendingCollectionDeltas.values()) {
+      for (const change of changes) if (change.key === key) value = applyStateDelta(change.base, change.value, value);
+    }
+    return value;
+  }
+
   async mutateStateAtomically<T>(
     expectedRevision: string,
     mutator: (draft: PersistedState) => T,
     options?: { lockKey?: string }
   ): Promise<T> {
     this.assertWritable();
-    const draft = this.clone(this.state);
+    const baseline = this.clone(this.state);
+    const draft = this.clone(baseline);
     if (computePersistenceRevision(draft) !== expectedRevision) {
       throw new Error('PERSISTENCE_REVISION_CONFLICT: persisted state changed before atomic mutation.');
     }
@@ -220,11 +304,12 @@ export class PersistenceService implements OnModuleDestroy {
       await operation;
     } catch (cause) {
       if (String(cause).includes('PERSISTENCE_REVISION_CONFLICT')) {
-        this.state = await this.relationalStore.loadState();
+        const fresh = await this.relationalStore.loadState();
+        this.state = applyStateDelta(baseline, this.state, fresh) as PersistedState;
       }
       throw cause;
     }
-    this.state = this.clone(draft);
+    this.state = applyStateDelta(baseline, this.state, draft) as PersistedState;
     return result;
   }
 
@@ -322,6 +407,21 @@ export class PersistenceService implements OnModuleDestroy {
     });
   }
 
+  discardEventOutbox(eventExternalId: string, reason: string): Promise<boolean> {
+    if (!this.enabled) return Promise.resolve(true);
+    if (this.backend === 'file') {
+      if (this.markLocalEventDiscarded(eventExternalId, reason)) this.writeFileState();
+      return Promise.resolve(true);
+    }
+    return this.enqueuePostgresWrite(`event-discarded:${eventExternalId}`, () => {
+      if (!this.relationalStore) throw new Error('RELATIONAL_PERSISTENCE_UNAVAILABLE: relational state store is not initialized.');
+      return this.relationalStore.discardEventOutbox(eventExternalId, reason);
+    }).then((discarded) => {
+      if (discarded) this.markLocalEventDiscarded(eventExternalId, reason);
+      return discarded;
+    });
+  }
+
   async acquireWorkspaceSessionLease(workspaceId: string, sessionId: string): Promise<{ acquired: boolean; conflictSessionId?: string }> {
     if (!this.enabled) return { acquired: true };
     if (this.backend === 'postgres') {
@@ -376,6 +476,72 @@ export class PersistenceService implements OnModuleDestroy {
     }
     this.state[collection] = leases;
     this.writeFileState();
+  }
+
+  /**
+   * Physically removes one session and everything it owns.
+   *
+   * Deletion used to rely on the differential soft delete performed by a full
+   * collection rewrite, which left the session row and most of its child rows
+   * behind. This removes them for real.
+   */
+  async deleteSessionData(sessionId: string): Promise<boolean> {
+    if (!this.enabled) return true;
+    this.assertWritable();
+    this.forgetSessionInLocalState(sessionId);
+    if (this.backend === 'postgres') {
+      return this.enqueuePostgresWrite(`session-delete:${sessionId}`, () => {
+        if (!this.relationalStore) throw new Error('RELATIONAL_PERSISTENCE_UNAVAILABLE: relational state store is not initialized.');
+        return this.relationalStore.deleteSessionCascade(sessionId);
+      });
+    }
+    this.writeFileState();
+    return true;
+  }
+
+  /**
+   * Drops every trace of one session from the in-memory projection so a later
+   * full rewrite cannot resurrect it.
+   */
+  private forgetSessionInLocalState(sessionId: string) {
+    for (const collection of SESSION_KEYED_COLLECTIONS) {
+      const value = this.state[collection];
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      delete (value as Record<string, unknown>)[sessionId];
+    }
+
+    const sessions = this.state.sessions;
+    if (Array.isArray(sessions)) {
+      this.state.sessions = sessions.filter(
+        (item) => (item as { id?: unknown } | null)?.id !== sessionId
+      );
+    }
+
+    const artifacts = this.state.artifacts as {
+      artifactsById?: Record<string, { sessionId?: unknown }>;
+      artifactIdsBySession?: Record<string, unknown>;
+    } | undefined;
+    if (artifacts?.artifactsById) {
+      for (const [artifactId, artifact] of Object.entries(artifacts.artifactsById)) {
+        if (artifact?.sessionId === sessionId) delete artifacts.artifactsById[artifactId];
+      }
+    }
+    if (artifacts?.artifactIdsBySession) delete artifacts.artifactIdsBySession[sessionId];
+
+    // Leases are keyed by workspace, so the session id is the value here.
+    const leases = this.state.workspaceSessionLeases as Record<string, string> | undefined;
+    if (leases) {
+      for (const [workspaceId, holder] of Object.entries(leases)) {
+        if (holder === sessionId) delete leases[workspaceId];
+      }
+    }
+
+    const writebacks = this.state.workspaceWritebacks as Record<string, { sessionId?: unknown }> | undefined;
+    if (writebacks) {
+      for (const [key, record] of Object.entries(writebacks)) {
+        if (record?.sessionId === sessionId) delete writebacks[key];
+      }
+    }
   }
 
   backendName(): PersistenceBackend {
@@ -478,30 +644,31 @@ export class PersistenceService implements OnModuleDestroy {
 
   private mergeFileEventOutbox(value: unknown) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+    for (const events of Object.values(value as Record<string, CollaborationEvent[]>)) {
+      if (!Array.isArray(events)) continue;
+      for (const event of events) {
+        this.appendLocalEventOutbox(event);
+      }
+    }
+  }
+
+  private appendLocalEventOutbox(event: CollaborationEvent) {
     const current = Array.isArray(this.state.eventOutbox)
       ? this.state.eventOutbox as Array<Record<string, unknown>>
       : [];
-    const byId = new Map(current.map((item) => [String(item.id), item]));
-    for (const [sessionId, events] of Object.entries(value as Record<string, CollaborationEvent[]>)) {
-      if (!Array.isArray(events)) continue;
-      for (const event of events) {
-        const id = `outbox:${event.id}`;
-        if (byId.has(id)) continue;
-        const record: Record<string, unknown> = {
-          id,
-          idempotencyKey: `session:${sessionId}:event:${event.id}`,
-          aggregateType: 'session',
-          aggregateId: sessionId,
-          eventType: event.type,
-          payload: { event },
-          status: 'pending',
-          attempts: 0,
-          createdAt: event.createdAt
-        };
-        current.push(record);
-        byId.set(id, record);
-      }
-    }
+    const id = `outbox:${event.id}`;
+    if (current.some((item) => item.id === id)) return;
+    current.push({
+      id,
+      idempotencyKey: `session:${event.sessionId}:event:${event.id}`,
+      aggregateType: 'session',
+      aggregateId: event.sessionId,
+      eventType: event.type,
+      payload: { event: this.clone(event) },
+      status: 'pending',
+      attempts: 0,
+      createdAt: event.createdAt
+    });
     this.state.eventOutbox = current;
   }
 
@@ -515,6 +682,20 @@ export class PersistenceService implements OnModuleDestroy {
     record.status = 'published';
     record.publishedAt = new Date().toISOString();
     if (!wasClaimed) record.attempts = Number(record.attempts ?? 0) + 1;
+    delete record.leaseOwner;
+    delete record.leaseExpiresAt;
+    this.state.eventOutbox = outbox;
+    return true;
+  }
+
+  private markLocalEventDiscarded(eventExternalId: string, reason: string): boolean {
+    const outbox = Array.isArray(this.state.eventOutbox)
+      ? this.state.eventOutbox as Array<Record<string, unknown>>
+      : [];
+    const record = outbox.find((item) => item.id === `outbox:${eventExternalId}`);
+    if (!record || record.status === 'published' || record.status === 'discarded') return false;
+    record.status = 'discarded';
+    record.lastError = reason;
     delete record.leaseOwner;
     delete record.leaseExpiresAt;
     this.state.eventOutbox = outbox;
@@ -618,16 +799,24 @@ export class PersistenceService implements OnModuleDestroy {
     }
   }
 
-  private writePostgresCollection(key: string, value: unknown): Promise<boolean> {
+  private writePostgresCollection(key: string, baseline: unknown, value: unknown): Promise<boolean> {
     if (!this.pool) {
       const error = new Error('POSTGRES_PERSISTENCE_UNAVAILABLE: PostgreSQL persistence is not initialized.');
       this.pendingPostgresWriteError ??= error;
       return Promise.resolve(false);
     }
 
-    return this.enqueuePostgresWrite(key, () => {
+    const token = Symbol();
+    this.pendingCollectionDeltas.set(token, [{ key, base: baseline, value }]);
+    return this.enqueuePostgresWrite(key, async () => {
       if (!this.relationalStore) throw new Error('RELATIONAL_PERSISTENCE_UNAVAILABLE: relational state store is not initialized.');
-      return this.relationalStore.writeCollection(key, value);
+      try {
+        const committed = await this.retryCollectionTransaction([key], () => this.relationalStore!.mutateCollections([key], draft => {
+          draft[key] = applyStateDelta(baseline, value, draft[key]);
+        }));
+        this.pendingCollectionDeltas.delete(token);
+        this.state[key] = this.overlayPendingChanges(key, committed.state[key]);
+      } finally { this.pendingCollectionDeltas.delete(token); }
     });
   }
 

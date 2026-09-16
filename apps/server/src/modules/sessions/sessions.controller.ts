@@ -49,6 +49,12 @@ export class SessionsController {
     return ok(this.sessions.get(sessionId));
   }
 
+  @Get('sessions/:sessionId/stop-state')
+  @Header('Cache-Control', 'no-store')
+  stopState(@Param('sessionId') sessionId: string) {
+    return ok(this.sessions.stopState(sessionId));
+  }
+
   @Get('sessions/:sessionId/work-items')
   workItems(@Param('sessionId') sessionId: string) {
     return ok({ items: this.sessions.listWorkItems(sessionId), hasMore: false });
@@ -254,8 +260,12 @@ export class SessionsController {
   }
 
   @Post('sessions/:sessionId/briefs/:briefId/confirm')
-  confirmBrief(@Param('sessionId') sessionId: string, @Param('briefId') briefId: string) {
-    return this.sessions.confirmBrief(sessionId, briefId).then(ok);
+  confirmBrief(
+    @Param('sessionId') sessionId: string,
+    @Param('briefId') briefId: string,
+    @Body() body: { confirmationId?: string }
+  ) {
+    return this.sessions.confirmBrief(sessionId, briefId, body?.confirmationId).then(ok);
   }
 
   @Post('sessions/:sessionId/workflow/select')
@@ -286,6 +296,39 @@ export class SessionsController {
       throw new BadRequestException('confirmationId, taskId and agentId are required.');
     }
     return ok(await this.sessions.resolveWorkflowAgentSubstitution(sessionId, body));
+  }
+
+  @Post('sessions/:sessionId/workflow/agent-skip')
+  async resolveWorkflowAgentSkip(
+    @Param('sessionId') sessionId: string,
+    @Body() body: { confirmationId: string; taskId: string; reason?: string }
+  ) {
+    if (!body?.confirmationId || !body.taskId) {
+      throw new BadRequestException('confirmationId and taskId are required.');
+    }
+    return ok(await this.sessions.resolveWorkflowAgentSkip(sessionId, body));
+  }
+
+  @Post('sessions/:sessionId/workflow/upstream-rerun')
+  async resolveWorkflowUpstreamRerun(
+    @Param('sessionId') sessionId: string,
+    @Body() body: {
+      confirmationId: string;
+      nodeId?: string;
+      decision?: 'rerun_upstream' | 'retry_current';
+      instruction?: string;
+    }
+  ) {
+    if (!body?.confirmationId) {
+      throw new BadRequestException('confirmationId is required.');
+    }
+    if (body.decision && !['rerun_upstream', 'retry_current'].includes(body.decision)) {
+      throw new BadRequestException('decision must be rerun_upstream or retry_current.');
+    }
+    if (body.decision === 'rerun_upstream' && !body.nodeId) {
+      throw new BadRequestException('nodeId is required when rerunning an upstream node.');
+    }
+    return ok(await this.sessions.resolveWorkflowUpstreamRerun(sessionId, body));
   }
 
   @Post('sessions/:sessionId/workspace-writebacks/:writebackId/resolve')

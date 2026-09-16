@@ -14,6 +14,7 @@ import type {
   IntentRoutingStatus,
   SessionDetail,
   RuntimePreference,
+  RuntimeStopSummary,
   SessionListItem,
   SessionStatus,
   SessionViewMode,
@@ -35,6 +36,13 @@ type CreateSessionInput = {
 
 const favoriteStorageKey = 'agent-cluster.favorite-session-ids'
 export const BACKEND_HEALTH_REQUEST_TIMEOUT_MS = 5_000
+/**
+ * 一次用户操作往往连着调好几个 action（selectWorkflow → loadSession → reconcile），
+ * 每个 action 开头都 assertBackendCompatible()。逐个强制探活会把一次后端抖动
+ * 放大成整页失联，所以同一操作窗口内复用上一次探活结果。
+ * 只用于合并连锁调用，不用于长时间缓存：后端重启导致的版本错位仍会在下个窗口暴露。
+ */
+export const BACKEND_HEALTH_REUSE_WINDOW_MS = 2_000
 export const SESSION_DELETE_REQUEST_TIMEOUT_MS = 20_000
 
 function emptyFileRevisionState(): FileRevisionState {
@@ -93,11 +101,13 @@ export const useSessionStore = defineStore('session', {
     sessions: [] as SessionListItem[],
     currentSession: undefined as SessionDetail | undefined,
     currentViewMode: 'chat' as SessionViewMode,
+    sessionLoadGeneration: 0,
     loading: false,
     favoriteSessionIds: loadFavoriteSessionIds() as string[],
     deletingSessionIds: [] as string[],
     runtimeHealth: undefined as OpsHealth | undefined,
     runtimeHealthChecked: false,
+    runtimeHealthCheckedAt: 0,
     runtimeHealthError: undefined as string | undefined,
     fileRevisionStatesBySession: {} as Record<string, FileRevisionState>,
     fileRevisionCandidates: {} as Record<string, FileRevisionCandidate>,
@@ -108,7 +118,9 @@ export const useSessionStore = defineStore('session', {
     fileRevisionLoadingBySession: {} as Record<string, boolean>,
     workItemsBySession: {} as Record<string, WorkItem[]>,
     intentRoutingsById: {} as Record<string, IntentRoutingRecord>,
-    intentRoutingIdsBySession: {} as Record<string, string[]>
+    intentRoutingIdsBySession: {} as Record<string, string[]>,
+    stopStatesBySession: {} as Record<string, RuntimeStopSummary>,
+    stopStateErrorsBySession: {} as Record<string, string>
   }),
   getters: {
     isFavorite: (state) => (sessionId: string) => state.favoriteSessionIds.includes(sessionId),
@@ -154,10 +166,17 @@ export const useSessionStore = defineStore('session', {
         throw error
       } finally {
         this.runtimeHealthChecked = true
+        this.runtimeHealthCheckedAt = Date.now()
       }
     },
     async assertBackendCompatible() {
-      await this.loadRuntimeHealth(true)
+      // 同一操作窗口内已经探活成功过就复用，避免一次用户操作打好几次 /health。
+      // 上一次探活失败时不复用：那种情况必须立刻重试，否则错误状态会粘住。
+      const reusable =
+        this.runtimeHealth !== undefined &&
+        this.runtimeHealthError === undefined &&
+        Date.now() - this.runtimeHealthCheckedAt < BACKEND_HEALTH_REUSE_WINDOW_MS
+      if (!reusable) await this.loadRuntimeHealth(true)
       if (!this.backendCompatible) {
         this.sessions = []
         this.currentSession = undefined
@@ -169,7 +188,11 @@ export const useSessionStore = defineStore('session', {
       this.loading = true
       try {
         const page = await apiPage<SessionListItem>('/sessions')
-        this.sessions = sortSessionsByRecency(page.items)
+        const visible = new Map(this.sessions.map(item => [item.id, item]))
+        this.sessions = sortSessionsByRecency(page.items.map(item => {
+          const current = visible.get(item.id)
+          return current && Date.parse(current.updatedAt) > Date.parse(item.updatedAt) ? current : item
+        }))
       } finally {
         this.loading = false
       }
@@ -197,6 +220,7 @@ export const useSessionStore = defineStore('session', {
       return session
     },
     async loadSession(sessionId?: string) {
+      const generation = ++this.sessionLoadGeneration
       await this.assertBackendCompatible()
       this.loading = true
       const selectedSessionId = sessionId ?? this.sessions[0]?.id
@@ -206,10 +230,15 @@ export const useSessionStore = defineStore('session', {
         return
       }
       try {
-        this.currentSession = await apiGet<SessionDetail>(`/sessions/${selectedSessionId}`)
-        if (this.currentSession) await this.loadWorkItems(this.currentSession.id)
+        const session = await apiGet<SessionDetail>(`/sessions/${selectedSessionId}`)
+        if (generation !== this.sessionLoadGeneration) return
+        this.currentSession = session
+        if (this.currentSession) await Promise.all([
+          this.loadWorkItems(this.currentSession.id),
+          this.loadStopState(this.currentSession.id)
+        ])
       } finally {
-        this.loading = false
+        if (generation === this.sessionLoadGeneration) this.loading = false
       }
     },
     async sendMessage(sessionId: string, content: string, mentionedAgentIds: string[] = []) {
@@ -237,6 +266,39 @@ export const useSessionStore = defineStore('session', {
       const page = await apiPage<WorkItem>(`/sessions/${sessionId}/work-items`)
       this.workItemsBySession[sessionId] = page.items
       return page.items
+    },
+    async loadStopState(sessionId: string) {
+      try {
+        const summary = await apiGet<RuntimeStopSummary>(`/sessions/${sessionId}/stop-state`)
+        this.applyStopState(summary)
+        delete this.stopStateErrorsBySession[sessionId]
+        return summary
+      } catch (error) {
+        this.stopStateErrorsBySession[sessionId] = error instanceof Error ? error.message : '停止状态查询失败'
+        const current = this.stopStatesBySession[sessionId]
+        const unknown: RuntimeStopSummary = {
+          sessionId,
+          stopRequestId: current?.stopRequestId,
+          version: current?.version ?? 0,
+          status: 'unknown',
+          requestedCount: current?.requestedCount ?? 0,
+          confirmedCount: current?.confirmedCount ?? 0,
+          targets: current?.targets ?? [],
+          blockers: [{ reason: 'state_query_failed', message: '停止状态查询失败，暂不能确认是否可继续。' }],
+          canResume: false,
+          updatedAt: current?.updatedAt
+        }
+        this.stopStatesBySession[sessionId] = unknown
+        return unknown
+      }
+    },
+    applyStopState(summary: RuntimeStopSummary) {
+      const current = this.stopStatesBySession[summary.sessionId]
+      if (current?.stopRequestId === summary.stopRequestId && current.version > summary.version) return false
+      if (current?.stopRequestId && summary.stopRequestId && current.stopRequestId !== summary.stopRequestId &&
+          current.updatedAt && summary.updatedAt && Date.parse(current.updatedAt) > Date.parse(summary.updatedAt)) return false
+      this.stopStatesBySession[summary.sessionId] = summary
+      return true
     },
     recordIntentRouting(sessionId: string, routing: IntentRoutingRecord) {
       this.intentRoutingsById[routing.id] = routing
@@ -297,8 +359,11 @@ export const useSessionStore = defineStore('session', {
     async refreshCurrentSession(sessionId: string) {
       await this.assertBackendCompatible()
       if (this.currentSession?.id !== sessionId) return undefined
+      const generation = this.sessionLoadGeneration
+      const snapshot = this.currentSession
       const refreshed = await apiGet<SessionDetail>(`/sessions/${sessionId}`)
-      if (this.currentSession?.id === sessionId) {
+      if (this.currentSession?.id === sessionId && generation === this.sessionLoadGeneration &&
+          (this.currentSession === snapshot || Date.parse(refreshed.updatedAt) >= Date.parse(this.currentSession.updatedAt))) {
         this.currentSession = refreshed
       }
       return refreshed
@@ -517,12 +582,13 @@ export const useSessionStore = defineStore('session', {
         : [...this.favoriteSessionIds, sessionId]
       persistFavoriteSessionIds(this.favoriteSessionIds)
     },
-    async confirmBrief(sessionId: string, briefId: string) {
+    async confirmBrief(sessionId: string, briefId: string, confirmationId: string) {
       await this.assertBackendCompatible()
       // Execution now runs in the background; confirm returns "accepted" and the
       // UI follows execution over SSE rather than waiting for the full result.
       const result = await apiPost<{ accepted: boolean; status: SessionStatus }>(
-        `/sessions/${sessionId}/briefs/${briefId}/confirm`
+        `/sessions/${sessionId}/briefs/${briefId}/confirm`,
+        { confirmationId }
       )
       await this.loadSession(sessionId)
       return result
@@ -546,7 +612,7 @@ export const useSessionStore = defineStore('session', {
         `/sessions/${sessionId}/pause`,
         confirmationId ? { confirmationId } : undefined
       )
-      await this.loadSession(sessionId)
+      if (this.currentSession?.id === sessionId) await this.loadSession(sessionId)
       return result
     },
     async resumeSession(sessionId: string, confirmationId?: string) {
@@ -555,7 +621,7 @@ export const useSessionStore = defineStore('session', {
         `/sessions/${sessionId}/resume`,
         confirmationId ? { confirmationId } : undefined
       )
-      await this.loadSession(sessionId)
+      if (this.currentSession?.id === sessionId) await this.loadSession(sessionId)
       return result
     },
     async cancelSession(sessionId: string, confirmationId?: string) {
@@ -618,6 +684,35 @@ export const useSessionStore = defineStore('session', {
       await this.assertBackendCompatible()
       const result = await apiPost<{ session: SessionDetail }>(
         `/sessions/${sessionId}/workflow/agent-substitution`,
+        input
+      )
+      await this.loadSession(sessionId)
+      return result
+    },
+    async resolveWorkflowAgentSkip(
+      sessionId: string,
+      input: { confirmationId: string; taskId: string; reason?: string }
+    ) {
+      await this.assertBackendCompatible()
+      const result = await apiPost<{ session: SessionDetail }>(
+        `/sessions/${sessionId}/workflow/agent-skip`,
+        input
+      )
+      await this.loadSession(sessionId)
+      return result
+    },
+    async resolveWorkflowUpstreamRerun(
+      sessionId: string,
+      input: {
+        confirmationId: string
+        nodeId?: string
+        decision?: 'rerun_upstream' | 'retry_current'
+        instruction?: string
+      }
+    ) {
+      await this.assertBackendCompatible()
+      const result = await apiPost<{ session: SessionDetail }>(
+        `/sessions/${sessionId}/workflow/upstream-rerun`,
         input
       )
       await this.loadSession(sessionId)
@@ -713,8 +808,7 @@ export const useSessionStore = defineStore('session', {
     switchViewMode(mode: SessionViewMode) {
       this.currentViewMode = mode
     },
-    setCurrentStatus(sessionId: string, status: SessionStatus) {
-      const updatedAt = new Date().toISOString()
+    setCurrentStatus(sessionId: string, status: SessionStatus, updatedAt = new Date().toISOString()) {
       if (this.currentSession?.id === sessionId) {
         this.currentSession = { ...this.currentSession, status, updatedAt }
       }

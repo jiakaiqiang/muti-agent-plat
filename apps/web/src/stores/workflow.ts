@@ -13,6 +13,7 @@ type WorkflowInput = {
 export const useWorkflowStore = defineStore('workflow', {
   state: () => ({
     workflows: [] as WorkflowDefinition[],
+    authorToken: '',
     versionsByWorkflowId: {} as Record<string, WorkflowVersion[]>,
     selectedWorkflowId: '' as string,
     loading: false,
@@ -60,7 +61,7 @@ export const useWorkflowStore = defineStore('workflow', {
     async createWorkflow(input: WorkflowInput) {
       this.saving = true
       try {
-        const workflow = await apiPost<WorkflowDefinition>('/workflows', input)
+        const workflow = await apiPost<WorkflowDefinition>('/workflows', input, { headers: { 'x-workflow-author-token': this.authorToken } })
         this.workflows = [workflow, ...this.workflows]
         this.selectedWorkflowId = workflow.id
         return workflow
@@ -71,7 +72,7 @@ export const useWorkflowStore = defineStore('workflow', {
     async updateWorkflow(workflowId: string, input: WorkflowInput) {
       this.saving = true
       try {
-        const workflow = await apiPatch<WorkflowDefinition>(`/workflows/${workflowId}/draft`, input)
+        const workflow = await apiPatch<WorkflowDefinition>(`/workflows/${workflowId}/draft`, input, { headers: { 'x-workflow-author-token': this.authorToken } })
         this.replaceWorkflow(workflow)
         return workflow
       } finally {
@@ -81,7 +82,7 @@ export const useWorkflowStore = defineStore('workflow', {
     async publishWorkflow(workflowId: string, expectedDraftRevision: number) {
       this.saving = true
       try {
-        const workflow = await apiPost<WorkflowDefinition>(`/workflows/${workflowId}/publish`, { expectedDraftRevision })
+        const workflow = await apiPost<WorkflowDefinition>(`/workflows/${workflowId}/publish`, { expectedDraftRevision }, { headers: { 'x-workflow-author-token': this.authorToken } })
         this.replaceWorkflow(workflow)
         await this.loadVersions(workflowId)
         return workflow
@@ -90,12 +91,12 @@ export const useWorkflowStore = defineStore('workflow', {
       }
     },
     async archiveWorkflow(workflowId: string) {
-      const workflow = await apiPost<WorkflowDefinition>(`/workflows/${workflowId}/archive`, {})
+      const workflow = await apiPost<WorkflowDefinition>(`/workflows/${workflowId}/archive`, {}, { headers: { 'x-workflow-author-token': this.authorToken } })
       this.replaceWorkflow(workflow)
       return workflow
     },
     async deleteWorkflow(workflowId: string) {
-      await apiDelete(`/workflows/${workflowId}`)
+      await apiDelete(`/workflows/${workflowId}`, { headers: { 'x-workflow-author-token': this.authorToken } })
       this.workflows = this.workflows.filter((workflow) => workflow.id !== workflowId)
       if (this.selectedWorkflowId === workflowId) this.selectedWorkflowId = this.workflows[0]?.id ?? ''
     },

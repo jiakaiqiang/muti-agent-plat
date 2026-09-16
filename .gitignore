@@ -41,6 +41,7 @@ dump.sql
 *.dump
 *.backup.sql
 agent_cluster_backup.sql
+db-export/
 
 # AgentRoom runtime state (sessions/worktrees/probes) — never commit
 .agentroom/

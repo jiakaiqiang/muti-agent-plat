@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import {
   DEFAULT_LOCAL_RUNTIME_PERMISSION_POLICY,
@@ -10,12 +13,132 @@ import {
 import { firstValueFrom } from 'rxjs';
 import { WebSocket } from 'ws';
 import { makeInvocationPlan } from '../runtimes/invocation-plan.fixture.js';
+import { SessionStopStateStore } from '../runtimes/session-stop-state-store.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { BrokerGateway } from '../workspaces/runtime-broker/broker-gateway.js';
 import { HeartbeatTracker } from '../workspaces/runtime-broker/heartbeat-tracker.js';
 import { PendingRequestRegistry } from '../workspaces/runtime-broker/pending-request-registry.js';
 import { LocalRuntimeAuthService } from './local-runtime-auth.service.js';
 import { LocalRuntimeConnectionService } from './local-runtime-connection.service.js';
+
+test('normal completion receipts stay silent; concurrent stop receipts notify only once', async () => {
+  const persistence = new PersistenceService({ enabled: false });
+  const connections = new LocalRuntimeConnectionService(
+    new LocalRuntimeAuthService(persistence), new BrokerGateway(() => 'epoch-test'),
+    new PendingRequestRegistry(), new HeartbeatTracker(30_000), persistence
+  );
+  const internals = connections as any;
+  const operations = internals.operationStops;
+  const transport = { deviceId: 'device', workspaceId: 'workspace', runtimeType: 'codex' };
+  const notices: unknown[] = [];
+  const receiptLogs: Array<Record<string, unknown>> = [];
+  internals.logger = {
+    log: (message: string) => receiptLogs.push(JSON.parse(message)),
+    warn: () => undefined
+  };
+  const subscription = connections.stopConfirmations().subscribe(notice => notices.push(notice));
+  try {
+    await operations.begin({ id: 'operation', sessionId: 'session', phase: 'task_execution' });
+    await operations.reserve('session', 'operation', 'normal', { transport });
+    await internals.confirmStopReceipt('device', { invocationId: 'normal', ...transport });
+    assert.equal(notices.length, 0);
+    await operations.reserve('session', 'operation', 'stopped', { transport });
+    await operations.settle('session', 'operation', 'stopped', 'unconfirmed', true);
+    await internals.confirmStopReceipt('foreign', { invocationId: 'stopped', ...transport });
+    assert.equal(operations.hasUnknownStop('session'), true);
+    await Promise.all(Array.from({ length: 100 }, () =>
+      internals.confirmStopReceipt('device', { invocationId: 'stopped', ...transport })));
+    assert.deepEqual(notices, [{ sessionId: 'session', invocationId: 'stopped' }]);
+    assert.equal(operations.hasUnknownStop('session'), false);
+    await internals.confirmStopReceipt('device', { invocationId: 'stopped', ...transport });
+    assert.equal(notices.length, 1);
+    assert.equal(receiptLogs.some(log => log.event === 'local_runtime_stop_receipt_ignored' && log.matched === false), true);
+    assert.equal(receiptLogs.some(log => log.event === 'local_runtime_stop_receipt_replayed' &&
+      log.operationId === 'operation' && log.invocationId === 'stopped'), true);
+  } finally { subscription.unsubscribe(); }
+});
+
+test('a receipt replay after simulated ACK loss does not duplicate stop state, event, outbox, or notice', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'runtime-stop-ack-replay-'));
+  const persistence = new PersistenceService({
+    enabled: true,
+    backend: 'file',
+    filePath: join(directory, 'state.json')
+  });
+  await persistence.initialize();
+  const connections = new LocalRuntimeConnectionService(
+    new LocalRuntimeAuthService(persistence), new BrokerGateway(() => 'epoch-test'),
+    new PendingRequestRegistry(), new HeartbeatTracker(30_000), persistence
+  );
+  const internals = connections as any;
+  const operations = internals.operationStops;
+  const stops = new SessionStopStateStore(persistence);
+  const transport = { deviceId: 'device', workspaceId: 'workspace', runtimeType: 'codex' as const };
+  const notices: unknown[] = [];
+  const subscription = connections.stopConfirmations().subscribe(notice => notices.push(notice));
+  try {
+    await operations.begin({ id: 'operation', sessionId: 'session', phase: 'task_execution' });
+    await operations.reserve('session', 'operation', 'stopped', { transport });
+    const request = await stops.request('session', 'user_paused');
+    await operations.settle('session', 'operation', 'stopped', 'unconfirmed', true);
+
+    assert.equal(await internals.confirmStopReceipt('device', { invocationId: 'stopped', ...transport }), true);
+    const committed = stops.summary('session');
+    const committedEvents = persistence.getCollection<Record<string, Array<{ id: string; metadata: { idempotencyKey?: string } }>>>(
+      'eventsBySession', {}
+    ).session;
+    const committedOutbox = persistence.getCollection<Array<{ id: string }>>('eventOutbox', []);
+    assert.equal(committed.status, 'confirmed');
+    assert.equal(committed.version, 3);
+    assert.equal(committedEvents.at(-1)?.metadata.idempotencyKey, `runtime-stop:${request.id}:3`);
+    assert.equal(notices.length, 1);
+
+    assert.equal(await internals.confirmStopReceipt('device', { invocationId: 'stopped', ...transport }), true);
+    assert.equal(stops.summary('session').version, committed.version);
+    assert.deepEqual(
+      persistence.getCollection<Record<string, Array<{ id: string }>>>('eventsBySession', {}).session.map(event => event.id),
+      committedEvents.map(event => event.id)
+    );
+    assert.deepEqual(
+      persistence.getCollection<Array<{ id: string }>>('eventOutbox', []).map(record => record.id),
+      committedOutbox.map(record => record.id)
+    );
+    assert.equal(notices.length, 1);
+  } finally {
+    subscription.unsubscribe();
+    await persistence.onModuleDestroy();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a stop receipt persistence failure is never acknowledged', async () => {
+  const persistence = new PersistenceService({ enabled: false });
+  const connections = new LocalRuntimeConnectionService(
+    new LocalRuntimeAuthService(persistence), new BrokerGateway(() => 'epoch-test'),
+    new PendingRequestRegistry(), new HeartbeatTracker(30_000), persistence
+  );
+  const internals = connections as any;
+  const sent: LocalRuntimeServerMessage[] = [];
+  const warnings: Array<Record<string, unknown>> = [];
+  internals.operationStops.confirmTransportReceipt = async () => {
+    throw new Error('isolated receipt commit failure');
+  };
+  internals.send = (_client: unknown, message: LocalRuntimeServerMessage) => sent.push(message);
+  internals.logger = {
+    log: () => undefined,
+    warn: (message: string) => warnings.push(JSON.parse(message))
+  };
+
+  internals.handleMessage({ clientId: 'connection-test', deviceId: 'device', hello: {} }, {
+    kind: 'local_runtime.invocation.stopped',
+    payload: { invocationId: 'stopped', deviceId: 'device', workspaceId: 'workspace', runtimeType: 'codex' }
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(sent.some(message => message.kind === 'local_runtime.invocation.stop_ack'), false);
+  assert.equal(warnings.some(log => log.event === 'local_runtime_stop_receipt_persistence_failed' &&
+    log.reason === 'STOP_RECEIPT_PERSISTENCE_FAILED' && log.connectionId === 'connection-test'), true);
+});
 
 test('authenticated Local Runtime carries an invocation and disconnects without a server fallback', async () => {
   const persistence = new PersistenceService({ enabled: false });
@@ -320,6 +443,60 @@ test('authenticated Local Runtime carries an invocation and disconnects without 
     assert.equal((await handle.result).status, 'completed');
     assert.equal(connections.getWorkspace('workspace-local-runtime')?.revision.id, 'revision-local-4');
 
+    const stoppedFirstPlan = {
+      ...plan,
+      invocationId: 'invocation-stopped-before-result',
+      sessionId: 'session-stopped-before-result'
+    };
+    const stoppedFirstHandle = connections.startInvocation(stoppedFirstPlan);
+    await inbox.next('local_runtime.invocation.start');
+    socket.send(JSON.stringify({
+      kind: 'local_runtime.invocation.stopped',
+      payload: {
+        invocationId: stoppedFirstPlan.invocationId,
+        workspaceId: 'workspace-local-runtime',
+        runtimeType: 'codex'
+      }
+    }));
+    assert.equal((await inbox.next('local_runtime.invocation.stop_ack')).payload.invocationId, stoppedFirstPlan.invocationId);
+    const stoppedFirstResult = await stoppedFirstHandle.result;
+    assert.equal(stoppedFirstResult.status, 'cancelled');
+    assert.equal(stoppedFirstResult.termination?.diagnosticRef, 'local_runtime_stopped_without_result');
+
+    socket.send(JSON.stringify({
+      kind: 'local_runtime.invocation.result',
+      payload: {
+        workspaceId: 'workspace-local-runtime',
+        workspaceRevision: { id: 'revision-late-result-ignored', observedAt: '2026-07-24T00:03:30.000Z' },
+        result: {
+          invocationId: stoppedFirstPlan.invocationId,
+          runtimeType: 'codex',
+          status: 'completed',
+          output: {
+            schemaVersion: '1.0',
+            kind: 'agent_message',
+            messageKind: 'answer',
+            content: 'this late business result must be ignored',
+            targetAgentIds: [],
+            targetAgentKeys: [],
+            mentionedAgentIds: [],
+            relatedTaskIds: []
+          },
+          events: [],
+          artifacts: [],
+          systemEvidence: {
+            workspaceChangeSet: null,
+            verifiedTestResults: [],
+            capturedAt: '2026-07-24T00:03:30.000Z',
+            invocationId: stoppedFirstPlan.invocationId
+          },
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: 'codex' }
+        }
+      }
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(connections.getWorkspace('workspace-local-runtime')?.revision.id, 'revision-local-4');
+
     const indexResult = pending.waitFor('workspace-operation-index', 'workspace-local-runtime');
     gateway.dispatch({
       requestId: 'workspace-operation-index',
@@ -381,6 +558,153 @@ test('authenticated Local Runtime carries an invocation and disconnects without 
     assert.equal(interrupted.invocationId, 'invocation-local-runtime-disconnect');
     assert.equal(connections.listRuntimeCandidates('workspace-local-runtime').length, 0);
   } finally {
+    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.terminate();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('a silent Local Runtime invocation is terminated by the idle deadline', async () => {
+  const persistence = new PersistenceService({ enabled: false });
+  const auth = new LocalRuntimeAuthService(persistence);
+  const gateway = new BrokerGateway(() => 'epoch-test');
+  const connections = new LocalRuntimeConnectionService(
+    auth,
+    gateway,
+    new PendingRequestRegistry(),
+    new HeartbeatTracker(30_000),
+    persistence
+  );
+  const code = auth.createDeviceCode({
+    deviceId: 'device-idle',
+    displayName: 'developer-pc',
+    cliVersion: '0.1.0',
+    protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+    runtimes: { codex: 'codex-cli 1.0.0' }
+  }, 'http://localhost');
+  auth.approveDeviceCode(code.userCode);
+  const tokens = auth.exchangeDeviceCode(code.deviceCode);
+  assert.ok('accessToken' in tokens);
+  if (!('accessToken' in tokens)) return;
+
+  const server = createServer();
+  connections.attach(server);
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const socket = new WebSocket(`ws://127.0.0.1:${address.port}/local-runtime`, {
+    headers: { Authorization: `Bearer ${tokens.accessToken}` }
+  });
+  const inbox = new LocalRuntimeMessageInbox(socket);
+  const previousIdleTimeout = process.env.LOCAL_RUNTIME_IDLE_TIMEOUT_MS;
+  const previousStopTimeout = process.env.LOCAL_RUNTIME_STOP_ACK_TIMEOUT_MS;
+  process.env.LOCAL_RUNTIME_IDLE_TIMEOUT_MS = '60';
+
+  try {
+    await once(socket, 'open');
+    socket.send(JSON.stringify({
+      kind: 'local_runtime.hello',
+      payload: {
+        deviceId: 'device-idle',
+        cliVersion: '0.1.0',
+        protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+        runtimes: { codex: 'codex-cli 1.0.0' }
+      }
+    }));
+    await inbox.next('local_runtime.connected');
+    socket.send(JSON.stringify({
+      kind: 'local_runtime.workspace.register',
+      payload: {
+        workspaceId: 'workspace-idle',
+        displayName: 'local-project',
+        capabilities: { read: true, write: true, command: true, test: true },
+        revision: { id: 'revision-idle-1', observedAt: '2026-08-27T00:00:00.000Z' },
+        permissions: DEFAULT_LOCAL_RUNTIME_PERMISSION_POLICY,
+        registeredAt: '2026-08-27T00:00:00.000Z'
+      }
+    }));
+    await inbox.next('local_runtime.workspace.registered');
+
+    const plan = makeInvocationPlan({
+      invocationId: 'invocation-idle',
+      sessionId: 'session-idle',
+      phase: 'discussion',
+      executionTarget: {
+        runtimeType: 'codex',
+        workspaceProviderKind: 'local_bridge',
+        executionLocation: 'local'
+      },
+      contextEnvelope: {
+        workspaceId: 'workspace-idle',
+        L0: {
+          workspace: {
+            workspaceId: 'workspace-idle',
+            rootName: 'local-project',
+            providerKind: 'local_bridge',
+            revision: { id: 'revision-idle-1', observedAt: '2026-08-27T00:00:00.000Z' }
+          }
+        }
+      }
+    });
+    // The CLI stays connected and simply never answers, which is the shape that used to
+    // leave the invocation promise unsettled forever.
+    const handle = connections.startInvocation(plan);
+    await inbox.next('local_runtime.invocation.start');
+
+    const stop = await inbox.next('local_runtime.invocation.cancel');
+    assert.equal(stop.payload.invocationId, plan.invocationId);
+    let settled = false;
+    void handle.result.then(() => { settled = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(settled, false, 'sending cancel must not count as a stopped process');
+    socket.send(JSON.stringify({ kind: 'local_runtime.invocation.result', payload: {
+      workspaceId: 'workspace-idle', workspaceRevision: { id: 'revision-idle-1', observedAt: new Date().toISOString() },
+      result: { invocationId: plan.invocationId, runtimeType: 'codex', status: 'cancelled',
+        output: {}, events: [], artifacts: [], usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } }
+    } }));
+    const result = await handle.result;
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error?.code, 'RUNTIME_TIMEOUT');
+    assert.equal(result.error?.retryable, true);
+    assert.equal(result.termination?.kind, 'runtime_timeout');
+    assert.equal(result.termination?.timeout?.mode, 'idle');
+    assert.equal(result.termination?.timeout?.timeoutMs, 60);
+    assert.equal((await handle.events[Symbol.asyncIterator]().next()).done, true);
+    process.env.LOCAL_RUNTIME_STOP_ACK_TIMEOUT_MS = '25';
+    const unconfirmedPlan = { ...plan, invocationId: 'invocation-unconfirmed' };
+    const unconfirmedHandle = connections.startInvocation(unconfirmedPlan);
+    await inbox.next('local_runtime.invocation.start');
+    await unconfirmedHandle.cancel();
+    await inbox.next('local_runtime.invocation.cancel');
+    const unconfirmedResult = await unconfirmedHandle.result;
+    assert.equal(unconfirmedResult.error?.details?.stopUnconfirmed, true);
+    assert.equal(connections.hasUnconfirmedStops(plan.sessionId), true);
+    assert.equal(connections.hasUnconfirmedStops('another-session'), false);
+    const confirmedReceipt = firstValueFrom(connections.stopConfirmations());
+    socket.send(JSON.stringify({ kind: 'local_runtime.invocation.stopped', payload: {
+      invocationId: unconfirmedPlan.invocationId, workspaceId: 'foreign-workspace', runtimeType: 'codex'
+    } }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(inbox.count('local_runtime.invocation.stop_ack'), 0, 'a foreign receipt must not be acknowledged');
+    assert.equal(connections.hasUnconfirmedStops(plan.sessionId), true, 'a foreign workspace cannot release the barrier');
+    socket.send(JSON.stringify({ kind: 'local_runtime.invocation.stopped', payload: {
+      invocationId: unconfirmedPlan.invocationId, workspaceId: 'workspace-idle', runtimeType: 'codex'
+    } }));
+    await inbox.next('local_runtime.invocation.stop_ack');
+    assert.equal((await confirmedReceipt).sessionId, plan.sessionId);
+    assert.equal(connections.hasUnconfirmedStops(plan.sessionId), false);
+    socket.send(JSON.stringify({ kind: 'local_runtime.invocation.result', payload: {
+      workspaceId: 'workspace-idle', workspaceRevision: { id: 'late-revision', observedAt: new Date().toISOString() },
+      result: { invocationId: unconfirmedPlan.invocationId, runtimeType: 'codex', status: 'completed', output: {} }
+    } }));
+    await new Promise(resolve => setTimeout(resolve, 15));
+    assert.equal(connections.hasUnconfirmedStops(plan.sessionId), false);
+    assert.equal(connections.getWorkspace('workspace-idle')?.revision.id, 'revision-idle-1', 'late business result must not be applied');
+  } finally {
+    if (previousStopTimeout === undefined) delete process.env.LOCAL_RUNTIME_STOP_ACK_TIMEOUT_MS;
+    else process.env.LOCAL_RUNTIME_STOP_ACK_TIMEOUT_MS = previousStopTimeout;
+    if (previousIdleTimeout === undefined) delete process.env.LOCAL_RUNTIME_IDLE_TIMEOUT_MS;
+    else process.env.LOCAL_RUNTIME_IDLE_TIMEOUT_MS = previousIdleTimeout;
     if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.terminate();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
@@ -504,5 +828,9 @@ class LocalRuntimeMessageInbox {
     return new Promise<Message>((resolve) => {
       this.waiters.push({ kind, resolve: (message) => resolve(message as Message) });
     });
+  }
+
+  count(kind: LocalRuntimeServerMessage['kind']) {
+    return this.messages.filter((message) => message.kind === kind).length;
   }
 }

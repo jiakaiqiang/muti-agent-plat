@@ -9,8 +9,246 @@ import { LocalContentStore } from '../local-content-store.js';
 import { PersistenceService } from '../persistence.service.js';
 import { runPostgresMigrations } from './postgres-migration-runner.js';
 import { RelationalStateStore } from './relational-state-store.js';
+import { LogicalOperationStore } from '../../runtimes/logical-operation-store.js';
+import { SessionStopStateStore } from '../../runtimes/session-stop-state-store.js';
 
 const databaseUrl = process.env.RELATIONAL_TEST_DATABASE_URL;
+
+test('online PostgreSQL mutations preserve concurrent sessions and are independent of event/outbox revisions', { skip: !databaseUrl }, async () => {
+  const first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const second = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const restored = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const sessionId = `scoped-${process.pid}-${Date.now()}`;
+  const now = new Date().toISOString();
+  try {
+    await first.initialize();
+    const session = { id: sessionId, title: 'initial', status: 'FAILED', ownerId: 'test', createdAt: now, updatedAt: now };
+    await first.setCollection('sessions', [...first.getCollection<unknown[]>('sessions', []), session]);
+    await second.initialize();
+    const staleSessions = second.getCollection<any[]>('sessions', []);
+    await first.mutateCollections(['sessions'], draft => {
+      const sessions = draft.sessions as any[];
+      sessions.find(item => item.id === sessionId).status = 'AGENT_DISCUSSING';
+      sessions.push({ ...session, id: `${sessionId}-concurrent`, title: 'concurrent addition' });
+    });
+    staleSessions.find(item => item.id === sessionId).title = 'local title edit';
+    assert.equal(await second.setCollection('sessions', staleSessions), true);
+    const operations = new LogicalOperationStore(first);
+    const event = { id: `${sessionId}-event`, sessionId, type: 'user_message' as const, toAgentIds: [],
+      content: 'concurrent event', metadata: { schemaVersion: '0.1' as const, payload: {} }, createdAt: now };
+    // first's full state revision is now stale, including missing outbox fields.
+    await second.appendEvent(event);
+    const claimed = await second.claimPendingEventOutbox('test-worker', 100);
+    assert.ok(claimed.some(item => item.id === `outbox:${event.id}`));
+    await Promise.all([
+      second.markEventPublished(event.id),
+      operations.begin({ id: `${sessionId}-operation`, sessionId, phase: 'brief_generation' })
+    ]);
+    await operations.reserve(sessionId, `${sessionId}-operation`, `${sessionId}-invocation`);
+    await assert.rejects(first.mutateStateAtomically(first.stateRevision(), draft => {
+      (draft.sessions as any[]).find(item => item.id === sessionId).title = 'stale maintenance overwrite';
+    }), /PERSISTENCE_REVISION_CONFLICT/);
+    await first.mutateCollections(['sessions', 'eventsBySession', 'eventOutbox'], draft => {
+      (draft.sessions as any[]).find(item => item.id === sessionId).tokenUsed = 42;
+    });
+    await assert.rejects(first.mutateCollections(['sessions'], draft => {
+      (draft.sessions as any[]).find(item => item.id === sessionId).title = 'rolled back';
+      throw new Error('rollback fixture');
+    }), /rollback fixture/);
+    await assert.rejects(first.mutateCollections(['sessions'], async () => {}), /MUST_BE_SYNCHRONOUS/);
+    await assert.rejects(first.mutateCollections(['sessions'], draft => { draft.eventOutbox = []; }), /OUTSIDE_SCOPE/);
+    await restored.initialize();
+    const saved = restored.getCollection<any[]>('sessions', []);
+    assert.equal(saved.find(item => item.id === sessionId).title, 'local title edit');
+    assert.equal(saved.find(item => item.id === sessionId).status, 'AGENT_DISCUSSING');
+    assert.equal(saved.find(item => item.id === sessionId).tokenUsed, 42);
+    assert.ok(saved.some(item => item.id === `${sessionId}-concurrent`));
+    assert.equal(restored.getCollection<any[]>('eventOutbox', []).find(item => item.id === `outbox:${event.id}`).status, 'published');
+    assert.equal(new LogicalOperationStore(restored).list(sessionId)[0].attemptsUsed, 1);
+  } finally { await Promise.all([first, second, restored].map(service => service.onModuleDestroy())); }
+});
+
+test('PostgreSQL commit blocked by a collection lock preserves new local messages and status edits', { skip: !databaseUrl }, async () => {
+  const service = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const restored = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const pool = new Pool({ connectionString: databaseUrl });
+  const blocker = await pool.connect();
+  const sessionId = `delayed-${process.pid}-${Date.now()}`;
+  const now = new Date().toISOString();
+  try {
+    await service.initialize();
+    await service.setCollection('sessions', [...service.getCollection<any[]>('sessions', []), {
+      id: sessionId, title: 'before', status: 'FAILED', ownerId: 'test', createdAt: now, updatedAt: now
+    }]);
+    await blocker.query('begin');
+    await blocker.query('select pg_advisory_xact_lock(hashtext($1))', ['agent_cluster:collection:eventOutbox']);
+    const store = (service as any).relationalStore;
+    const original = store.mutateCollections.bind(store);
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    store.mutateCollections = (...args: unknown[]) => { entered(); return original(...args); };
+    const transaction = service.mutateCollections(['sessions', 'eventsBySession', 'eventOutbox'], draft => {
+      (draft.sessions as any[]).find(item => item.id === sessionId).status = 'AGENT_DISCUSSING';
+    });
+    await started;
+    const local = service.getCollection<any[]>('sessions', []);
+    local.find(item => item.id === sessionId).title = 'typed while committing';
+    const write = service.setCollection('sessions', local);
+    const event = { id: `${sessionId}-event`, sessionId, type: 'user_message' as const, toAgentIds: [],
+      content: 'message during commit', metadata: { schemaVersion: '0.1' as const, payload: {} }, createdAt: now };
+    const append = service.appendEvent(event);
+    await blocker.query('commit');
+    await Promise.all([transaction, write, append]);
+    await service.flush();
+    assert.equal(service.getCollection<any[]>('sessions', []).find(item => item.id === sessionId).status, 'AGENT_DISCUSSING');
+    assert.equal(service.getCollection<any[]>('sessions', []).find(item => item.id === sessionId).title, 'typed while committing');
+    assert.ok(service.getCollection<Record<string, any[]>>('eventsBySession', {})[sessionId].some(item => item.id === event.id));
+    await restored.initialize();
+    assert.deepEqual(restored.getCollection<Record<string, any[]>>('eventsBySession', {})[sessionId], [event]);
+    assert.equal(restored.getCollection<any[]>('sessions', []).find(item => item.id === sessionId).status, 'AGENT_DISCUSSING');
+    assert.equal(restored.getCollection<any[]>('sessions', []).find(item => item.id === sessionId).title, 'typed while committing');
+  } finally {
+    await blocker.query('rollback').catch(() => undefined);
+    blocker.release();
+    await Promise.all([service.onModuleDestroy(), restored.onModuleDestroy(), pool.end()]);
+  }
+});
+
+test('PostgreSQL logical operations reserve atomically and retain stop barriers across process reconstruction', { skip: !databaseUrl }, async () => {
+  const first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const second = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const restored = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const sessionId = `operation-session-${process.pid}-${Date.now()}`;
+  const now = new Date().toISOString();
+  try {
+    await first.initialize();
+    await first.setCollection('sessions', [...first.getCollection<unknown[]>('sessions', []), {
+      id: sessionId, title: 'Logical operation integration', status: 'EXECUTING', ownerId: 'test', createdAt: now, updatedAt: now
+    }]);
+    const firstStore = new LogicalOperationStore(first);
+    const operation = await firstStore.begin({ id: `op-${sessionId}`, sessionId, phase: 'user_message_routing' });
+    await second.initialize();
+    const secondStore = new LogicalOperationStore(second);
+    const binding = { transport: { deviceId: 'test-device', workspaceId: 'test-workspace', runtimeType: 'codex' as const } };
+    const reservations = await Promise.allSettled([
+      firstStore.reserve(sessionId, operation.id, 'call-first', binding),
+      secondStore.reserve(sessionId, operation.id, 'call-second', binding)
+    ]);
+    assert.equal(reservations.filter(result => result.status === 'fulfilled').length, 1);
+    const ownerService = reservations[0]?.status === 'fulfilled' ? first : second;
+    const ownerStore = reservations[0]?.status === 'fulfilled' ? firstStore : secondStore;
+    const activeInvocationId = ownerStore.list(sessionId)[0]?.activeInvocationId;
+    assert.ok(activeInvocationId);
+    const requested = await new SessionStopStateStore(ownerService).request(sessionId, 'integration_stop', [activeInvocationId]);
+    await restored.initialize();
+    const restoredStore = new LogicalOperationStore(restored);
+    const [saved] = restoredStore.list(sessionId);
+    assert.equal(saved.attemptsUsed, 1);
+    assert.equal(saved.deadlineAt, operation.deadlineAt);
+    assert.equal(restoredStore.hasUnknownStop(sessionId), true);
+    assert.equal(await restoredStore.confirmTransportResult(saved.activeInvocationId!, binding.transport), true);
+    assert.equal(restoredStore.hasUnknownStop(sessionId), false);
+    const restoredStop = new SessionStopStateStore(restored).summary(sessionId);
+    assert.equal(restoredStop.stopRequestId, requested.id);
+    assert.equal(restoredStop.status, 'confirmed');
+    assert.equal(restoredStop.version, 2);
+    await restoredStore.reserve(sessionId, operation.id, 'call-after-restart', binding);
+    await restoredStore.settle(sessionId, operation.id, 'call-after-restart');
+    await assert.rejects(restoredStore.reserve(sessionId, operation.id, 'over-budget'), /BUDGET_EXHAUSTED/);
+  } finally {
+    await Promise.all([first.onModuleDestroy(), second.onModuleDestroy(), restored.onModuleDestroy()]);
+  }
+});
+
+test('PostgreSQL rejects a reserve racing a paused zero-target stop until the Session is resumed', { skip: !databaseUrl }, async () => {
+  const first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const second = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const restored = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const sessionId = `paused-stop-race-${process.pid}-${Date.now()}`;
+  const now = new Date().toISOString();
+  try {
+    await first.initialize();
+    await first.setCollection('sessions', [...first.getCollection<unknown[]>('sessions', []), {
+      id: sessionId, title: 'Paused stop race', status: 'PAUSED', ownerId: 'test', createdAt: now, updatedAt: now
+    }]);
+    const operations = new LogicalOperationStore(first);
+    await operations.begin({ id: `op-${sessionId}`, sessionId, phase: 'task_execution' });
+    await second.initialize();
+    const stops = new SessionStopStateStore(second);
+
+    const [stopResult, reserveResult] = await Promise.allSettled([
+      stops.request(sessionId, 'user_paused'),
+      operations.reserve(sessionId, `op-${sessionId}`, `call-${sessionId}`)
+    ]);
+    assert.equal(stopResult.status, 'fulfilled');
+    assert.equal(stopResult.status === 'fulfilled' ? stopResult.value.status : undefined, 'confirmed');
+    assert.equal(reserveResult.status, 'rejected');
+    assert.match(String(reserveResult.status === 'rejected' ? reserveResult.reason : ''), /OPERATION_STOP_UNCONFIRMED/);
+
+    await restored.initialize();
+    assert.equal(new LogicalOperationStore(restored).list(sessionId)[0]?.activeInvocationId, undefined);
+    assert.equal(new SessionStopStateStore(restored).summary(sessionId).status, 'confirmed');
+
+    const sessions = first.getCollection<any[]>('sessions', []);
+    sessions.find(item => item.id === sessionId).status = 'EXECUTING';
+    await first.setCollection('sessions', sessions);
+    await operations.reserve(sessionId, `op-${sessionId}`, `call-after-resume-${sessionId}`);
+  } finally {
+    await Promise.all([first.onModuleDestroy(), second.onModuleDestroy(), restored.onModuleDestroy()]);
+  }
+});
+
+test('PostgreSQL deduplicates cross-connection stop receipt replay and recovers its pending outbox', { skip: !databaseUrl }, async () => {
+  const first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const second = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const restored = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const sessionId = `stop-receipt-replay-${process.pid}-${Date.now()}`;
+  const operationId = `op-${sessionId}`;
+  const invocationId = `call-${sessionId}`;
+  const now = new Date().toISOString();
+  const appNow = () => Date.now() + 60_000;
+  const transport = { deviceId: 'test-device', workspaceId: 'test-workspace', runtimeType: 'codex' as const };
+  try {
+    await first.initialize();
+    await first.setCollection('sessions', [...first.getCollection<unknown[]>('sessions', []), {
+      id: sessionId, title: 'Stop receipt replay', status: 'EXECUTING', ownerId: 'test', createdAt: now, updatedAt: now
+    }]);
+    const firstOperations = new LogicalOperationStore(first, appNow);
+    await firstOperations.begin({ id: operationId, sessionId, phase: 'task_execution' });
+    await firstOperations.reserve(sessionId, operationId, invocationId, { transport });
+    const sessions = first.getCollection<any[]>('sessions', []);
+    sessions.find(item => item.id === sessionId).status = 'PAUSED';
+    await first.setCollection('sessions', sessions);
+    const request = await new SessionStopStateStore(first, appNow).request(sessionId, 'user_paused');
+    await firstOperations.settle(sessionId, operationId, invocationId, 'unconfirmed', true);
+    await second.initialize();
+    const secondOperations = new LogicalOperationStore(second, appNow);
+
+    const receipts = await Promise.all([
+      firstOperations.confirmTransportReceipt(invocationId, transport),
+      secondOperations.confirmTransportReceipt(invocationId, transport)
+    ]);
+    assert.equal(receipts.every(receipt => receipt.confirmed), true);
+    assert.equal(receipts.filter(receipt => receipt.alreadyConfirmed).length, 1);
+
+    await restored.initialize();
+    const summary = new SessionStopStateStore(restored).summary(sessionId);
+    assert.equal(summary.stopRequestId, request.id);
+    assert.equal(summary.status, 'confirmed');
+    assert.equal(summary.version, 3);
+    const stopEvents = restored.getCollection<Record<string, any[]>>('eventsBySession', {})[sessionId]
+      .filter(event => event.metadata?.payload?.code === 'RUNTIME_STOP_STATE_CHANGED');
+    assert.deepEqual(stopEvents.map(event => event.metadata.payload.version), [1, 2, 3]);
+    assert.equal(new Set(stopEvents.map(event => event.id)).size, 3);
+    const stopOutbox = restored.getCollection<any[]>('eventOutbox', [])
+      .filter(record => stopEvents.some(event => record.id === `outbox:${event.id}`));
+    assert.equal(stopOutbox.length, 3);
+    const claimedAfterRestart = await restored.claimPendingEventOutbox('restart-worker', 100);
+    assert.equal(claimedAfterRestart.filter(record => record.id === `outbox:runtime-stop:${request.id}:3`).length, 1);
+  } finally {
+    await Promise.all([first.onModuleDestroy(), second.onModuleDestroy(), restored.onModuleDestroy()]);
+  }
+});
 
 test('PostgreSQL migration creates a fully commented relational schema and is idempotent', { skip: !databaseUrl }, async () => {
   const pool = new Pool({ connectionString: databaseUrl });
@@ -214,8 +452,15 @@ test('relational projections preserve catalog versions, bindings, session progre
       updatedAt: now
     };
     await store.writeCollection('workspaceWritebacks', [writeback]);
-    await store.writeCollection('eventsBySession', {
-      [sessionId]: [{ id: eventId, sessionId, type: 'agent_message', content: 'persisted', actor: { type: 'agent', id: agentId }, createdAt: now }]
+    await store.appendEvent({
+      id: eventId,
+      sessionId,
+      type: 'agent_message',
+      content: 'persisted',
+      actor: { type: 'agent', id: agentId },
+      toAgentIds: [],
+      metadata: { schemaVersion: '0.1', payload: {} },
+      createdAt: now
     });
     await store.markEventPublished(eventId);
 
@@ -290,7 +535,7 @@ test('relational projections preserve catalog versions, bindings, session progre
     await unavailablePool.end();
     await assert.rejects(
       unavailableStore.compareAndSetCollection('fileRevisions', afterCas, loadedFileRevisions),
-      /ended|closed|connect/i
+      /end|closed|connect/i
     );
   } finally {
     await competingPool.end();

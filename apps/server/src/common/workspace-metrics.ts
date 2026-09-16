@@ -38,6 +38,10 @@ export const WORKSPACE_METRIC_NAMES = [
   'context_insufficient_terminal_total',
   'workspace_writeback_conflict_total',
   'workspace_revision_unstable_total',
+  'runtime_stop_pending_sync_count',
+  'runtime_stop_pending_sync_oldest_ms',
+  'runtime_stop_receipt_replay_total',
+  'runtime_stop_event_idempotency_conflict_total',
   ...INTENT_ROUTING_METRIC_NAMES,
   ...FILE_REVISION_METRIC_NAMES
 ] as const;

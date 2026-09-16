@@ -1,6 +1,7 @@
 import {
   assertRuntimeContractsReady,
   getRuntimeOutputContract,
+  getVersionedRuntimeOutputContract,
   validateRuntimeOutput as validateRegisteredRuntimeOutput,
   type RuntimeOutputKind
 } from '@agent-cluster/shared';
@@ -17,8 +18,8 @@ export function runtimeOutputExample(kind: RuntimeOutputKind): Record<string, un
   return getRuntimeOutputContract(kind).example as unknown as Record<string, unknown>;
 }
 
-export function runtimeOutputContractAudit(kind: RuntimeOutputKind) {
-  const contract = getRuntimeOutputContract(kind);
+export function runtimeOutputContractAudit(kind: RuntimeOutputKind, version = '1.0') {
+  const contract = getVersionedRuntimeOutputContract(kind, version);
   return {
     contractId: contract.contractId,
     contractVersion: contract.version,

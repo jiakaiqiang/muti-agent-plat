@@ -1,4 +1,4 @@
-import { Injectable, Optional, type OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, Optional, type OnModuleInit } from '@nestjs/common';
 import type {
   AgentMessageOutput,
   AgentRunResult,
@@ -12,11 +12,13 @@ import type {
   RuntimeAttemptTrace,
   RuntimeAvailability,
   RuntimeAvailabilityStatus,
+  RuntimeStopSummary,
   RuntimeType
 } from '@agent-cluster/shared';
-import { createAgentMessageOutput } from '@agent-cluster/shared';
+import { createAgentMessageOutput, classifyProviderFailure, ProviderCircuit, usefulRuntimeActivity, runtimeActivityKind } from '@agent-cluster/shared';
 import { runtimeStreamingEnabledFor } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
+import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import {
   abortWithTermination,
   createExecutionTermination,
@@ -38,8 +40,15 @@ import { emptyRuntimeSystemEvidence } from './runtime-system-evidence.js';
 import { LocalRuntimeConnectionService } from '../local-runtime/local-runtime-connection.service.js';
 import { ServerRuntimeWorkerService } from './server-runtime-worker.service.js';
 import { InvocationWorkspaceBindingsService } from './invocation-workspace-bindings.service.js';
+import { LogicalOperationStore } from './logical-operation-store.js';
+import { RuntimeModelConfigService } from './runtime-model-config.service.js';
+import { SessionStopStateStore } from './session-stop-state-store.js';
+import { EventsService } from '../events/events.service.js';
 
 export type RuntimeInvocationLog = {
+  operationTelemetry?: AgentRunResult['operationTelemetry'];
+  executionCandidate?: AgentRunResult['executionCandidate'];
+  operation?: InvocationPlan['operation'];
   id: string;
   dataEpoch: string;
   invocationId: string;
@@ -87,12 +96,31 @@ export type RuntimeExecutionHandle = AgentRuntimeRunHandle & {
 
 @Injectable()
 export class RuntimeService implements OnModuleInit {
+  private readonly logger = new Logger(RuntimeService.name);
   private readonly invocationsBySession = new Map<string, RuntimeInvocationLog[]>();
   private readonly activeInvocationsBySession = new Map<
     string,
     Map<string, { handle: AgentRuntimeRunHandle; done: Promise<unknown> }>
   >();
   private readonly registrationReady: Promise<void>;
+  readonly operations: LogicalOperationStore;
+  readonly stopStates: SessionStopStateStore;
+  private invocationWrites = Promise.resolve();
+  private readonly providerCircuits = new ProviderCircuit();
+  private readonly supervised = new Map<string, Map<string, RuntimeExecutionHandle>>();
+  private readonly pendingStopStateSync = new Map<string, {
+    sessionId: string;
+    operationId: string;
+    invocationId: string;
+    stopState: 'confirmed' | 'unconfirmed';
+    pause: boolean;
+    attempts: number;
+    lastError: string;
+    exhausted: boolean;
+    registeredAt: number;
+    timer?: NodeJS.Timeout;
+  }>();
+  private readonly stopRequestFailures = new Map<string, string>();
 
   constructor(
     private readonly persistence: PersistenceService,
@@ -106,8 +134,12 @@ export class RuntimeService implements OnModuleInit {
     @Optional() private readonly worktreeExecution?: WorktreeExecutionService,
     @Optional() private readonly localRuntime?: LocalRuntimeConnectionService,
     @Optional() private readonly serverRuntimeWorker?: ServerRuntimeWorkerService,
-    @Optional() private readonly workspaceBindings?: InvocationWorkspaceBindingsService
+    @Optional() private readonly workspaceBindings?: InvocationWorkspaceBindingsService,
+    @Optional() private readonly modelConfig?: RuntimeModelConfigService,
+    @Optional() private readonly events?: EventsService
   ) {
+    this.operations = new LogicalOperationStore(persistence);
+    this.stopStates = new SessionStopStateStore(persistence);
     const persisted = this.persistence.getCollection<Record<string, RuntimeInvocationLog[]>>(
       'runtimeInvocationsBySession',
       {}
@@ -126,9 +158,9 @@ export class RuntimeService implements OnModuleInit {
         if (!invocation.expectedOutput?.kind) {
           throw new Error(`CUTOVER_REQUIRED: persisted RuntimeInvocation has no expected output kind: ${invocation.id}`);
         }
-        const currentContract = runtimeOutputContractAudit(invocation.expectedOutput.kind);
+        const currentContract = runtimeOutputContractAudit(invocation.expectedOutput.kind, invocation.expectedOutput.schemaVersion);
         if (
-          invocation.expectedOutput?.schemaVersion !== '1.0' ||
+          !['1.0', '2.0'].includes(invocation.expectedOutput?.schemaVersion) ||
           invocation.outputContract?.contractVersion !== currentContract.contractVersion ||
           invocation.outputContract?.contractId !== currentContract.contractId ||
           invocation.outputContract?.schemaHash !== currentContract.schemaHash ||
@@ -230,6 +262,271 @@ export class RuntimeService implements OnModuleInit {
 
   start(input: InvocationPlan, signal?: AbortSignal): RuntimeExecutionHandle {
     const startedAt = nowIso();
+    let adapterStartedAt: string | undefined;
+    let firstUsefulOutputAt: string | undefined;
+    const publishedEvents = new Set<string>();
+    const submissionFailures = new Set<string>();
+    const activeTools = new Set<string>();
+    let toolIntervalStartedAt: number | undefined;
+    let observedToolMs = 0;
+    const isUseful = usefulRuntimeActivity();
+    const queue = new RuntimeEventQueue();
+    const controller = new AbortController();
+    let underlying: RuntimeExecutionHandle | undefined;
+    let timer: NodeJS.Timeout | undefined;
+    let stopTimer: NodeJS.Timeout | undefined;
+    let reserved = false;
+    let stopUnconfirmed = false;
+    let eventsSealed = false;
+    let bookkeeping = Promise.resolve();
+    let supervisionFailed = false;
+    let stopStatePersistenceError: Error | undefined;
+    let supervisorHandle: RuntimeExecutionHandle | undefined;
+    let resolveStopped!: (result: AgentRunResult) => void;
+    const stopped = new Promise<AgentRunResult>(resolve => { resolveStopped = resolve; });
+    const stop = () => {
+      if (!underlying) return;
+      const termination = terminationFromSignal(controller.signal);
+      void underlying.cancel(termination).catch(() => undefined);
+      stopTimer ??= setTimeout(() => {
+        stopUnconfirmed = true;
+        const failure = this.invocationFailureResult(input, '上一调用尚未确认结束，禁止替代执行。');
+        failure.error = { code: 'RUNTIME_INVOCATION_ERROR', message: '上一调用尚未确认结束，禁止替代执行。',
+          retryable: false, details: { operationFailure: 'OPERATION_STOP_UNCONFIRMED', stopUnconfirmed: true, operationId: input.operation?.id } };
+        resolveStopped(failure);
+      }, 15_000);
+    };
+    const forwardAbort = () => controller.abort(signal?.reason);
+    if (signal?.aborted) forwardAbort();
+    else signal?.addEventListener('abort', forwardAbort, { once: true });
+    controller.signal.addEventListener('abort', stop, { once: true });
+    const result = (async (): Promise<AgentRunResult> => {
+      try {
+        const operation = await this.operations.begin({ id: input.operation?.id ?? input.invocationId,
+          sessionId: input.sessionId, taskId: input.taskId, phase: input.phase });
+        input.operation = { id: operation.id, deadlineAt: operation.deadlineAt,
+          maxAttempts: operation.maxAttempts, policyVersion: operation.policyVersion };
+        this.assertStopBarrierAllowsStart(input.sessionId);
+        if (controller.signal.aborted) return ensureStructuredTermination(this.unsupportedResult(input, 'Cancelled before invocation start.'),
+          { phase: input.phase, signal: controller.signal });
+        await this.operations.reserve(input.sessionId, operation.id, input.invocationId, {
+          transport: input.executionTarget.executionLocation === 'local' ? this.localRuntime?.invocationBinding?.(input) : undefined,
+          executionKind: input.executionTarget.runtimeType === 'mock' ? 'internal' : 'process',
+          outputContractKey: `${input.expectedOutput.kind}@${input.expectedOutput.schemaVersion}`
+        });
+        reserved = true;
+        this.assertStopBarrierAllowsStart(input.sessionId);
+        if (controller.signal.aborted) return ensureStructuredTermination(this.unsupportedResult(input, 'Cancelled before invocation start.'),
+          { phase: input.phase, signal: controller.signal });
+        const remainingMs = Date.parse(operation.deadlineAt) - Date.now();
+        if (remainingMs <= 0) throw new Error('OPERATION_BUDGET_EXHAUSTED');
+        // Unknown CLI connections are scoped to their workspace, never all users of a Runtime type.
+        input.executionTarget.providerIdentity = this.providerIdentity(input);
+        const providerKey = this.providerCircuits.key(input.executionTarget.providerIdentity);
+        const circuitWait = this.providerCircuits.remaining(providerKey);
+        if (circuitWait > 0) {
+          const failure = this.invocationFailureResult(input, '当前模型连接处于故障等待期。');
+          failure.error = { code: 'MODEL_ERROR', message: '当前模型连接处于故障等待期。', retryable: false,
+            details: { providerFailure: true, circuitOpen: true, retryAfterMs: circuitWait, operationId: operation.id } };
+          return failure;
+        }
+        timer = setTimeout(() => abortWithTermination(controller, createExecutionTermination({
+          kind: 'phase_timeout', source: 'orchestrator', scope: 'phase', phase: input.phase,
+          timeout: { mode: 'deadline', timeoutMs: remainingMs }
+        })), remainingMs);
+        underlying = this.startUnsupervised(input, controller.signal);
+        adapterStartedAt = nowIso();
+        const failSupervision = () => {
+          supervisionFailed = true;
+          abortWithTermination(controller, createExecutionTermination({
+            kind: 'output_contract_failure', source: 'orchestrator', scope: 'invocation', phase: input.phase,
+            diagnosticRef: 'operation_supervision_failed'
+          }));
+        };
+        const publish = (event: AgentRuntimeEvent) => {
+          if (publishedEvents.has(JSON.stringify(event))) return;
+          const toolId = event.metadata?.toolCallId;
+          if (typeof toolId === 'string' && event.type === 'tool_called') {
+            if (activeTools.size === 0) toolIntervalStartedAt = Date.now();
+            activeTools.add(toolId);
+          } else if (typeof toolId === 'string' && event.type === 'tool_completed' && activeTools.delete(toolId) && activeTools.size === 0) {
+            observedToolMs += Date.now() - (toolIntervalStartedAt ?? Date.now());
+            toolIntervalStartedAt = undefined;
+          }
+          if (event.type === 'tool_completed' && event.metadata?.name === 'StructuredOutput' &&
+            event.metadata.isError === true && typeof toolId === 'string' && !submissionFailures.has(toolId)) {
+            submissionFailures.add(toolId);
+            bookkeeping = bookkeeping.then(async () => {
+              if (supervisionFailed) return;
+              const permitted = await this.operations.reserveCorrection(input.sessionId, operation.id);
+              if (!permitted) abortWithTermination(controller, createExecutionTermination({
+                kind: 'output_contract_failure', source: 'orchestrator', scope: 'invocation', phase: input.phase,
+                diagnosticRef: 'operation_submission_correction_exhausted'
+              }));
+            }).catch(failSupervision);
+          }
+          publishedEvents.add(JSON.stringify(event));
+          if (isUseful(event)) firstUsefulOutputAt ??= nowIso();
+          queue.push({ ...event, metadata: { ...event.metadata, operationId: operation.id,
+            policyVersion: operation.policyVersion, activityKind: runtimeActivityKind(event),
+            remainingMs: Math.max(0, Date.parse(operation.deadlineAt) - Date.now()) } });
+        };
+        const eventPump = (async () => {
+          for await (const event of underlying!.events) {
+            if (eventsSealed) break;
+            publish(event);
+          }
+        })().catch(() => { if (!eventsSealed) failSupervision(); });
+        // A late result clears the tombstone only; it is never delivered as a new success.
+        void underlying.result.then(async resolved => {
+          if (stopUnconfirmed && !resolved.error?.details?.stopUnconfirmed) {
+            await this.operations.settle(input.sessionId, operation.id, input.invocationId, 'confirmed',
+              terminationFromSignal(controller.signal)?.kind === 'user_paused');
+          }
+        }).catch(() => undefined);
+        let resolved = await Promise.race([underlying.result, stopped]);
+        // A transport result is the process-exit receipt. A broken event iterator
+        // must not turn a completed process into a 20 minute wait.
+        void eventPump;
+        // Drain known accounting, not the potentially broken iterator. Buffered
+        // events obey the same correction budget as streamed events.
+        for (const event of resolved.events) publish(event);
+        eventsSealed = true;
+        await bookkeeping;
+        if (supervisionFailed) {
+          resolved = { ...this.invocationFailureResult(input, '执行监督信息保存或读取失败，已请求停止本次调用。'),
+            executionCandidate: resolved.executionCandidate,
+            error: { code: 'RUNTIME_INVOCATION_ERROR', message: '执行监督信息保存或读取失败，已请求停止本次调用。',
+              retryable: false, details: { operationFailure: 'OPERATION_SUPERVISION_FAILED',
+                stopUnconfirmed: Boolean(resolved.error?.details?.stopUnconfirmed) } } };
+        } else {
+          resolved = ensureStructuredTermination(resolved, { phase: input.phase, signal: controller.signal });
+        }
+        stopUnconfirmed ||= Boolean(resolved.error?.details?.stopUnconfirmed);
+        if (resolved.error && (!resolved.termination || resolved.error.details?.providerFailure) && !stopUnconfirmed) {
+          const failure = classifyProviderFailure(resolved.error);
+          if (failure.failureClass !== 'unknown' || resolved.error.details?.providerFailure) {
+            resolved.error = { ...resolved.error, retryable: failure.retryable, details: {
+              ...resolved.error.details, failureClass: failure.failureClass,
+              providerFailure: !['schema', 'protocol'].includes(failure.failureClass), operationId: operation.id
+            } };
+            if (failure.failureClass !== 'schema') this.providerCircuits.failed(providerKey, failure);
+          }
+        } else if (resolved.status === 'completed') this.providerCircuits.succeeded(providerKey);
+        return resolved;
+      } catch (error) {
+        const failure = this.invocationFailureResult(input, errorMessage(error));
+        failure.error = { code: errorMessage(error).includes('BUDGET_EXHAUSTED') ? 'RUNTIME_TIMEOUT' : 'RUNTIME_INVOCATION_ERROR',
+          message: errorMessage(error), retryable: false,
+          details: { operationId: input.operation?.id,
+            operationFailure: errorMessage(error).match(/OPERATION_[A-Z_]+/)?.[0] ?? 'OPERATION_PERSISTENCE_FAILED',
+            stopUnconfirmed: errorMessage(error).includes('STOP_UNCONFIRMED') } };
+        return failure;
+      } finally {
+        eventsSealed = true;
+        clearTimeout(timer);
+        clearTimeout(stopTimer);
+        signal?.removeEventListener('abort', forwardAbort);
+        controller.signal.removeEventListener('abort', stop);
+        try {
+          if (reserved && input.operation) {
+            const stopEvent = await this.operations.settle(input.sessionId, input.operation.id, input.invocationId,
+              stopUnconfirmed ? 'unconfirmed' : 'confirmed', terminationFromSignal(controller.signal)?.kind === 'user_paused');
+            if (stopEvent) this.events?.acceptCommitted(stopEvent);
+          }
+        } catch (error) {
+          stopStatePersistenceError = error instanceof Error ? error : new Error(String(error));
+          if (reserved && input.operation) this.registerPendingStopStateSync({
+            sessionId: input.sessionId,
+            operationId: input.operation.id,
+            invocationId: input.invocationId,
+            stopState: stopUnconfirmed ? 'unconfirmed' : 'confirmed',
+            pause: terminationFromSignal(controller.signal)?.kind === 'user_paused',
+            error: stopStatePersistenceError
+          });
+        } finally {
+          const session = this.supervised.get(input.sessionId);
+          if (!supervisorHandle || session?.get(input.invocationId) === supervisorHandle) session?.delete(input.invocationId);
+          if (session && session.size === 0) this.supervised.delete(input.sessionId);
+        }
+      }
+    })().then(async resolved => {
+      if (stopStatePersistenceError) {
+        const original = resolved;
+        resolved = {
+          ...this.invocationFailureResult(input, '执行已经结束，但停止状态保存失败，系统正在有限重试同步。'),
+          executionCandidate: original.executionCandidate,
+          termination: original.termination,
+          systemEvidence: original.systemEvidence,
+          error: {
+            code: 'RUNTIME_INVOCATION_ERROR',
+            message: '执行已经结束，但停止状态保存失败，系统正在有限重试同步。',
+            retryable: false,
+            details: {
+              reason: 'STOP_STATE_PERSISTENCE_FAILED',
+              operationFailure: 'OPERATION_PERSISTENCE_FAILED',
+              operationId: input.operation?.id,
+              originalStatus: original.status,
+              diagnosticRef: 'runtime_stop_state_pending_sync'
+            }
+          }
+        };
+      }
+      const completedAt = nowIso();
+      const elapsedMs = Date.parse(completedAt) - Date.parse(startedAt);
+      const preparationMs = adapterStartedAt ? Date.parse(adapterStartedAt) - Date.parse(startedAt) : elapsedMs;
+      if (toolIntervalStartedAt !== undefined) observedToolMs += Date.parse(completedAt) - toolIntervalStartedAt;
+      resolved.operationTelemetry = { operationId: input.operation?.id ?? input.invocationId,
+        policyVersion: input.operation?.policyVersion ?? 'execution-reliability-v1', startedAt, adapterStartedAt,
+        firstUsefulOutputAt, completedAt, elapsedMs, preparationMs, observedToolMs,
+        unclassifiedMs: Math.max(0, elapsedMs - preparationMs - observedToolMs), queueWaitMs: null,
+        initialEvidenceBytes: input.contextEnvelope.L3.totalByteLength,
+        remainingMs: Math.max(0, Date.parse(input.operation?.deadlineAt ?? completedAt) - Date.now()),
+        stopState: stopUnconfirmed ? 'unconfirmed' : 'confirmed', upstreamWaitMs: null,
+        usageScope: 'reported_cumulative', billableTokens: null };
+      await this.recordInvocation(input, resolved, startedAt);
+      for (const event of resolved.events) {
+        if (!publishedEvents.has(JSON.stringify(event))) queue.push({ ...event, metadata: {
+          ...event.metadata, operationId: input.operation?.id, policyVersion: input.operation?.policyVersion
+        } });
+      }
+      if (resolved.error) queue.push({ invocationId: input.invocationId, type: 'runtime_failed', visibility: 'user',
+        content: resolved.error.message, createdAt: completedAt, metadata: { code: resolved.error.code,
+          runtimeError: resolved.error, operationId: input.operation?.id, policyVersion: input.operation?.policyVersion,
+          stopState: resolved.error.details?.stopUnconfirmed ? 'unconfirmed' : 'confirmed' } });
+      return resolved;
+    }).finally(() => queue.close());
+    const handle: RuntimeExecutionHandle = { events: queue, result, hasStreamingEvents: true,
+      cancel: async termination => {
+        abortWithTermination(controller, termination ?? createExecutionTermination({
+          kind: 'user_cancelled', source: 'user', scope: 'invocation', phase: input.phase
+        }));
+        await result;
+      } };
+    supervisorHandle = handle;
+    const session = this.supervised.get(input.sessionId) ?? new Map<string, RuntimeExecutionHandle>();
+    session.set(input.invocationId, handle);
+    this.supervised.set(input.sessionId, session);
+    return handle;
+  }
+
+  private providerIdentity(input: InvocationPlan): NonNullable<ResolvedExecutionTarget['providerIdentity']> {
+    const target = input.executionTarget;
+    if (this.modelConfig && (target.runtimeType === 'generic_llm' ||
+      (target.executionLocation === 'local' && target.modelId))) {
+      const connection = this.modelConfig.connectionForModelId(target.modelId);
+      if (target.runtimeType === 'generic_llm' || connection.id === target.modelId) {
+        return { connectionId: connection.id, modelId: connection.model,
+          protocol: target.runtimeType === 'codex' ? 'openai_responses' : connection.provider,
+          source: 'configured_connection' };
+      }
+    }
+    return { connectionId: `unknown:${target.executionLocation}:${input.contextEnvelope.L0.workspace.workspaceId}`,
+      modelId: 'unknown', protocol: target.runtimeType, source: 'unknown' };
+  }
+
+  private startUnsupervised(input: InvocationPlan, signal?: AbortSignal): RuntimeExecutionHandle {
+    const startedAt = nowIso();
     const runtimeType = input.executionTarget.runtimeType;
     const isLocalExecution = input.executionTarget.executionLocation === 'local';
     const adapter = isLocalExecution ? undefined : this.registry.getAdapter(runtimeType);
@@ -300,7 +597,6 @@ export class RuntimeService implements OnModuleInit {
               }
             }
           : terminated;
-        this.recordInvocation(input, normalized, startedAt);
         return normalized;
       });
     const activeHandle = {
@@ -348,9 +644,24 @@ export class RuntimeService implements OnModuleInit {
     termination: Parameters<AgentRuntimeRunHandle['cancel']>[0],
     timeoutMs = 10_000
   ) {
-    const active = [...(this.activeInvocationsBySession.get(sessionId)?.values() ?? [])];
+    this.localRuntime?.retryUnconfirmedStops?.(sessionId);
+    const active = [...(this.supervised.get(sessionId)?.values() ?? [])].map(handle => ({ handle, done: handle.result }));
+    try {
+      const committed = await this.stopStates.requestWithEvent(sessionId, termination?.diagnosticRef ?? termination?.kind ?? 'session_stop',
+        [...(this.supervised.get(sessionId)?.keys() ?? [])]);
+      this.events?.acceptCommitted(committed.event);
+      this.stopRequestFailures.delete(sessionId);
+    } catch (error) {
+      this.stopRequestFailures.set(sessionId, errorMessage(error));
+      this.logger.warn(JSON.stringify({
+        event: 'runtime_stop_request_persistence_failed',
+        sessionId,
+        reason: 'STOP_REQUEST_PERSISTENCE_FAILED'
+      }));
+    }
     if (!active.length) {
-      return { requested: 0, completed: 0, timedOut: false };
+      const summary = this.getStopSummary(sessionId);
+      return { requested: summary.requestedCount, completed: summary.confirmedCount, timedOut: !summary.canResume };
     }
 
     // The result promise is authoritative. Adapter cancellation is best-effort
@@ -368,20 +679,134 @@ export class RuntimeService implements OnModuleInit {
     ]);
     if (timer) clearTimeout(timer);
 
-    const remaining = this.activeInvocationsBySession.get(sessionId)?.size ?? 0;
+    const remaining = this.supervised.get(sessionId)?.size ?? 0;
+    const summary = this.getStopSummary(sessionId);
     return {
       requested: active.length,
       completed: active.length - remaining,
-      timedOut: remaining > 0
+      timedOut: remaining > 0 || !summary.canResume
     };
   }
 
   activeInvocationCount(sessionId: string) {
-    return this.activeInvocationsBySession.get(sessionId)?.size ?? 0;
+    return this.supervised.get(sessionId)?.size ?? 0;
+  }
+
+  hasUnconfirmedStops(sessionId: string) {
+    return this.activeInvocationCount(sessionId) > 0 || !this.getStopSummary(sessionId).canResume;
+  }
+
+  getStopSummary(sessionId: string): RuntimeStopSummary {
+    this.pruneResolvedPendingStopStates(sessionId);
+    this.refreshStopSyncMetrics();
+    const durable = this.stopStates.summary(sessionId);
+    const pending = [...this.pendingStopStateSync.values()].filter(item => item.sessionId === sessionId);
+    const activeIds = [...(this.supervised.get(sessionId)?.keys() ?? [])];
+    const localUnknown = this.localRuntime?.hasUnconfirmedStops?.(sessionId) ?? false;
+    const unknownOperations = this.operations.list(sessionId).filter(operation => operation.stopState === 'unconfirmed' ||
+      (operation.status === 'running' && operation.executionKind !== 'internal' && !activeIds.includes(operation.activeInvocationId ?? '')));
+    const requestFailure = this.stopRequestFailures.get(sessionId);
+    if (activeIds.length && durable.status === 'confirmed' && pending.length === 0 &&
+      !localUnknown && unknownOperations.length === 0 && !requestFailure) return {
+      sessionId,
+      version: 0,
+      status: 'idle',
+      requestedCount: 0,
+      confirmedCount: 0,
+      targets: [],
+      blockers: [],
+      canResume: true
+    };
+    const blockers = [...durable.blockers];
+    for (const item of pending) blockers.push({
+      invocationId: item.invocationId,
+      operationId: item.operationId,
+      reason: item.exhausted ? 'stop_state_sync_exhausted' : 'stop_state_pending_sync',
+      message: item.exhausted ? '停止状态同步重试已耗尽，需要重新核对。' : '执行已结束，停止状态正在同步。'
+    });
+    if (durable.status !== 'idle') for (const invocationId of activeIds) if (!blockers.some(item => item.invocationId === invocationId)) blockers.push({
+      invocationId,
+      reason: 'process_running',
+      message: '正在等待执行进程结束。'
+    });
+    for (const operation of unknownOperations) if (!blockers.some(item => item.invocationId === operation.activeInvocationId)) blockers.push({
+      invocationId: operation.activeInvocationId,
+      operationId: operation.id,
+      reason: 'process_exit_unknown',
+      message: '服务重启后缺少可信的进程结束证据。'
+    });
+    if (localUnknown && !blockers.some(item => item.reason === 'process_exit_unknown')) blockers.push({
+      reason: 'process_exit_unknown',
+      message: '本地执行结束状态尚未确认。'
+    });
+    if (requestFailure) blockers.push({ reason: 'state_query_failed', message: '停止请求未能持久化，已临时阻止新执行。' });
+    if (!blockers.length) return durable;
+    return {
+      ...durable,
+      status: requestFailure ? 'unknown' : 'waiting',
+      blockers,
+      canResume: false
+    };
+  }
+
+  private assertStopBarrierAllowsStart(sessionId: string) {
+    if (!this.getStopSummary(sessionId).canResume) throw new Error('OPERATION_STOP_UNCONFIRMED');
+  }
+
+  async reconcilePendingStopStates(sessionId?: string) {
+    const pending = [...this.pendingStopStateSync.values()].filter(item => !sessionId || item.sessionId === sessionId);
+    for (const item of pending) {
+      if (item.timer) clearTimeout(item.timer);
+      item.timer = undefined;
+      try {
+        const stopEvent = await this.operations.settle(item.sessionId, item.operationId, item.invocationId, item.stopState, item.pause);
+        if (stopEvent) this.events?.acceptCommitted(stopEvent);
+        this.pendingStopStateSync.delete(item.invocationId);
+        this.refreshStopSyncMetrics();
+        const summary = this.stopStates.summary(item.sessionId);
+        this.logger.log(JSON.stringify({
+          event: 'runtime_stop_state_reconciled',
+          sessionId: item.sessionId,
+          stopRequestId: summary.stopRequestId,
+          operationId: item.operationId,
+          invocationId: item.invocationId,
+          version: summary.version,
+          attempts: item.attempts + 1
+        }));
+      } catch (error) {
+        item.attempts += 1;
+        item.lastError = errorMessage(error);
+        item.exhausted = item.attempts >= 5;
+        this.logger.warn(JSON.stringify({
+          event: item.exhausted ? 'runtime_stop_state_sync_exhausted' : 'runtime_stop_state_sync_retry',
+          sessionId: item.sessionId,
+          stopRequestId: this.stopStates.latest(item.sessionId)?.id,
+          operationId: item.operationId,
+          invocationId: item.invocationId,
+          attempt: item.attempts,
+          reason: 'STOP_STATE_PERSISTENCE_FAILED'
+        }));
+        if (!item.exhausted) this.schedulePendingStopStateSync(item);
+      }
+    }
+    return sessionId ? this.getStopSummary(sessionId) : undefined;
   }
 
   listInvocations(sessionId: string) {
     return this.invocationsBySession.get(sessionId) ?? [];
+  }
+
+  findExecutionCandidate(plan: InvocationPlan) {
+    const previous = [...this.listInvocations(plan.sessionId)].reverse().find(item =>
+      item.agentId === plan.agent.agentId && item.workItemId === plan.workItemId &&
+      (item.taskId === plan.taskId || Boolean(plan.recoveryOriginTaskId && item.taskId === plan.recoveryOriginTaskId)) &&
+      item.phase === 'task_execution');
+    // Never resurrect an older candidate after a newer success or failed restore.
+    const candidate = previous?.status === 'completed' ? undefined : previous?.executionCandidate;
+    if (!candidate || candidate.workspaceId !== plan.contextEnvelope.L0.workspace.workspaceId ||
+      candidate.outputVersion !== plan.expectedOutput.schemaVersion || Date.parse(candidate.expiresAt) <= Date.now() ||
+      candidate.baseRevision.id !== plan.contextEnvelope.L0.workspace.revision.id) return undefined;
+    return structuredClone(candidate);
   }
 
   private releaseActiveInvocation(sessionId: string, invocationId: string) {
@@ -391,8 +816,65 @@ export class RuntimeService implements OnModuleInit {
     if (!sessionInvocations.size) this.activeInvocationsBySession.delete(sessionId);
   }
 
-  private recordInvocation(input: InvocationPlan, result: AgentRunResult, startedAt: string) {
+  private registerPendingStopStateSync(input: {
+    sessionId: string;
+    operationId: string;
+    invocationId: string;
+    stopState: 'confirmed' | 'unconfirmed';
+    pause: boolean;
+    error: Error;
+  }) {
+    const existing = this.pendingStopStateSync.get(input.invocationId);
+    if (existing) {
+      existing.lastError = input.error.message;
+      return;
+    }
+    const item = { ...input, attempts: 0, lastError: input.error.message, exhausted: false, registeredAt: Date.now() };
+    this.pendingStopStateSync.set(input.invocationId, item);
+    this.refreshStopSyncMetrics();
+    this.logger.warn(JSON.stringify({
+      event: 'runtime_stop_state_sync_registered',
+      sessionId: input.sessionId,
+      stopRequestId: this.stopStates.latest(input.sessionId)?.id,
+      operationId: input.operationId,
+      invocationId: input.invocationId,
+      reason: 'STOP_STATE_PERSISTENCE_FAILED'
+    }));
+    this.schedulePendingStopStateSync(item);
+  }
+
+  private schedulePendingStopStateSync(item: (typeof this.pendingStopStateSync extends Map<string, infer T> ? T : never)) {
+    const delay = [1_000, 2_000, 5_000, 10_000, 30_000][item.attempts] ?? 30_000;
+    item.timer = setTimeout(() => void this.reconcilePendingStopStates(item.sessionId), delay);
+    item.timer.unref?.();
+  }
+
+  private pruneResolvedPendingStopStates(sessionId: string) {
+    const operations = this.operations.list(sessionId);
+    for (const item of this.pendingStopStateSync.values()) {
+      if (item.sessionId !== sessionId) continue;
+      const operation = operations.find(candidate => candidate.id === item.operationId);
+      if (operation?.stopState === 'confirmed' && operation.activeInvocationId !== item.invocationId) {
+        if (item.timer) clearTimeout(item.timer);
+        this.pendingStopStateSync.delete(item.invocationId);
+        this.refreshStopSyncMetrics();
+      }
+    }
+  }
+
+  private refreshStopSyncMetrics() {
+    const pending = [...this.pendingStopStateSync.values()];
+    workspaceMetrics.set('runtime_stop_pending_sync_count', pending.length);
+    workspaceMetrics.set('runtime_stop_pending_sync_oldest_ms', pending.length
+      ? Math.max(0, Date.now() - Math.min(...pending.map(item => item.registeredAt)))
+      : 0);
+  }
+
+  private async recordInvocation(input: InvocationPlan, result: AgentRunResult, startedAt: string) {
     const log: RuntimeInvocationLog = {
+      operationTelemetry: result.operationTelemetry,
+      executionCandidate: result.executionCandidate,
+      operation: input.operation,
       id: crypto.randomUUID(),
       dataEpoch: this.persistence.currentDataEpoch(),
       invocationId: input.invocationId,
@@ -409,7 +891,7 @@ export class RuntimeService implements OnModuleInit {
       toolCatalog: input.toolCatalog,
       contextEnvelope: input.contextEnvelope,
       expectedOutput: input.expectedOutput,
-      outputContract: runtimeOutputContractAudit(input.expectedOutput.kind),
+      outputContract: runtimeOutputContractAudit(input.expectedOutput.kind, input.expectedOutput.schemaVersion),
       budget: input.budget,
       usage: result.usage,
       streamMetrics: result.streamMetrics,
@@ -433,8 +915,17 @@ export class RuntimeService implements OnModuleInit {
       startedAt,
       completedAt: nowIso()
     };
-    this.invocationsBySession.set(input.sessionId, [...this.listInvocations(input.sessionId), log]);
-    this.persistence.setCollection('runtimeInvocationsBySession', Object.fromEntries(this.invocationsBySession));
+    const write = this.invocationWrites.then(async () => {
+      const committed = await this.persistence.mutateCollections(['runtimeInvocationsBySession'], draft => {
+        const all = (draft.runtimeInvocationsBySession ??= Object.fromEntries(this.invocationsBySession)) as Record<string, RuntimeInvocationLog[]>;
+        const items = all[input.sessionId] ??= [];
+        if (!items.some(item => item.invocationId === log.invocationId)) items.push(log);
+        return structuredClone(items);
+      });
+      this.invocationsBySession.set(input.sessionId, committed);
+    });
+    this.invocationWrites = write.catch(() => undefined);
+    await write;
   }
 
   private buildProfileSnapshot(input: InvocationPlan): RuntimeInvocationProfileSnapshot {
@@ -490,6 +981,13 @@ export class RuntimeService implements OnModuleInit {
       usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: input.executionTarget.modelId ?? runtimeType },
       error: { code: 'CAPABILITY_BLOCKED', message: normalizedMessage, retryable: false }
     };
+  }
+
+  private invocationFailureResult(input: InvocationPlan, message: string): AgentRunResult {
+    const result = this.unsupportedResult(input, message);
+    result.output = createAgentMessageOutput({ messageKind: 'risk', content: message });
+    result.events = [];
+    return result;
   }
 
   private startInManagedWorktree(
@@ -664,9 +1162,10 @@ function withoutResume(input: InvocationPlan): InvocationPlan {
 }
 
 function shouldFallbackResume(input: InvocationPlan, result: AgentRunResult) {
+  // A completed invocation may already have side effects. A different CLI session ID is not permission to replay it.
+  if (input.operation || result.status === 'completed') return false;
   const expected = input.resume?.cliSessionId;
   if (!expected || result.status === 'cancelled') return false;
-  if (result.status === 'completed') return result.runtimeSession?.cliSessionId !== expected;
   return !['RUNTIME_OUTPUT_CONTRACT_VIOLATION', 'RUNTIME_INVOCATION_ERROR', 'RUNTIME_CANCELLED'].includes(
     result.error?.code ?? ''
   );

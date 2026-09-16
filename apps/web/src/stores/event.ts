@@ -33,6 +33,7 @@ const eventTypeToMessageType: Partial<Record<CollaborationEvent['type'], ChatMes
   task_started: 'task',
   task_waiting: 'task',
   task_completed: 'task',
+  task_failed: 'task',
   task_rejected: 'task',
   task_reworked: 'task',
   user_confirmation_requested: 'confirmation',
@@ -124,11 +125,12 @@ export function shouldRenderInTimeline(event: CollaborationEvent) {
   const unsafeVisibility = (event as unknown as { visibility?: unknown }).visibility
   if (event.type === 'runtime_failed' && payload.code === 'HUMAN_APPROVAL_REQUIRED') return false
   if (
-    event.type === 'task_rejected' &&
+    (event.type === 'task_rejected' || event.type === 'task_failed') &&
     typeof (payload as { resultSummary?: unknown }).resultSummary === 'string' &&
     (payload as { resultSummary: string }).resultSummary.includes('HUMAN_APPROVAL_REQUIRED')
   ) return false
   if (payload.phase === 'user_message_routing' && event.type.startsWith('runtime_')) return false
+  if (payload.code === 'RUNTIME_STOP_STATE_CHANGED') return false
   if (!shouldPublishRuntimeEventToCollaboration({
     type: event.type,
     visibility: unsafeVisibility ?? payload.visibility,
@@ -144,6 +146,38 @@ export function shouldRenderInTimeline(event: CollaborationEvent) {
     return !(payload as { internal?: boolean }).internal
   }
   return eventTypeToMessageType[event.type] !== undefined
+}
+
+function collapseLegacyStopReceipts(messages: ChatMessage[]): ChatMessage[] {
+  const collapsed: ChatMessage[] = []
+  for (const message of messages) {
+    const payload = message.payload as Record<string, unknown> | undefined
+    const code = payload?.code
+    const invocationId = payload?.runtimeInvocationId
+    const stopState = payload?.stopState
+    const previous = collapsed.at(-1)
+    const previousPayload = previous?.payload as Record<string, unknown> | undefined
+    const sameLegacyReceipt = code === 'RUNTIME_STOP_CONFIRMED' && typeof invocationId === 'string' &&
+      previousPayload?.code === code && previousPayload.runtimeInvocationId === invocationId &&
+      previousPayload.stopState === stopState
+    if (!previous || !sameLegacyReceipt) {
+      collapsed.push(message)
+      continue
+    }
+    const priorTimes = Array.isArray(previousPayload.collapsedStopReceiptTimes)
+      ? previousPayload.collapsedStopReceiptTimes.map(String)
+      : [previous.createdAt]
+    collapsed[collapsed.length - 1] = {
+      ...previous,
+      content: `${previous.content.replace(/（连续重复 \d+ 次）$/, '')}（连续重复 ${priorTimes.length + 1} 次）`,
+      payload: {
+        ...previousPayload,
+        collapsedStopReceiptCount: priorTimes.length + 1,
+        collapsedStopReceiptTimes: [...priorTimes, message.createdAt]
+      }
+    }
+  }
+  return collapsed
 }
 
 function discussionProgress(events: CollaborationEvent[]) {
@@ -176,7 +210,7 @@ function confirmationStatuses(events: CollaborationEvent[]) {
   for (const event of events) {
     if (event.type === 'user_confirmation_requested' || event.type === 'intent_clarification_required') {
       const payload = payloadOf<ConfirmationRequestedPayload & Record<string, unknown>>(event)
-      statuses.set(payload.confirmationId, 'pending')
+      if (!statuses.has(payload.confirmationId)) statuses.set(payload.confirmationId, 'pending')
       if (payload.relatedBriefId) {
         confirmationIdByBriefId.set(String(payload.relatedBriefId), payload.confirmationId)
       }
@@ -314,7 +348,7 @@ function statusFromEvent(event: CollaborationEvent): AgentCardState['status'] | 
     typeof payload.resultSummary === 'string' &&
     payload.resultSummary.includes('HUMAN_APPROVAL_REQUIRED')
   ) return 'waiting'
-  if (event.type === 'task_rejected') return 'failed'
+  if (event.type === 'task_rejected' || event.type === 'task_failed') return 'failed'
   if (event.type === 'runtime_failed') {
     if ('code' in payload && payload.code === 'HUMAN_APPROVAL_REQUIRED') return 'waiting'
     const kind = (payload as RuntimeEventPayload).termination?.kind
@@ -359,7 +393,7 @@ export const useEventStore = defineStore('event', {
     chatMessages: (state) => (sessionId: string): ChatMessage[] => {
       const events = state.eventsBySessionId[sessionId] ?? []
       const confirmationStatusById = confirmationStatuses(events)
-      return events.filter(shouldRenderInTimeline).map((event) => {
+      return collapseLegacyStopReceipts(events.filter(shouldRenderInTimeline).map((event) => {
         const payload = event.metadata.payload ?? {}
         const confirmationId =
           event.type === 'user_confirmation_requested' || event.type === 'intent_clarification_required'
@@ -379,7 +413,7 @@ export const useEventStore = defineStore('event', {
             ? { ...payload, status: confirmationStatusById.get(confirmationId) ?? 'pending' }
             : payload
         }
-      })
+      }))
     },
     agentCards: (state) => (sessionId: string, participantAgentIds?: string[]): AgentCardState[] => {
       const agentStore = useAgentStore()
@@ -542,9 +576,11 @@ export const useEventStore = defineStore('event', {
     },
     activeConfirmation: (state) => (sessionId: string): ConfirmationCardState | undefined => {
       let card: ConfirmationCardState | undefined
+      const finalStatuses = confirmationStatuses(state.eventsBySessionId[sessionId] ?? [])
       for (const event of state.eventsBySessionId[sessionId] ?? []) {
         if (event.type === 'user_confirmation_requested' || event.type === 'intent_clarification_required') {
           const payload = payloadOf<ConfirmationRequestedPayload & Record<string, unknown>>(event)
+          if (finalStatuses.get(payload.confirmationId) !== 'pending') continue
           card = {
             confirmationId: payload.confirmationId,
             reason: payload.reason,
