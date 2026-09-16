@@ -22,7 +22,7 @@
 
 ### 2.2
 
-拟增加独立 SessionLifecycle 记录或字段（active/deleting/deleted、generation、deleteRequestId、deletedAt、lastError）；不把这些业务生命周期直接混入模型任务状态枚举。墓碑在重启恢复、队列领取、缓存读取和所有结果提交入口共同检查。
+阶段 0 已冻结独立 CollaborationLifecycleSnapshot 与存储/迁移落点，见[主 Agent 协作合同](../contracts/main-agent-collaboration-contract-v1.md)。本阶段接入 active/deleting/deleted、generation、deleteRequestId、deletedAt 及阻塞明细；不把这些业务生命周期直接混入模型任务状态枚举。墓碑在重启恢复、队列领取、缓存读取和所有结果提交入口共同检查。阶段 0 仅有纯函数，持久化及入口校验仍是本阶段待实施项。
 
 ### 2.3
 
@@ -32,7 +32,7 @@
 
 ### 2.4
 
-删除入口保持幂等语义；响应区分 deleting/blocked/deleted 并返回同一 requestId，前端用快照+SSE 展示。实际 API schema 和 HTTP 状态在阶段 0 合同评审确定，不用 deleted:true 表示尚未停稳。
+删除入口保持幂等语义；响应区分 deleting/blocked/deleted 并返回同一 requestId，前端用快照+SSE 展示。HTTP 与事件语义遵守阶段 0 冻结合同第 9 节：进行中返回 202、已隐藏返回 200，恢复过期/不安全返回 409；blocked 为阻塞明细而非另一个生命周期状态，不用 deleted:true 表示尚未停稳。
 
 ### 2.5
 
