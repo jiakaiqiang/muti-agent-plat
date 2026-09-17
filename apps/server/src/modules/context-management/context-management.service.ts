@@ -7,6 +7,7 @@ import type {
   DecisionRecordKind,
   CollaborationEvent,
   IntentContextSnapshot,
+  IntentSnapshotMessageExcerpt,
   PendingConfirmationContext,
   IntentRoutingDecisionV2,
   IntentRoutingRecord,
@@ -20,6 +21,20 @@ import type { MemoryItem } from '@agent-cluster/shared';
 import { PersistenceService, type PersistedState } from '../persistence/persistence.service.js';
 
 type BySession<T> = Record<string, T[]>;
+
+/**
+ * Routing snapshot caps. The classifier never reads Session history directly, so these
+ * bounds are what keeps a routing request from growing with the number of past
+ * requirements or messages. Every snapshot reports them back in `bounds`.
+ */
+const SNAPSHOT_CANDIDATE_WORK_ITEM_LIMIT = 5;
+const SNAPSHOT_RECENT_MESSAGE_LIMIT = 8;
+const SNAPSHOT_MESSAGE_CHAR_LIMIT = 400;
+const SNAPSHOT_DIALOGUE_EVENT_TYPES = new Set<CollaborationEvent['type']>([
+  'user_message',
+  'agent_message',
+  'intent_clarification_required'
+]);
 
 export type CreateWorkItemInput = {
   session: SessionDetail;
@@ -114,6 +129,12 @@ export class ContextManagementService {
 
   listFollowUps(sessionId: string) {
     return this.collection<SessionFollowUpMessage>('followUpMessagesBySession')[sessionId] ?? [];
+  }
+
+  /** Reply targets are verified against durable Session events so a restart cannot reject a valid one. */
+  hasSessionEvent(sessionId: string, eventId: string) {
+    return (this.collection<CollaborationEvent>('eventsBySession')[sessionId] ?? [])
+      .some((event) => event.id === eventId);
   }
 
   buildWorkItemContextSlice(input: {
@@ -386,6 +407,8 @@ export class ContextManagementService {
     currentMessage: string;
     latestEventSeq: number;
     explicitWorkItemIds?: string[];
+    mentionedAgentIds?: string[];
+    replyToEventId?: string;
     pendingConfirmation?: string;
     pendingConfirmationContext?: PendingConfirmationContext;
     failureCheckpoint?: string;
@@ -394,12 +417,42 @@ export class ContextManagementService {
       const workItems = this.listWorkItems(input.session.id);
       const active = this.activeWorkItem(input.session);
       const explicit = (input.explicitWorkItemIds ?? []).map((id) => this.getWorkItem(input.session.id, id));
-      const candidates = uniqueById([
+      const ranked = uniqueById([
         ...explicit,
         ...(active ? [active] : []),
         ...workItems.filter((item) => ['WAITING_USER', 'FAILED'].includes(item.status)).reverse(),
         ...[...workItems].reverse()
-      ]).slice(0, 5);
+      ]);
+      const candidates = ranked.slice(0, SNAPSHOT_CANDIDATE_WORK_ITEM_LIMIT);
+      const sessionEvents = this.collection<CollaborationEvent>('eventsBySession')[input.session.id] ?? [];
+      const replyTarget = input.replyToEventId
+        ? sessionEvents.find((event) => event.id === input.replyToEventId)
+        : undefined;
+      if (input.replyToEventId && !replyTarget) {
+        throw new BadRequestException(
+          `REPLY_TARGET_OUTSIDE_SESSION: ${input.replyToEventId} does not belong to Session ${input.session.id}.`
+        );
+      }
+      const initialWorkItemId = workItems[0]?.id;
+      const allowLegacyUnscoped = !active || active.id === initialWorkItemId;
+      const relevantEvents = sessionEvents.filter((event) =>
+        SNAPSHOT_DIALOGUE_EVENT_TYPES.has(event.type) &&
+        (event.workItemId === active?.id || (allowLegacyUnscoped && !event.workItemId))
+      );
+      const recentRelevantMessages = relevantEvents
+        .slice(-SNAPSHOT_RECENT_MESSAGE_LIMIT)
+        .map(messageExcerpt);
+      const mentionedAgentIds = input.mentionedAgentIds?.length
+        ? [...new Set(input.mentionedAgentIds)]
+        : undefined;
+      const bounds = {
+        recentMessageLimit: SNAPSHOT_RECENT_MESSAGE_LIMIT,
+        messageCharLimit: SNAPSHOT_MESSAGE_CHAR_LIMIT,
+        candidateWorkItemLimit: SNAPSHOT_CANDIDATE_WORK_ITEM_LIMIT,
+        totalCandidateWorkItems: ranked.length,
+        omittedCandidateWorkItems: Math.max(0, ranked.length - candidates.length),
+        omittedRecentMessages: Math.max(0, relevantEvents.length - recentRelevantMessages.length)
+      };
       const activeDecisions = active ? this.validDecisions(input.session.id, active.id) : [];
       const revision = {
         sessionRevision: input.session.revision ?? 1,
@@ -416,6 +469,11 @@ export class ContextManagementService {
         activeWorkItemId: active?.id,
         activeWorkItem: active ? workItemSummary(active) : undefined,
         currentMessage: input.currentMessage,
+        mentionedAgentIds,
+        replyToEventId: replyTarget?.id,
+        replyToMessage: replyTarget ? messageExcerpt(replyTarget) : undefined,
+        recentRelevantMessages: recentRelevantMessages.length ? recentRelevantMessages : undefined,
+        bounds,
         pendingConfirmation: input.pendingConfirmation,
         pendingConfirmationContext: input.pendingConfirmationContext,
         validDecisionIds: activeDecisions.map((item) => item.id),
@@ -1026,6 +1084,19 @@ function isExecutionActive(session: SessionDetail) {
 
 function uniqueById<T extends { id: string }>(items: T[]) {
   return [...new Map(items.map((item) => [item.id, item])).values()];
+}
+
+/** Truncates one durable event into a bounded excerpt; the full payload never reaches the classifier. */
+function messageExcerpt(event: CollaborationEvent): IntentSnapshotMessageExcerpt {
+  const content = event.content ?? '';
+  const truncated = content.length > SNAPSHOT_MESSAGE_CHAR_LIMIT;
+  return {
+    eventId: event.id,
+    role: event.actor?.type === 'user' ? 'user' : event.fromAgentId ? 'agent' : 'system',
+    content: truncated ? content.slice(0, SNAPSHOT_MESSAGE_CHAR_LIMIT) : content,
+    ...(truncated ? { truncated: true } : {}),
+    createdAt: event.createdAt
+  };
 }
 
 function workItemSummary(item: WorkItem): Pick<WorkItem, 'id' | 'title' | 'goal' | 'status' | 'revision'> {

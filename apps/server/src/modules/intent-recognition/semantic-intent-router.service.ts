@@ -175,6 +175,25 @@ export class SemanticIntentRouterService {
       decision.selectedDecisionIds.every((id) => decisionIds.has(id)) &&
       decision.selectedArtifactIds.every((id) => artifactIds.has(id));
     if (!referencesValid) errors.push('REFERENCE_OUTSIDE_SNAPSHOT');
+    /**
+     * The user's @ targets are resolved server-side before classification. A classifier
+     * that returns a narrower set has dropped an explicit instruction, so the route stops
+     * for clarification instead of silently addressing fewer agents.
+     */
+    const mentioned = snapshot.mentionedAgentIds ?? [];
+    if (mentioned.length) {
+      const requested = new Set(decision.requestedAgentIds ?? []);
+      if (!mentioned.every((id) => requested.has(id))) errors.push('MENTION_TARGET_DROPPED');
+    }
+    /**
+     * Agent targeting follows the same rule as WorkItem selection: the classifier may only
+     * name identifiers the server already put in front of it. Adding a non-participant is a
+     * membership change, which belongs to an explicit join/selection confirmation.
+     */
+    const addressableAgentIds = new Set([...mentioned, ...(session.participatingAgentIds ?? [])]);
+    if ((decision.requestedAgentIds ?? []).some((id) => !addressableAgentIds.has(id))) {
+      errors.push('AGENT_TARGET_OUTSIDE_SNAPSHOT');
+    }
     const snapshotCurrent = this.context.isSnapshotCurrent(
       session,
       snapshot,
@@ -197,6 +216,8 @@ export class SemanticIntentRouterService {
       (transitionValid ? 0 : 0.25) -
       (decision.missingFields.length ? 0.25 : 0) -
       (decision.ambiguityReasons.length ? 0.25 : 0) -
+      (errors.includes('MENTION_TARGET_DROPPED') ? 0.3 : 0) -
+      (errors.includes('AGENT_TARGET_OUTSIDE_SNAPSHOT') ? 0.3 : 0) -
       (decision.riskLevel === 'high' && !deterministic ? 0.3 : 0) -
       (decision.requestedAction === 'confirm' || decision.requestedAction === 'reject' ? 0.4 : 0)
     ));
@@ -240,6 +261,8 @@ export class SemanticIntentRouterService {
       selectedWorkItemId: activeId,
       selectedDecisionIds: snapshot.validDecisionIds,
       selectedArtifactIds: [] as string[],
+      // The server resolved these targets, so an exact command keeps them without a model call.
+      requestedAgentIds: snapshot.mentionedAgentIds ?? [],
       goalSegments: [] as string[],
       missingFields: [] as string[],
       ambiguityReasons: [] as string[],
@@ -342,6 +365,10 @@ export class SemanticIntentRouterService {
         L5: {
           bullets: [
             `Current message: ${snapshot.currentMessage}`,
+            `Explicitly mentioned Agents (must all appear in requestedAgentIds): ${JSON.stringify(snapshot.mentionedAgentIds ?? [])}`,
+            `Reply target: ${JSON.stringify(snapshot.replyToMessage ?? snapshot.replyToEventId ?? null)}`,
+            `Recent relevant messages (bounded, oldest first): ${JSON.stringify(snapshot.recentRelevantMessages ?? [])}`,
+            `Snapshot bounds: ${JSON.stringify(snapshot.bounds ?? null)}`,
             `Active WorkItem: ${JSON.stringify(snapshot.activeWorkItem ?? null)}`,
             `Candidate WorkItems: ${JSON.stringify(snapshot.candidateWorkItems)}`,
             `Valid Decisions: ${JSON.stringify(snapshot.validDecisions)}`,
@@ -368,6 +395,7 @@ export class SemanticIntentRouterService {
       selectedWorkItemId: output.selectedWorkItemId ?? undefined,
       selectedDecisionIds: output.selectedDecisionIds,
       selectedArtifactIds: output.selectedArtifactIds,
+      requestedAgentIds: output.requestedAgentIds,
       goalSegments: output.goalSegments,
       missingFields: output.missingFields,
       ambiguityReasons: output.ambiguityReasons,

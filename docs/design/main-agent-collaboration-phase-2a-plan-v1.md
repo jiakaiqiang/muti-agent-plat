@@ -1,7 +1,7 @@
 # 阶段 2A：统一消息意图、需求隔离与完整 Token 预算 — Plan v1
 
 > 日期：2026-09-16
-> 状态：设计与实施基线，待实施；现有能力的复用不代表本阶段验收已完成。
+> 状态：实施中（2026-09-17）。设计与落点未变更；执行结果与证据见 Tasks/Checklist。
 > 依赖：阶段 0、1 通过；为 2B、2C、3 提供统一上下文入口。
 
 [总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-2a-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-2a-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-2a-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-2a-checklist-v1.md)

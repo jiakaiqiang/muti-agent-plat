@@ -27,6 +27,7 @@ export class MessageIngressService {
     handlingPlan: UserMessageHandlingPlan;
     routingMode: IntentRoutingRolloutMode;
     messageIdempotencyKey?: string;
+    replyToEventId?: string;
   }) {
     const mentionedAgentIds = [...new Set(input.mentionedAgentIds)].map((id) => {
       const agent = this.agents.getForSurface(id, 'mention');
@@ -38,6 +39,14 @@ export class MessageIngressService {
       }
       return agent.id;
     });
+    // A reply target is a user-stated routing fact, so it is resolved here rather
+    // than left for the classifier to guess, and it may never cross Sessions.
+    if (input.replyToEventId && !this.context.hasSessionEvent(input.session.id, input.replyToEventId)) {
+      throw new BadRequestException({
+        code: 'REPLY_TARGET_NOT_IN_SESSION',
+        message: `Reply target does not belong to this Session: ${input.replyToEventId}`
+      });
+    }
     const event = this.events.createDraft({
       sessionId: input.session.id,
       type: 'user_message',
@@ -50,7 +59,8 @@ export class MessageIngressService {
         ...createMetadata('chat_message', {
           text: input.content,
           mentionedAgentIds,
-          intentRoutingPending: true
+          intentRoutingPending: true,
+          ...(input.replyToEventId ? { replyToEventId: input.replyToEventId } : {})
         }),
         ...(input.messageIdempotencyKey ? { idempotencyKey: input.messageIdempotencyKey } : {})
       }
@@ -60,6 +70,7 @@ export class MessageIngressService {
       sourceEventId: event.id,
       content: input.content,
       mentionedAgentIds,
+      ...(input.replyToEventId ? { replyToEventId: input.replyToEventId } : {}),
       handlingPlan: input.handlingPlan,
       status: 'queued',
       queuedAt: nowIso()

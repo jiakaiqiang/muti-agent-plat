@@ -1,7 +1,7 @@
 # 阶段 0：合同收敛、现状基线与迁移边界 — Plan v1
 
 > 日期：2026-09-16
-> 状态：设计与实施基线，待实施；现有能力的复用不代表本阶段验收已完成。
+> 状态：阶段 0 已实现并验证；交付共享合同、纯校验、现状与迁移基线，不启用后续业务流程。
 > 依赖：无；作为所有阶段的入口。
 
 [总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-0-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-0-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-0-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-0-checklist-v1.md)
@@ -22,7 +22,7 @@
 
 ### 2.2
 
-身份链拟统一为 sessionId → workItemId → discussionId/delegationId 或 workflowRunId/taskId → operationId → invocationId，并关联 profileRevision、contextSnapshotId、generation。现有字段先复用；generation 表示会话/轮次写入资格，不用全局数据库 revision。
+身份链已通过 CollaborationExecutionIdentity 冻结为 sessionId → workItemId → discussionId/delegationId 或 workflowRunId/taskId → operationId → invocationId，并关联 profileRevision、contextSnapshotId、generation。现有字段先复用；generation 表示会话/轮次写入资格，不用全局数据库 revision。intent 与 summary 分支分别使用 routingId/checkpointKey，避免假造工作流身份。
 
 ### 2.3
 
@@ -50,10 +50,10 @@
 
 ## 4. 数据与接口影响
 
-- 拟新增/扩展字段统一登记：会话生命周期与 generation、讨论/委派 ID、文档版本与内容 hash、确认绑定、上下文依赖版本、缓存用量。字段名为设计候选，阶段入口完成正式共享合同。
+- 新增共享字段和后续存储/接口落点已登记于[冻结合同](../contracts/main-agent-collaboration-contract-v1.md)：会话生命周期与 generation、讨论/委派 ID、文档版本与内容 hash、确认绑定和策略参数；上下文依赖版本、缓存用量的领域接入仍归后续阶段。
 - API 继续基于现有 Sessions/Workflow 入口；新增操作必须在 API、event、data、runtime、UI-state 合同同步，未知事件安全忽略，未知执行状态不可默认为允许。
 
-拟新增类型、状态和接口均为设计项，不是当前可调用 API。涉及持久化时，实施必须同步 shared、API/event/data/runtime/UI-state 合同、PostgreSQL projection/迁移和 file backend，不能只加内存 Map。
+共享类型与纯校验已实现并由 index 导出；HTTP、事件联合类型、存储和业务服务接入仍为 deferred，不是当前可调用 API。涉及持久化时，实施必须同步 shared、API/event/data/runtime/UI-state 合同、PostgreSQL projection/迁移和 file backend，不能只加内存 Map。
 
 ## 5. 修改边界
 
@@ -78,4 +78,12 @@
 
 回退：本阶段默认无行为切换；合同版本评审未通过时只回退设计，保留已采集基线。将来涉及 schema 的回退必须先验证旧代码能读取新数据。
 
-产品交互按总计划已沟通边界执行。模型预算、并发、缓存容量与 TTL 等环境参数不在文档中冒充现有配置；在阶段 0 冻结配置合同、相关阶段实现前记录有效值和验证依据。新增破坏性维护/外部服务采购/发布需单独确认，不影响本轮生成设计文档。
+产品交互按总计划已沟通边界执行。模型预算、并发、缓存容量与 TTL 等环境参数不在文档中冒充现有配置；CollaborationPolicySnapshot 已冻结基本有限参数结构，相关阶段接入前记录有效值和验证依据。新增破坏性维护/外部服务采购/发布需单独确认；本阶段没有部署或数据迁移。
+
+## 8. 实际落点与交接
+
+- 新增 `packages/shared/src/collaboration-contracts.ts` 及 15 项合同测试，增量导出，不改既有必填 Session/Invocation 结构。
+- 新增 `tests/harness-engineering/main-agent-collaboration-phase0.spec.mjs`，6 项合同文档/追踪检查接入根 `test:harness`。
+- API/data/event/runtime/UI-state/relational 合同索引同步，阶段 1 计划引用冻结的生命周期/HTTP 语义。
+- 新增[现状与迁移基线](../implementation/main-agent-collaboration-phase-0-baseline-v1.md)；未修改服务端执行逻辑、Web/桌面 UI 或数据库 schema。
+- 测试与回退未执行范围统一见 [Checklist](../quality/main-agent-collaboration-phase-0-checklist-v1.md)。

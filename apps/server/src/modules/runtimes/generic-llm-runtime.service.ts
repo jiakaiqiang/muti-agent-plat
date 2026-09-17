@@ -12,6 +12,8 @@ import type {
   RuntimeArtifactOutput,
   RuntimeContextRequest,
   RuntimeOutput,
+  RuntimeTokenEstimationBreakdown,
+  RuntimeTokenEstimationDiagnostic,
   RuntimeUsage,
   TaskAcceptanceDecisionOutput,
   UserMessageHandlingPlanOutput
@@ -21,6 +23,7 @@ import { buildStructuredOutputInstructions, modelProviderSupportsRuntime } from 
 import {
   genericLlmMockFallbackEnabled,
   llmDiagnosticPreviewChars,
+  llmInputSafetyMarginRatio,
   llmLocalMaxOutputTokens,
   llmLocalNumCtx,
   llmMaxRetries,
@@ -31,6 +34,7 @@ import {
   llmTimeoutMs
 } from '../../common/runtime-config.js';
 import { nowIso } from '../../common/time.js';
+import { estimateTokens, inputTokenEstimationDrift, reserveInputTokenSafetyMargin } from '../../common/token.js';
 import { promiseHandle } from './promise-run-handle.js';
 import { withStructuredTermination } from './structured-termination-run-handle.js';
 import { MockRuntimeService } from './mock-runtime.service.js';
@@ -120,6 +124,9 @@ type HttpRuntimeError = {
   retryable: boolean;
   details: Record<string, unknown>;
 };
+
+/** Share of the output budget reserved for reasoning + JSON before every input check. */
+const TOOL_LOOP_OUTPUT_RESERVATION_RATIO = 0.5;
 
 @Injectable()
 export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
@@ -215,25 +222,58 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
 
     const missingConfig = this.missingConfig(selectedConnection);
     if (missingConfig.length) {
-      return this.withTokenEstimationDiagnostic(input, this.failedResult(
+      return this.failedResult(
         input,
         startedAt,
         selectedConnection.model,
         `通用大模型未配置（缺少 ${missingConfig.join('、')}），本次执行已中止而不会回退到模拟运行时。请在 .env 设置 LLM_PROVIDER/LLM_MODEL/LLM_API_KEY/LLM_BASE_URL，或在运行时模型管理中添加并选择可用模型；如需本地演示模式，请显式设置 LLM_MOCK_FALLBACK=true。`,
         'CAPABILITY_BLOCKED'
-      ));
+      );
     }
 
     const hasTools = input.toolCatalog.tools.length > 0;
     if (hasTools && this.workspaceBindings.resolveServerRoot(input)) {
-      return this.withTokenEstimationDiagnostic(input, await this.runWithToolLoop(input, selectedConnection, signal));
+      try {
+        return await this.runWithToolLoop(input, selectedConnection, signal);
+      } catch (error) {
+        const guard = (error as { budgetGuard?: { code: string; round: number; estimator: string;
+          estimatedInputTokens: number; effectiveMaxInputTokens: number; maxInputTokens?: number;
+          safetyMarginTokens: number; outputReservationTokens: number;
+          tokenEstimation?: RuntimeTokenEstimationDiagnostic } }).budgetGuard;
+        if (!guard) throw error;
+        return this.withTokenEstimationDiagnostic(this.failedResult(
+          input,
+          startedAt,
+          selectedConnection.model,
+          `输入预算不足以完成本轮工具循环（估算 ${guard.estimatedInputTokens} tokens，有效上限 ${guard.effectiveMaxInputTokens}，含安全余量 ${guard.safetyMarginTokens} 与输出/推理保留 ${guard.outputReservationTokens}）。请缩减补读范围或拆分任务后再试。`,
+          guard.code as RuntimeError['code'],
+          {
+            estimator: guard.estimator,
+            round: guard.round,
+            estimatedInputTokens: guard.estimatedInputTokens,
+            effectiveMaxInputTokens: guard.effectiveMaxInputTokens,
+            maxInputTokens: guard.maxInputTokens,
+            safetyMarginTokens: guard.safetyMarginTokens,
+            outputReservationTokens: guard.outputReservationTokens,
+            retryable: false
+          }
+        ), guard.tokenEstimation);
+      }
     }
 
-    return this.withTokenEstimationDiagnostic(input, await this.runOpenAiCompatible(input, selectedConnection, signal));
+    return this.runOpenAiCompatible(input, selectedConnection, signal);
   }
 
-  private withTokenEstimationDiagnostic(input: InvocationPlan, result: AgentRunResult): AgentRunResult {
-    return result;
+  /**
+   * Single place where the request-budget diagnostic is wired onto the result
+   * contract. Absent diagnostics stay absent so an unknown budget is never
+   * reported as a measured one.
+   */
+  private withTokenEstimationDiagnostic(
+    result: AgentRunResult,
+    estimation?: RuntimeTokenEstimationDiagnostic
+  ): AgentRunResult {
+    return estimation ? { ...result, tokenEstimation: estimation } : result;
   }
 
   private connectionCompatibilityError(connection: RuntimeModelConnection): string | undefined {
@@ -661,6 +701,83 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       { role: 'user', content: contextPayload }
     ];
 
+    /**
+     * Input budget guard: the platform cannot tokenise the upstream payload exactly, so it
+     * counts with the declared estimator, reserves the configured safety margin plus an
+     * output/reasoning allowance, and re-checks before every round — a tool result that
+     * pushes the conversation over the cap fails with a clear capacity code instead of a
+     * provider-side truncation.
+     */
+    const safetyMargin = reserveInputTokenSafetyMargin(input.budget.maxInputTokens, llmInputSafetyMarginRatio());
+    const effectiveInputCap = safetyMargin.effectiveMaxInputTokens;
+    const outputReservationTokens = Math.ceil(
+      (input.budget.maxOutputTokens ?? 0) * TOOL_LOOP_OUTPUT_RESERVATION_RATIO
+    );
+
+    /**
+     * Fixed surfaces are attributed once; tool history grows per round, so it is
+     * measured from the accumulated turns on every check.
+     */
+    const breakdownBase: Omit<RuntimeTokenEstimationBreakdown, 'toolHistoryTokens'> = {
+      systemPromptTokens: estimateTokens(baseSystemPrompt),
+      toolDefinitionTokens: estimateTokens(input.toolCatalog),
+      contextEnvelopeTokens: estimateTokens(input.contextEnvelope),
+      expectedOutputTokens: estimateTokens(input.expectedOutput)
+    };
+    const toolHistoryMessages: Array<{ role: string; content: string }> = [];
+    let countedRounds = 0;
+    let estimatedInputTokensTotal = 0;
+    let actualInputTokens = 0;
+    let countedToolHistoryTokens = 0;
+
+    const buildTokenEstimation = (): RuntimeTokenEstimationDiagnostic => {
+      const drift = inputTokenEstimationDrift(estimatedInputTokensTotal, actualInputTokens);
+      return {
+        estimator: 'chars/4',
+        estimatedInputTokens: estimatedInputTokensTotal,
+        actualInputTokens,
+        ...(drift ? { drift } : {}),
+        outputReservationTokens,
+        safetyMarginTokens: safetyMargin.safetyMarginTokens,
+        ...(input.budget.maxInputTokens === undefined ? {} : { maxInputTokens: input.budget.maxInputTokens }),
+        ...(effectiveInputCap === undefined ? {} : { effectiveMaxInputTokens: effectiveInputCap }),
+        rounds: countedRounds,
+        breakdown: { ...breakdownBase, toolHistoryTokens: countedToolHistoryTokens }
+      };
+    };
+
+    /**
+     * The comparison the cap uses includes the output/reasoning reservation,
+     * but `estimatedInputTokens` must stay input-only so it stays comparable to
+     * the provider's reported input usage — otherwise the recorded error is
+     * inflated by a reservation the provider never charges as input.
+     */
+    const assertWithinInputBudget = (round: number) => {
+      const estimatedInputTokens = estimateTokens({ messages });
+      const comparedInputTokens = estimatedInputTokens + outputReservationTokens;
+      countedToolHistoryTokens = toolHistoryMessages.length ? estimateTokens(toolHistoryMessages) : 0;
+      countedRounds += 1;
+      estimatedInputTokensTotal += estimatedInputTokens;
+      if (!effectiveInputCap) return;
+      if (comparedInputTokens <= effectiveInputCap) return;
+      throw Object.assign(new Error(
+        `Estimated input tokens ${comparedInputTokens} exceed effective budget ${effectiveInputCap} (configured ${input.budget.maxInputTokens}).`
+      ), {
+        budgetGuard: {
+          code: 'TOKEN_BUDGET_EXCEEDED',
+          round,
+          estimator: 'chars/4',
+          estimatedInputTokens: comparedInputTokens,
+          effectiveMaxInputTokens: effectiveInputCap,
+          maxInputTokens: input.budget.maxInputTokens,
+          safetyMarginTokens: safetyMargin.safetyMarginTokens,
+          outputReservationTokens,
+          tokenEstimation: buildTokenEstimation()
+        }
+      });
+    };
+    assertWithinInputBudget(0);
+
     for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
       if (signal?.aborted) {
         return this.failedResult(
@@ -767,6 +884,9 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
               : await this.parseJsonResponse(response, 'Tool-loop LLM request');
           const body = this.asResponseBody(rawBody);
           rawResponse = this.extractTextFromBody(body);
+          // Provider-reported usage is the only measurement the estimate can be
+          // checked against, so accumulate it instead of discarding it.
+          actualInputTokens += this.toUsage(body.usage, selectedModel).inputTokens;
           break;
         } catch (error) {
           const isAbort = error instanceof Error && (error.name === 'AbortError' || Boolean(signal?.aborted));
@@ -880,11 +1000,12 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           ],
           artifacts: output.kind === 'task_execution_result' ? output.changedArtifacts : [],
           systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+          tokenEstimation: buildTokenEstimation(),
           usage: {
             model: selectedModel,
-            inputTokens: 0,
+            inputTokens: actualInputTokens,
             outputTokens: 0,
-            totalTokens: 0
+            totalTokens: actualInputTokens
           }
         };
       }
@@ -943,6 +1064,12 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
 
       messages.push({ role: 'assistant', content: rawResponse });
       messages.push({ role: 'user', content: toolResults.join('\n\n') });
+      // Tracked separately so the tool turns are attributed to their own surface
+      // instead of being folded into the system prompt.
+      toolHistoryMessages.push({ role: 'assistant', content: rawResponse });
+      toolHistoryMessages.push({ role: 'user', content: toolResults.join('\n\n') });
+      // Re-count after the tool history grows; the next provider call includes both turns.
+      assertWithinInputBudget(round + 1);
     }
 
     return this.failedResult(

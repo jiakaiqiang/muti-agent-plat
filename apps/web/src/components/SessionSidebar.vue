@@ -39,6 +39,7 @@ const emit = defineEmits<{
   select: [sessionId: string]
   create: []
   delete: [sessionId: string]
+  restore: [sessionId: string]
   toggleFavorite: [sessionId: string]
 }>()
 
@@ -52,6 +53,8 @@ const deletingIds = computed(() => new Set(props.deletingSessionIds))
 const filteredSessions = computed(() => {
   const query = search.value.trim().toLowerCase()
   return props.sessions.filter((session) => {
+    const deleted = session.lifecycleState === 'deleted'
+    if (activeTab.value === 'deleted' ? !deleted : deleted) return false
     if (activeTab.value === 'favorites' && !favoriteIds.value.has(session.id)) return false
     if (query && !`${session.title} ${session.latestEventSummary ?? ''}`.toLowerCase().includes(query)) return false
     return true
@@ -82,6 +85,11 @@ function deleteSession(sessionId: string) {
   closeContextMenu()
 }
 
+function restoreSession(sessionId: string) {
+  emit('restore', sessionId)
+  closeContextMenu()
+}
+
 function isFavorite(sessionId: string) {
   return favoriteIds.value.has(sessionId)
 }
@@ -92,6 +100,12 @@ function isDeletingSession(sessionId: string) {
 
 function sessionStatus(status: SessionStatus) {
   return sessionStatusPresentation[status]
+}
+
+function lifecycleLabel(session: SessionListItem) {
+  if (session.lifecycleState === 'deleting') return '删除中'
+  if (session.lifecycleState === 'deleted') return '已删除'
+  return sessionStatus(session.status).label
 }
 
 function handleGlobalPointerDown(event: PointerEvent) {
@@ -133,6 +147,7 @@ onBeforeUnmount(() => {
       <button type="button" :class="{ active: activeTab === 'all' }" @click="activeTab = 'all'">全部</button>
       <button type="button" :class="{ active: activeTab === 'mine' }" @click="activeTab = 'mine'">我创建的</button>
       <button type="button" :class="{ active: activeTab === 'favorites' }" @click="activeTab = 'favorites'">收藏</button>
+      <button type="button" :class="{ active: activeTab === 'deleted' }" @click="activeTab = 'deleted'">已删除</button>
     </div>
 
     <article
@@ -140,17 +155,17 @@ onBeforeUnmount(() => {
       :key="session.id"
       class="session-list-item"
       :class="{ active: session.id === currentSessionId, favorite: isFavorite(session.id) }"
-      @click="emit('select', session.id)"
+      @click="session.lifecycleState !== 'deleted' && emit('select', session.id)"
       @contextmenu="openContextMenu($event, session.id)"
     >
       <span class="session-avatar">
         <AgentPortrait :tone="(index % 5) + 1" :label="session.title" size="md" />
         <span
           :class="['session-status-badge', `status-${sessionStatus(session.status).tone}`]"
-          :aria-label="`会话状态：${sessionStatus(session.status).label}`"
-          :title="sessionStatus(session.status).label"
+          :aria-label="`会话状态：${lifecycleLabel(session)}`"
+          :title="lifecycleLabel(session)"
         >
-          {{ sessionStatus(session.status).label }}
+          {{ lifecycleLabel(session) }}
         </span>
       </span>
       <span class="session-item-main">
@@ -159,11 +174,11 @@ onBeforeUnmount(() => {
       <button
         class="session-delete-button"
         type="button"
-        title="删除会话"
+        :title="session.lifecycleState === 'deleted' ? '恢复会话' : '删除会话'"
         :disabled="isDeletingSession(session.id)"
-        @click.stop="deleteSession(session.id)"
+        @click.stop="session.lifecycleState === 'deleted' ? restoreSession(session.id) : deleteSession(session.id)"
       >
-        <UiIcon name="trash" :size="16" />
+        <UiIcon :name="session.lifecycleState === 'deleted' ? 'refresh-cw' : 'trash'" :size="16" />
       </button>
     </article>
 
@@ -179,7 +194,7 @@ onBeforeUnmount(() => {
           <UiIcon name="sparkles" :size="15" />
           {{ isFavorite(contextMenu.sessionId) ? '取消收藏' : '收藏会话' }}
         </button>
-        <button
+        <button v-if="props.sessions.find(item => item.id === contextMenu?.sessionId)?.lifecycleState !== 'deleted'"
           type="button"
           class="danger"
           :disabled="isDeletingSession(contextMenu.sessionId)"
@@ -187,6 +202,10 @@ onBeforeUnmount(() => {
         >
           <UiIcon name="trash" :size="15" />
           删除会话
+        </button>
+        <button v-else type="button" @click="restoreSession(contextMenu.sessionId)">
+          <UiIcon name="refresh-cw" :size="15" />
+          恢复会话
         </button>
       </div>
     </teleport>

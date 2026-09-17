@@ -93,9 +93,11 @@
 ```powershell
 node node_modules/tsx/dist/cli.mjs --test packages/shared/src/collaboration-contracts.spec.ts
 npm run test -w @agent-cluster/shared
-node node_modules/tsx/dist/cli.mjs --tsconfig apps/server/tsconfig.json --test apps/server/src/modules/agents/system-agent-runtime-policy.service.spec.ts apps/server/src/modules/intent-recognition/deterministic-command-guard.service.spec.ts apps/server/src/modules/intent-recognition/semantic-intent-router.service.spec.ts apps/server/src/modules/context-management/context-management.service.spec.ts apps/server/src/modules/runtimes/logical-operation-store.spec.ts apps/server/src/modules/persistence/persistence-scoped-mutation.spec.ts
+node node_modules/tsx/dist/cli.mjs --tsconfig apps/server/tsconfig.json --test apps/server/src/modules/agents/system-agent-runtime-policy.service.spec.ts apps/server/src/modules/intent-recognition/deterministic-command-guard.service.spec.ts apps/server/src/modules/intent-recognition/semantic-intent-router.service.spec.ts apps/server/src/modules/context-management/context-management.service.spec.ts apps/server/src/modules/runtimes/logical-operation-store.spec.ts apps/server/src/modules/persistence/persistence-scoped-mutation.spec.ts apps/server/src/modules/sessions/sessions.controller.stop-state.spec.ts apps/server/src/modules/runtimes/runtime-stop-event.spec.ts
 npm run typecheck
 npm run test:harness:main-agent-phase0
+npm run test:harness
+npm run build -w @agent-cluster/shared
 ```
 
 具体数量与执行结果在阶段 0 Checklist 登记；旧专项通过证据只作为背景，不替代本轮输出。

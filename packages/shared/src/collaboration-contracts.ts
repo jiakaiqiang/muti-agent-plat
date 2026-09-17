@@ -90,6 +90,24 @@ export type CollaborationLifecycleSnapshot = {
   stopStatus: RuntimeStopSummary['status'];
   deleteRequestId?: UUID;
   deletedAt?: ISODateTime;
+  lastRestoreRequestId?: UUID;
+  restoredAt?: ISODateTime;
+};
+
+export type SessionLifecycleView = {
+  lifecycle: CollaborationLifecycleSnapshot;
+  stopSummary: RuntimeStopSummary;
+  blockers: RuntimeStopSummary['blockers'];
+};
+
+export type DeleteSessionLifecycleResult = SessionLifecycleView & {
+  sessionId: UUID;
+  deleted: boolean;
+};
+
+export type RestoreSessionLifecycleInput = {
+  requestId: UUID;
+  expectedGeneration: number;
 };
 
 export type CollaborationContractGate = {
@@ -188,7 +206,9 @@ export function evaluateCollaborationAdmission(value: unknown, reader: {
     typeof value.stopStatus !== 'string' || !['idle', 'requested', 'waiting', 'confirmed', 'unknown'].includes(value.stopStatus) ||
     (value.state !== 'active' && value.admission !== 'closed') ||
     (value.deleteRequestId !== undefined && !nonEmpty(value.deleteRequestId)) ||
-    (value.deletedAt !== undefined && !validTimestamp(value.deletedAt))) return deny('invalid_snapshot');
+    (value.deletedAt !== undefined && !validTimestamp(value.deletedAt)) ||
+    (value.lastRestoreRequestId !== undefined && !nonEmpty(value.lastRestoreRequestId)) ||
+    (value.restoredAt !== undefined && !validTimestamp(value.restoredAt))) return deny('invalid_snapshot');
   if (value.sessionId !== reader.sessionId || value.dataEpoch !== reader.dataEpoch) return deny('scope_mismatch');
   if (value.generation !== reader.generation) return deny('stale_generation');
   if (value.state !== 'active') return deny('lifecycle_closed');

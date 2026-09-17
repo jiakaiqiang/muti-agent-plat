@@ -3,6 +3,11 @@ import { phaseTimeoutMs } from '../../common/runtime-config.js';
 import type { PersistenceService, PersistedState } from '../persistence/persistence.service.js';
 import { SESSION_STOP_REQUESTS_COLLECTION, type StopRequestsBySession } from './session-stop-state-store.js';
 import { appendRuntimeStopStateEvent } from './runtime-stop-event.js';
+import {
+  SESSION_LIFECYCLES_COLLECTION,
+  type SessionLifecyclesBySession,
+  syncLifecycleStopStatus
+} from './session-lifecycle-store.js';
 
 const collection = 'logicalOperationsBySession';
 type Operations = Record<string, LogicalOperation[]>;
@@ -30,16 +35,37 @@ export class LogicalOperationStore {
     return this.persistence.getCollection<Operations>(collection, this.cache)[sessionId] ?? [];
   }
 
+  findResumable(sessionId: string, scopeKey: string) {
+    const lifecycle = this.persistence.getCollection<SessionLifecyclesBySession>(SESSION_LIFECYCLES_COLLECTION, {})[sessionId];
+    if (lifecycle && (lifecycle.state !== 'active' || lifecycle.admission !== 'open')) return undefined;
+    return this.list(sessionId).find(item => item.status === 'paused' && item.scopeKey === scopeKey &&
+      (!lifecycle || item.sessionGeneration === lifecycle.generation));
+  }
+
   begin(input: { id: string; sessionId: string; taskId?: string; phase: AgentRunPhase; parentId?: string; previousId?: string; scopeKey?: string }) {
-    return this.mutate(input.sessionId, operations => {
-      const existing = operations.find(item => item.id === input.id);
+    return this.mutateStopAware(input.sessionId, (operations, _requests, draft) => {
+      const lifecycle = ((draft[SESSION_LIFECYCLES_COLLECTION] ?? {}) as SessionLifecyclesBySession)[input.sessionId];
+      if (lifecycle && (lifecycle.state !== 'active' || lifecycle.admission !== 'open')) {
+        throw new Error('SESSION_ADMISSION_CLOSED');
+      }
+      const id = lifecycle && operations.some(item =>
+        item.id === input.id && item.sessionGeneration !== lifecycle.generation)
+        ? generationOperationId(input.id, lifecycle.generation)
+        : input.id;
+      const existing = operations.find(item => item.id === id);
       if (existing) return structuredClone(existing);
       const policy = operationPolicy(input.phase);
       const now = this.now();
-      const parent = input.parentId ? operations.find(item => item.id === input.parentId) : undefined;
+      const parentId = input.parentId && lifecycle && operations.some(item =>
+        item.id === input.parentId && item.sessionGeneration !== lifecycle.generation)
+        ? generationOperationId(input.parentId, lifecycle.generation)
+        : input.parentId;
+      const parent = parentId ? operations.find(item => item.id === parentId) : undefined;
       if (input.parentId && !parent) throw new Error('OPERATION_PARENT_MISSING');
       const deadline = Math.min(now + policy.timeoutMs, parent ? Date.parse(parent.deadlineAt) : Infinity);
-      const operation: LogicalOperation = { ...input, policyVersion: policy.policyVersion, status: 'ready',
+      const operation: LogicalOperation = { ...input, id, ...(parentId ? { parentId } : {}),
+        ...(lifecycle ? { sessionGeneration: lifecycle.generation } : {}),
+        policyVersion: policy.policyVersion, status: 'ready',
         deadlineAt: new Date(deadline).toISOString(), remainingActiveMs: Math.max(0, deadline - now),
         maxAttempts: policy.maxAttempts, attemptsUsed: 0, stopState: 'none', invocationIds: [],
         diagnostics: policy.diagnostics, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString() };
@@ -54,6 +80,11 @@ export class LogicalOperationStore {
       const session = Array.isArray(draft.sessions)
         ? (draft.sessions as Array<{ id?: string; status?: string }>).find(item => item.id === sessionId)
         : undefined;
+      const lifecycle = ((draft[SESSION_LIFECYCLES_COLLECTION] ?? {}) as SessionLifecyclesBySession)[sessionId];
+      if (lifecycle && (lifecycle.state !== 'active' || lifecycle.admission !== 'open' ||
+        operationGenerationMismatch(operations, operationId, lifecycle.generation))) {
+        throw new Error('SESSION_ADMISSION_CLOSED');
+      }
       if (session?.status && STOPPED_SESSION_STATUSES.has(session.status)) {
         throw new Error('OPERATION_STOP_UNCONFIRMED');
       }
@@ -100,13 +131,17 @@ export class LogicalOperationStore {
       const request = requests.at(-1);
       const changed = updateStopTarget(request, invocationId, stopState === 'confirmed' ? 'confirmed' : 'unknown',
         this.now(), stopState === 'confirmed' ? 'adapter_result' : undefined);
+      if (request) syncLifecycleStopStatus(draft, sessionId, request.status);
       return changed && request ? appendRuntimeStopStateEvent(draft, request) : undefined;
     });
   }
 
   resume(sessionId: string, operationId: string) {
-    return this.mutate(sessionId, operations => {
+    return this.mutateStopAware(sessionId, (operations, _requests, draft) => {
       const operation = this.require(operations, operationId);
+      const lifecycle = ((draft[SESSION_LIFECYCLES_COLLECTION] ?? {}) as SessionLifecyclesBySession)[sessionId];
+      if (lifecycle && (lifecycle.state !== 'active' || lifecycle.admission !== 'open' ||
+        operation.sessionGeneration !== lifecycle.generation)) throw new Error('SESSION_ADMISSION_CLOSED');
       if (operation.status !== 'paused') throw new Error('OPERATION_NOT_PAUSED');
       if (operation.stopState !== 'confirmed' || operation.activeInvocationId) throw new Error('OPERATION_STOP_UNCONFIRMED');
       if (operation.remainingActiveMs <= 0 || operation.attemptsUsed >= operation.maxAttempts) throw new Error('OPERATION_BUDGET_EXHAUSTED');
@@ -125,8 +160,11 @@ export class LogicalOperationStore {
   }
 
   reserveCorrection(sessionId: string, operationId: string) {
-    return this.mutate(sessionId, operations => {
+    return this.mutateStopAware(sessionId, (operations, _requests, draft) => {
       const operation = this.require(operations, operationId);
+      const lifecycle = ((draft[SESSION_LIFECYCLES_COLLECTION] ?? {}) as SessionLifecyclesBySession)[sessionId];
+      if (lifecycle && (lifecycle.state !== 'active' || lifecycle.admission !== 'open' ||
+        operation.sessionGeneration !== lifecycle.generation)) throw new Error('SESSION_ADMISSION_CLOSED');
       if ((operation.correctionsUsed ?? 0) >= 1 || Date.parse(operation.deadlineAt) <= this.now()) return false;
       operation.correctionsUsed = 1;
       return true;
@@ -141,7 +179,8 @@ export class LogicalOperationStore {
     // Resolve and settle against the same locked snapshot, including after a
     // server restart. A duplicate receipt cannot confirm a newer invocation.
     let committed: Operations | undefined;
-    const receipt = await this.persistence.mutateCollections([collection, SESSION_STOP_REQUESTS_COLLECTION, 'eventsBySession', 'eventOutbox'], draft => {
+    const receipt = await this.persistence.mutateCollections([SESSION_LIFECYCLES_COLLECTION, collection,
+      SESSION_STOP_REQUESTS_COLLECTION, 'eventsBySession', 'eventOutbox'], draft => {
       const all = (draft[collection] ??= {}) as Operations;
       const stopRequests = (draft[SESSION_STOP_REQUESTS_COLLECTION] ??= {}) as StopRequestsBySession;
       const candidates = Object.values(all).flat().filter(item => item.invocationIds.includes(invocationId) &&
@@ -171,6 +210,7 @@ export class LogicalOperationStore {
       }
       const request = stopRequests[operation.sessionId]?.at(-1);
       const changed = updateStopTarget(request, invocationId, 'confirmed', this.now(), 'transport_receipt');
+      if (request) syncLifecycleStopStatus(draft, operation.sessionId, request.status);
       committed = structuredClone(all);
       return { confirmed: true, alreadyConfirmed, stopConfirmed, sessionId: operation.sessionId,
         operationId: operation.id, stopRequestId: request?.id, version: request?.version,
@@ -215,7 +255,8 @@ export class LogicalOperationStore {
     const run = async () => {
       let committed: Operations | undefined;
       const result = await this.persistence.mutateCollections(
-        ['sessions', collection, SESSION_STOP_REQUESTS_COLLECTION, 'eventsBySession', 'eventOutbox'],
+        ['sessions', SESSION_LIFECYCLES_COLLECTION, collection, SESSION_STOP_REQUESTS_COLLECTION,
+          'eventsBySession', 'eventOutbox'],
         (draft: PersistedState) => {
           const all = (draft[collection] ??= {}) as Operations;
           const stopRequests = (draft[SESSION_STOP_REQUESTS_COLLECTION] ??= {}) as StopRequestsBySession;
@@ -231,6 +272,10 @@ export class LogicalOperationStore {
     this.pending = result.then(() => undefined, () => undefined);
     return result;
   }
+}
+
+function generationOperationId(baseId: string, generation: number) {
+  return `${baseId}:generation:${generation}`;
 }
 
 function updateStopTarget(
@@ -251,4 +296,9 @@ function updateStopTarget(
   request.status = request.targets.every(item => item.state === 'confirmed') ? 'confirmed' : 'waiting';
   request.updatedAt = timestamp;
   return true;
+}
+
+function operationGenerationMismatch(operations: LogicalOperation[], operationId: string, generation: number) {
+  const operation = operations.find(item => item.id === operationId);
+  return operation?.sessionGeneration !== undefined && operation.sessionGeneration !== generation;
 }

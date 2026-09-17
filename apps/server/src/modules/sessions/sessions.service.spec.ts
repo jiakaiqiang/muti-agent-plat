@@ -16,14 +16,14 @@ test('failed brief resumes at generation, consumes its confirmation once and rej
   service.resumeExecution = () => { executions++; };
   service.failSession(session, new Error('PERSISTENCE_REVISION_CONFLICT'), 'brief_generation');
   const confirmationId = session.activeRecoveryCheckpoint!.confirmationId;
-  fixture.service.resume(session.id, 'retry', confirmationId);
-  fixture.service.resume(session.id, 'duplicate', confirmationId);
-  fixture.service.resume(session.id);
+  await fixture.service.resume(session.id, 'retry', confirmationId);
+  await fixture.service.resume(session.id, 'duplicate', confirmationId);
+  await fixture.service.resume(session.id);
   assert.equal(session.status, 'AGENT_DISCUSSING');
   assert.equal(generations, 1);
   assert.equal(executions, 0);
   service.failSession(session, new Error('new failure'), 'brief_generation');
-  assert.throws(() => fixture.service.resume(session.id, 'old card', confirmationId), /已过期/);
+  await assert.rejects(fixture.service.resume(session.id, 'old card', confirmationId), /已过期/);
   assert.equal(session.status, 'FAILED');
   assert.equal(generations, 1);
 });
@@ -39,11 +39,11 @@ test('failed task with a brief resumes execution while an unconfirmed stop remai
   service.failSession(session, new Error('task failed'), 'task_execution');
   const confirmationId = session.activeRecoveryCheckpoint!.confirmationId;
   service.runtime = { hasUnconfirmedStops: () => true };
-  assert.throws(() => fixture.service.resume(session.id, 'retry', confirmationId), /停止状态尚未确认/);
+  await assert.rejects(fixture.service.resume(session.id, 'retry', confirmationId), /停止状态尚未确认/);
   assert.equal(session.activeRecoveryCheckpoint!.confirmationId, confirmationId);
   service.runtime.hasUnconfirmedStops = () => false;
-  fixture.service.resume(session.id, 'retry', confirmationId);
-  fixture.service.resume(session.id, 'duplicate', confirmationId);
+  await fixture.service.resume(session.id, 'retry', confirmationId);
+  await fixture.service.resume(session.id, 'duplicate', confirmationId);
   assert.equal(session.status, 'EXECUTING');
   assert.equal(executions, 1);
 });
@@ -72,11 +72,11 @@ test('legacy missing-brief dead end recovers generation without bypassing ordina
   assert.equal(session.status, 'WAIT_USER_DECISION');
   let generations = 0;
   service.generateBriefInBackground = () => { generations++; };
-  fixture.service.resume(session.id, 'retry', session.activeRecoveryCheckpoint!.confirmationId);
+  await fixture.service.resume(session.id, 'retry', session.activeRecoveryCheckpoint!.confirmationId);
   assert.equal(session.status, 'AGENT_DISCUSSING');
   assert.equal(generations, 1);
   session.status = 'WAIT_USER_CONFIRM';
-  assert.throws(() => fixture.service.resume(session.id), /任务契约尚未生成/);
+  await assert.rejects(fixture.service.resume(session.id), /任务契约尚未生成/);
   assert.equal(session.status, 'WAIT_USER_CONFIRM');
 });
 
@@ -130,6 +130,7 @@ function makeService(options: {
   };
 } = {}) {
   const persistedSessions: SessionDetail[] = structuredClone(options.initialSessions ?? []);
+  const persistedState: Record<string, unknown> = { sessions: persistedSessions };
   const persistedSnapshots: SessionDetail[][] = [];
   const events: Array<Record<string, unknown>> = [];
   const executionStarts: Array<{ sessionId: string; taskCount: number }> = [];
@@ -197,6 +198,11 @@ function makeService(options: {
         };
         events.push(event);
         return event;
+      },
+      acceptCommitted(event: Record<string, unknown>) {
+        if (events.some((item) => item.id === event.id)) return false;
+        events.push(event);
+        return true;
       },
       list() {
         return events;
@@ -394,8 +400,8 @@ function makeService(options: {
       deleteSession() {}
     } as never,
     {
-      getCollection() {
-        return persistedSessions;
+      getCollection(key: string, fallback: unknown) {
+        return structuredClone(persistedState[key] ?? fallback);
       },
       assertWritable() {},
       currentDataEpoch() {
@@ -409,9 +415,27 @@ function makeService(options: {
         options.cleanupCalls?.push(`purge:${sessionId}`);
         return !options.sessionPurgeFails;
       },
-      setCollection(_key: string, value: SessionDetail[]) {
-        persistedSnapshots.push(structuredClone(value));
-        persistedSessions.splice(0, persistedSessions.length, ...value);
+      setCollection(key: string, value: unknown) {
+        persistedState[key] = structuredClone(value);
+        if (key === 'sessions') {
+          const sessions = value as SessionDetail[];
+          persistedSnapshots.push(structuredClone(sessions));
+          persistedSessions.splice(0, persistedSessions.length, ...sessions);
+          persistedState.sessions = persistedSessions;
+        }
+      },
+      async mutateCollections<T>(keys: string[], mutate: (draft: Record<string, unknown>) => T) {
+        const draft = structuredClone(Object.fromEntries(
+          keys.filter((key) => persistedState[key] !== undefined).map((key) => [key, persistedState[key]])
+        ));
+        const result = mutate(draft);
+        for (const key of keys) if (draft[key] !== undefined) persistedState[key] = structuredClone(draft[key]);
+        if (draft.sessions) {
+          const sessions = draft.sessions as SessionDetail[];
+          persistedSessions.splice(0, persistedSessions.length, ...structuredClone(sessions));
+          persistedState.sessions = persistedSessions;
+        }
+        return result;
       }
     } as never,
     {
@@ -1400,7 +1424,7 @@ test('pause stops Session execution and Runtime work while preserving a resumabl
   assert.equal((fixture.executionTerminations[0] as { scope?: string })?.scope, 'session');
   assert.deepEqual(runtimeCalls, [`runtime:${session.id}`]);
 
-  fixture.service.resume(session.id, '用户恢复当前执行');
+  await fixture.service.resume(session.id, '用户恢复当前执行');
   assert.equal(session.pauseState, undefined);
   fixture.service.control(session.id, 'CANCELLED', '用户取消整个会话');
 
@@ -1433,7 +1457,7 @@ test('pause cancels in-flight chat intent recognition without retrying or leavin
   assert.equal(session.status, 'PAUSED');
   assert.equal(route.status, 'PENDING_RETRY');
   assert.equal(service.intentRoutingRetryTimers.size, 0);
-  fixture.service.resume(session.id);
+  await fixture.service.resume(session.id);
   assert.equal(session.status, 'WAIT_USER_CONFIRM');
   assert.equal(calls, 1);
 });
@@ -1448,22 +1472,19 @@ test('deleting a Session also stops Runtime-owned invocations', async () => {
   assert.deepEqual(runtimeCalls, [`runtime:${session.id}`]);
 });
 
-test('deleting a Session clears all corresponding runtime directories before persistence', async () => {
+test('deleting a Session keeps directories, artifacts and persisted history recoverable', async () => {
   const cleanupCalls: string[] = [];
   const { service, persistedSessions } = makeService({ cleanupCalls });
   const { session } = await service.create({ input: 'Delete this Session later' });
 
   const result = await service.delete(session.id);
 
-  assert.deepEqual(cleanupCalls, [
-    `terminate:${session.id}`,
-    `worktree:${session.id}`,
-    `brief:${session.id}`,
-    `artifacts:${session.id}`,
-    `purge:${session.id}`
-  ]);
-  assert.deepEqual(result, { deleted: true, sessionId: session.id });
-  assert.equal(persistedSessions.length, 0);
+  assert.deepEqual(cleanupCalls, [`terminate:${session.id}`]);
+  assert.equal(result.deleted, true);
+  assert.equal(result.lifecycle.state, 'deleted');
+  assert.equal(persistedSessions.length, 1);
+  assert.throws(() => service.get(session.id), /会话已删除/);
+  assert.equal(service.getIncludingDeleted(session.id).id, session.id);
 });
 
 test('rejects Session deletion after backend shutdown starts without removing persisted state', async () => {
@@ -1478,26 +1499,93 @@ test('rejects Session deletion after backend shutdown starts without removing pe
   assert.deepEqual(cleanupCalls, []);
 });
 
-test('a failed physical record purge surfaces as an error instead of reporting a successful deletion', async () => {
+test('recoverable deletion never calls the physical purge path', async () => {
   const cleanupCalls: string[] = [];
   const { service } = makeService({ cleanupCalls, sessionPurgeFails: true });
   const { session } = await service.create({ input: 'Fail the record purge for this Session' });
 
-  await assert.rejects(service.delete(session.id), /会话记录未能完全清除/);
+  const result = await service.delete(session.id);
 
-  assert.deepEqual(cleanupCalls, [
-    `terminate:${session.id}`,
-    `worktree:${session.id}`,
-    `brief:${session.id}`,
-    `artifacts:${session.id}`,
-    `purge:${session.id}`
-  ]);
-  // The in-flight guard has to be released even on failure, otherwise the Session
-  // would stay permanently undeletable behind an "already in progress" conflict.
+  assert.equal(result.deleted, true);
+  assert.deepEqual(cleanupCalls, [`terminate:${session.id}`]);
   assert.equal(
     (service as unknown as { deletingSessionIds: Set<string> }).deletingSessionIds.has(session.id),
     false
   );
+});
+
+test('restoring a deleted Session returns it paused without starting a model or losing history', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Keep this history through restore' });
+  const deleted = await fixture.service.delete(session.id, 'delete-request-restore');
+  const discussionCount = fixture.discussionStarts.length;
+
+  const restored = await fixture.service.restore(session.id, {
+    requestId: 'restore-request-1',
+    expectedGeneration: deleted.lifecycle.generation
+  });
+
+  assert.equal(restored.lifecycle.state, 'active');
+  assert.equal(restored.lifecycle.admission, 'closed');
+  assert.equal(restored.session.status, 'PAUSED');
+  assert.equal(fixture.discussionStarts.length, discussionCount);
+  assert.equal(fixture.service.list('active').some(item => item.id === session.id), true);
+  assert.equal(fixture.events.some(event => event.content === 'Keep this history through restore'), true);
+});
+
+test('deleting one Session blocks its late outcome without changing a sibling Session', async () => {
+  const fixture = makeService();
+  const first = await fixture.service.create({ input: 'First Session' });
+  const second = await fixture.service.create({ input: 'Second Session' });
+  const generation = fixture.service.lifecycleState(first.session.id).lifecycle.generation;
+  second.session.status = 'EXECUTING';
+
+  await fixture.service.delete(first.session.id, 'delete-request-isolation');
+  fixture.service.applyOutcome(first.session.id, { kind: 'delivered' }, generation);
+
+  assert.equal(fixture.service.getIncludingDeleted(first.session.id).status, 'PAUSED');
+  assert.equal(fixture.service.get(second.session.id).status, 'EXECUTING');
+  assert.equal(fixture.service.list('deleted').map(item => item.id).includes(first.session.id), true);
+  assert.equal(fixture.service.list('active').map(item => item.id).includes(second.session.id), true);
+});
+
+test('a queued outcome from before deletion cannot mutate the restored generation', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Reject an obsolete queued result' });
+  const oldGeneration = fixture.service.lifecycleState(session.id).lifecycle.generation;
+  session.status = 'EXECUTING';
+  session.activeFollowUpMessageId = 'obsolete-follow-up';
+  session.pendingFollowUpMessages = [{
+    id: 'obsolete-follow-up',
+    sourceEventId: 'obsolete-event',
+    content: '旧 generation 的队列工作',
+    mentionedAgentIds: ['backend'],
+    handlingPlan: {
+      intent: 'command',
+      priority: 'normal',
+      shouldPause: false,
+      affectedTaskIds: [],
+      affectedAgentIds: ['backend'],
+      requiresBriefRevision: false,
+      requiresUserConfirmation: false,
+      coordinatorInstruction: 'dispatch'
+    },
+    status: 'executing',
+    queuedAt: '2026-09-16T00:00:00.000Z'
+  }];
+  const deleted = await fixture.service.delete(session.id, 'delete-obsolete-queue');
+  await fixture.service.restore(session.id, {
+    requestId: 'restore-obsolete-queue',
+    expectedGeneration: deleted.lifecycle.generation
+  });
+  const eventCount = fixture.events.length;
+
+  await fixture.service.applyQueuedExecutionOutcome(session.id, { kind: 'delivered' }, oldGeneration);
+
+  assert.equal(session.status, 'PAUSED');
+  assert.equal(session.activeFollowUpMessageId, 'obsolete-follow-up');
+  assert.equal(session.pendingFollowUpMessages?.[0]?.status, 'executing');
+  assert.equal(fixture.events.length, eventCount);
 });
 
 test('deleting a Session drops only its own pending intent routing retries', async () => {
@@ -2121,7 +2209,8 @@ test('queued worker outcomes close the active follow-up and publish the final Se
     queuedAt: '2026-07-11T00:00:00.000Z'
   }];
 
-  await service.applyQueuedExecutionOutcome(session.id, { kind: 'delivered' });
+  const generation = service.lifecycleState(session.id).lifecycle.generation;
+  await service.applyQueuedExecutionOutcome(session.id, { kind: 'delivered' }, generation);
 
   assert.equal(session.activeFollowUpMessageId, undefined);
   assert.deepEqual(session.pendingFollowUpMessages, []);
@@ -2722,7 +2811,7 @@ test('ordinary resume keeps a parked workflow Agent substitution waiting for an 
     awaitsUpstreamRerun: () => false
   } as never;
 
-  const result = fixture.service.resume(session.id, '继续执行');
+  const result = await fixture.service.resume(session.id, '继续执行');
 
   assert.equal(result.session.status, 'WAIT_USER_DECISION');
   assert.equal(result.event?.metadata.payload?.status, 'WAIT_USER_DECISION');

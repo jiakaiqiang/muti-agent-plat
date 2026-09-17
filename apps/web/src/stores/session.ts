@@ -20,6 +20,7 @@ import type {
   SessionViewMode,
   SessionWorkingDirectory,
   CollaborationEvent,
+  DeleteSessionLifecycleResult,
   WorkItem
 } from '@/types/contracts'
 import type { PostReviewAction } from '@/types/contracts'
@@ -187,12 +188,15 @@ export const useSessionStore = defineStore('session', {
       await this.assertBackendCompatible()
       this.loading = true
       try {
-        const page = await apiPage<SessionListItem>('/sessions')
+        const page = await apiPage<SessionListItem>('/sessions?visibility=all')
         const visible = new Map(this.sessions.map(item => [item.id, item]))
         this.sessions = sortSessionsByRecency(page.items.map(item => {
           const current = visible.get(item.id)
           return current && Date.parse(current.updatedAt) > Date.parse(item.updatedAt) ? current : item
         }))
+        this.deletingSessionIds = this.sessions
+          .filter(session => session.lifecycleState === 'deleting')
+          .map(session => session.id)
       } finally {
         this.loading = false
       }
@@ -554,27 +558,39 @@ export const useSessionStore = defineStore('session', {
       }
 
       this.deletingSessionIds = [...this.deletingSessionIds, sessionId]
-      let deleted = false
+      let result: DeleteSessionLifecycleResult | undefined
       try {
-        await apiDelete<{ deleted: boolean; sessionId: string }>(`/sessions/${sessionId}`, {
+        result = await apiDelete<DeleteSessionLifecycleResult>(`/sessions/${sessionId}`, {
           timeoutMs: SESSION_DELETE_REQUEST_TIMEOUT_MS,
-          timeoutMessage: '删除会话请求超时：后端可能正在退出或已经断开，删除结果尚未确认；请恢复服务后重试。'
+          timeoutMessage: '删除会话请求超时：后端可能正在退出或已经断开，删除结果尚未确认；请恢复服务后重试。',
+          headers: { 'Idempotency-Key': globalThis.crypto?.randomUUID?.() ?? `delete-${sessionId}-${Date.now()}` }
         })
-        deleted = true
       } catch (error) {
         if (error instanceof Error && error.message.includes('Session not found')) {
-          deleted = true
+          this.removeSessionFromState(sessionId)
+          return true
         } else {
           throw normalizeSessionDeleteError(error)
         }
       } finally {
         this.deletingSessionIds = this.deletingSessionIds.filter((id) => id !== sessionId)
       }
-
-      if (deleted) {
-        this.removeSessionFromState(sessionId)
-      }
-      return deleted
+      await this.loadSessions()
+      return result?.deleted ?? false
+    },
+    async restoreSession(sessionId: string) {
+      await this.assertBackendCompatible()
+      const item = this.sessions.find(session => session.id === sessionId)
+      if (!item?.lifecycleGeneration) throw new Error('会话生命周期信息缺失，请刷新列表后重试。')
+      const result = await apiPost<{ session: SessionDetail; restored: boolean }>(
+        `/sessions/${sessionId}/restore`,
+        {
+          requestId: globalThis.crypto?.randomUUID?.() ?? `restore-${sessionId}-${Date.now()}`,
+          expectedGeneration: item.lifecycleGeneration
+        }
+      )
+      await this.loadSessions()
+      return result
     },
     toggleFavoriteSession(sessionId: string) {
       this.favoriteSessionIds = this.favoriteSessionIds.includes(sessionId)

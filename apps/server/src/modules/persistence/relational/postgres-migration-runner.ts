@@ -11,7 +11,8 @@ import {
   RELATIONAL_SCHEMA_V6_SQL,
   RELATIONAL_SCHEMA_V7_SQL,
   RELATIONAL_SCHEMA_V8_SQL,
-  RELATIONAL_SCHEMA_V9_SQL
+  RELATIONAL_SCHEMA_V9_SQL,
+  RELATIONAL_SCHEMA_V10_SQL
 } from './relational-schema.js';
 
 type Migration = {
@@ -65,6 +66,11 @@ const MIGRATIONS: Migration[] = [
     version: 9,
     name: 'session_stop_request_state',
     sql: RELATIONAL_SCHEMA_V9_SQL
+  },
+  {
+    version: 10,
+    name: 'session_recoverable_lifecycle',
+    sql: RELATIONAL_SCHEMA_V10_SQL
   }
 ];
 

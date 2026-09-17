@@ -524,6 +524,8 @@ export type WorkspaceWritebackResolutionAction =
 export type WorkspaceWritebackRecord = {
   id: UUID;
   sessionId: UUID;
+  /** Session generation that admitted this writeback; stale generations cannot apply after restore. */
+  sessionGeneration?: number;
   taskId?: UUID;
   invocationId: UUID;
   workspaceId: string;
@@ -1197,6 +1199,7 @@ export type CollaborationEventType =
   | 'agent_message'
   | 'agent_mention'
   | 'session_status_changed'
+  | 'session_lifecycle_changed'
   | 'agent_status_changed'
   | 'brief_created'
   | 'brief_updated'
@@ -1436,6 +1439,10 @@ export type SessionListItem = Pick<
   latestEventSummary?: string;
   projectId?: UUID;
   workspaceId?: string;
+  lifecycleState?: 'active' | 'deleting' | 'deleted';
+  lifecycleGeneration?: number;
+  lifecycleRevision?: number;
+  deleteRequestId?: UUID;
 };
 
 export type RuntimePreference = {
@@ -1665,6 +1672,8 @@ export type WorkflowRun = {
   workflowVersion: number;
   workflowName: string;
   sessionId: UUID;
+  /** Session generation captured when the run started; rejects results from a deleted/restored generation. */
+  sessionGeneration?: number;
   workItemId?: UUID;
   briefId: UUID;
   ownerId: UUID;
@@ -2118,6 +2127,28 @@ export type PendingConfirmationContext = {
   createdAt: ISODateTime;
 };
 
+/** Bounded excerpt of one durable Session event; never the full event payload. */
+export type IntentSnapshotMessageExcerpt = {
+  eventId: UUID;
+  role: 'user' | 'agent' | 'system';
+  content: string;
+  truncated?: boolean;
+  createdAt: ISODateTime;
+};
+
+/**
+ * Declared caps for a routing snapshot plus what those caps left out, so a routing
+ * decision can be audited without replaying the whole Session history.
+ */
+export type IntentSnapshotBounds = {
+  recentMessageLimit: number;
+  messageCharLimit: number;
+  candidateWorkItemLimit: number;
+  totalCandidateWorkItems: number;
+  omittedCandidateWorkItems: number;
+  omittedRecentMessages: number;
+};
+
 export type IntentContextSnapshot = {
   /** Business inputs only; progress and heartbeat events never invalidate routing. */
   businessFingerprint?: string;
@@ -2127,6 +2158,13 @@ export type IntentContextSnapshot = {
   activeWorkItemId?: UUID;
   activeWorkItem?: Pick<WorkItem, 'id' | 'title' | 'goal' | 'status' | 'revision'>;
   currentMessage: string;
+  /** Server-resolved @ targets. The classifier may not add, replace or silently drop them. */
+  mentionedAgentIds?: UUID[];
+  replyToEventId?: UUID;
+  replyToMessage?: IntentSnapshotMessageExcerpt;
+  /** Bounded recent dialogue for the current requirement, oldest first. */
+  recentRelevantMessages?: IntentSnapshotMessageExcerpt[];
+  bounds?: IntentSnapshotBounds;
   pendingConfirmation?: string;
   pendingConfirmationContext?: PendingConfirmationContext;
   validDecisionIds: UUID[];
@@ -2147,6 +2185,12 @@ export type IntentRoutingDecisionV2 = {
   selectedWorkItemId?: UUID;
   selectedDecisionIds: UUID[];
   selectedArtifactIds: UUID[];
+  /**
+   * Agents the route should address. Optional so routing records persisted before
+   * this field existed stay readable; the server rejects a decision that drops an
+   * explicit @ target rather than trusting the classifier to repeat it.
+   */
+  requestedAgentIds?: UUID[];
   goalSegments: string[];
   missingFields: string[];
   ambiguityReasons: string[];
@@ -2197,6 +2241,8 @@ export type SessionFollowUpMessage = {
   sourceEventId: UUID;
   content: string;
   mentionedAgentIds: UUID[];
+  /** Explicit user reply target. Server-validated to the same Session; the classifier cannot invent it. */
+  replyToEventId?: UUID;
   handlingPlan: UserMessageHandlingPlan;
   workItemId?: UUID;
   routingId?: UUID;
@@ -2221,6 +2267,43 @@ export type RuntimeUsage = {
   totalTokens: number;
   cost?: number;
   model?: string;
+};
+
+/**
+ * Per-surface attribution of one invocation's request budget. A single opaque
+ * total cannot show that the system prompt, tool definitions, schema, evidence
+ * and tool history were all counted, so each surface is reported separately.
+ */
+export type RuntimeTokenEstimationBreakdown = {
+  systemPromptTokens: number;
+  toolDefinitionTokens: number;
+  contextEnvelopeTokens: number;
+  expectedOutputTokens: number;
+  toolHistoryTokens: number;
+};
+
+/**
+ * Request-budget accounting for one invocation. The platform cannot tokenise an
+ * upstream payload exactly, so every check records which estimator was used,
+ * what it predicted per surface, and — when the provider reports usage — how far
+ * the prediction was off. `drift` is absent when usage is unknown rather than
+ * reported as zero error.
+ */
+export type RuntimeTokenEstimationDiagnostic = {
+  estimator: string;
+  estimatedInputTokens: number;
+  actualInputTokens: number;
+  drift?: {
+    estimated: number;
+    actual: number;
+    ratio: number;
+  };
+  outputReservationTokens: number;
+  safetyMarginTokens: number;
+  maxInputTokens?: number;
+  effectiveMaxInputTokens?: number;
+  rounds: number;
+  breakdown: RuntimeTokenEstimationBreakdown;
 };
 
 export type RuntimeModelProvider = 'openai-compatible' | 'anthropic-compatible' | 'ollama';
@@ -2623,6 +2706,8 @@ export type LogicalOperation = {
   previousId?: UUID;
   id: UUID;
   sessionId: UUID;
+  /** Captured Session lifecycle generation; stale callbacks cannot cross a delete/restore boundary. */
+  sessionGeneration?: number;
   parentId?: UUID;
   taskId?: UUID;
   phase: AgentRunPhase;
@@ -2722,7 +2807,7 @@ export type InvocationPlan = {
   attempt?: RuntimeAttemptTrace;
   resume?: RuntimeResumeRequest;
   pendingApprovals?: PendingApprovalInfo[];
-  operation?: Pick<LogicalOperation, 'id' | 'deadlineAt' | 'policyVersion' | 'maxAttempts'>;
+  operation?: Pick<LogicalOperation, 'id' | 'deadlineAt' | 'policyVersion' | 'maxAttempts' | 'sessionGeneration'>;
 };
 
 export type RuntimeAttemptTrace = {
@@ -2996,6 +3081,7 @@ export type AgentRunResult<TOutput = RuntimeOutput> = {
   workspaceExecution?: RuntimeWorkspaceExecution;
   streamMetrics?: RuntimeStreamMetrics;
   runtimeDiagnostics?: RuntimeDiagnostics;
+  tokenEstimation?: RuntimeTokenEstimationDiagnostic;
   error?: RuntimeError;
   termination?: ExecutionTermination;
 };

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ExecutionTermination } from '@agent-cluster/shared';
+import { createExecutionTermination } from '../../common/execution-termination.js';
 import { ExecutionService } from './execution.service.js';
 
 test('graceful shutdown aborts active execution with service_shutdown and rejects new work', async () => {
@@ -65,6 +66,40 @@ test('pipeline rejection preserves structured RuntimeError in the failed outcome
   assert.equal(outcome.kind, 'failed');
   if (outcome.kind !== 'failed') return;
   assert.deepEqual(outcome.error, runtimeError);
+});
+
+test('admission closure after a structured stop is cancelled without crash logging', async () => {
+  const orchestrator = {
+    async runPipeline(_session: unknown, _brief: unknown, _tasks: unknown, signal: AbortSignal) {
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) resolve();
+        else signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      throw new Error('SESSION_ADMISSION_CLOSED');
+    }
+  };
+  const service = new ExecutionService(orchestrator as never, { cancel() {}, cancelAll() {} } as never);
+  const errorLogs: unknown[][] = [];
+  (service as unknown as { logger: { error: (...args: unknown[]) => void } }).logger.error = (...args) => {
+    errorLogs.push(args);
+  };
+
+  const outcomePromise = new Promise<Parameters<Parameters<ExecutionService['start']>[3]>[0]>((resolve) => {
+    service.start({ id: 'session-paused', dataEpoch: 'epoch-1' } as never, { id: 'brief-paused' } as never, [], resolve);
+  });
+  const termination = createExecutionTermination({
+    kind: 'user_paused',
+    source: 'user',
+    scope: 'session'
+  });
+  service.cancel('session-paused', termination);
+
+  const outcome = await outcomePromise;
+  assert.equal(outcome.kind, 'cancelled');
+  if (outcome.kind !== 'cancelled') return;
+  assert.equal(outcome.reason, 'Session admission closed.');
+  assert.equal(outcome.termination?.terminationId, termination.terminationId);
+  assert.deepEqual(errorLogs, []);
 });
 
 test('cancelAndWait does not complete until the session pipeline has exited', async () => {

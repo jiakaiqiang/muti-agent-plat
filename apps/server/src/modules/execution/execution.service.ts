@@ -3,7 +3,8 @@ import type { AgentTask, ExecutionTermination, SessionDetail, TaskBrief } from '
 import { bullMqEnabled } from '../../common/redis.js';
 import {
   abortWithTermination,
-  createExecutionTermination
+  createExecutionTermination,
+  terminationFromSignal
 } from '../../common/execution-termination.js';
 import { ExecutionOutcome, OrchestratorService } from '../orchestrator/orchestrator.service.js';
 import { ExecutionQueue } from '../queue/execution.queue.js';
@@ -31,7 +32,8 @@ export class ExecutionService implements BeforeApplicationShutdown {
     session: SessionDetail,
     brief: TaskBrief,
     tasks: AgentTask[],
-    onOutcome: (outcome: ExecutionOutcome) => void
+    onOutcome: (outcome: ExecutionOutcome) => void,
+    sessionGeneration?: number
   ) {
     if (this.shuttingDown) {
       onOutcome({
@@ -47,7 +49,12 @@ export class ExecutionService implements BeforeApplicationShutdown {
       return;
     }
     if (bullMqEnabled()) {
-      void this.executionQueue.enqueue({ sessionId: session.id, briefId: brief.id, dataEpoch: session.dataEpoch }).catch((error) => {
+      void this.executionQueue.enqueue({
+        sessionId: session.id,
+        briefId: brief.id,
+        dataEpoch: session.dataEpoch,
+        sessionGeneration
+      }).catch((error) => {
         this.logger.error(`Failed to enqueue execution for session ${session.id}: ${String(error)}`);
         onOutcome({
           kind: 'failed',
@@ -61,7 +68,7 @@ export class ExecutionService implements BeforeApplicationShutdown {
     const existing = this.running.get(session.id);
     if (existing) {
       if (existing.controller.signal.aborted) {
-        void existing.done.finally(() => this.start(session, brief, tasks, onOutcome));
+        void existing.done.finally(() => this.start(session, brief, tasks, onOutcome, sessionGeneration));
       }
       return;
     }
@@ -70,6 +77,14 @@ export class ExecutionService implements BeforeApplicationShutdown {
     const done = this.orchestrator
       .runPipeline(session, brief, tasks, controller.signal)
       .catch((error): ExecutionOutcome => {
+        const termination = terminationFromSignal(controller.signal);
+        if (termination && error instanceof Error && error.message === 'SESSION_ADMISSION_CLOSED') {
+          return {
+            kind: 'cancelled',
+            reason: 'Session admission closed.',
+            termination
+          };
+        }
         this.logger.error(`Execution pipeline crashed for session ${session.id}: ${String(error)}`);
         return {
           kind: 'failed',

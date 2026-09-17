@@ -707,6 +707,17 @@ async function confirmDeleteSession() {
   }
 }
 
+async function restoreDeletedSession(sessionId: string) {
+  try {
+    await sessionStore.restoreSession(sessionId)
+    workspaceUiStore.sessionListTab = 'all'
+    await selectSession(sessionId)
+    showMessage('会话已恢复为暂停状态', 'success')
+  } catch (error) {
+    showErrorMessage(error, '恢复会话失败')
+  }
+}
+
 async function createSession(
   input: string,
   agentIds: string[],
@@ -1691,6 +1702,7 @@ async function submitWorkflowStepRevision() {
       @select="selectSession"
       @create="openCreateSessionDialog"
       @delete="requestDeleteSession"
+      @restore="restoreDeletedSession"
       @toggle-favorite="sessionStore.toggleFavoriteSession"
     />
 

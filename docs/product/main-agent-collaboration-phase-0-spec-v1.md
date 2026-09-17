@@ -1,7 +1,7 @@
 # 阶段 0：合同收敛、现状基线与迁移边界 — Spec v1
 
 > 日期：2026-09-16
-> 状态：设计与实施基线，待实施；现有能力的复用不代表本阶段验收已完成。
+> 状态：阶段 0 已实现并验证；交付共享合同、纯校验、现状与迁移基线，不启用后续业务流程。
 > 依赖：无；作为所有阶段的入口。
 
 [总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-0-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-0-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-0-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-0-checklist-v1.md)
@@ -49,3 +49,10 @@
 AC 全部有审查/测试证据；状态所有权、迁移与策略快照明确；实现边界没有待裁决冲突。
 
 本阶段详细任务和证据填写位置见 Tasks/Checklist。只有实现与必须验证均完成后才可更新状态，文档生成不勾选开发项。
+
+## 7. 本阶段实施结果（2026-09-16）
+
+- [共享代码](../../packages/shared/src/collaboration-contracts.ts)：统一身份、角色所有权、精确确认、生命周期准入资格和不可变策略快照；均为纯合同，不替代服务端持久化/权限/停止校验。
+- [冻结合同](../contracts/main-agent-collaboration-contract-v1.md)：逐项登记 implemented 与 deferred，明确新旧版本读取、API/事件、集合/projection 和逐阶段接入边界。
+- [现状及迁移基线](../implementation/main-agent-collaboration-phase-0-baseline-v1.md)：按当前源码列出能力差距、会话工作句柄、迁移顺序及回退约束。
+- 本阶段 6 条 AC 的证据见 [Checklist](../quality/main-agent-collaboration-phase-0-checklist-v1.md)；不将合同测试当作阶段 1 及后续端到端验收。

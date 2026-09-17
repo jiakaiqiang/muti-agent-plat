@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import type { Subscription } from 'rxjs';
 import crypto from 'node:crypto';
+import { existsSync } from 'node:fs';
 import type {
   AgentDefinition as Agent,
   AgentMessageOutput,
@@ -77,6 +78,7 @@ import { WorkflowsService } from '../workflows/workflows.service.js';
 import { WorktreeExecutionService } from '../worktree-execution/worktree-execution.service.js';
 import { WorkdirBriefService } from '../runtimes/streaming/workdir-brief.service.js';
 import { RuntimeService } from '../runtimes/runtime.service.js';
+import { SessionLifecycleStore } from '../runtimes/session-lifecycle-store.js';
 import { LocalRuntimeConnectionService } from '../local-runtime/local-runtime-connection.service.js';
 import { WorkspaceProviderResolver } from '../workspaces/workspace-provider-resolver.js';
 import { WorkspaceWritebackService } from '../workspaces/workspace-writeback.service.js';
@@ -195,6 +197,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   private readonly runtimeInterruptSubscription?: Subscription;
   private readonly workspaceOfflineSubscription?: Subscription;
   private readonly runtimeStopSubscription?: Subscription;
+  private readonly lifecycle: SessionLifecycleStore;
 
   constructor(
     private readonly agents: AgentsService,
@@ -221,15 +224,18 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     @Optional() private readonly messageIngress?: MessageIngressService,
     @Optional() private readonly artifacts?: ArtifactsService
   ) {
+    this.lifecycle = new SessionLifecycleStore(persistence);
     const persisted = this.persistence.getCollection<SessionDetail[]>('sessions', []);
     let recoveredWorkspaceWriteback = false;
     for (const session of persisted) {
       this.assertCurrentSchema(session);
       if (this.recoverWorkspaceWritebackState(session)) recoveredWorkspaceWriteback = true;
       this.sessions.set(session.id, session);
+      if (this.lifecycle.get(session.id)?.state === 'deleting') this.deletingSessionIds.add(session.id);
     }
     if (recoveredWorkspaceWriteback) this.persist();
     for (const session of this.sessions.values()) {
+      if (this.lifecycle.get(session.id)?.state !== 'active' && this.lifecycle.get(session.id)) continue;
       this.orchestrator.ensureArchitectureReportSaveConfirmation(session);
     }
     this.orchestrator.registerSavePendingInvocationCallback((sessionId, invocation) => {
@@ -291,10 +297,16 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
   }
 
-  list() {
+  list(visibility: 'active' | 'deleted' | 'all' = 'active') {
     return [...this.sessions.values()]
+      .filter(session => {
+        const state = this.lifecycle.get(session.id)?.state ?? 'active';
+        return visibility === 'all' || (visibility === 'deleted' ? state === 'deleted' : state !== 'deleted');
+      })
       .sort((left, right) => this.compareSessionRecency(left, right))
-      .map((session) => ({
+      .map((session) => {
+        const lifecycle = this.lifecycle.get(session.id);
+        return ({
         id: session.id,
         title: session.title,
         projectId: session.projectId,
@@ -313,18 +325,53 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
           'INTERRUPTED'
         ].includes(session.status),
         latestEventSummary: this.events.list(session.id).at(-1)?.content,
+        lifecycleState: lifecycle?.state ?? 'active',
+        lifecycleGeneration: lifecycle?.generation,
+        lifecycleRevision: lifecycle?.revision,
+        deleteRequestId: lifecycle?.deleteRequestId,
         createdAt: session.createdAt,
         updatedAt: session.updatedAt
-      }));
+        });
+      });
   }
 
   get(sessionId: string) {
+    const session = this.getIncludingDeleted(sessionId);
+    const lifecycle = this.lifecycle.get(sessionId);
+    if (lifecycle?.state !== undefined && lifecycle.state !== 'active') {
+      throw new ConflictException({
+        code: lifecycle.state === 'deleted' ? 'SESSION_DELETED' : 'SESSION_DELETING',
+        message: lifecycle.state === 'deleted' ? '会话已删除，请先恢复后再操作。' : '会话正在删除，当前操作已被阻止。',
+        lifecycle
+      });
+    }
+    return session;
+  }
+
+  getIncludingDeleted(sessionId: string) {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new NotFoundException(`Session not found: ${sessionId}`);
     }
     if (this.workspaceWritebacks) session.workspaceWritebacks = this.workspaceWritebacks.list(sessionId);
     return session;
+  }
+
+  lifecycleState(sessionId: string) {
+    const session = this.getIncludingDeleted(sessionId);
+    const lifecycle = this.lifecycle.get(sessionId);
+    if (!lifecycle) throw new NotFoundException(`Session lifecycle not found: ${sessionId}`);
+    const stopSummary = this.runtime?.getStopSummary?.(sessionId) ?? {
+      sessionId, version: 0, status: lifecycle.stopStatus, requestedCount: 0, confirmedCount: 0,
+      targets: [], blockers: lifecycle.stopStatus === 'idle' || lifecycle.stopStatus === 'confirmed' ? [] : [{
+        reason: 'state_query_failed' as const, message: '停止状态服务不可用，无法确认会话已经停稳。'
+      }], canResume: lifecycle.stopStatus === 'idle' || lifecycle.stopStatus === 'confirmed'
+    };
+    return { lifecycle, stopSummary, blockers: stopSummary.blockers, sessionStatus: session.status };
+  }
+
+  matchesActiveGeneration(sessionId: string, expectedGeneration?: number) {
+    return this.lifecycle.matchesActiveGeneration(sessionId, expectedGeneration);
   }
 
   listWorkItems(sessionId: string) {
@@ -421,6 +468,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       sourceEventId: routing.sourceEventId,
       currentMessage: followUp.content,
       latestEventSeq: this.events.list(sessionId).length,
+      mentionedAgentIds: followUp.mentionedAgentIds,
+      replyToEventId: followUp.replyToEventId,
       pendingConfirmation: this.pendingConfirmationSummary(sessionId),
       pendingConfirmationContext: this.pendingConfirmationContext(sessionId),
       failureCheckpoint: this.latestFailurePhase(sessionId)
@@ -1231,6 +1280,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
           sourceEventId: routing.sourceEventId,
           currentMessage: followUp.content,
           latestEventSeq: this.events.list(session.id).length,
+          mentionedAgentIds: followUp.mentionedAgentIds,
+          replyToEventId: followUp.replyToEventId,
           pendingConfirmation: this.pendingConfirmationSummary(session.id),
           pendingConfirmationContext: this.pendingConfirmationContext(session.id),
           failureCheckpoint: this.latestFailurePhase(session.id)
@@ -1253,95 +1304,94 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     return recovered;
   }
 
-  async delete(sessionId: string) {
+  async delete(sessionId: string, deleteRequestId: string = crypto.randomUUID()) {
     this.persistence.assertWritable();
     if (this.shuttingDown) {
       throw new ServiceUnavailableException('后端正在关闭，请在服务重启后重试删除。');
     }
-    const session = this.get(sessionId);
-    if (this.deletingSessionIds.has(sessionId)) {
-      throw new ConflictException(`Session deletion is already in progress: ${sessionId}`);
+    const session = this.getIncludingDeleted(sessionId);
+    const existingLifecycle = this.lifecycle.get(sessionId);
+    if (existingLifecycle?.state === 'deleted') {
+      const view = this.lifecycleState(sessionId);
+      return { sessionId, deleted: true, ...view };
     }
-
+    const begun = await this.lifecycle.beginDelete(sessionId, session.dataEpoch, deleteRequestId);
+    if (begun.event) this.events.acceptCommitted(begun.event);
     this.deletingSessionIds.add(sessionId);
-    try {
-      const termination = createExecutionTermination({
-        kind: 'user_cancelled',
-        source: 'user',
-        scope: 'session',
-        diagnosticRef: 'session_delete'
+    session.status = 'PAUSED';
+    session.updatedAt = nowIso();
+    const termination = createExecutionTermination({
+      kind: 'user_paused', source: 'user', scope: 'session', diagnosticRef: 'session_delete'
+    });
+    this.briefGenerationSeqBySession.set(sessionId, (this.briefGenerationSeqBySession.get(sessionId) ?? 0) + 1);
+    this.cancelIntentRoutingRetries(sessionId);
+    this.intentRoutingControllers.get(sessionId)?.abort(termination);
+    const briefRun = this.briefGenerationRuns.get(sessionId);
+    if (briefRun) abortWithTermination(briefRun.controller, termination);
+    const [briefStopped, executionStopped, runtimeStopped] = await Promise.all([
+      briefRun ? settlesWithin(briefRun.done, 10_000) : Promise.resolve(true),
+      this.execution.cancelAndWait(sessionId, termination),
+      this.runtime?.cancelSessionAndWait(sessionId, termination) ??
+        Promise.resolve({ requested: 0, completed: 0, timedOut: false })
+    ]);
+    if (!briefStopped || executionStopped.timedOut || runtimeStopped.timedOut) {
+      const view = this.lifecycleState(sessionId);
+      const blockers = [...view.blockers];
+      if (!briefStopped) blockers.push({ reason: 'process_running' as const, message: '需求讨论仍在停止中。' });
+      if (executionStopped.timedOut) blockers.push({ reason: 'process_running' as const, message: '任务执行仍在停止中。' });
+      if (runtimeStopped.timedOut && !blockers.length) blockers.push({
+        reason: 'process_exit_unknown' as const, message: 'Runtime 尚未提供可信停止证据。'
       });
-      // Invalidate background brief callbacks before requesting termination so
-      // a late completion cannot recreate state while deletion is in progress.
-      this.briefGenerationSeqBySession.set(
-        sessionId,
-        (this.briefGenerationSeqBySession.get(sessionId) ?? 0) + 1
-      );
-      // Drop pending retries before terminating: a timer that fires mid-deletion
-      // re-enqueues intent routing for a session that is about to be erased.
-      this.cancelIntentRoutingRetries(sessionId);
-      const briefRun = this.briefGenerationRuns.get(sessionId);
-      if (briefRun) abortWithTermination(briefRun.controller, termination);
-      const workflowCancellation = session.workflowRunId && this.workflowRuntime
-        ? this.workflowRuntime.cancel(session.workflowRunId, '会话删除前终止工作流。')
-        : Promise.resolve();
-      // Every Agent still running for this session is torn down in one shared
-      // grace window. Awaiting the brief separately made the worst case two
-      // windows (20s), which is exactly the frontend request timeout.
-      const [briefStopped, executionStopped, runtimeStopped] = await Promise.all([
-        briefRun ? settlesWithin(briefRun.done, 10_000) : Promise.resolve(true),
-        this.execution.cancelAndWait(sessionId, termination),
-        this.runtime?.cancelSessionAndWait(sessionId, termination) ??
-          Promise.resolve({ requested: 0, completed: 0, timedOut: false }),
-        workflowCancellation
-      ]);
-      if (!briefStopped || executionStopped.timedOut || runtimeStopped.timedOut) {
-        throw new ConflictException(
-          `Session runtime did not stop within the deletion grace period: ${sessionId}`
-        );
-      }
-      this.logger.log(
-        `Session ${sessionId} deletion interrupted agents: execution ${executionStopped.completed}/${executionStopped.requested}, runtime ${runtimeStopped.completed}/${runtimeStopped.requested}`
-      );
-
-      await this.worktreeExecution?.deleteSessionDirectory(sessionId);
-      this.workdirBrief?.deleteSessionDirectory(sessionId);
-      // Each subsystem rewrite is scoped by the sessions collection, so the
-      // session has to stay in the map until they have all run. Dropping it
-      // first is what used to leave their rows behind, neither written nor
-      // soft-deleted.
-      this.tasks.deleteSession(sessionId);
-      this.memories.deleteSession(sessionId);
-      this.events.deleteSession(sessionId);
-      this.orchestrator.deleteSession(sessionId);
-      this.artifacts?.deleteSession(sessionId);
-      await this.contextManagement?.deleteSession(sessionId);
-      await this.fileRevisions?.deleteSession(sessionId);
-      this.sessions.delete(sessionId);
-      this.briefGenerationSeqBySession.delete(sessionId);
-      this.briefGenerationRuns.delete(sessionId);
-      this.intentRoutingRuns.delete(sessionId);
-      this.followUpPlanningRuns.delete(sessionId);
-      this.persist();
-      await this.persistence
-        .releaseWorkspaceSessionLease(session.workspaceId, session.id)
-        .catch((error) => {
-          this.logger.error(
-            `Failed to release workspace session lease for ${session.workspaceId}: ${String(error)}`
-          );
-        });
-      // The rewrites above only soft-delete. This physically removes the session
-      // row plus the child rows whose FK is `on delete set null` and would
-      // otherwise survive as orphans.
-      const purged = await this.persistence.deleteSessionData(sessionId);
-      if (!purged) {
-        throw new ConflictException(
-          `会话记录未能完全清除，请重启后端后重试删除：${sessionId}`
-        );
-      }
-      return { deleted: true, sessionId: session.id };
-    } finally {
+      return { sessionId, deleted: false, ...view, blockers };
+    }
+    const completed = await this.lifecycle.completeDelete(sessionId);
+    if (completed.event) this.events.acceptCommitted(completed.event);
+    if (completed.lifecycle.state === 'deleted') {
       this.deletingSessionIds.delete(sessionId);
+      await this.persistence.releaseWorkspaceSessionLease(session.workspaceId, session.id).catch((error) => {
+        this.logger.error(`Failed to release workspace session lease for ${session.workspaceId}: ${String(error)}`);
+      });
+    }
+    return {
+      sessionId,
+      deleted: completed.lifecycle.state === 'deleted',
+      lifecycle: completed.lifecycle,
+      stopSummary: completed.stopSummary,
+      blockers: completed.stopSummary.blockers,
+      sessionStatus: session.status
+    };
+  }
+
+  async restore(sessionId: string, input: { requestId: string; expectedGeneration: number }) {
+    const session = this.getIncludingDeleted(sessionId);
+    const lifecycle = this.lifecycle.get(sessionId);
+    if (!lifecycle) throw new NotFoundException(`Session lifecycle not found: ${sessionId}`);
+    if (session.workingDirectory?.kind === 'server_local' &&
+      (!session.workingDirectory.path || !existsSync(session.workingDirectory.path))) {
+      throw new ConflictException('会话工作目录已被移动或删除，无法安全恢复。');
+    }
+    if (session.workingDirectory?.kind === 'local_bridge' && !this.localRuntime?.getWorkspace(session.workspaceId)) {
+      throw new ConflictException('本地 Runtime 工作区当前不可用，请连接本地助手后再恢复。');
+    }
+    const leaseAcquired = await this.persistence.acquireWorkspaceSessionLease(session.workspaceId, session.id);
+    if (!leaseAcquired) throw new ConflictException('该工作区正被另一个活动会话使用，暂时无法恢复。');
+    try {
+      const restored = await this.lifecycle.restore(sessionId, input);
+      if (restored.event) this.events.acceptCommitted(restored.event);
+      session.status = 'PAUSED';
+      session.pauseState = {
+        previousStatus: session.pauseState?.previousStatus ?? 'EXECUTING',
+        pausedAt: nowIso(),
+        reason: 'session_restored'
+      };
+      session.updatedAt = nowIso();
+      this.deletingSessionIds.delete(sessionId);
+      return { session, lifecycle: restored.lifecycle, restored: true };
+    } catch (error) {
+      await this.persistence.releaseWorkspaceSessionLease(session.workspaceId, session.id).catch(() => undefined);
+      if (String(error).includes('STALE_GENERATION')) throw new ConflictException('会话生命周期已变化，请刷新后重试。');
+      if (String(error).includes('STOP_UNCONFIRMED')) throw new ConflictException('停止状态尚未确认，不能恢复会话。');
+      throw error;
     }
   }
 
@@ -1430,6 +1480,15 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       };
       this.sessions.set(session.id, session);
       this.persist();
+      try {
+        const initialized = await this.lifecycle.initialize(session.id, dataEpoch);
+        if (initialized.event) this.events.acceptCommitted(initialized.event);
+      } catch (error) {
+        this.sessions.delete(session.id);
+        this.persist();
+        await this.persistence.releaseWorkspaceSessionLease(workspaceId, sessionId).catch(() => undefined);
+        throw error;
+      }
 
       const firstEvent = this.events.create({
         sessionId: session.id,
@@ -1549,6 +1608,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   }
 
   private generateBriefInBackground(session: SessionDetail) {
+    const lifecycleGeneration = this.lifecycle.generation(session.id);
+    if (!this.lifecycle.isActive(session.id, lifecycleGeneration)) return;
     const generationSeq = (this.briefGenerationSeqBySession.get(session.id) ?? 0) + 1;
     this.briefGenerationSeqBySession.set(session.id, generationSeq);
     const previousRun = this.briefGenerationRuns.get(session.id);
@@ -1565,6 +1626,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         if (
           controller.signal.aborted ||
           this.deletingSessionIds.has(session.id) ||
+          !this.lifecycle.isActive(session.id, lifecycleGeneration) ||
           this.briefGenerationSeqBySession.get(session.id) !== generationSeq
         ) {
           return;
@@ -1578,7 +1640,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         }
       })
       .catch((error) => {
-        if (controller.signal.aborted || this.deletingSessionIds.has(session.id)) return;
+        if (controller.signal.aborted || this.deletingSessionIds.has(session.id) ||
+          !this.lifecycle.isActive(session.id, lifecycleGeneration)) return;
         this.failSessionWithFullError(session, error, 'brief_generation');
       })
       .finally(() => {
@@ -1594,7 +1657,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     sessionId: string,
     content: string,
     mentionedAgentIds: string[] = [],
-    clientMessageId?: string
+    clientMessageId?: string,
+    replyToEventId?: string
   ) {
     const session = this.get(sessionId);
     const replay = this.findMessageReplay(session, clientMessageId);
@@ -1630,7 +1694,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
     const routingMode = this.intentRoutingMode();
     if (this.shouldEnforceIntentRouting(session, routingMode)) {
-      return this.sendMessageWithIntentV2(session, content, mentionedAgentIds, clientMessageId, routingMode);
+      return this.sendMessageWithIntentV2(session, content, mentionedAgentIds, clientMessageId, routingMode, replyToEventId);
     }
     const receiverRecognitionPending = session.status === 'PAUSED';
     const useLocalIntentRecognition = receiverRecognitionPending;
@@ -1704,6 +1768,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       content,
       mentionedAgentIds: Array.from(new Set(mentionedAgentIds)),
       handlingPlan,
+      ...(replyToEventId ? { replyToEventId } : {}),
       receiverRecognitionPending: receiverRecognitionPending || undefined,
       status: 'queued',
       queuedAt: nowIso()
@@ -1723,6 +1788,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         sourceEventId: event.id,
         currentMessage: content,
         latestEventSeq: this.events.list(session.id).length,
+        mentionedAgentIds: followUp.mentionedAgentIds,
+        replyToEventId: followUp.replyToEventId,
         pendingConfirmation: this.pendingConfirmationSummary(session.id),
         pendingConfirmationContext: this.pendingConfirmationContext(session.id),
         failureCheckpoint: this.latestFailurePhase(session.id)
@@ -1796,7 +1863,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     content: string,
     mentionedAgentIds: string[],
     clientMessageId: string | undefined,
-    routingMode: IntentRoutingRolloutMode
+    routingMode: IntentRoutingRolloutMode,
+    replyToEventId?: string
   ) {
     const handlingPlan = this.pendingIntentHandlingPlan();
     const deferred = this.hasActiveSessionWork(session);
@@ -1810,6 +1878,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       mentionedAgentIds,
       handlingPlan,
       routingMode,
+      replyToEventId,
       messageIdempotencyKey: clientMessageId ? this.messageIdempotencyKey(session.id, clientMessageId) : undefined
     });
     const { event, followUp, routing, workItem } = committed;
@@ -1826,6 +1895,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
             sourceEventId: event.id,
             currentMessage: followUp.content,
             latestEventSeq: this.events.list(session.id).length,
+            mentionedAgentIds: followUp.mentionedAgentIds,
+            replyToEventId: followUp.replyToEventId,
             pendingConfirmation: this.pendingConfirmationSummary(session.id),
             pendingConfirmationContext: this.pendingConfirmationContext(session.id),
             failureCheckpoint: this.latestFailurePhase(session.id)
@@ -1855,6 +1926,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         sourceEventId: event.id,
         currentMessage: content,
         latestEventSeq: this.events.list(session.id).length,
+        mentionedAgentIds: followUp.mentionedAgentIds,
+        replyToEventId: followUp.replyToEventId,
         pendingConfirmation: this.pendingConfirmationSummary(session.id),
         pendingConfirmationContext: this.pendingConfirmationContext(session.id),
         failureCheckpoint: this.latestFailurePhase(session.id)
@@ -2434,7 +2507,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   ) {
     const startedAt = Date.now();
     const session = this.sessions.get(sessionId);
-    if (!session || this.deletingSessionIds.has(sessionId) || session.status === 'PAUSED') return;
+    const lifecycleGeneration = this.lifecycle.generation(sessionId);
+    if (!session || this.deletingSessionIds.has(sessionId) || session.status === 'PAUSED' ||
+      !this.lifecycle.isActive(sessionId, lifecycleGeneration)) return;
     const routingController = new AbortController();
     this.intentRoutingControllers.set(sessionId, routingController);
     try {
@@ -2446,6 +2521,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         `${this.intentRoutingWorkerId}:${crypto.randomUUID()}`,
         150_000
       );
+      if (!this.lifecycle.isActive(sessionId, lifecycleGeneration)) return;
       if (claim.state === 'terminal') return;
       if (claim.state === 'blocked') {
         const blocking = claim.blockingRouting;
@@ -2482,6 +2558,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
           sourceEventId: routing.sourceEventId,
           currentMessage: followUp.content,
           latestEventSeq: this.events.list(session.id).length,
+          mentionedAgentIds: followUp.mentionedAgentIds,
+          replyToEventId: followUp.replyToEventId,
           pendingConfirmation: this.pendingConfirmationSummary(session.id),
           pendingConfirmationContext: this.pendingConfirmationContext(session.id),
           failureCheckpoint: this.latestFailurePhase(session.id)
@@ -2835,7 +2913,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       coordinatorId: coordinator.id,
       workflowId: workflow.id,
       workflowVersion: version.version,
-      confirmationId: input.confirmationId
+      confirmationId: input.confirmationId,
+      sessionGeneration: this.lifecycle.generation(session.id)
     });
     session.workflowRunId = run.id;
     this.setStatus(session, 'EXECUTING');
@@ -2893,7 +2972,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       coordinatorId: coordinator.id,
       workflowId: workflow.id,
       workflowVersion: pending.workflowVersion,
-      confirmationId: pending.selectionConfirmationId
+      confirmationId: pending.selectionConfirmationId,
+      sessionGeneration: this.lifecycle.generation(session.id)
     });
     session.workflowRunId = run.id;
     this.setStatus(session, 'EXECUTING');
@@ -2928,14 +3008,19 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     return { session, ...result };
   }
 
-  async applyQueuedExecutionOutcome(sessionId: string, outcome: ExecutionOutcome) {
+  async applyQueuedExecutionOutcome(
+    sessionId: string,
+    outcome: ExecutionOutcome,
+    expectedGeneration?: number
+  ) {
+    if (!this.lifecycle.matchesActiveGeneration(sessionId, expectedGeneration)) return;
     const session = this.sessions.get(sessionId);
     if (session?.activeFollowUpMessageId) {
-      await this.applyFollowUpOutcome(sessionId, session.activeFollowUpMessageId, outcome);
+      await this.applyFollowUpOutcome(sessionId, session.activeFollowUpMessageId, outcome, expectedGeneration);
       return;
     }
     if (await this.workflowRuntime?.acceptExecutionOutcome(sessionId, outcome)) return;
-    this.applyOutcome(sessionId, outcome);
+    this.applyOutcome(sessionId, outcome, expectedGeneration);
   }
 
   resolveWorkflowStep(
@@ -3230,11 +3315,14 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   }
 
   private scheduleFollowUpPlanning(sessionId: string) {
-    if (this.followUpPlanningRuns.has(sessionId) || this.shuttingDown) return;
+    const lifecycleGeneration = this.lifecycle.generation(sessionId);
+    if (this.followUpPlanningRuns.has(sessionId) || this.shuttingDown ||
+      !this.lifecycle.isActive(sessionId, lifecycleGeneration)) return;
     const run = this.processNextFollowUp(sessionId)
       .catch((error) => {
         const session = this.sessions.get(sessionId);
-        if (!session || this.deletingSessionIds.has(sessionId)) return;
+        if (!session || this.deletingSessionIds.has(sessionId) ||
+          !this.lifecycle.isActive(sessionId, lifecycleGeneration)) return;
         const active = session.pendingFollowUpMessages?.find(
           (item) => item.id === session.activeFollowUpMessageId
         );
@@ -3264,7 +3352,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
   private async processNextFollowUp(sessionId: string) {
     const session = this.sessions.get(sessionId);
-    if (!session || session.status === 'PAUSED' || session.activeFollowUpMessageId) return;
+    const lifecycleGeneration = this.lifecycle.generation(sessionId);
+    if (!session || !this.lifecycle.isActive(sessionId, lifecycleGeneration) ||
+      session.status === 'PAUSED' || session.activeFollowUpMessageId) return;
     if (
       this.briefGenerationRuns.has(sessionId) ||
       this.execution.isRunning(sessionId)
@@ -3350,15 +3440,16 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         requirementRelation: followUp.handlingPlan.requirementRelation
       }
     );
+    if (!this.lifecycle.isActive(sessionId, lifecycleGeneration)) return;
     session.currentTaskBriefId = brief.id;
     followUp.status = 'executing';
     await this.contextManagement?.saveFollowUp(sessionId, followUp);
     this.setStatus(session, 'EXECUTING');
     this.execution.start(session, brief, tasks, (outcome) => {
-      void this.applyFollowUpOutcome(sessionId, followUp.id, outcome).catch((error) => {
+      void this.applyFollowUpOutcome(sessionId, followUp.id, outcome, lifecycleGeneration).catch((error) => {
         this.logger.error(`Failed to persist follow-up completion for session ${sessionId}: ${String(error)}`);
       });
-    });
+    }, lifecycleGeneration);
   }
 
   private normalizeFollowUpHandlingPlan(
@@ -3426,9 +3517,14 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     await this.completeFollowUpRouting(session, followUp.id, action === 'cancel' ? 'cancelled' : 'completed');
   }
 
-  private async applyFollowUpOutcome(sessionId: string, followUpMessageId: string, outcome: ExecutionOutcome) {
+  private async applyFollowUpOutcome(
+    sessionId: string,
+    followUpMessageId: string,
+    outcome: ExecutionOutcome,
+    expectedGeneration?: number
+  ) {
     const session = this.sessions.get(sessionId);
-    if (!session) return;
+    if (!session || !this.lifecycle.matchesActiveGeneration(sessionId, expectedGeneration)) return;
     await this.completeFollowUpRouting(
       session,
       followUpMessageId,
@@ -3447,14 +3543,15 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         outcome: outcome.kind
       })
     });
-    this.applyOutcome(sessionId, outcome);
+    this.applyOutcome(sessionId, outcome, expectedGeneration);
   }
 
   /** Applied when the background execution pipeline finishes. */
-  applyOutcome(sessionId: string, outcome: ExecutionOutcome) {
+  applyOutcome(sessionId: string, outcome: ExecutionOutcome, expectedGeneration?: number) {
     const session = this.sessions.get(sessionId);
     if (
       !session ||
+      !this.lifecycle.isActive(sessionId, expectedGeneration) ||
       session.status === 'CANCELLED' ||
       session.status === 'COMPLETED' ||
       session.status === 'PAUSED'
@@ -3888,9 +3985,10 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         reason
       })
     });
-    this.execution.start(session, brief, this.tasks.unfinished(session.id), (outcome) =>
-      this.applyOutcome(session.id, outcome)
-    );
+    const lifecycleGeneration = this.lifecycle.generation(session.id);
+    this.execution.start(session, brief, this.tasks.unfinished(session.id),
+      (outcome) => this.applyOutcome(session.id, outcome, lifecycleGeneration),
+      lifecycleGeneration);
   }
 
   listBriefs(sessionId: string) {
@@ -4072,6 +4170,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
   async pause(sessionId: string, reason = '用户已停止会话', confirmationId?: string) {
     const session = this.get(sessionId);
+    const admission = await this.lifecycle.closeForStop(sessionId, session.dataEpoch);
+    if (admission.event) this.events.acceptCommitted(admission.event);
     const alreadyPaused = session.status === 'PAUSED';
     if (!alreadyPaused) {
       const pendingRouting = this.contextManagement?.listRoutingRecords(sessionId)
@@ -4147,7 +4247,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     return { session, event, confirmationEvent };
   }
 
-  resume(sessionId: string, reason = '用户已继续会话', confirmationId?: string) {
+  async resume(sessionId: string, reason = '用户已继续会话', confirmationId?: string) {
     const session = this.get(sessionId);
     const history = this.events.list(sessionId);
     const pending = this.pendingConfirmationContext(sessionId);
@@ -4174,6 +4274,18 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
     if (this.runtime?.hasUnconfirmedStops?.(sessionId)) {
       throw new ConflictException('本地执行停止状态尚未确认，请先重试停止或检查本地助手。');
+    }
+    const lifecycle = this.lifecycle.get(sessionId);
+    if (lifecycle?.state === 'active' && lifecycle.admission === 'closed') {
+      try {
+        const reopened = await this.lifecycle.reopen(sessionId);
+        if (reopened.event) this.events.acceptCommitted(reopened.event);
+      } catch (error) {
+        if (String(error).includes('STOP_UNCONFIRMED')) {
+          throw new ConflictException('本地执行停止状态尚未确认，请先重试停止或检查本地助手。');
+        }
+        throw error;
+      }
     }
     if (
       session.status === 'WAIT_USER_DECISION' &&
@@ -4442,7 +4554,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
   private applyWorkflowRuntimeUpdate(update: WorkflowRuntimeUpdate) {
     const session = this.sessions.get(update.sessionId);
-    if (!session) return;
+    if (!session || !this.lifecycle.matchesActiveGeneration(update.sessionId, update.sessionGeneration)) return;
     session.workflowRunId = update.workflowRunId;
     if (update.kind === 'session_outcome') {
       this.applyOutcome(session.id, update.outcome);
@@ -5139,6 +5251,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   }
 
   private resumeExecution(session: SessionDetail) {
+    const lifecycleGeneration = this.lifecycle.generation(session.id);
+    if (!this.lifecycle.isActive(session.id, lifecycleGeneration)) return;
     if (!session.currentTaskBriefId) {
       this.applyOutcome(session.id, { kind: 'ask_user', reason: messages.resumeBriefMissing });
       return;
@@ -5154,7 +5268,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         .resumeCurrentExecution(session.workflowRunId, {
           session,
           brief,
-          coordinatorId: coordinator.id
+          coordinatorId: coordinator.id,
+          sessionGeneration: lifecycleGeneration
         })
         .then((resumed) => {
           if (!resumed) {
@@ -5174,7 +5289,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
     this.tasks.resetStaleRunning(session.id, session.activeWorkItemId);
     const unfinishedTasks = this.tasks.unfinished(session.id, session.activeWorkItemId);
-    this.execution.start(session, brief, unfinishedTasks, (outcome) => this.applyOutcome(session.id, outcome));
+    this.execution.start(session, brief, unfinishedTasks,
+      (outcome) => this.applyOutcome(session.id, outcome, lifecycleGeneration), lifecycleGeneration);
   }
 
   private recoverWorkspaceWritebackState(session: SessionDetail) {
@@ -5329,7 +5445,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         affectedTaskIds: unfinishedTasks.map((task) => task.id)
       })
     });
-    this.execution.start(session, brief, unfinishedTasks, (outcome) => this.applyOutcome(session.id, outcome));
+    const lifecycleGeneration = this.lifecycle.generation(session.id);
+    this.execution.start(session, brief, unfinishedTasks,
+      (outcome) => this.applyOutcome(session.id, outcome, lifecycleGeneration), lifecycleGeneration);
   }
 
   private titleFromInput(input: string) {

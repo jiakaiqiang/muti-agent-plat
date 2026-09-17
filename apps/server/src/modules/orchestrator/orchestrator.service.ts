@@ -82,6 +82,7 @@ import { CapabilitiesService } from '../capabilities/capabilities.service.js';
 import { EventsService } from '../events/events.service.js';
 import { MemoryService } from '../memory/memory.service.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
+import { SessionLifecycleStore } from '../runtimes/session-lifecycle-store.js';
 import { KnowledgeService } from '../rag/knowledge.service.js';
 import { RuntimeService } from '../runtimes/runtime.service.js';
 import { TasksService } from '../tasks/tasks.service.js';
@@ -265,6 +266,7 @@ export class OrchestratorService {
   private readonly suggestedTasksByBriefId = new Map<string, SuggestedAgentTask[]>();
   private readonly runtimeProviderCircuits = new Map<RuntimeType, number>();
   private savePendingInvocationCallback?: (sessionId: string, invocation: PendingInvocation) => void;
+  private readonly lifecycle: SessionLifecycleStore;
 
   constructor(
     private readonly agents: AgentsService,
@@ -288,6 +290,7 @@ export class OrchestratorService {
     @Optional() private readonly contextManagement?: ContextManagementService,
     @Optional() private readonly systemAgentPolicies?: SystemAgentRuntimePolicyService
   ) {
+    this.lifecycle = new SessionLifecycleStore(persistence);
     const persistedBriefs = this.persistence.getCollection<Record<string, TaskBrief[]>>('briefsBySession', {});
     for (const [sessionId, briefs] of Object.entries(persistedBriefs)) {
       this.briefsBySession.set(sessionId, briefs);
@@ -6597,7 +6600,7 @@ export class OrchestratorService {
     if (!input.operation && this.runtime.operations) {
       const scopeKey = JSON.stringify([input.phase, input.agent.id, input.contextAssembly.workItemId ?? inputSession.activeWorkItemId,
         input.taskId, input.contextAssembly.currentContractGoal ?? input.contextAssembly.sessionGoal]);
-      const paused = this.runtime.operations.list(input.sessionId).find(item => item.status === 'paused' && item.scopeKey === scopeKey);
+      const paused = this.runtime.operations.findResumable(input.sessionId, scopeKey);
       const operation = paused ? await this.runtime.operations.resume(input.sessionId, paused.id)
         : await this.runtime.operations.begin({ id: input.invocationId,
           sessionId: input.sessionId, taskId: input.taskId, phase: input.phase, scopeKey });
@@ -6608,6 +6611,9 @@ export class OrchestratorService {
     let draft = input;
     while (true) {
       const result = await this.runRuntimeProviderAttempts(inputSession, draft, signal);
+      if (!this.lifecycle.isActive(inputSession.id, draft.operation?.sessionGeneration)) {
+        throw new Error('SESSION_ADMISSION_CLOSED');
+      }
       if (result.status === 'completed' || result.status === 'cancelled' || signal?.aborted) return result;
       if (!draft.submissionRepair && draft.phase === 'task_execution' && draft.writeModeOverride !== 'proposal_only' &&
         result.error?.code === 'RUNTIME_OUTPUT_CONTRACT_VIOLATION' && result.executionCandidate?.schemaErrors?.length &&

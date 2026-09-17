@@ -1,16 +1,16 @@
 # 阶段 1：多会话执行隔离、停止与可恢复删除 — Plan v1
 
 > 日期：2026-09-16
-> 状态：设计与实施基线，待实施；现有能力的复用不代表本阶段验收已完成。
+> 状态：已实施并通过阶段验收（2026-09-16）。
 > 依赖：阶段 0 通过。
 
-[总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-1-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-1-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-1-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-1-checklist-v1.md)
+[总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [冻结合同](../contracts/main-agent-collaboration-contract-v1.md) | [spec](../product/main-agent-collaboration-phase-1-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-1-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-1-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-1-checklist-v1.md)
 
 ## 1. 目标、依据与决策
 
 同一 Agent 服务多个会话时，停止或删除其中一个只影响目标会话；未知停止状态不得伪装成功，删除不损毁源码或未合并产物。
 
-当前依据见同阶段 Spec 第 3 节。已沟通决定统一见总计划，本文将其映射为实现边界。
+当前依据见同阶段 Spec 第 3 节与阶段 0 [冻结合同](../contracts/main-agent-collaboration-contract-v1.md)。已沟通决定统一见总计划，本文将其映射为实现边界。
 
 方案选择：沿用现有领域模块与共享合同，增量补强；不新增平行编排/上下文系统。收益是保持现有 Runtime、流程图、双端状态和数据可追溯性；代价是必须覆盖旧入口并完成版本兼容验证。
 
@@ -22,7 +22,7 @@
 
 ### 2.2
 
-阶段 0 已冻结独立 CollaborationLifecycleSnapshot 与存储/迁移落点，见[主 Agent 协作合同](../contracts/main-agent-collaboration-contract-v1.md)。本阶段接入 active/deleting/deleted、generation、deleteRequestId、deletedAt 及阻塞明细；不把这些业务生命周期直接混入模型任务状态枚举。墓碑在重启恢复、队列领取、缓存读取和所有结果提交入口共同检查。阶段 0 仅有纯函数，持久化及入口校验仍是本阶段待实施项。
+阶段 0 冻结的 CollaborationLifecycleSnapshot 已落入 file backend 与 PostgreSQL V10 `session_lifecycles` 投影。`active/deleting/deleted`、generation、deleteRequestId、deletedAt 及阻塞明细保持独立于模型任务状态；墓碑在重启恢复、队列领取、工作流和结果提交入口共同检查。
 
 ### 2.3
 
@@ -55,11 +55,11 @@
 - 扩展停止/删除查询、恢复操作和 UI-state，事件携带 sessionId、generation、requestId、version。
 - PostgreSQL 与 file 持久化生命周期/墓碑；事务失败不发布完成事件；沿用 outbox 去重。
 
-拟新增类型、状态和接口均为设计项，不是当前可调用 API。涉及持久化时，实施必须同步 shared、API/event/data/runtime/UI-state 合同、PostgreSQL projection/迁移和 file backend，不能只加内存 Map。
+已同步 shared、API/event/data/runtime/UI-state 合同、PostgreSQL projection/迁移和 file backend。新增 `GET /sessions/:id/lifecycle`、可见性查询及 `POST /sessions/:id/restore`；删除响应按生命周期返回 202/200。
 
 ## 5. 修改边界
 
-允许修改的候选落点（实施时按任务裁剪）：
+实际修改落点：
 
 - `apps/server/src/modules/sessions/`
 - `apps/server/src/modules/runtimes/`
@@ -75,13 +75,13 @@
 
 ## 6. 实施次序与验证
 
-按 [tasks](../implementation/main-agent-collaboration-phase-1-tasks-v1.md) 顺序推进，每项先补失败用例/合同断言，再实现并最小回归。完整场景和命令见 [checklist](../quality/main-agent-collaboration-phase-1-checklist-v1.md)；现有命令并不自动覆盖拟新增场景。
+已按 [tasks](../implementation/main-agent-collaboration-phase-1-tasks-v1.md) 完成实现。新增生命周期、恢复、迟到结果、工作流 generation、双端展示及真实 PostgreSQL 竞争用例；完整命令和数量见 [checklist](../quality/main-agent-collaboration-phase-1-checklist-v1.md)。
 
 ## 7. 风险、回退与未决参数
 
 - 旧代码继续调用物理删除会破坏恢复保证，必须覆盖所有删除入口和清理 worker。
 - 只依赖进程内 Map 的删除标识不能抵御重启或多实例。
 
-回退：发现隔离/删除问题先停用新的删除/启动入口，保留墓碑与未知停止屏障。不能回退到物理删除路径处理新生命周期记录；需兼容构建或向前修复。
+回退：发现隔离/删除问题先停用新的删除/恢复入口，保留墓碑与未知停止屏障。不能回退到物理删除路径处理新生命周期记录；需兼容构建或向前修复。本轮未执行破坏性回退演练。
 
-产品交互按总计划已沟通边界执行。模型预算、并发、缓存容量与 TTL 等环境参数不在文档中冒充现有配置；在阶段 0 冻结配置合同、相关阶段实现前记录有效值和验证依据。新增破坏性维护/外部服务采购/发布需单独确认，不影响本轮生成设计文档。
+产品交互按总计划已沟通边界执行。模型预算、并发、缓存容量与 TTL 等环境参数不在本文冒充现有配置。新增物理清理、外部服务采购或发布仍需单独确认。

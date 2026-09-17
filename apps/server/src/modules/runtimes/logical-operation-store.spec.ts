@@ -155,3 +155,55 @@ test('a restarted owner blocks replacement until the previous process has really
     await restored.reserve('session', 'replacement', 'new-process');
   } finally { await persistence.onModuleDestroy(); rmSync(directory, { recursive: true, force: true }); }
 });
+
+test('a restored generation gets a new idempotent operation without overwriting its audit predecessor', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'operation-generation-'));
+  const persistence = new PersistenceService({ enabled: true, backend: 'file', filePath: join(directory, 'state.json') });
+  await persistence.initialize();
+  const timestamp = new Date().toISOString();
+  try {
+    await persistence.setCollection('sessions', [{
+      id: 'session', title: 'Generation session', status: 'EXECUTING', ownerId: 'test',
+      createdAt: timestamp, updatedAt: timestamp
+    }]);
+    await persistence.setCollection('sessionLifecyclesBySession', {
+      session: {
+        contractVersion: 'main-agent-collaboration/v1', sessionId: 'session', dataEpoch: 'epoch',
+        generation: 1, revision: 1, state: 'active', admission: 'open', stopStatus: 'idle'
+      }
+    });
+    const store = new LogicalOperationStore(persistence);
+    const original = await store.begin({
+      id: 'brief-operation', sessionId: 'session', phase: 'brief_generation', scopeKey: 'brief-scope'
+    });
+    await store.reserve('session', original.id, 'original-invocation');
+    await store.settle('session', original.id, 'original-invocation', 'confirmed', true);
+    await persistence.setCollection('sessionLifecyclesBySession', {
+      session: {
+        contractVersion: 'main-agent-collaboration/v1', sessionId: 'session', dataEpoch: 'epoch',
+        generation: 3, revision: 4, state: 'active', admission: 'open', stopStatus: 'confirmed'
+      }
+    });
+
+    const restored = await store.begin({
+      id: 'brief-operation', sessionId: 'session', phase: 'brief_generation', scopeKey: 'brief-scope'
+    });
+    const replay = await store.begin({
+      id: 'brief-operation', sessionId: 'session', phase: 'brief_generation', scopeKey: 'brief-scope'
+    });
+    await store.reserve('session', restored.id, 'restored-invocation');
+
+    assert.equal(store.findResumable('session', 'brief-scope'), undefined);
+    await assert.rejects(store.resume('session', original.id), /SESSION_ADMISSION_CLOSED/);
+    await assert.rejects(store.reserveCorrection('session', original.id), /SESSION_ADMISSION_CLOSED/);
+    assert.equal(original.id, 'brief-operation');
+    assert.equal(original.sessionGeneration, 1);
+    assert.equal(restored.id, 'brief-operation:generation:3');
+    assert.equal(restored.sessionGeneration, 3);
+    assert.equal(replay.id, restored.id);
+    assert.equal(store.list('session').length, 2);
+  } finally {
+    await persistence.onModuleDestroy();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

@@ -21,6 +21,7 @@ import { buildContextEnvelopeV2 } from './context-assembly-builder-v2.js';
 import type { ContextPhase } from './phase-context-policy.js';
 import { selectEvidenceWithinBudget } from './select-evidence-within-budget.js';
 import type { ScoredEvidenceCandidate } from './score-evidence-candidates.js';
+import { assertL0SystemRuleTrustBoundary } from './l0-trust-boundary.js';
 import { workspaceProviderKindForDirectory } from '../workspaces/workspace-provider.js';
 import { workspaceMetrics } from '../../common/workspace-metrics.js';
 
@@ -83,8 +84,7 @@ export function buildEnvelopeFromContextAssembly(args: {
   const fileRevisionBudgetBytes = Math.max(0, (evidenceTokens - workspaceEvidenceTokens) * 4);
   const revisionEvidence = selectedFileRevisionEvidence(contextAssembly, fileRevisionBudgetBytes);
 
-  return {
-    ...buildContextEnvelopeV2({
+  const built = buildContextEnvelopeV2({
     phase: toContextPhase(args.phase),
     sessionId: session.id,
     l0: {
@@ -167,7 +167,10 @@ export function buildEnvelopeFromContextAssembly(args: {
       projectMapTokens: Math.floor(inputTokens * 0.1),
       evidenceTokens
     }
-    }),
+    });
+  assertL0SystemRuleTrustBoundary(built);
+  return {
+    ...built,
     contextScope: {
       ...(contextAssembly.workItemId ? { workItemId: contextAssembly.workItemId } : {}),
       ...(contextAssembly.contextSnapshotId ? { contextSnapshotId: contextAssembly.contextSnapshotId } : {}),

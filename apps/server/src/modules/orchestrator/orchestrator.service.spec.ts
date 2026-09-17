@@ -109,6 +109,33 @@ test('recovery with a failed submission never replays development when safe repa
   }
 });
 
+test('runtime results cannot enter orchestrator post-processing after Session admission closes', async () => {
+  const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+  const service = makeService([], recorder) as any;
+  service.lifecycle = { isActive: () => false };
+  service.runRuntimeProviderAttempts = async () => ({
+    invocationId: 'late-invocation', runtimeType: 'mock', status: 'completed',
+    output: createAgentMessageOutput({ messageKind: 'answer', content: 'late output' }),
+    events: [], artifacts: [], systemEvidence: createRuntimeArtifactSystemEvidence('late-invocation'),
+    usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, model: 'mock' }
+  });
+
+  await assert.rejects(
+    service.runRuntime(session(), {
+      invocationId: 'late-invocation', sessionId: 'session-1', phase: 'discussion',
+      agent: agent('coordinator'), contextAssembly: { taskContext: {} },
+      expectedOutput: { kind: 'agent_message', schemaVersion: '1.0' }, budget: {},
+      operation: {
+        id: 'late-operation', deadlineAt: '2026-09-16T00:00:00.000Z',
+        policyVersion: 'execution-reliability-v1', maxAttempts: 3, sessionGeneration: 1
+      }
+    }),
+    /SESSION_ADMISSION_CLOSED/
+  );
+  assert.equal(recorder.events.length, 0);
+  assert.equal(recorder.taskUpdates.length, 0);
+});
+
 function agent(key: string): Agent {
   return {
     id: key,

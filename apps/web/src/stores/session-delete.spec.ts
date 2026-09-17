@@ -5,11 +5,15 @@ import {
   useSessionStore
 } from './session'
 
-function apiResponse(data: unknown) {
+function apiResponse(data: unknown, status = 200) {
   return new Response(JSON.stringify({ data, requestId: 'session-delete-spec' }), {
-    status: 200,
+    status,
     headers: { 'content-type': 'application/json' }
   })
+}
+
+function page(items: unknown[]) {
+  return { items, page: 1, pageSize: 50, total: items.length }
 }
 
 function health() {
@@ -92,5 +96,99 @@ describe('session deletion failure recovery', () => {
 
     expect(store.deletingSessionIds).not.toContain('session-1')
     expect(store.sessions.map((session) => session.id)).toContain('session-1')
+  })
+
+  it('keeps a Session visible when deletion is accepted but still stopping', async () => {
+    const deleting = {
+      ...seedSession().sessions[0]!,
+      lifecycleState: 'deleting' as const,
+      lifecycleAdmission: 'closed' as const,
+      lifecycleGeneration: 2,
+      lifecycleRevision: 2,
+      lifecycleStopStatus: 'pending' as const
+    }
+    fetchMock
+      .mockResolvedValueOnce(apiResponse(health()))
+      .mockResolvedValueOnce(apiResponse({
+        sessionId: deleting.id,
+        deleted: false,
+        lifecycle: {
+          sessionId: deleting.id,
+          dataEpoch: 'epoch-v3',
+          generation: 2,
+          revision: 2,
+          state: 'deleting',
+          admission: 'closed',
+          stopStatus: 'pending'
+        }
+      }, 202))
+      .mockResolvedValueOnce(apiResponse(page([deleting])))
+    const store = useSessionStore()
+
+    await expect(store.deleteSession(deleting.id)).resolves.toBe(false)
+
+    expect(store.sessions).toEqual([expect.objectContaining({
+      id: deleting.id,
+      lifecycleState: 'deleting'
+    })])
+    expect(store.deletingSessionIds).toEqual([deleting.id])
+  })
+
+  it('retains deleted tombstones in the all-sessions projection', async () => {
+    const deleted = {
+      ...seedSession().sessions[0]!,
+      status: 'PAUSED' as const,
+      lifecycleState: 'deleted' as const,
+      lifecycleAdmission: 'closed' as const,
+      lifecycleGeneration: 3,
+      lifecycleRevision: 4,
+      lifecycleStopStatus: 'confirmed' as const
+    }
+    fetchMock
+      .mockResolvedValueOnce(apiResponse(health()))
+      .mockResolvedValueOnce(apiResponse(page([deleted])))
+    const store = useSessionStore()
+
+    await store.loadSessions()
+
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain('/sessions?visibility=all')
+    expect(store.sessions).toEqual([expect.objectContaining({
+      id: deleted.id,
+      lifecycleState: 'deleted'
+    })])
+  })
+
+  it('restores the current generation and refreshes the Session as paused', async () => {
+    const store = seedSession()
+    store.sessions[0] = {
+      ...store.sessions[0]!,
+      status: 'PAUSED',
+      lifecycleState: 'deleted',
+      lifecycleAdmission: 'closed',
+      lifecycleGeneration: 7,
+      lifecycleRevision: 8,
+      lifecycleStopStatus: 'confirmed'
+    }
+    const restored = {
+      ...store.sessions[0]!,
+      lifecycleState: 'active' as const,
+      lifecycleGeneration: 8,
+      lifecycleRevision: 9
+    }
+    fetchMock
+      .mockResolvedValueOnce(apiResponse(health()))
+      .mockResolvedValueOnce(apiResponse({ session: restored, restored: true }))
+      .mockResolvedValueOnce(apiResponse(page([restored])))
+
+    await expect(store.restoreSession('session-1')).resolves.toEqual({ session: restored, restored: true })
+
+    const restoreRequest = fetchMock.mock.calls[1]
+    expect(String(restoreRequest?.[0])).toContain('/sessions/session-1/restore')
+    expect(JSON.parse(String(restoreRequest?.[1]?.body))).toEqual(expect.objectContaining({ expectedGeneration: 7 }))
+    expect(store.sessions[0]).toEqual(expect.objectContaining({
+      status: 'PAUSED',
+      lifecycleState: 'active',
+      lifecycleGeneration: 8
+    }))
   })
 })

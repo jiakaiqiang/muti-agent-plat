@@ -661,3 +661,145 @@ test('WorkItem context slices exclude unrelated records and retain explicit inhe
     await context.cleanup();
   }
 });
+
+function userMessage(sessionId: string, index: number, content: string, workItemId?: string): CollaborationEvent {
+  return {
+    id: `history-${index}`,
+    sessionId,
+    ...(workItemId ? { workItemId } : {}),
+    type: 'user_message',
+    toAgentIds: [],
+    content,
+    metadata: createMetadata('chat_message', { text: content }),
+    actor: { type: 'user', id: 'user-1' },
+    createdAt: new Date(Date.UTC(2026, 7, 7, 0, 0, index)).toISOString()
+  };
+}
+
+test('intent snapshots bound recent dialogue and candidates instead of injecting whole history', async () => {
+  const context = await fixture();
+  try {
+    const active = await context.service.ensureInitialWorkItem(context.session, 'event-1');
+    for (let index = 0; index < 40; index += 1) {
+      await context.service.createWorkItem({
+        session: context.session,
+        sourceEventId: `event-history-${index}`,
+        title: `历史需求 ${index}`,
+        goal: `历史需求目标 ${index}`,
+        activate: false
+      });
+    }
+    const history = Array.from({ length: 1_000 }, (_, index) =>
+      userMessage(context.session.id, index, `第 ${index} 条历史消息`, active.id));
+    await context.persistence.setCollection('eventsBySession', { [context.session.id]: history });
+
+    const snapshot = await context.service.buildIntentSnapshot({
+      session: context.session,
+      sourceEventId: 'history-999',
+      currentMessage: '继续刚才那个需求',
+      latestEventSeq: history.length
+    });
+
+    assert.ok(snapshot.bounds, 'snapshot must declare its own bounds');
+    assert.equal(snapshot.candidateWorkItemIds.length, snapshot.bounds.candidateWorkItemLimit);
+    assert.equal(snapshot.bounds.totalCandidateWorkItems, 41);
+    assert.equal(snapshot.bounds.omittedCandidateWorkItems, 41 - snapshot.bounds.candidateWorkItemLimit);
+    assert.ok(
+      (snapshot.recentRelevantMessages?.length ?? 0) <= snapshot.bounds.recentMessageLimit,
+      `recent dialogue must stay within the declared cap, got ${snapshot.recentRelevantMessages?.length}`
+    );
+    assert.ok((snapshot.recentRelevantMessages?.length ?? 0) > 0, 'recent dialogue must not be empty');
+    assert.equal(snapshot.bounds.omittedRecentMessages, 1_000 - (snapshot.recentRelevantMessages?.length ?? 0));
+    assert.deepEqual(
+      snapshot.recentRelevantMessages?.map((item) => item.eventId),
+      history.slice(-(snapshot.recentRelevantMessages?.length ?? 0)).map((item) => item.id),
+      'recent dialogue keeps the newest messages, oldest first'
+    );
+    const serialized = JSON.stringify(snapshot);
+    assert.equal(serialized.includes('第 0 条历史消息'), false, 'the oldest history must not reach the classifier');
+    assert.ok(serialized.length < 40_000, `snapshot payload must not grow with history, got ${serialized.length}`);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('intent snapshots keep the server-resolved reply target and @ constraint', async () => {
+  const context = await fixture();
+  try {
+    await context.service.ensureInitialWorkItem(context.session, 'event-1');
+    const long = '排查'.repeat(2_000);
+    const events = [
+      userMessage(context.session.id, 1, '第一条历史消息'),
+      userMessage(context.session.id, 2, long)
+    ];
+    await context.persistence.setCollection('eventsBySession', { [context.session.id]: events });
+
+    const snapshot = await context.service.buildIntentSnapshot({
+      session: context.session,
+      sourceEventId: 'event-reply',
+      currentMessage: '@质量 这个也一起看下',
+      latestEventSeq: events.length,
+      mentionedAgentIds: ['agent-quality', 'agent-quality'],
+      replyToEventId: 'history-2'
+    });
+
+    assert.deepEqual(snapshot.mentionedAgentIds, ['agent-quality'], '@ targets are deduplicated but preserved');
+    assert.equal(snapshot.replyToEventId, 'history-2');
+    assert.equal(snapshot.replyToMessage?.eventId, 'history-2');
+    assert.equal(snapshot.replyToMessage?.role, 'user');
+    assert.equal(snapshot.replyToMessage?.truncated, true, 'a long reply target is excerpted, not inlined whole');
+    assert.ok(
+      (snapshot.replyToMessage?.content.length ?? 0) <= (snapshot.bounds?.messageCharLimit ?? 0),
+      'the reply excerpt respects the declared char cap'
+    );
+
+    await assert.rejects(
+      () => context.service.buildIntentSnapshot({
+        session: context.session,
+        sourceEventId: 'event-reply-2',
+        currentMessage: '回复一条不存在的消息',
+        latestEventSeq: events.length,
+        replyToEventId: 'event-from-another-session'
+      }),
+      /REPLY_TARGET_OUTSIDE_SESSION/
+    );
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('snapshot hash covers the new target fields so a changed @ target is not reusable', async () => {
+  const context = await fixture();
+  try {
+    await context.service.ensureInitialWorkItem(context.session, 'event-1');
+    const events = [userMessage(context.session.id, 1, '第一条历史消息')];
+    await context.persistence.setCollection('eventsBySession', { [context.session.id]: events });
+    const base = {
+      session: context.session,
+      sourceEventId: 'event-hash',
+      currentMessage: '同一句话',
+      latestEventSeq: events.length
+    };
+
+    const withoutMention = await context.service.buildIntentSnapshot(base);
+    const withMention = await context.service.buildIntentSnapshot({
+      ...base,
+      mentionedAgentIds: ['agent-quality']
+    });
+    const withReply = await context.service.buildIntentSnapshot({
+      ...base,
+      mentionedAgentIds: ['agent-quality'],
+      replyToEventId: 'history-1'
+    });
+
+    assert.notEqual(withoutMention.snapshotHash, withMention.snapshotHash, '@ targets must change the hash');
+    assert.notEqual(withMention.snapshotHash, withReply.snapshotHash, 'a reply target must change the hash');
+    assert.equal(
+      context.service.isSnapshotCurrent(context.session, withReply, events.length),
+      true,
+      'target fields alone must not make a fresh snapshot stale'
+    );
+  } finally {
+    await context.cleanup();
+  }
+});

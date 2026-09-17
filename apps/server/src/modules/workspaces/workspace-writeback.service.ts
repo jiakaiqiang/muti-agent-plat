@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import type {
   ResolveWorkspaceWritebackInput,
   RuntimeWorkspaceExecution,
@@ -10,6 +10,7 @@ import type {
 } from '@agent-cluster/shared';
 import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
+import { SessionLifecycleStore } from '../runtimes/session-lifecycle-store.js';
 import type { WorkspaceProvider } from './workspace-provider.js';
 import { WorkspaceProviderResolver } from './workspace-provider-resolver.js';
 
@@ -21,11 +22,13 @@ export class WorkspaceWritebackService {
   private readonly tails = new Map<string, Promise<unknown>>();
   private readonly resolutionTails = new Map<string, Promise<unknown>>();
   private readonly activeOperations = new Map<string, Promise<WorkspaceWritebackRecord>>();
+  private readonly lifecycle: SessionLifecycleStore;
 
   constructor(
     private readonly persistence: PersistenceService,
     private readonly providers: WorkspaceProviderResolver
   ) {
+    this.lifecycle = new SessionLifecycleStore(persistence);
     let recovered = false;
     for (const record of persistence.getCollection<WorkspaceWritebackRecord[]>(COLLECTION, [])) {
       if (['queued', 'merging', 'applying'].includes(record.status)) {
@@ -52,10 +55,13 @@ export class WorkspaceWritebackService {
     execution: RuntimeWorkspaceExecution;
     resultSummary?: string;
   }): Promise<WorkspaceWritebackRecord> {
+    const sessionGeneration = this.lifecycle.generation(input.session.id);
+    this.assertActiveGeneration(input.session.id, sessionGeneration);
     const existing = input.execution.writeback?.id
       ? this.records.get(input.execution.writeback.id)
       : [...this.records.values()].find((record) => record.changeSet.id === input.execution.changeSet.id);
     if (existing) {
+      this.assertActiveGeneration(existing.sessionId, existing.sessionGeneration);
       return ['queued', 'merging', 'applying'].includes(existing.status)
         ? this.runSerialized(existing, input.session, false)
         : structuredClone(existing);
@@ -64,6 +70,7 @@ export class WorkspaceWritebackService {
     const record: WorkspaceWritebackRecord = {
       id: crypto.randomUUID(),
       sessionId: input.session.id,
+      ...(sessionGeneration !== undefined ? { sessionGeneration } : {}),
       ...(input.taskId ? { taskId: input.taskId } : {}),
       invocationId: input.invocationId,
       workspaceId: input.session.workspaceId,
@@ -97,6 +104,7 @@ export class WorkspaceWritebackService {
   ): Promise<WorkspaceWritebackRecord> {
     const record = this.records.get(writebackId);
     if (!record || record.sessionId !== session.id) throw new NotFoundException('Workspace writeback not found.');
+    this.assertActiveGeneration(record.sessionId, record.sessionGeneration);
     const previous = this.resolutionTails.get(record.id) ?? Promise.resolve();
     const operation = previous.catch(() => undefined).then(() => this.resolveLocked(record, session, input));
     this.resolutionTails.set(record.id, operation);
@@ -152,6 +160,14 @@ export class WorkspaceWritebackService {
   }
 
   private async apply(record: WorkspaceWritebackRecord, session: SessionDetail, force: boolean) {
+    try {
+      this.assertActiveGeneration(record.sessionId, record.sessionGeneration);
+    } catch (error) {
+      return this.update(record, {
+        status: 'failed',
+        error: error instanceof Error ? error.message : 'SESSION_ADMISSION_CLOSED'
+      });
+    }
     const provider = this.providers.resolve(session);
     if (!provider) return this.update(record, { status: 'failed', error: 'Workspace provider is unavailable.' });
     try {
@@ -189,6 +205,12 @@ export class WorkspaceWritebackService {
     return this.persistence.setCollection(COLLECTION, [...this.records.values()]).then((persisted) => {
       if (!persisted) throw new Error('WORKSPACE_WRITEBACK_PERSISTENCE_FAILED: writeback state was not durably stored.');
     });
+  }
+
+  private assertActiveGeneration(sessionId: string, expectedGeneration?: number) {
+    if (!this.lifecycle.isActive(sessionId, expectedGeneration)) {
+      throw new ConflictException('SESSION_ADMISSION_CLOSED');
+    }
   }
 }
 

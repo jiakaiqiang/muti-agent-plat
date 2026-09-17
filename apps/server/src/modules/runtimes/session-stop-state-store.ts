@@ -1,6 +1,10 @@
 import type { LogicalOperation, RuntimeStopSummary, SessionStopRequest } from '@agent-cluster/shared';
 import type { PersistenceService, PersistedState } from '../persistence/persistence.service.js';
 import { appendRuntimeStopStateEvent } from './runtime-stop-event.js';
+import {
+  SESSION_LIFECYCLES_COLLECTION,
+  syncLifecycleStopStatus
+} from './session-lifecycle-store.js';
 
 export const SESSION_STOP_REQUESTS_COLLECTION = 'sessionStopRequestsBySession';
 export type StopRequestsBySession = Record<string, SessionStopRequest[]>;
@@ -23,20 +27,22 @@ export class SessionStopStateStore {
 
   async requestWithEvent(sessionId: string, reason: string, supervisedInvocationIds: string[] = []) {
     return this.persistence.mutateCollections(
-      ['logicalOperationsBySession', SESSION_STOP_REQUESTS_COLLECTION, 'eventsBySession', 'eventOutbox'],
+      [SESSION_LIFECYCLES_COLLECTION, 'logicalOperationsBySession', SESSION_STOP_REQUESTS_COLLECTION,
+        'eventsBySession', 'eventOutbox'],
       (draft: PersistedState) => {
         const requests = (draft[SESSION_STOP_REQUESTS_COLLECTION] ??= {}) as StopRequestsBySession;
         const existing = requests[sessionId]?.at(-1);
-        if (existing && existing.status !== 'confirmed') return {
-          request: structuredClone(existing),
-          event: appendRuntimeStopStateEvent(draft, existing)
-        };
+        if (existing && existing.status !== 'confirmed') {
+          syncLifecycleStopStatus(draft, sessionId, existing.status);
+          return { request: structuredClone(existing), event: appendRuntimeStopStateEvent(draft, existing) };
+        }
 
         const operations = ((draft.logicalOperationsBySession ?? {}) as OperationsBySession)[sessionId] ?? [];
         const targetIds = new Set<string>();
         for (const operation of operations) {
           if (operation.activeInvocationId && operation.stopState !== 'confirmed') targetIds.add(operation.activeInvocationId);
         }
+        for (const invocationId of supervisedInvocationIds) if (invocationId) targetIds.add(invocationId);
         const timestamp = new Date(this.now()).toISOString();
         const targets = [...targetIds].map(invocationId => {
           const operation = operations.find(item => item.activeInvocationId === invocationId || item.invocationIds.includes(invocationId));
@@ -59,6 +65,7 @@ export class SessionStopStateStore {
           updatedAt: timestamp
         };
         (requests[sessionId] ??= []).push(request);
+        syncLifecycleStopStatus(draft, sessionId, request.status);
         return { request: structuredClone(request), event: appendRuntimeStopStateEvent(draft, request) };
       }
     );

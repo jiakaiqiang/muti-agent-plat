@@ -39,8 +39,12 @@ export class ExecutionWorker implements OnModuleInit, OnModuleDestroy {
     this.worker = new Worker<ExecutionJobData>(
       executionQueueName,
       async (job) => {
-        const { sessionId, briefId, dataEpoch } = job.data;
+        const { sessionId, briefId, dataEpoch, sessionGeneration } = job.data;
         assertCurrentDataEpoch(this.persistence.currentDataEpoch(), dataEpoch, `execution job ${job.id}`);
+        if (!this.sessions.matchesActiveGeneration(sessionId, sessionGeneration)) {
+          this.logger.log(`Skipping execution job ${job.id}; session ${sessionId} generation is stale or closed`);
+          return;
+        }
         const session = this.sessions.get(sessionId);
         if (['PAUSED', 'INTERRUPTED', 'CANCELLED', 'COMPLETED'].includes(session.status)) {
           this.logger.log(`Skipping execution job ${job.id}; session ${sessionId} is ${session.status}`);
@@ -49,7 +53,11 @@ export class ExecutionWorker implements OnModuleInit, OnModuleDestroy {
 
         const brief = this.orchestrator.getBrief(sessionId, briefId);
         if (!brief) {
-          this.sessions.applyOutcome(sessionId, { kind: 'ask_user', reason: '队列执行失败：未找到任务契约。' });
+          this.sessions.applyOutcome(
+            sessionId,
+            { kind: 'ask_user', reason: '队列执行失败：未找到任务契约。' },
+            sessionGeneration
+          );
           return;
         }
 
@@ -58,7 +66,7 @@ export class ExecutionWorker implements OnModuleInit, OnModuleDestroy {
         const controller = this.executionQueue.registerAbortController(sessionId);
         try {
           const outcome = await this.orchestrator.runPipeline(session, brief, unfinishedTasks, controller.signal);
-          await this.sessions.applyQueuedExecutionOutcome(sessionId, outcome);
+          await this.sessions.applyQueuedExecutionOutcome(sessionId, outcome, sessionGeneration);
         } finally {
           this.executionQueue.releaseAbortController(sessionId, controller);
         }

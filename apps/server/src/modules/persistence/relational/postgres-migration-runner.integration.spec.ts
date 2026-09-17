@@ -11,8 +11,64 @@ import { runPostgresMigrations } from './postgres-migration-runner.js';
 import { RelationalStateStore } from './relational-state-store.js';
 import { LogicalOperationStore } from '../../runtimes/logical-operation-store.js';
 import { SessionStopStateStore } from '../../runtimes/session-stop-state-store.js';
+import { SessionLifecycleStore } from '../../runtimes/session-lifecycle-store.js';
 
 const databaseUrl = process.env.RELATIONAL_TEST_DATABASE_URL;
+
+test('PostgreSQL serializes delete admission against reserve and restores only a paused generation', { skip: !databaseUrl }, async () => {
+  const first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const second = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const restored = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const sessionId = `lifecycle-race-${process.pid}-${Date.now()}`;
+  const siblingId = `${sessionId}-sibling`;
+  const now = new Date().toISOString();
+  try {
+    await first.initialize();
+    await first.setCollection('sessions', [...first.getCollection<unknown[]>('sessions', []),
+      { id: sessionId, dataEpoch: first.currentDataEpoch(), title: 'Lifecycle race', status: 'EXECUTING', ownerId: 'test', createdAt: now, updatedAt: now },
+      { id: siblingId, dataEpoch: first.currentDataEpoch(), title: 'Sibling', status: 'EXECUTING', ownerId: 'test', createdAt: now, updatedAt: now }
+    ]);
+    const firstLifecycle = new SessionLifecycleStore(first);
+    await firstLifecycle.initialize(sessionId, first.currentDataEpoch());
+    await firstLifecycle.initialize(siblingId, first.currentDataEpoch());
+    const firstOperations = new LogicalOperationStore(first);
+    const operation = await firstOperations.begin({ id: `op-${sessionId}`, sessionId, phase: 'task_execution' });
+    const siblingOperation = await firstOperations.begin({ id: `op-${siblingId}`, sessionId: siblingId, phase: 'task_execution' });
+    await second.initialize();
+    const secondLifecycle = new SessionLifecycleStore(second);
+    const secondOperations = new LogicalOperationStore(second);
+
+    const [deletion, reservation] = await Promise.allSettled([
+      secondLifecycle.beginDelete(sessionId, second.currentDataEpoch(), `delete-${sessionId}`),
+      firstOperations.reserve(sessionId, operation.id, `call-${sessionId}`)
+    ]);
+    assert.equal(deletion.status, 'fulfilled');
+    assert.equal(secondLifecycle.get(sessionId)?.state, 'deleting');
+    await assert.rejects(secondOperations.reserve(sessionId, operation.id, `call-after-delete-${sessionId}`),
+      /SESSION_ADMISSION_CLOSED/);
+    await secondOperations.reserve(siblingId, siblingOperation.id, `call-${siblingId}`);
+
+    const activeInvocation = reservation.status === 'fulfilled' ? reservation.value.activeInvocationId : undefined;
+    const stops = new SessionStopStateStore(second);
+    await stops.request(sessionId, 'delete', activeInvocation ? [activeInvocation] : []);
+    if (activeInvocation) await secondOperations.settle(sessionId, operation.id, activeInvocation, 'confirmed', true);
+    const deleted = await secondLifecycle.completeDelete(sessionId);
+    assert.equal(deleted.lifecycle.state, 'deleted');
+    const restoredLifecycle = await secondLifecycle.restore(sessionId, {
+      requestId: `restore-${sessionId}`,
+      expectedGeneration: deleted.lifecycle.generation
+    });
+    assert.equal(restoredLifecycle.lifecycle.state, 'active');
+    assert.equal(restoredLifecycle.lifecycle.admission, 'closed');
+
+    await restored.initialize();
+    assert.equal(new SessionLifecycleStore(restored).get(sessionId)?.generation, deleted.lifecycle.generation + 1);
+    assert.equal(restored.getCollection<any[]>('sessions', []).find(item => item.id === sessionId)?.status, 'PAUSED');
+    assert.equal(new LogicalOperationStore(restored).list(siblingId)[0]?.activeInvocationId, `call-${siblingId}`);
+  } finally {
+    await Promise.all([first.onModuleDestroy(), second.onModuleDestroy(), restored.onModuleDestroy()]);
+  }
+});
 
 test('online PostgreSQL mutations preserve concurrent sessions and are independent of event/outbox revisions', { skip: !databaseUrl }, async () => {
   const first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });

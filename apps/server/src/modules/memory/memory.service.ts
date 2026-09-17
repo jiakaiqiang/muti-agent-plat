@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type { MemoryItem, MemoryScope, RuntimeMemoryItem, UUID } from '@agent-cluster/shared';
 import { nowIso } from '../../common/time.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
+import { SessionLifecycleStore } from '../runtimes/session-lifecycle-store.js';
 
 type CreateMemoryInput = {
   sessionId: UUID;
@@ -16,8 +17,10 @@ type CreateMemoryInput = {
 @Injectable()
 export class MemoryService {
   private readonly memoriesBySession = new Map<string, MemoryItem[]>();
+  private readonly lifecycle: SessionLifecycleStore;
 
   constructor(private readonly persistence: PersistenceService) {
+    this.lifecycle = new SessionLifecycleStore(persistence);
     const persisted = this.persistence.getCollection<Record<string, MemoryItem[]>>('memoriesBySession', {});
     for (const [sessionId, memories] of Object.entries(persisted)) {
       this.memoriesBySession.set(sessionId, memories);
@@ -25,6 +28,9 @@ export class MemoryService {
   }
 
   create(input: CreateMemoryInput) {
+    if (!this.lifecycle.isActive(input.sessionId, this.lifecycle.generation(input.sessionId))) {
+      throw new Error('SESSION_ADMISSION_CLOSED');
+    }
     const now = nowIso();
     const memory: MemoryItem = {
       id: crypto.randomUUID(),
@@ -48,6 +54,7 @@ export class MemoryService {
   }
 
   search(sessionId: string, query: string, agentId?: string, limit = 6): MemoryItem[] {
+    if (!this.lifecycle.isActive(sessionId, this.lifecycle.generation(sessionId))) return [];
     const normalizedQuery = this.normalize(query);
     const tokens = new Set(normalizedQuery.split(/\s+/).filter(Boolean));
     return this.list(sessionId)

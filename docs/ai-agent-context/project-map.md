@@ -162,7 +162,7 @@
 | Watchdog 基线分析器 | `npm run test:watchdog-baseline` |
 ## 需求到上下文的路由
 
-主 Agent 主持讨论、动态 @ 协作、版本化需求确认、多会话停止/可恢复删除、长期记忆与 Token/缓存治理，统一进入 [主 Agent 协作分阶段总计划](../roadmap/main-agent-collaboration-roadmap-v1.md)。该计划提供 9 阶段四件套；阶段 0 的[共享合同/纯校验](../contracts/main-agent-collaboration-contract-v1.md)已实现，证据见[阶段 0 验收](../quality/main-agent-collaboration-phase-0-checklist-v1.md)。阶段 1 及后续业务接入仍待实施；既有能力应复用并重新验证，不依据旧文档中的历史状态重复开发。
+主 Agent 主持讨论、动态 @ 协作、版本化需求确认、多会话停止/可恢复删除、长期记忆与 Token/缓存治理，统一进入 [主 Agent 协作分阶段总计划](../roadmap/main-agent-collaboration-roadmap-v1.md)。该计划提供 9 阶段四件套；阶段 0 的[共享合同/纯校验](../contracts/main-agent-collaboration-contract-v1.md)与阶段 1 的多会话隔离、可信停止及可恢复删除已经实现，证据分别见[阶段 0 验收](../quality/main-agent-collaboration-phase-0-checklist-v1.md)和[阶段 1 验收](../quality/main-agent-collaboration-phase-1-checklist-v1.md)。阶段 2A 及后续业务接入仍待实施；既有能力应复用并重新验证，不依据旧文档中的历史状态重复开发。
 
 | 如果用户说 | 优先读取 |
 | --- | --- |

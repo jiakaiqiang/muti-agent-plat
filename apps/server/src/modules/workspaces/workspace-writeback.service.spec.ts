@@ -17,8 +17,15 @@ const session = {
   workspaceContext: { binding: { providerKind: 'server_local' } }
 } as SessionDetail;
 
-function fixture(apply: (input: WorkspaceChangeSet) => Promise<any>, persisted: unknown[] = []) {
-  const collections = new Map<string, unknown>([['workspaceWritebacks', persisted]]);
+function fixture(
+  apply: (input: WorkspaceChangeSet) => Promise<any>,
+  persisted: unknown[] = [],
+  lifecycles: Record<string, unknown> = {}
+) {
+  const collections = new Map<string, unknown>([
+    ['workspaceWritebacks', persisted],
+    ['sessionLifecyclesBySession', lifecycles]
+  ]);
   const service = new WorkspaceWritebackService(
     {
       getCollection: (key: string, fallback: unknown) => collections.get(key) ?? fallback,
@@ -221,4 +228,70 @@ test('workspace writeback recovers in-flight persisted records as retryable fail
   const record = service.list(session.id)[0];
   assert.equal(record?.status, 'failed');
   assert.match(record?.error ?? '', /backend restart/i);
+});
+
+test('queued writeback from a closed generation never reaches the workspace provider', async () => {
+  let releaseFirst!: () => void;
+  let firstEntered!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const entered = new Promise<void>((resolve) => { firstEntered = resolve; });
+  let applyCount = 0;
+  const activeLifecycle = {
+    [session.id]: {
+      contractVersion: 'main-agent-collaboration/v1', sessionId: session.id, dataEpoch: 'epoch-test',
+      generation: 1, revision: 1, state: 'active', admission: 'open', stopStatus: 'idle'
+    }
+  };
+  const { service, collections } = fixture(async (input) => {
+    applyCount += 1;
+    if (input.id === changeSet.id) {
+      firstEntered();
+      await firstGate;
+    }
+    return { ok: true, changeSetId: input.id, revision, appliedCount: input.changes.length };
+  }, [], activeLifecycle);
+
+  const first = service.enqueue({
+    session,
+    invocationId: 'invocation-first-generation',
+    execution: { mode: 'staging_copy', baseRevision: revision, changeSet, dirtyBaseline: false, requiresUserConfirmation: false }
+  });
+  await entered;
+  const queuedChangeSet = { ...changeSet, id: 'changes-queued-after-close' };
+  const queued = service.enqueue({
+    session,
+    invocationId: 'invocation-queued-generation',
+    execution: { mode: 'staging_copy', baseRevision: revision, changeSet: queuedChangeSet, dirtyBaseline: false, requiresUserConfirmation: false }
+  });
+  collections.set('sessionLifecyclesBySession', {
+    [session.id]: { ...activeLifecycle[session.id], revision: 2, state: 'deleting', admission: 'closed' }
+  });
+  releaseFirst();
+
+  const [firstResult, queuedResult] = await Promise.all([first, queued]);
+  assert.equal(firstResult.status, 'applied');
+  assert.equal(queuedResult.status, 'failed');
+  assert.match(queuedResult.error ?? '', /SESSION_ADMISSION_CLOSED/);
+  assert.equal(applyCount, 1);
+});
+
+test('a restored Session cannot resolve a conflicted writeback from an older generation', async () => {
+  const persisted = [{
+    id: 'writeback-old-generation', sessionId: session.id, sessionGeneration: 1,
+    invocationId: 'invocation-old-generation', workspaceId: session.workspaceId,
+    providerKind: 'server_local', changeSet, status: 'conflicted', conflicts: [],
+    createdAt: revision.observedAt, updatedAt: revision.observedAt
+  }];
+  const { service } = fixture(async () => { throw new Error('must not apply'); }, persisted, {
+    [session.id]: {
+      contractVersion: 'main-agent-collaboration/v1', sessionId: session.id, dataEpoch: 'epoch-test',
+      generation: 3, revision: 4, state: 'active', admission: 'open', stopStatus: 'confirmed'
+    }
+  });
+  await assert.rejects(
+    service.resolve(session, 'writeback-old-generation', {
+      action: 'use_session', confirmationId: 'writeback-old-generation'
+    }),
+    /SESSION_ADMISSION_CLOSED/
+  );
 });

@@ -1,9 +1,9 @@
 # 主 Agent 协作与长会话治理：分阶段实施总计划 v1
 
 > 日期：2026-09-16
-> 状态：补充后的 SDD 设计与开发基线；业务功能待按阶段实施。
-> 本次交付：1 份总计划 + 9 阶段 × 4 份文档，共 37 份新增文档。
-> 本轮仅生成文档，不启动开发、迁移、真实模型调用、服务重启或发布。
+> 状态：阶段 0 与阶段 1 已实现并验证；阶段 2A 及后续业务接入待实施。
+> 初始文档交付：1 份总计划 + 9 阶段 × 4 份文档，共 37 份新增文档，记录保留于第 11 节。
+> 当前实施范围：阶段 0 与阶段 1；未调用真实模型、部署或发布。
 
 ## 1. 目标与已沟通决定
 
@@ -60,7 +60,7 @@
 - [已有持久化验收](../quality/session-persistence-recovery-checklist-v1.md)
 - [已有停止验收](../quality/runtime-stop-consistency-checklist-v1.md)
 
-旧专项的“通过”不自动代表本专项通过；本次没有重新执行这些业务测试。项目地图中的历史状态可能滞后，实施以当前代码及新验证证据复核，保留既有修改。
+旧专项的“通过”不自动代表本专项通过。阶段 0 已按[本轮基线](../implementation/main-agent-collaboration-phase-0-baseline-v1.md)重新验证相关合同/停止/意图/持久化测试，具体范围见[验收记录](../quality/main-agent-collaboration-phase-0-checklist-v1.md)。项目地图中的历史状态可能滞后，实施以当前代码及新验证证据复核，保留既有修改。
 
 ## 4. 更新后的阶段表与 SDD 入口
 
@@ -68,8 +68,8 @@
 
 | 阶段 | 交付重点 | 前置条件 | 四份文档 |
 | --- | --- | --- | --- |
-| 0 | 合同收敛、现状基线与迁移边界 | 无 | [spec](../product/main-agent-collaboration-phase-0-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-0-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-0-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-0-checklist-v1.md) |
-| 1 | 多会话执行隔离、停止与可恢复删除 | 0 | [spec](../product/main-agent-collaboration-phase-1-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-1-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-1-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-1-checklist-v1.md) |
+| 0 | 合同收敛、现状基线与迁移边界（已完成合同/基线验证） | 无 | [spec](../product/main-agent-collaboration-phase-0-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-0-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-0-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-0-checklist-v1.md) |
+| 1 | 多会话执行隔离、停止与可恢复删除（已完成并通过验收） | 0 | [spec](../product/main-agent-collaboration-phase-1-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-1-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-1-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-1-checklist-v1.md) |
 | 2A | 统一消息意图、需求隔离与完整 Token 预算 | 1 | [spec](../product/main-agent-collaboration-phase-2a-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2a-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2a-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2a-checklist-v1.md) |
 | 2B | 版本化长期记忆、增量摘要与历史需求召回 | 2A | [spec](../product/main-agent-collaboration-phase-2b-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2b-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2b-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2b-checklist-v1.md) |
 | 2C | 分层缓存、失效治理与成本观测 | 2B | [spec](../product/main-agent-collaboration-phase-2c-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2c-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2c-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2c-checklist-v1.md) |
@@ -87,7 +87,7 @@
 - Tasks：有序任务、依赖、交付物及关联 AC。
 - Checklist：具体场景、预期、现有命令、必须新增的测试和证据位置。
 
-本专项共 61 条阶段 AC、54 项开发任务；均为待实施/待验证，不因文档生成而完成。
+本专项共 61 条阶段 AC、54 项开发任务。阶段 0 与阶段 1 的 12 条 AC、12 项任务已完成实现和验证；阶段 2A 及以后仍待实施/待验证，不因文档生成而完成。
 
 ## 5. 跨阶段架构决策与不变量
 
@@ -140,7 +140,7 @@
 | 存量活动会话 | 维持原策略快照；停稳/完成后再升级，不自动重跑 |
 | 数据库迁移/服务重启/发布/真实模型评测 | 先隔离演练，涉及运行环境的高风险操作单独征求确认 |
 
-拟新增类型、字段、API 与测试在阶段文档中标为设计/待新增；不得当成现成能力调用。实际配置名称在阶段 0 冻结，避免先写一批不存在的环境变量。
+共享类型/基本参数合同已在[阶段 0 合同](../contracts/main-agent-collaboration-contract-v1.md)冻结并提供纯校验；API、存储与业务入口仍明确为 deferred，不得当成现成能力调用。未新增生产环境变量或默认启用开关。
 
 ## 8. 验证策略与阶段门禁
 
@@ -177,7 +177,7 @@
 - [工作流质量拒绝与返工](../product/workflow-quality-rejection-rework-spec-v1.md)、[桌面工作区](../product/codex-style-multi-agent-workspace-spec-v1.md) 及持久化/停止专项作为依赖和回归依据，未被本次文档重新标为已完成。
 - Harness Engineering 仅约束本次工程交付方式，不作为产品模块引入。
 
-## 11. 本轮文档交付记录
+## 11. 初始文档交付记录（历史记录）
 
 - 已生成各阶段 Spec/Plan/Tasks/Checklist，开发项保持待实施/待验证。
 - 已将长会话、累计预算、缓存失效与真实成本观测纳入前置阶段，不留到最后做性能优化。
@@ -189,3 +189,17 @@
 - 298 个文档内本地链接、候选修改路径和 npm 脚本名称检查通过。
 - `npm run test:harness` 通过，退出码 0；这是仓库工程规程/文档合同检查，不是新增业务功能验收。
 - 文档格式/空白检查通过；未运行完整业务单测、E2E、真实模型、迁移或构建，因为本轮只写文档。
+
+## 12. 阶段 0 实施交付（2026-09-16）
+
+- 按用户确认先实施阶段 0，新增共享身份/职责/确认/生命周期/策略快照合同与纯校验，未接入服务端业务流程。
+- 新增[冻结合同](../contracts/main-agent-collaboration-contract-v1.md)、[现状/迁移基线](../implementation/main-agent-collaboration-phase-0-baseline-v1.md)，同步合同索引、四件套及阶段 1 交接引用。
+- 新增 15 项合同单测、6 项文档追踪检查；shared 全量 107、后端定向基线 40 全部通过；全仓类型检查、Harness、shared 构建通过。
+- [阶段 0 Checklist](../quality/main-agent-collaboration-phase-0-checklist-v1.md)记录实际证据与未执行项目。本次没有把后续阶段业务验收、迁移/回退、双端 E2E 或真实模型测试标为通过。
+
+## 13. 阶段 1 实施交付（2026-09-16）
+
+- 完成持久化 Session 生命周期、generation 准入、可信停止屏障、可恢复删除与显式恢复。
+- 普通执行、队列、工作流、Runtime 后处理、Memory、Workspace Writeback 和 LogicalOperation 均阻止旧 generation 迟到写入。
+- Web 与 Desktop 共用生命周期事实，分别保留自身样式并提供已删除会话查看/恢复入口。
+- [阶段 1 Checklist](../quality/main-agent-collaboration-phase-1-checklist-v1.md)记录 PostgreSQL 竞争、三项 E2E、全量测试、类型检查和构建证据；未调用真实模型，未部署或发布。

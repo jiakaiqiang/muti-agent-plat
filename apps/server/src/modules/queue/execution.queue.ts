@@ -17,6 +17,7 @@ export type ExecutionJobData = {
   sessionId: string;
   briefId: string;
   dataEpoch: string;
+  sessionGeneration?: number;
 };
 
 @Injectable()

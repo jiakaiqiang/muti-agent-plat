@@ -12,6 +12,7 @@ import {
   RELATIONAL_SCHEMA_V5_TABLES,
   RELATIONAL_SCHEMA_V8_TABLES,
   RELATIONAL_SCHEMA_V9_TABLES,
+  RELATIONAL_SCHEMA_V10_TABLES,
   RELATIONAL_TABLES
 } from './relational-schema.js';
 
@@ -70,6 +71,7 @@ export type McpObservationRecord = {
  * a key missing here is a session remnant that cannot be forgotten locally.
  */
 export const SESSION_KEYED_COLLECTIONS = [
+  'sessionLifecyclesBySession',
   'logicalOperationsBySession',
   'sessionStopRequestsBySession',
   'eventsBySession',
@@ -85,6 +87,7 @@ export const SESSION_KEYED_COLLECTIONS = [
 ] as const;
 
 const KNOWN_COLLECTIONS = new Set([
+  'sessionLifecyclesBySession',
   'logicalOperationsBySession',
   'sessionStopRequestsBySession',
   'systemDataMetadata',
@@ -129,7 +132,8 @@ const REPLACEABLE_RELATIONAL_TABLES = [
   ...RELATIONAL_SCHEMA_V4_TABLES,
   ...RELATIONAL_SCHEMA_V5_TABLES,
   ...RELATIONAL_SCHEMA_V8_TABLES,
-  ...RELATIONAL_SCHEMA_V9_TABLES
+  ...RELATIONAL_SCHEMA_V9_TABLES,
+  ...RELATIONAL_SCHEMA_V10_TABLES
 ]
   .map((definition) => definition.name)
   .filter((name) => !RETAINED_OPERATIONAL_TABLES.has(name))
@@ -396,6 +400,9 @@ export class RelationalStateStore {
           break;
         case 'sessions':
           state.sessions = await sourceRecords(client, `select metadata->'sourceRecord' value from agent_cluster.sessions where deleted_at is null order by created_at`);
+          break;
+        case 'sessionLifecyclesBySession':
+          state.sessionLifecyclesBySession = await keyedSources(client, `select s.external_id,l.source_snapshot->'sourceRecord' value from agent_cluster.session_lifecycles l join agent_cluster.sessions s on s.id=l.session_id order by s.external_id`);
           break;
         case 'eventsBySession':
           state.eventsBySession = await groupedSources(client, `select s.external_id group_id,e.payload->'sourceRecord' value from agent_cluster.collaboration_events e join agent_cluster.sessions s on s.id=e.session_id where s.deleted_at is null order by s.id,e.session_seq`);
@@ -814,6 +821,7 @@ export class RelationalStateStore {
   private async writeCollectionWithClient(client: PoolClient, key: string, value: unknown): Promise<void> {
     switch (key) {
       case 'logicalOperationsBySession': return this.writeLogicalOperations(client, record(value));
+      case 'sessionLifecyclesBySession': return this.writeSessionLifecycles(client, record(value));
       case 'sessionStopRequestsBySession': return this.writeSessionStopRequests(client, record(value));
       case 'systemDataMetadata': return this.writeMetadata(client, record(value));
       case 'agents': return this.writeAgents(client, array(value));
@@ -861,6 +869,27 @@ export class RelationalStateStore {
           where logical_operations.session_id=excluded.session_id`,
         [text(operation.id), sessionId, json({ sourceRecord: operation })]);
       }
+    }
+  }
+
+  private async writeSessionLifecycles(client: PoolClient, value: Record<string, unknown>) {
+    for (const [sessionExternalId, rawLifecycle] of Object.entries(value)) {
+      const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
+      if (!sessionId) throw new Error('SESSION_LIFECYCLE_SESSION_NOT_FOUND');
+      const lifecycle = record(rawLifecycle);
+      await client.query(
+        `insert into agent_cluster.session_lifecycles
+           (session_id,generation,revision,state,admission,stop_status,source_snapshot,updated_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8)
+         on conflict (session_id) do update set
+           generation=excluded.generation,revision=excluded.revision,state=excluded.state,
+           admission=excluded.admission,stop_status=excluded.stop_status,
+           source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at
+         where session_lifecycles.revision <= excluded.revision`,
+        [sessionId, integer(lifecycle.generation, 1), integer(lifecycle.revision, 1), text(lifecycle.state),
+          text(lifecycle.admission), text(lifecycle.stopStatus), json({ sourceRecord: lifecycle }),
+          date(lifecycle.restoredAt ?? lifecycle.deletedAt ?? new Date().toISOString())]
+      );
     }
   }
 
@@ -2079,6 +2108,7 @@ export class RelationalStateStore {
   }
 
   private async loadRuntime(client: PoolClient, state: PersistedState) {
+    state.sessionLifecyclesBySession = await keyedSources(client, `select s.external_id,l.source_snapshot->'sourceRecord' value from agent_cluster.session_lifecycles l join agent_cluster.sessions s on s.id=l.session_id order by s.external_id`);
     state.runtimeInvocationsBySession = await groupedSources(client, `select s.external_id group_id,r.profile_snapshot->'sourceRecord' value from agent_cluster.runtime_invocations r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by r.started_at`);
     state.logicalOperationsBySession = await groupedSources(client, `select s.external_id group_id,o.source_snapshot->'sourceRecord' value from agent_cluster.logical_operations o join agent_cluster.sessions s on s.id=o.session_id where s.deleted_at is null order by o.external_id`);
     state.sessionStopRequestsBySession = await groupedSources(client, `select s.external_id group_id,r.source_snapshot->'sourceRecord' value from agent_cluster.session_stop_requests r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by r.created_at,r.external_id`);
@@ -2116,7 +2146,7 @@ export class RelationalStateStore {
 }
 
 function collectionWriteOrder(state: PersistedState): string[] {
-  const order = ['systemDataMetadata','agents','systemAgentRuntimePolicies','skills','capabilities','workflowCatalog','workflows','sessions','workItemsBySession','decisionRecordsBySession','contextSnapshotsBySession','intentRoutingRecordsBySession','followUpMessagesBySession','fileRevisions','workspaceWritebacks','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','localRuntimeDevices','localRuntimeOperationAudits','eventOutbox','cutoverAudits'];
+  const order = ['systemDataMetadata','agents','systemAgentRuntimePolicies','skills','capabilities','workflowCatalog','workflows','sessions','sessionLifecyclesBySession','workItemsBySession','decisionRecordsBySession','contextSnapshotsBySession','intentRoutingRecordsBySession','followUpMessagesBySession','fileRevisions','workspaceWritebacks','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','localRuntimeDevices','localRuntimeOperationAudits','eventOutbox','cutoverAudits'];
   order.push('logicalOperationsBySession', 'sessionStopRequestsBySession');
   return order.filter((key) => Object.prototype.hasOwnProperty.call(state, key));
 }

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type {
   AgentRunResult,
+  ContextEnvelopeV2,
   IntentContextSnapshot,
   IntentRoutingRecord,
   SessionDetail
@@ -64,8 +65,16 @@ function result(output: AgentRunResult['output'], status: AgentRunResult['status
   };
 }
 
+type CapturedRuntimeInput = {
+  contextEnvelopeFactory: (input: {
+    identity: { agentId: string; profileHash: string; profileRevision: number };
+    toolCatalog: { catalogHash: string };
+  }) => ContextEnvelopeV2;
+};
+
 function setup(runtimeResults: AgentRunResult[] = [], snapshotCurrent = true) {
   let runtimeCalls = 0;
+  const inputs: CapturedRuntimeInput[] = [];
   const records = new Map([['routing-1', routing()]]);
   const context = {
     async updateRoutingRecord(_sessionId: string, routingId: string, patch: Partial<IntentRoutingRecord>) {
@@ -78,7 +87,8 @@ function setup(runtimeResults: AgentRunResult[] = [], snapshotCurrent = true) {
   };
   const service = new SemanticIntentRouterService(
     {
-      async invoke() {
+      async invoke(input: CapturedRuntimeInput) {
+        inputs.push(input);
         const item = runtimeResults[runtimeCalls++];
         if (!item) throw new Error('RUNTIME_UNAVAILABLE');
         return item;
@@ -88,7 +98,15 @@ function setup(runtimeResults: AgentRunResult[] = [], snapshotCurrent = true) {
     { get: () => ({ role: 'intent_router', preferredRuntimeType: 'mock' }) } as never,
     context as never
   );
-  return { service, runtimeCalls: () => runtimeCalls, record: () => records.get('routing-1')! };
+  return {
+    service,
+    runtimeCalls: () => runtimeCalls,
+    record: () => records.get('routing-1')!,
+    lastEnvelope: () => inputs.at(-1)?.contextEnvelopeFactory({
+      identity: { agentId: 'intent-agent', profileHash: 'hash', profileRevision: 1 },
+      toolCatalog: { catalogHash: 'catalog' }
+    })
+  };
 }
 
 test('exact continue command is state-validated without invoking the model', async () => {
@@ -114,7 +132,7 @@ test('model-created WorkItem references fail closed and request clarification', 
     schemaVersion: '1.0', kind: 'intent_routing_decision', dialogueAct: 'question',
     scopeRelation: 'same_requirement', contextPolicy: 'inherit_confirmed',
     requestedAction: 'continue_active_work_item', selectedWorkItemId: '00000000-0000-0000-0000-000000000999',
-    selectedDecisionIds: [], selectedArtifactIds: [], goalSegments: ['Continue'], missingFields: [],
+    selectedDecisionIds: [], selectedArtifactIds: [], requestedAgentIds: [], goalSegments: ['Continue'], missingFields: [],
     ambiguityReasons: [], reasonCodes: ['MODEL_SELECTION'], riskLevel: 'low', modelConfidence: 0.99
   })]);
   const outcome = await fixture.service.classify(session(), routing(), snapshot('请按之前的方案处理这个问题'));
@@ -143,6 +161,59 @@ test('two Runtime failures clarify instead of defaulting to continuation', async
   );
 });
 
+test('the classifier input carries the explicit @ constraint', async () => {
+  const fixture = setup();
+  await fixture.service.classify(session(), routing(), {
+    ...snapshot('@质量 这个也一起看下'),
+    mentionedAgentIds: ['agent-quality']
+  });
+
+  const envelope = fixture.lastEnvelope();
+  assert.ok(envelope, 'the runtime input must be built at least once');
+  assert.ok(
+    envelope.L5?.bullets.some((bullet) => bullet.includes('agent-quality')),
+    `the @ target must reach the classifier: ${JSON.stringify(envelope.L5?.bullets)}`
+  );
+});
+
+test('a decision that silently drops the @ target is not auto-applied', async () => {
+  const decision = {
+    schemaVersion: '1.0' as const, kind: 'intent_routing_decision' as const, dialogueAct: 'question' as const,
+    scopeRelation: 'same_requirement' as const, contextPolicy: 'inherit_confirmed' as const,
+    requestedAction: 'continue_active_work_item' as const, selectedWorkItemId: 'work-1',
+    selectedDecisionIds: [], selectedArtifactIds: [], requestedAgentIds: [],
+    goalSegments: ['Continue'], missingFields: [], ambiguityReasons: [],
+    reasonCodes: ['MODEL_SELECTION'], riskLevel: 'low' as const, modelConfidence: 0.99
+  };
+  const dropped = setup([result(decision)]);
+  const outcome = await dropped.service.classify(session('COMPLETED'), routing(), {
+    ...snapshot('@质量 这个也一起看下'),
+    mentionedAgentIds: ['agent-quality']
+  });
+
+  assert.equal(outcome.autoApplicable, false, JSON.stringify(outcome.validation));
+  assert.ok(outcome.validation.errors.includes('MENTION_TARGET_DROPPED'));
+  assert.equal(outcome.routing.status, 'CLARIFICATION_REQUIRED');
+
+  const kept = setup([result({ ...decision, requestedAgentIds: ['agent-quality'] })]);
+  const keptOutcome = await kept.service.classify(session('COMPLETED'), routing(), {
+    ...snapshot('@质量 这个也一起看下'),
+    mentionedAgentIds: ['agent-quality']
+  });
+  assert.equal(keptOutcome.validation.errors.includes('MENTION_TARGET_DROPPED'), false);
+  assert.deepEqual(keptOutcome.decision.requestedAgentIds, ['agent-quality']);
+
+  const invented = setup([result({ ...decision, requestedAgentIds: ['agent-quality', 'agent-not-mentioned'] })]);
+  const inventedOutcome = await invented.service.classify(session('COMPLETED'), routing(), {
+    ...snapshot('@质量 这个也一起看下'),
+    mentionedAgentIds: ['agent-quality']
+  });
+  assert.ok(
+    inventedOutcome.validation.errors.includes('AGENT_TARGET_OUTSIDE_SNAPSHOT'),
+    `the classifier must not invent targets: ${JSON.stringify(inventedOutcome.validation.errors)}`
+  );
+});
+
 test('golden dataset is evaluated through the SemanticIntentRouter validation path', async () => {
   for (const item of INTENT_ROUTING_GOLDEN_DATASET_V1) {
     const runtimeFailure = item.tags.includes('runtime_failure');
@@ -160,6 +231,7 @@ test('golden dataset is evaluated through the SemanticIntentRouter validation pa
       selectedWorkItemId: item.hasActiveWorkItem ? 'work-1' : null,
       selectedDecisionIds: [],
       selectedArtifactIds: [],
+      requestedAgentIds: [],
       goalSegments: action.includes('work_item') ? ['Golden task segment'] : [],
       missingFields: [],
       ambiguityReasons: item.expected.relation === 'ambiguous' ? ['GOLDEN_AMBIGUITY'] : [],

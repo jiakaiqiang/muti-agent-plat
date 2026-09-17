@@ -1,4 +1,5 @@
-import { BadRequestException, Body, Controller, Delete, Get, Header, Headers, HttpCode, Param, Post, Put } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Header, Headers, HttpCode, Param, Post, Put, Query, Res } from '@nestjs/common';
+import crypto from 'node:crypto';
 import { ok } from '../../common/api-response.js';
 import type {
   CaptureFileRevisionBaselineInput,
@@ -20,9 +21,12 @@ export class SessionsController {
   constructor(private readonly sessions: SessionsService) {}
 
   @Get('sessions')
-  list() {
+  list(@Query('visibility') visibility?: 'active' | 'deleted' | 'all') {
+    if (visibility && !['active', 'deleted', 'all'].includes(visibility)) {
+      throw new BadRequestException('visibility must be active, deleted or all.');
+    }
     return ok({
-      items: this.sessions.list(),
+      items: this.sessions.list(visibility ?? 'active'),
       hasMore: false
     });
   }
@@ -46,7 +50,13 @@ export class SessionsController {
 
   @Get('sessions/:sessionId')
   detail(@Param('sessionId') sessionId: string) {
-    return ok(this.sessions.get(sessionId));
+    return ok(this.sessions.getIncludingDeleted(sessionId));
+  }
+
+  @Get('sessions/:sessionId/lifecycle')
+  @Header('Cache-Control', 'no-store')
+  lifecycle(@Param('sessionId') sessionId: string) {
+    return ok(this.sessions.lifecycleState(sessionId));
   }
 
   @Get('sessions/:sessionId/stop-state')
@@ -201,18 +211,37 @@ export class SessionsController {
   }
 
   @Delete('sessions/:sessionId')
-  async delete(@Param('sessionId') sessionId: string) {
-    return ok(await this.sessions.delete(sessionId));
+  async delete(
+    @Param('sessionId') sessionId: string,
+    @Headers('idempotency-key') requestId: string | undefined,
+    @Res({ passthrough: true }) response: { status(code: number): unknown }
+  ) {
+    const result = await this.sessions.delete(sessionId, requestId || crypto.randomUUID());
+    response.status(result.deleted ? 200 : 202);
+    return ok(result);
+  }
+
+  @Post('sessions/:sessionId/restore')
+  async restore(
+    @Param('sessionId') sessionId: string,
+    @Body() body: { requestId: string; expectedGeneration: number }
+  ) {
+    if (!body?.requestId || !Number.isSafeInteger(body.expectedGeneration) || body.expectedGeneration < 1) {
+      throw new BadRequestException('requestId and a positive expectedGeneration are required.');
+    }
+    return ok(await this.sessions.restore(sessionId, body));
   }
 
   @Post('sessions/:sessionId/messages')
   @HttpCode(202)
   sendMessage(
     @Param('sessionId') sessionId: string,
-    @Body() body: { content: string; mentionedAgentIds?: string[] },
+    @Body() body: { content: string; mentionedAgentIds?: string[]; replyToEventId?: string },
     @Headers('idempotency-key') idempotencyKey?: string
   ) {
-    return this.sessions.sendMessage(sessionId, body.content, body.mentionedAgentIds, idempotencyKey).then(ok);
+    return this.sessions
+      .sendMessage(sessionId, body.content, body.mentionedAgentIds, idempotencyKey, body.replyToEventId)
+      .then(ok);
   }
 
   @Post('sessions/:sessionId/memories/confirm')
@@ -229,8 +258,8 @@ export class SessionsController {
   }
 
   @Post('sessions/:sessionId/resume')
-  resume(@Param('sessionId') sessionId: string, @Body() body: { reason?: string; confirmationId?: string }) {
-    return ok(this.sessions.resume(sessionId, body?.reason ?? '用户已继续会话', body?.confirmationId));
+  async resume(@Param('sessionId') sessionId: string, @Body() body: { reason?: string; confirmationId?: string }) {
+    return ok(await this.sessions.resume(sessionId, body?.reason ?? '用户已继续会话', body?.confirmationId));
   }
 
   @Post('sessions/:sessionId/cancel')

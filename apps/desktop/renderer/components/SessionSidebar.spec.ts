@@ -83,4 +83,20 @@ describe('SessionSidebar status badges', () => {
 
     expect(wrapper.emitted('delete')).toEqual([['session-1']])
   })
+
+  it('shows deleted Sessions only in the deleted tab and emits restore', async () => {
+    const deleted = { ...session('PAUSED', 2), lifecycleState: 'deleted' as const, lifecycleGeneration: 2 }
+    const wrapper = mountSidebar([session('EXECUTING', 1), deleted])
+
+    expect(wrapper.text()).toContain('会话 1')
+    expect(wrapper.text()).not.toContain('会话 2')
+    await wrapper.findAll('.session-tabs button')[3]!.trigger('click')
+
+    expect(wrapper.text()).not.toContain('会话 1')
+    expect(wrapper.text()).toContain('会话 2')
+    expect(wrapper.get('.session-status-badge').text()).toBe('已删除')
+    await wrapper.get('.session-delete-button').trigger('click')
+    expect(wrapper.emitted('restore')).toEqual([['session-2']])
+    expect(wrapper.emitted('select')).toBeUndefined()
+  })
 })

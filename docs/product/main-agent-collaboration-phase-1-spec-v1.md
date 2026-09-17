@@ -1,7 +1,7 @@
 # 阶段 1：多会话执行隔离、停止与可恢复删除 — Spec v1
 
 > 日期：2026-09-16
-> 状态：设计与实施基线，待实施；现有能力的复用不代表本阶段验收已完成。
+> 状态：已实施并通过阶段验收（2026-09-16）。
 > 依赖：阶段 0 通过。
 
 [总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-1-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-1-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-1-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-1-checklist-v1.md)
@@ -22,11 +22,12 @@
 
 ## 3. 当前实现依据
 
-- 已有 SessionStopStateStore 与 LogicalOperation 停止请求、固定目标和恢复屏障；需扩展覆盖未来讨论/摘要任务而非重做。 [源码/既有文档](../../apps/server/src/modules/runtimes/session-stop-state-store.ts)
-- 当前 delete 在停止后删除会话目录、子系统记录并调用 deleteSessionData 物理清理；与可恢复删除目标存在明确差异。 [源码/既有文档](../../apps/server/src/modules/sessions/sessions.service.ts)
+- SessionStopStateStore 与 LogicalOperation 已接入持久化生命周期准入和 generation；停止请求、调用预留及删除使用同一事务锁。 [源码](../../apps/server/src/modules/runtimes/session-lifecycle-store.ts)
+- 普通用户 delete 已改为可恢复隐藏，不再删除目录、任务、产物、记忆或调用 `deleteSessionData`；旧物理清理能力不在该入口调用。 [源码](../../apps/server/src/modules/sessions/sessions.service.ts)
+- 普通执行、BullMQ 队列和工作流运行均携带 Session generation；旧 generation 的领取、回调和投影被拒绝。 [源码](../../apps/server/src/modules/queue/execution.worker.ts)
 - 已有同目录多 Session 隔离/写回设计，不能退回整工作区单活动会话锁。 [源码/既有文档](../../docs/design/workspace-multi-session-isolation-writeback-v1.md)
 
-以上为现状定位，不等于本专项测试结果；实施前复核当前工作树，不覆盖无关改动。
+实现采用增量接入，未改变同目录多 Session 隔离设计，也未覆盖工作区中的无关改动。
 
 ## 4. 验收条件
 
@@ -46,6 +47,6 @@
 
 ## 6. 阶段退出
 
-双会话隔离、可信停止、可恢复删除、迟到写回和真实 PostgreSQL 竞争全部通过。
+双会话隔离、可信停止、可恢复删除、迟到写回和真实 PostgreSQL 竞争全部通过。真实模型未调用；验证使用单元测试、Mock Runtime、file backend 及一次性 PostgreSQL 数据库。
 
-本阶段详细任务和证据填写位置见 Tasks/Checklist。只有实现与必须验证均完成后才可更新状态，文档生成不勾选开发项。
+详细任务和命令证据见 Tasks/Checklist。

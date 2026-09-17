@@ -21,6 +21,7 @@ import { EventsService } from '../events/events.service.js';
 import { ExecutionService } from '../execution/execution.service.js';
 import type { ExecutionOutcome } from '../orchestrator/orchestrator.service.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
+import { SessionLifecycleStore } from '../runtimes/session-lifecycle-store.js';
 import { TasksService } from '../tasks/tasks.service.js';
 import { WorkflowsService } from './workflows.service.js';
 import { WorkflowFileHistoryService } from './workflow-file-history.service.js';
@@ -46,6 +47,7 @@ export type WorkflowRuntimeUpdate =
       kind: 'projection';
       sessionId: string;
       workflowRunId: string;
+      sessionGeneration?: number;
       status: WorkflowRunStatus;
       revision: number;
     }
@@ -53,6 +55,7 @@ export type WorkflowRuntimeUpdate =
       kind: 'session_outcome';
       sessionId: string;
       workflowRunId: string;
+      sessionGeneration?: number;
       outcome: ExecutionOutcome;
     };
 
@@ -63,6 +66,7 @@ export type StartWorkflowRunInput = {
   workflowId: string;
   workflowVersion?: number;
   confirmationId: string;
+  sessionGeneration?: number;
 };
 
 export type WorkflowHumanDecisionInput = {
@@ -129,6 +133,7 @@ export class WorkflowRuntimeService {
   private readonly commandTails = new Map<string, Promise<unknown>>();
   private readonly supersededNodeRunIds = new Set<string>();
   private readonly updatesSubject = new Subject<WorkflowRuntimeUpdate>();
+  private readonly lifecycle: SessionLifecycleStore;
 
   constructor(
     private readonly workflows: WorkflowsService,
@@ -139,6 +144,7 @@ export class WorkflowRuntimeService {
     private readonly persistence: PersistenceService,
     @Optional() private readonly fileHistory?: WorkflowFileHistoryService
   ) {
+    this.lifecycle = new SessionLifecycleStore(persistence);
     const state = this.persistence.getCollection<WorkflowRuntimeState>(RUNTIME_KEY, {
       schemaVersion: 2,
       runs: [],
@@ -188,6 +194,9 @@ export class WorkflowRuntimeService {
     const startIdempotencyKey = `${input.session.id}:${input.confirmationId}`;
     const existing = [...this.runs.values()].find((run) => run.startIdempotencyKey === startIdempotencyKey);
     if (existing) return existing;
+    if (!this.lifecycle.matchesActiveGeneration(input.session.id, input.sessionGeneration)) {
+      throw new ConflictException('SESSION_ADMISSION_CLOSED');
+    }
 
     const version = this.workflows.getVersion(input.workflowId, input.workflowVersion);
     const workflow = this.workflows.get(input.workflowId);
@@ -201,6 +210,7 @@ export class WorkflowRuntimeService {
       workflowVersion: version.version,
       workflowName: version.name,
       sessionId: input.session.id,
+      ...(input.sessionGeneration !== undefined ? { sessionGeneration: input.sessionGeneration } : {}),
       workItemId: input.session.activeWorkItemId,
       briefId: input.brief.id,
       ownerId: input.session.ownerId,
@@ -397,7 +407,12 @@ export class WorkflowRuntimeService {
 
   async resumeCurrentExecution(
     runId: string,
-    recoveryContext?: { session: SessionDetail; brief: TaskBrief; coordinatorId: string }
+    recoveryContext?: {
+      session: SessionDetail;
+      brief: TaskBrief;
+      coordinatorId: string;
+      sessionGeneration?: number;
+    }
   ) {
     return this.serialize(runId, async () => {
       const run = this.get(runId);
@@ -409,7 +424,17 @@ export class WorkflowRuntimeService {
         run.workItemId &&
         recoveryContext.session.activeWorkItemId !== run.workItemId
       ) return false;
-      if (recoveryContext) this.contexts.set(run.id, recoveryContext);
+      if (recoveryContext) {
+        if (!this.lifecycle.matchesActiveGeneration(run.sessionId, recoveryContext.sessionGeneration)) return false;
+        this.contexts.set(run.id, recoveryContext);
+        if (recoveryContext.sessionGeneration !== undefined &&
+          run.sessionGeneration !== recoveryContext.sessionGeneration) {
+          run.sessionGeneration = recoveryContext.sessionGeneration;
+          run.revision += 1;
+          run.updatedAt = nowIso();
+          this.persist();
+        }
+      }
       if (run.status === 'failed') {
         const failedNodeId = this.failedNodeId(run);
         if (!failedNodeId || !this.contexts.has(run.id)) return false;
@@ -471,6 +496,7 @@ export class WorkflowRuntimeService {
       kind: 'projection',
       sessionId: run.sessionId,
       workflowRunId: run.id,
+      ...(run.sessionGeneration !== undefined ? { sessionGeneration: run.sessionGeneration } : {}),
       status: run.status,
       revision: run.revision
     });
@@ -1135,7 +1161,7 @@ export class WorkflowRuntimeService {
       ];
       this.execution.start(context.session, context.brief, executionTasks, (outcome) => {
         void this.serialize(run.id, () => this.handleExecutionOutcome(run.id, nodeRun.id, outcome));
-      });
+      }, run.sessionGeneration);
     };
     if (forceRestart) {
       startExecution();
@@ -1146,6 +1172,7 @@ export class WorkflowRuntimeService {
 
   private async handleExecutionOutcome(runId: string, nodeRunId: string, outcome: ExecutionOutcome) {
     const run = this.get(runId);
+    if (!this.lifecycle.matchesActiveGeneration(run.sessionId, run.sessionGeneration)) return;
     if (this.isTerminal(run.status)) return;
     const nodeRun = this.listNodeRuns(run.id).find((item) => item.id === nodeRunId);
     if (!nodeRun || nodeRun.status !== 'running') return;
@@ -1201,6 +1228,7 @@ export class WorkflowRuntimeService {
         kind: 'session_outcome',
         sessionId: run.sessionId,
         workflowRunId: run.id,
+        ...(run.sessionGeneration !== undefined ? { sessionGeneration: run.sessionGeneration } : {}),
         outcome
       });
       return;
@@ -1210,6 +1238,7 @@ export class WorkflowRuntimeService {
         kind: 'session_outcome',
         sessionId: run.sessionId,
         workflowRunId: run.id,
+        ...(run.sessionGeneration !== undefined ? { sessionGeneration: run.sessionGeneration } : {}),
         outcome
       });
       return;
@@ -1219,6 +1248,7 @@ export class WorkflowRuntimeService {
         kind: 'session_outcome',
         sessionId: run.sessionId,
         workflowRunId: run.id,
+        ...(run.sessionGeneration !== undefined ? { sessionGeneration: run.sessionGeneration } : {}),
         outcome
       });
       return;
@@ -1431,8 +1461,12 @@ export class WorkflowRuntimeService {
     // instead of being swallowed by the first round's completed effect.
     await this.runEffect(run, 'start_post_review', `post-review:${run.revision}`, { taskIds }, () => {
       this.execution.start(context.session, context.brief, workflowTasks, (outcome) => {
-        this.updatesSubject.next({ kind: 'session_outcome', sessionId: run.sessionId, workflowRunId: run.id, outcome });
-      });
+        if (!this.lifecycle.matchesActiveGeneration(run.sessionId, run.sessionGeneration)) return;
+        this.updatesSubject.next({
+          kind: 'session_outcome', sessionId: run.sessionId, workflowRunId: run.id,
+          ...(run.sessionGeneration !== undefined ? { sessionGeneration: run.sessionGeneration } : {}), outcome
+        });
+      }, run.sessionGeneration);
     });
   }
 
@@ -1533,6 +1567,7 @@ export class WorkflowRuntimeService {
         kind: 'projection',
         sessionId: run.sessionId,
         workflowRunId: run.id,
+        ...(run.sessionGeneration !== undefined ? { sessionGeneration: run.sessionGeneration } : {}),
         status: run.status,
         revision: run.revision
       });

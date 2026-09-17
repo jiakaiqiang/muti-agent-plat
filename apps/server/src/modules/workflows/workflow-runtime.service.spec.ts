@@ -1260,3 +1260,56 @@ test('WorkflowRuntimeService cancels a persisted run without ephemeral runtime c
   assert.equal(setup.cancelCalls.length, 1);
   assert.equal(setup.cancelCalls[0][1].scope, 'session');
 });
+
+test('WorkflowRuntimeService rejects an old generation outcome and adopts the restored generation only on explicit resume', async () => {
+  const setup = fixture([
+    { id: 'development', type: 'agent', agentId: 'frontend', order: 0 }
+  ]);
+  setup.collections.set('sessionLifecyclesBySession', {
+    [setup.session.id]: {
+      contractVersion: 'main-agent-collaboration/v1',
+      sessionId: setup.session.id,
+      dataEpoch: setup.session.dataEpoch,
+      generation: 1,
+      revision: 1,
+      state: 'active',
+      admission: 'open',
+      stopStatus: 'idle'
+    }
+  });
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    confirmationId: 'generation-bound-workflow',
+    sessionGeneration: 1
+  });
+  const task = setup.taskItems[0]!;
+  setup.collections.set('sessionLifecyclesBySession', {
+    [setup.session.id]: {
+      contractVersion: 'main-agent-collaboration/v1',
+      sessionId: setup.session.id,
+      dataEpoch: setup.session.dataEpoch,
+      generation: 3,
+      revision: 4,
+      state: 'active',
+      admission: 'open',
+      stopStatus: 'confirmed'
+    }
+  });
+
+  setup.callbacks[0]({ kind: 'workflow_step_completed', taskId: task.id, resultSummary: 'obsolete result' });
+  await settle();
+
+  assert.equal(task.status, 'assigned');
+  assert.equal(run.sessionGeneration, 1);
+  assert.equal(await setup.runtime.resumeCurrentExecution(run.id, {
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    sessionGeneration: 3
+  }), true);
+  assert.equal(run.sessionGeneration, 3);
+  assert.equal(setup.callbacks.length, 2);
+});

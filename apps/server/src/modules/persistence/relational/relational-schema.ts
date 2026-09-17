@@ -998,6 +998,22 @@ export const RELATIONAL_SCHEMA_V9_TABLES: RelationalTableDefinition[] = [
 ];
 export const RELATIONAL_SCHEMA_V9_SQL = renderTables(RELATIONAL_SCHEMA_V9_TABLES);
 
+export const RELATIONAL_SCHEMA_V10_TABLES: RelationalTableDefinition[] = [
+  table('session_lifecycles', '保存会话执行准入、删除墓碑、恢复代次和停止聚合状态。', [
+    column('session_id', 'bigint primary key references agent_cluster.sessions(id) on delete cascade', '生命周期所属会话。'),
+    column('generation', 'integer not null check (generation > 0)', '删除或恢复边界递增的会话代次。'),
+    column('revision', 'integer not null check (revision > 0)', '生命周期快照的单调修订号。'),
+    column('state', 'text not null check (state in (\'active\',\'deleting\',\'deleted\'))', '会话可恢复生命周期状态。'),
+    column('admission', 'text not null check (admission in (\'open\',\'closed\'))', '是否允许创建新的执行预留。'),
+    column('stop_status', 'text not null', '目标会话最近一次停止聚合状态。'),
+    column('source_snapshot', 'jsonb not null', '版本化生命周期合同完整快照。'),
+    column('updated_at', 'timestamptz not null', '生命周期最后更新时间。')
+  ], [], [
+    'create index if not exists session_lifecycles_state_idx on agent_cluster.session_lifecycles(state, updated_at)'
+  ])
+];
+export const RELATIONAL_SCHEMA_V10_SQL = renderTables(RELATIONAL_SCHEMA_V10_TABLES);
+
 export function expectedRelationalComments() {
   return [
     SCHEMA_MIGRATIONS_TABLE,
@@ -1007,7 +1023,8 @@ export function expectedRelationalComments() {
     ...RELATIONAL_SCHEMA_V4_TABLES,
     ...RELATIONAL_SCHEMA_V5_TABLES,
     ...RELATIONAL_SCHEMA_V8_TABLES,
-    ...RELATIONAL_SCHEMA_V9_TABLES
+    ...RELATIONAL_SCHEMA_V9_TABLES,
+    ...RELATIONAL_SCHEMA_V10_TABLES
   ].flatMap((definition) => [
     { table: definition.name, column: null, comment: definition.comment },
     ...definition.columns.map((item) => ({ table: definition.name, column: item.name, comment: item.comment }))
