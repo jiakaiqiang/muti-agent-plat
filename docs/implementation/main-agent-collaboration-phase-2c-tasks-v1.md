@@ -40,8 +40,12 @@
   **第一个真实调用方已接**：`context-bundle-cache.ts`（8/8）缓存 `buildEnvelopeFromContextAssembly`
   的 navigation + projectMap（上下文包层），orchestrator 两处 `contextEnvelopeFactory` 传入实例与
   lifecycle generation，`deleteSession` 即时失效；配置 `CONTEXT_BUNDLE_CACHE_MAX_ENTRIES` /
-  `CONTEXT_BUNDLE_CACHE_TTL_MS`。**未完成**：文件解析层与摘要层尚未接（`workspace-index-cache.ts`
-  未复用；2B 检查点 store 已有版本化提交，是否再套一层派生缓存待评估）。
+  `CONTEXT_BUNDLE_CACHE_TTL_MS`。
+- 决定（2026-09-19）：**文件层与摘要层不再套派生缓存。** 文件层 `workspace-index-cache.ts` 按
+  workspace revision 单槽持有，"只保留当前 revision"正是它该有的失效语义，换成 LRU/TTL 没有收益；
+  摘要层 2B 的 `SummaryCheckpointStore` 已是按逻辑键（含 coveredEventSeq/版本）的持久化读写，
+  `latest()` 直接命中，再叠一层进程内缓存只会引入第二份真相。四层里真正需要派生缓存的是
+  上下文包层，已接。此项按"不做，理由如上"关闭，不再作为缺口挂着。
 
 ### P2C-T3 实现失效与并发回填保护
 
@@ -52,8 +56,9 @@
 - 验证：执行 Checklist 对应场景，记录命令/环境/结果；失败时保留证据并回到所属任务。
 - 进度（2026-09-18）：业务指纹与 generation 校验由 T1 合同覆盖；进程内 single-flight
   `cache-single-flight.ts` 8/8（100 并发 → 1 次构建、失败不做负缓存、按 key 熔断）。
-  **未完成**：跨进程唯一提交——本阶段没有新增持久化集合，缓存是进程内派生态，跨实例
-  竞争尚无落点；若后续接 Redis/PostgreSQL 需按 2B 检查点 store 的唯一逻辑键模式补。
+  **延后（2026-09-19 决定）**：跨进程唯一提交——本阶段没有新增持久化集合，缓存是进程内派生态，
+  跨实例竞争没有落点；单实例部署下进程内 single-flight 已覆盖 AC4 的"百个相同请求一个构建"。
+  若后续多实例部署需要，按 2B 检查点 store 的唯一逻辑键 + 短租约模式补，届时作为独立任务立项。
 
 ### P2C-T4 实现 Provider/CLI 缓存适配
 
@@ -72,7 +77,10 @@
   streaming runner 的 `usageFromFrames`（只读 input/output，扔掉 parser 已解析的缓存计数），
   抽成 `streaming/usage-from-frames.ts`（6/6）后 claude_code 按 anthropic 语义、codex 按 openai
   语义归一化，无 usage 帧 → `measurement:'unknown'`；runner + adapter 六个 spec 91/91。
-  **未做**：CLI 内建提示词缓存的能力声明（`declaredCacheCapability` 目前只在 generic-llm 调用）。
+  **决定（2026-09-19）：CLI 内建提示词缓存的能力声明不单独记录。** claude_code / codex 的提示词
+  由 CLI 自己组装，平台既不控制缓存断点也不发缓存参数（plan §2.5），所以平台侧的声明结构上
+  恒为 `unknown`——记录一个常量不产生信息。AC5 对 CLI 路径真正要求的"无回执 → unknown、
+  不假定命中"已由 usage 归一化落实。
 
 ### P2C-T5 接入成本诊断
 

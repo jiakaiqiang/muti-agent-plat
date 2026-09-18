@@ -1,10 +1,11 @@
 # TASK.md — 阶段 2C：分层缓存、失效治理与成本观测
 
 状态：进行中（2026-09-18 开工）。阶段 2B 已验收，四道门禁全绿，因此 2C 准入成立。
-当前：T1 完成；T2–T6 原语已落地，上下文包缓存有真实调用方，三条 runtime 路径
-（generic-llm / claude_code / codex）usage 归一化已接线，全仓四门禁全绿；**阶段未验收**——
-文件/摘要两层缓存未接、跨进程 single-flight 无落点、priceVersion 无实际来源、真实模型 E2E 未做。
-各项缺口见下方每节「未做/未接入」。
+当前：T1 完成；T2–T6 落地——上下文包缓存有真实调用方且 AC1 已在真实服务上按"同一会话
+hit→仍拒绝"验证，三条 runtime 路径 usage 归一化已接，命中率经 ops 指标可读，全仓四门禁
++ 新增 E2E 全绿。文件/摘要层不套缓存、CLI 能力声明不记录、跨进程 single-flight 延后——
+三项已在 tasks 文档写明理由关闭。**待验收决定**：`priceVersion` 来源（产品决策）；真实付费
+模型抽样是否在 2C 做（roadmap 把它归在阶段 6）。见 checklist §5。
 
 依据文档（四件套，2026-09-16 生成）：
 `docs/product/main-agent-collaboration-phase-2c-spec-v1.md`（AC）、

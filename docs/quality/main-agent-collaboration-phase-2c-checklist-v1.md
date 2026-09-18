@@ -95,5 +95,10 @@ npm run test:e2e:context-bundle-cache   # 2026-09-19 新增：AC1 系统级（mo
   grounded-evidence 门禁以 `CONTEXT_INSUFFICIENT` 拒绝，E2E 必须用不需要证据的提示词。
 - 定向：`context-bundle-cache.spec` 10/10、`derived-cache.spec` 8/8、`usage-from-frames.spec` 6/6、
   `workspace-metrics.spec`（名字数守卫 38）；四门禁全绿。
-- **阶段结论：仍未验收，但 AC1 已闭合到系统级。** 剩余：文件/摘要两层未接缓存、CLI 内建缓存能力
-  声明未接、跨进程 single-flight 无落点、`priceVersion` 无实际来源（产品决策待定）、真实付费模型未测。
+- **阶段结论：待验收决定。** 对照阶段通过条件——「失效/隔离/并发/容量测试通过」原语级 + E2E 已验；
+  「成本可解释，未知值不伪装为零」三条 runtime 路径已接，未知一律 `unknown`；「缓存不可绕过预算或
+  真实执行」已在真实服务上按同一会话的 hit→仍拒绝 验证。文件/摘要层不套缓存、CLI 能力声明不记录、
+  跨进程 single-flight 延后，三项已在 tasks 文档写明理由关闭。
+  **仍需产品决定的两项**：(1) `priceVersion` 的实际来源与维护方式——没有它，金额一律不出具
+  （这是设计要求的诚实状态，不是伪零）；(2) 真实付费模型抽样属于总计划阶段 6「长会话成本评测」
+  的范围（roadmap §4），是否要求 2C 先做一轮。
