@@ -1,7 +1,7 @@
 # 阶段 2C：分层缓存、失效治理与成本观测 — Checklist v1
 
 > 日期：2026-09-16
-> 状态：实施中（2026-09-18）。原语级与 generic-llm 路径证据已回填，**阶段未验收**；详见第 5 节实施记录。
+> 状态：**已通过验收（2026-09-19）**。证据见第 1 节矩阵与第 5 节实施记录；priceVersion 与真实付费模型抽样归阶段 6「形成质量与成本报告」任务。
 > 依赖：阶段 2A、2B 通过；所有缓存必须服从阶段 1 生命周期。
 
 [总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-2c-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-2c-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-2c-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-2c-checklist-v1.md)
@@ -14,8 +14,8 @@
 | P2C-AC2 | P2C-T1、P2C-T3、P2C-T6 | 同 Agent 的 A/B 会话不得交换内容；删除后到达的回填被拒绝；恢复后旧 generation 缓存不复用。 | **原语级通过（2026-09-18）**。`derived-cache.spec` 8/8：B 持 A 的 key 读不到、`invalidateSession` 只清本会话、恢复后旧 generation 未命中、丢失作用域的回填 `set` 返回 false 且 `rejectedBackfills+1`。`cache-contracts.spec` 私有 key 含 session/workItem/agent/generation，公共 key 不含 session 字样。系统级（真实删除/恢复流程）未验。 |
 | P2C-AC3 | P2C-T2、P2C-T3、P2C-T6 | 修改相关文件只使依赖它的分析失效；无关进度事件不改变稳定上下文指纹。 | **原语级通过（2026-09-18）**。`cache-contracts.spec`：六项依赖任一变化指纹即变；心跳字段按名读取结构上进不了指纹；文件 hash 顺序无关。`derived-cache.invalidateFingerprint` 按指纹后缀清理。未接入真实文件变更事件。 |
 | P2C-AC4 | P2C-T3、P2C-T6 | 百个相同请求仅一个有效构建提交；缓存宕机不会发起无限摘要或绕过调用总预算。 | **原语级通过（2026-09-18）**。`cache-single-flight.spec` 8/8：100 并发同 key → 1 次构建、恰一个 `owner:true`；构建失败不做负缓存；连续失败达阈值 → `circuit_open` 不再打原点，熔断按 key 独立。"回源仍受总预算"依赖 2A 预算门禁，本阶段未新增绕过路径。跨进程 single-flight **未做**。 |
-| P2C-AC5 | P2C-T1、P2C-T4、P2C-T6 | 不支持缓存的模型正常执行并标注 unsupported；请求已配置但无回执用量时标记 unknown，不假定命中。 | **三条 runtime 路径通过（2026-09-18）**。能力声明：`runtime-cache-capability.spec` 8/8 + `generic-llm-token-estimation.spec` 新增用例，未声明 model → `unknown`、第三方 host → `unsupported`，两者 `blocksExecution:false` 正常执行，每次 generic-llm run 写 `tokenEstimation.cacheCapability`。无回执 → `unknown`：generic-llm `toUsage`、claude_code / codex 的 `usage-from-frames.spec` 6/6 均断言无 usage 帧时 `measurement:'unknown'` 且不伪造 cacheRead 计数。**未做**：CLI 内建缓存的能力声明未接（只有 usage 归一化接了）。 |
-| P2C-AC6 | P2C-T1、P2C-T5、P2C-T6 | 不同 usage fixture 映射正确，缺失字段为 unknown；实际金额缺价格版本时不可伪造为零。 | **generic-llm 路径通过（2026-09-18）**。`cache-contracts.spec`：anthropic（input 不含 cache，logical = input + read）/ openai（input 含 cache，不重复加）/ ollama（unknown）；raw 缺失 → 各字段 `undefined` 非 0；金额无 `priceVersion` 整个 cost 不出具；`summarizeUsageBreakdown` 按 attemptId 去重。`toUsage`/`mergeUsage`/`settleRequirementBudget` 已接线。价格版本实际来源、摘要额外成本单列**未做**。 |
+| P2C-AC5 | P2C-T1、P2C-T4、P2C-T6 | 不支持缓存的模型正常执行并标注 unsupported；请求已配置但无回执用量时标记 unknown，不假定命中。 | **三条 runtime 路径通过（2026-09-18）**。能力声明：`runtime-cache-capability.spec` 8/8 + `generic-llm-token-estimation.spec` 新增用例，未声明 model → `unknown`、第三方 host → `unsupported`，两者 `blocksExecution:false` 正常执行，每次 generic-llm run 写 `tokenEstimation.cacheCapability`。无回执 → `unknown`：generic-llm `toUsage`、claude_code / codex 的 `usage-from-frames.spec` 6/6 均断言无 usage 帧时 `measurement:'unknown'` 且不伪造 cacheRead 计数。决定不单独记录 CLI 内建缓存能力（平台不控制 CLI 提示词，声明恒为 unknown，见 tasks T4）。 |
+| P2C-AC6 | P2C-T1、P2C-T5、P2C-T6 | 不同 usage fixture 映射正确，缺失字段为 unknown；实际金额缺价格版本时不可伪造为零。 | **generic-llm 路径通过（2026-09-18）**。`cache-contracts.spec`：anthropic（input 不含 cache，logical = input + read）/ openai（input 含 cache，不重复加）/ ollama（unknown）；raw 缺失 → 各字段 `undefined` 非 0；金额无 `priceVersion` 整个 cost 不出具；`summarizeUsageBreakdown` 按 attemptId 去重。`toUsage`/`mergeUsage`/`settleRequirementBudget` 已接线。价格版本实际来源归阶段 6「形成质量与成本报告」任务（在此之前金额一律不出具）；摘要额外成本单列未做。 |
 | P2C-AC7 | P2C-T1、P2C-T2、P2C-T6 | 超容量/过期后正确回源；用户历史与决策仍在；安全/控制类动作不命中旧回答。 | **原语级通过 + 可观测（2026-09-18/19）**。`derived-cache.spec`：`maxEntries` 满时 LRU 逐出、过期读判失效并释放容量（`size` 归零）、`stats()` 只有计数不含正文。命中率已暴露：`context_bundle_cache_total{layer,outcome}`，outcome 互斥（hit/miss/expired/evicted/rejected_backfill），标签不含 session（用例断言 + E2E 断言）。"历史与决策仍在"由设计保证（缓存是派生态，不触碰原始记录）。"安全动作不命中旧回答"当前不适用：没有调用方把动作结果放进缓存。 |
 
 ## 2. 现有验证入口
@@ -95,10 +95,9 @@ npm run test:e2e:context-bundle-cache   # 2026-09-19 新增：AC1 系统级（mo
   grounded-evidence 门禁以 `CONTEXT_INSUFFICIENT` 拒绝，E2E 必须用不需要证据的提示词。
 - 定向：`context-bundle-cache.spec` 10/10、`derived-cache.spec` 8/8、`usage-from-frames.spec` 6/6、
   `workspace-metrics.spec`（名字数守卫 38）；四门禁全绿。
-- **阶段结论：待验收决定。** 对照阶段通过条件——「失效/隔离/并发/容量测试通过」原语级 + E2E 已验；
+- **阶段结论：已验收（2026-09-19，用户确认）。** 对照阶段通过条件——「失效/隔离/并发/容量测试通过」原语级 + E2E 已验；
   「成本可解释，未知值不伪装为零」三条 runtime 路径已接，未知一律 `unknown`；「缓存不可绕过预算或
   真实执行」已在真实服务上按同一会话的 hit→仍拒绝 验证。文件/摘要层不套缓存、CLI 能力声明不记录、
   跨进程 single-flight 延后，三项已在 tasks 文档写明理由关闭。
-  **仍需产品决定的两项**：(1) `priceVersion` 的实际来源与维护方式——没有它，金额一律不出具
-  （这是设计要求的诚实状态，不是伪零）；(2) 真实付费模型抽样属于总计划阶段 6「长会话成本评测」
-  的范围（roadmap §4），是否要求 2C 先做一轮。
+  **验收时决定**：(1) `priceVersion` 的实际来源与维护方式归阶段 6「形成质量与成本报告」任务——在此之前金额一律不出具
+  （这是设计要求的诚实状态，不是伪零）；(2) 真实付费模型抽样归阶段 6「长会话成本评测」（roadmap §4）。

@@ -1,9 +1,8 @@
 # 阶段 2C：分层缓存、失效治理与成本观测 — Tasks v1
 
 > 日期：2026-09-16
-> 状态：实施中（2026-09-18 开工）。T1 完成；T2–T6 原语落地，上下文包缓存有真实调用方，
-> 三条 runtime 路径 usage 归一化已接线并全绿；但文件/摘要层未接、跨进程 single-flight 无落点、
-> 系统级/E2E 未做，**阶段未验收**。
+> 状态：**已完成并通过验收（2026-09-19）**。priceVersion 来源与真实付费模型抽样归入阶段 6「形成质量与成本报告」任务；
+> 文件/摘要层不套缓存、CLI 能力声明不记录、跨进程 single-flight 延后，理由见各任务。
 > 依赖：阶段 2A、2B 通过；所有缓存必须服从阶段 1 生命周期。
 
 [总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-2c-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-2c-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-2c-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-2c-checklist-v1.md)
@@ -30,7 +29,7 @@
 
 ### P2C-T2 实现本地派生缓存
 
-- [ ] 完成实现与审查。
+- [x] 完成实现与审查（2026-09-19 验收）。
 - 前置：P2C-T1 完成；涉及的其他阶段依赖同页顶部。
 - 交付：文件、摘要、上下文包缓存及 LRU/TTL，复用现有索引实现。
 - 覆盖：P2C-AC1、P2C-AC3、P2C-AC7。
@@ -49,7 +48,7 @@
 
 ### P2C-T3 实现失效与并发回填保护
 
-- [ ] 完成实现与审查。
+- [x] 完成实现与审查（2026-09-19 验收）。
 - 前置：P2C-T2 完成；涉及的其他阶段依赖同页顶部。
 - 交付：业务指纹、generation、跨进程唯一提交、single-flight 和有限回源。
 - 覆盖：P2C-AC2、P2C-AC3、P2C-AC4。
@@ -62,7 +61,7 @@
 
 ### P2C-T4 实现 Provider/CLI 缓存适配
 
-- [ ] 完成实现与审查。
+- [x] 完成实现与审查（2026-09-19 验收）。
 - 前置：P2C-T3 完成；涉及的其他阶段依赖同页顶部。
 - 交付：按实际能力拆稳定/动态内容，unsupported/unknown 回退，不改消息权限。
 - 覆盖：P2C-AC1、P2C-AC5。
@@ -84,7 +83,7 @@
 
 ### P2C-T5 接入成本诊断
 
-- [ ] 完成实现与审查。
+- [x] 完成实现与审查（2026-09-19 验收）。
 - 前置：P2C-T4 完成；涉及的其他阶段依赖同页顶部。
 - 交付：归一化用量、价格版本、摘要额外成本、命中率和耗时，不记录敏感正文。
 - 覆盖：P2C-AC6。
@@ -97,11 +96,13 @@
   `runtime.service.ts settleRequirementBudget` 改用显式 `measurement`：unknown →
   unavailable（保留预留上限），结算额取 `logicalInputTokens ?? inputTokens`；attemptId 幂等
   沿用 2A。用例：generic-llm 四个 spec 47/47、runtime.service 36/36。
-  **未做**：价格版本实际来源与金额出具、摘要/检索额外成本单列、命中率与耗时 metrics。
+  命中率 metrics 已接（2026-09-19）：`DerivedCache.onOutcome` → `context_bundle_cache_total{layer,outcome}`，
+  标签不含 session，经 `GET /ops/workspace-metrics` 可读。**归阶段 6「形成质量与成本报告」任务**：价格版本实际来源与
+  金额出具。**未做**：摘要/检索额外成本单列、耗时 metrics。
 
 ### P2C-T6 验证缓存故障与收益
 
-- [ ] 完成实现与审查。
+- [x] 完成实现与审查（2026-09-19 验收）。
 - 前置：P2C-T5 完成；涉及的其他阶段依赖同页顶部。
 - 交付：冷热请求、文件/需求变更、删除并发、缓存宕机、不同供应商 usage fixture。
 - 覆盖：P2C-AC1、P2C-AC2、P2C-AC3、P2C-AC4、P2C-AC5、P2C-AC6、P2C-AC7。

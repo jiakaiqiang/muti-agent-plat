@@ -1,9 +1,9 @@
 # 主 Agent 协作与长会话治理：分阶段实施总计划 v1
 
 > 日期：2026-09-16
-> 状态：阶段 0、阶段 1、阶段 2A 与阶段 2B 已实现并验收；阶段 2C 实施中（2026-09-18 开工，原语与 generic-llm 接线已落地，未验收）；阶段 3 及后续业务接入待实施。
+> 状态：阶段 0、阶段 1、阶段 2A、阶段 2B 与阶段 2C 已实现并验收；阶段 3 及后续业务接入待实施。
 > 初始文档交付：1 份总计划 + 9 阶段 × 4 份文档，共 37 份新增文档，记录保留于第 11 节。
-> 当前已验收范围：阶段 0、阶段 1、阶段 2A、阶段 2B；未调用真实付费/多模态 Provider、部署或发布。
+> 当前已验收范围：阶段 0、阶段 1、阶段 2A、阶段 2B、阶段 2C；未调用真实付费/多模态 Provider、部署或发布。
 
 ## 1. 目标与已沟通决定
 
@@ -72,7 +72,7 @@
 | 1 | 多会话执行隔离、停止与可恢复删除（已完成并通过验收） | 0 | [spec](../product/main-agent-collaboration-phase-1-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-1-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-1-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-1-checklist-v1.md) |
 | 2A | 统一消息意图、需求隔离与完整 Token 预算（已完成并通过验收） | 1 | [spec](../product/main-agent-collaboration-phase-2a-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2a-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2a-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2a-checklist-v1.md) |
 | 2B | 版本化长期记忆、增量摘要与历史需求召回（已完成并通过验收） | 2A | [spec](../product/main-agent-collaboration-phase-2b-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2b-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2b-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2b-checklist-v1.md) |
-| 2C | 分层缓存、失效治理与成本观测 | 2B | [spec](../product/main-agent-collaboration-phase-2c-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2c-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2c-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2c-checklist-v1.md) |
+| 2C | 分层缓存、失效治理与成本观测（已完成并通过验收） | 2B | [spec](../product/main-agent-collaboration-phase-2c-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2c-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2c-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2c-checklist-v1.md) |
 | 3 | 主 Agent 主持讨论与可恢复专家协作 | 2A/2B/2C | [spec](../product/main-agent-collaboration-phase-3-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-3-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-3-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-3-checklist-v1.md) |
 | 4 | 主 Agent 文档、精确确认与所选工作流交接 | 3 | [spec](../product/main-agent-collaboration-phase-4-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-4-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-4-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-4-checklist-v1.md) |
 | 5 | 执行中补充、新需求与范围变更治理 | 4 | [spec](../product/main-agent-collaboration-phase-5-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-5-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-5-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-5-checklist-v1.md) |
@@ -87,7 +87,7 @@
 - Tasks：有序任务、依赖、交付物及关联 AC。
 - Checklist：具体场景、预期、现有命令、必须新增的测试和证据位置。
 
-本专项共 61 条阶段 AC、54 项开发任务。阶段 0、阶段 1、阶段 2A 与阶段 2B 的 26 条 AC、24 项任务已完成实现和验收；阶段 2C 及以后仍待实施/待验证，不因前置阶段通过而自动完成。
+本专项共 61 条阶段 AC、54 项开发任务。阶段 0、阶段 1、阶段 2A、阶段 2B 与阶段 2C 的 33 条 AC、30 项任务已完成实现和验收；阶段 3 及以后仍待实施/待验证，不因前置阶段通过而自动完成。
 
 ## 5. 跨阶段架构决策与不变量
 
@@ -216,3 +216,11 @@
 - 完成 WorkItem 有界历史召回、相似项澄清、事件分页/32 页 LRU，以及 CLI 按 WorkItem/generation 隔离与受控轮换。
 - [阶段 2B Checklist](../quality/main-agent-collaboration-phase-2b-checklist-v1.md)记录 176/176 定向回归、独立 PostgreSQL 11/11、六条关键 E2E 和全仓门禁。
 - 已知边界：file backend 启动仍加载完整 JSON/事件投影；本阶段不把请求级分页描述成存储完全懒加载。未调用真实付费模型、部署或发布。
+
+## 16. 阶段 2C 实施交付（2026-09-19）
+
+- 完成缓存与用量合同（分层 key、私有/公共作用域、依赖指纹、`normalizeRuntimeUsage`）、有界派生缓存（LRU/TTL、读取与回填双重 generation 校验）、进程内 single-flight 与按 key 熔断。
+- 上下文包层（navigation + project map）接入真实调用方；三条 runtime 路径（generic-llm / claude_code / codex）的 usage 归一化统一，缓存计数不再在 runner 处丢失，未知用量一律 `unknown` 不伪装为零；结算按 `logicalInputTokens` 计入需求预算。
+- 命中率经 `context_bundle_cache_total{layer,outcome}` 暴露于既有 ops 指标出口，标签不含会话 id。
+- [阶段 2C Checklist](../quality/main-agent-collaboration-phase-2c-checklist-v1.md)记录原语级用例、四门禁与新增 E2E `test:e2e:context-bundle-cache`：真实服务上同一会话的缓存命中仍被发送前预算守卫拒绝（AC1）。
+- 已知边界与延后：文件/摘要层不再套派生缓存、CLI 内建缓存能力声明不记录、跨进程 single-flight 延后（理由见 tasks）；`priceVersion` 来源与真实付费模型抽样归入阶段 6 P6-T5 成本报告。未调用真实付费模型、部署或发布。
