@@ -9,7 +9,8 @@ export const RUNTIME_OUTPUT_KINDS = [
   'post_review_report',
   'final_delivery',
   'user_message_handling_plan',
-  'intent_routing_decision'
+  'intent_routing_decision',
+  'discussion_plan'
 ] as const;
 
 export type RuntimeOutputKind = (typeof RUNTIME_OUTPUT_KINDS)[number];

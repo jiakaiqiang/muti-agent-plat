@@ -82,12 +82,37 @@
 
 ## T2 实现主 Agent 规划与派发（AC1/AC3/AC5/AC6）
 
-- [ ] T2-1 新 RuntimeOutput kind `discussion_plan`（propose_consultation[] / propose_question? /
-      propose_summary?），三处注册 + 结构化输出指令
-- [ ] T2-2 领域服务校验：目标成员必须在 `session.participatingAgentIds` 内，否则生成
-      `member_addition` 用户确认而不是擅自加入（AC3）；只读工具策略；预算走
-      `WorkItemBudgetStore.reserve(category:'consultation')`
-- [ ] T2-3 首轮由主 Agent 出计划替换 `runDiscussion` 的全员轮询；计划持久化后再派发
+落点：`packages/shared/src/runtime-contracts/output-contracts.ts`（新 kind）+
+`discussion-plan-output.spec.ts`（5 例）；`orchestrator/discussion-planner.ts` + `.spec.ts`（8 例）；
+`orchestrator.service.ts` `runPlannedDiscussion` + `planned-discussion.spec.ts`（3 例）。
+
+- [x] T2-1 新 RuntimeOutput kind `discussion_plan`：objective / gaps[] / exitCondition /
+      consultations[{targetAgentKey, objective, expectedResult}] / questionsForUser[] /
+      readyToSummarize。**封闭 schema**：`addMembers`、`approvedByUser` 之类多余字段直接拒绝
+      ——成员与批准不是模型能声明的。注册实际只在一处（`RUNTIME_OUTPUT_KINDS` + schema map +
+      example + union），registry/server 是泛型派生；公开类型走 `contracts.ts` 的
+      `Registered*` 别名（在 `runtime-contracts/index.ts` 重复导出会撞 TS2308）。
+      现有表驱动 spec（example 必过、拒多余属性、preflight 禁 optional）自动覆盖新 kind
+- [x] T2-2 `resolveDiscussionPlan` 纯函数：目标是参与者 → 委派；在目录但不在会话 →
+      `memberAdditions`（用户确认，模型不能加人，AC3）；名字哪都没有 → `unknownTargets`
+      （报出来，不编造）；主 Agent 点自己 → dropped(self_consultation)；同人两次 → 一次。
+      "空计划"按**原始提议**判（consultations/questions 全空且未 ready），解析后全被拒的计划
+      仍是 resolved——诊断信息正是主 Agent 重规划需要的
+- [x] T2-3 orchestrator：`MAIN_AGENT_DISCUSSION_ENABLED`（默认关，回退 = 取消设置；阶段 0
+      的 `main_agent_discussion` 策略特性在服务端无消费者，先用 env 闸，记为缺口）。
+      开启时 `runDiscussion` 先走 `runPlannedDiscussion`：无 activeWorkItem/contextManagement
+      → 返回 false 回落旧循环；否则主 Agent 出 `discussion_plan`（system rule 里给出可用专家
+      key 名单）→ `resolveDiscussionPlan` → `DiscussionStore.open` 持久化 → 扩员发
+      `confirm_member_addition` 确认卡 → 逐条 `reserveDelegation` → `consulting` →
+      `boundedConsultations(…, shouldStop=()=>false)` 只跑被点名的专家，异常/失败只标该委派
+      `failed`（**不再中止整场**，AC6）→ `synthesizing`。事件带 discussionId/delegationId。
+      专家仍返回 agent_message，`ExpertReport` 只填 conclusion，不编造 evidenceRefs。
+      mock runtime 加 `discussion_plan` 分支（固定提议 architect）。
+      测试夹具从 spec 抽到 `orchestrator.test-fixtures.ts`——spec 互相 import 会让 node:test
+      把整套用例重复注册。
+      **未做**：一次 `runDiscussion` 只跑 1 轮计划（多轮重规划归 T5）；扩员确认卡的
+      approve/decline 处理（用户点了之后把该成员加入并补委派）归 T4；`runFollowUpDiscussion`
+      仍是旧全员路径（T4）
 
 ## T3 实现持久化专家执行（AC4/AC6）
 

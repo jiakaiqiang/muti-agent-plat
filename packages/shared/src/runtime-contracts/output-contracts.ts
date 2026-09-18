@@ -243,6 +243,30 @@ export const IntentRoutingDecisionOutputSchema = strictObject({
   modelConfidence: Type.Union([Type.Number({ minimum: 0, maximum: 1 }), Type.Null()])
 });
 
+/**
+ * The coordinator's proposal for one bounded discussion round (phase 3).
+ * It is a proposal only: membership, budget and confirmation are decided by
+ * the domain service that validates it, never by the model. The shape is
+ * closed so a member addition or an approval cannot ride along as an extra
+ * field.
+ */
+const DiscussionConsultationProposalSchema = strictObject({
+  targetAgentKey: NonEmptyString,
+  objective: NonEmptyString,
+  expectedResult: NonEmptyString
+});
+
+export const DiscussionPlanOutputSchema = strictObject({
+  ...RuntimeOutputHeader,
+  kind: Type.Literal('discussion_plan'),
+  objective: NonEmptyString,
+  gaps: StringArray,
+  exitCondition: NonEmptyString,
+  consultations: Type.Array(DiscussionConsultationProposalSchema),
+  questionsForUser: StringArray,
+  readyToSummarize: Type.Boolean()
+});
+
 export const runtimeOutputSchemas = {
   agent_message: AgentMessageOutputSchema,
   task_acceptance_decision: TaskAcceptanceDecisionOutputSchema,
@@ -252,7 +276,8 @@ export const runtimeOutputSchemas = {
   post_review_report: PostReviewReportOutputSchema,
   final_delivery: FinalDeliveryOutputSchema,
   user_message_handling_plan: UserMessageHandlingPlanOutputSchema,
-  intent_routing_decision: IntentRoutingDecisionOutputSchema
+  intent_routing_decision: IntentRoutingDecisionOutputSchema,
+  discussion_plan: DiscussionPlanOutputSchema
 } as const;
 
 export type AgentMessageOutput = Static<typeof AgentMessageOutputSchema>;
@@ -268,6 +293,7 @@ export type PostReviewReportOutput = Static<typeof PostReviewReportOutputSchema>
 export type FinalDeliveryOutput = Static<typeof FinalDeliveryOutputSchema>;
 export type UserMessageHandlingPlanOutput = Static<typeof UserMessageHandlingPlanOutputSchema>;
 export type IntentRoutingDecisionOutput = Static<typeof IntentRoutingDecisionOutputSchema>;
+export type DiscussionPlanOutput = Static<typeof DiscussionPlanOutputSchema>;
 
 export type RuntimeOutput =
   | AgentMessageOutput
@@ -278,7 +304,8 @@ export type RuntimeOutput =
   | PostReviewReportOutput
   | FinalDeliveryOutput
   | UserMessageHandlingPlanOutput
-  | IntentRoutingDecisionOutput;
+  | IntentRoutingDecisionOutput
+  | DiscussionPlanOutput;
 
 export type RuntimeOutputByKind = {
   [K in RuntimeOutput['kind']]: Extract<RuntimeOutput, { kind: K }>;
@@ -411,5 +438,21 @@ export const runtimeOutputExamples = {
     reasonCodes: ['ACTIVE_WORK_ITEM_REFERENCE'],
     riskLevel: 'low',
     modelConfidence: 0.9
+  },
+  discussion_plan: {
+    schemaVersion: '1.0',
+    kind: 'discussion_plan',
+    objective: '决定存储方案并列出未决风险。',
+    gaps: ['迁移成本未知', '保留期未确认'],
+    exitCondition: '每个未决问题都有负责人或已交由用户决定。',
+    consultations: [
+      {
+        targetAgentKey: 'architect',
+        objective: '评估关系型与文档型存储的迁移成本与风险。',
+        expectedResult: '结论、依据引用、风险与建议动作。'
+      }
+    ],
+    questionsForUser: [],
+    readyToSummarize: false
   }
 } as const satisfies { [K in RuntimeOutput['kind']]: RuntimeOutputByKind[K] };

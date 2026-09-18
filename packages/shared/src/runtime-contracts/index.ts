@@ -24,6 +24,7 @@ export {
   FinalDeliveryOutputSchema,
   UserMessageHandlingPlanOutputSchema,
   IntentRoutingDecisionOutputSchema,
+  DiscussionPlanOutputSchema,
   runtimeOutputSchemas,
   runtimeOutputExamples
 } from './output-contracts.js';

@@ -144,6 +144,22 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
           requiresUserConfirmation: false,
           coordinatorInstruction: 'Apply the new constraint to the current invocation.'
         } satisfies UserMessageHandlingPlanOutput;
+      case 'discussion_plan':
+        // A deterministic plan: consult the architect preset. Whether that is a
+        // delegation or a member-addition confirmation is the domain's call,
+        // which is exactly the boundary the mock should not pre-empt.
+        return {
+          schemaVersion: '1.0',
+          kind: 'discussion_plan',
+          objective: goal,
+          gaps: ['Root cause not yet confirmed.'],
+          exitCondition: 'Every gap has an owner or a user decision.',
+          consultations: [
+            { targetAgentKey: 'architect', objective: `Assess: ${goal}`, expectedResult: 'Conclusion, evidence, risks.' }
+          ],
+          questionsForUser: [],
+          readyToSummarize: false
+        };
       case 'intent_routing_decision':
         // A deterministic test Runtime must still honor the strict router output
         // contract. It intentionally chooses clarification instead of guessing

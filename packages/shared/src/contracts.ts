@@ -17,7 +17,8 @@ import type {
   TaskBriefOutput as RegisteredTaskBriefOutput,
   TaskExecutionResultOutput as RegisteredTaskExecutionResultOutput,
   UserMessageHandlingPlanOutput as RegisteredUserMessageHandlingPlanOutput,
-  IntentRoutingDecisionOutput as RegisteredIntentRoutingDecisionOutput
+  IntentRoutingDecisionOutput as RegisteredIntentRoutingDecisionOutput,
+  DiscussionPlanOutput as RegisteredDiscussionPlanOutput
 } from './runtime-contracts/output-contracts.js';
 
 export type UUID = string;
@@ -3259,6 +3260,7 @@ export type PostReviewReportOutput = RegisteredPostReviewReportOutput;
 export type FinalDeliveryOutput = RegisteredFinalDeliveryOutput;
 export type UserMessageHandlingPlanOutput = RegisteredUserMessageHandlingPlanOutput;
 export type IntentRoutingDecisionOutput = RegisteredIntentRoutingDecisionOutput;
+export type DiscussionPlanOutput = RegisteredDiscussionPlanOutput;
 
 export type AgentRuntimeAdapter = {
   type: RuntimeType;

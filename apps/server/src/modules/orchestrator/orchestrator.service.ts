@@ -72,6 +72,8 @@ import {
 import {
   contextBundleCacheMaxEntries,
   contextBundleCacheTtlMs,
+  discussionConsultationBudgetTokens,
+  mainAgentDiscussionEnabled,
   globalDefaultRuntimeType,
   phaseTimeoutMs,
   projectPolicyRuntimeType,
@@ -114,6 +116,8 @@ import { consumeRuntimeEvents } from './runtime-stream-consumer.js';
 import { structuredOutputGuard } from './structured-output-guard.js';
 import { acceptanceFingerprint, explicitTaskPreflight } from './task-acceptance-preflight.js';
 import { boundedConsultations, consultationConcurrency } from './bounded-consultation.js';
+import { DiscussionStore } from './discussion-store.js';
+import { resolveDiscussionPlan } from './discussion-planner.js';
 import { shouldEmitHeartbeat, shouldSuppressHeartbeat } from './runtime-heartbeat-policy.js';
 import { smartRuntimePick } from './smart-runtime-pick.js';
 import { buildCoverageSystemRule, buildWorkspaceManifest } from './workspace-manifest.js';
@@ -288,6 +292,8 @@ export class OrchestratorService {
   private savePendingInvocationCallback?: (sessionId: string, invocation: PendingInvocation) => void;
   private readonly lifecycle: SessionLifecycleStore;
   private readonly summaryCheckpoints: SummaryCheckpointService;
+  /** Phase 3: the persisted discussion plan that recovery trusts (used only behind the flag). */
+  private readonly discussions: DiscussionStore;
   /**
    * Workspace-derived envelope layers, keyed per session/requirement/role/
    * generation. Sits before the runtime's pre-send budget check, never in
@@ -321,6 +327,7 @@ export class OrchestratorService {
     @Optional() private readonly systemAgentPolicies?: SystemAgentRuntimePolicyService
   ) {
     this.lifecycle = new SessionLifecycleStore(persistence);
+    this.discussions = new DiscussionStore(persistence);
     this.summaryCheckpoints = new SummaryCheckpointService(
       new SummaryCheckpointStore(persistence),
       runtime.workItemBudgets
@@ -3424,6 +3431,7 @@ export class OrchestratorService {
   private async runDiscussion(session: SessionDetail, coordinator: Agent, signal?: AbortSignal) {
     await this.runtime.refreshRuntimeAvailability?.();
     throwIfAborted(signal);
+    if (mainAgentDiscussionEnabled() && (await this.runPlannedDiscussion(session, coordinator, signal))) return;
     const participants = this.discussionParticipants(session, coordinator);
     const rounds = this.discussionMaxRounds();
     for (let round = 1; round <= rounds; round += 1) {
@@ -3522,6 +3530,256 @@ export class OrchestratorService {
       }
     }
   }
+  /**
+   * Phase 3 discussion round: the coordinator proposes a plan, the domain
+   * decides what it means, the plan is persisted, and only the named experts
+   * run. Returns false when the session cannot host a planned discussion (no
+   * active requirement to bind to), in which case the caller falls back to the
+   * legacy loop rather than failing.
+   *
+   * Differences from the legacy loop that matter for the ACs:
+   * - not every participant answers, only the ones the coordinator asked (AC1)
+   * - a catalogued agent outside the session becomes a confirmation for the
+   *   user, never an automatic member (AC3)
+   * - one expert failing marks that delegation failed; the round completes and
+   *   the failure is visible instead of aborting everyone (AC6)
+   * - the run and its delegations are persisted before dispatch, so a restart
+   *   resumes unfinished delegations instead of re-consulting everyone (AC4)
+   */
+  private async runPlannedDiscussion(session: SessionDetail, coordinator: Agent, signal?: AbortSignal): Promise<boolean> {
+    const workItemId = session.activeWorkItemId;
+    const workItem = workItemId ? this.contextManagement?.getWorkItem(session.id, workItemId) : undefined;
+    if (!workItemId || !workItem) return false;
+    const generation = this.lifecycle.generation(session.id) ?? 0;
+
+    // 1. The coordinator proposes.
+    const planInvocationId = crypto.randomUUID();
+    const participants = this.discussionParticipants(session, coordinator);
+    const planAssembly = this.createContextAssembly(session, coordinator, undefined, undefined, 'discussion');
+    planAssembly.systemRules = [
+      ...(planAssembly.systemRules ?? []),
+      'You are hosting this discussion. Name the gaps, the experts you need and how the round ends.',
+      `Available experts (targetAgentKey): ${participants.map((agent) => agent.key).join(', ') || '(none)'}.`,
+      'Ask only the experts whose input closes a gap. Do not add members: name them and the user decides.'
+    ];
+    const planResult = await this.runRuntime(session, {
+      invocationId: planInvocationId,
+      sessionId: session.id,
+      phase: 'discussion',
+      agent: coordinator,
+      contextAssembly: planAssembly,
+      expectedOutput: { kind: 'discussion_plan', schemaVersion: '1.0' },
+      budget: planAssembly.budget
+    }, signal);
+    throwIfAborted(signal);
+    if (planResult.status !== 'completed' || planResult.output.kind !== 'discussion_plan') {
+      const runtimeError: RuntimeError = planResult.error ?? {
+        code: 'RUNTIME_OUTPUT_CONTRACT_VIOLATION',
+        message: 'Coordinator did not return a discussion_plan.',
+        retryable: true,
+        details: { expectedKind: 'discussion_plan', receivedKind: planResult.output?.kind }
+      };
+      throw Object.assign(new Error(runtimeError.message), { cause: runtimeError, runtimeError });
+    }
+
+    // 2. The domain decides.
+    const resolved = resolveDiscussionPlan(planResult.output, {
+      coordinatorAgentId: coordinator.id,
+      participants: participants.map((agent) => ({ id: agent.id, key: agent.key })),
+      catalog: this.agents.listForSurface('chat').map((agent) => ({ id: agent.id, key: agent.key })),
+      budgetPerConsultationTokens: discussionConsultationBudgetTokens()
+    });
+    if (resolved.status === 'invalid') {
+      const runtimeError: RuntimeError = {
+        code: 'RUNTIME_OUTPUT_CONTRACT_VIOLATION',
+        message: 'Coordinator plan proposed nothing: no experts, no questions, not ready.',
+        retryable: true,
+        details: { code: resolved.code }
+      };
+      throw Object.assign(new Error(runtimeError.message), { cause: runtimeError, runtimeError });
+    }
+
+    // 3. The plan is persisted before anything runs.
+    const opened = await this.discussions.open({
+      sessionId: session.id,
+      workItemId,
+      requirementRevision: workItem.revision,
+      generation,
+      coordinatorAgentId: coordinator.id,
+      objective: resolved.objective,
+      exitCondition: resolved.exitCondition,
+      roundLimit: this.discussionMaxRounds(),
+      budgetTokens: resolved.delegations.reduce((sum, item) => sum + item.budgetTokens, 0)
+    });
+    if (opened.status !== 'opened') {
+      throw new Error(`DISCUSSION_OPEN_REJECTED: ${opened.code}`);
+    }
+    const discussionId = opened.run.id;
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      fromAgentId: coordinator.id,
+      toAgentIds: resolved.delegations.map((item) => item.targetAgentId),
+      content: [
+        `讨论目标：${resolved.objective}`,
+        resolved.gaps.length ? `待补缺口：${resolved.gaps.join('；')}` : '',
+        resolved.delegations.length ? `将咨询：${resolved.delegations.map((item) => item.targetAgentKey).join('、')}` : '本轮不咨询专家',
+        `结束条件：${resolved.exitCondition}`
+      ].filter(Boolean).join('\n'),
+      metadata: createMetadata('chat_message', {
+        messageKind: 'decision',
+        discussionId,
+        requirementRevision: workItem.revision,
+        plannedTargets: resolved.delegations.map((item) => item.targetAgentKey),
+        unknownTargets: resolved.unknownTargets,
+        dropped: resolved.dropped,
+        questionsForUser: resolved.questionsForUser,
+        runtimeInvocationId: planInvocationId
+      })
+    });
+
+    // A catalogued agent outside the session is the user's decision (AC3).
+    for (const addition of resolved.memberAdditions) {
+      this.events.create({
+        sessionId: session.id,
+        type: 'user_confirmation_requested',
+        fromAgentId: coordinator.id,
+        content: `主 Agent 建议邀请 ${addition.targetAgentKey} 参与讨论，是否加入？`,
+        metadata: createMetadata('confirmation_card', {
+          confirmationId: crypto.randomUUID(),
+          reason: 'confirm_member_addition',
+          title: `是否邀请 ${addition.targetAgentKey}`,
+          description: `主 Agent 希望 ${addition.targetAgentKey} 就「${addition.objective}」给出「${addition.expectedResult}」。未确认前不会咨询该成员。`,
+          discussionId,
+          targetAgentId: addition.targetAgentId,
+          targetAgentKey: addition.targetAgentKey,
+          options: [
+            { key: 'approve_member', label: '邀请加入', style: 'primary' },
+            { key: 'decline_member', label: '暂不邀请', style: 'default' }
+          ]
+        })
+      });
+    }
+
+    // 4. Reserve, then run only what was reserved.
+    const reserved: Array<{ delegationId: string; agent: Agent; objective: string; expectedResult: string }> = [];
+    for (const planned of resolved.delegations) {
+      const agent = participants.find((item) => item.id === planned.targetAgentId);
+      if (!agent) continue;
+      const outcome = await this.discussions.reserveDelegation(discussionId, {
+        targetAgentId: planned.targetAgentId,
+        origin: planned.origin,
+        objective: planned.objective,
+        expectedResult: planned.expectedResult,
+        budgetTokens: planned.budgetTokens,
+        requirementRevision: workItem.revision
+      });
+      if (outcome.status === 'reserved') {
+        reserved.push({ delegationId: outcome.delegation.id, agent, objective: planned.objective, expectedResult: planned.expectedResult });
+      }
+    }
+    const consulting = await this.discussions.transitionRun(discussionId, { status: 'consulting' });
+    if (consulting.status === 'rejected') throw new Error(`DISCUSSION_ROUND_REJECTED: ${consulting.code}`);
+
+    await boundedConsultations(reserved, consultationConcurrency(), async ({ delegationId, agent, objective, expectedResult }) => {
+      throwIfAborted(signal);
+      const invocationId = crypto.randomUUID();
+      await this.discussions.transitionDelegation(discussionId, delegationId, { status: 'running', invocationId });
+      this.events.create({
+        sessionId: session.id,
+        type: 'agent_status_changed',
+        fromAgentId: agent.id,
+        content: messages.discussionCheckingStatus(agent.name),
+        metadata: createMetadata('system_notice', {
+          agentId: agent.id, status: 'discussing', discussionId, delegationId,
+          thoughtSummary: messages.discussionCheckingThought, actionSummary: objective, waitingFor: [coordinator.id]
+        })
+      });
+      const assembly = this.createContextAssembly(session, agent, undefined, undefined, 'discussion');
+      assembly.systemRules = [
+        ...(assembly.systemRules ?? []),
+        `Delegated objective: ${objective}`,
+        `Expected result: ${expectedResult}`
+      ];
+      let result: AgentRunResult;
+      try {
+        result = await this.runDiscussionRuntime(session, agent, invocationId, assembly, signal);
+      } catch (error) {
+        // An exception is a failed delegation, not a failed round (AC6).
+        const failure = { code: 'RUNTIME_INVOCATION_ERROR', message: error instanceof Error ? error.message : String(error), retryable: true };
+        await this.discussions.transitionDelegation(discussionId, delegationId, { status: 'failed', failure });
+        this.recordDelegationOutcome(session, coordinator, agent, invocationId, discussionId, delegationId, undefined, failure);
+        return;
+      }
+      const usable = result.status === 'completed' && usableAgentMessageOutput(result.output);
+      if (!usable) {
+        const failure = result.error
+          ? { code: result.error.code, message: result.error.message, retryable: result.error.retryable }
+          : { code: 'RUNTIME_OUTPUT_CONTRACT_VIOLATION', message: 'Expert returned an invalid or empty agent_message output.', retryable: false };
+        await this.discussions.transitionDelegation(discussionId, delegationId, { status: 'failed', failure });
+        this.recordDelegationOutcome(session, coordinator, agent, invocationId, discussionId, delegationId, undefined, failure);
+        return;
+      }
+      const output = result.output as AgentMessageOutput;
+      // Experts still answer with agent_message today; the closed ExpertReport
+      // shape carries the conclusion verbatim and leaves the structured fields
+      // empty rather than inventing evidence the expert did not cite.
+      await this.discussions.transitionDelegation(discussionId, delegationId, {
+        status: 'completed',
+        result: { conclusion: output.content, evidenceRefs: [], risks: [], openQuestions: [], suggestedActions: [] }
+      });
+      this.recordDelegationOutcome(session, coordinator, agent, invocationId, discussionId, delegationId, output, undefined);
+    }, () => false, signal);
+
+    await this.discussions.transitionRun(discussionId, { status: 'synthesizing' });
+    return true;
+  }
+
+  private recordDelegationOutcome(
+    session: SessionDetail,
+    coordinator: Agent,
+    agent: Agent,
+    invocationId: string,
+    discussionId: string,
+    delegationId: string,
+    output: AgentMessageOutput | undefined,
+    failure: { code: string; message: string; retryable: boolean } | undefined
+  ) {
+    const failed = Boolean(failure);
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_status_changed',
+      fromAgentId: agent.id,
+      content: failed ? messages.discussionFailedStatus(agent.name) : messages.discussionCompletedStatus(agent.name),
+      metadata: createMetadata('system_notice', {
+        agentId: agent.id,
+        status: failed ? 'failed' : 'thinking',
+        discussionId,
+        delegationId,
+        thoughtSummary: failed ? messages.discussionFailedThought : messages.discussionCompletedThought,
+        actionSummary: output?.content ?? failure?.message ?? '',
+        waitingFor: [],
+        ...(failure ? { runtimeError: { ...failure } } : {})
+      })
+    });
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      fromAgentId: agent.id,
+      toAgentIds: [coordinator.id],
+      content: output?.content ?? messages.discussionFailedMessage(agent.name, failure?.message ?? 'failed'),
+      metadata: createMetadata('chat_message', {
+        messageKind: output?.messageKind ?? 'risk',
+        mentionedAgentIds: output?.mentionedAgentIds ?? [],
+        relatedTaskIds: output?.relatedTaskIds ?? [],
+        runtimeInvocationId: invocationId,
+        discussionId,
+        delegationId,
+        ...(failure ? { runtimeError: { ...failure } } : {})
+      })
+    });
+  }
+
   private async runDiscussionRuntime(
     session: SessionDetail,
     agent: Agent,

@@ -154,6 +154,21 @@ export function cliContextRotationInputTokens() {
 }
 
 /**
+ * Phase 3 admission gate for coordinator-planned discussions. Off means the
+ * legacy every-participant round loop; on means the coordinator proposes a
+ * plan and only the experts it names are consulted. Rollback is unsetting it.
+ */
+export function mainAgentDiscussionEnabled() {
+  return envFlag('MAIN_AGENT_DISCUSSION_ENABLED', false);
+}
+
+/** Per-consultation token allowance handed to each planned delegation. */
+export function discussionConsultationBudgetTokens() {
+  const parsed = Number(process.env.DISCUSSION_CONSULTATION_BUDGET_TOKENS ?? 4_000);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 4_000;
+}
+
+/**
  * Capacity of the in-process context bundle cache (navigation + project map per
  * session/requirement/role/generation). Bounded so memory tracks the number of
  * concurrently active scopes, not the lifetime of the process.
