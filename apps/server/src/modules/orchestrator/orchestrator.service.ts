@@ -3551,10 +3551,29 @@ export class OrchestratorService {
     const workItem = workItemId ? this.contextManagement?.getWorkItem(session.id, workItemId) : undefined;
     if (!workItemId || !workItem) return false;
     const generation = this.lifecycle.generation(session.id) ?? 0;
+    const participants = this.discussionParticipants(session, coordinator);
+
+    // A restart or a retry finds the persisted plan and continues it. The
+    // coordinator is not asked again and finished experts are not re-run: the
+    // record, not the in-memory loop, is what recovery trusts (AC4).
+    const resumable = this.discussions.findResumable(session.id, { workItemId, requirementRevision: workItem.revision, generation });
+    if (resumable && resumable.delegations.length > 0) {
+      if (resumable.status === 'paused') {
+        const resumed = await this.discussions.transitionRun(resumable.id, { status: 'consulting' });
+        if (resumed.status === 'rejected') throw new Error(`DISCUSSION_RESUME_REJECTED: ${resumed.code}`);
+      }
+      const pending = this.discussions.runnableDelegations(session.id, resumable.id, { generation });
+      await this.dispatchDelegations(session, coordinator, resumable.id, pending.map((delegation) => ({
+        delegationId: delegation.id,
+        agent: participants.find((item) => item.id === delegation.targetAgentId),
+        objective: delegation.objective,
+        expectedResult: delegation.expectedResult
+      })), signal);
+      return true;
+    }
 
     // 1. The coordinator proposes.
     const planInvocationId = crypto.randomUUID();
-    const participants = this.discussionParticipants(session, coordinator);
     const planAssembly = this.createContextAssembly(session, coordinator, undefined, undefined, 'discussion');
     planAssembly.systemRules = [
       ...(planAssembly.systemRules ?? []),
@@ -3681,58 +3700,83 @@ export class OrchestratorService {
     const consulting = await this.discussions.transitionRun(discussionId, { status: 'consulting' });
     if (consulting.status === 'rejected') throw new Error(`DISCUSSION_ROUND_REJECTED: ${consulting.code}`);
 
-    await boundedConsultations(reserved, consultationConcurrency(), async ({ delegationId, agent, objective, expectedResult }) => {
-      throwIfAborted(signal);
-      const invocationId = crypto.randomUUID();
-      await this.discussions.transitionDelegation(discussionId, delegationId, { status: 'running', invocationId });
-      this.events.create({
-        sessionId: session.id,
-        type: 'agent_status_changed',
-        fromAgentId: agent.id,
-        content: messages.discussionCheckingStatus(agent.name),
-        metadata: createMetadata('system_notice', {
-          agentId: agent.id, status: 'discussing', discussionId, delegationId,
-          thoughtSummary: messages.discussionCheckingThought, actionSummary: objective, waitingFor: [coordinator.id]
-        })
-      });
-      const assembly = this.createContextAssembly(session, agent, undefined, undefined, 'discussion');
-      assembly.systemRules = [
-        ...(assembly.systemRules ?? []),
-        `Delegated objective: ${objective}`,
-        `Expected result: ${expectedResult}`
-      ];
-      let result: AgentRunResult;
-      try {
-        result = await this.runDiscussionRuntime(session, agent, invocationId, assembly, signal);
-      } catch (error) {
-        // An exception is a failed delegation, not a failed round (AC6).
-        const failure = { code: 'RUNTIME_INVOCATION_ERROR', message: error instanceof Error ? error.message : String(error), retryable: true };
-        await this.discussions.transitionDelegation(discussionId, delegationId, { status: 'failed', failure });
-        this.recordDelegationOutcome(session, coordinator, agent, invocationId, discussionId, delegationId, undefined, failure);
-        return;
+    await this.dispatchDelegations(session, coordinator, discussionId, reserved, signal);
+    return true;
+  }
+
+  /**
+   * Runs the reserved delegations of one round. Each expert's outcome is
+   * recorded on its own delegation; a stop mid-round pauses the run and leaves
+   * the interrupted delegation `running` so a resume can pick it up.
+   */
+  private async dispatchDelegations(
+    session: SessionDetail,
+    coordinator: Agent,
+    discussionId: string,
+    items: Array<{ delegationId: string; agent: Agent | undefined; objective: string; expectedResult: string }>,
+    signal?: AbortSignal
+  ) {
+    const runnable = items.filter((item): item is { delegationId: string; agent: Agent; objective: string; expectedResult: string } => Boolean(item.agent));
+    try {
+      await boundedConsultations(runnable, consultationConcurrency(), async ({ delegationId, agent, objective, expectedResult }) => {
+        throwIfAborted(signal);
+        const invocationId = crypto.randomUUID();
+        await this.discussions.transitionDelegation(discussionId, delegationId, { status: 'running', invocationId });
+        this.events.create({
+          sessionId: session.id,
+          type: 'agent_status_changed',
+          fromAgentId: agent.id,
+          content: messages.discussionCheckingStatus(agent.name),
+          metadata: createMetadata('system_notice', {
+            agentId: agent.id, status: 'discussing', discussionId, delegationId,
+            thoughtSummary: messages.discussionCheckingThought, actionSummary: objective, waitingFor: [coordinator.id]
+          })
+        });
+        const assembly = this.createContextAssembly(session, agent, undefined, undefined, 'discussion');
+        assembly.systemRules = [
+          ...(assembly.systemRules ?? []),
+          `Delegated objective: ${objective}`,
+          `Expected result: ${expectedResult}`
+        ];
+        let result: AgentRunResult;
+        try {
+          result = await this.runDiscussionRuntime(session, agent, invocationId, assembly, signal);
+        } catch (error) {
+          // A stop is not a failure: leave the delegation running for resume.
+          if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
+          // Any other exception is a failed delegation, not a failed round (AC6).
+          const failure = { code: 'RUNTIME_INVOCATION_ERROR', message: error instanceof Error ? error.message : String(error), retryable: true };
+          await this.discussions.transitionDelegation(discussionId, delegationId, { status: 'failed', failure });
+          this.recordDelegationOutcome(session, coordinator, agent, invocationId, discussionId, delegationId, undefined, failure);
+          return;
+        }
+        const usable = result.status === 'completed' && usableAgentMessageOutput(result.output);
+        if (!usable) {
+          const failure = result.error
+            ? { code: result.error.code, message: result.error.message, retryable: result.error.retryable }
+            : { code: 'RUNTIME_OUTPUT_CONTRACT_VIOLATION', message: 'Expert returned an invalid or empty agent_message output.', retryable: false };
+          await this.discussions.transitionDelegation(discussionId, delegationId, { status: 'failed', failure });
+          this.recordDelegationOutcome(session, coordinator, agent, invocationId, discussionId, delegationId, undefined, failure);
+          return;
+        }
+        const output = result.output as AgentMessageOutput;
+        // Experts still answer with agent_message today; the closed ExpertReport
+        // shape carries the conclusion verbatim and leaves the structured fields
+        // empty rather than inventing evidence the expert did not cite.
+        await this.discussions.transitionDelegation(discussionId, delegationId, {
+          status: 'completed',
+          result: { conclusion: output.content, evidenceRefs: [], risks: [], openQuestions: [], suggestedActions: [] }
+        });
+        this.recordDelegationOutcome(session, coordinator, agent, invocationId, discussionId, delegationId, output, undefined);
+      }, () => false, signal);
+    } catch (error) {
+      if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
+        await this.discussions.transitionRun(discussionId, { status: 'paused' });
       }
-      const usable = result.status === 'completed' && usableAgentMessageOutput(result.output);
-      if (!usable) {
-        const failure = result.error
-          ? { code: result.error.code, message: result.error.message, retryable: result.error.retryable }
-          : { code: 'RUNTIME_OUTPUT_CONTRACT_VIOLATION', message: 'Expert returned an invalid or empty agent_message output.', retryable: false };
-        await this.discussions.transitionDelegation(discussionId, delegationId, { status: 'failed', failure });
-        this.recordDelegationOutcome(session, coordinator, agent, invocationId, discussionId, delegationId, undefined, failure);
-        return;
-      }
-      const output = result.output as AgentMessageOutput;
-      // Experts still answer with agent_message today; the closed ExpertReport
-      // shape carries the conclusion verbatim and leaves the structured fields
-      // empty rather than inventing evidence the expert did not cite.
-      await this.discussions.transitionDelegation(discussionId, delegationId, {
-        status: 'completed',
-        result: { conclusion: output.content, evidenceRefs: [], risks: [], openQuestions: [], suggestedActions: [] }
-      });
-      this.recordDelegationOutcome(session, coordinator, agent, invocationId, discussionId, delegationId, output, undefined);
-    }, () => false, signal);
+      throw error;
+    }
 
     await this.discussions.transitionRun(discussionId, { status: 'synthesizing' });
-    return true;
   }
 
   private recordDelegationOutcome(

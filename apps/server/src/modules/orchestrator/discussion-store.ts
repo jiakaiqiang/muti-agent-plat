@@ -107,6 +107,23 @@ export class DiscussionStore {
     return run ? structuredClone(run) : undefined;
   }
 
+  /**
+   * The run a restart should continue instead of opening a second one: same
+   * requirement, same revision, same generation, and not yet past consulting.
+   * `synthesizing` and later have nothing left to dispatch; `failed` is a
+   * deliberate side exit that a retry re-plans rather than silently resumes.
+   */
+  findResumable(sessionId: string, scope: { workItemId: string; requirementRevision: number; generation: number }): DiscussionRun | undefined {
+    const run = this.list(sessionId).find(
+      (item) =>
+        item.workItemId === scope.workItemId &&
+        item.requirementRevision === scope.requirementRevision &&
+        item.generation === scope.generation &&
+        (item.status === 'planning' || item.status === 'consulting' || item.status === 'paused')
+    );
+    return run ? structuredClone(run) : undefined;
+  }
+
   /** Delegations a resume or restart should dispatch — never finished or older-generation work. */
   runnableDelegations(sessionId: string, discussionId: string, scope: { generation: number }): Delegation[] {
     const run = this.get(sessionId, discussionId);

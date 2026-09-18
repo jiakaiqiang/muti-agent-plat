@@ -116,10 +116,21 @@
 
 ## T3 实现持久化专家执行（AC4/AC6）
 
-- [ ] T3-1 委派执行复用 `boundedConsultations` + `runDiscussionRuntime`，每个委派
-      先 reserve 再跑；专家失败只标该委派 `failed`，不中止整场
-- [ ] T3-2 重启恢复：只运行 `pending|running` 且 generation 当前的委派；`completed` 不重跑
-- [ ] T3-3 停止/删除：讨论进入 `paused`，委派 `cancelled`，遵守阶段 1 准入
+落点：`orchestrator.service.ts` `dispatchDelegations`（从 T2-3 抽出）+ `DiscussionStore.findResumable`；
+`planned-discussion.spec.ts` +2 例（共 5）、`discussion-store.spec.ts` +1 例（共 11）。
+
+- [x] T3-1 委派执行已在 T2-3 落地：每条先 `reserveDelegation` 再 running → completed/failed，
+      `boundedConsultations(shouldStop=()=>false)`，异常与失败只标该委派，整场继续
+- [x] T3-2 重启/重试幂等：`runPlannedDiscussion` 入口先 `findResumable`（同 workItem +
+      requirementRevision + generation，状态 planning|consulting|paused）；命中且已有委派 →
+      **不再问主 Agent 要计划**（用例断言 planCalls=0）、只跑 `runnableDelegations`
+      （pending|running）、已完成的结果原样保留、不开第二个 run、`roundsStarted` 不重复计。
+      `synthesizing` 及之后无可派发项、`failed` 是有意的侧出口（重试走重规划）——两者不算可续
+- [x] T3-3 停止：abort 时 `dispatchDelegations` 把 run → `paused` 后重抛，被打断的委派**保持
+      `running`**（reservation 仍有效，恢复时算 runnable）；`paused` → 恢复入口先转回
+      `consulting`。删除：阶段 1 关准入后 store 的 `checkAdmission` 结构上拒写，恢复换 generation
+      后 `delegationsToRun` 忽略旧代次——无需额外动作，且**不能**在删除时改写记录（会被拒）。
+      **仍记着**：跨实例 CAS（`revision <` + 0 行受影响回滚）未做，T1-3 已记
 
 ## T4 接入用户 @ 与中途补充（AC2/AC7）
 

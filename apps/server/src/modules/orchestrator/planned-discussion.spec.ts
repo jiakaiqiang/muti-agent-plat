@@ -163,3 +163,87 @@ test('with the flag off the legacy loop is untouched', async () => {
   // Legacy behaviour: every participant except the coordinator answers.
   assert.deepEqual([...consulted].sort(), ['backend', 'test']);
 });
+
+test('a restart resumes the unfinished delegations without re-planning or re-consulting finished ones', async () => {
+  const context = await fixture();
+  try {
+    // Seed what a crash mid-round leaves behind: one delegation done, one still
+    // reserved, the run in `consulting`.
+    const seed = new DiscussionStore(context.persistence, () => '2026-09-19T00:00:00.000Z');
+    const opened = await seed.open({
+      sessionId: 'session-1', workItemId: 'wi-1', requirementRevision: 1, generation: 0,
+      coordinatorAgentId: 'coordinator', objective: 'seeded', exitCondition: 'seeded', roundLimit: 3, budgetTokens: 8_000
+    });
+    assert.equal(opened.status, 'opened');
+    if (opened.status !== 'opened') return;
+    const done = await seed.reserveDelegation(opened.run.id, {
+      targetAgentId: 'backend', origin: 'coordinator', objective: 'a', expectedResult: 'b', budgetTokens: 4_000, requirementRevision: 1
+    });
+    const pending = await seed.reserveDelegation(opened.run.id, {
+      targetAgentId: 'test', origin: 'coordinator', objective: 'c', expectedResult: 'd', budgetTokens: 4_000, requirementRevision: 1
+    });
+    if (done.status !== 'reserved' || pending.status !== 'reserved') return;
+    await seed.transitionRun(opened.run.id, { status: 'consulting' });
+    await seed.transitionDelegation(opened.run.id, done.delegation.id, { status: 'running', invocationId: 'inv-old' });
+    await seed.transitionDelegation(opened.run.id, done.delegation.id, {
+      status: 'completed', result: { conclusion: 'already answered', evidenceRefs: [], risks: [], openQuestions: [], suggestedActions: [] }
+    });
+
+    const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+    const service = makeService([], recorder, undefined, undefined, undefined, context) as unknown as PlannedService;
+    service.createContextAssembly = () => ({ budget: {}, systemRules: [] } as unknown as ContextAssembly);
+    let planCalls = 0;
+    service.runRuntime = async (_session, input) => {
+      if (input.expectedOutput.kind === 'discussion_plan') planCalls += 1;
+      return completedRun('plan-again', discussionPlan([{ targetAgentKey: 'backend' }, { targetAgentKey: 'test' }]));
+    };
+    const consulted: string[] = [];
+    service.runDiscussionRuntime = async (_session, expert, invocationId) => {
+      consulted.push(expert.key);
+      return completedRun(invocationId, createAgentMessageOutput({ messageKind: 'answer', content: `${expert.key} conclusion` }));
+    };
+
+    await service.runDiscussion(context.session(), agent('coordinator'));
+
+    assert.equal(planCalls, 0, 'the persisted plan is the truth; the coordinator is not asked again');
+    assert.deepEqual(consulted, ['test'], 'only the unfinished delegation runs');
+
+    const runs = new DiscussionStore(context.persistence).list('session-1');
+    assert.equal(runs.length, 1, 'no second run was opened');
+    const byAgent = Object.fromEntries(runs[0]!.delegations.map((item) => [item.targetAgentId, item]));
+    assert.equal(byAgent.backend?.result?.conclusion, 'already answered', 'the finished result is untouched');
+    assert.equal(byAgent.test?.status, 'completed');
+    assert.equal(runs[0]!.status, 'synthesizing');
+    assert.equal(runs[0]!.roundsStarted, 1, 'resuming a round does not count as a new round');
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('a stop mid-round pauses the run and leaves the interrupted delegation resumable', async () => {
+  const context = await fixture();
+  try {
+    const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+    const service = makeService([], recorder, undefined, undefined, undefined, context) as unknown as PlannedService & {
+      runDiscussion(session: SessionDetail, coordinator: Agent, signal?: AbortSignal): Promise<void>;
+    };
+    service.createContextAssembly = () => ({ budget: {}, systemRules: [] } as unknown as ContextAssembly);
+    service.runRuntime = async () => completedRun('plan-1', discussionPlan([{ targetAgentKey: 'backend' }]));
+    const controller = new AbortController();
+    service.runDiscussionRuntime = async () => {
+      // The user stops while the expert is running.
+      controller.abort();
+      throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+    };
+
+    await assert.rejects(() => service.runDiscussion(context.session(), agent('coordinator'), controller.signal));
+
+    const run = new DiscussionStore(context.persistence).list('session-1')[0];
+    assert.equal(run?.status, 'paused');
+    assert.equal(run?.delegations[0]?.status, 'running', 'the reservation stands so a resume can pick it up');
+    const runnable = new DiscussionStore(context.persistence).runnableDelegations('session-1', run!.id, { generation: 0 });
+    assert.equal(runnable.length, 1);
+  } finally {
+    await context.cleanup();
+  }
+});

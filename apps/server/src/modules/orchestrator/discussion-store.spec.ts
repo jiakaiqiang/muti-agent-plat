@@ -294,3 +294,29 @@ test('records never carry a thinking transcript', async () => {
     await context.cleanup();
   }
 });
+
+test('findResumable returns only a run that still has a round to continue on the same scope', async () => {
+  const context = await fixture();
+  try {
+    const scope = { workItemId: 'work-1', requirementRevision: 3, generation: 1 };
+    const opened = await context.store.open(openRun);
+    if (opened.status !== 'opened') return;
+
+    assert.equal(context.store.findResumable('session-1', scope)?.id, opened.run.id, 'planning is resumable');
+    await context.store.transitionRun(opened.run.id, { status: 'consulting' });
+    assert.equal(context.store.findResumable('session-1', scope)?.id, opened.run.id, 'consulting is resumable');
+    await context.store.transitionRun(opened.run.id, { status: 'paused' });
+    assert.equal(context.store.findResumable('session-1', scope)?.id, opened.run.id, 'paused is resumable');
+
+    assert.equal(context.store.findResumable('session-1', { ...scope, requirementRevision: 4 }), undefined, 'another revision is other work');
+    assert.equal(context.store.findResumable('session-1', { ...scope, generation: 2 }), undefined, 'a recovered session does not resume old work');
+
+    await context.store.transitionRun(opened.run.id, { status: 'consulting' });
+    await context.store.transitionRun(opened.run.id, { status: 'synthesizing' });
+    assert.equal(context.store.findResumable('session-1', scope), undefined, 'nothing left to dispatch once synthesizing');
+    await context.store.transitionRun(opened.run.id, { status: 'failed' });
+    assert.equal(context.store.findResumable('session-1', scope), undefined, 'a failed run is re-planned, not silently resumed');
+  } finally {
+    await context.cleanup();
+  }
+});
