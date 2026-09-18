@@ -1,8 +1,9 @@
 # 阶段 2C：分层缓存、失效治理与成本观测 — Tasks v1
 
 > 日期：2026-09-16
-> 状态：实施中（2026-09-18 开工）。T1 完成；T2–T6 原语与 generic-llm 接线已落地并全绿，
-> 但缓存尚无业务调用方、CLI 适配器未接、系统级验证未做，**阶段未验收**。
+> 状态：实施中（2026-09-18 开工）。T1 完成；T2–T6 原语落地，上下文包缓存有真实调用方，
+> 三条 runtime 路径 usage 归一化已接线并全绿；但文件/摘要层未接、跨进程 single-flight 无落点、
+> 系统级/E2E 未做，**阶段未验收**。
 > 依赖：阶段 2A、2B 通过；所有缓存必须服从阶段 1 生命周期。
 
 [总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-2c-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-2c-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-2c-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-2c-checklist-v1.md)
@@ -67,8 +68,11 @@
   已接入 `generic-llm-runtime.service.ts`，每次 run 写进 `tokenEstimation.cacheCapability`
   （`generic-llm-token-estimation.spec.ts` 新增用例）。`splitPromptForCache` 已实现并测试
   （证据/用户文本结构上进不了稳定前缀、空前缀不填充），**未接入**：现有组装已是稳定
-  system 在前、动态 payload 在后，为用它重排消息没有收益。**未做**：claude_code / codex
-  CLI 适配器仍硬写 usage 全 0，未按 CLI 内建缓存声明能力。
+  system 在前、动态 payload 在后，为用它重排消息没有收益。**CLI 路径已接**：丢包点在两个
+  streaming runner 的 `usageFromFrames`（只读 input/output，扔掉 parser 已解析的缓存计数），
+  抽成 `streaming/usage-from-frames.ts`（6/6）后 claude_code 按 anthropic 语义、codex 按 openai
+  语义归一化，无 usage 帧 → `measurement:'unknown'`；runner + adapter 六个 spec 91/91。
+  **未做**：CLI 内建提示词缓存的能力声明（`declaredCacheCapability` 目前只在 generic-llm 调用）。
 
 ### P2C-T5 接入成本诊断
 

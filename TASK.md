@@ -1,9 +1,10 @@
 # TASK.md — 阶段 2C：分层缓存、失效治理与成本观测
 
 状态：进行中（2026-09-18 开工）。阶段 2B 已验收，四道门禁全绿，因此 2C 准入成立。
-当前：T1 完成；T2–T6 原语与 generic-llm 接线已落地，全仓四门禁全绿（typecheck / test
-1463+122 / harness / build 全 exit 0）；**阶段未验收**——缓存尚无业务调用方、CLI 适配器
-未接、系统级与 E2E 未验，AC1 无路径可验。各项缺口见下方每节「未做/未接入」。
+当前：T1 完成；T2–T6 原语已落地，上下文包缓存有真实调用方，三条 runtime 路径
+（generic-llm / claude_code / codex）usage 归一化已接线，全仓四门禁全绿；**阶段未验收**——
+文件/摘要两层缓存未接、跨进程 single-flight 无落点、priceVersion 无实际来源、真实模型 E2E 未做。
+各项缺口见下方每节「未做/未接入」。
 
 依据文档（四件套，2026-09-16 生成）：
 `docs/product/main-agent-collaboration-phase-2c-spec-v1.md`（AC）、
@@ -114,6 +115,14 @@
       用例：`generic-llm-token-estimation.spec.ts` 新增「test-model@llm.test → unknown 且不
       伪造 cacheRead 计数」。`splitPromptForCache` **仍未接入**：现有组装已是 system 在前、
       动态 payload 在后，为用它而重排消息是无收益改动，先不动
+- [x] T4-4 CLI 适配器 usage 接线：真正的丢包点不在 adapter 而在两个 streaming runner 的
+      `usageFromFrames`——只读 input/output，把 parser 已解析的 cacheRead/cacheWrite 扔掉，
+      无帧时硬写 0 且无 measurement。抽成 `streaming/usage-from-frames.ts`
+      （`runtimeUsageFromFrames`，6 例全绿）委托 `usageFromStreamFrame`：claude_code 按
+      anthropic 语义（input 不含 cache）、codex 按 openai 语义（cached 是 input 子集）；
+      codex 取最后一个 `usage` 帧（累计值）否则回落 `result` 帧；无 usage → `unknown`；
+      `cachedInputTokens:0` 是"报了 0"不是"没报"。runner + adapter 六个 spec 91/91。
+      **三条 runtime 路径（generic-llm / claude_code / codex）现在共用一套归一化**
 
 ## T5 接入成本诊断（AC6）
 

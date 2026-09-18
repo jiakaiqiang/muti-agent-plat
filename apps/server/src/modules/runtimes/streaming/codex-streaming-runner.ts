@@ -17,6 +17,7 @@ import { LivenessWatchdog, type WatchdogTimeoutObservation } from './liveness-wa
 import { RunChannel } from './run-channel.js';
 import { RuntimeStreamMetricsCollector } from './runtime-stream-metrics.js';
 import { isRuntimeActivityFrame, type RuntimeStreamFrame } from './runtime-stream-frame.js';
+import { runtimeUsageFromFrames } from './usage-from-frames.js';
 import { buildWatchdogTimeoutDetails } from './watchdog-timeout-details.js';
 import { validateRuntimeOutput } from '../runtime-output-schema.js';
 import { buildRuntimeDiagnostics } from './runtime-diagnostics.js';
@@ -364,15 +365,9 @@ function stderrTailToString(chunks: Buffer[]): string | undefined {
 }
 
 function usageFromFrames(frames: RuntimeStreamFrame[]): RuntimeUsage {
-  const usageFrame = lastFrameOfKind(frames, 'usage');
-  const resultFrame = frames.find((f) => f.kind === 'result');
-  const u = usageFrame?.kind === 'usage' ? usageFrame.usage : resultFrame?.kind === 'result' ? resultFrame.usage : undefined;
-  if (!u) {
-    return { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: 'codex' };
-  }
-  const input = u?.inputTokens ?? 0;
-  const output = u?.outputTokens ?? 0;
-  return { inputTokens: input, outputTokens: output, totalTokens: input + output, model: 'codex' };
+  // Codex (OpenAI Responses) reports cached tokens as a subset of inputTokens;
+  // the shared mapper keeps them as a counter without re-adding them.
+  return runtimeUsageFromFrames(frames, { provider: 'openai-compatible', model: 'codex' });
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

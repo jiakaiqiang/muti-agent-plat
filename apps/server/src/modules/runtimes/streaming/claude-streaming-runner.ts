@@ -17,6 +17,7 @@ import { LivenessWatchdog, type WatchdogTimeoutObservation } from './liveness-wa
 import { RunChannel } from './run-channel.js';
 import { RuntimeStreamMetricsCollector } from './runtime-stream-metrics.js';
 import { isRuntimeActivityFrame, type RuntimeStreamFrame } from './runtime-stream-frame.js';
+import { runtimeUsageFromFrames } from './usage-from-frames.js';
 import { buildWatchdogTimeoutDetails } from './watchdog-timeout-details.js';
 import { validateRuntimeOutput } from '../runtime-output-schema.js';
 import { buildRuntimeDiagnostics } from './runtime-diagnostics.js';
@@ -303,14 +304,9 @@ function stderrTailToString(chunks: Buffer[]): string | undefined {
 }
 
 function usageFromFrames(frames: RuntimeStreamFrame[]): RuntimeUsage {
-  const resultFrame = frames.find((f) => f.kind === 'result');
-  if (!resultFrame || resultFrame.kind !== 'result') {
-    return { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: 'claude_code' };
-  }
-  const u = resultFrame.usage;
-  const input = u?.inputTokens ?? 0;
-  const output = u?.outputTokens ?? 0;
-  return { inputTokens: input, outputTokens: output, totalTokens: input + output, model: 'claude_code' };
+  // Claude's input_tokens excludes the cached prefix; the shared mapper adds the
+  // parsed cache counters back in as the logical total instead of dropping them.
+  return runtimeUsageFromFrames(frames, { provider: 'anthropic-compatible', model: 'claude_code' });
 }
 
 function sessionFromFrames(input: InvocationPlan, frames: RuntimeStreamFrame[], cwd?: string) {

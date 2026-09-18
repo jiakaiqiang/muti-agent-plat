@@ -14,7 +14,7 @@
 | P2C-AC2 | P2C-T1、P2C-T3、P2C-T6 | 同 Agent 的 A/B 会话不得交换内容；删除后到达的回填被拒绝；恢复后旧 generation 缓存不复用。 | **原语级通过（2026-09-18）**。`derived-cache.spec` 8/8：B 持 A 的 key 读不到、`invalidateSession` 只清本会话、恢复后旧 generation 未命中、丢失作用域的回填 `set` 返回 false 且 `rejectedBackfills+1`。`cache-contracts.spec` 私有 key 含 session/workItem/agent/generation，公共 key 不含 session 字样。系统级（真实删除/恢复流程）未验。 |
 | P2C-AC3 | P2C-T2、P2C-T3、P2C-T6 | 修改相关文件只使依赖它的分析失效；无关进度事件不改变稳定上下文指纹。 | **原语级通过（2026-09-18）**。`cache-contracts.spec`：六项依赖任一变化指纹即变；心跳字段按名读取结构上进不了指纹；文件 hash 顺序无关。`derived-cache.invalidateFingerprint` 按指纹后缀清理。未接入真实文件变更事件。 |
 | P2C-AC4 | P2C-T3、P2C-T6 | 百个相同请求仅一个有效构建提交；缓存宕机不会发起无限摘要或绕过调用总预算。 | **原语级通过（2026-09-18）**。`cache-single-flight.spec` 8/8：100 并发同 key → 1 次构建、恰一个 `owner:true`；构建失败不做负缓存；连续失败达阈值 → `circuit_open` 不再打原点，熔断按 key 独立。"回源仍受总预算"依赖 2A 预算门禁，本阶段未新增绕过路径。跨进程 single-flight **未做**。 |
-| P2C-AC5 | P2C-T1、P2C-T4、P2C-T6 | 不支持缓存的模型正常执行并标注 unsupported；请求已配置但无回执用量时标记 unknown，不假定命中。 | **generic-llm 路径通过（2026-09-18）**。`runtime-cache-capability.spec` 8/8 + `generic-llm-token-estimation.spec` 新增用例：未声明 model → `unknown`、第三方 host → `unsupported`，两者 `blocksExecution:false` 正常执行；每次 run 写 `tokenEstimation.cacheCapability`；无回执 → `measurement:'unknown'` 且不伪造 cacheRead 计数。claude_code / codex 适配器**未接**（仍硬写 0）。 |
+| P2C-AC5 | P2C-T1、P2C-T4、P2C-T6 | 不支持缓存的模型正常执行并标注 unsupported；请求已配置但无回执用量时标记 unknown，不假定命中。 | **三条 runtime 路径通过（2026-09-18）**。能力声明：`runtime-cache-capability.spec` 8/8 + `generic-llm-token-estimation.spec` 新增用例，未声明 model → `unknown`、第三方 host → `unsupported`，两者 `blocksExecution:false` 正常执行，每次 generic-llm run 写 `tokenEstimation.cacheCapability`。无回执 → `unknown`：generic-llm `toUsage`、claude_code / codex 的 `usage-from-frames.spec` 6/6 均断言无 usage 帧时 `measurement:'unknown'` 且不伪造 cacheRead 计数。**未做**：CLI 内建缓存的能力声明未接（只有 usage 归一化接了）。 |
 | P2C-AC6 | P2C-T1、P2C-T5、P2C-T6 | 不同 usage fixture 映射正确，缺失字段为 unknown；实际金额缺价格版本时不可伪造为零。 | **generic-llm 路径通过（2026-09-18）**。`cache-contracts.spec`：anthropic（input 不含 cache，logical = input + read）/ openai（input 含 cache，不重复加）/ ollama（unknown）；raw 缺失 → 各字段 `undefined` 非 0；金额无 `priceVersion` 整个 cost 不出具；`summarizeUsageBreakdown` 按 attemptId 去重。`toUsage`/`mergeUsage`/`settleRequirementBudget` 已接线。价格版本实际来源、摘要额外成本单列**未做**。 |
 | P2C-AC7 | P2C-T1、P2C-T2、P2C-T6 | 超容量/过期后正确回源；用户历史与决策仍在；安全/控制类动作不命中旧回答。 | **原语级通过（2026-09-18）**。`derived-cache.spec`：`maxEntries` 满时 LRU 逐出、过期读判失效并释放容量（`size` 归零）、`stats()` 只有计数不含正文。"历史与决策仍在"由设计保证（缓存是派生态，不触碰原始记录）。"安全动作不命中旧回答"当前不适用：没有调用方把动作结果放进缓存。 |
 
@@ -83,6 +83,6 @@ npm run typecheck
   `does not provide an export named`；(3) 带 Nest 装饰器的 server spec 必须以 `apps/server` 为 cwd
   跑 tsx，从仓库根跑会报 `Parameter decorators only work when experimental decorators are enabled`
   ——这是 tsconfig 解析位置问题，不是代码缺陷。
-- **阶段结论：未验收。** 原语、generic-llm 接线与上下文包缓存调用方全绿；但文件/摘要两层未接、
-  CLI 适配器（claude_code/codex）仍硬写 usage 0、跨进程 single-flight 未做、
+- **阶段结论：未验收。** 原语、三条 runtime 路径的 usage 归一化、上下文包缓存调用方全绿；但文件/摘要两层未接、
+  CLI 内建缓存能力声明未接、跨进程 single-flight 未做、
   系统级/E2E 未验，AC1 无路径可验。
