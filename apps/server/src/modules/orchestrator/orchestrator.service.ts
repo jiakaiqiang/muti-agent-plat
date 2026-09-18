@@ -70,6 +70,8 @@ import {
   terminationFromSignal
 } from '../../common/execution-termination.js';
 import {
+  contextBundleCacheMaxEntries,
+  contextBundleCacheTtlMs,
   globalDefaultRuntimeType,
   phaseTimeoutMs,
   projectPolicyRuntimeType,
@@ -101,6 +103,7 @@ import {
 } from '../context-management/context-management.service.js';
 import { SystemAgentRuntimePolicyService } from '../agents/system-agent-runtime-policy.service.js';
 import { buildEnvelopeFromContextAssembly } from '../context-v2/build-envelope-from-context-assembly.js';
+import { ContextBundleCache } from '../context-v2/context-bundle-cache.js';
 import {
   evaluateGroundedEvidenceGate,
   requiresGroundedRuntimeEvidence
@@ -285,6 +288,15 @@ export class OrchestratorService {
   private savePendingInvocationCallback?: (sessionId: string, invocation: PendingInvocation) => void;
   private readonly lifecycle: SessionLifecycleStore;
   private readonly summaryCheckpoints: SummaryCheckpointService;
+  /**
+   * Workspace-derived envelope layers, keyed per session/requirement/role/
+   * generation. Sits before the runtime's pre-send budget check, never in
+   * place of it.
+   */
+  private readonly contextBundles = new ContextBundleCache({
+    maxEntries: contextBundleCacheMaxEntries(),
+    ttlMs: contextBundleCacheTtlMs()
+  });
 
   constructor(
     private readonly agents: AgentsService,
@@ -1112,6 +1124,8 @@ export class OrchestratorService {
       this.suggestedTasksByBriefId.delete(brief.id);
     }
     this.briefsBySession.delete(sessionId);
+    // Derived bundles must stop being visible now, not at the next TTL.
+    this.contextBundles.invalidateSession(sessionId);
     this.persistBriefs();
   }
 
@@ -2399,7 +2413,8 @@ export class OrchestratorService {
           projectPolicyRuntime: projectPolicyRuntimeType(), globalDefaultRuntime: globalDefaultRuntimeType(),
           smartRouterPick: smartRuntimePick({ phase: 'task_execution', requiresCodeChanges: contextAssembly.taskContext.requiresCodeChanges }),
           contextEnvelopeFactory: ({ identity, toolCatalog }) => buildEnvelopeFromContextAssembly({ session,
-            phase: 'task_execution', contextAssembly, identity, toolCatalogHash: toolCatalog.catalogHash }),
+            phase: 'task_execution', contextAssembly, identity, toolCatalogHash: toolCatalog.catalogHash,
+            cache: { bundles: this.contextBundles, generation: this.lifecycle.generation(session.id) ?? 0 } }),
           expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' }, budget: contextAssembly.budget,
           ...(isFileRevisionTask ? { writeModeOverride: 'proposal_only' as const } : {}) });
         inputFingerprint = acceptanceFingerprint(task, plan, this.taskDependencyArtifacts(session, task));
@@ -7097,7 +7112,10 @@ export class OrchestratorService {
             phase: input.phase,
             contextAssembly: input.contextAssembly,
             identity,
-            toolCatalogHash: toolCatalog.catalogHash
+            toolCatalogHash: toolCatalog.catalogHash,
+            // `generation()` is an index read and can be undefined for a session
+            // without an admission record; 0 keeps the key honest and consistent.
+            cache: { bundles: this.contextBundles, generation: this.lifecycle.generation(inputSession.id) ?? 0 }
           }),
         expectedOutput: input.expectedOutput,
         budget: input.budget,

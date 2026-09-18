@@ -35,9 +35,12 @@
 - 覆盖：P2C-AC1、P2C-AC3、P2C-AC7。
 - 验证：执行 Checklist 对应场景，记录命令/环境/结果；失败时保留证据并回到所属任务。
 - 进度（2026-09-18）：通用有界缓存 `apps/server/src/modules/context-v2/derived-cache.ts`
-  已落地并测试 8/8（LRU/TTL/作用域/迟到回填拒绝/计数不含正文）。**未完成**：尚未按
-  文件/摘要/上下文包三层分别接入调用方，`workspace-index-cache.ts` 未复用它，AC1 的
-  「命中后仍走预算检查」因此还没有系统级路径可验。
+  已落地并测试 8/8（LRU/TTL/作用域/迟到回填拒绝/计数不含正文）。
+  **第一个真实调用方已接**：`context-bundle-cache.ts`（8/8）缓存 `buildEnvelopeFromContextAssembly`
+  的 navigation + projectMap（上下文包层），orchestrator 两处 `contextEnvelopeFactory` 传入实例与
+  lifecycle generation，`deleteSession` 即时失效；配置 `CONTEXT_BUNDLE_CACHE_MAX_ENTRIES` /
+  `CONTEXT_BUNDLE_CACHE_TTL_MS`。**未完成**：文件解析层与摘要层尚未接（`workspace-index-cache.ts`
+  未复用；2B 检查点 store 已有版本化提交，是否再套一层派生缓存待评估）。
 
 ### P2C-T3 实现失效与并发回填保护
 
@@ -94,7 +97,7 @@
 - 进度（2026-09-18）：原语级场景已覆盖（过期回源、跨会话/跨 generation 隔离、删除后
   回填拒绝、100 并发单构建、熔断、三 provider usage fixture 含缺字段 → unknown）；
   全仓 `npm run typecheck` / `test`（1463/1463）/ `test:harness` / `build` 全部 exit 0。
-  **未做**：系统级冷热请求与缓存宕机回源（缓存尚无调用方）、E2E；独立 PostgreSQL 不适用
+  **未做**：系统级冷热请求与缓存宕机回源（上下文包层已有调用方但未做端到端）、E2E；独立 PostgreSQL 不适用
   （本阶段未新增持久化集合）。
 
 ## 完成定义

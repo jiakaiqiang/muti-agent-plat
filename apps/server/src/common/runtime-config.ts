@@ -153,6 +153,26 @@ export function cliContextRotationInputTokens() {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 150_000;
 }
 
+/**
+ * Capacity of the in-process context bundle cache (navigation + project map per
+ * session/requirement/role/generation). Bounded so memory tracks the number of
+ * concurrently active scopes, not the lifetime of the process.
+ */
+export function contextBundleCacheMaxEntries() {
+  const parsed = Number(process.env.CONTEXT_BUNDLE_CACHE_MAX_ENTRIES ?? 256);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 256;
+}
+
+/**
+ * How long a cached bundle stays servable. The workspace revision in the key
+ * already invalidates on real file change; the TTL only bounds how long a
+ * scope that stopped being used keeps its slot.
+ */
+export function contextBundleCacheTtlMs() {
+  const parsed = Number(process.env.CONTEXT_BUNDLE_CACHE_TTL_MS ?? 10 * 60_000);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 10 * 60_000;
+}
+
 export function discussionTimeoutMs() {
   const parsed = Number(process.env.DISCUSSION_TIMEOUT_MS ?? 0);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;

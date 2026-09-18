@@ -74,7 +74,17 @@
       （`stats().size` 归零），hits/misses/evictions/rejectedBackfills 可读
 - [x] T2-2 读取与回填都调 `isCacheKeyScopedTo`：跨会话持 A 的 key 读不到 A 的内容；
       恢复后旧 generation 条目一律未命中；`invalidateSession` 只清该会话，兄弟会话不受影响
-- [ ] T2-3 命中后仍走 2A 发送前预算检查（缓存不能绕过预算）——待接入 runtime 调用点
+- [x] T2-3 第一个真实调用方已接：`context-v2/context-bundle-cache.ts`（8 例全绿）包住
+      `buildEnvelopeFromContextAssembly` 里的 **navigation + projectMap**（纯工作区派生态），
+      L3 证据 / L5 摘要每次重建不缓存。key 作用域 = session/workItem/agent/generation，
+      指纹 = revision.id + inputTokens + 入口 + detectedStack + 索引状态。
+      orchestrator 两个 `contextEnvelopeFactory` 调用点传入实例与 `lifecycle.generation()`
+      （无记录时兜底 0），`deleteSession` 调 `invalidateSession` 即时清理。
+      **AC1 路径成立**：缓存在 envelope 阶段，2A 的 `assertWithinInputBudget` 在 runtime 里
+      在其之后，命中的 envelope 与新建的对预算守卫不可区分（用例断言 `budget` deepEqual）。
+      配置：`CONTEXT_BUNDLE_CACHE_MAX_ENTRIES`(256) / `CONTEXT_BUNDLE_CACHE_TTL_MS`(10min)。
+      fixture 教训：有 provider index 时证据条目必须带匹配的 `revision.id`，否则被
+      `selectedEvidence` 静默过滤，用例会得到 L3 为空的假结果
 
 ## T3 实现失效与并发回填保护（AC2/AC3/AC4）
 
@@ -142,6 +152,8 @@
 ## 遗留（跨阶段，未完成）
 
 - [ ] 中断会话续接 G3：`npm run dev:restart-server` + 真实场景手测（上一专项人工项）。
-- [ ] 2A/2B 两个提交（`bdbdfd6`、`8f2a305`）**未推送到远端**：本机到 github.com:443
-      不可达（curl connect=000 超时、DNS 正常），需网络恢复或代理后 `git push origin main`。
-      当前 `ahead 27`。
+- [x] 2A/2B/2C 提交已推送：`bdbdfd6`、`8f2a305`、`6672a85` 均在 `origin/main`
+      （2026-09-18 网络恢复后推送，`git ls-remote` 核对远端 HEAD = 本地 HEAD）。
+      教训：第一次推送报 `curl 55 Connection was reset` 时对象其实已传完 25 个提交，
+      只是回包前断线导致本地跟踪引用没更新，之后一直假显示 `ahead 27`。
+      判断推送是否真失败要 `git ls-remote origin refs/heads/main`，不能只看 `status -sb`。

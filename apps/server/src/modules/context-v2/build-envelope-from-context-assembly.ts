@@ -18,6 +18,7 @@ import { isSensitiveWorkspacePath } from '../workspaces/workspace-index/is-sensi
 import { buildNavigationManifest } from './build-navigation-manifest.js';
 import { buildProjectMap } from './build-project-map.js';
 import { buildContextEnvelopeV2 } from './context-assembly-builder-v2.js';
+import type { ContextBundleCache } from './context-bundle-cache.js';
 import type { ContextPhase } from './phase-context-policy.js';
 import { selectEvidenceWithinBudget } from './select-evidence-within-budget.js';
 import type { ScoredEvidenceCandidate } from './score-evidence-candidates.js';
@@ -34,6 +35,12 @@ export function buildEnvelopeFromContextAssembly(args: {
   contextAssembly: ContextAssembly;
   identity: CompiledAgentIdentity;
   toolCatalogHash: string;
+  /**
+   * Optional derived-bundle cache. Only the workspace-derived layers (navigation,
+   * project map) go through it; evidence and summary are always rebuilt. Absent
+   * means every call builds from scratch, which is the pre-2C behaviour.
+   */
+  cache?: { bundles: ContextBundleCache; generation: number };
 }): ContextEnvelopeV2 {
   const { session, contextAssembly } = args;
   const snapshot = session.workspaceSnapshot;
@@ -84,6 +91,57 @@ export function buildEnvelopeFromContextAssembly(args: {
   const fileRevisionBudgetBytes = Math.max(0, (evidenceTokens - workspaceEvidenceTokens) * 4);
   const revisionEvidence = selectedFileRevisionEvidence(contextAssembly, fileRevisionBudgetBytes);
 
+  const detectedStack = Array.from(new Set([
+    ...(providerIndex?.detectedStack ?? []),
+    ...(snapshot?.detectedStack ?? [])
+  ]));
+  const buildBundle = () => ({
+    navigation: {
+      ...buildNavigationManifest({
+        entries: index,
+        entrypoints,
+        budgetTokens: Math.floor(inputTokens * 0.15)
+      }),
+      ...(providerIndex
+        ? {
+            indexGeneration: providerIndex.generation,
+            indexStatus: providerIndex.status,
+            indexComplete: providerIndex.complete,
+            indexRevision: providerIndex.revision
+          }
+        : {})
+    },
+    projectMap: buildProjectMap({
+      entries: index,
+      entrypoints,
+      detectedStack,
+      budgetTokens: Math.floor(inputTokens * 0.1)
+    })
+  });
+  const bundle = args.cache
+    ? args.cache.bundles.getOrBuild({
+        scope: {
+          sessionId: session.id,
+          // Navigation is workspace-derived, not requirement-derived, but the
+          // private key contract still partitions by requirement and role.
+          // Over-scoping costs hit rate; under-scoping would be a leak.
+          workItemId: contextAssembly.workItemId ?? '-',
+          agentId: args.identity.agentId,
+          generation: args.cache.generation
+        },
+        dependencyFingerprint: bundleFingerprint({
+          revisionId: revision.id,
+          inputTokens,
+          entrypoints,
+          detectedStack,
+          providerIndexState: providerIndex
+            ? { generation: providerIndex.generation, status: providerIndex.status, complete: providerIndex.complete }
+            : undefined
+        }),
+        build: buildBundle
+      })
+    : buildBundle();
+
   const built = buildContextEnvelopeV2({
     phase: toContextPhase(args.phase),
     sessionId: session.id,
@@ -119,31 +177,9 @@ export function buildEnvelopeFromContextAssembly(args: {
             }
           }
         : {}),
-      navigation: {
-        ...buildNavigationManifest({
-          entries: index,
-          entrypoints,
-          budgetTokens: Math.floor(inputTokens * 0.15)
-        }),
-        ...(providerIndex
-          ? {
-              indexGeneration: providerIndex.generation,
-              indexStatus: providerIndex.status,
-              indexComplete: providerIndex.complete,
-              indexRevision: providerIndex.revision
-            }
-          : {})
-      }
+      navigation: bundle.navigation
     },
-    l2: buildProjectMap({
-      entries: index,
-      entrypoints,
-      detectedStack: Array.from(new Set([
-        ...(providerIndex?.detectedStack ?? []),
-        ...(snapshot?.detectedStack ?? [])
-      ])),
-      budgetTokens: Math.floor(inputTokens * 0.1)
-    }),
+    l2: bundle.projectMap,
     l3: {
       files: evidence.files,
       fileRevisions: revisionEvidence.items,
@@ -323,6 +359,30 @@ function snapshotRevision(scannedAt: string | undefined, identity: string): Work
     id: `snapshot-${createHash('sha256').update(`${identity}:${scannedAt ?? 'unknown'}`).digest('hex').slice(0, 16)}`,
     observedAt: scannedAt ?? new Date(0).toISOString()
   };
+}
+
+/**
+ * Everything the navigation/project-map bundle is built from, and nothing else.
+ * The workspace revision id already stands for the whole tree state, so file
+ * paths are not repeated here; the remaining inputs are the ones that change
+ * the bundle's shape without changing the revision (budget, extra entrypoints
+ * from revision evidence, index readiness). Per-call evidence is deliberately
+ * absent because it never enters the bundle.
+ */
+function bundleFingerprint(input: {
+  revisionId: string;
+  inputTokens: number;
+  entrypoints: string[];
+  detectedStack: string[];
+  providerIndexState: { generation: number; status: string; complete: boolean } | undefined;
+}): string {
+  return JSON.stringify({
+    revisionId: input.revisionId,
+    inputTokens: input.inputTokens,
+    entrypoints: [...input.entrypoints].sort(),
+    detectedStack: [...input.detectedStack].sort(),
+    providerIndexState: input.providerIndexState ?? null
+  });
 }
 
 function toContextPhase(phase: AgentRunPhase): ContextPhase {

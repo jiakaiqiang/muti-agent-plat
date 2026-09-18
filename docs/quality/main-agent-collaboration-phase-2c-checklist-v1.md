@@ -10,7 +10,7 @@
 
 | 验收 ID | 关联任务 | 场景与预期 | 状态/证据 |
 | --- | --- | --- | --- |
-| P2C-AC1 | P2C-T1、P2C-T2、P2C-T4、P2C-T6 | 命中上下文包后仍进行发送前预算检查；高命中但输入超窗时仍拒绝，不通过缓存绕过 2A。 | **待验证（系统级）**。结算侧已按 `logicalInputTokens` 计入需求预算（缓存读不当免费，`runtime.service.spec` 36/36）；但派生缓存尚无业务调用方，"命中后再检查"这条路径还不存在，无法验。 |
+| P2C-AC1 | P2C-T1、P2C-T2、P2C-T4、P2C-T6 | 命中上下文包后仍进行发送前预算检查；高命中但输入超窗时仍拒绝，不通过缓存绕过 2A。 | **路径级通过（2026-09-18）**。上下文包缓存接在 `buildEnvelopeFromContextAssembly`（envelope 阶段），2A 的 `assertWithinInputBudget` 在 generic-llm runtime 里、在 envelope 之后执行，命中与新建的 envelope 对预算守卫不可区分（`context-bundle-cache.spec`：命中后 `budget` 与新建 deepEqual；证据 L3 每次重建）。结算侧按 `logicalInputTokens` 计入需求预算。**未做**：真实模型下"高命中但超窗仍拒绝"的端到端场景。 |
 | P2C-AC2 | P2C-T1、P2C-T3、P2C-T6 | 同 Agent 的 A/B 会话不得交换内容；删除后到达的回填被拒绝；恢复后旧 generation 缓存不复用。 | **原语级通过（2026-09-18）**。`derived-cache.spec` 8/8：B 持 A 的 key 读不到、`invalidateSession` 只清本会话、恢复后旧 generation 未命中、丢失作用域的回填 `set` 返回 false 且 `rejectedBackfills+1`。`cache-contracts.spec` 私有 key 含 session/workItem/agent/generation，公共 key 不含 session 字样。系统级（真实删除/恢复流程）未验。 |
 | P2C-AC3 | P2C-T2、P2C-T3、P2C-T6 | 修改相关文件只使依赖它的分析失效；无关进度事件不改变稳定上下文指纹。 | **原语级通过（2026-09-18）**。`cache-contracts.spec`：六项依赖任一变化指纹即变；心跳字段按名读取结构上进不了指纹；文件 hash 顺序无关。`derived-cache.invalidateFingerprint` 按指纹后缀清理。未接入真实文件变更事件。 |
 | P2C-AC4 | P2C-T3、P2C-T6 | 百个相同请求仅一个有效构建提交；缓存宕机不会发起无限摘要或绕过调用总预算。 | **原语级通过（2026-09-18）**。`cache-single-flight.spec` 8/8：100 并发同 key → 1 次构建、恰一个 `owner:true`；构建失败不做负缓存；连续失败达阈值 → `circuit_open` 不再打原点，熔断按 key 独立。"回源仍受总预算"依赖 2A 预算门禁，本阶段未新增绕过路径。跨进程 single-flight **未做**。 |
@@ -43,7 +43,7 @@ npm run typecheck
   anthropic / openai / ollama 三种映射 + raw 缺失 → unknown + 无 priceVersion 不出具金额）。
 - [ ] 有界缓存容量与回源成本测试（待新增；不能用现有冒烟脚本代替）。
   进度：容量上限/LRU/TTL 已补（`derived-cache.spec`）；**回源成本**（miss 后重建的 Token 计入需求预算）
-  未补，因缓存尚无调用方。
+  未补：上下文包层 miss 后的重建成本走既有 2A 结算路径（`logicalInputTokens`），未单独计量。
 
 ## 4. 跨阶段安全复核
 
@@ -52,7 +52,7 @@ npm run typecheck
 - [ ] 重复、乱序、重启、取消/删除、迟到结果均不破坏幂等与版本边界。
   原语级：attemptId 幂等（`summarizeUsageBreakdown`）、迟到回填拒绝、旧 generation 未命中已验；系统级未验。
 - [ ] 未确认范围、高风险动作、未知停止状态均不会被摘要/缓存/模型判断绕过。
-  本阶段未新增任何绕过路径；缓存无调用方，无新增风险面。
+  本阶段未新增任何绕过路径；上下文包缓存在 envelope 阶段、预算守卫之前，命中不跳过任何检查。
 - [ ] 双端保持同一业务状态和各自样式；不依赖刷新才能修复状态。
   本阶段未改双端。
 - [x] 无凭据、完整敏感提示或用户私有正文进入测试报告与指标（2026-09-18，用例断言：
@@ -83,5 +83,6 @@ npm run typecheck
   `does not provide an export named`；(3) 带 Nest 装饰器的 server spec 必须以 `apps/server` 为 cwd
   跑 tsx，从仓库根跑会报 `Parameter decorators only work when experimental decorators are enabled`
   ——这是 tsconfig 解析位置问题，不是代码缺陷。
-- **阶段结论：未验收。** 原语与 generic-llm 接线全绿，但缓存无业务调用方、CLI 适配器未接、
+- **阶段结论：未验收。** 原语、generic-llm 接线与上下文包缓存调用方全绿；但文件/摘要两层未接、
+  CLI 适配器（claude_code/codex）仍硬写 usage 0、跨进程 single-flight 未做、
   系统级/E2E 未验，AC1 无路径可验。
