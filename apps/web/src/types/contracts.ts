@@ -186,6 +186,7 @@ export type ConfirmationReason =
   | 'recover_interrupted_execution'
   | 'retry_failed_execution'
   | 'coordinator_routing_needs_user_decision'
+  | 'work_item_budget_exhausted'
   | 'resolve_contract_conflict'
   | 'confirm_memory_write'
   | 'confirm_local_report_save'
@@ -209,7 +210,8 @@ export type RuntimeError = {
     | 'RUNTIME_OUTPUT_CONTRACT_VIOLATION'
     | 'CAPABILITY_BLOCKED'
     | 'CONTEXT_INSUFFICIENT'
-    | 'TOKEN_BUDGET_EXCEEDED'
+  | 'TOKEN_BUDGET_EXCEEDED'
+  | 'WORK_ITEM_BUDGET_EXHAUSTED'
     | 'UNKNOWN_ERROR'
   message: string
   retryable: boolean

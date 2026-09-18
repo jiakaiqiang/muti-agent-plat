@@ -9,6 +9,7 @@ const runtimeErrorCodes = new Set<RuntimeError['code']>([
   'CAPABILITY_BLOCKED',
   'CONTEXT_INSUFFICIENT',
   'TOKEN_BUDGET_EXCEEDED',
+  'WORK_ITEM_BUDGET_EXHAUSTED',
   'UNKNOWN_ERROR'
 ]);
 

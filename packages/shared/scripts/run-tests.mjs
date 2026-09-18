@@ -13,7 +13,9 @@ const tests = readdirSync(sourceRoot)
 
 if (!tests.length) throw new Error('No shared contract tests found.');
 const tsx = join(repositoryRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
-const result = spawnSync(process.execPath, [tsx, '--test', ...tests], {
+// --test-force-exit: spec 打开的句柄在测试结束后不关闭,没有该标志时进程空转,
+// npm run test 因此无法结束。
+const result = spawnSync(process.execPath, [tsx, '--test', '--test-force-exit', ...tests], {
   cwd: repositoryRoot,
   stdio: 'inherit'
 });

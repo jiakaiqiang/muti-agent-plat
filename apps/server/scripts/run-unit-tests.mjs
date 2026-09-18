@@ -6,6 +6,8 @@ import { createRequire } from 'node:module';
 
 // Node 20 的 --test 不支持 glob,默认发现规则又匹配不到 *.spec.ts,
 // 这里显式收集 src 下的单测文件后交给 tsx --test 执行。
+// --test-force-exit:部分 spec 会打开句柄(临时库、文件监视)且测试结束后不关闭,
+// 没有该标志时进程会无限空转,npm run test 因此永远无法结束。
 const serverRoot = fileURLToPath(new URL('..', import.meta.url));
 
 function collectTestFiles(dir, files = []) {
@@ -33,7 +35,7 @@ if (!existsSync(tsxCli)) {
   process.exit(1);
 }
 
-const result = spawnSync(process.execPath, [tsxCli, '--test', ...testFiles], {
+const result = spawnSync(process.execPath, [tsxCli, '--test', '--test-force-exit', ...testFiles], {
   cwd: serverRoot,
   stdio: 'inherit'
 });

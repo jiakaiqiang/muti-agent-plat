@@ -2149,6 +2149,18 @@ export type IntentSnapshotBounds = {
   omittedRecentMessages: number;
 };
 
+export type IntentSnapshotRecall = {
+  availability: 'ok' | 'limited';
+  needsClarification: boolean;
+  clarificationReason?: 'no_match' | 'multiple_similar_candidates' | 'low_confidence' | 'index_unavailable';
+  candidates: Array<{
+    workItemId: UUID;
+    matchedBy: 'explicit' | 'lexical';
+    matchedTerms: string[];
+    latestCheckpointId?: UUID;
+  }>;
+};
+
 export type IntentContextSnapshot = {
   /** Business inputs only; progress and heartbeat events never invalidate routing. */
   businessFingerprint?: string;
@@ -2165,6 +2177,11 @@ export type IntentContextSnapshot = {
   /** Bounded recent dialogue for the current requirement, oldest first. */
   recentRelevantMessages?: IntentSnapshotMessageExcerpt[];
   bounds?: IntentSnapshotBounds;
+  /**
+   * Bounded historical-requirement recall (phase 2B). Ambiguity is surfaced here
+   * so the router clarifies instead of switching requirements on a guess.
+   */
+  recall?: IntentSnapshotRecall;
   pendingConfirmation?: string;
   pendingConfirmationContext?: PendingConfirmationContext;
   validDecisionIds: UUID[];
@@ -2227,6 +2244,12 @@ export type IntentRoutingRecord = {
   actionStatus?: 'pending' | 'applying' | 'applied' | 'failed';
   /** Persisted because a replay must not activate a deferred WorkItem early. */
   deferredActivation?: boolean;
+  /**
+   * A server-created replacement context. The semantic classifier may describe
+   * the new message, but it must never redirect this recovery message back to
+   * the WorkItem whose cumulative budget was exhausted.
+   */
+  forcedWorkItemId?: UUID;
   leaseOwner?: string;
   leaseExpiresAt?: ISODateTime;
   reasonCodes: string[];
@@ -2267,6 +2290,53 @@ export type RuntimeUsage = {
   totalTokens: number;
   cost?: number;
   model?: string;
+};
+
+/**
+ * Every counted model call against one requirement. Classification, consultation,
+ * retries, summaries and supplemental reads all draw on the same requirement
+ * budget, so they share one ledger rather than each holding its own allowance.
+ */
+export type WorkItemBudgetCategory =
+  | 'classification'
+  | 'consultation'
+  | 'retry'
+  | 'summary'
+  | 'supplemental_read'
+  | 'execution';
+
+export type WorkItemBudgetReservation = {
+  attemptId: string;
+  operationId: string;
+  category: WorkItemBudgetCategory;
+  reservedTokens: number;
+  reservedAt: ISODateTime;
+};
+
+/**
+ * `reported` carries a provider measurement; `unavailable` keeps the reservation
+ * cap as a conservative bound because the call may still have been billed.
+ */
+export type WorkItemBudgetSettlement = {
+  attemptId: string;
+  settledAt: ISODateTime;
+  outcome: 'reported' | 'unavailable';
+  actualTokens: number;
+  unknownTokens: number;
+};
+
+export type WorkItemBudgetLedger = {
+  workItemId: UUID;
+  limitTokens: number;
+  reservedTokens: number;
+  actualTokens: number;
+  unknownTokens: number;
+  /** Spend that already went past the limit; kept visible instead of clamped away. */
+  overrunTokens: number;
+  reservations: WorkItemBudgetReservation[];
+  settlements: WorkItemBudgetSettlement[];
+  revision: number;
+  updatedAt: ISODateTime;
 };
 
 /**
@@ -2534,6 +2604,54 @@ export type SummaryMemoryCheckpoint = {
   sourceEventIds: UUID[];
   sourceArtifactIds: UUID[];
   sourceMemoryIds: UUID[];
+  createdAt: ISODateTime;
+  /**
+   * Version binding (phase 2B). Optional so checkpoints persisted before this
+   * field set stay readable; a checkpoint without them is treated as legacy and
+   * never wins over a versioned one.
+   */
+  coveredEventSeq?: number;
+  workItemRevision?: number;
+  decisionLedgerRevision?: number;
+  policyVersion?: string;
+  contentHash?: string;
+  generation?: number;
+  logicalKey?: string;
+  sourceDecisionIds?: UUID[];
+};
+
+/** Current summary generation strategy; bump when the derivation rules change. */
+export const SUMMARY_CHECKPOINT_POLICY_VERSION = 'summary-checkpoint-v2' as const;
+
+export type SummaryCheckpointRejectionCode =
+  | 'SUMMARY_CHECKPOINT_STALE_GENERATION'
+  | 'SUMMARY_CHECKPOINT_STALE_VERSION'
+  | 'SUMMARY_CHECKPOINT_COVERAGE_REGRESSED'
+  | 'SESSION_ADMISSION_CLOSED';
+
+/**
+ * Durable, queryable checkpoint row. The checkpoint itself stays derived data:
+ * events, artifacts and DecisionRecords remain the traceable source; this row
+ * only pins which versions of them a summary was built from.
+ */
+export type SummaryCheckpointRecord = {
+  checkpointId: UUID;
+  sessionId: UUID;
+  workItemId: UUID;
+  /** workItemId + coveredEventSeq + version fingerprint; one commit per key across processes. */
+  logicalKey: string;
+  coveredEventSeq: number;
+  workItemRevision: number;
+  decisionLedgerRevision: number;
+  policyVersion: string;
+  contentHash: string;
+  generation?: number;
+  phase: AgentRunPhase;
+  summaryMemory: SummaryMemory;
+  sourceEventIds: UUID[];
+  sourceArtifactIds: UUID[];
+  sourceMemoryIds: UUID[];
+  sourceDecisionIds: UUID[];
   createdAt: ISODateTime;
 };
 
@@ -2996,6 +3114,7 @@ export type RuntimeError = {
     | 'CONTEXT_INSUFFICIENT'
     | 'CONTEXT_RETRY_EXHAUSTED'
     | 'TOKEN_BUDGET_EXCEEDED'
+    | 'WORK_ITEM_BUDGET_EXHAUSTED'
     | 'UNKNOWN_ERROR';
   message: string;
   retryable: boolean;
