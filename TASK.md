@@ -179,8 +179,21 @@
 
 ## T6 验证协作故障矩阵（AC1–AC7）
 
-- [ ] T6-1 @、扩员拒绝、专家失败、冲突、主 Agent 失败、重启、停止/删除、Token 累计
-- [ ] T6-2 独立 PostgreSQL（新增集合）+ E2E + 四门禁
+- [x] T6-1 故障矩阵（单测 + E2E）：
+      @ → `planned-discussion` 用例 6（单条 user_mention 委派、署名回复、无固定文案）；
+      扩员拒绝 → 用例 1 + E2E 场景 B（`confirm_member_addition` 卡，未批准不咨询）；
+      专家失败 → 用例 2 + synthesis 用例 4（只标该委派 failed，整场继续，综合里点名列出）；
+      冲突 → synthesis 用例 2（同 objective 不同结论 → 两条待选，绝不写"一致同意"）；
+      主 Agent 失败 → 用例 10（出计划失败 → 抛 runtimeError 交既有恢复，不咨询、不落 run）；
+      重启 → 用例 4 + store 用例（只跑未完成、不重问计划、不开第二个 run）；
+      停止 → 用例 5（run paused、委派保持 running 可续）；删除 → store 用例（准入关闭拒写）；
+      Token 累计 → 委派经 `runDiscussionRuntime → runRuntime`，`runtime.service.ts:1046`
+      `budgetCategoryFor('discussion')='consultation'` 统一预留结算，**不新建第二套预算**
+- [x] T6-2 E2E `tests/e2e/planned-discussion-smoke.mjs`（`npm run test:e2e:planned-discussion`，
+      exit 0，真服务 + mock + 开关开启）：场景 A（architect 在会话内）只咨询 architect 一人、
+      综合事件 `sourceDelegationIds` 恰 1 条、无扩员卡无澄清卡；场景 B（architect 不在）
+      扩员卡点名 architect、零委派运行、主 Agent 持有的 `discussion_clarification` 卡列出待批扩员。
+      独立 PostgreSQL：T1-3 已 12/12（临时库）。四门禁：见提交记录
 
 ## 遗留（跨阶段，未完成）
 

@@ -405,3 +405,33 @@ test('unresolved items produce one clarification card owned by the coordinator',
     await context.cleanup();
   }
 });
+
+test('a coordinator that cannot plan fails the phase for recovery and leaves no half-open run', async () => {
+  const context = await fixture();
+  try {
+    const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+    const service = makeService([], recorder, undefined, undefined, undefined, context) as unknown as PlannedService;
+    service.createContextAssembly = () => ({ budget: {}, systemRules: [] } as unknown as ContextAssembly);
+    service.runRuntime = async () => ({
+      ...completedRun('plan-1', createAgentMessageOutput({ messageKind: 'risk', content: 'no plan' })),
+      status: 'failed',
+      error: { code: 'RUNTIME_INVOCATION_ERROR', message: 'coordinator provider down', retryable: true }
+    });
+    let consulted = 0;
+    service.runDiscussionRuntime = async (_session, _expert, invocationId) => {
+      consulted += 1;
+      return completedRun(invocationId, createAgentMessageOutput({ messageKind: 'answer', content: 'x' }));
+    };
+
+    // The existing session recovery (retry_failed_execution) is the handler;
+    // the discussion must not swallow the failure or improvise a round.
+    await assert.rejects(
+      () => service.runDiscussion(context.session(), agent('coordinator')),
+      (error: unknown) => (error as { runtimeError?: { code: string } }).runtimeError?.code === 'RUNTIME_INVOCATION_ERROR'
+    );
+    assert.equal(consulted, 0, 'no expert runs without a plan');
+    assert.deepEqual(new DiscussionStore(context.persistence).list('session-1'), [], 'nothing persisted before a valid plan');
+  } finally {
+    await context.cleanup();
+  }
+});
