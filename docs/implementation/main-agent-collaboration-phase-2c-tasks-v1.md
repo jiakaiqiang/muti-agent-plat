@@ -101,8 +101,11 @@
 - 进度（2026-09-18）：原语级场景已覆盖（过期回源、跨会话/跨 generation 隔离、删除后
   回填拒绝、100 并发单构建、熔断、三 provider usage fixture 含缺字段 → unknown）；
   全仓 `npm run typecheck` / `test`（1463/1463）/ `test:harness` / `build` 全部 exit 0。
-  **未做**：系统级冷热请求与缓存宕机回源（上下文包层已有调用方但未做端到端）、E2E；独立 PostgreSQL 不适用
-  （本阶段未新增持久化集合）。
+- 进度（2026-09-19）：**AC1 系统级 E2E 已落地**——`npm run test:e2e:context-bundle-cache` 起真服务
+  （mock runtime）：正常会话产生真实命中（hit=2），预算 10 的会话重试时命中缓存仍被
+  `TOKEN_BUDGET_EXCEEDED` 拒绝；命中率经 `/ops/workspace-metrics` 可读且不带 session 标签。
+  **未做**：缓存宕机回源的端到端（当前是进程内 Map，没有"宕机"形态）；真实付费模型；
+  独立 PostgreSQL 不适用（本阶段未新增持久化集合）。
 
 ## 完成定义
 

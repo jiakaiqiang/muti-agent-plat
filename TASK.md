@@ -142,8 +142,12 @@
       inputTokens`，缓存读虽便宜但占窗口，按逻辑总量计入需求预算。attemptId 幂等由 2A
       `settleWorkItemBudget` 原有逻辑保证。runtime.service spec 36/36。
       **未做**：摘要/检索额外成本单列、priceVersion 实际取值来源
-- [ ] T5-3 **未做**：未新增任何 metrics 标签，因此没有引入高基数问题，但也没有新增
-      缓存命中率/耗时观测
+- [x] T5-3 命中率可观测：`DerivedCache` 加 `onOutcome` 钩子（本身不依赖指标模块），
+      `ContextBundleCache` 把它接到 `workspaceMetrics.increment('context_bundle_cache_total',
+      1, { layer, outcome })`，outcome ∈ hit/miss/expired/evicted/rejected_backfill 互斥，
+      命中率 = hit/(hit+miss+expired)。**标签只有 layer 与 outcome**，用例断言序列化后不含
+      session id。已在 `GET /api/ops/workspace-metrics` 暴露（既有出口，无新 API）。
+      连带：`workspace-metrics.spec` 的名字数量守卫 37→38。**未做**：耗时观测
 
 ## T6 验证缓存故障与收益（AC1–AC7）
 
@@ -155,7 +159,14 @@
       金额无 priceVersion 不出具（cache-contracts.spec 15 例）
 - [x] T6-3 四门禁：typecheck / test / test:harness / build 全 exit 0，最近一次在 CLI usage
       接线之后（`cbdd4d9`）。**独立 PostgreSQL 不适用**：本阶段没有新增持久化集合。
-      **真实模型 E2E 未做**：AC1 已有路径级用例（见 T2-3），端到端"高命中但超窗仍拒绝"未跑
+- [x] T6-4 AC1 系统级 E2E（2026-09-19）：`tests/e2e/context-bundle-cache-smoke.mjs`
+      （`npm run test:e2e:context-bundle-cache`，exit 0）。起真 smoke 服务 + mock runtime：
+      (A) 正常会话 COMPLETED → 指标 hit=2，证明真实流程有命中；(B) **同一个**预算 10 的
+      会话：第一次 miss + `TOKEN_BUDGET_EXCEEDED`，发 `继续` 重试 → hit+1 且第二次仍
+      `TOKEN_BUDGET_EXCEEDED`。这就是 AC1 那句话的端到端形态。
+      探针教训：smoke 默认 workspace 为空，"分析仓库结构"类提示词会被 grounded-evidence
+      门禁以 `CONTEXT_INSUFFICIENT` 拒绝——不是 bug，是 E2E 必须用不需证据的提示词。
+      **未做**：真实付费模型下的同一场景
 
 ## 遗留（跨阶段，未完成）
 

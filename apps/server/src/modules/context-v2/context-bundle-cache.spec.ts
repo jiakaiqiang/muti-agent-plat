@@ -3,6 +3,7 @@ import test from 'node:test';
 import type { CompiledAgentIdentity, ContextAssembly, SessionDetail } from '@agent-cluster/shared';
 import { buildEnvelopeFromContextAssembly } from './build-envelope-from-context-assembly.js';
 import { ContextBundleCache } from './context-bundle-cache.js';
+import { workspaceMetrics } from '../../common/workspace-metrics.js';
 
 const REVISION = { id: 'rev-1', observedAt: '2026-09-18T00:00:00.000Z' };
 
@@ -210,3 +211,48 @@ test('building without a cache argument behaves exactly as before', () => {
   assert.deepEqual(cached.L1.navigation, uncached.L1.navigation);
   assert.deepEqual(cached.L2, uncached.L2);
 });
+
+test('cache outcomes are observable as low-cardinality metrics', () => {
+  const before = seriesValue('context_bundle_cache_total', { layer: 'file_index', outcome: 'hit' });
+  const beforeMiss = seriesValue('context_bundle_cache_total', { layer: 'file_index', outcome: 'miss' });
+  const cache = new ContextBundleCache({ maxEntries: 8, ttlMs: 60_000 });
+  const session = makeSession({ id: 'session-metrics' });
+
+  build({ session, cache });
+  build({ session, cache });
+
+  assert.equal(seriesValue('context_bundle_cache_total', { layer: 'file_index', outcome: 'miss' }), beforeMiss + 1);
+  assert.equal(seriesValue('context_bundle_cache_total', { layer: 'file_index', outcome: 'hit' }), before + 1);
+
+  // Session ids are high-cardinality and belong in traces, never in metric
+  // labels: one series per session would grow without bound.
+  const labelled = workspaceMetrics.snapshot().series.filter((series) => series.name === 'context_bundle_cache_total');
+  for (const series of labelled) {
+    assert.equal('sessionId' in series.labels, false);
+    assert.equal(JSON.stringify(series.labels).includes('session-metrics'), false);
+  }
+});
+
+test('expiry is reported as its own outcome', () => {
+  let now = 1_000;
+  const before = seriesValue('context_bundle_cache_total', { layer: 'file_index', outcome: 'expired' });
+  const cache = new ContextBundleCache({ maxEntries: 8, ttlMs: 500, now: () => now });
+  const session = makeSession({ id: 'session-expiry' });
+
+  build({ session, cache });
+  now = 2_000;
+  build({ session, cache });
+
+  assert.equal(seriesValue('context_bundle_cache_total', { layer: 'file_index', outcome: 'expired' }), before + 1);
+});
+
+function seriesValue(name: string, labels: Record<string, string>): number {
+  const match = workspaceMetrics
+    .snapshot()
+    .series.find(
+      (series) =>
+        series.name === name &&
+        Object.entries(labels).every(([key, value]) => series.labels[key] === value)
+    );
+  return match?.value ?? 0;
+}

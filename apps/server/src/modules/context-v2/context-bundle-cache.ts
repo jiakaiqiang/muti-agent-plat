@@ -1,6 +1,10 @@
 import type { ContextL1NavigationManifest, ContextL2ProjectMap } from '@agent-cluster/shared';
 import { derivedCacheKey } from '@agent-cluster/shared';
+import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import { DerivedCache, type DerivedCacheOptions, type DerivedCacheStats } from './derived-cache.js';
+
+/** The only label this cache ever attaches. Session/requirement ids belong in traces. */
+const BUNDLE_LAYER = 'file_index' as const;
 
 /**
  * The part of a context envelope that is derived purely from the workspace
@@ -33,7 +37,15 @@ export class ContextBundleCache {
   private readonly cache: DerivedCache<ContextBundle>;
 
   constructor(options: DerivedCacheOptions) {
-    this.cache = new DerivedCache<ContextBundle>(options);
+    this.cache = new DerivedCache<ContextBundle>({
+      ...options,
+      // Layer + outcome only. A per-session series would grow with every session
+      // ever seen, which is exactly the high-cardinality label the plan forbids.
+      onOutcome: (outcome) => {
+        workspaceMetrics.increment('context_bundle_cache_total', 1, { layer: BUNDLE_LAYER, outcome });
+        options.onOutcome?.(outcome);
+      }
+    });
   }
 
   getOrBuild(input: {
@@ -42,7 +54,7 @@ export class ContextBundleCache {
     build: () => ContextBundle;
   }): ContextBundle {
     const key = derivedCacheKey({
-      layer: 'file_index',
+      layer: BUNDLE_LAYER,
       scope: { kind: 'private', ...input.scope },
       dependencyFingerprint: input.dependencyFingerprint
     });

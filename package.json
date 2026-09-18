@@ -114,6 +114,7 @@
     "test:e2e:memory-confirm": "node tests/e2e/memory-confirm-smoke.mjs",
     "test:e2e:token-budget": "node tests/e2e/token-budget-smoke.mjs",
     "test:e2e:work-item-budget-recovery": "node tests/e2e/work-item-budget-recovery-smoke.mjs",
+    "test:e2e:context-bundle-cache": "node tests/e2e/context-bundle-cache-smoke.mjs",
     "test:e2e:phase-2a-routing": "node tests/e2e/phase-2a-routing-smoke.mjs",
     "test:e2e:phase-2a-client-sse": "node tests/e2e/phase-2a-client-sse-smoke.mjs",
     "test:e2e:context-insufficient": "node tests/e2e/context-insufficient-smoke.mjs",

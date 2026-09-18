@@ -24,7 +24,7 @@ test('workspace metrics expose counters, gauges and bounded duration aggregates 
   assert.equal(duration?.sum, 20);
   assert.equal(duration?.min, 8);
   assert.equal(duration?.max, 12);
-  assert.equal(WORKSPACE_METRIC_NAMES.length, 37);
+  assert.equal(WORKSPACE_METRIC_NAMES.length, 38);
   for (const metric of [
     'routing_idempotency_replay_total',
     'decision_inheritance_total',

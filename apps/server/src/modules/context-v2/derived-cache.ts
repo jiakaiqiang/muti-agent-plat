@@ -5,10 +5,21 @@ export type DerivedCacheScopeCheck = {
   generation: number;
 };
 
+/**
+ * One outcome per operation, mutually exclusive, so a hit rate can be computed
+ * as hit / (hit + miss + expired) without double counting.
+ */
+export type DerivedCacheOutcome = 'hit' | 'miss' | 'expired' | 'evicted' | 'rejected_backfill';
+
 export type DerivedCacheOptions = {
   maxEntries: number;
   ttlMs: number;
   now?: () => number;
+  /**
+   * Observability hook. The cache itself stays free of any metrics dependency;
+   * the owner decides what to record and, crucially, which labels to attach.
+   */
+  onOutcome?: (outcome: DerivedCacheOutcome) => void;
 };
 
 export type DerivedCacheStats = {
@@ -46,6 +57,7 @@ export class DerivedCache<T> {
   private readonly maxEntries: number;
   private readonly ttlMs: number;
   private readonly now: () => number;
+  private readonly onOutcome: (outcome: DerivedCacheOutcome) => void;
   private hits = 0;
   private misses = 0;
   private evictions = 0;
@@ -56,17 +68,20 @@ export class DerivedCache<T> {
     this.maxEntries = Math.max(1, Math.floor(options.maxEntries));
     this.ttlMs = Math.max(1, Math.floor(options.ttlMs));
     this.now = options.now ?? (() => Date.now());
+    this.onOutcome = options.onOutcome ?? (() => undefined);
   }
 
   get(key: string, scope: DerivedCacheScopeCheck): T | undefined {
     if (!isCacheKeyScopedTo(key, scope)) {
       this.misses += 1;
+      this.onOutcome('miss');
       return undefined;
     }
 
     const entry = this.entries.get(key);
     if (!entry) {
       this.misses += 1;
+      this.onOutcome('miss');
       return undefined;
     }
 
@@ -76,12 +91,14 @@ export class DerivedCache<T> {
       this.entries.delete(key);
       this.expirations += 1;
       this.misses += 1;
+      this.onOutcome('expired');
       return undefined;
     }
 
     this.entries.delete(key);
     this.entries.set(key, entry);
     this.hits += 1;
+    this.onOutcome('hit');
     return entry.value;
   }
 
@@ -93,6 +110,7 @@ export class DerivedCache<T> {
   set(key: string, value: T, scope: DerivedCacheScopeCheck): boolean {
     if (!isCacheKeyScopedTo(key, scope)) {
       this.rejectedBackfills += 1;
+      this.onOutcome('rejected_backfill');
       return false;
     }
 
@@ -104,6 +122,7 @@ export class DerivedCache<T> {
       if (oldest.done) break;
       this.entries.delete(oldest.value);
       this.evictions += 1;
+      this.onOutcome('evicted');
     }
 
     return true;
