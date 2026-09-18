@@ -1051,6 +1051,27 @@ export const RELATIONAL_SCHEMA_V12_TABLES: RelationalTableDefinition[] = [
 ];
 export const RELATIONAL_SCHEMA_V12_SQL = renderTables(RELATIONAL_SCHEMA_V12_TABLES);
 
+export const RELATIONAL_SCHEMA_V13_TABLES: RelationalTableDefinition[] = [
+  table('discussion_runs', '保存主 Agent 主持的讨论运行：需求版本、生命周期代次、轮次上限、状态与内嵌委派；恢复以此为准而非内存循环。', [
+    column('external_id', 'text primary key', '讨论运行的稳定外部标识。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '讨论所属会话。'),
+    column('work_item_external_id', 'text not null', '讨论所属需求的稳定外部标识。'),
+    column('requirement_revision', 'bigint not null check (requirement_revision > 0)', '讨论当前绑定的需求修订号；更早修订的委派视为过期。'),
+    column('generation', 'integer not null', '创建时绑定的会话生命周期代次；恢复后旧代次不再复用。'),
+    column('coordinator_agent_external_id', 'text not null', '主持该讨论的主 Agent 稳定外部标识。'),
+    column('status', 'text not null', '讨论状态：planning/consulting/synthesizing/waiting_user/ready_for_confirmation/paused/failed。'),
+    column('round_limit', 'integer not null check (round_limit > 0)', '有界咨询轮次上限。'),
+    column('rounds_started', 'integer not null check (rounds_started >= 0)', '已开始的咨询轮次数。'),
+    column('revision', 'integer not null check (revision > 0)', '讨论记录的单调修订号；含委派状态变化。'),
+    column('source_snapshot', 'jsonb not null', '版本化讨论运行合同完整快照，含内嵌委派与综合结论。'),
+    column('created_at', 'timestamptz not null', '讨论创建时间。'),
+    column('updated_at', 'timestamptz not null', '讨论最后更新时间。')
+  ], [], [
+    'create index if not exists discussion_runs_session_idx on agent_cluster.discussion_runs(session_id, work_item_external_id, updated_at desc)'
+  ])
+];
+export const RELATIONAL_SCHEMA_V13_SQL = renderTables(RELATIONAL_SCHEMA_V13_TABLES);
+
 export function expectedRelationalComments() {
   return [
     SCHEMA_MIGRATIONS_TABLE,
@@ -1063,7 +1084,8 @@ export function expectedRelationalComments() {
     ...RELATIONAL_SCHEMA_V9_TABLES,
     ...RELATIONAL_SCHEMA_V10_TABLES,
     ...RELATIONAL_SCHEMA_V11_TABLES,
-    ...RELATIONAL_SCHEMA_V12_TABLES
+    ...RELATIONAL_SCHEMA_V12_TABLES,
+    ...RELATIONAL_SCHEMA_V13_TABLES
   ].flatMap((definition) => [
     { table: definition.name, column: null, comment: definition.comment },
     ...definition.columns.map((item) => ({ table: definition.name, column: item.name, comment: item.comment }))

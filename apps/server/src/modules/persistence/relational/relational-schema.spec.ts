@@ -24,6 +24,8 @@ import {
   RELATIONAL_SCHEMA_V11_TABLES,
   RELATIONAL_SCHEMA_V12_SQL,
   RELATIONAL_SCHEMA_V12_TABLES,
+  RELATIONAL_SCHEMA_V13_SQL,
+  RELATIONAL_SCHEMA_V13_TABLES,
   RELATIONAL_TABLES,
   SCHEMA_MIGRATIONS_TABLE
 } from './relational-schema.js';
@@ -40,7 +42,8 @@ test('every relational table and column has a non-empty Chinese explanation', ()
     ...RELATIONAL_SCHEMA_V9_TABLES,
     ...RELATIONAL_SCHEMA_V10_TABLES,
     ...RELATIONAL_SCHEMA_V11_TABLES,
-    ...RELATIONAL_SCHEMA_V12_TABLES
+    ...RELATIONAL_SCHEMA_V12_TABLES,
+    ...RELATIONAL_SCHEMA_V13_TABLES
   ];
   assert.ok(definitions.length >= 35, 'expected the complete relational domain schema');
 
@@ -63,7 +66,8 @@ test('rendered migration emits COMMENT statements for every declared table and c
   for (const expected of expectedRelationalComments()) {
     const target = expected.column ? `${expected.table}.${expected.column}` : expected.table;
     const prefix = expected.column ? 'comment on column' : 'comment on table';
-    assert.ok(`${sql}\n${RELATIONAL_SCHEMA_V8_SQL}\n${RELATIONAL_SCHEMA_V9_SQL}\n${RELATIONAL_SCHEMA_V10_SQL}\n${RELATIONAL_SCHEMA_V11_SQL}\n${RELATIONAL_SCHEMA_V12_SQL}`.includes(`${prefix} agent_cluster.${target} is `), `missing rendered SQL comment: ${target}`);
+    assert.ok(`${sql}\n${RELATIONAL_SCHEMA_V8_SQL}\n${RELATIONAL_SCHEMA_V9_SQL}\n${RELATIONAL_SCHEMA_V10_SQL}\n${RELATIONAL_SCHEMA_V11_SQL}\n${RELATIONAL_SCHEMA_V12_SQL}
+${RELATIONAL_SCHEMA_V13_SQL}`.includes(`${prefix} agent_cluster.${target} is `), `missing rendered SQL comment: ${target}`);
   }
 });
 

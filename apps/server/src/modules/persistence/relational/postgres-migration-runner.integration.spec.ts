@@ -14,6 +14,7 @@ import { SessionStopStateStore } from '../../runtimes/session-stop-state-store.j
 import { SessionLifecycleStore } from '../../runtimes/session-lifecycle-store.js';
 import { WorkItemBudgetStore } from '../../runtimes/work-item-budget-store.js';
 import { SummaryCheckpointStore, type SummaryCheckpointDraft } from '../../memory/summary-checkpoint-store.js';
+import { DiscussionStore } from '../../orchestrator/discussion-store.js';
 
 const databaseUrl = process.env.RELATIONAL_TEST_DATABASE_URL;
 
@@ -805,6 +806,91 @@ test('PostgreSQL commits one summary checkpoint per coverage across instances an
       );
       assert.equal(rows.rows.length, 1, 'the rejected late summary must not be persisted');
       assert.equal(Number(rows.rows[0].covered_event_seq), 40);
+    } finally {
+      await pool.end();
+    }
+  } finally {
+    await first?.onModuleDestroy().catch(() => undefined);
+    await second?.onModuleDestroy().catch(() => undefined);
+    await third?.onModuleDestroy().catch(() => undefined);
+    await setupPool.query(`drop database if exists ${isolatedDatabase}`).catch(() => undefined);
+    await setupPool.end().catch(() => undefined);
+  }
+});
+
+test('PostgreSQL reserves one delegation per expert and revision across instances and refuses stale asks', { skip: !databaseUrl }, async () => {
+  const isolatedDatabase = `agent_cluster_dr_${process.pid}_${Date.now()}`;
+  const isolatedUrl = new URL(databaseUrl!);
+  isolatedUrl.pathname = `/${isolatedDatabase}`;
+  const setupPool = new Pool({ connectionString: databaseUrl });
+  const isolated = isolatedUrl.toString();
+  const sessionId = `discussion-${process.pid}-${Date.now()}`;
+  const workItemId = `${sessionId}-item`;
+  const now = new Date().toISOString();
+  let first: PersistenceService | undefined;
+  let second: PersistenceService | undefined;
+  let third: PersistenceService | undefined;
+  try {
+    await setupPool.query(`create database ${isolatedDatabase}`);
+    first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    second = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    third = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    await first.initialize();
+    await first.setCollection('sessions', [...first.getCollection<unknown[]>('sessions', []),
+      { id: sessionId, dataEpoch: first.currentDataEpoch(), title: 'Discussion', status: 'DISCUSSING', ownerId: 'test',
+        decisionLedgerRevision: 0, createdAt: now, updatedAt: now }
+    ]);
+    await first.setCollection('workItemsBySession', {
+      [sessionId]: [{ id: workItemId, sessionId, title: 'Storage', goal: 'Pick storage', status: 'active',
+        revision: 3, createdFromEventId: 'e-1', inheritedDecisionIds: [], inheritedArtifactIds: [], createdAt: now, updatedAt: now }]
+    });
+    await second.initialize();
+
+    const firstStore = new DiscussionStore(first, () => now);
+    const secondStore = new DiscussionStore(second, () => now);
+    const opened = await firstStore.open({
+      sessionId, workItemId, requirementRevision: 3, generation: 0, coordinatorAgentId: 'coordinator',
+      objective: 'Decide storage', exitCondition: 'owners assigned', roundLimit: 3, budgetTokens: 10_000
+    });
+    assert.equal(opened.status, 'opened');
+    if (opened.status !== 'opened') return;
+    // The second instance must see the run before it can reserve against it.
+    await second.initialize();
+    const ask = { targetAgentId: 'expert-1', origin: 'coordinator' as const, objective: 'Assess', expectedResult: 'Risks',
+      budgetTokens: 2_000, requirementRevision: 3 };
+    const [a, b] = await Promise.all([
+      firstStore.reserveDelegation(opened.run.id, ask),
+      secondStore.reserveDelegation(opened.run.id, ask)
+    ]);
+    // Two instances asking the same expert the same question on the same
+    // revision: at most one delegation may exist afterwards.
+    await third.initialize();
+    const reopened = new DiscussionStore(third, () => now);
+    const run = reopened.get(sessionId, opened.run.id);
+    assert.ok(run, 'the run is visible to a fresh instance');
+    const forExpert = (run?.delegations ?? []).filter((item) => item.targetAgentId === 'expert-1');
+    assert.equal(forExpert.length, 1, `exactly one delegation persisted, got ${JSON.stringify([a.status, b.status])}`);
+
+    const revised = await reopened.reviseRequirement(opened.run.id, { requirementRevision: 4 });
+    assert.equal(revised.status, 'applied');
+    const stale = await reopened.reserveDelegation(opened.run.id, ask);
+    assert.equal(stale.status, 'rejected');
+    assert.equal(stale.status === 'rejected' && stale.code, 'DELEGATION_STALE_REVISION');
+
+    const pool = new Pool({ connectionString: isolated });
+    try {
+      const rows = await pool.query<{ requirement_revision: string; revision: string; status: string }>(
+        `select requirement_revision,revision,status from agent_cluster.discussion_runs where external_id=$1`,
+        [opened.run.id]
+      );
+      assert.equal(rows.rows.length, 1);
+      assert.equal(Number(rows.rows[0].requirement_revision), 4, 'the projection follows the revised requirement');
+      assert.equal(rows.rows[0].status, 'planning');
+      const snapshot = await pool.query<{ count: string }>(
+        `select jsonb_array_length(source_snapshot->'sourceRecord'->'delegations') count from agent_cluster.discussion_runs where external_id=$1`,
+        [opened.run.id]
+      );
+      assert.equal(Number(snapshot.rows[0].count), 1, 'the refused stale ask left no delegation behind');
     } finally {
       await pool.end();
     }

@@ -48,21 +48,37 @@
 
 ## T1 固化讨论与委派合同（AC1/AC4/AC6/AC7）
 
-- [ ] T1-1 shared：`DiscussionRun`（sessionId/workItemId/requirementRevision/generation/
-      parentDiscussionId?/status: planning|consulting|synthesizing|waiting_user|
-      ready_for_confirmation|paused|failed，objective/exitCondition/budget/roundLimit/
-      revision/createdAt/updatedAt）与 `Delegation`（discussionId/targetAgentId/
-      requirementRevision/objective/expectedResult/deadline?/budgetTokens/operationId/
-      invocationId?/status: pending|running|completed|blocked|failed|cancelled|superseded/
-      result?/origin: coordinator|user_mention）；纯校验函数（同阶段 0 风格）；
-      专家结果 schema：conclusion/evidenceRefs/risks/openQuestions/suggestedActions（plan §2.6，
-      不含思考过程）
-- [ ] T1-2 状态机纯函数：合法迁移表 + `supersede`（需求修订使旧委派 stale，AC7）+
-      重复提交/重启只运行未完成项（AC4）
-- [ ] T1-3 `discussion-store.ts`：`discussionsBySession` 集合（Delegation 内嵌于 run），
-      Delegation reservation 以 `discussionId|targetAgentId|requirementRevision` 为逻辑键，
-      同键并发恰一个 `reserved`，旧 requirementRevision 拒绝且不落盘；PostgreSQL V13
-      `discussion_runs` + `delegations`（unique logical_key）；6 处 relational 约定 + cutover seed
+落点：`packages/shared/src/discussion-contracts.ts` + `.spec.ts`（8 例）；
+`apps/server/src/modules/orchestrator/discussion-store.ts` + `.spec.ts`（10 例，file backend）；
+`postgres-migration-runner.integration.spec.ts` 新增用例（临时库 12/12）。
+
+- [x] T1-1 `DiscussionRun`（status: planning|consulting|synthesizing|waiting_user|
+      ready_for_confirmation|paused|failed，含 roundLimit/roundsStarted/budgetTokens/
+      synthesis?/pendingConfirmationId?/delegations[]）与 `Delegation`（status: pending|running|
+      completed|blocked|failed|cancelled|superseded，origin: coordinator|user_mention，
+      requirementRevision/generation/operationId/invocationId?/result?/failure?/stale?）；
+      `ExpertReport` 五字段**封闭形状**，`isExpertReport` 拒绝任何额外字段（思考过程进不来）。
+      浏览器安全：无 `node:` import（2C 教训）
+- [x] T1-2 迁移表 `canTransitionDiscussion` / `canTransitionDelegation`（终态不可回退、
+      不可跳过 synthesizing 直达 confirmation、waiting_user 只能回 consulting）；
+      `delegationLogicalKey` = discussionId|targetAgentId|requirementRevision；
+      `delegationsToRun` 只取当前 generation 的 pending|running（blocked 等输入不盲派）；
+      `supersedeStaleDelegations` 旧修订未完成 → superseded，已完成 → 保留但 `stale:true`
+- [x] T1-3 `DiscussionStore`：`open` 校验 lifecycle admission + generation + workItem revision；
+      `reserveDelegation` 同逻辑键并发 12 个恰一个 `reserved`（其余 `duplicate`），旧修订 →
+      `DELEGATION_STALE_REVISION` 且不落盘；`transitionDelegation` 校验迁移表 + 报告形状，
+      重放 `idempotent`；`transitionRun` 进入 consulting 计一轮、超 roundLimit →
+      `DISCUSSION_ROUND_LIMIT`（限制在 store 里，调用方重试绕不过）；`reviseRequirement`
+      落实 supersede；重启后 `runnableDelegations` 只给未完成项。
+      PostgreSQL：V13 `discussion_runs`（revision 守卫 upsert，委派内嵌 jsonb），relational
+      store 8 处接线 + cutover seed + COMMENT 门禁；跨实例同键并发只留 1 条委派，修订后旧
+      ask 拒绝且 jsonb 委派数不变。
+      **记到 T3**：V11/V13 的 `revision <= excluded.revision` 守卫在跨实例并发写同一 run 时
+      会静默丢一方更新（与既有 budgets 语义一致）；T3 的"租约/幂等"要补 CAS（`<` + 0 行受影响
+      → 事务回滚）。
+      **环境教训**：集成 spec 前 8 条直接用共享开发库，开发数据的内容引用在测试进程读不到会报
+      `CONTENT_UNAVAILABLE`——这是环境不是回归；把 `RELATIONAL_TEST_DATABASE_URL` 指向临时空库
+      即 12/12。
 
 ## T2 实现主 Agent 规划与派发（AC1/AC3/AC5/AC6）
 

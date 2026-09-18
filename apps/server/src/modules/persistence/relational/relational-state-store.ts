@@ -85,7 +85,8 @@ export const SESSION_KEYED_COLLECTIONS = [
   'contextSnapshotsBySession',
   'intentRoutingRecordsBySession',
   'followUpMessagesBySession',
-  'summaryCheckpointsBySession'
+  'summaryCheckpointsBySession',
+  'discussionsBySession'
 ] as const;
 
 const KNOWN_COLLECTIONS = new Set([
@@ -94,6 +95,7 @@ const KNOWN_COLLECTIONS = new Set([
   'sessionStopRequestsBySession',
   'workItemBudgetsBySession',
   'summaryCheckpointsBySession',
+  'discussionsBySession',
   'systemDataMetadata',
   'agents',
   'skills',
@@ -131,6 +133,8 @@ const KNOWN_COLLECTIONS = new Set([
 const RETAINED_OPERATIONAL_TABLES = new Set(['migration_runs', 'migration_errors']);
 const SUMMARY_CHECKPOINTS_SELECT_SQL =
   `select s.external_id group_id,c.source_snapshot->'sourceRecord' value from agent_cluster.summary_checkpoints c join agent_cluster.sessions s on s.id=c.session_id where s.deleted_at is null order by s.id,c.work_item_external_id,c.covered_event_seq,c.created_at`;
+const DISCUSSION_RUNS_SELECT_SQL =
+  `select s.external_id group_id,d.source_snapshot->'sourceRecord' value from agent_cluster.discussion_runs d join agent_cluster.sessions s on s.id=d.session_id where s.deleted_at is null order by s.id,d.created_at,d.external_id`;
 const REPLACEABLE_RELATIONAL_TABLES = [
   ...RELATIONAL_TABLES,
   ...RELATIONAL_SCHEMA_V2_TABLES,
@@ -439,6 +443,9 @@ export class RelationalStateStore {
           break;
         case 'summaryCheckpointsBySession':
           state.summaryCheckpointsBySession = await groupedSources(client, SUMMARY_CHECKPOINTS_SELECT_SQL);
+          break;
+        case 'discussionsBySession':
+          state.discussionsBySession = await groupedSources(client, DISCUSSION_RUNS_SELECT_SQL);
           break;
         case 'eventsBySession':
           state.eventsBySession = await groupedSources(client, `select s.external_id group_id,e.payload->'sourceRecord' value from agent_cluster.collaboration_events e join agent_cluster.sessions s on s.id=e.session_id where s.deleted_at is null order by s.id,e.session_seq`);
@@ -886,6 +893,7 @@ export class RelationalStateStore {
       case 'workspaceWritebacks': return this.writeWorkspaceWritebacks(client, array(value));
       case 'workItemBudgetsBySession': return this.writeWorkItemBudgets(client, record(value));
       case 'summaryCheckpointsBySession': return this.writeSummaryCheckpoints(client, record(value));
+      case 'discussionsBySession': return this.writeDiscussionRuns(client, record(value));
       case 'workItemsBySession': return this.writeWorkItems(client, record(value));
       case 'decisionRecordsBySession': return this.writeDecisionRecords(client, record(value));
       case 'contextSnapshotsBySession': return this.writeContextSnapshots(client, record(value));
@@ -1851,6 +1859,38 @@ export class RelationalStateStore {
     }
   }
 
+  private async writeDiscussionRuns(client: PoolClient, value: Record<string, unknown>) {
+    for (const [sessionExternalId, values] of Object.entries(value)) {
+      const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
+      if (!sessionId) continue;
+      for (const rawRun of array(values)) {
+        const run = record(rawRun);
+        const externalId = text(run.id);
+        if (!externalId) throw new Error('DISCUSSION_RUN_ID_MISSING');
+        // Mutable record, same guard as the budget ledger: a stale snapshot never
+        // overwrites a newer revision. Delegations live inside the snapshot, so
+        // their reservation uniqueness is settled in the store transaction that
+        // produced this revision, not by a second table.
+        await client.query(
+          `insert into agent_cluster.discussion_runs
+             (external_id,session_id,work_item_external_id,requirement_revision,generation,coordinator_agent_external_id,
+              status,round_limit,rounds_started,revision,source_snapshot,created_at,updated_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+           on conflict (external_id) do update set
+             session_id=excluded.session_id,work_item_external_id=excluded.work_item_external_id,
+             requirement_revision=excluded.requirement_revision,generation=excluded.generation,
+             coordinator_agent_external_id=excluded.coordinator_agent_external_id,status=excluded.status,
+             round_limit=excluded.round_limit,rounds_started=excluded.rounds_started,revision=excluded.revision,
+             source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at
+           where discussion_runs.revision <= excluded.revision`,
+          [externalId, sessionId, text(run.workItemId), integer(run.requirementRevision, 1), integer(run.generation, 0),
+            text(run.coordinatorAgentId), text(run.status), integer(run.roundLimit, 1), integer(run.roundsStarted, 0),
+            integer(run.revision, 1), json({ sourceRecord: run }), date(run.createdAt), date(run.updatedAt)]
+        );
+      }
+    }
+  }
+
   private async writeWorkItemBudgets(client: PoolClient, value: Record<string, unknown>) {
     for (const [sessionExternalId, values] of Object.entries(value)) {
       const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
@@ -2203,6 +2243,7 @@ export class RelationalStateStore {
     state.sessionLifecyclesBySession = await keyedSources(client, `select s.external_id,l.source_snapshot->'sourceRecord' value from agent_cluster.session_lifecycles l join agent_cluster.sessions s on s.id=l.session_id order by s.external_id`);
     state.workItemBudgetsBySession = await groupedSources(client, `select s.external_id group_id,b.source_snapshot->'sourceRecord' value from agent_cluster.work_item_budgets b join agent_cluster.sessions s on s.id=b.session_id where s.deleted_at is null order by s.id,b.updated_at`);
     state.summaryCheckpointsBySession = await groupedSources(client, SUMMARY_CHECKPOINTS_SELECT_SQL);
+    state.discussionsBySession = await groupedSources(client, DISCUSSION_RUNS_SELECT_SQL);
     state.runtimeInvocationsBySession = await groupedSources(client, `select s.external_id group_id,r.profile_snapshot->'sourceRecord' value from agent_cluster.runtime_invocations r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by r.started_at`);
     state.logicalOperationsBySession = await groupedSources(client, `select s.external_id group_id,o.source_snapshot->'sourceRecord' value from agent_cluster.logical_operations o join agent_cluster.sessions s on s.id=o.session_id where s.deleted_at is null order by o.external_id`);
     state.sessionStopRequestsBySession = await groupedSources(client, `select s.external_id group_id,r.source_snapshot->'sourceRecord' value from agent_cluster.session_stop_requests r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by r.created_at,r.external_id`);
@@ -2240,7 +2281,7 @@ export class RelationalStateStore {
 }
 
 function collectionWriteOrder(state: PersistedState): string[] {
-  const order = ['systemDataMetadata','agents','systemAgentRuntimePolicies','skills','capabilities','workflowCatalog','workflows','sessions','sessionLifecyclesBySession','workItemBudgetsBySession','workItemsBySession','decisionRecordsBySession','contextSnapshotsBySession','intentRoutingRecordsBySession','followUpMessagesBySession','summaryCheckpointsBySession','fileRevisions','workspaceWritebacks','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','localRuntimeDevices','localRuntimeOperationAudits','eventOutbox','cutoverAudits'];
+  const order = ['systemDataMetadata','agents','systemAgentRuntimePolicies','skills','capabilities','workflowCatalog','workflows','sessions','sessionLifecyclesBySession','workItemBudgetsBySession','workItemsBySession','decisionRecordsBySession','contextSnapshotsBySession','intentRoutingRecordsBySession','followUpMessagesBySession','summaryCheckpointsBySession','discussionsBySession','fileRevisions','workspaceWritebacks','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','localRuntimeDevices','localRuntimeOperationAudits','eventOutbox','cutoverAudits'];
   order.push('logicalOperationsBySession', 'sessionStopRequestsBySession');
   return order.filter((key) => Object.prototype.hasOwnProperty.call(state, key));
 }
