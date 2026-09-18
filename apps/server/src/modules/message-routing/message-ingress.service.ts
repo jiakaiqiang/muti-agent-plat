@@ -6,6 +6,7 @@ import type {
   UserMessageHandlingPlan
 } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
+import { messages } from '../../common/messages.js';
 import { nowIso } from '../../common/time.js';
 import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import { ContextManagementService } from '../context-management/context-management.service.js';
@@ -28,6 +29,10 @@ export class MessageIngressService {
     routingMode: IntentRoutingRolloutMode;
     messageIdempotencyKey?: string;
     replyToEventId?: string;
+    /** Create the durable long-term-memory confirmation card with the message. */
+    preferenceConfirmation?: { confidence?: number };
+    /** Confirmation that requires the next user message to become a fresh WorkItem. */
+    budgetExhaustionConfirmationId?: string;
   }) {
     const mentionedAgentIds = [...new Set(input.mentionedAgentIds)].map((id) => {
       const agent = this.agents.getForSurface(id, 'mention');
@@ -75,15 +80,64 @@ export class MessageIngressService {
       status: 'queued',
       queuedAt: nowIso()
     };
+    const budgetRecoveryResolution = input.budgetExhaustionConfirmationId
+      ? this.events.createDraft({
+          sessionId: input.session.id,
+          workItemId: input.session.activeWorkItemId,
+          type: 'user_confirmation_resolved',
+          content: '已收到拆分后的需求，将在新的任务上下文中处理。',
+          metadata: createMetadata('system_notice', {
+            confirmationId: input.budgetExhaustionConfirmationId,
+            status: 'approved',
+            selectedOptionKey: 'submit_narrowed_requirement',
+            reason: 'work_item_budget_exhausted'
+          })
+        })
+      : undefined;
+    const preferenceConfirmation = input.preferenceConfirmation
+      ? this.events.createDraft({
+          sessionId: input.session.id,
+          workItemId: input.session.activeWorkItemId,
+          type: 'user_confirmation_requested',
+          content: messages.confirmMemoryWrite,
+          metadata: createMetadata('confirmation_card', {
+            confirmationId: crypto.randomUUID(),
+            reason: 'confirm_memory_write',
+            title: messages.confirmMemoryWriteTitle,
+            description: messages.confirmMemoryWriteDescription,
+            candidate: {
+              content: input.content,
+              sourceEventId: event.id,
+              scope: 'long_term_candidate',
+              confidence: input.preferenceConfirmation.confidence ?? 0.72
+            },
+            options: [
+              { key: 'approve', label: messages.saveMemory, style: 'primary' },
+              { key: 'reject', label: messages.skipMemory, style: 'default' }
+            ]
+          })
+        })
+      : undefined;
+    const additionalEvents = [
+      ...(budgetRecoveryResolution ? [budgetRecoveryResolution] : []),
+      ...(preferenceConfirmation ? [preferenceConfirmation] : [])
+    ];
     const committed = await this.context.commitMessageIngress({
       session: input.session,
       event,
       followUp,
       rolloutMode: input.routingMode,
       routingIdempotencyKey: `${input.session.id}:${event.id}:intent-v2.1`,
-      initialGoal: input.session.originalInput
+      initialGoal: input.session.originalInput,
+      forceNewRelatedWorkItem: Boolean(input.budgetExhaustionConfirmationId),
+      ...(additionalEvents.length ? { additionalEvents } : {})
     });
     this.events.acceptCommitted(committed.event);
+    if (!committed.idempotentReplay) {
+      for (const additionalEvent of committed.additionalEvents ?? []) {
+        this.events.acceptCommitted(additionalEvent);
+      }
+    }
     if (committed.idempotentReplay) workspaceMetrics.increment('routing_idempotency_replay_total');
     return committed;
   }

@@ -10,7 +10,7 @@
     "dev": "node scripts/dev-entry.mjs",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node ../../node_modules/tsx/dist/cli.mjs --test src/atomic-file.spec.ts src/directory-picker.spec.ts src/local-secret-store.spec.ts src/protocol-handler.spec.ts src/state.spec.ts src/transport.spec.ts src/workspace.spec.ts src/runtime.spec.ts src/runtime-process-stop.spec.ts src/adapters/codex-adapter.spec.ts src/adapters/prompt.spec.ts",
+    "test": "node ../../node_modules/tsx/dist/cli.mjs --test --test-force-exit src/atomic-file.spec.ts src/directory-picker.spec.ts src/local-secret-store.spec.ts src/protocol-handler.spec.ts src/state.spec.ts src/transport.spec.ts src/workspace.spec.ts src/runtime.spec.ts src/runtime-process-stop.spec.ts src/adapters/codex-adapter.spec.ts src/adapters/prompt.spec.ts",
     "test:perf:workspace-registration": "tsx --tsconfig tsconfig.json src/workspace-registration.performance.ts"
   },
   "dependencies": {

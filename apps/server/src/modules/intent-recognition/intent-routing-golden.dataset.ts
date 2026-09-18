@@ -11,6 +11,10 @@ export type IntentRoutingGoldenCase = {
   sessionStatus: SessionStatus;
   hasActiveWorkItem: boolean;
   pendingConfirmation?: boolean;
+  /** Server-resolved @ targets present in the snapshot. */
+  mentionedAgentIds?: string[];
+  /** What the classifier claims it targeted; dropping a mention must not auto-apply. */
+  expectedAgentIds?: string[];
   expected: {
     relation: RequirementScopeRelation;
     contextPolicy: ContextInheritancePolicy;
@@ -58,5 +62,11 @@ export const INTENT_ROUTING_GOLDEN_DATASET_V1: IntentRoutingGoldenCase[] = [
   { id: 'multiple-similar-work-items', message: 'Continue the API migration task.', sessionStatus: 'COMPLETED', hasActiveWorkItem: true,
     expected: { relation: 'ambiguous', contextPolicy: 'ask_user', action: 'clarify', autoApply: false }, tags: ['similar_candidates', 'ambiguous'] },
   { id: 'switch-approach-continue', message: 'Keep the same goal, but switch to a queue-based approach and continue.', sessionStatus: 'FAILED', hasActiveWorkItem: true,
-    expected: { relation: 'same_requirement', contextPolicy: 'inherit_confirmed', action: 'replan', autoApply: true }, tags: ['replan', 'same_requirement'] }
+    expected: { relation: 'same_requirement', contextPolicy: 'inherit_confirmed', action: 'replan', autoApply: true }, tags: ['replan', 'same_requirement'] },
+  { id: 'mention-target-preserved-zh', message: '请 @质量 Agent 复核这次改动，沿用当前需求', sessionStatus: 'COMPLETED', hasActiveWorkItem: true,
+    mentionedAgentIds: ['agent-quality'], expectedAgentIds: ['agent-quality'],
+    expected: { relation: 'same_requirement', contextPolicy: 'inherit_confirmed', action: 'continue_active_work_item', autoApply: true }, tags: ['mention', 'target_preserved'] },
+  { id: 'mention-target-dropped-zh', message: '请 @质量 Agent 复核这次改动', sessionStatus: 'COMPLETED', hasActiveWorkItem: true,
+    mentionedAgentIds: ['agent-quality'], expectedAgentIds: [],
+    expected: { relation: 'same_requirement', contextPolicy: 'inherit_confirmed', action: 'continue_active_work_item', autoApply: false }, tags: ['mention', 'target_dropped', 'fail_closed'] }
 ];

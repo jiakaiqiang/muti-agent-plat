@@ -93,3 +93,11 @@ test('classifies explicit new requirements separately from failed-task continuat
   assert.equal(replan.requirementRelation, 'continuation');
   assert.equal(replan.failedExecutionAction, 'replan');
 });
+
+test('classifies preference messages for the memory confirmation card', () => {
+  const result = service.recognizeUserMessage('请记住：以后偏好标记为 X。', 'AGENT_DISCUSSING');
+
+  assert.equal(result.intent, 'preference_input');
+  assert.equal(result.shouldPause, false);
+  assert.equal(result.requiresUserConfirmation, false);
+});

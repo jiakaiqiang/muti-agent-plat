@@ -80,16 +80,20 @@ export const SESSION_KEYED_COLLECTIONS = [
   'memoriesBySession',
   'runtimeInvocationsBySession',
   'workItemsBySession',
+  'workItemBudgetsBySession',
   'decisionRecordsBySession',
   'contextSnapshotsBySession',
   'intentRoutingRecordsBySession',
-  'followUpMessagesBySession'
+  'followUpMessagesBySession',
+  'summaryCheckpointsBySession'
 ] as const;
 
 const KNOWN_COLLECTIONS = new Set([
   'sessionLifecyclesBySession',
   'logicalOperationsBySession',
   'sessionStopRequestsBySession',
+  'workItemBudgetsBySession',
+  'summaryCheckpointsBySession',
   'systemDataMetadata',
   'agents',
   'skills',
@@ -125,6 +129,8 @@ const KNOWN_COLLECTIONS = new Set([
 ]);
 
 const RETAINED_OPERATIONAL_TABLES = new Set(['migration_runs', 'migration_errors']);
+const SUMMARY_CHECKPOINTS_SELECT_SQL =
+  `select s.external_id group_id,c.source_snapshot->'sourceRecord' value from agent_cluster.summary_checkpoints c join agent_cluster.sessions s on s.id=c.session_id where s.deleted_at is null order by s.id,c.work_item_external_id,c.covered_event_seq,c.created_at`;
 const REPLACEABLE_RELATIONAL_TABLES = [
   ...RELATIONAL_TABLES,
   ...RELATIONAL_SCHEMA_V2_TABLES,
@@ -188,6 +194,30 @@ export class RelationalStateStore {
     } finally {
       client.release();
     }
+  }
+
+  async readEventPage(sessionId: string, options: { afterEventId?: string; limit: number }) {
+    const limit = Math.max(1, Math.min(500, Math.floor(options.limit)));
+    const result = await this.pool.query<{ value: CollaborationEvent }>(
+      `select e.payload->'sourceRecord' value
+         from agent_cluster.collaboration_events e
+         join agent_cluster.sessions s on s.id=e.session_id
+        where s.external_id=$1 and s.deleted_at is null
+          and e.session_seq > coalesce((
+            select cursor.session_seq from agent_cluster.collaboration_events cursor
+             where cursor.session_id=s.id and cursor.external_id=$2
+          ),0)
+        order by e.session_seq
+        limit $3`,
+      [sessionId, options.afterEventId ?? null, limit + 1]
+    );
+    const items = this.codec.hydrate(result.rows.slice(0, limit).map((row) => row.value));
+    const hasMore = result.rows.length > limit;
+    return {
+      items,
+      hasMore,
+      ...(hasMore && items.length ? { nextCursor: items[items.length - 1].id } : {})
+    };
   }
 
   private async lockCollections(client: PoolClient, keys: string[]) {
@@ -403,6 +433,12 @@ export class RelationalStateStore {
           break;
         case 'sessionLifecyclesBySession':
           state.sessionLifecyclesBySession = await keyedSources(client, `select s.external_id,l.source_snapshot->'sourceRecord' value from agent_cluster.session_lifecycles l join agent_cluster.sessions s on s.id=l.session_id order by s.external_id`);
+          break;
+        case 'workItemBudgetsBySession':
+          state.workItemBudgetsBySession = await groupedSources(client, `select s.external_id group_id,b.source_snapshot->'sourceRecord' value from agent_cluster.work_item_budgets b join agent_cluster.sessions s on s.id=b.session_id where s.deleted_at is null order by s.id,b.updated_at`);
+          break;
+        case 'summaryCheckpointsBySession':
+          state.summaryCheckpointsBySession = await groupedSources(client, SUMMARY_CHECKPOINTS_SELECT_SQL);
           break;
         case 'eventsBySession':
           state.eventsBySession = await groupedSources(client, `select s.external_id group_id,e.payload->'sourceRecord' value from agent_cluster.collaboration_events e join agent_cluster.sessions s on s.id=e.session_id where s.deleted_at is null order by s.id,e.session_seq`);
@@ -848,6 +884,8 @@ export class RelationalStateStore {
       case 'cutoverAudits': return this.writeCutoverAudits(client, array(value));
       case 'workspaceSessionLeases': return this.writeWorkspaceSessionLeases(client, record(value));
       case 'workspaceWritebacks': return this.writeWorkspaceWritebacks(client, array(value));
+      case 'workItemBudgetsBySession': return this.writeWorkItemBudgets(client, record(value));
+      case 'summaryCheckpointsBySession': return this.writeSummaryCheckpoints(client, record(value));
       case 'workItemsBySession': return this.writeWorkItems(client, record(value));
       case 'decisionRecordsBySession': return this.writeDecisionRecords(client, record(value));
       case 'contextSnapshotsBySession': return this.writeContextSnapshots(client, record(value));
@@ -1785,6 +1823,60 @@ export class RelationalStateStore {
     }
   }
 
+  private async writeSummaryCheckpoints(client: PoolClient, value: Record<string, unknown>) {
+    for (const [sessionExternalId, values] of Object.entries(value)) {
+      const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
+      if (!sessionId) continue;
+      for (const rawCheckpoint of array(values)) {
+        const checkpoint = record(rawCheckpoint);
+        const externalId = text(checkpoint.checkpointId);
+        const logicalKey = text(checkpoint.logicalKey);
+        if (!externalId || !logicalKey) throw new Error('SUMMARY_CHECKPOINT_KEY_MISSING');
+        // A checkpoint row is immutable once committed: the unique logical key is
+        // what makes the cross-process "one commit per coverage" guarantee real,
+        // so a conflicting insert is dropped rather than turned into an update.
+        await client.query(
+          `insert into agent_cluster.summary_checkpoints
+             (external_id,session_id,work_item_external_id,logical_key,covered_event_seq,work_item_revision,
+              decision_ledger_revision,policy_version,content_hash,generation,source_snapshot,created_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+           on conflict (external_id) do nothing`,
+          [externalId, sessionId, text(checkpoint.workItemId), logicalKey, integer(checkpoint.coveredEventSeq, 0),
+            integer(checkpoint.workItemRevision, 1), integer(checkpoint.decisionLedgerRevision, 0),
+            text(checkpoint.policyVersion), text(checkpoint.contentHash),
+            checkpoint.generation === undefined || checkpoint.generation === null ? null : integer(checkpoint.generation, 1),
+            json({ sourceRecord: checkpoint }), date(checkpoint.createdAt)]
+        );
+      }
+    }
+  }
+
+  private async writeWorkItemBudgets(client: PoolClient, value: Record<string, unknown>) {
+    for (const [sessionExternalId, values] of Object.entries(value)) {
+      const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
+      if (!sessionId) continue;
+      for (const rawLedger of array(values)) {
+        const ledger = record(rawLedger);
+        const workItemExternalId = text(ledger.workItemId);
+        if (!workItemExternalId) throw new Error('WORK_ITEM_BUDGET_WORK_ITEM_MISSING');
+        await client.query(
+          `insert into agent_cluster.work_item_budgets
+             (work_item_external_id,session_id,revision,limit_tokens,reserved_tokens,actual_tokens,unknown_tokens,source_snapshot,updated_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+           on conflict (work_item_external_id) do update set
+             session_id=excluded.session_id,revision=excluded.revision,limit_tokens=excluded.limit_tokens,
+             reserved_tokens=excluded.reserved_tokens,actual_tokens=excluded.actual_tokens,
+             unknown_tokens=excluded.unknown_tokens,source_snapshot=excluded.source_snapshot,
+             updated_at=excluded.updated_at
+           where work_item_budgets.revision <= excluded.revision`,
+          [workItemExternalId, sessionId, integer(ledger.revision, 1), tokenCount(ledger.limitTokens),
+            tokenCount(ledger.reservedTokens), tokenCount(ledger.actualTokens), tokenCount(ledger.unknownTokens),
+            json({ sourceRecord: ledger }), date(ledger.updatedAt)]
+        );
+      }
+    }
+  }
+
   private async writeWorkItems(client: PoolClient, value: Record<string, unknown>) {
     const active = new Set<string>();
     const parentIds = new Map<string, string>();
@@ -2109,6 +2201,8 @@ export class RelationalStateStore {
 
   private async loadRuntime(client: PoolClient, state: PersistedState) {
     state.sessionLifecyclesBySession = await keyedSources(client, `select s.external_id,l.source_snapshot->'sourceRecord' value from agent_cluster.session_lifecycles l join agent_cluster.sessions s on s.id=l.session_id order by s.external_id`);
+    state.workItemBudgetsBySession = await groupedSources(client, `select s.external_id group_id,b.source_snapshot->'sourceRecord' value from agent_cluster.work_item_budgets b join agent_cluster.sessions s on s.id=b.session_id where s.deleted_at is null order by s.id,b.updated_at`);
+    state.summaryCheckpointsBySession = await groupedSources(client, SUMMARY_CHECKPOINTS_SELECT_SQL);
     state.runtimeInvocationsBySession = await groupedSources(client, `select s.external_id group_id,r.profile_snapshot->'sourceRecord' value from agent_cluster.runtime_invocations r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by r.started_at`);
     state.logicalOperationsBySession = await groupedSources(client, `select s.external_id group_id,o.source_snapshot->'sourceRecord' value from agent_cluster.logical_operations o join agent_cluster.sessions s on s.id=o.session_id where s.deleted_at is null order by o.external_id`);
     state.sessionStopRequestsBySession = await groupedSources(client, `select s.external_id group_id,r.source_snapshot->'sourceRecord' value from agent_cluster.session_stop_requests r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by r.created_at,r.external_id`);
@@ -2146,7 +2240,7 @@ export class RelationalStateStore {
 }
 
 function collectionWriteOrder(state: PersistedState): string[] {
-  const order = ['systemDataMetadata','agents','systemAgentRuntimePolicies','skills','capabilities','workflowCatalog','workflows','sessions','sessionLifecyclesBySession','workItemsBySession','decisionRecordsBySession','contextSnapshotsBySession','intentRoutingRecordsBySession','followUpMessagesBySession','fileRevisions','workspaceWritebacks','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','localRuntimeDevices','localRuntimeOperationAudits','eventOutbox','cutoverAudits'];
+  const order = ['systemDataMetadata','agents','systemAgentRuntimePolicies','skills','capabilities','workflowCatalog','workflows','sessions','sessionLifecyclesBySession','workItemBudgetsBySession','workItemsBySession','decisionRecordsBySession','contextSnapshotsBySession','intentRoutingRecordsBySession','followUpMessagesBySession','summaryCheckpointsBySession','fileRevisions','workspaceWritebacks','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','localRuntimeDevices','localRuntimeOperationAudits','eventOutbox','cutoverAudits'];
   order.push('logicalOperationsBySession', 'sessionStopRequestsBySession');
   return order.filter((key) => Object.prototype.hasOwnProperty.call(state, key));
 }
@@ -2239,6 +2333,8 @@ function array(value: unknown): unknown[] { return Array.isArray(value)?value:[]
 function text(value: unknown, fallback=''): string { return typeof value==='string'&&value.length?value:fallback; }
 function nullableText(value: unknown): string|null { return typeof value==='string'&&value.length?value:null; }
 function integer(value: unknown, fallback=0): number { const n=Number(value); return Number.isInteger(n)?n:fallback; }
+/** Token counters are non-negative whole numbers; anything else must not leak into the ledger. */
+function tokenCount(value: unknown): number { const n=Number(value); return Number.isFinite(n)&&n>0?Math.floor(n):0; }
 function nullableInteger(value: unknown): number|null { const n=Number(value); return Number.isInteger(n)?n:null; }
 function boolean(value: unknown, fallback=false): boolean { return typeof value==='boolean'?value:fallback; }
 function date(value: unknown): string { return typeof value==='string'&&value?value:new Date().toISOString(); }

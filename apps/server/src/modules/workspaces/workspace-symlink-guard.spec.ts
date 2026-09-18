@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, rm, symlink, writeFile, mkdir, realpath } from 'node:fs/promises';
+import { lstat, mkdtemp, rm, symlink, writeFile, mkdir, realpath } from 'node:fs/promises';
 import { tmpdir, platform } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -24,9 +24,16 @@ function sha256(input: string): FileHash {
   return { algorithm: 'sha256', value: createHash('sha256').update(input).digest('hex') };
 }
 
+/** Which kind of real escaping link the fixture managed to create. */
+type EscapingLinkCarrier = 'file-symlink' | 'junction';
+
+type EscapingLinkResult =
+  | { skipped: true; reason: string }
+  | { skipped: false; carrier: EscapingLinkCarrier; symlinkRelative: string };
+
 async function withEscapingSymlink(
   fn: (ctx: { root: string; outside: string; symlinkRelative: string }) => Promise<void>
-) {
+): Promise<EscapingLinkResult> {
   const parent = await mkdtemp(join(tmpdir(), 'workspace-t120-'));
   const root = join(parent, 'root');
   const outside = join(parent, 'outside');
@@ -34,22 +41,55 @@ async function withEscapingSymlink(
   await mkdir(outside, { recursive: true });
   await writeFile(join(outside, 'secret.txt'), 'leaked\n');
   const linkPath = join(root, 'escape.txt');
+  let symlinkRelative = 'escape.txt';
+  let carrier: EscapingLinkCarrier | undefined;
   try {
     await symlink(join(outside, 'secret.txt'), linkPath, 'file');
-  } catch (error) {
-    if (platform() === 'win32') {
-      // Windows requires elevated privileges for file symlinks; skip if unavailable.
-      await rm(parent, { recursive: true, force: true });
-      return { skipped: true as const };
-    }
-    throw error;
+    // Trust lstat, not symlink()'s return value: some Windows/sandbox
+    // environments report success while creating a regular file instead
+    // (isSymbolicLink() === false, readlink throws EINVAL) or creating nothing
+    // at all (lstat throws ENOENT).
+    if ((await lstat(linkPath)).isSymbolicLink()) carrier = 'file-symlink';
+  } catch {
+    carrier = undefined;
   }
+  if (!carrier && platform() === 'win32') {
+    // Fall back to a directory junction. It needs no elevation on Windows and
+    // is a genuine reparse point — lstat reports isSymbolicLink() === true and
+    // realpath resolves it to `outside` — so the escaping path (a file *through*
+    // the junction) must be rejected exactly like an escaping file symlink.
+    const junctionPath = join(root, 'escape-dir');
+    try {
+      await symlink(outside, junctionPath, 'junction');
+      if ((await lstat(junctionPath)).isSymbolicLink()) {
+        carrier = 'junction';
+        symlinkRelative = 'escape-dir/secret.txt';
+      }
+    } catch {
+      carrier = undefined;
+    }
+  }
+  if (!carrier) {
+    // No real escaping link available on this host; Linux CI still exercises
+    // the file-symlink fixture end to end. Reported as a real skip so the
+    // coverage gap is visible in the skipped count instead of hiding behind a
+    // passing assertion.
+    await rm(parent, { recursive: true, force: true });
+    return {
+      skipped: true,
+      reason: 'no real escaping link could be created on this host (symlink privilege unavailable and junction fallback failed)'
+    };
+  }
+  // Remove the reparse point before the recursive cleanup so removal can never
+  // traverse it into the outside tree.
+  const reparsePoint = carrier === 'junction' ? join(root, 'escape-dir') : linkPath;
   try {
-    await fn({ root, outside, symlinkRelative: 'escape.txt' });
+    await fn({ root, outside, symlinkRelative });
   } finally {
+    await rm(reparsePoint, { recursive: false, force: true }).catch(() => undefined);
     await rm(parent, { recursive: true, force: true });
   }
-  return { skipped: false as const };
+  return { skipped: false, carrier, symlinkRelative };
 }
 
 test('assertWorkspacePathWithinRoot resolves normal paths inside root', async () => {
@@ -64,7 +104,7 @@ test('assertWorkspacePathWithinRoot resolves normal paths inside root', async ()
   }
 });
 
-test('assertWorkspacePathWithinRoot rejects symlink escaping the workspace root', async () => {
+test('assertWorkspacePathWithinRoot rejects symlink escaping the workspace root', async (t) => {
   const result = await withEscapingSymlink(async ({ root, symlinkRelative }) => {
     await assert.rejects(
       assertWorkspacePathWithinRoot(root, symlinkRelative),
@@ -72,12 +112,13 @@ test('assertWorkspacePathWithinRoot rejects symlink escaping the workspace root'
     );
   });
   if (result.skipped) {
-    // Windows without symlink privilege — still exercised on Linux CI.
-    assert.ok(true);
+    t.skip(result.reason);
+    return;
   }
+  t.diagnostic(`escaping link carrier: ${result.carrier}, path: ${result.symlinkRelative}`);
 });
 
-test('readServerLocalFile rejects a symlink whose target lives outside the workspace root', async () => {
+test('readServerLocalFile rejects a symlink whose target lives outside the workspace root', async (t) => {
   const result = await withEscapingSymlink(async ({ root, symlinkRelative }) => {
     await assert.rejects(
       readServerLocalFile({
@@ -88,10 +129,14 @@ test('readServerLocalFile rejects a symlink whose target lives outside the works
       /符号链接|路径越界|escape/i
     );
   });
-  if (result.skipped) assert.ok(true);
+  if (result.skipped) {
+    t.skip(result.reason);
+    return;
+  }
+  t.diagnostic(`escaping link carrier: ${result.carrier}, path: ${result.symlinkRelative}`);
 });
 
-test('statServerLocalFile rejects a symlink whose target lives outside the workspace root', async () => {
+test('statServerLocalFile rejects a symlink whose target lives outside the workspace root', async (t) => {
   const result = await withEscapingSymlink(async ({ root, symlinkRelative }) => {
     await assert.rejects(
       statServerLocalFile({
@@ -102,10 +147,14 @@ test('statServerLocalFile rejects a symlink whose target lives outside the works
       /符号链接|路径越界|escape/i
     );
   });
-  if (result.skipped) assert.ok(true);
+  if (result.skipped) {
+    t.skip(result.reason);
+    return;
+  }
+  t.diagnostic(`escaping link carrier: ${result.carrier}, path: ${result.symlinkRelative}`);
 });
 
-test('applyServerLocalChangeSet refuses to write through a symlink escaping the workspace root', async () => {
+test('applyServerLocalChangeSet refuses to write through a symlink escaping the workspace root', async (t) => {
   const result = await withEscapingSymlink(async ({ root, symlinkRelative }) => {
     const changeSet = {
       id: '00000000-0000-4000-8000-000000000120',
@@ -131,5 +180,9 @@ test('applyServerLocalChangeSet refuses to write through a symlink escaping the 
       /符号链接|路径越界|escape/i
     );
   });
-  if (result.skipped) assert.ok(true);
+  if (result.skipped) {
+    t.skip(result.reason);
+    return;
+  }
+  t.diagnostic(`escaping link carrier: ${result.carrier}, path: ${result.symlinkRelative}`);
 });

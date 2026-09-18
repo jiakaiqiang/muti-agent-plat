@@ -11,7 +11,7 @@
     "build": "node scripts/build.mjs",
     "start": "electron .",
     "typecheck": "tsc --noEmit",
-    "test": "node ../../node_modules/tsx/dist/cli.mjs --test src/policy.spec.ts src/update-controller.spec.ts src/completion-notifications.spec.ts",
+    "test": "node ../../node_modules/tsx/dist/cli.mjs --test --test-force-exit src/policy.spec.ts src/update-controller.spec.ts src/completion-notifications.spec.ts",
     "pack": "node scripts/package.mjs",
     "pack:release": "node scripts/package.mjs --release"
   },

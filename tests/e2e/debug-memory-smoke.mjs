@@ -137,7 +137,9 @@ try {
     method: 'POST',
     body: JSON.stringify({
       input: '继续保持 dry-run 非破坏性执行，并输出可审计的 context pack。',
-      agentIds: ['coordinator', 'backend', 'test', 'review', 'notification']
+      // coordinator became management-only (system-agent policy); the chat
+      // surface only accepts user agents, and the receiver is resolved server-side.
+      agentIds: ['requirements', 'backend', 'test', 'review', 'notification']
     })
   });
   const sessionId = created.data.session.id;

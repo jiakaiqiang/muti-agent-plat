@@ -1,7 +1,7 @@
 # 阶段 2A：统一消息意图、需求隔离与完整 Token 预算 — Spec v1
 
 > 日期：2026-09-16
-> 状态：实施中（2026-09-17）。T1–T3 已完成；T4 部分完成；T5、T6 未开始。验收条件本身未变更，证据见 Checklist。
+> 状态：**已验收通过（2026-09-17）**。T1–T6 已完成；并发 HTTP 路由、真实 Web + Electron SSE、停止/删除/恢复、预算恢复、千条历史上界、L0 信任边界与旧工具结果引用化均已复验。验收适用于当前已实现的 mock / generic LLM 适配器；未接入真实付费或多模态 Provider，不能将本结论外推为其生产验证结果。
 > 依赖：阶段 0、1 通过；为 2B、2C、3 提供统一上下文入口。
 
 [总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-2a-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-2a-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-2a-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-2a-checklist-v1.md)
@@ -48,6 +48,6 @@
 
 ## 6. 阶段退出
 
-精确命令零语义调用、目标与 @ 保留、完整请求预算和累计并发预算用例通过；上下文不会随无关历史线性增长。
+精确命令零语义调用、目标与 @ 保留、完整请求预算和累计并发预算用例均已通过；Context snapshot 在 1,000 条历史消息和 101 个候选需求下仍保持有界。完整证据见 Tasks/Checklist。
 
-本阶段详细任务和证据填写位置见 Tasks/Checklist。只有实现与必须验证均完成后才可更新状态，文档生成不勾选开发项。
+本阶段只验收已实现的适配器能力。真实付费/多模态 Provider 尚未配置，因而明确记为未执行而非伪造通过；其接入后的 Provider 专项验证不改变本阶段已实现的业务语义，也不推进 2B 的长期记忆、召回或缓存范围。

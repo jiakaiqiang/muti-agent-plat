@@ -42,6 +42,8 @@ export const WORKSPACE_METRIC_NAMES = [
   'runtime_stop_pending_sync_oldest_ms',
   'runtime_stop_receipt_replay_total',
   'runtime_stop_event_idempotency_conflict_total',
+  'cli_context_rotated_total',
+  'summary_checkpoint_failed_total',
   ...INTENT_ROUTING_METRIC_NAMES,
   ...FILE_REVISION_METRIC_NAMES
 ] as const;

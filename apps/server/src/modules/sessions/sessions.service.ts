@@ -1693,8 +1693,22 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       return this.handleExactCommandMessage(session, content, mentionedAgentIds, clientMessageId, exactCommand);
     }
     const routingMode = this.intentRoutingMode();
-    if (this.shouldEnforceIntentRouting(session, routingMode)) {
-      return this.sendMessageWithIntentV2(session, content, mentionedAgentIds, clientMessageId, routingMode, replyToEventId);
+    const explicitPreference = this.intentRecognition
+      .recognizeUserMessage(content, session.status).intent === 'preference_input';
+    const budgetExhaustionRecovery = pendingConfirmation?.reason === 'work_item_budget_exhausted'
+      ? pendingConfirmation.confirmationId
+      : undefined;
+    if (budgetExhaustionRecovery || this.shouldEnforceIntentRouting(session, routingMode)) {
+      return this.sendMessageWithIntentV2(
+        session,
+        content,
+        mentionedAgentIds,
+        clientMessageId,
+        routingMode,
+        replyToEventId,
+        budgetExhaustionRecovery,
+        explicitPreference
+      );
     }
     const receiverRecognitionPending = session.status === 'PAUSED';
     const useLocalIntentRecognition = receiverRecognitionPending;
@@ -1737,7 +1751,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       })
     });
 
-    if (handlingPlan.intent === 'preference_input') {
+    if (explicitPreference || handlingPlan.intent === 'preference_input') {
       this.events.create({
         sessionId,
         type: 'user_confirmation_requested',
@@ -1864,7 +1878,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     mentionedAgentIds: string[],
     clientMessageId: string | undefined,
     routingMode: IntentRoutingRolloutMode,
-    replyToEventId?: string
+    replyToEventId?: string,
+    budgetExhaustionConfirmationId?: string,
+    explicitPreference = false
   ) {
     const handlingPlan = this.pendingIntentHandlingPlan();
     const deferred = this.hasActiveSessionWork(session);
@@ -1879,7 +1895,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       handlingPlan,
       routingMode,
       replyToEventId,
-      messageIdempotencyKey: clientMessageId ? this.messageIdempotencyKey(session.id, clientMessageId) : undefined
+      messageIdempotencyKey: clientMessageId ? this.messageIdempotencyKey(session.id, clientMessageId) : undefined,
+      ...(explicitPreference ? { preferenceConfirmation: {} } : {}),
+      ...(budgetExhaustionConfirmationId ? { budgetExhaustionConfirmationId } : {})
     });
     const { event, followUp, routing, workItem } = committed;
     if (committed.idempotentReplay) {
@@ -3580,6 +3598,50 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       });
       return;
     }
+    if (outcome.kind === 'work_item_budget_exhausted') {
+      this.setStatus(session, 'WAIT_USER_DECISION');
+      if (session.workflowRunId && this.workflowRuntime) {
+        this.workflowRuntime.checkpointInterruptedExecution?.(session.workflowRunId, {
+          code: 'WORK_ITEM_BUDGET_EXHAUSTED',
+          message: outcome.reason
+        });
+      }
+      this.events.create({
+        sessionId,
+        workItemId: outcome.workItemId,
+        type: 'session_status_changed',
+        priority: 'high',
+        content: '当前需求的累计预算已用尽，等待用户拆分或缩小需求范围。',
+        metadata: createMetadata('system_notice', {
+          status: 'WAIT_USER_DECISION',
+          outcome: outcome.kind,
+          reason: 'work_item_budget_exhausted',
+          taskId: outcome.taskId,
+          workItemId: outcome.workItemId,
+          runtimeError: outcome.error
+        })
+      });
+      const confirmationId = `work-item-budget-exhausted:${outcome.workItemId ?? outcome.taskId ?? session.activeWorkItemId ?? 'session'}`;
+      this.events.createOnce(`confirmation-request:${session.id}:${confirmationId}`, {
+        sessionId,
+        workItemId: outcome.workItemId,
+        type: 'user_confirmation_requested',
+        priority: 'high',
+        content: '当前需求的预算已用尽，请提交拆分或缩小范围后的新需求。',
+        metadata: createMetadata('confirmation_card', {
+          confirmationId,
+          reason: 'work_item_budget_exhausted',
+          title: '需要拆分当前需求',
+          description: `${outcome.reason}\n系统不会重试已耗尽预算的任务。请在下方输入拆分或缩小范围后的新需求，系统会创建关联的新任务上下文。`,
+          relatedTaskId: outcome.taskId,
+          options: [
+            { key: 'submit_narrowed_requirement', label: '提交拆分需求', style: 'primary' },
+            { key: 'cancel', label: '取消会话', style: 'default' }
+          ]
+        })
+      });
+      return;
+    }
     if (outcome.kind === 'failed' && this.pauseForLocalRuntimeConfirmation(session, outcome.error, 'task_execution')) {
       return;
     }
@@ -4740,6 +4802,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
   private failSession(session: SessionDetail, error: unknown, phase: string) {
     const runtimeError = extractRuntimeError(error);
+    if (this.applyWorkItemBudgetExhaustion(session, runtimeError)) return;
     if (this.pauseForLocalRuntimeConfirmation(session, runtimeError, phase)) return;
     const message = runtimeError?.message ?? (error instanceof Error ? error.message : String(error));
     this.setStatus(session, 'FAILED');
@@ -4776,6 +4839,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
   private failSessionWithFullError(session: SessionDetail, error: unknown, phase: string) {
     const runtimeError = extractRuntimeError(error);
+    if (this.applyWorkItemBudgetExhaustion(session, runtimeError)) return;
     if (this.pauseForLocalRuntimeConfirmation(session, runtimeError, phase)) return;
     const message = runtimeError?.message ?? (error instanceof Error ? error.message : String(error));
     const runtimePhase = typeof runtimeError?.details?.phase === 'string'
@@ -4818,6 +4882,17 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       title: '执行失败',
       description: `${fullMessage}\n继续时会重试当前阶段，不会重放已经完成的步骤。`
     });
+  }
+
+  private applyWorkItemBudgetExhaustion(session: SessionDetail, runtimeError: RuntimeError | undefined) {
+    if (runtimeError?.code !== 'WORK_ITEM_BUDGET_EXHAUSTED') return false;
+    this.applyOutcome(session.id, {
+      kind: 'work_item_budget_exhausted',
+      reason: runtimeError.message,
+      ...(session.activeWorkItemId ? { workItemId: session.activeWorkItemId } : {}),
+      error: runtimeError
+    });
+    return true;
   }
 
   private assertControlTransition(current: SessionStatus, next: SessionStatus) {

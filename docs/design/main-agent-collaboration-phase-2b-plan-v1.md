@@ -1,7 +1,7 @@
 # 阶段 2B：版本化长期记忆、增量摘要与历史需求召回 — Plan v1
 
 > 日期：2026-09-16
-> 状态：设计与实施基线，待实施；现有能力的复用不代表本阶段验收已完成。
+> 状态：已实现并验收（2026-09-18）；实现证据见 Tasks/Checklist。
 > 依赖：阶段 2A 通过；使用阶段 1 生命周期/取消屏障。
 
 [总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-2b-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-2b-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-2b-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-2b-checklist-v1.md)
@@ -38,7 +38,7 @@
 
 ### 2.6
 
-把按会话全量 Map 的读取逐步替换为分页与按需求查询；派生缓存有 LRU/容量上限。数据库查询索引、file 模式等价行为和历史懒加载纳入测试；原始持久化数据的保留不受缓存 TTL 支配。
+事件读取已提供 cursor/limit 分页（默认 200、最大 500）。PostgreSQL 直接执行数据库页查询；file backend 返回同形状的有界页，并用 32 页 LRU、事件写入/会话删除失效控制派生缓存。原始数据不受缓存淘汰影响。file backend 启动仍加载完整 JSON/事件投影，因此这里只声明请求级有界，不声明存储完全懒加载；生产长历史以 PostgreSQL 路径为准。
 
 ### 2.7
 
@@ -54,10 +54,10 @@ Runtime conversationKey 至少包含 sessionId/workItemId/role/上下文代次�
 
 ## 4. 数据与接口影响
 
-- 扩展现有 SummaryMemoryCheckpoint，而非让新旧摘要服务同时发布。新增历史需求检索/分页接口与来源可用性标记，接口返回受访问范围限制的候选。
-- 摘要生成任务纳入统一 operation、取消、预算和持久化恢复；删除墓碑排除归档索引，恢复时重新验证版本再建索引。
-
-拟新增类型、状态和接口均为设计项，不是当前可调用 API。涉及持久化时，实施必须同步 shared、API/event/data/runtime/UI-state 合同、PostgreSQL projection/迁移和 file backend，不能只加内存 Map。
+- 已加法扩展 `SummaryMemoryCheckpoint`，并新增独立 `SummaryCheckpointRecord`/V12 `summary_checkpoints` 持久化；旧 artifact 内嵌检查点仍可读取。
+- 历史召回结果进入版本化 Intent Snapshot；`GET /sessions/:id/events?limit=` 返回有界页，不带 `limit` 保持旧响应兼容。
+- 摘要检查点提交受 Session lifecycle generation/admission、WorkItem/Decision revision 和可选 WorkItem 摘要预算约束；原始事件/产物不被压缩删除。
+- CLI invocation 记录补充 WorkItem/上下文代次边界和累计输入轮换阈值，副作用继续由既有 LogicalOperation 去重。
 
 ## 5. 修改边界
 
@@ -75,7 +75,7 @@ Runtime conversationKey 至少包含 sessionId/workItemId/role/上下文代次�
 
 ## 6. 实施次序与验证
 
-按 [tasks](../implementation/main-agent-collaboration-phase-2b-tasks-v1.md) 顺序推进，每项先补失败用例/合同断言，再实现并最小回归。完整场景和命令见 [checklist](../quality/main-agent-collaboration-phase-2b-checklist-v1.md)；现有命令并不自动覆盖拟新增场景。
+T1-T6 已按 [tasks](../implementation/main-agent-collaboration-phase-2b-tasks-v1.md) 完成。定向回归 176/176、独立 PostgreSQL 11/11、预算/记忆/取消/恢复/删除 E2E、全仓 typecheck/test/Harness/build 均通过；完整命令和退出码见 [checklist](../quality/main-agent-collaboration-phase-2b-checklist-v1.md)。
 
 ## 7. 风险、回退与未决参数
 
@@ -84,4 +84,4 @@ Runtime conversationKey 至少包含 sessionId/workItemId/role/上下文代次�
 
 回退：停用摘要生成/语义检索时仍使用当前权威状态和已有有效检查点；不得退回全历史注入。不删除检查点或原文，索引可按版本重建。
 
-产品交互按总计划已沟通边界执行。模型预算、并发、缓存容量与 TTL 等环境参数不在文档中冒充现有配置；在阶段 0 冻结配置合同、相关阶段实现前记录有效值和验证依据。新增破坏性维护/外部服务采购/发布需单独确认，不影响本轮生成设计文档。
+本阶段未接入外部语义检索或真实付费模型；无匹配或低可信召回均走澄清。file backend 的启动期完整投影属于已知开发模式限制，后续若要消除需单独重构持久化装载模型，不能用本阶段的有界页测试冒充完成。新增破坏性维护、外部服务采购、部署或发布仍需单独确认。

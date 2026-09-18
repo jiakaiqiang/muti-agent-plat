@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { CollaborationEvent } from '@agent-cluster/shared';
 import { firstValueFrom } from 'rxjs';
-import { EventsService } from './events.service.js';
+import { EVENT_PAGE_CACHE_MAX, EventsService } from './events.service.js';
 
 function makeService(
   claimed: Array<Record<string, unknown>> = [],
@@ -98,6 +98,53 @@ test('outbox recovery republishes an event committed before the publishing proce
     assert.equal((await recovered).id, event.id);
     assert.deepEqual(calls.published, [event.id]);
     assert.deepEqual(service.list(event.sessionId).map(item => item.id), [event.id]);
+  } finally {
+    await service.onModuleDestroy();
+  }
+});
+
+test('paged history reads the durable page instead of a stale in-memory event log', async () => {
+  const old = { id: 'old', sessionId: 'session-1', type: 'agent_message', toAgentIds: [], content: 'old',
+    metadata: { schemaVersion: '0.1', payload: {} }, createdAt: '2026-09-17T00:00:00.000Z' } as CollaborationEvent;
+  const current = { ...old, id: 'current', content: 'current' };
+  const { service } = makeService([], { 'session-1': [old] });
+  const persistence = (service as unknown as { persistence: { readEventPage?: unknown } }).persistence;
+  let requestedLimit = 0;
+  persistence.readEventPage = async (_sessionId: string, options: { limit: number }) => {
+    requestedLimit = options.limit;
+    return { items: [current], hasMore: false };
+  };
+  try {
+    const page = await service.listPage('session-1', { limit: 2 });
+    assert.deepEqual(page.items.map((item) => item.id), ['current']);
+    assert.equal(requestedLimit, 2);
+  } finally {
+    await service.onModuleDestroy();
+  }
+});
+
+test('file history keeps only a bounded number of cached pages and invalidates them after an event', async () => {
+  const events = Array.from({ length: EVENT_PAGE_CACHE_MAX + 2 }, (_, index) => ({
+    id: `event-${index}`, sessionId: 'session-1', type: 'agent_message',
+    toAgentIds: [], content: `message-${index}`,
+    metadata: { schemaVersion: '0.1', payload: {} }, createdAt: '2026-09-17T00:00:00.000Z'
+  })) as CollaborationEvent[];
+  const { service } = makeService([], { 'session-1': events });
+  const inspect = service as unknown as { pageCache: Map<string, unknown> };
+  try {
+    for (let index = 0; index <= EVENT_PAGE_CACHE_MAX; index += 1) {
+      const page = await service.listPage('session-1', { afterEventId: events[index].id, limit: 1 });
+      assert.equal(page.items[0]?.id, events[index + 1]?.id);
+    }
+    assert.equal(inspect.pageCache.size, EVENT_PAGE_CACHE_MAX);
+    const previousLastId = events.at(-1)?.id;
+    const previousPenultimateId = events.at(-2)?.id;
+    const before = await service.listPage('session-1', { afterEventId: previousLastId, limit: 1 });
+    assert.deepEqual(before.items, []);
+    const next = service.create({ sessionId: 'session-1', type: 'agent_message', content: 'new message' });
+    const after = await service.listPage('session-1', { afterEventId: previousPenultimateId, limit: 2 });
+    assert.deepEqual(after.items.map((event) => event.id), [previousLastId, next.id]);
+    assert.ok(inspect.pageCache.size <= EVENT_PAGE_CACHE_MAX);
   } finally {
     await service.onModuleDestroy();
   }

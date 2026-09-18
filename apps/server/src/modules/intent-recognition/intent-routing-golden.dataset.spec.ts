@@ -10,7 +10,8 @@ test('intent routing golden dataset covers lifecycle, ambiguity, failure and saf
   for (const required of [
     'exact_command', 'recovery', 'related', 'independent', 'ambiguous', 'multi_intent',
     'invalid_reference', 'stale_snapshot', 'runtime_failure', 'fail_closed', 'high_risk',
-    'prompt_injection', 'cross_language', 'similar_candidates', 'replan'
+    'prompt_injection', 'cross_language', 'similar_candidates', 'replan',
+    'mention', 'target_preserved', 'target_dropped'
   ]) {
     assert.ok(tags.has(required), `missing golden dataset coverage: ${required}`);
   }
@@ -19,6 +20,19 @@ test('intent routing golden dataset covers lifecycle, ambiguity, failure and saf
     if (item.expected.relation === 'ambiguous') assert.equal(item.expected.autoApply, false);
     if (item.expected.contextPolicy === 'clean_task_context') {
       assert.equal(item.expected.action, 'create_independent_work_item');
+    }
+    // An @ target the classifier silently drops may never be applied on its own.
+    if (item.tags.includes('target_dropped')) {
+      assert.ok(item.mentionedAgentIds?.length, `${item.id} must carry a mentioned target to drop`);
+      assert.deepEqual(item.expectedAgentIds, [], `${item.id} must claim it targeted nothing`);
+      assert.equal(item.expected.autoApply, false, `${item.id} must not auto-apply`);
+    }
+    if (item.tags.includes('target_preserved')) {
+      assert.deepEqual(
+        item.expectedAgentIds,
+        item.mentionedAgentIds,
+        `${item.id} must keep exactly the mentioned targets`
+      );
     }
   }
 });

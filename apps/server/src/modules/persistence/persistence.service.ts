@@ -124,6 +124,13 @@ export class PersistenceService implements OnModuleDestroy {
     return this.clone(value) as T;
   }
 
+  async readEventPage(sessionId: string, options: { afterEventId?: string; limit: number }) {
+    if (!this.enabled || this.backend !== 'postgres') return undefined;
+    if (!this.relationalStore) throw new Error('RELATIONAL_PERSISTENCE_UNAVAILABLE: relational state store is not initialized.');
+    await this.flush();
+    return this.relationalStore.readEventPage(sessionId, options);
+  }
+
   setCollection<T>(key: string, value: T): Promise<boolean> {
     if (!this.enabled) {
       return Promise.resolve(true);

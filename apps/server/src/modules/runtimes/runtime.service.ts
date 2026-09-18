@@ -13,10 +13,12 @@ import type {
   RuntimeAvailability,
   RuntimeAvailabilityStatus,
   RuntimeStopSummary,
-  RuntimeType
+  RuntimeType,
+  SessionDetail
 } from '@agent-cluster/shared';
 import { createAgentMessageOutput, classifyProviderFailure, ProviderCircuit, usefulRuntimeActivity, runtimeActivityKind } from '@agent-cluster/shared';
-import { runtimeStreamingEnabledFor } from '../../common/runtime-config.js';
+import { cliContextRotationInputTokens, runtimeStreamingEnabledFor } from '../../common/runtime-config.js';
+import { buildBudget } from '../../common/token.js';
 import { nowIso } from '../../common/time.js';
 import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import {
@@ -43,6 +45,13 @@ import { InvocationWorkspaceBindingsService } from './invocation-workspace-bindi
 import { LogicalOperationStore } from './logical-operation-store.js';
 import { RuntimeModelConfigService } from './runtime-model-config.service.js';
 import { SessionStopStateStore } from './session-stop-state-store.js';
+import {
+  WORK_ITEM_BUDGET_EXHAUSTED_CODE,
+  budgetCategoryFor,
+  workItemBudgetExhaustedMessage
+} from './work-item-budget-policy.js';
+import { WorkItemBudgetStore } from './work-item-budget-store.js';
+import { SessionLifecycleStore } from './session-lifecycle-store.js';
 import { EventsService } from '../events/events.service.js';
 
 export type RuntimeInvocationLog = {
@@ -76,6 +85,8 @@ export type RuntimeInvocationLog = {
   profileSnapshot: RuntimeInvocationProfileSnapshot;
   cliSessionId?: string;
   workDir?: string;
+  /** Session lifecycle generation the CLI context belongs to; a restored session must not resume it. */
+  contextGeneration?: number;
   workspaceExecution?: AgentRunResult['workspaceExecution'];
   attempt?: RuntimeAttemptTrace;
   workspaceIndexGeneration?: number;
@@ -105,6 +116,8 @@ export class RuntimeService implements OnModuleInit {
   private readonly registrationReady: Promise<void>;
   readonly operations: LogicalOperationStore;
   readonly stopStates: SessionStopStateStore;
+  readonly workItemBudgets: WorkItemBudgetStore;
+  private readonly lifecycle: SessionLifecycleStore;
   private invocationWrites = Promise.resolve();
   private readonly providerCircuits = new ProviderCircuit();
   private readonly supervised = new Map<string, Map<string, RuntimeExecutionHandle>>();
@@ -140,6 +153,8 @@ export class RuntimeService implements OnModuleInit {
   ) {
     this.operations = new LogicalOperationStore(persistence);
     this.stopStates = new SessionStopStateStore(persistence);
+    this.workItemBudgets = new WorkItemBudgetStore(persistence);
+    this.lifecycle = new SessionLifecycleStore(persistence);
     const persisted = this.persistence.getCollection<Record<string, RuntimeInvocationLog[]>>(
       'runtimeInvocationsBySession',
       {}
@@ -334,7 +349,19 @@ export class RuntimeService implements OnModuleInit {
           kind: 'phase_timeout', source: 'orchestrator', scope: 'phase', phase: input.phase,
           timeout: { mode: 'deadline', timeoutMs: remainingMs }
         })), remainingMs);
+        // Reservation happens here on purpose: every cheap early return above
+        // must not leave an allowance committed for a call that never starts.
+        const budgetRefusal = await this.commitRequirementBudget(input);
+        if (budgetRefusal) return budgetRefusal;
         underlying = this.startUnsupervised(input, controller.signal);
+        // Reconcile from the adapter's own result so a refusal or a partial
+        // failure still releases the allowance instead of holding it forever.
+        // Deliberately not awaited inside the supervisor: the supervised result
+        // may return through the stop barrier without waiting for the late
+        // process exit, and bookkeeping must not change that.
+        void underlying.result
+          .then(async settled => { await this.settleRequirementBudget(input, settled); })
+          .catch(() => undefined);
         adapterStartedAt = nowIso();
         const failSupervision = () => {
           supervisionFailed = true;
@@ -902,6 +929,9 @@ export class RuntimeService implements OnModuleInit {
       profileSnapshot: this.buildProfileSnapshot(input),
       cliSessionId: result.runtimeSession?.cliSessionId ?? this.extractCliSessionId(result),
       workDir: result.runtimeSession?.workDir,
+      ...(this.lifecycle.generation(input.sessionId) !== undefined
+        ? { contextGeneration: this.lifecycle.generation(input.sessionId) }
+        : {}),
       workspaceExecution: result.workspaceExecution,
       attempt: input.attempt,
       workspaceIndexGeneration: input.contextEnvelope.L1.navigation.indexGeneration,
@@ -988,6 +1018,94 @@ export class RuntimeService implements OnModuleInit {
     result.output = createAgentMessageOutput({ messageKind: 'risk', content: message });
     result.events = [];
     return result;
+  }
+
+  /**
+   * Commits a slice of the requirement's cumulative model budget before the
+   * adapter is allowed to start, so two experts on one requirement cannot each
+   * spend the whole remaining allowance.
+   *
+   * The requirement limit reuses the session's already-configured token budget
+   * (`TOKEN_BUDGET_DEFAULT` / `session.tokenBudget`) rather than inventing a new
+   * parameter. An invocation without a work item has no requirement to charge,
+   * so it proceeds unchanged.
+   *
+   * Returns an explainable refusal when there is no allowance left, mirroring the
+   * provider-circuit early return: the caller gets a typed code and the numbers
+   * instead of a silently truncated request.
+   */
+  private async commitRequirementBudget(input: InvocationPlan): Promise<AgentRunResult | undefined> {
+    const workItemId = input.workItemId;
+    if (!workItemId) return undefined;
+    const session = this.sessionForBudget(input.sessionId);
+    if (!session) return undefined;
+    const sessionBudget = buildBudget(session);
+    const limitTokens = sessionBudget.maxTotalTokens;
+    const requestedTokens = input.budget.maxInputTokens ?? sessionBudget.maxInputTokens;
+    if (!limitTokens || !requestedTokens) return undefined;
+    const category = budgetCategoryFor(input.phase, input.attempt);
+    const attemptId = input.invocationId;
+    const outcome = await this.workItemBudgets.reserve({
+      sessionId: input.sessionId,
+      workItemId,
+      attemptId,
+      operationId: input.operation?.id ?? attemptId,
+      category,
+      requestedTokens,
+      limitTokens
+    });
+    if (outcome.status === 'reserved') return undefined;
+    const message = workItemBudgetExhaustedMessage({
+      availableTokens: outcome.availableTokens,
+      requestedTokens: outcome.requestedTokens,
+      limitTokens
+    });
+    const refusal = this.invocationFailureResult(input, message);
+    refusal.error = {
+      code: WORK_ITEM_BUDGET_EXHAUSTED_CODE,
+      message,
+      retryable: false,
+      details: {
+        workItemId,
+        category,
+        availableTokens: outcome.availableTokens,
+        requestedTokens: outcome.requestedTokens,
+        limitTokens,
+        operationId: input.operation?.id,
+        retryable: false
+      }
+    };
+    return refusal;
+  }
+
+  /**
+   * Reconciles the allowance against what the provider reported. Unavailable
+   * usage keeps the reservation cap as a conservative bound, because the call
+   * may still have been billed.
+   */
+  private async settleRequirementBudget(input: InvocationPlan, result: AgentRunResult): Promise<void> {
+    const workItemId = input.workItemId;
+    if (!workItemId) return;
+    const reportedTokens = result.usage?.inputTokens;
+    // Mock never dispatches a billable provider request. Its explicit zero is a
+    // measurement, unlike a zero reported by an external Runtime where usage
+    // may simply be unavailable after cancellation.
+    const hasReportedUsage = typeof reportedTokens === 'number' && (
+      reportedTokens > 0 || result.runtimeType === 'mock'
+    );
+    await this.workItemBudgets.settle({
+      sessionId: input.sessionId,
+      workItemId,
+      attemptId: input.invocationId,
+      outcome: hasReportedUsage
+        ? { kind: 'reported', actualTokens: Math.max(0, reportedTokens ?? 0) }
+        : { kind: 'unavailable' }
+    }).catch(() => undefined);
+  }
+
+  private sessionForBudget(sessionId: string): SessionDetail | undefined {
+    const sessions = this.persistence.getCollection<SessionDetail[]>('sessions', []);
+    return sessions.find(session => session.id === sessionId);
   }
 
   private startInManagedWorktree(
@@ -1123,23 +1241,45 @@ export class RuntimeService implements OnModuleInit {
     return withResumeFallback(startAdapter.bind(undefined, adapter), input, firstHandle, signal);
   }
 
+  /**
+   * A CLI conversation is private to (session, agent, task, runtime) **and** the
+   * WorkItem it served; a different requirement, or a session generation that has
+   * since been restored, starts a fresh context instead of replaying old history.
+   *
+   * Rotation: once the conversation's accumulated provider input crosses the
+   * configured window threshold, the old CLI session is not resumed. Phase-end
+   * checkpoints already captured the state to carry over; side-effect dedupe
+   * stays with the LogicalOperation, so the new context re-runs nothing.
+   */
   findPriorInvocation(
     sessionId: string,
     agentId: string,
     taskId: string,
-    runtimeType: RuntimeType
+    runtimeType: RuntimeType,
+    scope: { workItemId?: string } = {}
   ): { cliSessionId: string; workDir?: string } | undefined {
-    const latest = this.listInvocations(sessionId)
+    const generation = this.lifecycle.generation(sessionId);
+    const chain = this.listInvocations(sessionId)
       .filter(
         (invocation) =>
           invocation.agentId === agentId &&
           invocation.taskId === taskId &&
           invocation.runtimeType === runtimeType &&
           invocation.status === 'completed' &&
-          Boolean(invocation.cliSessionId)
+          Boolean(invocation.cliSessionId) &&
+          (scope.workItemId === undefined || invocation.workItemId === scope.workItemId) &&
+          (generation === undefined || invocation.contextGeneration === generation)
       )
-      .sort((left, right) => right.completedAt.localeCompare(left.completedAt))[0];
+      .sort((left, right) => right.completedAt.localeCompare(left.completedAt));
+    const latest = chain[0];
     if (!latest?.cliSessionId) return undefined;
+    const conversationInputTokens = chain
+      .filter((invocation) => invocation.cliSessionId === latest.cliSessionId)
+      .reduce((sum, invocation) => sum + (invocation.usage?.inputTokens ?? 0), 0);
+    if (conversationInputTokens >= cliContextRotationInputTokens()) {
+      workspaceMetrics.increment('cli_context_rotated_total', 1, { runtimeType });
+      return undefined;
+    }
     return { cliSessionId: latest.cliSessionId, workDir: latest.workDir };
   }
 }

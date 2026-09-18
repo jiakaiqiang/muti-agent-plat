@@ -348,6 +348,142 @@ test('discussion output guard rejects missing or blank agent message content', (
   assert.equal(usableAgentMessageOutput({ kind: 'agent_message', messageKind: 'summary', content: 'done' }), true);
 });
 
+test('runtime orchestration checks the long-conversation checkpoint threshold before provider dispatch', async () => {
+  const service = makeService() as any;
+  const triggers: string[] = [];
+  service.createSummaryMemoryCheckpoint = async (...args: unknown[]) => {
+    triggers.push(String(args[5]));
+  };
+  service.runRuntimeProviderAttempts = async (_activeSession: SessionDetail, input: { invocationId: string }) => ({
+    invocationId: input.invocationId,
+    runtimeType: 'mock',
+    status: 'completed',
+    output: createAgentMessageOutput({ messageKind: 'summary', content: 'completed' }),
+    events: [],
+    artifacts: [],
+    systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+    usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, model: 'mock' }
+  });
+
+  await service.runRuntime(
+    { ...session(), activeWorkItemId: 'work-1' },
+    {
+      invocationId: 'threshold-invocation',
+      sessionId: 'session-1',
+      phase: 'discussion',
+      agent: agent('coordinator'),
+      contextAssembly: { workItemId: 'work-1', sessionGoal: 'Continue the requirement.' },
+      expectedOutput: { kind: 'agent_message', schemaVersion: '1.0' },
+      budget: {}
+    }
+  );
+
+  assert.deepEqual(triggers, ['budget_threshold']);
+});
+
+test('context rebuilding reads the durable checkpoint when its artifact projection is missing', () => {
+  const service = makeService() as any;
+  service.summaryCheckpoints = {
+    latest() {
+      return {
+        checkpointId: 'checkpoint-durable-only',
+        sessionId: 'session-1',
+        workItemId: 'work-1',
+        logicalKey: 'work-1|seq:24|wi:1|dl:0|summary-checkpoint-v2',
+        coveredEventSeq: 24,
+        workItemRevision: 1,
+        decisionLedgerRevision: 0,
+        policyVersion: 'summary-checkpoint-v2',
+        contentHash: 'durable-content-hash',
+        phase: 'task_execution',
+        summaryMemory: {
+          goal: 'Durable requirement',
+          currentState: 'EXECUTING / task_execution',
+          confirmedFacts: ['DURABLE_CHECKPOINT_FACT'],
+          completed: ['already-written-file.ts'],
+          decisions: [],
+          openQuestions: [],
+          risks: [],
+          nextSteps: ['Continue validation']
+        },
+        sourceEventIds: ['event-24'],
+        sourceArtifactIds: [],
+        sourceMemoryIds: [],
+        sourceDecisionIds: [],
+        createdAt: '2026-09-17T00:00:00.000Z'
+      };
+    }
+  };
+  const activeSession = { ...session(), activeWorkItemId: 'work-1' };
+  const contextSlice = {
+    workItem: {
+      id: 'work-1', sessionId: activeSession.id, title: 'Durable requirement', goal: 'Durable requirement',
+      status: 'OPEN', revision: 1, inheritedDecisionIds: [], inheritedArtifactIds: [],
+      createdAt: activeSession.createdAt, updatedAt: activeSession.updatedAt
+    },
+    decisions: [], tasks: [], events: [], memories: [], artifacts: [],
+    inheritedDecisionIds: [], inheritedArtifactIds: []
+  };
+
+  const latest = service.latestSummaryMemoryCheckpoint(activeSession.id, 'work-1');
+  const rebuilt = service.createSummaryMemory(activeSession, undefined, undefined, 'discussion', contextSlice);
+
+  assert.equal(latest?.checkpoint.checkpointId, 'checkpoint-durable-only');
+  assert.equal(latest?.artifact, undefined, 'an artifact is only a display projection, not the durable read source');
+  assert.ok(rebuilt.confirmedFacts.includes('DURABLE_CHECKPOINT_FACT'));
+  assert.ok(rebuilt.completed.includes('already-written-file.ts'));
+});
+
+test('a checkpoint keeps superseded decision and event sources without restoring old event prose into current context', async () => {
+  const service = makeService() as any;
+  const current = {
+    id: 'decision-current', sessionId: 'session-1', workItemId: 'work-1', kind: 'constraint',
+    status: 'confirmed', content: '只允许 Excel', sourceEventId: 'event-current', revision: 1,
+    createdAt: '2026-09-17T00:00:00.000Z', updatedAt: '2026-09-17T00:00:00.000Z'
+  };
+  const superseded = {
+    ...current, id: 'decision-old', status: 'superseded', content: '允许 CSV', sourceEventId: 'event-old'
+  };
+  const activeSession = { ...session(), activeWorkItemId: 'work-1', decisionLedgerRevision: 2 };
+  service.createWorkItemContextSlice = () => ({
+    workItem: {
+      id: 'work-1', sessionId: activeSession.id, title: '导出', goal: '导出 Excel', status: 'OPEN',
+      revision: 2, inheritedDecisionIds: [], inheritedArtifactIds: [],
+      createdAt: activeSession.createdAt, updatedAt: activeSession.updatedAt
+    },
+    decisions: [current], tasks: [], events: [{
+      id: 'event-old-brief', sessionId: activeSession.id, workItemId: 'work-1', type: 'brief_created',
+      content: '旧版需求允许 CSV', actor: { type: 'system', id: 'system' }, toAgentIds: [],
+      metadata: { schemaVersion: '0.1', payload: {} }, createdAt: '2026-09-17T00:00:00.000Z'
+    }], memories: [], artifacts: [],
+    inheritedDecisionIds: [], inheritedArtifactIds: []
+  });
+  service.contextManagement = { listDecisions: () => [superseded, current] };
+  let sourceDecisionIds: string[] = [];
+  let sourceEventIds: string[] = [];
+  let summary: { decisions: string[] } | undefined;
+  service.summaryCheckpoints = {
+    latest() {
+      return undefined;
+    },
+    async checkpoint(request: { snapshot: { sourceDecisionIds: string[]; sourceEventIds: string[] }; generate(): { decisions: string[] } }) {
+      sourceDecisionIds = request.snapshot.sourceDecisionIds;
+      sourceEventIds = request.snapshot.sourceEventIds;
+      summary = request.generate();
+      return { status: 'skipped', reason: 'already_covered' };
+    }
+  };
+
+  await service.createSummaryMemoryCheckpoint(
+    activeSession, agent('coordinator'), 'task_execution', undefined, undefined, 'phase_end'
+  );
+
+  assert.deepEqual(sourceDecisionIds.sort(), ['decision-current', 'decision-old']);
+  assert.deepEqual(sourceEventIds, ['event-old-brief']);
+  assert.deepEqual(summary?.decisions, ['[decision-current] 只允许 Excel']);
+  assert.equal(JSON.stringify(summary).includes('允许 CSV'), false);
+});
+
 test('file revision artifact events never inline proposal or system evidence content', () => {
   const payload = artifactCreatedEventPayload({
     id: 'artifact-revision-secret',
@@ -1221,6 +1357,7 @@ type TaskExecutionTestService = {
     code?: RuntimeError['code'];
     retryable?: boolean;
     approvalRequired?: boolean;
+    workItemBudgetExhausted?: boolean;
   }>;
   createContextAssembly(): ContextAssembly;
   runRuntime(session: SessionDetail, input: {
@@ -2604,6 +2741,146 @@ test('pipeline preserves pending approval as an interactive outcome', async () =
   const outcome = await service.runPipeline(activeSession, brief, [task]);
 
   assert.deepEqual(outcome, { kind: 'approval_required', reason: 'Approval required.' });
+});
+
+test('work-item budget exhaustion parks the task and produces a non-retry execution outcome', async () => {
+  const { recorder, service, activeSession, task, brief } = taskExecutionHarness(
+    runtimeOutputExamples.task_execution_result
+  );
+  task.workItemId = 'work-item-budget-exhausted';
+  const runRuntimeNormally = service.runRuntime;
+  service.runRuntime = async (session, input) => {
+    if (input.phase !== 'task_execution') return runRuntimeNormally(session, input);
+    return {
+    invocationId: input.invocationId,
+    runtimeType: 'mock',
+    status: 'failed',
+    output: createAgentMessageOutput({ messageKind: 'progress', content: 'Budget exhausted.' }),
+    events: [],
+    artifacts: [],
+    systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+    usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: 'mock' },
+    error: {
+      code: 'WORK_ITEM_BUDGET_EXHAUSTED',
+      message: '当前需求的累计预算已用尽。',
+      retryable: false
+    }
+    };
+  };
+
+  const taskOutcome = await service.runOneTask(activeSession, brief, task);
+
+  assert.equal(taskOutcome.ok, false);
+  if (taskOutcome.ok) return;
+  assert.equal(taskOutcome.workItemBudgetExhausted, true);
+  assert.equal(task.status, 'waiting');
+  assert.ok(recorder.events.some((event) =>
+    event.type === 'task_waiting' &&
+    (event.metadata.payload as { reason?: string }).reason === 'work_item_budget_exhausted'
+  ));
+  assert.equal(recorder.events.some((event) => event.type === 'task_failed'), false);
+
+  const pipeline = makeService() as unknown as {
+    runPipeline(session: SessionDetail, brief: TaskBrief, tasks: AgentTask[]): Promise<ExecutionOutcome>;
+    runOneTask(): Promise<typeof taskOutcome>;
+  };
+  pipeline.runOneTask = async () => taskOutcome;
+  task.status = 'assigned';
+  const outcome = await pipeline.runPipeline(activeSession, brief, [task]);
+
+  assert.equal(outcome.kind, 'work_item_budget_exhausted');
+  if (outcome.kind !== 'work_item_budget_exhausted') return;
+  assert.equal(outcome.taskId, task.id);
+  assert.equal(outcome.workItemId, task.workItemId);
+  assert.equal(outcome.error.code, 'WORK_ITEM_BUDGET_EXHAUSTED');
+});
+
+test('work-item budget exhaustion during task acceptance also parks the task', async () => {
+  const { recorder, service, activeSession, task, brief } = taskExecutionHarness(
+    runtimeOutputExamples.task_execution_result
+  );
+  task.workItemId = 'work-item-budget-exhausted-at-acceptance';
+  const runRuntimeNormally = service.runRuntime;
+  service.runRuntime = async (session, input) => {
+    if (input.phase !== 'task_acceptance') return runRuntimeNormally(session, input);
+    return {
+      invocationId: input.invocationId,
+      runtimeType: 'mock',
+      status: 'failed',
+      output: createAgentMessageOutput({ messageKind: 'progress', content: 'Budget exhausted.' }),
+      events: [],
+      artifacts: [],
+      systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: 'mock' },
+      error: {
+        code: 'WORK_ITEM_BUDGET_EXHAUSTED',
+        message: '当前需求的累计预算已用尽。',
+        retryable: false
+      }
+    };
+  };
+
+  const outcome = await service.runOneTask(activeSession, brief, task);
+
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.workItemBudgetExhausted, true);
+  assert.equal(task.status, 'waiting');
+  assert.ok(recorder.events.some((event) =>
+    event.type === 'task_waiting' &&
+    (event.metadata.payload as { reason?: string }).reason === 'work_item_budget_exhausted'
+  ));
+  assert.equal(recorder.events.some((event) => event.type === 'task_failed'), false);
+});
+
+test('work-item budget exhaustion during terminal phases remains user-recoverable', async () => {
+  const runtimeError: RuntimeError = {
+    code: 'WORK_ITEM_BUDGET_EXHAUSTED',
+    message: '当前需求的累计模型预算已不足。',
+    retryable: false
+  };
+  const brief: TaskBrief = {
+    id: 'brief-terminal-budget',
+    sessionId: 'session-1',
+    version: 1,
+    goal: 'Produce a concise report.',
+    scope: [],
+    outOfScope: [],
+    constraints: [],
+    acceptanceCriteria: [],
+    risks: [],
+    openQuestions: [],
+    confirmedByUser: true,
+    createdAt: '2026-07-03T00:00:00.000Z'
+  };
+
+  for (const phase of ['post_review', 'final_delivery'] as const) {
+    const service = makeService() as unknown as {
+      runPipeline(session: SessionDetail, brief: TaskBrief, tasks: AgentTask[]): Promise<ExecutionOutcome>;
+      runPostReview(): Promise<PostReviewReportOutput>;
+      runFinalDelivery(): Promise<void>;
+      latestLimitedDeliveryAction(): { limitations: string[] } | undefined;
+    };
+    const failure = () => Object.assign(new Error(runtimeError.message), { cause: runtimeError, runtimeError });
+    if (phase === 'post_review') {
+      service.runPostReview = async () => { throw failure(); };
+    } else {
+      service.latestLimitedDeliveryAction = () => ({ limitations: [] });
+      service.runFinalDelivery = async () => { throw failure(); };
+    }
+
+    const outcome = await service.runPipeline(
+      { ...session(), status: 'EXECUTING', activeWorkItemId: 'work-item-terminal-budget' },
+      brief,
+      []
+    );
+
+    assert.equal(outcome.kind, 'work_item_budget_exhausted', `${phase} must not become a failed Session`);
+    if (outcome.kind !== 'work_item_budget_exhausted') continue;
+    assert.equal(outcome.taskId, undefined, `${phase} does not invent an AgentTask`);
+    assert.equal(outcome.workItemId, 'work-item-terminal-budget');
+    assert.equal(outcome.error, runtimeError);
+  }
 });
 
 test('infrastructure failure classification adds contract violations without swallowing interactive errors', () => {

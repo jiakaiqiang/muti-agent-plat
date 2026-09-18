@@ -1014,6 +1014,43 @@ export const RELATIONAL_SCHEMA_V10_TABLES: RelationalTableDefinition[] = [
 ];
 export const RELATIONAL_SCHEMA_V10_SQL = renderTables(RELATIONAL_SCHEMA_V10_TABLES);
 
+export const RELATIONAL_SCHEMA_V11_TABLES: RelationalTableDefinition[] = [
+  table('work_item_budgets', '保存需求级累计模型预算总账：预留、实际、未知用量与尝试去重状态。', [
+    column('work_item_external_id', 'text primary key', '预算总账所属需求的稳定外部标识。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '总账所属会话。'),
+    column('revision', 'integer not null check (revision > 0)', '总账快照的单调修订号。'),
+    column('limit_tokens', 'bigint not null check (limit_tokens >= 0)', '该需求的累计输入预算上限。'),
+    column('reserved_tokens', 'bigint not null check (reserved_tokens >= 0)', '尚未结算的预留额度合计。'),
+    column('actual_tokens', 'bigint not null check (actual_tokens >= 0)', 'provider 上报的实际用量合计。'),
+    column('unknown_tokens', 'bigint not null check (unknown_tokens >= 0)', '用量不可得时按预留上限保留的保守合计。'),
+    column('source_snapshot', 'jsonb not null', '版本化预算总账合同完整快照。'),
+    column('updated_at', 'timestamptz not null', '总账最后更新时间。')
+  ], [], [
+    'create index if not exists work_item_budgets_session_idx on agent_cluster.work_item_budgets(session_id, updated_at)'
+  ])
+];
+export const RELATIONAL_SCHEMA_V11_SQL = renderTables(RELATIONAL_SCHEMA_V11_TABLES);
+
+export const RELATIONAL_SCHEMA_V12_TABLES: RelationalTableDefinition[] = [
+  table('summary_checkpoints', '保存需求级增量摘要检查点：覆盖范围、需求/决策版本、策略版本与来源引用；同一逻辑键只提交一次。', [
+    column('external_id', 'text primary key', '检查点稳定外部标识。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '检查点所属会话。'),
+    column('work_item_external_id', 'text not null', '检查点所属需求的稳定外部标识。'),
+    column('logical_key', 'text not null unique', '需求 + 覆盖范围 + 版本指纹组成的唯一逻辑键。'),
+    column('covered_event_seq', 'bigint not null check (covered_event_seq >= 0)', '摘要已覆盖的会话事件序号上界。'),
+    column('work_item_revision', 'bigint not null check (work_item_revision > 0)', '生成时绑定的需求修订号。'),
+    column('decision_ledger_revision', 'bigint not null check (decision_ledger_revision >= 0)', '生成时绑定的决策账本修订号。'),
+    column('policy_version', 'text not null', '摘要生成策略版本。'),
+    column('content_hash', 'text not null', '摘要正文的稳定哈希。'),
+    column('generation', 'integer', '生成时绑定的会话生命周期代次；空表示旧会话。'),
+    column('source_snapshot', 'jsonb not null', '版本化检查点合同完整快照。'),
+    column('created_at', 'timestamptz not null', '检查点提交时间。')
+  ], [], [
+    'create index if not exists summary_checkpoints_work_item_idx on agent_cluster.summary_checkpoints(session_id, work_item_external_id, covered_event_seq desc)'
+  ])
+];
+export const RELATIONAL_SCHEMA_V12_SQL = renderTables(RELATIONAL_SCHEMA_V12_TABLES);
+
 export function expectedRelationalComments() {
   return [
     SCHEMA_MIGRATIONS_TABLE,
@@ -1024,7 +1061,9 @@ export function expectedRelationalComments() {
     ...RELATIONAL_SCHEMA_V5_TABLES,
     ...RELATIONAL_SCHEMA_V8_TABLES,
     ...RELATIONAL_SCHEMA_V9_TABLES,
-    ...RELATIONAL_SCHEMA_V10_TABLES
+    ...RELATIONAL_SCHEMA_V10_TABLES,
+    ...RELATIONAL_SCHEMA_V11_TABLES,
+    ...RELATIONAL_SCHEMA_V12_TABLES
   ].flatMap((definition) => [
     { table: definition.name, column: null, comment: definition.comment },
     ...definition.columns.map((item) => ({ table: definition.name, column: item.name, comment: item.comment }))

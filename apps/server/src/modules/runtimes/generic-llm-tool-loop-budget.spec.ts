@@ -152,3 +152,40 @@ test('tool loop re-counts after each round and keeps tool calls paired with resu
     'tool results stay paired with their call inside one message'
   );
 });
+
+test('older tool output is reference-compacted while the newest call/result pair stays complete', async () => {
+  const toolCall = (path: string) => [
+    '<<TOOL_CALL>>',
+    JSON.stringify({ name: 'read_file', input: { path } }),
+    '<<END_TOOL_CALL>>'
+  ].join('\n');
+  const { result, requestBodies } = await runWithToolLoop({
+    responses: [toolCall('src/first.ts'), toolCall('src/second.ts')]
+  });
+
+  assert.equal(result.status, 'completed');
+  const thirdRequest = requestBodies[2];
+  assert.ok(thirdRequest, 'two tool rounds must produce a third provider request');
+  const messages = thirdRequest.messages as Array<{ role: string; content: string }>;
+  const firstAssistantIndex = messages.findIndex((message) =>
+    message.role === 'assistant' && message.content.includes('src/first.ts')
+  );
+  const secondAssistantIndex = messages.findIndex((message) =>
+    message.role === 'assistant' && message.content.includes('src/second.ts')
+  );
+  assert.ok(firstAssistantIndex >= 0 && secondAssistantIndex > firstAssistantIndex);
+
+  const firstResult = messages[firstAssistantIndex + 1];
+  assert.equal(firstResult?.role, 'user', 'the first result remains paired with its assistant tool call');
+  assert.match(
+    firstResult?.content ?? '',
+    /<<TOOL_RESULT_REFERENCE name="read_file" path="src\/first\.ts" sha256="[a-f0-9]{64}" chars="\d+" truncated="false">>/,
+    'the older result must preserve path, hash and size metadata'
+  );
+  assert.doesNotMatch(firstResult?.content ?? '', /const line = 1;/, 'the old file body must not be resent');
+
+  const secondResult = messages[secondAssistantIndex + 1];
+  assert.equal(secondResult?.role, 'user', 'the newest result remains paired with its assistant tool call');
+  assert.match(secondResult?.content ?? '', /<<TOOL_RESULT name="read_file" path="src\/second\.ts"/);
+  assert.match(secondResult?.content ?? '', /const line = 1;/, 'the newest file body stays available to the model');
+});

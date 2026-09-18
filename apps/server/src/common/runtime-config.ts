@@ -142,6 +142,17 @@ export function llmLocalNumCtx() {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 8_192;
 }
 
+/**
+ * Accumulated provider input tokens after which a CLI conversation is rotated
+ * into a fresh context instead of resumed. Deliberately conservative: CLI
+ * private history is not visible to the platform, so this is a ceiling on what
+ * the platform itself has fed in, not a measurement of the CLI window.
+ */
+export function cliContextRotationInputTokens() {
+  const parsed = Number(process.env.CLI_CONTEXT_ROTATION_INPUT_TOKENS ?? 150_000);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 150_000;
+}
+
 export function discussionTimeoutMs() {
   const parsed = Number(process.env.DISCUSSION_TIMEOUT_MS ?? 0);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;

@@ -36,6 +36,7 @@ import type {
   FileRevisionCandidateOutput,
   FileRevisionRun,
   SessionDetail,
+  SummaryCheckpointRecord,
   SupplementalContextPathFailureCode,
   SupplementalContextResolution,
   TaskEvidenceRef,
@@ -58,6 +59,7 @@ import {
   validateRuntimeOutput
 } from '@agent-cluster/shared';
 import { applyServerLocalFileChanges } from '../../common/server-file-changes.js';
+import { extractRuntimeError } from '../../common/runtime-error.js';
 import { detectWorkspaceStack } from '../../common/workspace-scanner.js';
 import { messages } from '../../common/messages.js';
 import {
@@ -81,6 +83,12 @@ import { ArtifactsService } from '../artifacts/artifacts.service.js';
 import { CapabilitiesService } from '../capabilities/capabilities.service.js';
 import { EventsService } from '../events/events.service.js';
 import { MemoryService } from '../memory/memory.service.js';
+import {
+  SummaryCheckpointService,
+  type SummaryCheckpointTrigger
+} from '../memory/summary-checkpoint.service.js';
+import { SummaryCheckpointStore } from '../memory/summary-checkpoint-store.js';
+import { deriveSummaryMemory } from '../memory/summary-memory-derivation.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { SessionLifecycleStore } from '../runtimes/session-lifecycle-store.js';
 import { KnowledgeService } from '../rag/knowledge.service.js';
@@ -140,6 +148,14 @@ export type ExecutionOutcome =
   | { kind: 'approval_required'; reason: string }
   | { kind: 'workflow_step_completed'; taskId: string; resultSummary: string }
   | { kind: 'workspace_conflict'; reason: string }
+  | {
+      kind: 'work_item_budget_exhausted';
+      reason: string;
+      /** A task is present when an AgentTask was blocked; terminal phases have no AgentTask. */
+      taskId?: string;
+      workItemId?: string;
+      error: RuntimeError;
+    }
   | { kind: 'cancelled'; reason: string; termination?: ExecutionTermination }
   | { kind: 'failed'; reason: string; error?: RuntimeError };
 
@@ -162,6 +178,7 @@ type TaskRunOutcome =
       code?: RuntimeError['code'];
       retryable?: boolean;
       error?: RuntimeError;
+      workItemBudgetExhausted?: boolean;
       workflowAgentSubstitution?: WorkflowAgentSubstitutionRequest;
       workflowUpstreamIncomplete?: WorkflowUpstreamIncompleteSignal;
     };
@@ -267,6 +284,7 @@ export class OrchestratorService {
   private readonly runtimeProviderCircuits = new Map<RuntimeType, number>();
   private savePendingInvocationCallback?: (sessionId: string, invocation: PendingInvocation) => void;
   private readonly lifecycle: SessionLifecycleStore;
+  private readonly summaryCheckpoints: SummaryCheckpointService;
 
   constructor(
     private readonly agents: AgentsService,
@@ -291,6 +309,10 @@ export class OrchestratorService {
     @Optional() private readonly systemAgentPolicies?: SystemAgentRuntimePolicyService
   ) {
     this.lifecycle = new SessionLifecycleStore(persistence);
+    this.summaryCheckpoints = new SummaryCheckpointService(
+      new SummaryCheckpointStore(persistence),
+      runtime.workItemBudgets
+    );
     const persistedBriefs = this.persistence.getCollection<Record<string, TaskBrief[]>>('briefsBySession', {});
     for (const [sessionId, briefs] of Object.entries(persistedBriefs)) {
       this.briefsBySession.set(sessionId, briefs);
@@ -478,7 +500,7 @@ export class OrchestratorService {
       })
     });
 
-    this.createSummaryMemoryCheckpoint(session, coordinator, 'brief_generation', brief);
+    await this.createSummaryMemoryCheckpoint(session, coordinator, 'brief_generation', brief);
 
     return brief;
   }
@@ -898,7 +920,7 @@ export class OrchestratorService {
       })
     });
 
-    this.createSummaryMemoryCheckpoint(session, coordinator, 'brief_generation', brief);
+    await this.createSummaryMemoryCheckpoint(session, coordinator, 'brief_generation', brief);
 
     return brief;
   }
@@ -1716,6 +1738,19 @@ export class OrchestratorService {
       }
       const failedTask = taskResults.find((item) => !item.result.ok);
       if (failedTask && !failedTask.result.ok) {
+        if (failedTask.result.workItemBudgetExhausted || failedTask.result.code === 'WORK_ITEM_BUDGET_EXHAUSTED') {
+          return {
+            kind: 'work_item_budget_exhausted',
+            reason: `${messages.taskFailed(failedTask.task.title)}: ${failedTask.result.message}`,
+            taskId: failedTask.task.id,
+            ...(failedTask.task.workItemId ? { workItemId: failedTask.task.workItemId } : {}),
+            error: failedTask.result.error ?? {
+              code: 'WORK_ITEM_BUDGET_EXHAUSTED',
+              message: failedTask.result.message,
+              retryable: false
+            }
+          };
+        }
         if (failedTask.result.approvalRequired) {
           return { kind: 'approval_required', reason: failedTask.result.message };
         }
@@ -1771,6 +1806,8 @@ export class OrchestratorService {
       try {
         review = await this.runPostReview(session, brief, signal);
       } catch (error) {
+        const budgetOutcome = this.workItemBudgetExhaustionOutcome(session, error);
+        if (budgetOutcome) return budgetOutcome;
         if (signal?.aborted) {
           return cancelledExecutionOutcome(signal);
         }
@@ -1797,6 +1834,8 @@ export class OrchestratorService {
       try {
         await this.runFinalDelivery(session, brief, signal, limitedDelivery?.limitations);
       } catch (error) {
+        const budgetOutcome = this.workItemBudgetExhaustionOutcome(session, error);
+        if (budgetOutcome) return budgetOutcome;
         if (signal?.aborted) {
           return cancelledExecutionOutcome(signal);
         }
@@ -1858,6 +1897,7 @@ export class OrchestratorService {
         error: claim.error,
         code: claim.error?.code,
         retryable: claim.error?.retryable,
+        workItemBudgetExhausted: claim.error?.code === 'WORK_ITEM_BUDGET_EXHAUSTED',
         workflowAgentSubstitution: claim.workflowAgentSubstitution
       };
     }
@@ -2015,6 +2055,25 @@ export class OrchestratorService {
           code: 'HUMAN_APPROVAL_REQUIRED',
           retryable: true,
           error: result.error
+        };
+      }
+      if (code === 'WORK_ITEM_BUDGET_EXHAUSTED') {
+        this.markTaskWaitingForBudget(
+          session.id,
+          task,
+          taskAgent.id,
+          invocationId,
+          publicMessage,
+          executionRuntimeType,
+          result.error
+        );
+        return {
+          ok: false,
+          message: publicMessage,
+          code,
+          retryable: false,
+          error: result.error,
+          workItemBudgetExhausted: true
         };
       }
       if (this.canRetryRuntimeTimeout(result.error, runtimeRetryCount)) {
@@ -2283,7 +2342,7 @@ export class OrchestratorService {
     }
     if (!isFileRevisionTask) {
       this.emitTaskHandoff(session, task, taskAgent, output.summary);
-      this.createSummaryMemoryCheckpoint(session, taskAgent, 'task_execution', brief, task);
+      await this.createSummaryMemoryCheckpoint(session, taskAgent, 'task_execution', brief, task);
     }
     if (!isFileRevisionTask) {
       await this.applyServerLocalArtifactChanges(session, fileChanges, {
@@ -2426,16 +2485,35 @@ export class OrchestratorService {
           }
         }
       }
-      const publicMessage = isFileRevisionTask
+      const budgetExhausted = runtimeError.code === 'WORK_ITEM_BUDGET_EXHAUSTED';
+      const publicMessage = budgetExhausted
+        ? message
+        : isFileRevisionTask
         ? 'File revision task acceptance failed.'
         : message;
-      const publicError: RuntimeError = isFileRevisionTask
+      const publicError: RuntimeError = isFileRevisionTask && !budgetExhausted
         ? {
             code: runtimeError.code,
             message: publicMessage,
             retryable: runtimeError.retryable
           }
         : runtimeError;
+      if (budgetExhausted) {
+        this.markTaskWaitingForBudget(
+          session.id,
+          task,
+          candidate.id,
+          invocationId,
+          publicMessage,
+          result.runtimeType,
+          runtimeError
+        );
+        return {
+          ok: false,
+          message: publicMessage,
+          error: publicError
+        };
+      }
       this.markTaskFailed(
         session.id,
         task,
@@ -3040,7 +3118,7 @@ export class OrchestratorService {
       })
     });
     await this.applyServerLocalArtifactChanges(session, reviewFileChanges);
-    this.createSummaryMemoryCheckpoint(session, review, 'post_review', brief);
+    await this.createSummaryMemoryCheckpoint(session, review, 'post_review', brief);
     return reviewOutput;
   }
 
@@ -3241,7 +3319,7 @@ export class OrchestratorService {
       await this.applyServerLocalArtifactChanges(session, deliveryFileChanges);
       await this.applyServerLocalArtifactChanges(session, notificationFileChanges);
     }
-    this.createSummaryMemoryCheckpoint(session, coordinator, 'final_delivery', brief);
+    await this.createSummaryMemoryCheckpoint(session, coordinator, 'final_delivery', brief);
   }
 
   private emitMemoryUsedEvent(sessionId: string, taskId: string, agentId: string, contextAssembly: ContextAssembly) {
@@ -3646,6 +3724,41 @@ export class OrchestratorService {
     if (operation.status === 'paused') operation = await this.runtime.operations.resume(session.id, operation.id);
     if (!task.executionOperationId) this.tasks.update(task, { executionOperationId: operation.id });
     return operation;
+  }
+
+  /** A budget exhaustion is recoverable only by changing scope, never by retrying this task. */
+  private markTaskWaitingForBudget(
+    sessionId: string,
+    task: AgentTask,
+    agentId: string,
+    invocationId: string,
+    message: string,
+    runtimeType: RuntimeType,
+    error?: RuntimeError
+  ) {
+    this.tasks.update(task, { status: 'waiting', resultSummary: message });
+    this.events.create({
+      sessionId,
+      workItemId: task.workItemId,
+      type: 'task_waiting',
+      taskId: task.id,
+      fromAgentId: agentId,
+      content: `任务等待拆分或缩小需求范围：${task.title}`,
+      metadata: createMetadata('task_card', {
+        taskId: task.id,
+        title: task.title,
+        status: 'waiting',
+        resultSummary: message,
+        reason: 'work_item_budget_exhausted',
+        runtimeInvocationId: invocationId,
+        runtimeType,
+        runtimeError: error ?? {
+          code: 'WORK_ITEM_BUDGET_EXHAUSTED',
+          message,
+          retryable: false
+        }
+      })
+    });
   }
 
   private canRetryRuntimeTimeout(error: AgentRunResult['error'] | undefined, runtimeRetryCount: number) {
@@ -6300,53 +6413,108 @@ export class OrchestratorService {
         ? [`Detected stack: ${(session.workspaceIndex?.detectedStack ?? session.workspaceSnapshot?.detectedStack ?? []).join(', ')}`]
         : [])
     ];
-    const decisions = contextSlice.events
-      .filter((event) => event.type === 'brief_created' || event.type === 'brief_confirmed' || event.type === 'post_review_completed')
-      .map((event) => event.content)
-      .slice(-4);
     const previous = prior?.checkpoint.summaryMemory;
+    const requirementChanged = Boolean(prior && (
+      prior.checkpoint.workItemRevision !== contextSlice.workItem?.revision ||
+      prior.checkpoint.decisionLedgerRevision !== (session.decisionLedgerRevision ?? 0)
+    ));
     // 协商阶段(讨论/契约生成/修订)goal 回落到原始需求,不锚定上一版契约的旧
     // goal;否则用户修改契约后重新讨论时,summaryMemory 仍把旧目标带回上下文。
     const isBriefNegotiationPhase =
       phase === 'discussion' || phase === 'brief_generation' || phase === 'brief_revision';
-    return {
+    // 2B: decisions come from the DecisionRecord ledger of this WorkItem, not from
+    // the previous checkpoint, so a superseded decision cannot be carried forward.
+    const derived = deriveSummaryMemory({
       goal: brief?.goal ?? contextSlice.workItem?.goal ??
         (isBriefNegotiationPhase ? session.originalInput : previous?.goal ?? session.originalInput),
       currentState: `${session.status} / ${phase}${task ? ` / ${task.status}: ${task.title}` : ''}`,
-      confirmedFacts: this.uniqueStrings([...(previous?.confirmedFacts ?? []), ...confirmedFacts], 12),
-      completed: this.uniqueStrings([...(previous?.completed ?? []), ...completed], 12),
-      decisions: this.uniqueStrings([...(previous?.decisions ?? []), ...decisions], 8),
-      openQuestions: this.uniqueStrings([...(previous?.openQuestions ?? []), ...(brief?.openQuestions ?? [])], 8),
-      risks: this.uniqueStrings([...(previous?.risks ?? []), ...(brief?.risks ?? [])], 8),
+      confirmedFacts,
+      completed,
+      risks: brief?.risks ?? [],
+      openQuestions: brief?.openQuestions ?? [],
+      requirementChanged,
+      constraints: [
+        ...(brief?.confirmedByUser ? brief.constraints : []),
+        ...contextSlice.decisions.filter((decision) => decision.kind === 'constraint')
+          .map((decision) => decision.content)
+      ],
+      acceptanceCriteria: brief?.confirmedByUser ? brief.acceptanceCriteria : [],
       nextSteps: task
         ? [`Complete task: ${task.title}`]
         : session.status === 'WAIT_USER_CONFIRM'
           ? ['Wait for user confirmation of the current brief.']
           : ['Continue the next orchestration stage.'],
+      decisions: contextSlice.decisions,
+      previous
+    });
+    // `sourceDecisionIds` is checkpoint metadata, not part of the SummaryMemory
+    // surface handed to Runtimes; it travels on the versioned checkpoint instead.
+    const { sourceDecisionIds: _sourceDecisionIds, ...summary } = derived;
+    return {
+      ...summary,
       checkpointRefs: this.uniqueStrings([...(previous?.checkpointRefs ?? []), ...(prior ? [prior.checkpoint.checkpointId] : [])], 8),
       sourceEventIds: this.uniqueStrings([...(previous?.sourceEventIds ?? []), ...recentEvents.map((event) => event.id)], 12),
       sourceArtifactIds: this.uniqueStrings([
         ...(previous?.sourceArtifactIds ?? []),
-        ...(prior ? [prior.artifact.id] : []),
+        ...(prior?.artifact ? [prior.artifact.id] : []),
         ...recentArtifactIds
       ], 12),
       sourceMemoryIds: this.uniqueStrings(previous?.sourceMemoryIds ?? [], 12)
     };
   }
 
-  private createSummaryMemoryCheckpoint(
+  private async createSummaryMemoryCheckpoint(
     session: SessionDetail,
     agent: Agent,
     phase: AgentRunPhase,
     brief?: TaskBrief,
-    task?: AgentTask
+    task?: AgentTask,
+    trigger: SummaryCheckpointTrigger = phase === 'final_delivery' ? 'work_item_end' : 'phase_end'
   ) {
     const workItemId = task?.workItemId ?? brief?.workItemId ?? session.activeWorkItemId;
+    if (trigger === 'budget_threshold' && !workItemId) return undefined;
     const contextSlice = this.createWorkItemContextSlice(session, workItemId);
     const checkpointId = crypto.randomUUID();
     const sourceEventIds = contextSlice.events.slice(-12).map((event) => event.id);
     const sourceArtifactIds = contextSlice.artifacts.slice(-12).map((artifact) => artifact.id);
+    const supersededDecisionIds = workItemId && this.contextManagement &&
+      typeof this.contextManagement.listDecisions === 'function'
+      ? this.contextManagement.listDecisions(session.id)
+        .filter((decision) => decision.workItemId === workItemId && decision.status === 'superseded')
+        .map((decision) => decision.id)
+      : [];
+    const sourceDecisionIds = [...new Set([
+      ...contextSlice.decisions.map((decision) => decision.id),
+      ...supersededDecisionIds
+    ])];
     const summaryMemory = this.createSummaryMemory(session, brief, task, phase, contextSlice);
+    // Version binding: the summary is derived from the slice read above, so the
+    // checkpoint pins the event coverage, WorkItem and ledger revisions it saw.
+    // A duplicate/stale/rejected commit keeps the previous valid checkpoint and
+    // materializes nothing — the same coverage is never summarized twice.
+    // No budget is reserved here because this derivation makes no model call;
+    // a model-backed generator must pass `budget` to the service.
+    const versioned = workItemId
+      ? await this.summaryCheckpoints.checkpoint({
+          trigger,
+          checkpointId,
+          snapshot: {
+            sessionId: session.id,
+            workItemId,
+            phase,
+            coveredEventSeq: typeof this.events.list === 'function' ? this.events.list(session.id).length : 0,
+            workItemRevision: contextSlice.workItem?.revision ?? 1,
+            decisionLedgerRevision: session.decisionLedgerRevision ?? 0,
+            generation: this.lifecycle.generation(session.id),
+            sourceEventIds,
+            sourceArtifactIds,
+            sourceMemoryIds: [],
+            sourceDecisionIds
+          },
+          generate: () => summaryMemory
+        })
+      : undefined;
+    if (versioned && versioned.status !== 'committed') return undefined;
     const memory = this.memories.create({
       sessionId: session.id,
       agentId: agent.id,
@@ -6355,6 +6523,7 @@ export class OrchestratorService {
       content: this.summaryMemoryCheckpointText(checkpointId, phase, summaryMemory),
       confidence: 0.94
     });
+    const record = versioned?.status === 'committed' ? versioned.record : undefined;
     const checkpoint: SummaryMemoryCheckpoint = {
       kind: 'summary_memory_checkpoint',
       checkpointId,
@@ -6373,7 +6542,19 @@ export class OrchestratorService {
       sourceEventIds,
       sourceArtifactIds,
       sourceMemoryIds: [memory.id],
-      createdAt: nowIso()
+      createdAt: nowIso(),
+      ...(record
+        ? {
+            coveredEventSeq: record.coveredEventSeq,
+            workItemRevision: record.workItemRevision,
+            decisionLedgerRevision: record.decisionLedgerRevision,
+            policyVersion: record.policyVersion,
+            contentHash: record.contentHash,
+            generation: record.generation,
+            logicalKey: record.logicalKey,
+            sourceDecisionIds: record.sourceDecisionIds
+          }
+        : {})
     };
     const artifact = this.artifacts.create({
       sessionId: session.id,
@@ -6412,6 +6593,19 @@ export class OrchestratorService {
 
   private latestSummaryMemoryCheckpoint(sessionId: string, workItemId?: string) {
     const artifacts = this.artifacts.listBySession(sessionId);
+    if (workItemId) {
+      const record = this.summaryCheckpoints.latest(sessionId, workItemId);
+      if (record) {
+        const artifact = [...artifacts].reverse().find((candidate) => {
+          const projected = candidate.metadata.summaryMemoryCheckpoint;
+          return this.isSummaryMemoryCheckpoint(projected) && projected.checkpointId === record.checkpointId;
+        });
+        return {
+          artifact,
+          checkpoint: this.summaryMemoryCheckpointFromRecord(record, artifact)
+        };
+      }
+    }
     for (let index = artifacts.length - 1; index >= 0; index -= 1) {
       const artifact = artifacts[index];
       if (artifact.workItemId !== workItemId) continue;
@@ -6421,6 +6615,34 @@ export class OrchestratorService {
       }
     }
     return undefined;
+  }
+
+  private summaryMemoryCheckpointFromRecord(
+    record: SummaryCheckpointRecord,
+    artifact?: Artifact
+  ): SummaryMemoryCheckpoint {
+    return {
+      kind: 'summary_memory_checkpoint',
+      checkpointId: record.checkpointId,
+      sessionId: record.sessionId,
+      workItemId: record.workItemId,
+      phase: record.phase,
+      ...(artifact?.taskId ? { taskId: artifact.taskId } : {}),
+      ...(artifact?.agentId ? { agentId: artifact.agentId } : {}),
+      summaryMemory: structuredClone(record.summaryMemory),
+      sourceEventIds: [...record.sourceEventIds],
+      sourceArtifactIds: [...record.sourceArtifactIds],
+      sourceMemoryIds: [...record.sourceMemoryIds],
+      sourceDecisionIds: [...record.sourceDecisionIds],
+      coveredEventSeq: record.coveredEventSeq,
+      workItemRevision: record.workItemRevision,
+      decisionLedgerRevision: record.decisionLedgerRevision,
+      policyVersion: record.policyVersion,
+      contentHash: record.contentHash,
+      ...(record.generation !== undefined ? { generation: record.generation } : {}),
+      logicalKey: record.logicalKey,
+      createdAt: record.createdAt
+    };
   }
 
   private isSummaryMemoryCheckpoint(value: unknown): value is SummaryMemoryCheckpoint {
@@ -6596,7 +6818,38 @@ export class OrchestratorService {
     };
   }
 
+  private async maybeCreateBudgetThresholdCheckpoint(
+    session: SessionDetail,
+    input: RuntimeInvocationDraft
+  ) {
+    const workItemId = input.contextAssembly.workItemId ?? session.activeWorkItemId;
+    if (!workItemId) return;
+    try {
+      const task = input.taskId ? this.tasks.find(session.id, input.taskId) : undefined;
+      const briefs = this.listBriefs(session.id);
+      const brief = session.currentTaskBriefId
+        ? briefs.find((candidate) => candidate.id === session.currentTaskBriefId)
+        : briefs.at(-1);
+      await this.createSummaryMemoryCheckpoint(
+        session,
+        input.agent,
+        input.phase,
+        brief,
+        task,
+        'budget_threshold'
+      );
+    } catch {
+      // A derived summary is recoverable. It must not block the authoritative
+      // Runtime operation or turn a stop request into a late replacement run.
+      workspaceMetrics.increment('summary_checkpoint_failed_total', 1, {
+        phase: input.phase,
+        trigger: 'budget_threshold'
+      });
+    }
+  }
+
   private async runRuntime(inputSession: SessionDetail, input: RuntimeInvocationDraft, signal?: AbortSignal) {
+    await this.maybeCreateBudgetThresholdCheckpoint(inputSession, input);
     if (!input.operation && this.runtime.operations) {
       const scopeKey = JSON.stringify([input.phase, input.agent.id, input.contextAssembly.workItemId ?? inputSession.activeWorkItemId,
         input.taskId, input.contextAssembly.currentContractGoal ?? input.contextAssembly.sessionGoal]);
@@ -6900,7 +7153,8 @@ export class OrchestratorService {
             resolvedPlan.sessionId,
             resolvedPlan.agent.agentId,
             resolvedPlan.taskId,
-            resolvedPlan.executionTarget.runtimeType
+            resolvedPlan.executionTarget.runtimeType,
+            { workItemId: resolvedPlan.workItemId }
           )
         : undefined;
     const plan: InvocationPlan = priorRuntimeSession
@@ -7658,6 +7912,18 @@ export class OrchestratorService {
       new Error(messages.runtimeError(result.runtimeType, phase, result.error?.message ?? result.status)),
       { cause: result.error, runtimeError: result.error }
     );
+  }
+
+  /** Terminal phases have no AgentTask, but a WorkItem budget block remains user-recoverable. */
+  private workItemBudgetExhaustionOutcome(session: SessionDetail, error: unknown): ExecutionOutcome | undefined {
+    const runtimeError = extractRuntimeError(error);
+    if (runtimeError?.code !== 'WORK_ITEM_BUDGET_EXHAUSTED') return undefined;
+    return {
+      kind: 'work_item_budget_exhausted',
+      reason: runtimeError.message,
+      ...(session.activeWorkItemId ? { workItemId: session.activeWorkItemId } : {}),
+      error: runtimeError
+    };
   }
 
   /**

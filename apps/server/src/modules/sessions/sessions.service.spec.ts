@@ -48,6 +48,70 @@ test('failed task with a brief resumes execution while an unconfirmed stop remai
   assert.equal(executions, 1);
 });
 
+test('work-item budget exhaustion is durable waiting state and cannot resume the exhausted task', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Implement the entire product in one task' });
+  const service = fixture.service as any;
+  service.briefGenerationRuns.delete(session.id);
+  session.status = 'EXECUTING';
+  session.currentTaskBriefId = 'brief-budget-exhausted';
+
+  fixture.service.applyOutcome(session.id, {
+    kind: 'work_item_budget_exhausted',
+    reason: '当前需求的累计预算已用尽。',
+    taskId: 'task-budget-exhausted',
+    workItemId: 'work-item-budget-exhausted',
+    error: {
+      code: 'WORK_ITEM_BUDGET_EXHAUSTED',
+      message: '当前需求的累计预算已用尽。',
+      retryable: false
+    }
+  });
+
+  assert.equal(session.status, 'WAIT_USER_DECISION');
+  const request = fixture.events.find((event) => event.type === 'user_confirmation_requested');
+  const payload = (request?.metadata as {
+    payload?: { confirmationId?: string; reason?: string; options?: Array<{ key: string }> }
+  } | undefined)?.payload;
+  assert.equal(payload?.reason, 'work_item_budget_exhausted');
+  assert.deepEqual(payload?.options?.map((option) => option.key), ['submit_narrowed_requirement', 'cancel']);
+  await assert.rejects(
+    fixture.service.resume(session.id, 'retry unchanged input', payload?.confirmationId),
+    /当前确认不允许通过继续按钮执行/
+  );
+  assert.equal(session.status, 'WAIT_USER_DECISION');
+});
+
+test('an asynchronous work-item budget failure uses the narrowed-requirement confirmation', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: '分析并记录 token 使用情况，仅输出说明。' });
+  const service = fixture.service as unknown as {
+    briefGenerationRuns: Map<string, unknown>;
+    failSessionWithFullError(session: SessionDetail, error: unknown, phase: string): void;
+  };
+  service.briefGenerationRuns.delete(session.id);
+
+  const runtimeError = {
+    code: 'WORK_ITEM_BUDGET_EXHAUSTED' as const,
+    message: '当前需求的累计模型预算已不足。',
+    retryable: false
+  };
+  service.failSessionWithFullError(
+    session,
+    Object.assign(new Error(runtimeError.message), { cause: runtimeError, runtimeError }),
+    'brief_generation'
+  );
+
+  assert.equal(session.status, 'WAIT_USER_DECISION');
+  const request = fixture.events.find((event) => event.type === 'user_confirmation_requested');
+  const payload = (request?.metadata as {
+    payload?: { reason?: string; options?: Array<{ key: string }> }
+  } | undefined)?.payload;
+  assert.equal(payload?.reason, 'work_item_budget_exhausted');
+  assert.deepEqual(payload?.options?.map((option) => option.key), ['submit_narrowed_requirement', 'cancel']);
+  assert.equal(fixture.events.some((event) => event.type === 'error_reported'), false);
+});
+
 test('an exact continue command retries a failed brief revision even when the previous brief exists', async () => {
   const fixture = makeService();
   const { session } = await fixture.service.create({ input: 'Revise existing brief' });

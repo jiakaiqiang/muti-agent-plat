@@ -20,7 +20,10 @@ try {
     method: 'POST',
     body: JSON.stringify({
       input: 'Memory confirmation smoke session.',
-      agentIds: ['coordinator', 'backend', 'test', 'review']
+      // coordinator became management-only (system-agent policy); the chat
+      // surface only accepts user agents, and the receiver is resolved server-side.
+      agentIds: ['requirements', 'backend', 'test', 'review'],
+      runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] }
     })
   });
   const sessionId = created.data.session.id;

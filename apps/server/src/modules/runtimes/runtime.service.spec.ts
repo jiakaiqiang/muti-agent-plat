@@ -98,7 +98,7 @@ function createService(
     serverWorker as never,
     workspaceBindings as never
   );
-  return { service, persisted };
+  return { service, persisted, persistence };
 }
 
 test('dispatches by InvocationPlan.executionTarget', async () => {
@@ -680,4 +680,297 @@ test('findPriorInvocation is scoped to session, agent, task, and Runtime', async
     workDir: '/workspace'
   });
   assert.equal(service.findPriorInvocation('session-a', 'agent-a', 'task-a', 'codex'), undefined);
+});
+
+test('a CLI conversation is never resumed across WorkItems or across a superseded session generation', async () => {
+  const claude = adapter('claude_code', async (input) => ({
+    ...completed(input, 'claude_code'),
+    runtimeSession: { cliSessionId: `cli-${input.workItemId ?? 'none'}`, workDir: '/workspace' }
+  }));
+  const { service, persistence } = createService([claude]);
+  await persistence.setCollection('sessionLifecyclesBySession', {
+    'session-a': {
+      contractVersion: 'main-agent-collaboration/v1', sessionId: 'session-a', dataEpoch: 'epoch',
+      generation: 1, revision: 1, state: 'active', admission: 'open', stopStatus: 'idle'
+    }
+  });
+  await service.run(makeInvocationPlan({
+    sessionId: 'session-a', taskId: 'task-a', workItemId: 'work-a',
+    agent: { agentId: 'agent-a' }, executionTarget: { runtimeType: 'claude_code' }
+  }));
+
+  assert.deepEqual(
+    service.findPriorInvocation('session-a', 'agent-a', 'task-a', 'claude_code', { workItemId: 'work-a' }),
+    { cliSessionId: 'cli-work-a', workDir: '/workspace' }
+  );
+  assert.equal(
+    service.findPriorInvocation('session-a', 'agent-a', 'task-a', 'claude_code', { workItemId: 'work-b' }),
+    undefined,
+    'another requirement must not inherit the private CLI history'
+  );
+
+  await persistence.setCollection('sessionLifecyclesBySession', {
+    'session-a': {
+      contractVersion: 'main-agent-collaboration/v1', sessionId: 'session-a', dataEpoch: 'epoch',
+      generation: 2, revision: 3, state: 'active', admission: 'open', stopStatus: 'confirmed'
+    }
+  });
+  assert.equal(
+    service.findPriorInvocation('session-a', 'agent-a', 'task-a', 'claude_code', { workItemId: 'work-a' }),
+    undefined,
+    'a restored generation starts a fresh CLI context instead of replaying the old one'
+  );
+});
+
+test('a CLI conversation past the rotation threshold is not resumed; the checkpoint carries state instead', async () => {
+  const previous = process.env.CLI_CONTEXT_ROTATION_INPUT_TOKENS;
+  process.env.CLI_CONTEXT_ROTATION_INPUT_TOKENS = '1000';
+  try {
+    let call = 0;
+    const claude = adapter('claude_code', async (input) => {
+      call += 1;
+      return {
+        ...completed(input, 'claude_code'),
+        usage: { inputTokens: 600, outputTokens: 10, totalTokens: 610 },
+        runtimeSession: { cliSessionId: 'cli-rotating', workDir: '/workspace' }
+      };
+    });
+    const { service } = createService([claude]);
+    const plan = () => makeInvocationPlan({
+      invocationId: `invocation-${call + 1}`, sessionId: 'session-a', taskId: 'task-a', workItemId: 'work-a',
+      agent: { agentId: 'agent-a' }, executionTarget: { runtimeType: 'claude_code' }
+    });
+    await service.run(plan());
+    assert.deepEqual(
+      service.findPriorInvocation('session-a', 'agent-a', 'task-a', 'claude_code', { workItemId: 'work-a' }),
+      { cliSessionId: 'cli-rotating', workDir: '/workspace' },
+      'below the threshold the conversation resumes'
+    );
+    await service.run(plan());
+    assert.equal(
+      service.findPriorInvocation('session-a', 'agent-a', 'task-a', 'claude_code', { workItemId: 'work-a' }),
+      undefined,
+      'past the threshold the next invocation must start a fresh context'
+    );
+  } finally {
+    if (previous === undefined) delete process.env.CLI_CONTEXT_ROTATION_INPUT_TOKENS;
+    else process.env.CLI_CONTEXT_ROTATION_INPUT_TOKENS = previous;
+  }
+});
+
+test('a fresh CLI context cannot replay a completed invocation or its side effects', async () => {
+  let starts = 0;
+  const claude = adapter('claude_code', async (input) => {
+    starts += 1;
+    return {
+      ...completed(input, 'claude_code'),
+      runtimeSession: { cliSessionId: `cli-context-${starts}`, workDir: '/workspace' }
+    };
+  });
+  const { service } = createService([claude]);
+  const operation = {
+    id: 'operation-with-completed-side-effect',
+    deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    policyVersion: 'execution-reliability-v1' as const,
+    maxAttempts: 3
+  };
+  const plan = makeInvocationPlan({
+    invocationId: 'completed-side-effect-invocation',
+    sessionId: 'session-a',
+    taskId: 'task-a',
+    workItemId: 'work-a',
+    agent: { agentId: 'agent-a' },
+    executionTarget: { runtimeType: 'claude_code' },
+    operation
+  });
+
+  assert.equal((await service.run(plan)).status, 'completed');
+  const replay = await service.run({ ...plan, resume: undefined });
+
+  assert.equal(starts, 1, 'operation/invocation dedupe must stop a second adapter process before side effects run');
+  assert.equal(replay.status, 'failed');
+  assert.equal(replay.error?.details?.operationFailure, 'OPERATION_DUPLICATE_INVOCATION');
+});
+
+/**
+ * Settlement is deliberately asynchronous bookkeeping, so a test that asserts on
+ * the ledger has to wait for it instead of assuming it already happened.
+ */
+async function waitForSettlement(predicate: () => boolean, label: string) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.fail(`settlement never reconciled: ${label}`);
+}
+
+test('a requirement is charged before the call and settled from reported usage', async () => {
+  const seen: InvocationPlan[] = [];
+  const mock = adapter('mock', async plan => {
+    seen.push(plan);
+    return { ...completed(plan), usage: { inputTokens: 120, outputTokens: 5, totalTokens: 125, model: 'mock' } };
+  });
+  const { service, persisted } = createService([mock]);
+  // Requirement limit reuses the session budget that is already configured.
+  persisted.set('sessions', [{ id: 'session-1', tokenBudget: 1_000 }]);
+
+  const result = await service.run(makeInvocationPlan({
+    sessionId: 'session-1',
+    workItemId: 'work-item-1',
+    executionTarget: { runtimeType: 'mock' },
+    budget: { maxInputTokens: 400, maxOutputTokens: 200, maxTotalTokens: 1_000 }
+  }));
+
+  assert.equal(result.status, 'completed');
+  assert.equal(seen.length, 1, 'the call must actually run');
+  await waitForSettlement(
+    () => service.workItemBudgets.get('session-1', 'work-item-1')?.actualTokens === 120,
+    'reported usage must replace the reservation'
+  );
+  const ledger = service.workItemBudgets.get('session-1', 'work-item-1');
+  assert.ok(ledger, 'the requirement must have a ledger');
+  assert.equal(ledger?.reservedTokens, 0, 'the reservation must be reconciled');
+  assert.equal(ledger?.actualTokens, 120, 'the provider measurement must be recorded');
+  assert.equal(ledger?.settlements[0]?.outcome, 'reported');
+});
+
+test('a late result after cancellation settles the WorkItem ledger once without republishing success', async () => {
+  let finish: (result: AgentRunResult) => void = () => {
+    throw new Error('late result resolver was not initialized');
+  };
+  const selected = adapter('mock');
+  selected.start = plan => ({
+    events: (async function* () {})(),
+    result: new Promise<AgentRunResult>((resolve) => { finish = resolve; }),
+    // Simulate a non-cooperative provider: cancellation returns before the
+    // provider eventually reports its final, billable result.
+    async cancel() {}
+  });
+  const { service, persisted } = createService([selected]);
+  persisted.set('sessions', [{ id: 'session-1', tokenBudget: 1_000 }]);
+  const plan = makeInvocationPlan({
+    sessionId: 'session-1',
+    workItemId: 'work-item-late-result',
+    executionTarget: { runtimeType: 'mock' },
+    budget: { maxInputTokens: 400, maxOutputTokens: 200, maxTotalTokens: 1_000 }
+  });
+
+  const running = service.start(plan);
+  await waitForSettlement(
+    () => service.workItemBudgets.get('session-1', 'work-item-late-result')?.reservedTokens === 400,
+    'the admission reservation must exist before cancellation'
+  );
+  await running.cancel(createExecutionTermination({
+    kind: 'user_paused', source: 'user', scope: 'session'
+  }));
+  const cancelled = await running.result;
+  assert.notEqual(cancelled.status, 'completed', 'the stopped invocation must not publish a success first');
+  assert.equal(
+    service.workItemBudgets.get('session-1', 'work-item-late-result')?.reservedTokens,
+    400,
+    'the provider can still have billable work until its late result arrives'
+  );
+
+  finish({
+    ...completed(plan),
+    usage: { inputTokens: 120, outputTokens: 5, totalTokens: 125, model: 'mock' }
+  });
+  await waitForSettlement(
+    () => service.workItemBudgets.get('session-1', 'work-item-late-result')?.actualTokens === 120,
+    'the late provider result must reconcile the outstanding reservation'
+  );
+  const ledger = service.workItemBudgets.get('session-1', 'work-item-late-result');
+  assert.equal(ledger?.reservedTokens, 0);
+  assert.equal(ledger?.actualTokens, 120);
+  assert.equal(ledger?.settlements.length, 1, 'the late result must not charge the requirement twice');
+  assert.equal(
+    service.listInvocations(plan.sessionId).some((item) => item.status === 'completed'),
+    false,
+    'a late success may settle accounting but cannot revive the stopped invocation'
+  );
+});
+
+test('a non-billable mock cancellation releases its reservation instead of exhausting a restored requirement', async () => {
+  const mock = adapter('mock', async plan => ({
+    ...completed(plan),
+    status: 'cancelled',
+    usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: 'mock' },
+    error: { code: 'RUNTIME_CANCELLED', message: 'Mock invocation was cancelled.', retryable: false }
+  }));
+  const { service, persisted } = createService([mock]);
+  persisted.set('sessions', [{ id: 'session-1', tokenBudget: 1_000 }]);
+  const plan = makeInvocationPlan({
+    sessionId: 'session-1',
+    workItemId: 'work-item-restored-session',
+    executionTarget: { runtimeType: 'mock' },
+    budget: { maxInputTokens: 700, maxOutputTokens: 200, maxTotalTokens: 1_000 }
+  });
+
+  const result = await service.run(plan);
+  assert.equal(result.status, 'cancelled');
+  await waitForSettlement(
+    () => service.workItemBudgets.get('session-1', 'work-item-restored-session')?.settlements.length === 1,
+    'a deterministic mock cancellation must settle its reservation'
+  );
+  const ledger = service.workItemBudgets.get('session-1', 'work-item-restored-session');
+  assert.equal(ledger?.reservedTokens, 0);
+  assert.equal(ledger?.actualTokens, 0);
+  assert.equal(ledger?.unknownTokens, 0);
+  assert.equal(ledger?.settlements[0]?.outcome, 'reported');
+  assert.equal(service.workItemBudgets.available('session-1', 'work-item-restored-session'), 1_000);
+});
+
+test('a requirement without allowance left is refused before the adapter starts', async () => {
+  const seen: InvocationPlan[] = [];
+  const mock = adapter('mock', async plan => {
+    seen.push(plan);
+    // Reports the full reservation, so almost nothing is left afterwards.
+    return { ...completed(plan), usage: { inputTokens: 400, outputTokens: 5, totalTokens: 405, model: 'mock' } };
+  });
+  const { service, persisted } = createService([mock]);
+  persisted.set('sessions', [{ id: 'session-1', tokenBudget: 500 }]);
+
+  const first = await service.run(makeInvocationPlan({
+    invocationId: '00000000-0000-4000-8000-0000000009a1',
+    sessionId: 'session-1',
+    workItemId: 'work-item-1',
+    executionTarget: { runtimeType: 'mock' },
+    budget: { maxInputTokens: 400, maxOutputTokens: 200, maxTotalTokens: 500 }
+  }));
+  assert.equal(first.status, 'completed');
+  await waitForSettlement(
+    () => service.workItemBudgets.get('session-1', 'work-item-1')?.actualTokens === 400,
+    'the first call must be settled before the second one is judged'
+  );
+  assert.equal(service.workItemBudgets.available('session-1', 'work-item-1'), 100);
+
+  const second = await service.run(makeInvocationPlan({
+    invocationId: '00000000-0000-4000-8000-0000000009a2',
+    sessionId: 'session-1',
+    workItemId: 'work-item-1',
+    executionTarget: { runtimeType: 'mock' },
+    budget: { maxInputTokens: 400, maxOutputTokens: 200, maxTotalTokens: 500 }
+  }));
+
+  assert.equal(second.status, 'failed');
+  assert.equal(second.error?.code, 'WORK_ITEM_BUDGET_EXHAUSTED');
+  assert.match(String(second.error?.message), /累计模型预算已不足/, 'the refusal must be explained in Chinese');
+  assert.equal(seen.length, 1, 'the refused call must not reach the adapter');
+  assert.equal(second.error?.details?.availableTokens, 100);
+  assert.equal(second.error?.details?.requestedTokens, 400);
+  assert.equal(second.error?.details?.retryable, false);
+});
+
+test('an invocation without a work item is not charged to any requirement', async () => {
+  const mock = adapter('mock');
+  const { service, persisted } = createService([mock]);
+  persisted.set('sessions', [{ id: 'session-1', tokenBudget: 1_000 }]);
+
+  const result = await service.run(makeInvocationPlan({
+    sessionId: 'session-1',
+    executionTarget: { runtimeType: 'mock' }
+  }));
+
+  assert.equal(result.status, 'completed', 'an unowned invocation keeps working unchanged');
+  assert.equal(service.workItemBudgets.get('session-1', 'work-item-any'), undefined);
 });

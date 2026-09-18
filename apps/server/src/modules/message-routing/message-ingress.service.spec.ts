@@ -170,3 +170,69 @@ test('idempotent replay preserves the recorded reply target', async () => {
     await harness.cleanup();
   }
 });
+
+test('a budget-exhaustion recovery message atomically creates a clean related WorkItem', async () => {
+  const harness = await fixture();
+  try {
+    const original = await harness.service.commit({
+      session: harness.session,
+      content: '一次性完成所有模块',
+      mentionedAgentIds: [],
+      handlingPlan,
+      routingMode: 'shadow'
+    });
+    const replacement = await harness.service.commit({
+      session: harness.session,
+      content: '只实现登录接口，并补齐接口测试',
+      mentionedAgentIds: [],
+      handlingPlan,
+      routingMode: 'shadow',
+      budgetExhaustionConfirmationId: 'budget-card-1'
+    });
+
+    assert.equal(replacement.idempotentReplay, false);
+    assert.equal(replacement.routing.forcedWorkItemId, replacement.workItem.id);
+    assert.equal(replacement.workItem.parentWorkItemId, original.workItem.id);
+    assert.deepEqual(replacement.workItem.inheritedDecisionIds, []);
+    assert.deepEqual(replacement.workItem.inheritedArtifactIds, []);
+    assert.equal(harness.context.getWorkItem(harness.session.id, original.workItem.id).status, 'WAITING_USER');
+    assert.equal(harness.session.activeWorkItemId, replacement.workItem.id);
+    assert.ok(harness.accepted.some((event) =>
+      event.type === 'user_confirmation_resolved' &&
+      event.metadata.payload?.confirmationId === 'budget-card-1'
+    ));
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('a preference message atomically requests confirmation and replay does not create a second card', async () => {
+  const harness = await fixture();
+  try {
+    const input = {
+      session: harness.session,
+      content: '请记住：以后偏好简洁报告。',
+      mentionedAgentIds: [],
+      handlingPlan,
+      routingMode: 'enforce_new_sessions' as const,
+      messageIdempotencyKey: 'preference-message-1',
+      preferenceConfirmation: {}
+    };
+    const first = await harness.service.commit(input);
+    const replay = await harness.service.commit(input);
+    assert.equal(replay.idempotentReplay, true);
+    const persisted = harness.persistence.getCollection<Record<string, CollaborationEvent[]>>('eventsBySession', {});
+    const cards = persisted[harness.session.id].filter((item) =>
+      item.type === 'user_confirmation_requested' && item.metadata.payload?.reason === 'confirm_memory_write'
+    );
+    assert.equal(cards.length, 1);
+    const candidate = (cards[0].metadata.payload as {
+      candidate?: { sourceEventId?: string; content?: string };
+    }).candidate;
+    assert.equal(candidate?.sourceEventId, first.event.id);
+    assert.equal(candidate?.content, input.content);
+    assert.equal(harness.accepted.filter((item) => item.type === 'user_confirmation_requested').length, 1);
+  } finally {
+    await harness.cleanup();
+  }
+});

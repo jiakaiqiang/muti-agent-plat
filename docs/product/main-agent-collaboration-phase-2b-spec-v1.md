@@ -1,7 +1,7 @@
 # 阶段 2B：版本化长期记忆、增量摘要与历史需求召回 — Spec v1
 
 > 日期：2026-09-16
-> 状态：设计与实施基线，待实施；现有能力的复用不代表本阶段验收已完成。
+> 状态：已实现并验收（2026-09-18）；证据见同阶段 Checklist。
 > 依赖：阶段 2A 通过；使用阶段 1 生命周期/取消屏障。
 
 [总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-2b-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-2b-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-2b-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-2b-checklist-v1.md)
@@ -20,13 +20,15 @@
 - 不删除原始聊天来节约 Token，不每次加载所有历史需求摘要。
 - 不把全部专家发言自动提升为项目长期规则；不强制新增外部向量服务或发送历史数据给新供应商。
 
-## 3. 当前实现依据
+## 3. 当前实现
 
-- 已有阶段摘要检查点，包含目标、事实、决策、风险和来源，但主要通过字符串合并与限条保留。 [源码/既有文档](../../apps/server/src/modules/orchestrator/orchestrator.service.ts)
-- 现有 MemoryService 是按会话的内存集合与关键词评分，没有在此入口实现完整语义召回。 [源码/既有文档](../../apps/server/src/modules/memory/memory.service.ts)
-- 已有 confirmed/superseded 等决策状态和显式继承 ID，可作为权威事实。 [源码/既有文档](../../packages/shared/src/contracts.ts)
+- `SummaryCheckpointRecord` 以 WorkItem、事件覆盖序号、需求/决策版本、策略版本、generation 和来源引用持久化；同一逻辑键只允许一次有效提交，迟到版本拒绝。 [实现](../../apps/server/src/modules/memory/summary-checkpoint-store.ts)
+- 阶段结束、需求结束和事件阈值进入统一检查点服务；本地派生不调用模型，模型化生成入口支持摘要预算预留，持久化提交最多重试 3 次。 [实现](../../apps/server/src/modules/memory/summary-checkpoint.service.ts)
+- 当前摘要只从有效 `DecisionRecord` 派生决定；需求/决策版本变化时不转发旧事实，已确认约束与验收标准保留，superseded 决策仅作为来源回查。 [实现](../../apps/server/src/modules/memory/summary-memory-derivation.ts)
+- WorkItem 归档索引只保留元数据和检查点引用，显式引用优先，词法候选有界；低可信、相似候选或索引故障均要求澄清。 [实现](../../apps/server/src/modules/context-management/work-item-recall.ts)
+- 事件 API 支持游标分页；PostgreSQL 走数据库分页，file backend 提供有界页和 32 页 LRU。CLI 续接同时校验 WorkItem 与上下文代次，达到阈值后轮换且复用 operation 去重。 [实现](../../apps/server/src/modules/events/events.service.ts)
 
-以上为现状定位，不等于本专项测试结果；实施前复核当前工作树，不覆盖无关改动。
+已知边界：file backend 仍在启动时加载完整 JSON，并由 `EventsService` 保留完整事件投影；它不是完全懒加载的生产存储。阶段 2B 验收的是有界 API/缓存、PostgreSQL 数据库分页和模型上下文隔离，不把该开发模式限制描述为已消除。
 
 ## 4. 验收条件
 
@@ -49,4 +51,4 @@
 
 长会话可继续、旧需求可追溯、旧摘要不能覆盖新决定、取消与 CLI 交接不重播副作用；最终输入通过 2A 预算。
 
-本阶段详细任务和证据填写位置见 Tasks/Checklist。只有实现与必须验证均完成后才可更新状态，文档生成不勾选开发项。
+本阶段详细任务和证据见 Tasks/Checklist。7 条 AC 已通过确定性测试、独立 PostgreSQL、关键 E2E 和全仓门禁；未执行真实付费模型、部署或发布。

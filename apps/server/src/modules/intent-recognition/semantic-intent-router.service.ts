@@ -194,6 +194,17 @@ export class SemanticIntentRouterService {
     if ((decision.requestedAgentIds ?? []).some((id) => !addressableAgentIds.has(id))) {
       errors.push('AGENT_TARGET_OUTSIDE_SNAPSHOT');
     }
+    /**
+     * Historical recall (2B): when the server found several similar old
+     * requirements, or an index outage, the classifier may not pick one of the
+     * recalled candidates on its own — that is a requirement switch the user
+     * must confirm.
+     */
+    if (snapshot.recall?.needsClarification && decision.selectedWorkItemId &&
+      decision.selectedWorkItemId !== snapshot.activeWorkItemId &&
+      snapshot.recall.candidates.some((candidate) => candidate.workItemId === decision.selectedWorkItemId)) {
+      errors.push('HISTORICAL_RECALL_AMBIGUOUS');
+    }
     const snapshotCurrent = this.context.isSnapshotCurrent(
       session,
       snapshot,
@@ -218,6 +229,7 @@ export class SemanticIntentRouterService {
       (decision.ambiguityReasons.length ? 0.25 : 0) -
       (errors.includes('MENTION_TARGET_DROPPED') ? 0.3 : 0) -
       (errors.includes('AGENT_TARGET_OUTSIDE_SNAPSHOT') ? 0.3 : 0) -
+      (errors.includes('HISTORICAL_RECALL_AMBIGUOUS') ? 0.3 : 0) -
       (decision.riskLevel === 'high' && !deterministic ? 0.3 : 0) -
       (decision.requestedAction === 'confirm' || decision.requestedAction === 'reject' ? 0.4 : 0)
     ));
@@ -369,6 +381,7 @@ export class SemanticIntentRouterService {
             `Reply target: ${JSON.stringify(snapshot.replyToMessage ?? snapshot.replyToEventId ?? null)}`,
             `Recent relevant messages (bounded, oldest first): ${JSON.stringify(snapshot.recentRelevantMessages ?? [])}`,
             `Snapshot bounds: ${JSON.stringify(snapshot.bounds ?? null)}`,
+            `Historical recall (server-side, bounded): ${JSON.stringify(snapshot.recall ?? null)}`,
             `Active WorkItem: ${JSON.stringify(snapshot.activeWorkItem ?? null)}`,
             `Candidate WorkItems: ${JSON.stringify(snapshot.candidateWorkItems)}`,
             `Valid Decisions: ${JSON.stringify(snapshot.validDecisions)}`,

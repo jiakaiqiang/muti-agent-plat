@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -140,20 +140,54 @@ test('Artifact cleanup refuses to run a plan containing blocked paths', () => {
 
 test('Artifact cleanup blocks a symlink that escapes the data root', (context) => {
   const fixture = setup();
+  let junctionLink: string | undefined;
   try {
     const outside = join(fixture.outsideRoot, 'secret.md');
     const link = join(fixture.dataRoot, 'artifacts', 'linked.md');
     writeFileSync(outside, 'do not delete', 'utf8');
+    // The Artifact URI the planner must block. With a file symlink it is the link
+    // itself; with the junction fallback it is a file reached *through* the
+    // junction, because the junction directory itself would be rejected earlier
+    // as ARTIFACT_PATH_NOT_FILE rather than as an escaping path.
+    let blockedUri = link;
+    let carrier: 'file-symlink' | 'junction' | undefined;
     try {
       symlinkSync(outside, link, 'file');
-    } catch (error) {
-      context.skip(`symlink creation unavailable: ${String(error)}`);
+      // Trust lstat, not symlinkSync()'s return value: some Windows/sandbox
+      // environments report success while creating a regular file instead.
+      if (lstatSync(link).isSymbolicLink()) carrier = 'file-symlink';
+    } catch {
+      carrier = undefined;
+    }
+    if (!carrier && process.platform === 'win32') {
+      // Directory junctions need no elevation on Windows and are genuine reparse
+      // points, so realpath resolves a path through them to `outsideRoot`.
+      junctionLink = join(fixture.dataRoot, 'artifacts', 'linked-dir');
+      try {
+        symlinkSync(fixture.outsideRoot, junctionLink, 'junction');
+        if (lstatSync(junctionLink).isSymbolicLink()) {
+          carrier = 'junction';
+          blockedUri = join(junctionLink, 'secret.md');
+        }
+      } catch {
+        carrier = undefined;
+      }
+    }
+    if (!carrier) {
+      // No real escaping link available on this host; Linux CI still exercises
+      // the file-symlink fixture end to end. Reported as a real skip so the
+      // coverage gap shows up in the skipped count.
+      context.skip('no real escaping link could be created on this host');
       return;
     }
-    const plan = planArtifactCleanup({ artifacts: [{ id: 'a-link', uri: link }] }, fixture.dataRoot);
+    const plan = planArtifactCleanup({ artifacts: [{ id: 'a-link', uri: blockedUri }] }, fixture.dataRoot);
     assert.equal(plan.blocked[0]?.code, 'ARTIFACT_PATH_SYMLINK_ESCAPE');
     assert.equal(readFileSync(outside, 'utf8'), 'do not delete');
+    context.diagnostic(`escaping link carrier: ${carrier}, blocked uri: ${blockedUri}`);
   } finally {
+    // Drop the reparse point before the recursive fixture cleanup — including on
+    // assertion failure — so removal can never traverse it into the outside tree.
+    if (junctionLink) rmSync(junctionLink, { recursive: false, force: true });
     fixture.cleanup();
   }
 });

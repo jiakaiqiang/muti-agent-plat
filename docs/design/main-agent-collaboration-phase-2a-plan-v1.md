@@ -1,7 +1,7 @@
 # 阶段 2A：统一消息意图、需求隔离与完整 Token 预算 — Plan v1
 
 > 日期：2026-09-16
-> 状态：实施中（2026-09-17）。设计与落点未变更；执行结果与证据见 Tasks/Checklist。
+> 状态：**已验收通过（2026-09-17）**。设计与落点未变更；核心单测、跨进程预算验证、真实 HTTP 路由、Web + Electron SSE、停止/删除/恢复、预算恢复、`npm run typecheck`、`npm run test`、`npm run build` 与 Harness 门禁均已通过。当前没有多模态或真实付费 Provider 适配器，相关生产验证明确不在本次验收结论内。
 > 依赖：阶段 0、1 通过；为 2B、2C、3 提供统一上下文入口。
 
 [总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-2a-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-2a-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-2a-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-2a-checklist-v1.md)
@@ -84,6 +84,6 @@ ContextEnvelopeV2 保持唯一权威载荷。采用有效决策 → 当前任务
 - 更严格预算可能暴露当前请求超大问题，应返回可理解的容量阻塞而非偷偷截断。
 - 工具定义、输出 schema 与 CLI 内部历史可能不在平台初始估算中，需分适配器验证。
 
-回退：停止新语义策略入口可回到已验证入口，但不绕过预算或确认检查；有未结算 reservation 的需求保留总账，不通过重试清零。
+回退：停止新语义策略入口可回到已验证入口，但不绕过预算或确认检查；有未结算 reservation 的需求保留总账，不通过重试清零。本轮未演练回退，因为会主动改变当前验证态且用户要求不影响后续 2B；该不执行决定已在 Checklist 留档，不作为“已演练”的替代说法。
 
-产品交互按总计划已沟通边界执行。模型预算、并发、缓存容量与 TTL 等环境参数不在文档中冒充现有配置；在阶段 0 冻结配置合同、相关阶段实现前记录有效值和验证依据。新增破坏性维护/外部服务采购/发布需单独确认，不影响本轮生成设计文档。
+产品交互按总计划已沟通边界执行。模型预算、并发、缓存容量与 TTL 等环境参数不在文档中冒充现有配置；在阶段 0 冻结配置合同、相关阶段实现前记录有效值和验证依据。新增破坏性维护/外部服务采购/发布需单独确认。阶段 2B 的长期记忆、历史召回、缓存、TTL 与成本治理在本次验收中均未修改。

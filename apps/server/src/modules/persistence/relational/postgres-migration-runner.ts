@@ -12,7 +12,9 @@ import {
   RELATIONAL_SCHEMA_V7_SQL,
   RELATIONAL_SCHEMA_V8_SQL,
   RELATIONAL_SCHEMA_V9_SQL,
-  RELATIONAL_SCHEMA_V10_SQL
+  RELATIONAL_SCHEMA_V10_SQL,
+  RELATIONAL_SCHEMA_V11_SQL,
+  RELATIONAL_SCHEMA_V12_SQL
 } from './relational-schema.js';
 
 type Migration = {
@@ -71,6 +73,16 @@ const MIGRATIONS: Migration[] = [
     version: 10,
     name: 'session_recoverable_lifecycle',
     sql: RELATIONAL_SCHEMA_V10_SQL
+  },
+  {
+    version: 11,
+    name: 'work_item_budget_ledger',
+    sql: RELATIONAL_SCHEMA_V11_SQL
+  },
+  {
+    version: 12,
+    name: 'summary_checkpoint_versions',
+    sql: RELATIONAL_SCHEMA_V12_SQL
   }
 ];
 

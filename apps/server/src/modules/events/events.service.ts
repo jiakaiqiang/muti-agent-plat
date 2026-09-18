@@ -6,6 +6,12 @@ import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { deriveActor } from './derive-actor.js';
 
+export const EVENT_PAGE_DEFAULT = 200;
+export const EVENT_PAGE_MAX = 500;
+export const EVENT_PAGE_CACHE_MAX = 32;
+
+type EventPage = { items: CollaborationEvent[]; hasMore: boolean; nextCursor?: string };
+
 export type CreateEventInput<TPayload extends Record<string, unknown> = Record<string, unknown>> = {
   sessionId: UUID;
   workItemId?: UUID;
@@ -24,6 +30,7 @@ export type CreateEventInput<TPayload extends Record<string, unknown> = Record<s
 @Injectable()
 export class EventsService implements OnModuleDestroy {
   private readonly eventsBySession = new Map<string, CollaborationEvent[]>();
+  private readonly pageCache = new Map<string, EventPage>();
   private readonly subjectsBySession = new Map<string, Subject<CollaborationEvent>>();
   private readonly outboxWorkerId = `events:${process.pid}:${crypto.randomUUID()}`;
 
@@ -108,6 +115,42 @@ export class EventsService implements OnModuleDestroy {
     return index >= 0 ? events.slice(index + 1) : events;
   }
 
+  /**
+   * Cursor page over the durable event log so a long Session can be read in
+   * bounded slices instead of one full-history load. `limit` is clamped to
+   * [1, EVENT_PAGE_MAX] so a client cannot request the whole log through it.
+   */
+  async listPage(sessionId: string, options: { afterEventId?: string; limit?: number } = {}) {
+    const requested = options.limit ?? EVENT_PAGE_DEFAULT;
+    const limit = Number.isFinite(requested)
+      ? Math.max(1, Math.min(EVENT_PAGE_MAX, Math.floor(requested)))
+      : EVENT_PAGE_DEFAULT;
+    const durable = await this.persistence.readEventPage?.(sessionId, { afterEventId: options.afterEventId, limit });
+    if (durable) return durable;
+    const cacheKey = `${JSON.stringify(sessionId)}:${JSON.stringify(options.afterEventId ?? null)}:${limit}`;
+    const cached = this.pageCache.get(cacheKey);
+    if (cached) {
+      this.pageCache.delete(cacheKey);
+      this.pageCache.set(cacheKey, cached);
+      return structuredClone(cached);
+    }
+    const events = this.eventsBySession.get(sessionId) ?? [];
+    const cursor = options.afterEventId ? events.findIndex((event) => event.id === options.afterEventId) : -1;
+    const start = cursor < 0 ? 0 : cursor + 1;
+    const items = events.slice(start, start + limit);
+    const hasMore = start + items.length < events.length;
+    const page = {
+      items,
+      hasMore,
+      ...(hasMore && items.length ? { nextCursor: items[items.length - 1].id } : {})
+    };
+    this.pageCache.set(cacheKey, structuredClone(page));
+    if (this.pageCache.size > EVENT_PAGE_CACHE_MAX) {
+      this.pageCache.delete(this.pageCache.keys().next().value!);
+    }
+    return page;
+  }
+
   stream(sessionId: string) {
     return this.subjectFor(sessionId).asObservable();
   }
@@ -117,6 +160,7 @@ export class EventsService implements OnModuleDestroy {
   }
 
   deleteSession(sessionId: string) {
+    this.invalidatePages(sessionId);
     this.eventsBySession.delete(sessionId);
     const subject = this.subjectsBySession.get(sessionId);
     subject?.complete();
@@ -137,13 +181,22 @@ export class EventsService implements OnModuleDestroy {
   onModuleDestroy() {
     for (const subject of this.subjectsBySession.values()) subject.complete();
     this.subjectsBySession.clear();
+    this.pageCache.clear();
     return this.persistence.flush();
   }
 
   private appendToMemory(event: CollaborationEvent) {
+    this.invalidatePages(event.sessionId);
     const current = this.eventsBySession.get(event.sessionId) ?? [];
     current.push(event);
     this.eventsBySession.set(event.sessionId, current);
+  }
+
+  private invalidatePages(sessionId: string) {
+    const prefix = `${JSON.stringify(sessionId)}:`;
+    for (const key of this.pageCache.keys()) {
+      if (key.startsWith(prefix)) this.pageCache.delete(key);
+    }
   }
 
   private publishCommitted(event: CollaborationEvent) {

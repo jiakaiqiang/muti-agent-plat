@@ -27,9 +27,10 @@ function session(
   };
 }
 
-function snapshot(message: string, hasActiveWorkItem = true): IntentContextSnapshot {
+function snapshot(message: string, hasActiveWorkItem = true, mentionedAgentIds?: string[]): IntentContextSnapshot {
   return {
     id: 'snapshot-1', sessionId: 'session-1', sourceEventId: 'event-1',
+    ...(mentionedAgentIds?.length ? { mentionedAgentIds } : {}),
     ...(hasActiveWorkItem ? {
       activeWorkItemId: 'work-1',
       activeWorkItem: { id: 'work-1', title: 'Task', goal: 'Original task', status: 'FAILED' as const, revision: 1 }
@@ -214,6 +215,41 @@ test('a decision that silently drops the @ target is not auto-applied', async ()
   );
 });
 
+test('a guessed switch to one of two similar historical requirements is not auto-applied', async () => {
+  const decision = {
+    schemaVersion: '1.0' as const, kind: 'intent_routing_decision' as const, dialogueAct: 'command' as const,
+    scopeRelation: 'same_requirement' as const, contextPolicy: 'inherit_confirmed' as const,
+    requestedAction: 'continue_active_work_item' as const, selectedWorkItemId: 'work-export-2',
+    selectedDecisionIds: [], selectedArtifactIds: [], requestedAgentIds: [],
+    goalSegments: ['继续导出'], missingFields: [], ambiguityReasons: [],
+    reasonCodes: ['MODEL_SELECTION'], riskLevel: 'low' as const, modelConfidence: 0.95
+  };
+  const fixture = setup([result(decision)]);
+  const outcome = await fixture.service.classify(session('COMPLETED'), routing(), {
+    ...snapshot('把导出报表那个继续做完'),
+    candidateWorkItemIds: ['work-1', 'work-export-1', 'work-export-2'],
+    candidateWorkItems: [
+      { id: 'work-1', title: 'Task', goal: 'Original task', status: 'FAILED', revision: 1 },
+      { id: 'work-export-1', title: '导出报表', goal: 'Excel', status: 'COMPLETED', revision: 1 },
+      { id: 'work-export-2', title: '导出报表 v2', goal: 'CSV', status: 'OPEN', revision: 1 }
+    ],
+    recall: {
+      availability: 'ok', needsClarification: true, clarificationReason: 'multiple_similar_candidates',
+      candidates: [
+        { workItemId: 'work-export-1', matchedBy: 'lexical', matchedTerms: ['导出'] },
+        { workItemId: 'work-export-2', matchedBy: 'lexical', matchedTerms: ['导出'] }
+      ]
+    }
+  });
+
+  assert.equal(outcome.autoApplicable, false);
+  assert.ok(outcome.validation.errors.includes('HISTORICAL_RECALL_AMBIGUOUS'), JSON.stringify(outcome.validation));
+  assert.equal(outcome.routing.status, 'CLARIFICATION_REQUIRED');
+
+  const envelope = fixture.lastEnvelope();
+  assert.ok(envelope?.L5.bullets.some((bullet) => bullet.includes('multiple_similar_candidates')), 'the classifier is told recall is ambiguous');
+});
+
 test('golden dataset is evaluated through the SemanticIntentRouter validation path', async () => {
   for (const item of INTENT_ROUTING_GOLDEN_DATASET_V1) {
     const runtimeFailure = item.tags.includes('runtime_failure');
@@ -231,7 +267,7 @@ test('golden dataset is evaluated through the SemanticIntentRouter validation pa
       selectedWorkItemId: item.hasActiveWorkItem ? 'work-1' : null,
       selectedDecisionIds: [],
       selectedArtifactIds: [],
-      requestedAgentIds: [],
+      requestedAgentIds: item.expectedAgentIds ?? [],
       goalSegments: action.includes('work_item') ? ['Golden task segment'] : [],
       missingFields: [],
       ambiguityReasons: item.expected.relation === 'ambiguous' ? ['GOLDEN_AMBIGUITY'] : [],
@@ -243,11 +279,12 @@ test('golden dataset is evaluated through the SemanticIntentRouter validation pa
     const outcome = await fixture.service.classify(
       session(item.sessionStatus, item.hasActiveWorkItem),
       routing(),
-      snapshot(item.message, item.hasActiveWorkItem)
+      snapshot(item.message, item.hasActiveWorkItem, item.mentionedAgentIds)
     );
-    assert.equal(outcome.decision.scopeRelation, item.expected.relation, item.id);
-    assert.equal(outcome.decision.contextPolicy, item.expected.contextPolicy, item.id);
-    assert.equal(outcome.decision.requestedAction, item.expected.action, item.id);
-    assert.equal(outcome.autoApplicable, item.expected.autoApply, item.id);
+    const why = `${item.id} ${JSON.stringify(outcome.validation)}`;
+    assert.equal(outcome.decision.scopeRelation, item.expected.relation, why);
+    assert.equal(outcome.decision.contextPolicy, item.expected.contextPolicy, why);
+    assert.equal(outcome.decision.requestedAction, item.expected.action, why);
+    assert.equal(outcome.autoApplicable, item.expected.autoApply, why);
   }
 });

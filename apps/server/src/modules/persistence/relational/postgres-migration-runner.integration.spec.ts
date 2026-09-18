@@ -12,6 +12,8 @@ import { RelationalStateStore } from './relational-state-store.js';
 import { LogicalOperationStore } from '../../runtimes/logical-operation-store.js';
 import { SessionStopStateStore } from '../../runtimes/session-stop-state-store.js';
 import { SessionLifecycleStore } from '../../runtimes/session-lifecycle-store.js';
+import { WorkItemBudgetStore } from '../../runtimes/work-item-budget-store.js';
+import { SummaryCheckpointStore, type SummaryCheckpointDraft } from '../../memory/summary-checkpoint-store.js';
 
 const databaseUrl = process.env.RELATIONAL_TEST_DATABASE_URL;
 
@@ -635,6 +637,181 @@ test('empty relational startup imports a legacy collection state exactly once', 
       await verifyPool.end();
     }
   } finally {
+    await setupPool.query(`drop database if exists ${isolatedDatabase}`).catch(() => undefined);
+    await setupPool.end().catch(() => undefined);
+  }
+});
+
+test('PostgreSQL keeps one requirement ledger across instances and refuses a double-spent allowance', { skip: !databaseUrl }, async () => {
+  // Isolated database: the shared fixture database still holds content references
+  // from earlier cases whose content root has already been removed, which would
+  // make a plain initialize() fail on unavailable content instead of on real state.
+  const isolatedDatabase = `agent_cluster_wib_${process.pid}_${Date.now()}`;
+  const isolatedUrl = new URL(databaseUrl!);
+  isolatedUrl.pathname = `/${isolatedDatabase}`;
+  const setupPool = new Pool({ connectionString: databaseUrl });
+  const isolated = isolatedUrl.toString();
+  const sessionId = `work-item-budget-${process.pid}-${Date.now()}`;
+  const workItemId = `${sessionId}-item`;
+  const now = new Date().toISOString();
+  let first: PersistenceService | undefined;
+  let second: PersistenceService | undefined;
+  let third: PersistenceService | undefined;
+  try {
+    await setupPool.query(`create database ${isolatedDatabase}`);
+    first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    second = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    third = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    await first.initialize();
+    await first.setCollection('sessions', [...first.getCollection<unknown[]>('sessions', []),
+      { id: sessionId, dataEpoch: first.currentDataEpoch(), title: 'Budget ledger', status: 'EXECUTING', ownerId: 'test', createdAt: now, updatedAt: now }
+    ]);
+    await second.initialize();
+
+    const firstStore = new WorkItemBudgetStore(first, () => now);
+    const secondStore = new WorkItemBudgetStore(second, () => now);
+    // Two independent holders of the same requirement, issued before either settles.
+    const [a, b] = await Promise.all([
+      firstStore.reserve({ sessionId, workItemId, attemptId: 'attempt-a', operationId: 'op-a', category: 'execution', requestedTokens: 700, limitTokens: 1_000, now }),
+      secondStore.reserve({ sessionId, workItemId, attemptId: 'attempt-b', operationId: 'op-b', category: 'consultation', requestedTokens: 700, limitTokens: 1_000, now })
+    ]);
+    assert.deepEqual([a.status, b.status].sort(), ['insufficient', 'reserved'], 'exactly one may take the remaining allowance');
+
+    // Initialized only now: reading through an instance loaded before the write
+    // would assert on a stale snapshot rather than on what was committed.
+    await third.initialize();
+    const reopened = new WorkItemBudgetStore(third, () => now);
+    const ledger = reopened.get(sessionId, workItemId);
+    assert.ok(ledger, 'the committed ledger must survive a fresh instance');
+    assert.equal(ledger?.reservedTokens, 700);
+    assert.equal(reopened.available(sessionId, workItemId), 300);
+
+    const winner = a.status === 'reserved' ? 'attempt-a' : 'attempt-b';
+    const settled = await reopened.settle({ sessionId, workItemId, attemptId: winner, outcome: { kind: 'reported', actualTokens: 640 }, now });
+    assert.equal(settled.status, 'settled');
+    const replay = await reopened.settle({ sessionId, workItemId, attemptId: winner, outcome: { kind: 'reported', actualTokens: 640 }, now });
+    assert.equal(replay.status, 'idempotent', 'a replayed settlement must not double-charge');
+    assert.equal(reopened.get(sessionId, workItemId)?.actualTokens, 640);
+
+    const pool = new Pool({ connectionString: isolated });
+    try {
+      const row = await pool.query<{ reserved_tokens: string; actual_tokens: string; unknown_tokens: string }>(
+        `select reserved_tokens,actual_tokens,unknown_tokens from agent_cluster.work_item_budgets where work_item_external_id=$1`,
+        [workItemId]
+      );
+      assert.equal(row.rows.length, 1, 'the ledger must be persisted as a relational row, not only held in memory');
+      assert.equal(Number(row.rows[0].reserved_tokens), 0, 'settlement must release the reservation row');
+      assert.equal(Number(row.rows[0].actual_tokens), 640);
+      assert.equal(Number(row.rows[0].unknown_tokens), 0);
+    } finally {
+      await pool.end();
+    }
+  } finally {
+    await first?.onModuleDestroy().catch(() => undefined);
+    await second?.onModuleDestroy().catch(() => undefined);
+    await third?.onModuleDestroy().catch(() => undefined);
+    await setupPool.query(`drop database if exists ${isolatedDatabase}`).catch(() => undefined);
+    await setupPool.end().catch(() => undefined);
+  }
+});
+
+test('PostgreSQL commits one summary checkpoint per coverage across instances and rejects a stale late summary', { skip: !databaseUrl }, async () => {
+  const isolatedDatabase = `agent_cluster_sc_${process.pid}_${Date.now()}`;
+  const isolatedUrl = new URL(databaseUrl!);
+  isolatedUrl.pathname = `/${isolatedDatabase}`;
+  const setupPool = new Pool({ connectionString: databaseUrl });
+  const isolated = isolatedUrl.toString();
+  const sessionId = `summary-checkpoint-${process.pid}-${Date.now()}`;
+  const workItemId = `${sessionId}-item`;
+  const now = new Date().toISOString();
+  const summary = {
+    goal: '实现导出', currentState: 'EXECUTING / task_execution', confirmedFacts: [], completed: [],
+    decisions: ['[d-2] 导出只支持 Excel'], openQuestions: [], risks: [], nextSteps: []
+  };
+  const draft = (overrides: Partial<SummaryCheckpointDraft> = {}): SummaryCheckpointDraft => ({
+    sessionId, workItemId, phase: 'task_execution', coveredEventSeq: 40, workItemRevision: 2,
+    decisionLedgerRevision: 3, policyVersion: 'summary-checkpoint-v2', summaryMemory: summary,
+    sourceEventIds: ['e-40'], sourceArtifactIds: [], sourceMemoryIds: [], sourceDecisionIds: ['d-2'], ...overrides
+  });
+  let first: PersistenceService | undefined;
+  let second: PersistenceService | undefined;
+  let third: PersistenceService | undefined;
+  try {
+    await setupPool.query(`create database ${isolatedDatabase}`);
+    first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    second = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    third = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    await first.initialize();
+    await first.setCollection('sessions', [...first.getCollection<unknown[]>('sessions', []),
+      { id: sessionId, dataEpoch: first.currentDataEpoch(), title: 'Summary checkpoints', status: 'EXECUTING', ownerId: 'test',
+        decisionLedgerRevision: 3, createdAt: now, updatedAt: now }
+    ]);
+    await first.setCollection('workItemsBySession', {
+      [sessionId]: [{ id: workItemId, sessionId, title: 'Export', goal: 'Export Excel', status: 'active',
+        revision: 2, createdFromEventId: 'e-1', inheritedDecisionIds: [], inheritedArtifactIds: [], createdAt: now, updatedAt: now }]
+    });
+    await second.initialize();
+
+    const firstStore = new SummaryCheckpointStore(first, () => now);
+    const secondStore = new SummaryCheckpointStore(second, () => now);
+    // Two workers summarize the same coverage at the same time.
+    const [a, b] = await Promise.all([firstStore.commit(draft()), secondStore.commit(draft())]);
+    assert.deepEqual([a.status, b.status].sort(), ['committed', 'duplicate'], 'exactly one checkpoint per logical key');
+
+    await third.initialize();
+    const reopened = new SummaryCheckpointStore(third, () => now);
+    const latest = reopened.latest(sessionId, workItemId);
+    assert.equal(latest?.coveredEventSeq, 40, 'the committed checkpoint must be visible to a fresh instance');
+
+    // A summary generated before the user changed the decision (older ledger
+    // revision) arrives late: it must not become the effective checkpoint.
+    const late = await reopened.commit(draft({
+      coveredEventSeq: 45, decisionLedgerRevision: 2, summaryMemory: { ...summary, decisions: ['[d-1] 导出支持 CSV'] }
+    }));
+    assert.equal(late.status, 'rejected');
+    assert.equal(late.status === 'rejected' && late.code, 'SUMMARY_CHECKPOINT_STALE_VERSION');
+
+    // A revision can advance before any replacement checkpoint is generated.
+    await first.mutateCollections(['sessions', 'workItemsBySession'], (state) => {
+      (state.sessions as Array<{ id: string; decisionLedgerRevision: number }>)
+        .find((item) => item.id === sessionId)!.decisionLedgerRevision = 4;
+      (state.workItemsBySession as Record<string, Array<{ revision: number }>>)[sessionId][0].revision = 3;
+    });
+    const noReplacementYet = await reopened.commit(draft({ coveredEventSeq: 50 }));
+    assert.equal(noReplacementYet.status, 'rejected');
+    assert.equal(noReplacementYet.status === 'rejected' && noReplacementYet.code, 'SUMMARY_CHECKPOINT_STALE_VERSION');
+
+    const event = (id: string) => ({ id, sessionId, type: 'user_message', content: id,
+      toAgentIds: [], actor: { type: 'user', id: 'test' },
+      metadata: { schemaVersion: '0.1', payload: {} }, createdAt: now });
+    for (const id of ['page-1', 'page-2', 'page-3']) {
+      assert.equal(await first.appendEvent(event(id) as Parameters<PersistenceService['appendEvent']>[0]), true);
+    }
+    const page1 = await third.readEventPage(sessionId, { limit: 2 });
+    assert.deepEqual(page1?.items.map((item) => item.id), ['page-1', 'page-2']);
+    assert.equal(page1?.hasMore, true);
+    assert.equal(page1?.nextCursor, 'page-2');
+    const page2 = await third.readEventPage(sessionId, { afterEventId: page1?.nextCursor, limit: 2 });
+    assert.deepEqual(page2?.items.map((item) => item.id), ['page-3']);
+    assert.equal(page2?.hasMore, false);
+    const missing = await third.readEventPage('other-session', { limit: 2 });
+    assert.deepEqual(missing?.items, [], 'another Session cannot see this history');
+
+    const pool = new Pool({ connectionString: isolated });
+    try {
+      const rows = await pool.query<{ logical_key: string; covered_event_seq: string }>(
+        `select logical_key,covered_event_seq from agent_cluster.summary_checkpoints where work_item_external_id=$1`,
+        [workItemId]
+      );
+      assert.equal(rows.rows.length, 1, 'the rejected late summary must not be persisted');
+      assert.equal(Number(rows.rows[0].covered_event_seq), 40);
+    } finally {
+      await pool.end();
+    }
+  } finally {
+    await first?.onModuleDestroy().catch(() => undefined);
+    await second?.onModuleDestroy().catch(() => undefined);
+    await third?.onModuleDestroy().catch(() => undefined);
     await setupPool.query(`drop database if exists ${isolatedDatabase}`).catch(() => undefined);
     await setupPool.end().catch(() => undefined);
   }

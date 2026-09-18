@@ -1477,6 +1477,19 @@ async function resolveConfirmationAction(optionKey: string) {
     }
   }
 
+  if (activeConfirmation.value.reason === 'work_item_budget_exhausted') {
+    if (optionKey === 'submit_narrowed_requirement') {
+      workspaceUiStore.messageDraft = ''
+      showMessage('请在下方输入拆分或缩小范围后的需求；系统会创建新的任务上下文。', 'info')
+      return
+    }
+    if (optionKey === 'cancel') {
+      await sessionStore.cancelSession(sessionId, activeConfirmation.value.confirmationId)
+      await reconcileSessionEvents(sessionId)
+      return
+    }
+  }
+
   if (activeConfirmation.value.reason === 'confirm_feishu_notification') {
     if (optionKey === 'send_notification' || optionKey === 'skip_notification') {
       await sessionStore.decideFeishuNotification(sessionId, {

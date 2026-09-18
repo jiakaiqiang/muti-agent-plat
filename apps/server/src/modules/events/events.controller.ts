@@ -10,10 +10,24 @@ export class EventsController {
   constructor(private readonly events: EventsService) {}
 
   @Get()
-  list(@Param('sessionId') sessionId: string, @Query('afterEventId') afterEventId?: string) {
+  async list(
+    @Param('sessionId') sessionId: string,
+    @Query('afterEventId') afterEventId?: string,
+    @Query('limit') limit?: string
+  ) {
+    // Without `limit` the response keeps its historical whole-log shape; with it,
+    // the client pages through the durable log by cursor instead of loading all.
+    if (limit === undefined) {
+      return ok({
+        items: this.events.list(sessionId, afterEventId).filter(shouldExposeCollaborationEvent),
+        hasMore: false
+      });
+    }
+    const page = await this.events.listPage(sessionId, { afterEventId, limit: Number(limit) });
     return ok({
-      items: this.events.list(sessionId, afterEventId).filter(shouldExposeCollaborationEvent),
-      hasMore: false
+      items: page.items.filter(shouldExposeCollaborationEvent),
+      hasMore: page.hasMore,
+      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
     });
   }
 

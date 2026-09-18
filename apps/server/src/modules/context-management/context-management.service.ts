@@ -15,10 +15,13 @@ import type {
   IntentRoutingValidation,
   SessionDetail,
   SessionFollowUpMessage,
+  SummaryCheckpointRecord,
   WorkItem
 } from '@agent-cluster/shared';
 import type { MemoryItem } from '@agent-cluster/shared';
 import { PersistenceService, type PersistedState } from '../persistence/persistence.service.js';
+import { SUMMARY_CHECKPOINTS_COLLECTION } from '../memory/summary-checkpoint-store.js';
+import { buildWorkItemArchiveIndex, recallWorkItems } from './work-item-recall.js';
 
 type BySession<T> = Record<string, T[]>;
 
@@ -64,6 +67,7 @@ export type MessageIngressCommitResult = {
   followUp: SessionFollowUpMessage;
   routing: IntentRoutingRecord;
   workItem: WorkItem;
+  additionalEvents?: CollaborationEvent[];
   idempotentReplay: boolean;
 };
 
@@ -417,8 +421,25 @@ export class ContextManagementService {
       const workItems = this.listWorkItems(input.session.id);
       const active = this.activeWorkItem(input.session);
       const explicit = (input.explicitWorkItemIds ?? []).map((id) => this.getWorkItem(input.session.id, id));
+      // 2B: bounded historical recall runs on the server over the archive index
+      // (titles/keywords/checkpoint refs), so an early requirement among hundreds
+      // can become a candidate without the classifier reading all of history.
+      const recall = recallWorkItems({
+        index: buildWorkItemArchiveIndex(
+          workItems,
+          this.collection<SummaryCheckpointRecord>(SUMMARY_CHECKPOINTS_COLLECTION)[input.session.id] ?? []
+        ),
+        message: input.currentMessage,
+        explicitWorkItemIds: input.explicitWorkItemIds,
+        limit: SNAPSHOT_CANDIDATE_WORK_ITEM_LIMIT
+      });
+      const byId = new Map(workItems.map((item) => [item.id, item]));
+      const recalled = recall.candidates
+        .map((candidate) => byId.get(candidate.workItemId))
+        .filter((item): item is WorkItem => Boolean(item));
       const ranked = uniqueById([
         ...explicit,
+        ...recalled,
         ...(active ? [active] : []),
         ...workItems.filter((item) => ['WAITING_USER', 'FAILED'].includes(item.status)).reverse(),
         ...[...workItems].reverse()
@@ -474,6 +495,17 @@ export class ContextManagementService {
         replyToMessage: replyTarget ? messageExcerpt(replyTarget) : undefined,
         recentRelevantMessages: recentRelevantMessages.length ? recentRelevantMessages : undefined,
         bounds,
+        recall: {
+          availability: recall.availability,
+          needsClarification: recall.needsClarification,
+          ...(recall.clarificationReason ? { clarificationReason: recall.clarificationReason } : {}),
+          candidates: recall.candidates.map((candidate) => ({
+            workItemId: candidate.workItemId,
+            matchedBy: candidate.matchedBy,
+            matchedTerms: candidate.matchedTerms,
+            ...(candidate.latestCheckpointId ? { latestCheckpointId: candidate.latestCheckpointId } : {})
+          }))
+        },
         pendingConfirmation: input.pendingConfirmation,
         pendingConfirmationContext: input.pendingConfirmationContext,
         validDecisionIds: activeDecisions.map((item) => item.id),
@@ -551,6 +583,12 @@ export class ContextManagementService {
     rolloutMode: IntentRoutingRolloutMode;
     routingIdempotencyKey: string;
     initialGoal?: string;
+    /**
+     * A budget-exhausted requirement can only recover through a fresh related
+     * WorkItem. This is a server-enforced routing invariant, not a model hint.
+     */
+    forceNewRelatedWorkItem?: boolean;
+    additionalEvents?: CollaborationEvent[];
   }): Promise<MessageIngressCommitResult> {
     return this.serialized(input.session.id, async () => {
       const committed = await this.mutate((draft) => {
@@ -609,6 +647,32 @@ export class ContextManagementService {
           sessionWorkItems.push(workItem);
           projectedSession.activeWorkItemId = workItem.id;
         }
+        const previousWorkItem = workItem;
+        if (input.forceNewRelatedWorkItem && previousWorkItem) {
+          // Do not inherit decisions or artifacts implicitly. The new user
+          // message is a narrowed/split requirement, so it receives a clean
+          // budget ledger and only a parent link for auditability.
+          workItem = {
+            id: crypto.randomUUID(),
+            sessionId: input.session.id,
+            parentWorkItemId: previousWorkItem.id,
+            title: input.followUp.content.trim().slice(0, 120) || '拆分后的需求',
+            goal: input.followUp.content.trim(),
+            status: 'OPEN',
+            revision: 1,
+            createdFromEventId: input.event.id,
+            inheritedDecisionIds: [],
+            inheritedArtifactIds: [],
+            createdAt: now,
+            updatedAt: now
+          };
+          if (!workItem.goal) throw new BadRequestException('A replacement WorkItem requires user input.');
+          previousWorkItem.status = 'WAITING_USER';
+          previousWorkItem.revision += 1;
+          previousWorkItem.updatedAt = now;
+          sessionWorkItems.push(workItem);
+          projectedSession.activeWorkItemId = workItem.id;
+        }
         const routing: IntentRoutingRecord = {
           id: crypto.randomUUID(),
           sessionId: input.session.id,
@@ -623,12 +687,17 @@ export class ContextManagementService {
           createdAt: now,
           updatedAt: now
         };
+        if (input.forceNewRelatedWorkItem) {
+          routing.forcedWorkItemId = workItem.id;
+          routing.reasonCodes.push('WORK_ITEM_BUDGET_EXHAUSTION_REPLACEMENT');
+        }
         const followUp: SessionFollowUpMessage = {
           ...structuredClone(input.followUp),
           workItemId: workItem.id,
           routingId: routing.id
         };
-        sessionEvents.push(structuredClone(input.event));
+        const additionalEvents = input.additionalEvents ?? [];
+        sessionEvents.push(structuredClone(input.event), ...additionalEvents.map((item) => structuredClone(item)));
         sessionFollowUps.push(followUp);
         sessionRoutings.push(routing);
         projectedSession.pendingFollowUpMessages = [
@@ -638,12 +707,20 @@ export class ContextManagementService {
         projectedSession.revision = (projectedSession.revision ?? 1) + 1;
         projectedSession.updatedAt = now;
         appendEventOutbox(draft, input.event);
+        for (const additionalEvent of additionalEvents) appendEventOutbox(draft, additionalEvent);
         draft.sessions = sessions;
         draft.eventsBySession = events;
         draft.followUpMessagesBySession = followUps;
         draft.intentRoutingRecordsBySession = routings;
         draft.workItemsBySession = workItems;
-        return { event: input.event, followUp, routing, workItem, idempotentReplay: false };
+        return {
+          event: input.event,
+          followUp,
+          routing,
+          workItem,
+          ...(additionalEvents.length ? { additionalEvents } : {}),
+          idempotentReplay: false
+        };
       }, input.session.id);
 
       input.session.activeWorkItemId = committed.workItem.id;
@@ -734,9 +811,15 @@ export class ContextManagementService {
 
         const current = sessionWorkItems.find((item) => item.id === projectedSession.activeWorkItemId);
         const previousWorkItemId = current?.id;
-        let target = input.decision.selectedWorkItemId
+        const forcedTarget = routing.forcedWorkItemId
+          ? sessionWorkItems.find((item) => item.id === routing.forcedWorkItemId)
+          : undefined;
+        if (routing.forcedWorkItemId && !forcedTarget) {
+          throw new BadRequestException('Forced replacement WorkItem is no longer available.');
+        }
+        let target = forcedTarget ?? (input.decision.selectedWorkItemId
           ? sessionWorkItems.find((item) => item.id === input.decision.selectedWorkItemId)
-          : current;
+          : current);
         let createdWorkItem = false;
         if (
           input.decision.requestedAction === 'create_related_work_item' ||
@@ -777,7 +860,15 @@ export class ContextManagementService {
         projectedSession.revision = (projectedSession.revision ?? 1) + 1;
         projectedSession.updatedAt = new Date().toISOString();
         followUp.workItemId = target.id;
-        if (input.handlingPlan) followUp.handlingPlan = input.handlingPlan;
+        if (input.handlingPlan) {
+          followUp.handlingPlan = routing.forcedWorkItemId
+            ? {
+                ...input.handlingPlan,
+                requirementRelation: 'new_requirement',
+                failedExecutionAction: 'replan'
+              }
+            : input.handlingPlan;
+        }
         routing.status = 'ROUTED';
         routing.decision = input.decision;
         routing.validation = input.validation;

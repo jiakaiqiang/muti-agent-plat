@@ -182,11 +182,11 @@ export async function stopSmokeServer(handle) {
 
 export async function api(apiBase, path, init) {
   const response = await fetch(`${apiBase}${path}`, {
+    ...init,
     headers: {
       'content-type': 'application/json',
       ...(init?.headers ?? {})
-    },
-    ...init
+    }
   });
   if (!response.ok) {
     throw new Error(`${init?.method ?? 'GET'} ${path} failed: ${response.status} ${await response.text()}`);

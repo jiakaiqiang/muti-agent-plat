@@ -6,6 +6,7 @@ import type {
   AgentRuntimeRunHandle,
   FinalDeliveryOutput,
   FileRevisionCandidateOutput,
+  IntentRoutingDecisionOutput,
   InvocationPlan,
   PostReviewReportOutput,
   RuntimeArtifactOutput,
@@ -143,6 +144,28 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
           requiresUserConfirmation: false,
           coordinatorInstruction: 'Apply the new constraint to the current invocation.'
         } satisfies UserMessageHandlingPlanOutput;
+      case 'intent_routing_decision':
+        // A deterministic test Runtime must still honor the strict router output
+        // contract. It intentionally chooses clarification instead of guessing
+        // how a free-form message relates to an existing requirement.
+        return {
+          schemaVersion: '1.0',
+          kind: 'intent_routing_decision',
+          dialogueAct: 'clarification',
+          scopeRelation: 'ambiguous',
+          contextPolicy: 'ask_user',
+          requestedAction: 'clarify',
+          selectedWorkItemId: null,
+          selectedDecisionIds: [],
+          selectedArtifactIds: [],
+          requestedAgentIds: [],
+          goalSegments: [],
+          missingFields: ['requirement_relation'],
+          ambiguityReasons: ['MOCK_INTENT_ROUTING_REQUIRES_USER_CHOICE'],
+          reasonCodes: ['MOCK_INTENT_ROUTING_SAFE_CLARIFY'],
+          riskLevel: 'low',
+          modelConfidence: null
+        } satisfies IntentRoutingDecisionOutput;
       default:
         return createAgentMessageOutput({
           messageKind: 'discussion',

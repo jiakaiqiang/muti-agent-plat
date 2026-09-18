@@ -12,6 +12,7 @@ import type {
 } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
 import { PersistenceService } from '../persistence/persistence.service.js';
+import { SummaryCheckpointStore } from '../memory/summary-checkpoint-store.js';
 import { ContextManagementService } from './context-management.service.js';
 
 async function fixture() {
@@ -680,7 +681,7 @@ test('intent snapshots bound recent dialogue and candidates instead of injecting
   const context = await fixture();
   try {
     const active = await context.service.ensureInitialWorkItem(context.session, 'event-1');
-    for (let index = 0; index < 40; index += 1) {
+    for (let index = 0; index < 100; index += 1) {
       await context.service.createWorkItem({
         session: context.session,
         sourceEventId: `event-history-${index}`,
@@ -702,8 +703,8 @@ test('intent snapshots bound recent dialogue and candidates instead of injecting
 
     assert.ok(snapshot.bounds, 'snapshot must declare its own bounds');
     assert.equal(snapshot.candidateWorkItemIds.length, snapshot.bounds.candidateWorkItemLimit);
-    assert.equal(snapshot.bounds.totalCandidateWorkItems, 41);
-    assert.equal(snapshot.bounds.omittedCandidateWorkItems, 41 - snapshot.bounds.candidateWorkItemLimit);
+    assert.equal(snapshot.bounds.totalCandidateWorkItems, 101);
+    assert.equal(snapshot.bounds.omittedCandidateWorkItems, 101 - snapshot.bounds.candidateWorkItemLimit);
     assert.ok(
       (snapshot.recentRelevantMessages?.length ?? 0) <= snapshot.bounds.recentMessageLimit,
       `recent dialogue must stay within the declared cap, got ${snapshot.recentRelevantMessages?.length}`
@@ -803,3 +804,134 @@ test('snapshot hash covers the new target fields so a changed @ target is not re
     await context.cleanup();
   }
 });
+
+test('an early requirement among a hundred is recalled into the bounded candidates with its source', async () => {
+  const context = await fixture();
+  try {
+    const early = await context.service.createWorkItem({
+      session: context.session, sourceEventId: 'event-early', title: '登录页改版',
+      goal: '重做登录页并支持手机号验证码登录', activate: false
+    });
+    for (let index = 0; index < 99; index += 1) {
+      await context.service.createWorkItem({
+        session: context.session, sourceEventId: `event-${index}`, title: `其它需求 ${index}`,
+        goal: `与登录无关的功能 ${index}`, activate: index === 98
+      });
+    }
+    // A thousand old messages plus a versioned checkpoint for the early requirement:
+    // the recall must point at the checkpoint reference, not drag bodies along.
+    const history = Array.from({ length: 1_000 }, (_, index) =>
+      userMessage(context.session.id, index, `第 ${index} 条历史消息`, early.id));
+    await context.persistence.setCollection('eventsBySession', { [context.session.id]: history });
+    const checkpoints = new SummaryCheckpointStore(context.persistence);
+    const committed = await checkpoints.commit({
+      sessionId: context.session.id, workItemId: early.id, phase: 'task_execution', coveredEventSeq: 900,
+      workItemRevision: 1, decisionLedgerRevision: 0, policyVersion: 'summary-checkpoint-v2',
+      summaryMemory: {
+        goal: '重做登录页', currentState: 'COMPLETED', confirmedFacts: ['一段很长很长的摘要正文'.repeat(50)],
+        completed: [], decisions: [], openQuestions: [], risks: [], nextSteps: []
+      },
+      sourceEventIds: ['history-899'], sourceArtifactIds: [], sourceMemoryIds: [], sourceDecisionIds: []
+    });
+    assert.equal(committed.status, 'committed');
+    const snapshot = await context.service.buildIntentSnapshot({
+      session: context.session, sourceEventId: 'event-ask', latestEventSeq: history.length,
+      currentMessage: '之前那个登录页改版，手机号验证码的方案还在吗'
+    });
+
+    assert.ok(snapshot.candidateWorkItemIds.includes(early.id), 'the early requirement must be recallable');
+    assert.ok(snapshot.candidateWorkItemIds.length <= (snapshot.bounds?.candidateWorkItemLimit ?? 0), 'recall stays bounded');
+    assert.equal(snapshot.recall?.availability, 'ok');
+    assert.equal(snapshot.recall?.needsClarification, false);
+    assert.equal(snapshot.recall?.candidates[0]?.workItemId, early.id);
+    assert.equal(snapshot.recall?.candidates[0]?.matchedBy, 'lexical');
+    assert.equal(
+      snapshot.recall?.candidates[0]?.latestCheckpointId,
+      committed.status === 'committed' ? committed.record.checkpointId : undefined,
+      'recall carries the checkpoint reference so the body can be read on demand'
+    );
+    const serialized = JSON.stringify(snapshot);
+    assert.equal(serialized.includes('很长很长'), false, 'recall never inlines the checkpoint body');
+    assert.ok(serialized.length < 40_000, `snapshot must stay bounded with 100 requirements and 1,000 messages, got ${serialized.length}`);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('two similar historical requirements are surfaced for clarification, not auto-selected', async () => {
+  const context = await fixture();
+  try {
+    await context.service.ensureInitialWorkItem(context.session, 'event-1');
+    const first = await context.service.createWorkItem({
+      session: context.session, sourceEventId: 'event-a', title: '导出报表', goal: '支持 Excel 导出与分页', activate: false
+    });
+    const second = await context.service.createWorkItem({
+      session: context.session, sourceEventId: 'event-b', title: '导出报表 v2', goal: '支持 CSV 与 Excel 导出', activate: false
+    });
+    const snapshot = await context.service.buildIntentSnapshot({
+      session: context.session, sourceEventId: 'event-ask', latestEventSeq: 0, currentMessage: '把导出报表那个继续做完'
+    });
+    assert.equal(snapshot.recall?.needsClarification, true);
+    assert.equal(snapshot.recall?.clarificationReason, 'multiple_similar_candidates');
+    const recalled = snapshot.recall?.candidates.map((item) => item.workItemId).sort();
+    assert.deepEqual(recalled?.slice(0, 2), [first.id, second.id].sort());
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('recall is scoped to the Session: another session\'s private memory is never a candidate', async () => {
+  const context = await fixture();
+  try {
+    // Session-1 holds its own requirement and its own private memory.
+    const own = await context.service.ensureInitialWorkItem(context.session, 'event-1');
+    await context.service.recordDecision({
+      session: context.session, workItemId: own.id, sourceEventId: 'event-own',
+      kind: 'requirement', content: '本会话的私有决定：数据库使用 PostgreSQL'
+    });
+
+    // Session-2 (another chat with the same agentIds) holds the private
+    // requirement that session-1's message lexically matches.
+    const other: SessionDetail = { ...context.session, id: 'session-2', revision: 1, activeWorkItemId: undefined };
+    await context.persistence.setCollection('sessions', [
+      ...context.persistence.getCollection<SessionDetail[]>('sessions', []), other
+    ]);
+    const foreign = await context.service.createWorkItem({
+      session: other, sourceEventId: 'event-foreign', title: '登录页改版',
+      goal: '重做登录页并支持手机号验证码登录', activate: false
+    });
+    await context.service.recordDecision({
+      session: other, workItemId: foreign.id, sourceEventId: 'event-foreign',
+      kind: 'requirement', content: '另一会话的私有决定：验证码用短信通道'
+    });
+
+    const snapshot = await context.service.buildIntentSnapshot({
+      session: context.session, sourceEventId: 'event-ask', latestEventSeq: 1,
+      currentMessage: '之前那个登录页改版，手机号验证码的方案还在吗'
+    });
+
+    assert.equal(snapshot.recall?.availability, 'ok');
+    assert.equal(
+      snapshot.recall?.candidates.some((candidate) => candidate.workItemId === foreign.id),
+      false,
+      'a WorkItem from another Session must never enter the recall candidates'
+    );
+    assert.deepEqual(
+      snapshot.recall?.candidates.map((candidate) => candidate.workItemId),
+      [],
+      'no_match is the honest answer instead of leaking the other session'
+    );
+    assert.equal(snapshot.recall?.needsClarification, true);
+    assert.equal(snapshot.recall?.clarificationReason, 'no_match');
+    assert.equal(
+      snapshot.candidateWorkItemIds.includes(foreign.id), false,
+      'candidate list stays inside the Session boundary'
+    );
+    assert.deepEqual(
+      snapshot.validDecisions.filter((decision) => decision.content.includes('短信通道')),
+      [],
+      'another session\'s private decisions are not exposed as valid decisions'
+    );
+  } finally { await context.cleanup(); }
+});
+

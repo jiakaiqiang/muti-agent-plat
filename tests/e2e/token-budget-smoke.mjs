@@ -39,8 +39,11 @@ try {
     method: 'POST',
     body: JSON.stringify({
       input: 'Tiny token budget should fail preflight.',
-      agentIds: ['coordinator', 'backend', 'test', 'review'],
-      tokenBudget: 10
+      tokenBudget: 10,
+      runtimePreference: {
+        preferredRuntimeType: 'mock',
+        allowedRuntimeTypes: ['mock']
+      }
     })
   });
   const tinySessionId = tiny.data.session.id;

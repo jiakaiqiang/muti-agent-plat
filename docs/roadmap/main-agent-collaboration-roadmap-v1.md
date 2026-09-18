@@ -1,9 +1,9 @@
 # 主 Agent 协作与长会话治理：分阶段实施总计划 v1
 
 > 日期：2026-09-16
-> 状态：阶段 0 与阶段 1 已实现并验证；阶段 2A 及后续业务接入待实施。
+> 状态：阶段 0、阶段 1、阶段 2A 与阶段 2B 已实现并验收；阶段 2C 及后续业务接入待实施。
 > 初始文档交付：1 份总计划 + 9 阶段 × 4 份文档，共 37 份新增文档，记录保留于第 11 节。
-> 当前实施范围：阶段 0 与阶段 1；未调用真实模型、部署或发布。
+> 当前已验收范围：阶段 0、阶段 1、阶段 2A、阶段 2B；未调用真实付费/多模态 Provider、部署或发布。
 
 ## 1. 目标与已沟通决定
 
@@ -70,8 +70,8 @@
 | --- | --- | --- | --- |
 | 0 | 合同收敛、现状基线与迁移边界（已完成合同/基线验证） | 无 | [spec](../product/main-agent-collaboration-phase-0-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-0-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-0-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-0-checklist-v1.md) |
 | 1 | 多会话执行隔离、停止与可恢复删除（已完成并通过验收） | 0 | [spec](../product/main-agent-collaboration-phase-1-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-1-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-1-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-1-checklist-v1.md) |
-| 2A | 统一消息意图、需求隔离与完整 Token 预算 | 1 | [spec](../product/main-agent-collaboration-phase-2a-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2a-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2a-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2a-checklist-v1.md) |
-| 2B | 版本化长期记忆、增量摘要与历史需求召回 | 2A | [spec](../product/main-agent-collaboration-phase-2b-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2b-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2b-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2b-checklist-v1.md) |
+| 2A | 统一消息意图、需求隔离与完整 Token 预算（已完成并通过验收） | 1 | [spec](../product/main-agent-collaboration-phase-2a-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2a-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2a-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2a-checklist-v1.md) |
+| 2B | 版本化长期记忆、增量摘要与历史需求召回（已完成并通过验收） | 2A | [spec](../product/main-agent-collaboration-phase-2b-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2b-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2b-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2b-checklist-v1.md) |
 | 2C | 分层缓存、失效治理与成本观测 | 2B | [spec](../product/main-agent-collaboration-phase-2c-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2c-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2c-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2c-checklist-v1.md) |
 | 3 | 主 Agent 主持讨论与可恢复专家协作 | 2A/2B/2C | [spec](../product/main-agent-collaboration-phase-3-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-3-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-3-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-3-checklist-v1.md) |
 | 4 | 主 Agent 文档、精确确认与所选工作流交接 | 3 | [spec](../product/main-agent-collaboration-phase-4-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-4-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-4-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-4-checklist-v1.md) |
@@ -87,7 +87,7 @@
 - Tasks：有序任务、依赖、交付物及关联 AC。
 - Checklist：具体场景、预期、现有命令、必须新增的测试和证据位置。
 
-本专项共 61 条阶段 AC、54 项开发任务。阶段 0 与阶段 1 的 12 条 AC、12 项任务已完成实现和验证；阶段 2A 及以后仍待实施/待验证，不因文档生成而完成。
+本专项共 61 条阶段 AC、54 项开发任务。阶段 0、阶段 1、阶段 2A 与阶段 2B 的 26 条 AC、24 项任务已完成实现和验收；阶段 2C 及以后仍待实施/待验证，不因前置阶段通过而自动完成。
 
 ## 5. 跨阶段架构决策与不变量
 
@@ -203,3 +203,16 @@
 - 普通执行、队列、工作流、Runtime 后处理、Memory、Workspace Writeback 和 LogicalOperation 均阻止旧 generation 迟到写入。
 - Web 与 Desktop 共用生命周期事实，分别保留自身样式并提供已删除会话查看/恢复入口。
 - [阶段 1 Checklist](../quality/main-agent-collaboration-phase-1-checklist-v1.md)记录 PostgreSQL 竞争、三项 E2E、全量测试、类型检查和构建证据；未调用真实模型，未部署或发布。
+
+## 14. 阶段 2A 实施交付（2026-09-17）
+
+- 完成统一消息入口、Intent Snapshot/WorkItem 隔离、确定性命令优先和跨并发 WorkItem 累计预算。
+- Runtime 最终请求、工具循环、取消迟到结算和用户缩小需求恢复均进入同一预算与 lifecycle 边界。
+- [阶段 2A Checklist](../quality/main-agent-collaboration-phase-2a-checklist-v1.md)记录定向、PostgreSQL、E2E 和全仓门禁证据；预算耗尽不再伪装成普通重试失败。
+
+## 15. 阶段 2B 实施交付（2026-09-18）
+
+- 完成版本化 SummaryCheckpoint、跨实例唯一提交、迟到版本拒绝及当前有效 DecisionRecord 派生；superseded 决策只保留来源回查，不再进入当前上下文。
+- 完成 WorkItem 有界历史召回、相似项澄清、事件分页/32 页 LRU，以及 CLI 按 WorkItem/generation 隔离与受控轮换。
+- [阶段 2B Checklist](../quality/main-agent-collaboration-phase-2b-checklist-v1.md)记录 176/176 定向回归、独立 PostgreSQL 11/11、六条关键 E2E 和全仓门禁。
+- 已知边界：file backend 启动仍加载完整 JSON/事件投影；本阶段不把请求级分页描述成存储完全懒加载。未调用真实付费模型、部署或发布。

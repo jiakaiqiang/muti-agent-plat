@@ -30,7 +30,20 @@ const run = { id: session.workflowRunId, sessionId: session.id, workflowId: defi
 const events = [{ id: 'presentation-message', sessionId: session.id, type: 'user_message',
   actor: { type: 'user', id: 'fixture' }, content: session.originalInput, metadata: {}, createdAt: timestamp },
   { id: 'presentation-progress', sessionId: session.id, type: 'runtime_progress', content: '正在执行任务',
-    metadata: { schemaVersion: '0.1', payload: {} }, createdAt: new Date().toISOString() }];
+    metadata: { schemaVersion: '0.1', payload: {} }, createdAt: new Date().toISOString() },
+  { id: 'presentation-budget-exhausted', sessionId: session.id, type: 'user_confirmation_requested',
+    content: '当前需求的预算已用尽，请提交拆分或缩小范围后的新需求。', metadata: {
+      schemaVersion: '0.1', payload: {
+        confirmationId: 'presentation-budget-exhausted-confirmation',
+        reason: 'work_item_budget_exhausted',
+        title: '需要拆分当前需求',
+        description: '系统不会重试已耗尽预算的任务。请提交拆分或缩小范围后的新需求。',
+        options: [
+          { key: 'submit_narrowed_requirement', label: '提交拆分需求', style: 'primary' },
+          { key: 'cancel', label: '取消会话', style: 'default' }
+        ]
+      }
+    }, createdAt: new Date().toISOString() }];
 const pageData = items => ({ items, hasMore: false });
 function dataFor(path) {
   if (path === '/health') return { pipelineVersion: 'v2', dataSchemaVersion: 3, runtimeBuildStale: false, buildId: 'presentation-fixture' };
@@ -137,6 +150,20 @@ try {
     await page.goto(`${handle.origin}/workspace/${session.id}`);
     await page.locator('.session-list-item.active').waitFor();
     await page.getByText(session.originalInput, { exact: true }).last().waitFor();
+    const budgetConfirmations = page.locator('.confirmation-card').filter({ hasText: '需要拆分当前需求' });
+    await budgetConfirmations.first().waitFor();
+    const confirmationCount = await budgetConfirmations.count();
+    assert.ok(confirmationCount >= 1, `${client}: the budget confirmation must be visible`);
+    for (let index = 0; index < confirmationCount; index += 1) {
+      const budgetConfirmation = budgetConfirmations.nth(index);
+      await budgetConfirmation.getByRole('button', { name: '提交拆分需求', exact: true }).waitFor();
+      await budgetConfirmation.getByRole('button', { name: '取消会话', exact: true }).waitFor();
+      assert.equal(
+        await budgetConfirmation.getByRole('button', { name: '继续执行', exact: true }).count(),
+        0,
+        `${client}: an exhausted WorkItem must not offer retrying the old budget ledger`
+      );
+    }
     const activity = page.locator('.user-input-box .task-activity');
     await activity.filter({ hasText: '正在运行你的任务，请稍等' }).waitFor();
     const activityBox = await activity.boundingBox();
@@ -239,7 +266,7 @@ try {
     await page.evaluate(() => window.dispatchEvent(new Event('focus')));
     await page.locator('.session-list-item.active .status-running').waitFor();
     await page.locator('.task-activity.is-running').waitFor();
-    if (client === 'desktop') await page.getByRole('tab', { name: '群聊消息', exact: true }).click();
+    if (client === 'desktop') await page.getByRole('tab', { name: /^群聊消息/ }).click();
     const composer = page.locator('.user-input-box');
     await composer.locator('textarea').fill('保留这条未发送的草稿');
     await composer.getByRole('button', { name: '停止当前会话', exact: true }).click();
@@ -300,7 +327,7 @@ try {
     await composer.getByRole('button', { name: '停止当前会话', exact: true }).waitFor();
     await page.screenshot({ path: resolve(shots, `${client}-chat-stop-control.png`) });
     // Exercise the shared scroll control against both independently built layouts.
-    if (client === 'desktop') await page.getByRole('tab', { name: '群聊消息', exact: true }).click();
+    if (client === 'desktop') await page.getByRole('tab', { name: /^群聊消息/ }).click();
     for (let index = 0; index < 30; index++) events.push({
       id: `scroll-${client}-${index}`, sessionId: session.id, type: 'agent_message',
       actor: { type: 'agent', id: 'fixture' }, content: `滚动回归 ${client} ${index} — 需求开发验证返工的执行记录。`,
