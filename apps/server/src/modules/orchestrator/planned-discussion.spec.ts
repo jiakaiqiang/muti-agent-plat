@@ -107,7 +107,7 @@ test('planned discussion consults only the experts the coordinator named and per
     const runs = new DiscussionStore(context.persistence).list('session-1');
     assert.equal(runs.length, 1);
     const run = runs[0]!;
-    assert.equal(run.status, 'synthesizing', 'after the round the run waits for synthesis, not a restart');
+    assert.equal(run.status, 'waiting_user', 'the member addition awaits the user, so the round is not closed');
     assert.equal(run.roundsStarted, 1);
     assert.equal(run.delegations.length, 1);
     assert.equal(run.delegations[0]?.targetAgentId, 'backend');
@@ -142,7 +142,7 @@ test('an expert failure marks only its delegation failed and the round still com
     assert.equal(byAgent.backend?.status, 'failed');
     assert.equal(byAgent.backend?.failure?.code, 'RUNTIME_INVOCATION_ERROR');
     assert.equal(byAgent.test?.status, 'completed');
-    assert.equal(run?.status, 'synthesizing');
+    assert.equal(run?.status, 'waiting_user', 'a failed expert is surfaced to the user, not glossed over');
   } finally {
     await context.cleanup();
   }
@@ -213,7 +213,7 @@ test('a restart resumes the unfinished delegations without re-planning or re-con
     const byAgent = Object.fromEntries(runs[0]!.delegations.map((item) => [item.targetAgentId, item]));
     assert.equal(byAgent.backend?.result?.conclusion, 'already answered', 'the finished result is untouched');
     assert.equal(byAgent.test?.status, 'completed');
-    assert.equal(runs[0]!.status, 'synthesizing');
+    assert.equal(runs[0]!.status, 'ready_for_confirmation');
     assert.equal(runs[0]!.roundsStarted, 1, 'resuming a round does not count as a new round');
   } finally {
     await context.cleanup();
@@ -280,7 +280,7 @@ test('a user @ becomes an owned delegation to that expert, not a broadcast, and 
     assert.equal(run.delegations.length, 1);
     assert.equal(run.delegations[0]?.origin, 'user_mention');
     assert.equal(run.delegations[0]?.status, 'completed');
-    assert.equal(run.status, 'synthesizing');
+    assert.equal(run.status, 'ready_for_confirmation');
     assert.equal(run.roundsStarted, 2, 'a mention after synthesis opens a bounded new round');
 
     const reply = recorder.events.find((event) => event.type === 'agent_message' && event.fromAgentId === 'backend');
@@ -339,6 +339,68 @@ test('a requirement revision supersedes the old round and re-plans on the same r
     assert.equal(onRevision(1)[0]?.stale, true, 'the old answer is kept as history but marked stale');
     assert.equal(onRevision(2)[0]?.status, 'completed');
     assert.equal(onRevision(2)[0]?.result?.conclusion, 'answer to the NEW requirement');
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('the coordinator summary is built from the real results and the round closes clean', async () => {
+  const context = await fixture();
+  try {
+    const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+    const service = makeService([], recorder, undefined, undefined, undefined, context) as unknown as PlannedService;
+    service.createContextAssembly = () => ({ budget: {}, systemRules: [] } as unknown as ContextAssembly);
+    service.runRuntime = async () => completedRun('plan-1', discussionPlan([{ targetAgentKey: 'backend' }, { targetAgentKey: 'test' }]));
+    service.runDiscussionRuntime = async (_session, expert, invocationId) =>
+      completedRun(invocationId, createAgentMessageOutput({ messageKind: 'answer', content: `${expert.key} says: keep the current schema` }));
+
+    await service.runDiscussion(context.session(), agent('coordinator'));
+
+    const run = new DiscussionStore(context.persistence).list('session-1')[0]!;
+    assert.equal(run.status, 'ready_for_confirmation');
+    assert.deepEqual([...run.synthesis!.sourceDelegationIds].sort(), [...run.delegations.map((item) => item.id)].sort());
+
+    const summary = recorder.events.find(
+      (event) => event.type === 'agent_message' && event.fromAgentId === 'coordinator' && event.metadata.payload?.messageKind === 'summary'
+    );
+    assert.ok(summary, 'the coordinator posts a synthesis message');
+    assert.match(summary!.content, /backend agent[\s\S]*keep the current schema/);
+    assert.match(summary!.content, /test agent[\s\S]*keep the current schema/);
+    assert.doesNotMatch(summary!.content, /已汇总|一致同意/);
+    assert.deepEqual(summary!.metadata.payload?.sourceDelegationIds, run.synthesis!.sourceDelegationIds);
+    assert.equal(summary!.metadata.payload?.discussionId, run.id);
+    assert.equal(summary!.metadata.payload?.requirementRevision, 1);
+    assert.equal(recorder.events.some((event) => event.metadata.payload?.reason === 'discussion_clarification'), false, 'nothing to ask');
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('unresolved items produce one clarification card owned by the coordinator', async () => {
+  const context = await fixture();
+  try {
+    const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+    const service = makeService([], recorder, undefined, undefined, undefined, context) as unknown as PlannedService;
+    service.createContextAssembly = () => ({ budget: {}, systemRules: [] } as unknown as ContextAssembly);
+    service.runRuntime = async () => completedRun('plan-1', {
+      ...(discussionPlan([{ targetAgentKey: 'backend' }]) as object),
+      questionsForUser: ['需要保留多久？']
+    } as RuntimeOutput);
+    service.runDiscussionRuntime = async (_session, _expert, invocationId) =>
+      ({ ...completedRun(invocationId, createAgentMessageOutput({ messageKind: 'risk', content: 'down' })), status: 'failed',
+        error: { code: 'RUNTIME_TIMEOUT', message: 'timed out', retryable: true } });
+
+    await service.runDiscussion(context.session(), agent('coordinator'));
+
+    const run = new DiscussionStore(context.persistence).list('session-1')[0]!;
+    assert.equal(run.status, 'waiting_user');
+    const card = recorder.events.find((event) => event.metadata.payload?.reason === 'discussion_clarification');
+    assert.ok(card, 'the coordinator asks the user once for everything unresolved');
+    assert.equal(card!.fromAgentId, 'coordinator');
+    assert.equal(card!.metadata.payload?.confirmationId, run.pendingConfirmationId, 'the run knows which card it waits on');
+    assert.match(String(card!.metadata.payload?.description), /需要保留多久/);
+    assert.match(String(card!.metadata.payload?.description), /backend agent[\s\S]*RUNTIME_TIMEOUT/);
+    assert.equal(card!.metadata.payload?.discussionId, run.id);
   } finally {
     await context.cleanup();
   }

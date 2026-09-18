@@ -157,9 +157,25 @@
 
 ## T5 实现综合与统一澄清投影（AC1/AC2/AC5/AC7）
 
-- [ ] T5-1 主 Agent 综合读取真实委派结果，冲突/失败/未决显式列出，不用固定文案
-- [ ] T5-2 澄清卡由主 Agent 持有 confirmation ID；事件带 discussionId/delegationId/
-      requirementRevision，双端共用事件各自渲染
+落点：`orchestrator/discussion-synthesis.ts` + `.spec.ts`（6 例）；`DiscussionStore.recordSynthesis`
+（store spec 共 14）；`orchestrator.service.ts` `synthesizeRound`（`planned-discussion.spec.ts` 共 9）。
+
+- [x] T5-1 `synthesizeDiscussion(run)` **确定性纯函数**：只读当前 revision、非 stale、已完成的
+      委派；每条结论以【专家名】署名逐条列出，**不合并成"一致同意"**（用例断言正文不含
+      一致同意/consensus）；失败的按人列出 code/可重试，未回复的列状态；`unresolved` =
+      专家 openQuestions + 主 Agent 提给用户的问题 + 待确认的扩员；`sourceDelegationIds` 精确
+      记录读了哪些——"已汇总"变成可核验事实。冲突判定是**同一 objective 上结论不同**（不同
+      问题的不同回答不是冲突，这是从两条误判的用例改出来的）。outcome：有结论且无失败/
+      未回复/冲突/未决 → `ready`，否则 `needs_user`。结果经 `recordSynthesis` 持久化到
+      `run.synthesis`，run → `ready_for_confirmation` 或 `waiting_user`
+- [x] T5-2 `synthesizeRound` 在每轮 `dispatchDelegations` 末尾执行（新计划/续跑/@ 三条路径
+      同一出口）：主 Agent 发 `messageKind:'summary'` 事件，metadata 带 discussionId /
+      requirementRevision / sourceDelegationIds / conflicts / unresolved / failedDelegationIds /
+      outcome；`needs_user` 时主 Agent 生成 confirmationId 写进 `run.pendingConfirmationId`
+      并发**一张** `discussion_clarification` 卡（description 汇总全部未决项：问题、失败专家、
+      未回复、冲突），选项 answer_in_chat / proceed_anyway。双端共用这些事件（未改前端）。
+      **未做**：卡片选项的处理（answer_in_chat 走 T4 的 @/补充；proceed_anyway 与扩员
+      approve/decline 的落实归 T6 或阶段 4）；综合结果喂进 brief 生成上下文归阶段 4 文档交接
 
 ## T6 验证协作故障矩阵（AC1–AC7）
 

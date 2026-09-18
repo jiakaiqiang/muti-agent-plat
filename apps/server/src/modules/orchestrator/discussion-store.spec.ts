@@ -357,3 +357,40 @@ test('findOpenRun finds the requirement\'s live run whatever its revision, but n
     await context.cleanup();
   }
 });
+
+test('recordSynthesis persists the synthesis and moves the run to the outcome state', async () => {
+  const context = await fixture();
+  try {
+    const opened = await context.store.open(openRun);
+    if (opened.status !== 'opened') return;
+    const premature = await context.store.recordSynthesis(opened.run.id, {
+      summary: 'x', conflicts: [], unresolved: [], sourceDelegationIds: [], outcome: 'ready'
+    });
+    assert.equal(premature.status, 'rejected', 'nothing to synthesize before a round ran');
+
+    await context.store.transitionRun(opened.run.id, { status: 'consulting' });
+    await context.store.transitionRun(opened.run.id, { status: 'synthesizing' });
+    const needsUser = await context.store.recordSynthesis(opened.run.id, {
+      summary: '【A】x', conflicts: [], unresolved: ['retention?'], sourceDelegationIds: ['d-1'], outcome: 'needs_user',
+      pendingConfirmationId: 'confirm-1'
+    });
+    assert.equal(needsUser.status, 'applied');
+    const run = context.store.get('session-1', opened.run.id);
+    assert.equal(run?.status, 'waiting_user');
+    assert.equal(run?.pendingConfirmationId, 'confirm-1');
+    assert.deepEqual(run?.synthesis?.sourceDelegationIds, ['d-1']);
+    assert.equal(run?.synthesis?.summary, '【A】x');
+
+    // The user answered; a new round runs and closes clean.
+    await context.store.transitionRun(opened.run.id, { status: 'consulting' });
+    await context.store.transitionRun(opened.run.id, { status: 'synthesizing' });
+    const ready = await context.store.recordSynthesis(opened.run.id, {
+      summary: '【A】y', conflicts: [], unresolved: [], sourceDelegationIds: ['d-2'], outcome: 'ready'
+    });
+    assert.equal(ready.status, 'applied');
+    assert.equal(context.store.get('session-1', opened.run.id)?.status, 'ready_for_confirmation');
+    assert.equal(context.store.get('session-1', opened.run.id)?.pendingConfirmationId, undefined, 'a clean close clears the pending card');
+  } finally {
+    await context.cleanup();
+  }
+});

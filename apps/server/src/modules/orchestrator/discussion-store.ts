@@ -273,6 +273,46 @@ export class DiscussionStore {
   }
 
   /**
+   * Records the coordinator's synthesis and closes the round on its outcome:
+   * `ready` → ready_for_confirmation, `needs_user` → waiting_user with the
+   * confirmation the run now waits on. Only a run that actually consulted
+   * (status synthesizing) has anything to synthesize.
+   */
+  recordSynthesis(
+    discussionId: string,
+    input: {
+      summary: string;
+      conflicts: string[];
+      unresolved: string[];
+      sourceDelegationIds: string[];
+      outcome: 'ready' | 'needs_user';
+      pendingConfirmationId?: string;
+    }
+  ): Promise<TransitionOutcome<never>> {
+    const now = this.now();
+    return this.mutateRun(discussionId, (run): TransitionOutcome<never> => {
+      if (run.status !== 'synthesizing') return { status: 'rejected', code: 'DISCUSSION_INVALID_TRANSITION' };
+      run.synthesis = {
+        summary: input.summary,
+        conflicts: [...input.conflicts],
+        unresolved: [...input.unresolved],
+        sourceDelegationIds: [...input.sourceDelegationIds],
+        createdAt: now
+      };
+      if (input.outcome === 'needs_user') {
+        run.status = 'waiting_user';
+        if (input.pendingConfirmationId) run.pendingConfirmationId = input.pendingConfirmationId;
+      } else {
+        run.status = 'ready_for_confirmation';
+        delete run.pendingConfirmationId;
+      }
+      run.revision += 1;
+      run.updatedAt = now;
+      return { status: 'applied', run: structuredClone(run) };
+    });
+  }
+
+  /**
    * Applies a new requirement revision. Unfinished delegations on the old
    * revision are superseded and finished ones marked stale — the user changed
    * the question, so old answers must not be presented as current (AC7).

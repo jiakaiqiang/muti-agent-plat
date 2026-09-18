@@ -118,6 +118,7 @@ import { acceptanceFingerprint, explicitTaskPreflight } from './task-acceptance-
 import { boundedConsultations, consultationConcurrency } from './bounded-consultation.js';
 import { DiscussionStore } from './discussion-store.js';
 import { resolveDiscussionPlan } from './discussion-planner.js';
+import { synthesizeDiscussion } from './discussion-synthesis.js';
 import { shouldEmitHeartbeat, shouldSuppressHeartbeat } from './runtime-heartbeat-policy.js';
 import { smartRuntimePick } from './smart-runtime-pick.js';
 import { buildCoverageSystemRule, buildWorkspaceManifest } from './workspace-manifest.js';
@@ -3782,7 +3783,10 @@ export class OrchestratorService {
     const consulting = await this.discussions.transitionRun(discussionId, { status: 'consulting' });
     if (consulting.status === 'rejected') throw new Error(`DISCUSSION_ROUND_REJECTED: ${consulting.code}`);
 
-    await this.dispatchDelegations(session, coordinator, discussionId, reserved, signal);
+    await this.dispatchDelegations(session, coordinator, discussionId, reserved, signal, [
+      ...resolved.questionsForUser,
+      ...resolved.memberAdditions.map((item) => `是否邀请 ${item.targetAgentKey} 参与讨论？`)
+    ]);
     return true;
   }
 
@@ -3796,7 +3800,8 @@ export class OrchestratorService {
     coordinator: Agent,
     discussionId: string,
     items: Array<{ delegationId: string; agent: Agent | undefined; objective: string; expectedResult: string }>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    pendingUserItems: string[] = []
   ) {
     const runnable = items.filter((item): item is { delegationId: string; agent: Agent; objective: string; expectedResult: string } => Boolean(item.agent));
     try {
@@ -3859,6 +3864,75 @@ export class OrchestratorService {
     }
 
     await this.discussions.transitionRun(discussionId, { status: 'synthesizing' });
+    await this.synthesizeRound(session, coordinator, discussionId, pendingUserItems);
+  }
+
+  /**
+   * Closes a round with a synthesis built from the persisted results. Each
+   * conclusion is attributed to its expert; failures, unanswered asks and open
+   * questions are listed. When anything is left for the user, the coordinator
+   * owns one clarification card and the run waits on it (plan §2.7).
+   */
+  private async synthesizeRound(session: SessionDetail, coordinator: Agent, discussionId: string, pendingUserItems: string[]) {
+    const run = this.discussions.get(session.id, discussionId);
+    if (!run) return;
+    const agentNames = Object.fromEntries(this.participatingAgents(session).map((agent) => [agent.id, agent.name]));
+    const synthesis = synthesizeDiscussion(run, { agentNames, questionsForUser: pendingUserItems });
+    const pendingConfirmationId = synthesis.outcome === 'needs_user' ? crypto.randomUUID() : undefined;
+
+    const recorded = await this.discussions.recordSynthesis(discussionId, {
+      summary: synthesis.summary,
+      conflicts: synthesis.conflicts,
+      unresolved: synthesis.unresolved,
+      sourceDelegationIds: synthesis.sourceDelegationIds,
+      outcome: synthesis.outcome,
+      ...(pendingConfirmationId ? { pendingConfirmationId } : {})
+    });
+    if (recorded.status === 'rejected') throw new Error(`DISCUSSION_SYNTHESIS_REJECTED: ${recorded.code}`);
+
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      fromAgentId: coordinator.id,
+      toAgentIds: [],
+      content: synthesis.summary,
+      metadata: createMetadata('chat_message', {
+        messageKind: 'summary',
+        discussionId,
+        requirementRevision: run.requirementRevision,
+        sourceDelegationIds: synthesis.sourceDelegationIds,
+        conflicts: synthesis.conflicts,
+        unresolved: synthesis.unresolved,
+        failedDelegationIds: synthesis.failed.map((item) => item.delegationId),
+        outcome: synthesis.outcome
+      })
+    });
+
+    if (!pendingConfirmationId) return;
+    const description = [
+      ...synthesis.unresolved.map((text, index) => `${index + 1}. ${text}`),
+      ...synthesis.failed.map((item) => `${item.agentName} 未能回复（${item.code}${item.retryable ? '，可重试' : ''}）`),
+      ...synthesis.unanswered.map((item) => `${item.agentName} 尚未回复`),
+      ...(synthesis.conflicts.length ? [`专家结论不一致：${synthesis.conflicts.join(' / ')}`] : [])
+    ].join('\n');
+    this.events.create({
+      sessionId: session.id,
+      type: 'user_confirmation_requested',
+      fromAgentId: coordinator.id,
+      content: '讨论中有需要你决定的事项。',
+      metadata: createMetadata('confirmation_card', {
+        confirmationId: pendingConfirmationId,
+        reason: 'discussion_clarification',
+        title: '讨论待你决定',
+        description,
+        discussionId,
+        requirementRevision: run.requirementRevision,
+        options: [
+          { key: 'answer_in_chat', label: '在对话中回复', style: 'primary' },
+          { key: 'proceed_anyway', label: '按现有结论继续', style: 'default' }
+        ]
+      })
+    });
   }
 
   private recordDelegationOutcome(
