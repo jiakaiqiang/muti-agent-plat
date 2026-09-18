@@ -152,6 +152,9 @@
 ## 遗留（跨阶段，未完成）
 
 - [ ] 中断会话续接 G3：`npm run dev:restart-server` + 真实场景手测（上一专项人工项）。
+- [ ] `0b5ee52`（上下文包缓存接入）**未推送**：提交后网络再次中断，4 次重试均
+      `Failed to connect to github.com port 443`。`6672a85` 及之前已核对在远端。
+      网络恢复后 `git push origin main`，再用 `git ls-remote origin refs/heads/main` 核对。
 - [x] 2A/2B/2C 提交已推送：`bdbdfd6`、`8f2a305`、`6672a85` 均在 `origin/main`
       （2026-09-18 网络恢复后推送，`git ls-remote` 核对远端 HEAD = 本地 HEAD）。
       教训：第一次推送报 `curl 55 Connection was reset` 时对象其实已传完 25 个提交，
