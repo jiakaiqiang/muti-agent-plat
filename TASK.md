@@ -153,18 +153,16 @@
 - [x] T6-2 多 provider usage fixture：anthropic-compatible（input 不含 cache）、
       openai-compatible（input 含 cache）、ollama（unknown）；raw 缺失 → 全 undefined 非 0；
       金额无 priceVersion 不出具（cache-contracts.spec 15 例）
-- [ ] T6-3 四门禁：typecheck ✓ / harness ✓ / test 与 build 待本轮重跑确认。
-      **独立 PostgreSQL 与 E2E 未做**：本阶段没有新增持久化集合（缓存是进程内派生态），
-      因此没有迁移可验；但 AC1「命中后仍走预算检查」需要缓存接入真实发送路径才能做
-      系统级验证，见 T2-3 / T4-3 未接入项
+- [x] T6-3 四门禁：typecheck / test / test:harness / build 全 exit 0，最近一次在 CLI usage
+      接线之后（`cbdd4d9`）。**独立 PostgreSQL 不适用**：本阶段没有新增持久化集合。
+      **真实模型 E2E 未做**：AC1 已有路径级用例（见 T2-3），端到端"高命中但超窗仍拒绝"未跑
 
 ## 遗留（跨阶段，未完成）
 
 - [ ] 中断会话续接 G3：`npm run dev:restart-server` + 真实场景手测（上一专项人工项）。
-- [ ] `0b5ee52`（上下文包缓存接入）**未推送**：提交后网络再次中断，4 次重试均
-      `Failed to connect to github.com port 443`。`6672a85` 及之前已核对在远端。
-      网络恢复后 `git push origin main`，再用 `git ls-remote origin refs/heads/main` 核对。
-- [x] 2A/2B/2C 提交已推送：`bdbdfd6`、`8f2a305`、`6672a85` 均在 `origin/main`
+- [x] 全部 2C 提交已推送：`6672a85`、`0b5ee52`、`181a9f3`、`cbdd4d9` 均在 `origin/main`
+      （2026-09-19 核对 `git ls-remote` 远端 HEAD = 本地 HEAD = `cbdd4d9`）。
+- [x] 2A/2B 提交已推送：`bdbdfd6`、`8f2a305` 均在 `origin/main`
       （2026-09-18 网络恢复后推送，`git ls-remote` 核对远端 HEAD = 本地 HEAD）。
       教训：第一次推送报 `curl 55 Connection was reset` 时对象其实已传完 25 个提交，
       只是回包前断线导致本地跟踪引用没更新，之后一直假显示 `ahead 27`。
