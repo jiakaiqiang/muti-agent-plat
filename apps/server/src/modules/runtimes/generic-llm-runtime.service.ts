@@ -39,6 +39,7 @@ import { promiseHandle } from './promise-run-handle.js';
 import { withStructuredTermination } from './structured-termination-run-handle.js';
 import { MockRuntimeService } from './mock-runtime.service.js';
 import { POST_REVIEW_CONTEXT_ACTION_INSTRUCTION } from './post-review-action-normalizer.js';
+import { declaredCacheCapability } from './runtime-cache-capability.js';
 import { RuntimeModelConfigService, type RuntimeModelConnection } from './runtime-model-config.service.js';
 import {
   runtimeOutputExample,
@@ -79,6 +80,11 @@ type GenericLlmUsage = {
   total_tokens?: number;
   input_tokens?: number;
   output_tokens?: number;
+  /** OpenAI-compatible: a subset of prompt_tokens that was served from cache. */
+  prompt_tokens_details?: { cached_tokens?: number };
+  /** Anthropic-compatible: counted separately from input_tokens, not a subset. */
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
 };
 
 type GenericLlmStreamingChunk = {
@@ -102,6 +108,30 @@ type GenericLlmStreamingChunk = {
 
 type RuntimeOutputKind = RuntimeOutput['kind'];
 type ActiveStructuredOutputMode = 'json_schema' | 'json_object';
+
+/**
+ * Adds two counters that may each be absent. Absent stays absent: turning an
+ * unreported cache counter into 0 would claim the provider said "no cache hit"
+ * when it said nothing at all.
+ */
+function sumOptionalTokens(left: number | undefined, right: number | undefined): number | undefined {
+  if (left === undefined && right === undefined) return undefined;
+  return (left ?? 0) + (right ?? 0);
+}
+
+/**
+ * A sum is only as measured as its least-measured part. One unreported leg of a
+ * tool loop makes the whole total an estimate, so the weaker label wins.
+ */
+function mergeUsageMeasurement(
+  left: RuntimeUsage['measurement'],
+  right: RuntimeUsage['measurement']
+): RuntimeUsage['measurement'] {
+  if (left === 'unknown' || right === 'unknown') return 'unknown';
+  if (left === 'estimated' || right === 'estimated') return 'estimated';
+  if (left === undefined || right === undefined) return undefined;
+  return 'actual';
+}
 
 type CompletionResponse = {
   rawBody: unknown;
@@ -765,6 +795,21 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     let estimatedInputTokensTotal = 0;
     let actualInputTokens = 0;
     let countedToolHistoryTokens = 0;
+    /**
+     * Cache-aware usage accumulated across every leg of the tool loop. Kept
+     * alongside `actualInputTokens` because the estimation diagnostic compares
+     * against the provider's own input counter, while settlement needs the
+     * logical total and the cache split.
+     */
+    let loopUsage: RuntimeUsage | undefined;
+    // Declared once per run from the resolved connection. The spec fixture's
+    // provider-less connection falls back to the service default, matching how
+    // `connectionForModelId` fills it in production.
+    const cacheCapability = declaredCacheCapability({
+      provider: selectedConnection.provider ?? 'openai-compatible',
+      model: selectedModel,
+      endpoint: this.chatCompletionsUrl(selectedConnection.baseUrl)
+    }).capability;
 
     const buildTokenEstimation = (): RuntimeTokenEstimationDiagnostic => {
       const drift = inputTokenEstimationDrift(estimatedInputTokensTotal, actualInputTokens);
@@ -778,7 +823,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         ...(input.budget.maxInputTokens === undefined ? {} : { maxInputTokens: input.budget.maxInputTokens }),
         ...(effectiveInputCap === undefined ? {} : { effectiveMaxInputTokens: effectiveInputCap }),
         rounds: countedRounds,
-        breakdown: { ...breakdownBase, toolHistoryTokens: countedToolHistoryTokens }
+        breakdown: { ...breakdownBase, toolHistoryTokens: countedToolHistoryTokens },
+        cacheCapability
       };
     };
 
@@ -918,7 +964,9 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           rawResponse = this.extractTextFromBody(body);
           // Provider-reported usage is the only measurement the estimate can be
           // checked against, so accumulate it instead of discarding it.
-          actualInputTokens += this.toUsage(body.usage, selectedModel).inputTokens;
+          const roundUsage = this.toUsage(body.usage, selectedModel);
+          actualInputTokens += roundUsage.inputTokens;
+          loopUsage = loopUsage ? this.mergeUsage(loopUsage, roundUsage) : roundUsage;
           break;
         } catch (error) {
           const isAbort = error instanceof Error && (error.name === 'AbortError' || Boolean(signal?.aborted));
@@ -1033,11 +1081,14 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           artifacts: output.kind === 'task_execution_result' ? output.changedArtifacts : [],
           systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
           tokenEstimation: buildTokenEstimation(),
-          usage: {
+          // Carries the accumulated cache split and logical input forward. Falling
+          // back to a bare total would report every cache read at full price.
+          usage: loopUsage ?? {
             model: selectedModel,
             inputTokens: actualInputTokens,
             outputTokens: 0,
-            totalTokens: actualInputTokens
+            totalTokens: actualInputTokens,
+            measurement: 'unknown'
           }
         };
       }
@@ -1862,19 +1913,49 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   }
 
   private mergeUsage(left: RuntimeUsage, right: RuntimeUsage): RuntimeUsage {
+    const cacheRead = sumOptionalTokens(left.cacheReadInputTokens, right.cacheReadInputTokens);
+    const cacheWrite = sumOptionalTokens(left.cacheWriteInputTokens, right.cacheWriteInputTokens);
+    const logicalInput = sumOptionalTokens(left.logicalInputTokens, right.logicalInputTokens);
     return {
       inputTokens: left.inputTokens + right.inputTokens,
       outputTokens: left.outputTokens + right.outputTokens,
       totalTokens: left.totalTokens + right.totalTokens,
+      // A merged measurement is only as trustworthy as its weakest part: if one
+      // leg of the tool loop reported nothing, the sum is not a full measurement.
+      measurement: mergeUsageMeasurement(left.measurement, right.measurement),
+      ...(cacheRead === undefined ? {} : { cacheReadInputTokens: cacheRead }),
+      ...(cacheWrite === undefined ? {} : { cacheWriteInputTokens: cacheWrite }),
+      ...(logicalInput === undefined ? {} : { logicalInputTokens: logicalInput }),
       model: right.model || left.model
     };
   }
 
   private toUsage(usage: GenericLlmUsage | undefined, model: string): RuntimeUsage {
+    const reportedInput = usage?.prompt_tokens ?? usage?.input_tokens;
+    // OpenAI-compatible reports cached_tokens as a subset of prompt_tokens;
+    // Anthropic-compatible reports cache reads alongside a smaller input_tokens.
+    // Which one arrived decides whether the cached prefix is already counted.
+    const openAiCacheRead = usage?.prompt_tokens_details?.cached_tokens;
+    const anthropicCacheRead = usage?.cache_read_input_tokens;
+    const cacheRead = openAiCacheRead ?? anthropicCacheRead;
+    const cacheWrite = usage?.cache_creation_input_tokens;
+    const logicalInputTokens =
+      reportedInput === undefined
+        ? undefined
+        : openAiCacheRead !== undefined
+          ? reportedInput
+          : reportedInput + (anthropicCacheRead ?? 0);
+
     return {
-      inputTokens: usage?.prompt_tokens ?? usage?.input_tokens ?? 0,
+      inputTokens: reportedInput ?? 0,
       outputTokens: usage?.completion_tokens ?? usage?.output_tokens ?? 0,
       totalTokens: usage?.total_tokens ?? 0,
+      // Absent usage is unknown, not free. Callers that settle a budget need to
+      // tell "the provider said zero" apart from "the provider said nothing".
+      measurement: usage === undefined || reportedInput === undefined ? 'unknown' : 'actual',
+      ...(cacheRead === undefined ? {} : { cacheReadInputTokens: cacheRead }),
+      ...(cacheWrite === undefined ? {} : { cacheWriteInputTokens: cacheWrite }),
+      ...(logicalInputTokens === undefined ? {} : { logicalInputTokens }),
       model
     };
   }

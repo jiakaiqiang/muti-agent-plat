@@ -449,7 +449,11 @@ test('repairs an invalid RuntimeOutput once with a compact schema repair request
     inputTokens: 2,
     outputTokens: 2,
     totalTokens: 4,
-    model: 'test-model'
+    model: 'test-model',
+    // Provider reported usage, so it is a measurement; with no cache counters the
+    // logical input equals the raw input.
+    measurement: 'actual',
+    logicalInputTokens: 2
   });
 });
 

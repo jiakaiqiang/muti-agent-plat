@@ -2290,6 +2290,26 @@ export type RuntimeUsage = {
   totalTokens: number;
   cost?: number;
   model?: string;
+  /**
+   * Provider cache counters, kept separate from `inputTokens` because providers
+   * disagree about whether their input counter already contains the cached
+   * prefix. Absent means the provider reported nothing — not a zero-token miss.
+   */
+  cacheReadInputTokens?: number;
+  cacheWriteInputTokens?: number;
+  /**
+   * What the model had to read this call, cached or not. Absent when usage is
+   * unknown, so a silent provider is never settled as a free call.
+   */
+  logicalInputTokens?: number;
+  /**
+   * How the numbers were obtained. Existing call sites that hard-code zeros are
+   * indistinguishable from a measured zero without this, which is why unknown is
+   * a first-class value rather than a missing field.
+   */
+  measurement?: 'actual' | 'estimated' | 'unknown';
+  /** Required before `cost` can be explained; an amount without it is not reportable. */
+  priceVersion?: string;
 };
 
 /**
@@ -2374,6 +2394,13 @@ export type RuntimeTokenEstimationDiagnostic = {
   effectiveMaxInputTokens?: number;
   rounds: number;
   breakdown: RuntimeTokenEstimationBreakdown;
+  /**
+   * What the platform declared about prompt caching for this provider/model/
+   * endpoint before sending. Absent on adapters that never resolve a provider
+   * connection. `unknown` is recorded, not skipped: it is the difference between
+   * "no cache counters because none were expected" and "a zero-token miss".
+   */
+  cacheCapability?: 'supported' | 'unsupported' | 'unknown';
 };
 
 export type RuntimeModelProvider = 'openai-compatible' | 'anthropic-compatible' | 'ollama';

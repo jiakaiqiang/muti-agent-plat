@@ -1086,13 +1086,18 @@ export class RuntimeService implements OnModuleInit {
   private async settleRequirementBudget(input: InvocationPlan, result: AgentRunResult): Promise<void> {
     const workItemId = input.workItemId;
     if (!workItemId) return;
-    const reportedTokens = result.usage?.inputTokens;
-    // Mock never dispatches a billable provider request. Its explicit zero is a
-    // measurement, unlike a zero reported by an external Runtime where usage
-    // may simply be unavailable after cancellation.
-    const hasReportedUsage = typeof reportedTokens === 'number' && (
-      reportedTokens > 0 || result.runtimeType === 'mock'
-    );
+    const usage = result.usage;
+    // What the model actually had to read, cached or not. A cache read is cheaper
+    // but it is not free and it still occupies the window, so the requirement is
+    // charged for the logical total rather than only the uncached remainder.
+    const reportedTokens = usage?.logicalInputTokens ?? usage?.inputTokens;
+    // `measurement` is the explicit signal. Before it existed this had to infer
+    // "measured" from a non-zero count plus a mock special-case, which could not
+    // tell a real zero from absent usage; an explicit 'unknown' now says so.
+    const hasReportedUsage =
+      typeof reportedTokens === 'number' &&
+      usage?.measurement !== 'unknown' &&
+      (reportedTokens > 0 || usage?.measurement === 'actual' || result.runtimeType === 'mock');
     await this.workItemBudgets.settle({
       sessionId: input.sessionId,
       workItemId,

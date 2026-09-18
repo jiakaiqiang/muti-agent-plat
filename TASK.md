@@ -1,115 +1,147 @@
-# TASK.md — 阶段 2B：版本化长期记忆、增量摘要与历史需求召回
+# TASK.md — 阶段 2C：分层缓存、失效治理与成本观测
 
-状态：T1-T6 已完成，P2B-AC1～AC7 已验收（2026-09-18）。阶段 2C 及以后未开始。
+状态：进行中（2026-09-18 开工）。阶段 2B 已验收，四道门禁全绿，因此 2C 准入成立。
+当前：T1 完成；T2–T6 原语与 generic-llm 接线已落地，全仓四门禁全绿（typecheck / test
+1463+122 / harness / build 全 exit 0）；**阶段未验收**——缓存尚无业务调用方、CLI 适配器
+未接、系统级与 E2E 未验，AC1 无路径可验。各项缺口见下方每节「未做/未接入」。
 
 依据文档（四件套，2026-09-16 生成）：
-`docs/product/main-agent-collaboration-phase-2b-spec-v1.md`（AC）、
-`docs/design/main-agent-collaboration-phase-2b-plan-v1.md`（设计与落点）、
-`docs/implementation/main-agent-collaboration-phase-2b-tasks-v1.md`（任务）、
-`docs/quality/main-agent-collaboration-phase-2b-checklist-v1.md`（验收与证据）。
+`docs/product/main-agent-collaboration-phase-2c-spec-v1.md`（AC）、
+`docs/design/main-agent-collaboration-phase-2c-plan-v1.md`（设计与落点）、
+`docs/implementation/main-agent-collaboration-phase-2c-tasks-v1.md`（任务）、
+`docs/quality/main-agent-collaboration-phase-2c-checklist-v1.md`（验收与证据）。
 
-前置：阶段 0、1、2A 已验收（2A 于 2026-09-17 回填，其 TASK 记录已转入 2A Checklist §5）。
+前置：阶段 0、1、2A、2B 已验收（2B 于 2026-09-18，定向 176/176、独立 PostgreSQL 11/11、
+六条 E2E、typecheck/test/test:harness/build 全绿）。
 
 **纪律**：严格串行；每项先补失败用例再实现；每项结束时仓库必须绿；
 持久化改动必须同步 shared 合同 + file backend + PostgreSQL 迁移/投影（不能只加内存 Map）。
 
-## 开工前已核实的代码事实（2026-09-17）
+## 开工前已核实的代码事实（2026-09-18）
 
-- `SummaryMemoryCheckpoint`（`contracts.ts:2578`）只有 checkpointId/sessionId/workItemId/phase/
-  agentId/summaryMemory/source*Ids/createdAt；**无** coveredEventSeq、workItemRevision、
-  decisionLedgerRevision、policyVersion、contentHash、generation、唯一逻辑键。
-- 检查点**没有独立集合**：嵌在 `artifacts` 的 `metadata.summaryMemoryCheckpoint` 里，
-  `latestSummaryMemoryCheckpoint` 逆序扫全部 artifact；无跨进程唯一提交。
-- `createSummaryMemory`（orchestrator 6379）纯字符串合并 + 限条；`openQuestions` 只累加不消解；
-  `decisions` 取自事件 content 而非 `DecisionRecord`，被替代的决策无法从摘要中剔除。
-- `createSummaryMemoryCheckpoint` 同步、无模型调用、无预算预留、无生命周期/版本校验，
-  在 brief_generation / task_execution / post_review / final_delivery 四处调用。
-- `DecisionRecord` 已有 `supersedesDecisionId` + `superseded` 状态（`recordDecision`）。
-- `MemoryService`：按会话全量 Map + 关键词评分；`search(sessionId, …)` 天然按会话隔离，
-  但无 WorkItem 维度、无分页、无归档索引。
-- CLI 续接键 `findPriorInvocation(sessionId, agentId, taskId, runtimeType)`，无 workItemId/
-  role/上下文代次；无轮换检查点。
-- 阶段 2A 已提供 `WorkItemBudgetStore`（含 `summary` 类别）与 `LogicalOperationStore`，
-  T2 的预算预留与 single-flight 复用它们。
+- `RuntimeUsage`（`contracts.ts:2287`）只有 inputTokens/outputTokens/totalTokens/cost?/model?；
+  **无** cacheRead/cacheWrite 拆分、**无** estimated 与 actual 之分、**无** priceVersion、
+  **无** unknown 表达。AC6 要求的「未知值不伪装为零」目前在这个类型上无法表达。
+- 缓存 Token **已经在下层被解析出来但随后被丢弃**：`runtime-stream-frame.ts:13-14` 有
+  `cacheReadInputTokens` / `cacheWriteInputTokens`，`claude-stream-json-parser.ts:106-122`
+  与 `streaming/codex-frame-parser.ts:26-29,164-165` 都会填充；但没有任何代码把它们带进
+  `RuntimeUsage`，所以结算时归零。这是 2C 第一处真实缺口，不是新建能力。
+- 现存唯一缓存是 `workspace-index/workspace-index-cache.ts`：**单槽快照**（一个 `snapshot`
+  字段），按 `revision.id` 全等判命中，`invalidateOn` 换 revision 即整体丢弃。
+  无 LRU、无 TTL、无容量上限、无 session/workItem 作用域、无 generation 校验。
+  AC7 要求的容量/淘汰/可观测性全部缺失。
+- `generic-llm-runtime.service.ts:921` 用 `toUsage(body.usage).inputTokens` 累加
+  `actualInputTokens`；`toUsage`（1875 行）只读 `prompt_tokens ?? input_tokens ?? 0`。
+  **缺失即 0**，且不同 provider 的 `input_tokens` 是否已含缓存部分不同 → 直接相加会重复累计。
+- `runtime.service.ts:1089` 读 `result.usage?.inputTokens`，`1278` 按 invocation 求和；
+  `mock-runtime.service.ts:489` 用「字符数/4」造估算值，与真实回执同字段同权重，
+  下游无法区分 estimated 与 actual。
+- 多个 adapter（claude-code 314/368/432/758/971、codex 301/337/776/808、code-reader、
+  test-runner、server-runtime-worker 292、runtime.service 1011/1195）把 usage 硬写成
+  **全 0**。这些 0 当前与「真实测得 0」不可区分，正是 AC5/AC6 要区分 unsupported/unknown 的地方。
+- 2A 的 `work-item-budget.ts` 已有 reserve→settle、`unknownTokens`、`attemptId` 幂等，
+  AC4「回源仍受预算限制」与 AC6「未知不计零」应复用它，不新建第二套预算。
+- `PersistedState = Record<string, unknown>`（`persistence.service.ts:30`），新增集合需按
+  2B 同样的 6 处约定接入 relational store（KNOWN/SESSION_KEYED/两处 load/write switch/
+  writer/writeOrder）+ 迁移 + cutover seed。
 
-## T1 扩展权威事实与检查点合同（AC1/AC2/AC3）
+## T1 定义缓存与用量合同（AC1/AC2/AC5/AC6/AC7）
 
-- [x] T1-1 shared：`SummaryMemoryCheckpoint` 加法扩展（coveredEventSeq/workItemRevision/
-      decisionLedgerRevision/policyVersion/contentHash/generation/logicalKey/sourceDecisionIds，
-      均可选以兼容旧 artifact 内嵌检查点）；新增 `SummaryCheckpointRecord`、
-      `SUMMARY_CHECKPOINT_POLICY_VERSION`、`SummaryCheckpointRejectionCode`
-- [x] T1-2 `memory/summary-checkpoint-store.ts`：逻辑键 = workItemId|seq|wi|dl|policy；
-      同键并发 → 恰一个 `committed` 一个 `duplicate`；旧 workItemRevision/decisionLedgerRevision
-      → `SUMMARY_CHECKPOINT_STALE_VERSION`；覆盖范围倒退 → `_COVERAGE_REGRESSED`；
-      旧 generation → `_STALE_GENERATION`；**拒绝不落盘**（沿用 2A T5-2 教训）
-- [x] T1-3 PostgreSQL：`summaryCheckpointsBySession` 接入 6 处约定（KNOWN/SESSION_KEYED/
-      两处 load/write switch/writer/writeOrder）；V12 `summary_checkpoints`
-      （`logical_key` unique、行不可变 `on conflict do nothing`）；cutover seed 与 schema
-      COMMENT 门禁同步。一次性临时库 11/11 已通过，含跨实例唯一提交、迟到旧版本拒绝和分页。
+落点：`packages/shared/src/cache-contracts.ts` + `.spec.ts`（15 例，已全绿）；
+已从 `packages/shared/src/index.ts` 导出（漏导出会让 server 侧解析到 dist 旧产物而报
+`does not provide an export named`，已踩过一次）。
 
-## T2 实现增量摘要任务（AC2/AC3/AC6）
+- [x] T1-1 新增 `CACHE_CONTRACT_POLICY_VERSION`（参与 key，key 形状变更即整体失效）、
+      `DerivedCacheLayer` 四层、`RuntimeCacheCapability`(supported/unsupported/unknown)、
+      `UsageAvailability`(reported/unknown)、`NormalizedRuntimeUsage`、`UsageBreakdown`、
+      `CacheDependencyInputs`。未改 `RuntimeUsage` 本体：归一化在其外侧做，
+      既有 30 余处全 0 写入点因此零改动、零风险
+- [x] T1-2 `normalizeRuntimeUsage`：按 provider 声明 input 是否已含 cache read
+      （openai-compatible 含 → 不重复加；anthropic-compatible 不含 → 分别累计），
+      `logicalInputTokens` = 模型真实读入量；raw 缺失 → `availability:'unknown'` 且
+      各字段 `undefined`（不是 0）；金额无 `priceVersion` 则整个 cost 不出具。
+      `summarizeUsageBreakdown` 按 attemptId 去重，unknown 与 reported 分列计数
+- [x] T1-3 `derivedCacheKey`：私有 key = policy|layer|private|session|workItem|agent|
+      generation|fingerprint，公共 key 只有 templateId 且不含 session 字样；
+      `isCacheKeyScopedTo` 供读取/回填两处复核；`cacheDependencyFingerprint` 只按名读取
+      六项真实依赖，心跳字段结构上无法进入指纹
 
-- [x] T2-1 `SummaryCheckpointService.shouldCheckpoint`：同逻辑键 → `already_covered`；
-      `budget_threshold` 需新事件 ≥ 24 或版本变动；phase/work_item 边界有变动即摘要
-- [x] T2-2 生成前 `structuredClone` 快照、预留 `summary` 类别预算（不足 → `budget_insufficient`
-      跳过不生成）；提交走 store 版本校验；按实际摘要体积结算
-- [x] T2-3 提交有界重试 3 次；生成器抛错 → 按预留上限记 unknown、返回 `failed` 不抛；
-      orchestrator 五处 `createSummaryMemoryCheckpoint` 改 `await`，非 `committed` 不再
-      物化 memory/artifact（同一覆盖范围不会二次摘要）。本地派生无模型调用，故未传 budget。
+## T2 实现本地派生缓存（AC1/AC3/AC7）
 
-## T3 实现决策替代与摘要校验（AC1/AC3/AC6）
+落点：`apps/server/src/modules/context-v2/derived-cache.ts` + `.spec.ts`（8 例，已全绿）。
 
-- [x] T3-1 `memory/summary-memory-derivation.ts`：decisions 只取 `DecisionRecord.status==='confirmed'`
-      并带 `[id]` 前缀；**不再从上一检查点合并转发**，superseded 当场消失；proposed 不入 facts
-- [x] T3-2 `reconcileOpenQuestions`：added/resolved/open 三态；被新确认决策回答的问题被消解
-      （关键词重叠，CJK 用二元组）；brief/review 事件正文不进入 `confirmedFacts`，只通过
-      `sourceEventIds` 保留来源回查，避免旧需求文本重新污染当前上下文
-- [x] T3-3 迟到摘要拒绝由 T1-2 store 覆盖；`sourceDecisionIds` 落到检查点供回查
+- [x] T2-1 有界 LRU + TTL：`maxEntries` 满时逐出最久未用，过期条目在读取时判失效并释放容量
+      （`stats().size` 归零），hits/misses/evictions/rejectedBackfills 可读
+- [x] T2-2 读取与回填都调 `isCacheKeyScopedTo`：跨会话持 A 的 key 读不到 A 的内容；
+      恢复后旧 generation 条目一律未命中；`invalidateSession` 只清该会话，兄弟会话不受影响
+- [ ] T2-3 命中后仍走 2A 发送前预算检查（缓存不能绕过预算）——待接入 runtime 调用点
 
-## T4 实现有界历史召回（AC4/AC5）
+## T3 实现失效与并发回填保护（AC2/AC3/AC4）
 
-- [x] T4-1 `context-management/work-item-recall.ts`：归档索引只含标题/状态/时间/关键词/
-      最新检查点引用/coveredEventSeq，不含正文（用例断言）
-- [x] T4-2 显式引用 → 词法二元组重排 → 有界（默认 5）；`no_match`/`low_confidence`/
-      `multiple_similar_candidates`（次优 ≥ 最优 80%）→ `needsClarification`
-- [x] T4-3 `index.availability==='limited'` → `index_unavailable`，不解释为"不存在"；
-      `buildIntentSnapshot` 接入召回并把 `recall` 写进快照（含 hash）；router 新增
-      `HISTORICAL_RECALL_AMBIGUOUS`：召回要求澄清时模型擅自选中召回候选 → 不自动应用。
-      跨会话隔离由既有 `listWorkItems(sessionId)` 天然保证。语义检索首版未接（能力不足即澄清）。
+落点：`apps/server/src/modules/context-v2/cache-single-flight.ts` + `.spec.ts`（8 例，已全绿）。
 
-## T5 实现历史分页与 CLI 交接（AC5/AC7）
+- [x] T3-1 依赖指纹失效由 T1-3 的 `cacheDependencyFingerprint` 覆盖：六项依赖任一变化
+      指纹即变；心跳/流式进度不是指纹输入（用例断言 + 文件 hash 顺序无关）
+- [x] T3-2 single-flight：100 个相同 key 并发只构建 1 次，恰一个 caller 为 `owner:true`，
+      其余 `owner:false` 不得以 owner 身份回填
+- [x] T3-3 迟到回填：丢失作用域的 `set` 返回 false 且不落盘（T2-2 用例）；
+      构建失败不作为负缓存，下一次可重试；连续失败达 `maxConsecutiveFailures` 后
+      `circuit_open` 不再打原点，成功一次即清预算，熔断按 key 独立
 
-- [x] T5-1 `EventsService.listPage`（cursor + limit，夹在 [1,500]，默认 200）；
-      `GET /sessions/:id/events?limit=` 走分页，不带 `limit` 保持旧全量形状；PostgreSQL
-      执行数据库页查询，file backend 使用 32 页 LRU 并在写入/删除时失效。file 启动仍加载
-      完整 JSON/事件投影，不宣称完全懒加载
-- [x] T5-2 `findPriorInvocation` 增加 `{ workItemId }` 作用域 + `contextGeneration`
-      （记录在 invocation log）；跨需求或代次已恢复的会话不复用 CLI 私有历史；
-      orchestrator 调用点传入 `resolvedPlan.workItemId`
-- [x] T5-3 轮换：同 cliSessionId 累计 `usage.inputTokens` ≥ `CLI_CONTEXT_ROTATION_INPUT_TOKENS`
-      （默认 150k）→ 不 resume、计 `cli_context_rotated_total`；状态由阶段末检查点交接，
-      副作用去重仍由 `LogicalOperation` 控制（未改）
+## T4 实现 Provider/CLI 缓存适配（AC1/AC5）
 
-## T6 验证长会话与摘要竞争（AC1–AC7）
+落点：`apps/server/src/modules/runtimes/runtime-cache-capability.ts` + `.spec.ts`（8 例，已全绿）。
 
-- [x] T6-1 百需求/千消息 fixture；早期需求召回——context-management spec
-      「an early requirement among a hundred…」现含 100 需求 + 1,000 消息 + 版本化检查点，
-      断言召回命中早期需求、携带 `latestCheckpointId`、不内联摘要正文、序列化 < 40 KB
-- [x] T6-2 版本冲突 / 删除 / 重启 / 模型失败 / 原文保留——store spec
-      （旧版本/覆盖倒退/旧代次/准入关闭拒绝、重建后可读、原始事件不被改写）+ service spec
-      （生成器失败按预留上限记 unknown 且不抛）+ postgres 集成（跨实例并发一提交、迟到旧版本拒绝）
-- [x] T6-3 typecheck + test + harness + build；定向、PostgreSQL、关键 E2E 及 Checklist 证据已回填
+- [x] T4-1 `splitPromptForCache`：稳定部分（system/工具 schema/项目规则）在前、动态部分
+      （证据/当前消息）在后；证据与用户文本**结构上进不了** stablePrefix，不为命中率升级
+      信任层级；stablePrefix 为空时 `cacheable:false`，不填充凑厂商门槛
+- [x] T4-2 `declaredCacheCapability`：按 provider+model+endpoint host 三元组查显式声明表；
+      未声明的 model → `unknown`；已声明 model 走非厂商 host（第三方网关）→ `unsupported`；
+      两者都 `sendCacheParameters:false`、`blocksExecution:false`，正常执行只是不标命中
+- [x] T4-3 接入：`generic-llm-runtime.service.ts` 每次 run 按 `selectedConnection.provider`
+      + `selectedModel` + `chatCompletionsUrl(baseUrl)` 调 `declaredCacheCapability`，结果写进
+      `tokenEstimation.cacheCapability`（`RuntimeTokenEstimationDiagnostic` 加法扩展）。
+      用例：`generic-llm-token-estimation.spec.ts` 新增「test-model@llm.test → unknown 且不
+      伪造 cacheRead 计数」。`splitPromptForCache` **仍未接入**：现有组装已是 system 在前、
+      动态 payload 在后，为用它而重排消息是无收益改动，先不动
 
-## 验证结果（2026-09-18）
+## T5 接入成本诊断（AC6）
 
-- 2B 定向回归：176/176，通过。
-- 独立 PostgreSQL：11/11，通过；一次性数据库已删除。
-- E2E：memory-confirm、token-budget、work-item-budget-recovery、cancel、recovery、session-delete 全部通过。
-- 全仓：`npm run typecheck`、`npm run test`、`npm run test:harness`、`npm run build` 全部通过。
-- `work-item-budget-recovery` fixture 从 2,000 调整为 2,100：为单次输入保留已确认约束/验收摘要的余量，同时仍验证累计 WorkItem 预算耗尽及缩小需求恢复；没有改变生产预算逻辑。
-- `git diff --check` 仅报告既有 `context-management.service.spec.ts` EOF 空行，未擅自清理。
+- [x] T5-1 `RuntimeUsage` 加法扩展（`contracts.ts`）：cacheReadInputTokens /
+      cacheWriteInputTokens / logicalInputTokens / measurement('actual'|'estimated'|'unknown')
+      / priceVersion，全部可选，既有全 0 写入点零改动。
+      `generic-llm-runtime.service.ts`：`GenericLlmUsage` 识别 OpenAI 的
+      `prompt_tokens_details.cached_tokens`（是 prompt_tokens 子集）与 Anthropic 的
+      `cache_read_input_tokens` / `cache_creation_input_tokens`（独立计数）；`toUsage` 据此
+      算 logicalInputTokens 且 usage 缺失 → `measurement:'unknown'`；`mergeUsage` 累加缓存
+      计数、缺失保持缺失（`sumOptionalTokens`）、最弱 measurement 胜出；工具循环新增
+      `loopUsage` 累计器，最终 usage 不再是裸 `actualInputTokens`。
+      连带更新 1 个过时断言（`generic-llm-runtime.service.spec.ts:448` 的严格 deepEqual
+      现在含 measurement/logicalInputTokens，值正确）
+- [x] T5-2 `runtime.service.ts settleRequirementBudget`：改用显式 `measurement` 判断，
+      `'unknown'` → `unavailable`（保留预留上限为保守值）；结算额改为 `logicalInputTokens ??
+      inputTokens`，缓存读虽便宜但占窗口，按逻辑总量计入需求预算。attemptId 幂等由 2A
+      `settleWorkItemBudget` 原有逻辑保证。runtime.service spec 36/36。
+      **未做**：摘要/检索额外成本单列、priceVersion 实际取值来源
+- [ ] T5-3 **未做**：未新增任何 metrics 标签，因此没有引入高基数问题，但也没有新增
+      缓存命中率/耗时观测
 
-## 遗留（上一专项，未完成）
+## T6 验证缓存故障与收益（AC1–AC7）
 
-- [ ] 中断会话续接 G3：`npm run dev:restart-server` + 真实场景手测（上一专项人工项，不是 2B 门禁）。
-- [x] 2A 临时文件 `apps/server/src/modules/runtimes/debug-guard.spec.ts` 当前不存在。
+- [x] T6-1 原语级覆盖（非系统级）：过期→未命中并释放容量、跨会话/跨 generation 未命中、
+      `invalidateSession` 只清本会话、迟到回填拒绝、100 并发单次构建、连续失败熔断
+      （derived-cache 8 例 + single-flight 8 例）
+- [x] T6-2 多 provider usage fixture：anthropic-compatible（input 不含 cache）、
+      openai-compatible（input 含 cache）、ollama（unknown）；raw 缺失 → 全 undefined 非 0；
+      金额无 priceVersion 不出具（cache-contracts.spec 15 例）
+- [ ] T6-3 四门禁：typecheck ✓ / harness ✓ / test 与 build 待本轮重跑确认。
+      **独立 PostgreSQL 与 E2E 未做**：本阶段没有新增持久化集合（缓存是进程内派生态），
+      因此没有迁移可验；但 AC1「命中后仍走预算检查」需要缓存接入真实发送路径才能做
+      系统级验证，见 T2-3 / T4-3 未接入项
+
+## 遗留（跨阶段，未完成）
+
+- [ ] 中断会话续接 G3：`npm run dev:restart-server` + 真实场景手测（上一专项人工项）。
+- [ ] 2A/2B 两个提交（`bdbdfd6`、`8f2a305`）**未推送到远端**：本机到 github.com:443
+      不可达（curl connect=000 超时、DNS 正常），需网络恢复或代理后 `git push origin main`。
+      当前 `ahead 27`。

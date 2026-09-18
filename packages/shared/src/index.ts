@@ -1,5 +1,6 @@
 export * from './contracts.js';
 export * from './collaboration-contracts.js';
+export * from './cache-contracts.js';
 export * from './time.js';
 export * from './metadata.js';
 export * from './default-agents.js';

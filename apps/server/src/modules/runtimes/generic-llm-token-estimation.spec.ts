@@ -194,3 +194,18 @@ test('a capacity block still records the estimation diagnostic', async () => {
   assert.ok(estimation.safetyMarginTokens > 0, 'the safety margin must be recorded');
   assert.ok(estimation.rounds >= 1, 'the rounds already counted must be recorded');
 });
+
+test('the run records the declared prompt-cache capability for its provider/model/endpoint', async () => {
+  // `test-model` on `llm.test` is neither a declared model nor a vendor host, so
+  // the honest declaration is unknown. Recording it per run is what lets a cost
+  // report say "no cache counters because none were expected" instead of
+  // presenting the absence as a zero-token miss.
+  const { result } = await runInvocation({ responses: [] });
+
+  assert.equal(result.status, 'completed');
+  const estimation = result.tokenEstimation;
+  assert.ok(estimation);
+  assert.equal(estimation.cacheCapability, 'unknown');
+  assert.equal(result.usage?.measurement, 'actual', 'provider reported usage, so it is a measurement');
+  assert.equal(result.usage?.cacheReadInputTokens, undefined, 'no counters were reported, so none are claimed');
+});
