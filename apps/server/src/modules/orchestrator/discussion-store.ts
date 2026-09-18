@@ -124,6 +124,22 @@ export class DiscussionStore {
     return run ? structuredClone(run) : undefined;
   }
 
+  /**
+   * The requirement's live run regardless of revision: the one a follow-up
+   * attaches to and the one a requirement change supersedes in place.
+   * `ready_for_confirmation` and `failed` are closed to new rounds.
+   */
+  findOpenRun(sessionId: string, scope: { workItemId: string; generation: number }): DiscussionRun | undefined {
+    const run = this.list(sessionId).find(
+      (item) =>
+        item.workItemId === scope.workItemId &&
+        item.generation === scope.generation &&
+        item.status !== 'ready_for_confirmation' &&
+        item.status !== 'failed'
+    );
+    return run ? structuredClone(run) : undefined;
+  }
+
   /** Delegations a resume or restart should dispatch — never finished or older-generation work. */
   runnableDelegations(sessionId: string, discussionId: string, scope: { generation: number }): Delegation[] {
     const run = this.get(sessionId, discussionId);
@@ -243,8 +259,9 @@ export class DiscussionStore {
         return { status: 'rejected', code: 'DISCUSSION_INVALID_TRANSITION' };
       }
       // Entering consulting starts a bounded round. The limit is enforced here,
-      // in the store, so no caller can loop past it by retrying.
-      if (transition.status === 'consulting') {
+      // in the store, so no caller can loop past it by retrying. Coming back
+      // from `paused` continues the interrupted round rather than opening one.
+      if (transition.status === 'consulting' && run.status !== 'paused') {
         if (run.roundsStarted >= run.roundLimit) return { status: 'rejected', code: 'DISCUSSION_ROUND_LIMIT' };
         run.roundsStarted += 1;
       }

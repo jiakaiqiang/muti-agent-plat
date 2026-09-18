@@ -247,3 +247,99 @@ test('a stop mid-round pauses the run and leaves the interrupted delegation resu
     await context.cleanup();
   }
 });
+
+test('a user @ becomes an owned delegation to that expert, not a broadcast, and no fake summary is emitted', async () => {
+  const context = await fixture();
+  try {
+    // A prior round already happened and is waiting for synthesis.
+    const seed = new DiscussionStore(context.persistence, () => '2026-09-19T00:00:00.000Z');
+    const opened = await seed.open({
+      sessionId: 'session-1', workItemId: 'wi-1', requirementRevision: 1, generation: 0,
+      coordinatorAgentId: 'coordinator', objective: 'seeded', exitCondition: 'seeded', roundLimit: 3, budgetTokens: 8_000
+    });
+    if (opened.status !== 'opened') return;
+    await seed.transitionRun(opened.run.id, { status: 'consulting' });
+    await seed.transitionRun(opened.run.id, { status: 'synthesizing' });
+
+    const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+    const service = makeService([], recorder, undefined, undefined, undefined, context) as unknown as PlannedService & {
+      runFollowUpDiscussion(session: SessionDetail, coordinator: Agent, participants: Agent[], content: string, signal?: AbortSignal, origin?: 'user_mention'): Promise<void>;
+    };
+    service.createContextAssembly = () => ({ budget: {}, systemRules: [], constraints: [] } as unknown as ContextAssembly);
+    const consulted: string[] = [];
+    service.runDiscussionRuntime = async (_session, expert, invocationId) => {
+      consulted.push(expert.key);
+      return completedRun(invocationId, createAgentMessageOutput({ messageKind: 'answer', content: `${expert.key} on the follow-up` }));
+    };
+
+    await service.runFollowUpDiscussion(context.session(), agent('coordinator'), [agent('backend')], '@backend 请补充回滚方案', undefined, 'user_mention');
+
+    assert.deepEqual(consulted, ['backend']);
+    const run = new DiscussionStore(context.persistence).list('session-1')[0]!;
+    assert.equal(run.id, opened.run.id, 'the mention attaches to the live run');
+    assert.equal(run.delegations.length, 1);
+    assert.equal(run.delegations[0]?.origin, 'user_mention');
+    assert.equal(run.delegations[0]?.status, 'completed');
+    assert.equal(run.status, 'synthesizing');
+    assert.equal(run.roundsStarted, 2, 'a mention after synthesis opens a bounded new round');
+
+    const reply = recorder.events.find((event) => event.type === 'agent_message' && event.fromAgentId === 'backend');
+    assert.equal(reply?.metadata.payload?.delegationId, run.delegations[0]?.id, 'the reply is attributed to its delegation');
+    assert.equal(recorder.events.some((event) => event.content.includes('已汇总')), false, 'no fixed summary copy without a synthesis');
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('a requirement revision supersedes the old round and re-plans on the same run', async () => {
+  const context = await fixture();
+  try {
+    const seed = new DiscussionStore(context.persistence, () => '2026-09-19T00:00:00.000Z');
+    const opened = await seed.open({
+      sessionId: 'session-1', workItemId: 'wi-1', requirementRevision: 1, generation: 0,
+      coordinatorAgentId: 'coordinator', objective: 'old', exitCondition: 'old', roundLimit: 3, budgetTokens: 8_000
+    });
+    if (opened.status !== 'opened') return;
+    const old = await seed.reserveDelegation(opened.run.id, {
+      targetAgentId: 'backend', origin: 'coordinator', objective: 'old ask', expectedResult: 'x', budgetTokens: 4_000, requirementRevision: 1
+    });
+    if (old.status !== 'reserved') return;
+    await seed.transitionRun(opened.run.id, { status: 'consulting' });
+    await seed.transitionDelegation(opened.run.id, old.delegation.id, { status: 'running', invocationId: 'inv-old' });
+    await seed.transitionDelegation(opened.run.id, old.delegation.id, {
+      status: 'completed', result: { conclusion: 'answer to the OLD requirement', evidenceRefs: [], risks: [], openQuestions: [], suggestedActions: [] }
+    });
+    await seed.transitionRun(opened.run.id, { status: 'synthesizing' });
+
+    // The user changed the requirement: the work item is now at revision 2.
+    await context.persistence.setCollection('workItemsBySession', { 'session-1': [{ id: 'wi-1', revision: 2 }] });
+    context.contextManagement.getWorkItem = (_sessionId: string, workItemId: string) =>
+      workItemId === 'wi-1' ? { id: 'wi-1', revision: 2 } : undefined;
+
+    const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+    const service = makeService([], recorder, undefined, undefined, undefined, context) as unknown as PlannedService;
+    service.createContextAssembly = () => ({ budget: {}, systemRules: [] } as unknown as ContextAssembly);
+    let planCalls = 0;
+    service.runRuntime = async () => {
+      planCalls += 1;
+      return completedRun('plan-2', discussionPlan([{ targetAgentKey: 'backend' }]));
+    };
+    service.runDiscussionRuntime = async (_session, expert, invocationId) =>
+      completedRun(invocationId, createAgentMessageOutput({ messageKind: 'answer', content: 'answer to the NEW requirement' }));
+
+    await service.runDiscussion(context.session(), agent('coordinator'));
+
+    assert.equal(planCalls, 1, 'a changed requirement is re-planned');
+    const runs = new DiscussionStore(context.persistence).list('session-1');
+    assert.equal(runs.length, 1, 'the same run is reused, not a second one');
+    const run = runs[0]!;
+    assert.equal(run.requirementRevision, 2);
+    const onRevision = (revision: number) => run.delegations.filter((item) => item.requirementRevision === revision);
+    assert.equal(onRevision(1)[0]?.status, 'completed');
+    assert.equal(onRevision(1)[0]?.stale, true, 'the old answer is kept as history but marked stale');
+    assert.equal(onRevision(2)[0]?.status, 'completed');
+    assert.equal(onRevision(2)[0]?.result?.conclusion, 'answer to the NEW requirement');
+  } finally {
+    await context.cleanup();
+  }
+});

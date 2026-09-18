@@ -320,3 +320,40 @@ test('findResumable returns only a run that still has a round to continue on the
     await context.cleanup();
   }
 });
+
+test('resuming from paused does not count as a new round, a fresh consulting entry does', async () => {
+  const context = await fixture();
+  try {
+    const opened = await context.store.open(openRun);
+    if (opened.status !== 'opened') return;
+    await context.store.transitionRun(opened.run.id, { status: 'consulting' });
+    await context.store.transitionRun(opened.run.id, { status: 'paused' });
+    const resumed = await context.store.transitionRun(opened.run.id, { status: 'consulting' });
+    assert.equal(resumed.status === 'applied' && resumed.run.roundsStarted, 1, 'the same round continues');
+
+    await context.store.transitionRun(opened.run.id, { status: 'synthesizing' });
+    const next = await context.store.transitionRun(opened.run.id, { status: 'consulting' });
+    assert.equal(next.status === 'applied' && next.run.roundsStarted, 2, 'a round after synthesis is a new round');
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('findOpenRun finds the requirement\'s live run whatever its revision, but never a finished one', async () => {
+  const context = await fixture();
+  try {
+    const opened = await context.store.open(openRun);
+    if (opened.status !== 'opened') return;
+    await context.store.transitionRun(opened.run.id, { status: 'consulting' });
+    await context.store.transitionRun(opened.run.id, { status: 'synthesizing' });
+
+    // The user changed the requirement; the run still belongs to it.
+    assert.equal(context.store.findOpenRun('session-1', { workItemId: 'work-1', generation: 1 })?.id, opened.run.id);
+    assert.equal(context.store.findOpenRun('session-1', { workItemId: 'work-1', generation: 2 }), undefined);
+
+    await context.store.transitionRun(opened.run.id, { status: 'ready_for_confirmation' });
+    assert.equal(context.store.findOpenRun('session-1', { workItemId: 'work-1', generation: 1 }), undefined, 'ready_for_confirmation is closed for new rounds');
+  } finally {
+    await context.cleanup();
+  }
+});

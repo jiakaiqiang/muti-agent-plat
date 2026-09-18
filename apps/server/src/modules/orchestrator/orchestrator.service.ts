@@ -614,7 +614,7 @@ export class OrchestratorService {
     });
 
     if (mentionedAgents.length > 1 || options.discussionRequired) {
-      await this.runFollowUpDiscussion(session, coordinator, discussionAgents, content, signal);
+      await this.runFollowUpDiscussion(session, coordinator, discussionAgents, content, signal, mentionedAgents.length ? 'user_mention' : undefined);
     }
 
     const contextAssembly = this.createContextAssembly(
@@ -3368,9 +3368,12 @@ export class OrchestratorService {
     coordinator: Agent,
     participants: Agent[],
     content: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    origin?: 'user_mention'
   ) {
     await this.runtime.refreshRuntimeAvailability?.();
+    if (origin === 'user_mention' && mainAgentDiscussionEnabled() &&
+      (await this.runMentionDelegations(session, coordinator, participants, content, signal))) return;
     const consultations = participants.map(agent => {
       const contextAssembly = this.createContextAssembly(session, agent, undefined, undefined, 'discussion');
       contextAssembly.systemRules = [
@@ -3426,6 +3429,69 @@ export class OrchestratorService {
         mentionedAgentIds: participants.map((agent) => agent.id)
       })
     });
+  }
+
+  /**
+   * A user @ is an owned delegation to that expert (AC2): it attaches to the
+   * requirement's live run, carries the user's wording as its objective, and
+   * the reply is recorded on the delegation so it reaches the coordinator's
+   * synthesis instead of being swallowed by a broadcast. Returns false when
+   * there is no requirement to attach to, so the caller keeps the legacy path.
+   */
+  private async runMentionDelegations(
+    session: SessionDetail,
+    coordinator: Agent,
+    mentioned: Agent[],
+    content: string,
+    signal?: AbortSignal
+  ): Promise<boolean> {
+    const workItemId = session.activeWorkItemId;
+    const workItem = workItemId ? this.contextManagement?.getWorkItem(session.id, workItemId) : undefined;
+    if (!workItemId || !workItem || mentioned.length === 0) return false;
+    const generation = this.lifecycle.generation(session.id) ?? 0;
+
+    let run = this.discussions.findOpenRun(session.id, { workItemId, generation });
+    if (run && run.requirementRevision < workItem.revision) {
+      const revised = await this.discussions.reviseRequirement(run.id, { requirementRevision: workItem.revision });
+      if (revised.status === 'rejected') throw new Error(`DISCUSSION_REVISE_REJECTED: ${revised.code}`);
+      run = this.discussions.get(session.id, run.id);
+    }
+    if (!run) {
+      const opened = await this.discussions.open({
+        sessionId: session.id,
+        workItemId,
+        requirementRevision: workItem.revision,
+        generation,
+        coordinatorAgentId: coordinator.id,
+        objective: content.trim(),
+        exitCondition: '被 @ 的成员完成回复并由主 Agent 纳入综合。',
+        roundLimit: this.discussionMaxRounds(),
+        budgetTokens: discussionConsultationBudgetTokens() * mentioned.length
+      });
+      if (opened.status !== 'opened') throw new Error(`DISCUSSION_OPEN_REJECTED: ${opened.code}`);
+      run = opened.run;
+    }
+
+    const reserved: Array<{ delegationId: string; agent: Agent | undefined; objective: string; expectedResult: string }> = [];
+    for (const agent of mentioned) {
+      const outcome = await this.discussions.reserveDelegation(run.id, {
+        targetAgentId: agent.id,
+        origin: 'user_mention',
+        objective: content.trim(),
+        expectedResult: '针对用户补充给出结论、依据与风险。',
+        budgetTokens: discussionConsultationBudgetTokens(),
+        requirementRevision: workItem.revision
+      });
+      if (outcome.status === 'reserved') {
+        reserved.push({ delegationId: outcome.delegation.id, agent, objective: outcome.delegation.objective, expectedResult: outcome.delegation.expectedResult });
+      }
+    }
+    if (reserved.length === 0) return true;
+
+    const consulting = await this.discussions.transitionRun(run.id, { status: 'consulting' });
+    if (consulting.status === 'rejected') throw new Error(`DISCUSSION_ROUND_REJECTED: ${consulting.code}`);
+    await this.dispatchDelegations(session, coordinator, run.id, reserved, signal);
+    return true;
   }
 
   private async runDiscussion(session: SessionDetail, coordinator: Agent, signal?: AbortSignal) {
@@ -3556,8 +3622,17 @@ export class OrchestratorService {
     // A restart or a retry finds the persisted plan and continues it. The
     // coordinator is not asked again and finished experts are not re-run: the
     // record, not the in-memory loop, is what recovery trusts (AC4).
-    const resumable = this.discussions.findResumable(session.id, { workItemId, requirementRevision: workItem.revision, generation });
-    if (resumable && resumable.delegations.length > 0) {
+    let live = this.discussions.findOpenRun(session.id, { workItemId, generation });
+    if (live && live.requirementRevision < workItem.revision) {
+      // The user changed the requirement. Old delegations are superseded or
+      // marked stale on the same run; the round below re-plans against the new
+      // revision (AC7). Old answers stay as history, never as current input.
+      const revised = await this.discussions.reviseRequirement(live.id, { requirementRevision: workItem.revision });
+      if (revised.status === 'rejected') throw new Error(`DISCUSSION_REVISE_REJECTED: ${revised.code}`);
+      live = this.discussions.get(session.id, live.id);
+    }
+    const resumable = live && (live.status === 'planning' || live.status === 'consulting' || live.status === 'paused') ? live : undefined;
+    if (resumable && this.discussions.runnableDelegations(session.id, resumable.id, { generation }).length > 0) {
       if (resumable.status === 'paused') {
         const resumed = await this.discussions.transitionRun(resumable.id, { status: 'consulting' });
         if (resumed.status === 'rejected') throw new Error(`DISCUSSION_RESUME_REJECTED: ${resumed.code}`);
@@ -3618,22 +3693,29 @@ export class OrchestratorService {
       throw Object.assign(new Error(runtimeError.message), { cause: runtimeError, runtimeError });
     }
 
-    // 3. The plan is persisted before anything runs.
-    const opened = await this.discussions.open({
-      sessionId: session.id,
-      workItemId,
-      requirementRevision: workItem.revision,
-      generation,
-      coordinatorAgentId: coordinator.id,
-      objective: resolved.objective,
-      exitCondition: resolved.exitCondition,
-      roundLimit: this.discussionMaxRounds(),
-      budgetTokens: resolved.delegations.reduce((sum, item) => sum + item.budgetTokens, 0)
-    });
-    if (opened.status !== 'opened') {
-      throw new Error(`DISCUSSION_OPEN_REJECTED: ${opened.code}`);
+    // 3. The plan is persisted before anything runs. A live run (a revised
+    //    requirement, a plan that crashed before reserving) is reused so the
+    //    requirement keeps one discussion history rather than a run per attempt.
+    let discussionId: string;
+    if (live) {
+      discussionId = live.id;
+    } else {
+      const opened = await this.discussions.open({
+        sessionId: session.id,
+        workItemId,
+        requirementRevision: workItem.revision,
+        generation,
+        coordinatorAgentId: coordinator.id,
+        objective: resolved.objective,
+        exitCondition: resolved.exitCondition,
+        roundLimit: this.discussionMaxRounds(),
+        budgetTokens: resolved.delegations.reduce((sum, item) => sum + item.budgetTokens, 0)
+      });
+      if (opened.status !== 'opened') {
+        throw new Error(`DISCUSSION_OPEN_REJECTED: ${opened.code}`);
+      }
+      discussionId = opened.run.id;
     }
-    const discussionId = opened.run.id;
     this.events.create({
       sessionId: session.id,
       type: 'agent_message',

@@ -134,9 +134,26 @@
 
 ## T4 接入用户 @ 与中途补充（AC2/AC7）
 
-- [ ] T4-1 `@成员` 补充 → `Delegation{origin:'user_mention'}` 而不是全员 follow-up；
-      专家回复同时回传主 Agent
-- [ ] T4-2 目标/验收改变 → 新 requirementRevision，旧委派 `superseded`，结果不进汇总
+落点：`orchestrator.service.ts` `runMentionDelegations` + 入口改为 `findOpenRun`；
+`DiscussionStore.findOpenRun`；`planned-discussion.spec.ts` +2（共 7）、`discussion-store.spec.ts` +2（共 13）。
+
+- [x] T4-1 `prepareFollowUpExecution` 有 @ 时把 `origin:'user_mention'` 传给
+      `runFollowUpDiscussion`；开关开启且有活动需求 → `runMentionDelegations`：找需求的活 run
+      （没有则以用户原话为 objective 新开），为**每个被 @ 的成员**各 reserve 一条
+      `origin:'user_mention'` 委派（objective = 用户原话），进入 consulting（synthesizing/
+      waiting_user → consulting 是允许的新一轮，`roundsStarted` +1），`dispatchDelegations` 只跑
+      被 @ 的人；专家回复事件带 `delegationId`，经 `recordDelegationOutcome` 同时回到主 Agent。
+      **旧路径那条固定文案「接收者已汇总被 @Agent 的讨论结果」在新路径不再发**（plan §2.6）。
+      无 @ 的补充仍走旧全员 follow-up（主 Agent 对补充的重规划归 T5）
+- [x] T4-2 入口改用 `findOpenRun`（任意未终结状态、不限 revision）：run 的
+      `requirementRevision < workItem.revision` → `reviseRequirement`（旧修订未完成委派
+      superseded、已完成标 `stale:true`）→ **复用同一个 run** 重新出计划（用例断言 planCalls=1、
+      run 数=1、旧结论保留但 stale、新结论在新 revision 上）。修复 T3 边界：`paused →
+      consulting` 不计新一轮（`roundsStarted` 只在 planning/synthesizing/waiting_user 进入
+      consulting 时 +1）。
+      代码库事实：需求变更多数表现为**换 active work item**（旧的 revision+1 转 WAITING_USER），
+      这种情形旧 run 因 workItem 作用域天然不被读取；同 workItem 抬 revision 的情形由本项覆盖。
+      **未做**：`confirm_member_addition` 的 approve/decline 落实（归 T5/T6）
 
 ## T5 实现综合与统一澄清投影（AC1/AC2/AC5/AC7）
 
