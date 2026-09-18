@@ -1,7 +1,7 @@
 # 阶段 3：主 Agent 主持讨论与可恢复专家协作 — Checklist v1
 
 > 日期：2026-09-16
-> 状态：实施完成，待用户验收（2026-09-19）。证据见第 1 节矩阵与第 5 节；新路径由 `MAIN_AGENT_DISCUSSION_ENABLED` 闸控。
+> 状态：**已通过验收（2026-09-19，用户确认）**。证据见第 1 节矩阵与第 5 节；四项缺口归阶段 4。
 > 依赖：阶段 1、2A、2B、2C 通过；核心正确性不依赖缓存命中。
 
 [总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-3-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-3-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-3-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-3-checklist-v1.md)
@@ -77,7 +77,12 @@ npm run test:e2e:planned-discussion   # 2026-09-19 新增：主 Agent 规划讨�
 - 踩坑：spec 之间互相 `import` 会让 node:test 把整套用例重复注册（夹具已抽到 `orchestrator.test-fixtures.ts`）；
   `Object.groupBy` 不在本仓库 TS lib 目标内；冲突判定最初按"结论文本不同"误判了不同问题的正常差异，改为
   同 objective 内比较。
-- **阶段结论：实施完成，待用户验收。** 阶段退出条件（用户 @、按需咨询、主 Agent 实质汇总、统一澄清、
+- **阶段结论：已验收（2026-09-19，用户确认）。** 阶段退出条件（用户 @、按需咨询、主 Agent 实质汇总、统一澄清、
   成员授权、版本与重启恢复、讨论无源码写副作用）均有服务端证据。**需用户决定的缺口**：(1) 双端专用呈现未做
   （复用既有事件类型渲染）；(2) 扩员卡与澄清卡的选项处理未接（approve 后加人并补委派 / proceed_anyway）；
   (3) `blocked` 委派状态无写入方；(4) 开关默认关，是否在验收时置为默认开。
+
+### TASK.md 记录归档（2026-09-19）
+
+阶段 3 的 TASK.md 逐项记录（T1～T6 落点、用例数、踩坑、延后项）已随验收转入本节；完整文本见提交 `f80e27f` 的 `TASK.md`。
+此后 TASK.md 改写为阶段 4 锚点。

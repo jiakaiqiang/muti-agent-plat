@@ -30,6 +30,11 @@
 - 交付：确认关联需求/文档版本，旧卡拒绝、重复幂等、修订失效与共享投影。
 - 覆盖：P4-AC2、P4-AC3。
 - 验证：执行 Checklist 对应场景，记录命令/环境/结果；失败时保留证据并回到所属任务。
+- 承接自阶段 3（2026-09-19 验收时决定）：`confirm_member_addition`（approve 后把成员加入
+  `participatingAgentIds` 并为其补 `user_mention`/`coordinator` 委派；decline 关闭卡片）与
+  `discussion_clarification`（answer_in_chat 走阶段 3 的 @/补充路径；proceed_anyway 以现有综合
+  进入文档发布）两张卡的选项处理，均以主 Agent 持有的 confirmationId 为准、旧卡拒绝、重复幂等。
+  同时决定 `MAIN_AGENT_DISCUSSION_ENABLED` 的默认值（阶段 3 验收时保持默认关）。
 
 ### P4-T3 接入只读流程选择与映射
 
@@ -54,6 +59,10 @@
 - 交付：复用既有 Diff/历史，保持各端样式；质量拒绝显示返工或可处理的阻塞。
 - 覆盖：P4-AC2、P4-AC4、P4-AC7。
 - 验证：执行 Checklist 对应场景，记录命令/环境/结果；失败时保留证据并回到所属任务。
+- 承接自阶段 3（2026-09-19 验收时决定）：讨论计划（`plannedTargets`）、委派进度（带
+  `delegationId` 的状态事件）、综合（`messageKind:'summary'` + `sourceDelegationIds`）与两张确认卡
+  的双端专用呈现；阶段 3 只复用既有事件类型，两端按通用样式渲染。另：合同已定义 `blocked` 委派
+  状态但无写入方（专家"缺证"目前落 failed），是否映射由本阶段一并决定。
 
 ### P4-T6 验证版本竞争和完整交接
 

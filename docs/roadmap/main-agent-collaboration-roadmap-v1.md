@@ -1,9 +1,9 @@
 # 主 Agent 协作与长会话治理：分阶段实施总计划 v1
 
 > 日期：2026-09-16
-> 状态：阶段 0、阶段 1、阶段 2A、阶段 2B 与阶段 2C 已实现并验收；阶段 3 及后续业务接入待实施。
+> 状态：阶段 0、阶段 1、阶段 2A、阶段 2B、阶段 2C 与阶段 3 已实现并验收；阶段 4 及后续业务接入待实施。
 > 初始文档交付：1 份总计划 + 9 阶段 × 4 份文档，共 37 份新增文档，记录保留于第 11 节。
-> 当前已验收范围：阶段 0、阶段 1、阶段 2A、阶段 2B、阶段 2C；未调用真实付费/多模态 Provider、部署或发布。
+> 当前已验收范围：阶段 0、阶段 1、阶段 2A、阶段 2B、阶段 2C、阶段 3；未调用真实付费/多模态 Provider、部署或发布。
 
 ## 1. 目标与已沟通决定
 
@@ -73,7 +73,7 @@
 | 2A | 统一消息意图、需求隔离与完整 Token 预算（已完成并通过验收） | 1 | [spec](../product/main-agent-collaboration-phase-2a-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2a-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2a-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2a-checklist-v1.md) |
 | 2B | 版本化长期记忆、增量摘要与历史需求召回（已完成并通过验收） | 2A | [spec](../product/main-agent-collaboration-phase-2b-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2b-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2b-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2b-checklist-v1.md) |
 | 2C | 分层缓存、失效治理与成本观测（已完成并通过验收） | 2B | [spec](../product/main-agent-collaboration-phase-2c-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2c-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2c-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2c-checklist-v1.md) |
-| 3 | 主 Agent 主持讨论与可恢复专家协作 | 2A/2B/2C | [spec](../product/main-agent-collaboration-phase-3-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-3-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-3-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-3-checklist-v1.md) |
+| 3 | 主 Agent 主持讨论与可恢复专家协作（已完成并通过验收） | 2A/2B/2C | [spec](../product/main-agent-collaboration-phase-3-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-3-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-3-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-3-checklist-v1.md) |
 | 4 | 主 Agent 文档、精确确认与所选工作流交接 | 3 | [spec](../product/main-agent-collaboration-phase-4-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-4-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-4-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-4-checklist-v1.md) |
 | 5 | 执行中补充、新需求与范围变更治理 | 4 | [spec](../product/main-agent-collaboration-phase-5-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-5-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-5-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-5-checklist-v1.md) |
 | 6 | 双端综合验收、长会话成本评测与受控上线 | 全部前置阶段 | [spec](../product/main-agent-collaboration-phase-6-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-6-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-6-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-6-checklist-v1.md) |
@@ -87,7 +87,7 @@
 - Tasks：有序任务、依赖、交付物及关联 AC。
 - Checklist：具体场景、预期、现有命令、必须新增的测试和证据位置。
 
-本专项共 61 条阶段 AC、54 项开发任务。阶段 0、阶段 1、阶段 2A、阶段 2B 与阶段 2C 的 33 条 AC、30 项任务已完成实现和验收；阶段 3 及以后仍待实施/待验证，不因前置阶段通过而自动完成。
+本专项共 61 条阶段 AC、54 项开发任务。阶段 0、阶段 1、阶段 2A、阶段 2B、阶段 2C 与阶段 3 的 40 条 AC、36 项任务已完成实现和验收；阶段 4 及以后仍待实施/待验证，不因前置阶段通过而自动完成。
 
 ## 5. 跨阶段架构决策与不变量
 
@@ -224,3 +224,12 @@
 - 命中率经 `context_bundle_cache_total{layer,outcome}` 暴露于既有 ops 指标出口，标签不含会话 id。
 - [阶段 2C Checklist](../quality/main-agent-collaboration-phase-2c-checklist-v1.md)记录原语级用例、四门禁与新增 E2E `test:e2e:context-bundle-cache`：真实服务上同一会话的缓存命中仍被发送前预算守卫拒绝（AC1）。
 - 已知边界与延后：文件/摘要层不再套派生缓存、CLI 内建缓存能力声明不记录、跨进程 single-flight 延后（理由见 tasks）；`priceVersion` 来源与真实付费模型抽样归入阶段 6 P6-T5 成本报告。未调用真实付费模型、部署或发布。
+
+## 17. 阶段 3 实施交付（2026-09-19）
+
+- 完成持久化 DiscussionRun / Delegation 生命周期（PostgreSQL V13 `discussion_runs`，跨实例同键只留一条委派、旧修订拒绝不落盘、终态不可回退、重放幂等）。
+- 主 Agent 以新 `discussion_plan` 输出提议，领域校验后落实：只咨询被点名的已选专家；目录内非成员生成用户确认卡而非自行加入；未知名字报出不编造；模型无法通过多余字段声明成员或批准。
+- 专家失败只标该委派、整场继续；重启续跑只运行未完成项且不重问计划；停止时 run 暂停、委派保留可续；用户 @ 成为有归属的 `user_mention` 委派；需求修订就地 supersede 旧委派并在同一 run 重规划。
+- 每轮以确定性综合收口：署名逐条、不写"一致同意"、冲突 = 同问题不同结论列为待选、失败/未回复点名、`sourceDelegationIds` 可核验；有未决时主 Agent 持有一张 `discussion_clarification` 卡。
+- [阶段 3 Checklist](../quality/main-agent-collaboration-phase-3-checklist-v1.md)记录 120 余例单测、PostgreSQL 临时库 12/12、E2E `test:e2e:planned-discussion` 两场景与四门禁。
+- 已知边界与延后（归阶段 4）：双端专用呈现未做（复用既有事件类型渲染）；扩员卡与澄清卡的选项处理未接；`blocked` 委派状态无写入方；新路径由 `MAIN_AGENT_DISCUSSION_ENABLED` 闸控、默认关。跨实例 CAS 延后。未调用真实付费模型、部署或发布。
