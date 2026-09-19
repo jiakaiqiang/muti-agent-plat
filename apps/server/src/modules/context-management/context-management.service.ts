@@ -224,7 +224,9 @@ export class ContextManagementService {
   async createWorkItem(input: CreateWorkItemInput) {
     return this.serialized(input.session.id, async () => {
       const decisionIds = [...new Set(input.inheritedDecisionIds ?? [])];
+      const artifactIds = [...new Set(input.inheritedArtifactIds ?? [])];
       this.assertInheritedDecisions(input.session.id, decisionIds);
+      this.assertInheritedArtifacts(input.session.id, artifactIds);
       if (input.parentWorkItemId) this.getWorkItem(input.session.id, input.parentWorkItemId);
       const now = new Date().toISOString();
       const item: WorkItem = {
@@ -237,7 +239,7 @@ export class ContextManagementService {
         revision: 1,
         createdFromEventId: input.sourceEventId,
         inheritedDecisionIds: decisionIds,
-        inheritedArtifactIds: [...new Set(input.inheritedArtifactIds ?? [])],
+        inheritedArtifactIds: artifactIds,
         createdAt: now,
         updatedAt: now
       };
@@ -1092,6 +1094,24 @@ export class ContextManagementService {
     const decisions = new Map(this.listDecisions(sessionId).map((item) => [item.id, item]));
     const invalid = decisionIds.filter((id) => decisions.get(id)?.status !== 'confirmed');
     if (invalid.length) throw new BadRequestException(`Only confirmed Session decisions can be inherited: ${invalid.join(', ')}`);
+  }
+
+  /**
+   * Inherited artifacts are evidence the new requirement claims to build on, so
+   * they must be real artifacts of this Session. Decisions were already guarded;
+   * artifact ids used to be copied verbatim, which let an id from another
+   * Session — or a typo — be recorded as inherited evidence (phase 5 AC5).
+   */
+  private assertInheritedArtifacts(sessionId: string, artifactIds: string[]) {
+    if (!artifactIds.length) return;
+    const artifacts = this.persistence.getCollection<{
+      artifactIdsBySession?: Record<string, string[]>;
+    }>('artifacts', {});
+    const owned = new Set(artifacts.artifactIdsBySession?.[sessionId] ?? []);
+    const invalid = artifactIds.filter((id) => !owned.has(id));
+    if (invalid.length) {
+      throw new BadRequestException(`Only this Session's artifacts can be inherited: ${invalid.join(', ')}`);
+    }
   }
 
   private collection<T>(key: string): BySession<T> {

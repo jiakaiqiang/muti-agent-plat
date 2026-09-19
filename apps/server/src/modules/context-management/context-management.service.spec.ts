@@ -624,6 +624,16 @@ test('WorkItem context slices exclude unrelated records and retain explicit inhe
   const context = await fixture();
   try {
     const first = await context.service.ensureInitialWorkItem(context.session, 'event-1');
+    // Inherited artifacts must be real Session artifacts, so the one this slice
+    // claims to inherit is registered the way the artifacts service registers it.
+    await context.persistence.setCollection('artifacts', {
+      artifactsById: {
+        'artifact-inherited': {
+          id: 'artifact-inherited', sessionId: context.session.id, workItemId: first.id, type: 'json', title: 'inherited'
+        }
+      },
+      artifactIdsBySession: { [context.session.id]: ['artifact-inherited'] }
+    });
     const second = await context.service.createWorkItem({
       session: context.session,
       sourceEventId: 'event-2',
@@ -935,3 +945,60 @@ test('recall is scoped to the Session: another session\'s private memory is neve
   } finally { await context.cleanup(); }
 });
 
+test('a new requirement cannot inherit an artifact that is not a real Session artifact', async () => {
+  const context = await fixture();
+  try {
+    const parent = await context.service.ensureInitialWorkItem(context.session, 'initial');
+    const decision = await context.service.recordDecision({
+      session: context.session,
+      workItemId: parent.id,
+      kind: 'requirement',
+      content: '导出需包含退款明细',
+      sourceEventId: 'event-1'
+    });
+
+    // Decisions are already guarded; artifacts were copied verbatim, so an id
+    // from another Session (or a typo) could be presented as inherited evidence
+    // for the new requirement.
+    await assert.rejects(
+      () => context.service.createWorkItem({
+        session: context.session,
+        sourceEventId: 'event-2',
+        title: '独立需求',
+        goal: '另一个导出',
+        inheritedDecisionIds: [decision.id],
+        inheritedArtifactIds: ['artifact-from-another-session']
+      }),
+      /artifact/i,
+      'an unknown artifact id must be refused, not recorded as inherited evidence'
+    );
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('a real Session artifact can still be inherited explicitly', async () => {
+  const context = await fixture();
+  try {
+    const parent = await context.service.ensureInitialWorkItem(context.session, 'initial');
+    await context.persistence.setCollection('artifacts', {
+      artifactsById: {
+        'artifact-1': { id: 'artifact-1', sessionId: context.session.id, workItemId: parent.id, title: 'Report' }
+      },
+      artifactIdsBySession: { [context.session.id]: ['artifact-1'] }
+    });
+
+    const created = await context.service.createWorkItem({
+      session: context.session,
+      sourceEventId: 'event-2',
+      title: '相关需求',
+      goal: '在导出基础上加退款',
+      parentWorkItemId: parent.id,
+      inheritedArtifactIds: ['artifact-1']
+    });
+
+    assert.deepEqual(created.inheritedArtifactIds, ['artifact-1']);
+  } finally {
+    await context.cleanup();
+  }
+});
