@@ -132,8 +132,16 @@
   逐字段投影不带模型推理。双端各自样式：web `changeQueuePresentation.ts` 渲染单条内联列表
   （6 条用例），desktop 同名模块渲染分组小节（8 条用例）。
   `npm run test -w @project/web` 64 文件 / 312 用例全绿（该命令同时覆盖 desktop renderer spec）。
-- [ ] T5-2 取消/删除 fencing：删除后回调只允许审计；重启保留用户选择与已完成分析，
+- [x] T5-2 取消/删除 fencing：删除后回调只允许审计；重启保留用户选择与已完成分析，
       不自动重播模型
+  证据：缺口是 `open()` 有 `admissionRefusal` 守卫，但 `recordAnalysis` / `recordChoice` /
+  `transition` 三个变更方法都**没有**——会话删除后迟到的分析回调、迟到的用户点击仍会写入。
+  三处统一接入 lifecycle 守卫（锁集合加 `SESSION_LIFECYCLES_COLLECTION`，按请求自身记录的
+  `generation` 比对）：删除后写入返回 `SESSION_ADMISSION_CLOSED`、恢复后旧代次返回
+  `CHANGE_REQUEST_STALE_GENERATION`，记录保持可读供审计。
+  `change-request-store.spec` 15/15 绿（新增 5 条：删除后分析被拒且不落库、删除后选择被拒、
+  恢复后旧代次分析被拒、重启保留选择与分析且 analysisRevision 不被重启抬升、
+  已删除会话队列只读可审计）。
 
 ## T6 验证执行中交互矩阵（AC1–AC7）
 

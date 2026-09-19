@@ -160,11 +160,16 @@ export class ChangeRequestStore {
   async recordAnalysis(requestId: string, input: RecordAnalysisInput): Promise<ChangeRequestMutationOutcome> {
     const now = this.clock();
     return this.persistence.mutateCollections(
-      [CHANGE_REQUESTS_COLLECTION],
+      [CHANGE_REQUESTS_COLLECTION, SESSION_LIFECYCLES_COLLECTION],
       (draft): ChangeRequestMutationOutcome => {
         const all = (draft[CHANGE_REQUESTS_COLLECTION] ??= {}) as ChangeRequestsBySession;
         const request = Object.values(all).flat().find((item) => item.id === requestId);
         if (!request) return { status: 'rejected', code: 'CHANGE_REQUEST_NOT_FOUND' };
+        // A deleted session accepts no further work, and a restore bumps the
+        // generation: an analysis produced for the run that no longer exists must
+        // not be presented as current (AC7).
+        const refusal = this.mutationRefusal(draft, request.sessionId, request.generation);
+        if (refusal) return { status: 'rejected', code: refusal };
 
         const current = input.current ?? request.base;
         const previous = request.analysis;
@@ -209,11 +214,15 @@ export class ChangeRequestStore {
   ): Promise<ChangeRequestMutationOutcome> {
     const now = this.clock();
     return this.persistence.mutateCollections(
-      [CHANGE_REQUESTS_COLLECTION],
+      [CHANGE_REQUESTS_COLLECTION, SESSION_LIFECYCLES_COLLECTION],
       (draft): ChangeRequestMutationOutcome => {
         const all = (draft[CHANGE_REQUESTS_COLLECTION] ??= {}) as ChangeRequestsBySession;
         const request = Object.values(all).flat().find((item) => item.id === requestId);
         if (!request) return { status: 'rejected', code: 'CHANGE_REQUEST_NOT_FOUND' };
+        // Checked before idempotency: after a delete every mutation is closed,
+        // including a replayed click that would otherwise read as already done.
+        const refusal = this.mutationRefusal(draft, request.sessionId, request.generation);
+        if (refusal) return { status: 'rejected', code: refusal };
         if (request.choice) {
           return request.choice === input.choice
             ? { status: 'idempotent', request: structuredClone(request) }
@@ -242,11 +251,14 @@ export class ChangeRequestStore {
   async transition(requestId: string, status: ChangeRequestStatus): Promise<ChangeRequestMutationOutcome> {
     const now = this.clock();
     return this.persistence.mutateCollections(
-      [CHANGE_REQUESTS_COLLECTION],
+      [CHANGE_REQUESTS_COLLECTION, SESSION_LIFECYCLES_COLLECTION],
       (draft): ChangeRequestMutationOutcome => {
         const all = (draft[CHANGE_REQUESTS_COLLECTION] ??= {}) as ChangeRequestsBySession;
         const request = Object.values(all).flat().find((item) => item.id === requestId);
         if (!request) return { status: 'rejected', code: 'CHANGE_REQUEST_NOT_FOUND' };
+        // The record stays readable for audit after a delete; advancing it does not.
+        const refusal = this.mutationRefusal(draft, request.sessionId, request.generation);
+        if (refusal) return { status: 'rejected', code: refusal };
         if (request.status === status) return { status: 'idempotent', request: structuredClone(request) };
         if (!canTransitionChangeRequest(request.status, status)) {
           return { status: 'rejected', code: 'CHANGE_REQUEST_TRANSITION_REJECTED' };
@@ -259,6 +271,10 @@ export class ChangeRequestStore {
     );
   }
 
+  /**
+   * Gate for *raising* new scope: a session that is stopping or being deleted
+   * must not accept a new change request at all.
+   */
   private admissionRefusal(
     draft: Record<string, unknown>,
     sessionId: string,
@@ -267,6 +283,25 @@ export class ChangeRequestStore {
     const lifecycle = ((draft[SESSION_LIFECYCLES_COLLECTION] ?? {}) as SessionLifecyclesBySession)[sessionId];
     if (!lifecycle) return undefined;
     if (lifecycle.admission === 'closed') return 'SESSION_ADMISSION_CLOSED';
+    if (generation !== undefined && lifecycle.generation !== generation) return 'CHANGE_REQUEST_STALE_GENERATION';
+    return undefined;
+  }
+
+  /**
+   * Gate for advancing a request that already exists (AC7). Deliberately keyed on
+   * the lifecycle *state*, not on admission: choosing "stop and revise" closes
+   * admission on purpose (`closeForStop`), and fencing on that would refuse the
+   * very transition the user just asked for. What must be refused is a callback
+   * landing on a deleted session, or one from a pre-restore generation.
+   */
+  private mutationRefusal(
+    draft: Record<string, unknown>,
+    sessionId: string,
+    generation?: number
+  ): string | undefined {
+    const lifecycle = ((draft[SESSION_LIFECYCLES_COLLECTION] ?? {}) as SessionLifecyclesBySession)[sessionId];
+    if (!lifecycle) return undefined;
+    if (lifecycle.state === 'deleting' || lifecycle.state === 'deleted') return 'SESSION_ADMISSION_CLOSED';
     if (generation !== undefined && lifecycle.generation !== generation) return 'CHANGE_REQUEST_STALE_GENERATION';
     return undefined;
   }

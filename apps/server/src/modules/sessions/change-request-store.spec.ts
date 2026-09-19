@@ -276,3 +276,131 @@ test('stored requests carry versions and a summary, never a model transcript', a
     await context.cleanup();
   }
 });
+
+/** Moves the session's lifecycle to a state the fencing must respect. */
+async function setLifecycle(
+  context: Awaited<ReturnType<typeof fixture>>,
+  overrides: { state?: string; admission?: string; generation?: number }
+) {
+  await context.persistence.setCollection('sessionLifecyclesBySession', {
+    'session-1': {
+      contractVersion: 'main-agent-collaboration/v1',
+      sessionId: 'session-1',
+      dataEpoch: 'epoch',
+      generation: overrides.generation ?? 2,
+      revision: 3,
+      state: overrides.state ?? 'active',
+      admission: overrides.admission ?? 'open',
+      stopStatus: 'idle'
+    }
+  });
+}
+
+test('a late analysis arriving after the session was deleted is refused, not recorded', async () => {
+  const context = await fixture();
+  try {
+    const opened = await context.store.open({ base: base(), sourceEventId: 'event-1', summary: 'x', generation: 2 });
+    const id = opened.status === 'opened' ? opened.request.id : '';
+
+    // The coordinator was analysing while the user deleted the session. The
+    // callback must not resurrect work on a deleted session (AC7).
+    await setLifecycle(context, { state: 'deleting', admission: 'closed' });
+    const refused = await context.store.recordAnalysis(id, {
+      affectedTaskIds: [], affectedFilePaths: [], affectedDocumentRevision: 2,
+      explanation: 'x', options: ['pause_and_revise']
+    });
+
+    assert.equal(refused.status, 'rejected');
+    assert.equal(refused.status === 'rejected' && refused.code, 'SESSION_ADMISSION_CLOSED');
+    assert.equal(context.store.get('session-1', id)?.status, 'received', 'the request is untouched');
+    assert.equal(context.store.get('session-1', id)?.analysis, undefined, 'no analysis is stored for a deleted session');
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('a choice submitted after the session was deleted is refused', async () => {
+  const context = await fixture();
+  try {
+    const opened = await context.store.open({ base: base(), sourceEventId: 'event-1', summary: 'x', generation: 2 });
+    const id = opened.status === 'opened' ? opened.request.id : '';
+    await context.store.recordAnalysis(id, {
+      affectedTaskIds: [], affectedFilePaths: [], affectedDocumentRevision: 2,
+      explanation: 'x', options: ['pause_and_revise', 'defer']
+    });
+    await setLifecycle(context, { state: 'deleting', admission: 'closed' });
+
+    const refused = await context.store.recordChoice(id, { choice: 'pause_and_revise', confirmationId: 'confirm-1' });
+
+    assert.equal(refused.status, 'rejected');
+    assert.equal(refused.status === 'rejected' && refused.code, 'SESSION_ADMISSION_CLOSED');
+    assert.equal(context.store.get('session-1', id)?.choice, undefined, 'no decision is recorded after deletion');
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('an analysis from a pre-restore generation cannot land on a restored session', async () => {
+  const context = await fixture();
+  try {
+    const opened = await context.store.open({ base: base(), sourceEventId: 'event-1', summary: 'x', generation: 2 });
+    const id = opened.status === 'opened' ? opened.request.id : '';
+
+    // A restore bumps the generation. The in-flight analysis belongs to the run
+    // that no longer exists, so it must not be presented as current.
+    await setLifecycle(context, { generation: 3 });
+    const refused = await context.store.recordAnalysis(id, {
+      affectedTaskIds: [], affectedFilePaths: [], affectedDocumentRevision: 2,
+      explanation: 'x', options: ['pause_and_revise']
+    });
+
+    assert.equal(refused.status, 'rejected');
+    assert.equal(refused.status === 'rejected' && refused.code, 'CHANGE_REQUEST_STALE_GENERATION');
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('a restart keeps the user choice and the finished analysis without replaying a model', async () => {
+  const context = await fixture();
+  try {
+    const opened = await context.store.open({ base: base(), sourceEventId: 'event-1', summary: 'x', generation: 2 });
+    const id = opened.status === 'opened' ? opened.request.id : '';
+    await context.store.recordAnalysis(id, {
+      affectedTaskIds: ['task-1'], affectedFilePaths: ['src/export.ts'], affectedDocumentRevision: 2,
+      explanation: '导出按钮会改动前端与接口层', options: ['pause_and_revise', 'defer']
+    });
+    await context.store.recordChoice(id, { choice: 'defer', confirmationId: 'confirm-1' });
+
+    const afterRestart = context.reopen();
+    const restored = afterRestart.get('session-1', id)!;
+
+    // The analysis is evidence already produced: a restart reads it, it does not
+    // recompute it (AC7).
+    assert.equal(restored.choice, 'defer');
+    assert.equal(restored.status, 'deferred');
+    assert.equal(restored.analysis?.explanation, '导出按钮会改动前端与接口层');
+    assert.deepEqual(restored.analysis?.affectedFilePaths, ['src/export.ts']);
+    assert.equal(restored.analysis?.analysisRevision, 1, 'the stored revision is reused, not bumped by a restart');
+    assert.deepEqual(afterRestart.deferred('session-1').map((item) => item.id), [id]);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('a deleted session keeps its queue readable for audit but offers nothing to act on', async () => {
+  const context = await fixture();
+  try {
+    const opened = await context.store.open({ base: base(), sourceEventId: 'event-1', summary: 'x', generation: 2 });
+    const id = opened.status === 'opened' ? opened.request.id : '';
+    await setLifecycle(context, { state: 'deleted', admission: 'closed' });
+
+    // The record stays for audit; every mutation is closed.
+    assert.equal(context.store.get('session-1', id)?.id, id, 'the record remains readable');
+    const refused = await context.store.transition(id, 'analyzing');
+    assert.equal(refused.status, 'rejected');
+    assert.equal(refused.status === 'rejected' && refused.code, 'SESSION_ADMISSION_CLOSED');
+  } finally {
+    await context.cleanup();
+  }
+});
