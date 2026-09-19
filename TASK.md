@@ -125,7 +125,13 @@
 
 ## T5 接入状态投影和恢复（AC6/AC7）
 
-- [ ] T5-1 双端共享队列/变更卡投影（shared 投影 + web/desktop 各自样式）
+- [x] T5-1 双端共享队列/变更卡投影（shared 投影 + web/desktop 各自样式）
+  证据：shared `change-queue-projection.ts`（browser-safe，已导出 index 并重建 dist）9/9——
+  排队顺序按 raisedAt + id 稳定、waiting_user 与 deferred 分流、已结束状态不入队、
+  过期行带 `staleReason`、`grantsExecution:false` + `requiresReconfirmation:true`、
+  逐字段投影不带模型推理。双端各自样式：web `changeQueuePresentation.ts` 渲染单条内联列表
+  （6 条用例），desktop 同名模块渲染分组小节（8 条用例）。
+  `npm run test -w @project/web` 64 文件 / 312 用例全绿（该命令同时覆盖 desktop renderer spec）。
 - [ ] T5-2 取消/删除 fencing：删除后回调只允许审计；重启保留用户选择与已完成分析，
       不自动重播模型
 
