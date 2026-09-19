@@ -34,6 +34,11 @@ export type ExecutionStatusQuestionMatch = {
   reasonCode: 'EXECUTION_STATUS_QUESTION';
 };
 
+export type ExecutionConsultationQuestionMatch = {
+  normalizedText: string;
+  reasonCode: 'EXECUTION_CONSULTATION_QUESTION';
+};
+
 const COMMANDS: ReadonlyArray<{
   command: ExactUserCommand;
   reasonCode: ExactCommandReasonCode;
@@ -210,6 +215,32 @@ export function matchExecutionStatusQuestion(content: string): ExecutionStatusQu
   return { normalizedText, reasonCode: 'EXECUTION_STATUS_QUESTION' };
 }
 
+/**
+ * Phrases that ask for work rather than for an opinion. A question wrapped
+ * around one of these is still a scope change, so it must reach the change
+ * request path instead of being answered as a read-only consultation.
+ */
+const SCOPE_CARRYING_PHRASES =
+  /(?:顺便|另外|还要|再加|加一个|加上|增加|改成|换成|去掉|删掉|also|additionally|by the way|\badd\b|\bremove\b|\bdelete\b|\brename\b)/iu;
+
+/**
+ * Matches a read-only question addressed to an expert during execution, so it
+ * becomes a bounded consultation on the live requirement instead of a re-plan.
+ * A message that asks for work is deliberately excluded: answering it here
+ * would skip the impact analysis the user is entitled to (AC2/AC3).
+ */
+export function matchExecutionConsultationQuestion(content: string): ExecutionConsultationQuestionMatch | undefined {
+  const normalizedText = normalizeExactCommandText(content);
+  if (!normalizedText || normalizedText.length > 200) return undefined;
+  if (matchExactUserCommand(normalizedText)) return undefined;
+  if (SCOPE_CARRYING_PHRASES.test(normalizedText)) return undefined;
+
+  const chinese = /(?:吗|呢)$|(?:是否|会不会|有没有|能否|可不可以)/u;
+  const english = /^(?:does|do|did|would|will|is|are|was|were|should|could|how|what|why|which|whether)\b/i;
+  if (!chinese.test(normalizedText) && !english.test(normalizedText)) return undefined;
+  return { normalizedText, reasonCode: 'EXECUTION_CONSULTATION_QUESTION' };
+}
+
 @Injectable()
 export class DeterministicCommandGuardService {
   match(content: string) {
@@ -222,5 +253,9 @@ export class DeterministicCommandGuardService {
 
   matchStatusQuestion(content: string) {
     return matchExecutionStatusQuestion(content);
+  }
+
+  matchConsultationQuestion(content: string) {
+    return matchExecutionConsultationQuestion(content);
   }
 }

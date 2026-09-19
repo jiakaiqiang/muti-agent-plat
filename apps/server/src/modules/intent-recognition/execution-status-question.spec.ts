@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { matchExecutionStatusQuestion } from './deterministic-command-guard.service.js';
+import {
+  matchExecutionConsultationQuestion,
+  matchExecutionStatusQuestion
+} from './deterministic-command-guard.service.js';
 
 test('a plain progress question is recognised without a model call', () => {
   for (const content of [
@@ -48,4 +51,40 @@ test('an overlong message is not short circuited even if it starts like a questi
 
 test('an empty message matches nothing', () => {
   assert.equal(matchExecutionStatusQuestion('   '), undefined);
+});
+
+test('an @ question about impact is a consultation, not a scope change', () => {
+  for (const content of [
+    '这个改动对架构影响大吗？',
+    '这样做会不会有性能问题',
+    '接口这样改是否可行？',
+    'does this affect the api contract?',
+    'would this break the export flow'
+  ]) {
+    const matched = matchExecutionConsultationQuestion(content);
+    assert.ok(matched, `expected a consultation question: ${content}`);
+    assert.equal(matched.reasonCode, 'EXECUTION_CONSULTATION_QUESTION');
+  }
+});
+
+test('a message carrying a requirement is not a consultation even when phrased as a question', () => {
+  // These change scope, so they must reach the change-request path (AC3) rather
+  // than being answered as a read-only consultation.
+  for (const content of [
+    '能不能顺便加一个导出按钮？',
+    '把接口改成分页可以吗',
+    'can you also add a CSV export?'
+  ]) {
+    assert.equal(matchExecutionConsultationQuestion(content), undefined, `must not short circuit: ${content}`);
+  }
+});
+
+test('a control command or a bare statement is not a consultation', () => {
+  for (const content of ['停止', 'cancel', '继续执行', '导出要包含退款明细']) {
+    assert.equal(matchExecutionConsultationQuestion(content), undefined, `must not short circuit: ${content}`);
+  }
+});
+
+test('an overlong consultation message stays on the semantic router', () => {
+  assert.equal(matchExecutionConsultationQuestion(`影响大吗？${'补充说明'.repeat(60)}`), undefined);
 });

@@ -63,7 +63,15 @@
       `execution-status-question.spec.ts` 6/6 + 既有守卫 6/6（含「顺便加一个导出按钮」不短路、
       控制命令与 @ 专家不短路）；`sessions.service.spec.ts` 110/110（新增 2 条：状态询问
       runtimeCalls=0 且不进语义路由、夹带需求的消息仍进路由）。
-- [ ] T2-2 执行中 @ 专家 → 有界只读委派（复用阶段 3 `DiscussionStore`），不重跑全部专家/节点
+- [x] T2-2 执行中 @ 专家 → 有界只读委派（复用阶段 3 `DiscussionStore`），不重跑全部专家/节点
+  证据：`execution-status-question.spec.ts` 16/16（新增 4 条咨询匹配用例：影响类提问命中；
+  「能不能顺便加一个导出按钮」等带需求的提问**不**命中，仍走变更路径；控制命令/纯陈述不命中；
+  超长消息回落语义路由）；`sessions.service.spec.ts` 100/100（执行中 @architect 提问只产生
+  1 次定向咨询、不再拆任务、不改契约、不取消节点、状态仍 EXECUTING）。
+  实现：orchestrator 新增 `consultDuringExecution`，复用阶段 3 `runMentionDelegations`
+  （有界只读委派、回复落在 delegation 上进入主 Agent 综合）；`sendMessage` 在 EXECUTING +
+  有 @ + 命中咨询匹配时短路。缺口：`prepareFollowUpExecution` 原先只在 @ 人数>1 或
+  discussionRequired 时才走委派，单个 @ 会落到跟进执行路径（重新拆任务）。
 - [ ] T2-3 范围变更 → 影响分析（受影响任务/文件/确认版本 + 代价），用户未选前不改当前契约
 
 ## T3 实现用户选择与暂停修订（AC3/AC4）

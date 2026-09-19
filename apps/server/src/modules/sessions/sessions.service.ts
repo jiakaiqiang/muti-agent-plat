@@ -64,6 +64,7 @@ import { EventsService } from '../events/events.service.js';
 import { IntentRecognitionService } from '../intent-recognition/intent-recognition.service.js';
 import {
   matchExactUserCommand,
+  matchExecutionConsultationQuestion,
   matchExecutionStatusQuestion,
   matchWorkflowAgentDirective,
   matchWorkflowAgentSkipCommand,
@@ -1726,6 +1727,23 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     if (statusQuestion && !mentionedAgentIds.length) {
       return this.handleExecutionStatusQuestion(session, content, clientMessageId);
     }
+    // An @ that asks about impact is a read-only consultation of that expert, not
+    // a scope change: it must not re-plan the requirement or touch the running
+    // graph (AC2). A message carrying a requirement fails this match and reaches
+    // the change-request path instead.
+    if (
+      session.status === 'EXECUTING' &&
+      mentionedAgentIds.length &&
+      matchExecutionConsultationQuestion(content)
+    ) {
+      const consulted = await this.handleExecutionConsultation(
+        session,
+        content,
+        mentionedAgentIds,
+        clientMessageId
+      );
+      if (consulted) return consulted;
+    }
     const routingMode = this.intentRoutingMode();
     const explicitPreference = this.intentRecognition
       .recognizeUserMessage(content, session.status).intent === 'preference_input';
@@ -2163,6 +2181,68 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       lines.push(`待处理的范围变更：${change.summary}${change.awaitingUser ? '（等待你选择）' : '（已暂缓）'}`);
     }
     return lines.join('\n');
+  }
+
+  /**
+   * An @ that asks about impact while the graph runs. The named experts are
+   * consulted as bounded read-only delegations (phase 3 machinery), so the
+   * reply reaches the coordinator's synthesis without re-planning the
+   * requirement or cancelling a node. Returns undefined when there is nothing
+   * to attach the consultation to, so the caller keeps its own routing.
+   */
+  private async handleExecutionConsultation(
+    session: SessionDetail,
+    content: string,
+    mentionedAgentIds: string[],
+    clientMessageId: string | undefined
+  ) {
+    const consult = (this.orchestrator as unknown as {
+      consultDuringExecution?: (
+        session: SessionDetail,
+        content: string,
+        agentIds: string[]
+      ) => Promise<boolean>;
+    }).consultDuringExecution;
+    if (typeof consult !== 'function') return undefined;
+
+    const handlingPlan: UserMessageHandlingPlan = {
+      intent: 'question',
+      requirementRelation: 'continuation',
+      failedExecutionAction: 'none',
+      priority: 'normal',
+      shouldPause: false,
+      affectedTaskIds: [],
+      affectedAgentIds: [...mentionedAgentIds],
+      requiresBriefRevision: false,
+      requiresUserConfirmation: false,
+      coordinatorInstruction: '向被 @ 的成员发起有界只读咨询，不改动已确认范围。'
+    };
+    const event = this.events.create({
+      sessionId: session.id,
+      type: 'user_message',
+      sessionUserId: session.ownerId,
+      userMessageIntent: handlingPlan.intent,
+      priority: handlingPlan.priority,
+      content,
+      toAgentIds: mentionedAgentIds,
+      metadata: {
+        ...createMetadata('chat_message', { text: content, mentionedAgentIds, handlingPlan }),
+        ...(clientMessageId ? { idempotencyKey: this.messageIdempotencyKey(session.id, clientMessageId) } : {})
+      }
+    });
+
+    const consulted = await consult.call(this.orchestrator, session, content, mentionedAgentIds);
+    if (!consulted) return undefined;
+    this.touchSession(session);
+    return {
+      event,
+      handlingPlan,
+      deferred: false as const,
+      followUpMessageId: undefined,
+      routingId: undefined,
+      routingStatus: undefined,
+      idempotentReplay: false as const
+    };
   }
 
   private async handleExactCommandMessage(

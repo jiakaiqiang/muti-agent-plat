@@ -3575,6 +3575,29 @@ export class OrchestratorService {
   }
 
   /**
+   * Phase 5 AC2: an @ question while a workflow is running is a bounded
+   * consultation of exactly the named experts, not a reason to re-plan the
+   * requirement. It reuses the mention delegation path, so the reply lands on a
+   * delegation the coordinator can read; the running graph is untouched because
+   * nothing here cancels a node or revises the contract. Returns false when
+   * there is no requirement to attach to, so the caller keeps its own path.
+   */
+  async consultDuringExecution(
+    session: SessionDetail,
+    content: string,
+    agentIds: string[],
+    signal?: AbortSignal
+  ): Promise<boolean> {
+    if (!mainAgentDiscussionEnabled()) return false;
+    const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    const experts = this.participatingAgents(session).filter(
+      (agent) => agent.id !== coordinator.id && agentIds.includes(agent.id)
+    );
+    if (!experts.length) return false;
+    return this.runMentionDelegations(session, coordinator, experts, content, signal);
+  }
+
+  /**
    * A user @ is an owned delegation to that expert (AC2): it attaches to the
    * requirement's live run, carries the user's wording as its objective, and
    * the reply is recorded on the delegation so it reaches the coordinator's

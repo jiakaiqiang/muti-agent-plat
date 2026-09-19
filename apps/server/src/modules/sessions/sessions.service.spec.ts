@@ -207,6 +207,7 @@ function makeService(options: {
   const followUpRecognitions: string[] = [];
   const followUpPreparations: Array<{ content: string; mentionedAgentIds: string[] }> = [];
   const memberConsultations: Array<{ sessionId: string; discussionId: string; agentId: string }> = [];
+  const executionConsultations: Array<{ sessionId: string; content: string; agentIds: string[] }> = [];
   const acceptedSyntheses: Array<{ sessionId: string; discussionId: string }> = [];
   const workspaceOfflineEmitters: Array<(value: { workspaceId: string; reason: string; occurredAt: string }) => void> = [];
   const eventOnceKeys = new Set<string>();
@@ -369,6 +370,10 @@ function makeService(options: {
       },
       async consultApprovedMember(session: SessionDetail, input: { discussionId: string; agentId: string }) {
         memberConsultations.push({ sessionId: session.id, ...input });
+      },
+      async consultDuringExecution(session: SessionDetail, content: string, agentIds: string[]) {
+        executionConsultations.push({ sessionId: session.id, content, agentIds });
+        return true;
       },
       async acceptDiscussionSynthesis(session: SessionDetail, discussionId: string) {
         acceptedSyntheses.push({ sessionId: session.id, discussionId });
@@ -643,6 +648,7 @@ function makeService(options: {
   return {
     service,
     memberConsultations,
+    executionConsultations,
     acceptedSyntheses,
     persistedState,
     persistedSessions,
@@ -3645,4 +3651,40 @@ test('a progress question that also carries a requirement is not short circuited
   await fixture.service.sendMessage(session.id, '进度如何？顺便加一个导出按钮');
 
   assert.ok(fixture.followUpRecognitions.length > before, 'a scope change must reach the router, not the status reply');
+});
+
+test('an @ question during execution is a bounded consultation that leaves the run alone', async () => {
+  const runtimeCalls: string[] = [];
+  const fixture = makeService({ runtimeCalls });
+  const { session } = await fixture.service.create({ input: '实现订单导出。' });
+  session.status = 'EXECUTING';
+  session.workflowRunId = 'run-consult';
+  session.participatingAgentIds = ['coordinator', 'architect'];
+
+  const plans = fixture.followUpPreparations.length;
+  const result = await fixture.service.sendMessage(session.id, '这个改动对架构影响大吗？', ['architect']);
+
+  // Exactly one targeted consultation; no follow-up brief, no task re-planning.
+  assert.deepEqual(
+    fixture.executionConsultations.map((item) => item.agentIds),
+    [['architect']],
+    'only the named expert is consulted'
+  );
+  assert.equal(fixture.followUpPreparations.length, plans, 'a question must not re-plan the requirement');
+  assert.equal(result.handlingPlan.requiresBriefRevision, false);
+  assert.equal(result.handlingPlan.shouldPause, false);
+  assert.equal(fixture.service.get(session.id).status, 'EXECUTING', 'the run keeps going');
+  assert.equal(fixture.executionCancels.length, 0, 'no workflow node is cancelled or re-run');
+});
+
+test('an @ message that changes scope during execution is not treated as a consultation', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: '实现订单导出。' });
+  session.status = 'EXECUTING';
+  session.workflowRunId = 'run-consult-2';
+  session.participatingAgentIds = ['coordinator', 'architect'];
+
+  await fixture.service.sendMessage(session.id, '@架构 把导出改成分页接口', ['architect']);
+
+  assert.deepEqual(fixture.executionConsultations, [], 'a requirement must not be answered as a read-only consultation');
 });
