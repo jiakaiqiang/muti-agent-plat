@@ -162,6 +162,15 @@ export function mainAgentDiscussionEnabled() {
   return envFlag('MAIN_AGENT_DISCUSSION_ENABLED', false);
 }
 
+/**
+ * Phase 4 admission gate for versioned requirement documents. On, the
+ * coordinator publishes an immutable document version alongside the brief and
+ * the confirmation card binds to that exact version. Rollback is unsetting it.
+ */
+export function requirementDocumentEnabled() {
+  return envFlag('REQUIREMENT_DOCUMENT_ENABLED', false);
+}
+
 /** Per-consultation token allowance handed to each planned delegation. */
 export function discussionConsultationBudgetTokens() {
   const parsed = Number(process.env.DISCUSSION_CONSULTATION_BUDGET_TOKENS ?? 4_000);

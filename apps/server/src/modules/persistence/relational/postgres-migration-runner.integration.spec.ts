@@ -15,6 +15,7 @@ import { SessionLifecycleStore } from '../../runtimes/session-lifecycle-store.js
 import { WorkItemBudgetStore } from '../../runtimes/work-item-budget-store.js';
 import { SummaryCheckpointStore, type SummaryCheckpointDraft } from '../../memory/summary-checkpoint-store.js';
 import { DiscussionStore } from '../../orchestrator/discussion-store.js';
+import { RequirementDocumentStore } from '../../sessions/requirement-document-store.js';
 
 const databaseUrl = process.env.RELATIONAL_TEST_DATABASE_URL;
 
@@ -891,6 +892,81 @@ test('PostgreSQL reserves one delegation per expert and revision across instance
         [opened.run.id]
       );
       assert.equal(Number(snapshot.rows[0].count), 1, 'the refused stale ask left no delegation behind');
+    } finally {
+      await pool.end();
+    }
+  } finally {
+    await first?.onModuleDestroy().catch(() => undefined);
+    await second?.onModuleDestroy().catch(() => undefined);
+    await third?.onModuleDestroy().catch(() => undefined);
+    await setupPool.query(`drop database if exists ${isolatedDatabase}`).catch(() => undefined);
+    await setupPool.end().catch(() => undefined);
+  }
+});
+
+test('PostgreSQL publishes one requirement document per content across instances and confirms it once', { skip: !databaseUrl }, async () => {
+  const isolatedDatabase = `agent_cluster_rd_${process.pid}_${Date.now()}`;
+  const isolatedUrl = new URL(databaseUrl!);
+  isolatedUrl.pathname = `/${isolatedDatabase}`;
+  const setupPool = new Pool({ connectionString: databaseUrl });
+  const isolated = isolatedUrl.toString();
+  const sessionId = `requirement-doc-${process.pid}-${Date.now()}`;
+  const workItemId = `${sessionId}-item`;
+  const now = new Date().toISOString();
+  const sections = { goal: '实现导出', scope: ['Excel'], outOfScope: [], acceptanceCriteria: ['可打开'], risks: [], pendingItems: [] };
+  let first: PersistenceService | undefined;
+  let second: PersistenceService | undefined;
+  let third: PersistenceService | undefined;
+  try {
+    await setupPool.query(`create database ${isolatedDatabase}`);
+    first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    second = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    third = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    await first.initialize();
+    await first.setCollection('sessions', [...first.getCollection<unknown[]>('sessions', []),
+      { id: sessionId, dataEpoch: first.currentDataEpoch(), title: 'Document', status: 'WAIT_USER_CONFIRM', ownerId: 'test',
+        decisionLedgerRevision: 0, createdAt: now, updatedAt: now }
+    ]);
+    await first.setCollection('workItemsBySession', {
+      [sessionId]: [{ id: workItemId, sessionId, title: 'Export', goal: 'Export', status: 'active',
+        revision: 3, createdFromEventId: 'e-1', inheritedDecisionIds: [], inheritedArtifactIds: [], createdAt: now, updatedAt: now }]
+    });
+    await second.initialize();
+
+    const publish = (store: RequirementDocumentStore) => store.publish({
+      sessionId, workItemId, workItemRevision: 3, publishedByAgentId: 'coordinator',
+      sourceBriefId: 'brief-1', sourceDecisionIds: [], sourceDelegationIds: [], sections
+    });
+    const [a, b] = await Promise.all([publish(new RequirementDocumentStore(first, () => now)), publish(new RequirementDocumentStore(second, () => now))]);
+
+    await third.initialize();
+    const reopened = new RequirementDocumentStore(third, () => now);
+    const docs = reopened.list(sessionId, workItemId);
+    assert.equal(docs.length, 1, `exactly one document persisted, got ${JSON.stringify([a.status, b.status])}`);
+    assert.equal(docs[0]?.documentRevision, 1);
+
+    const stale = await reopened.publish({
+      sessionId, workItemId, workItemRevision: 2, publishedByAgentId: 'coordinator',
+      sourceDecisionIds: [], sourceDelegationIds: [], sections: { ...sections, goal: 'old' }
+    });
+    assert.equal(stale.status, 'rejected');
+    assert.equal(stale.status === 'rejected' && stale.code, 'DOCUMENT_STALE_REQUIREMENT');
+
+    const confirmed = await reopened.confirm(docs[0]!.id, { confirmationId: 'confirm-1' });
+    assert.equal(confirmed.status, 'applied');
+    const replay = await new RequirementDocumentStore(first, () => now).confirm(docs[0]!.id, { confirmationId: 'confirm-1' });
+    assert.equal(replay.status, 'idempotent', 'a second instance replaying the confirmation is a no-op');
+
+    const pool = new Pool({ connectionString: isolated });
+    try {
+      const rows = await pool.query<{ status: string; logical_key: string; content_hash: string }>(
+        `select status,logical_key,content_hash from agent_cluster.requirement_documents where work_item_external_id=$1`,
+        [workItemId]
+      );
+      assert.equal(rows.rows.length, 1, 'the refused stale publish left no row');
+      assert.equal(rows.rows[0].status, 'confirmed');
+      assert.equal(rows.rows[0].logical_key, `${workItemId}|3|1`);
+      assert.equal(rows.rows[0].content_hash, docs[0]!.contentHash);
     } finally {
       await pool.end();
     }

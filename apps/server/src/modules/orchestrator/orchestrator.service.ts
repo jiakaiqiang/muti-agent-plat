@@ -74,6 +74,7 @@ import {
   contextBundleCacheTtlMs,
   discussionConsultationBudgetTokens,
   mainAgentDiscussionEnabled,
+  requirementDocumentEnabled,
   globalDefaultRuntimeType,
   phaseTimeoutMs,
   projectPolicyRuntimeType,
@@ -117,6 +118,7 @@ import { structuredOutputGuard } from './structured-output-guard.js';
 import { acceptanceFingerprint, explicitTaskPreflight } from './task-acceptance-preflight.js';
 import { boundedConsultations, consultationConcurrency } from './bounded-consultation.js';
 import { DiscussionStore } from './discussion-store.js';
+import { RequirementDocumentStore } from '../sessions/requirement-document-store.js';
 import { resolveDiscussionPlan } from './discussion-planner.js';
 import { synthesizeDiscussion } from './discussion-synthesis.js';
 import { shouldEmitHeartbeat, shouldSuppressHeartbeat } from './runtime-heartbeat-policy.js';
@@ -295,6 +297,8 @@ export class OrchestratorService {
   private readonly summaryCheckpoints: SummaryCheckpointService;
   /** Phase 3: the persisted discussion plan that recovery trusts (used only behind the flag). */
   private readonly discussions: DiscussionStore;
+  /** Phase 4: immutable requirement document versions (used only behind the flag). */
+  private readonly requirementDocuments: RequirementDocumentStore;
   /**
    * Workspace-derived envelope layers, keyed per session/requirement/role/
    * generation. Sits before the runtime's pre-send budget check, never in
@@ -329,6 +333,7 @@ export class OrchestratorService {
   ) {
     this.lifecycle = new SessionLifecycleStore(persistence);
     this.discussions = new DiscussionStore(persistence);
+    this.requirementDocuments = new RequirementDocumentStore(persistence);
     this.summaryCheckpoints = new SummaryCheckpointService(
       new SummaryCheckpointStore(persistence),
       runtime.workItemBudgets
@@ -513,6 +518,7 @@ export class OrchestratorService {
         title: messages.confirmBriefTitle,
         description: messages.confirmBriefDescription,
         relatedBriefId: brief.id,
+        ...(await this.publishRequirementDocument(session, coordinator, brief) ?? {}),
         options: [
           { key: 'approve', label: messages.approve, style: 'primary' },
           { key: 'revise', label: messages.revise, style: 'default' }
@@ -933,6 +939,7 @@ export class OrchestratorService {
         title: messages.confirmBriefTitle,
         description: messages.confirmBriefDescription,
         relatedBriefId: brief.id,
+        ...(await this.publishRequirementDocument(session, coordinator, brief) ?? {}),
         options: [
           { key: 'approve', label: messages.approve, style: 'primary' },
           { key: 'revise', label: messages.revise, style: 'default' }
@@ -3430,6 +3437,93 @@ export class OrchestratorService {
         mentionedAgentIds: participants.map((agent) => agent.id)
       })
     });
+  }
+
+  /**
+   * Publishes the immutable requirement document the confirmation will bind
+   * to: the brief's sections, the requirement's confirmed decisions and the
+   * delegations the latest synthesis actually read, all by reference. Returns
+   * the version identity for the confirmation card, or nothing when the
+   * feature is off or the session has no requirement to bind to.
+   */
+  private async publishRequirementDocument(
+    session: SessionDetail,
+    coordinator: Agent,
+    brief: TaskBrief
+  ): Promise<{ documentId: string; documentRevision: number; contentHash: string; workItemRevision: number } | undefined> {
+    if (!requirementDocumentEnabled()) return undefined;
+    const workItemId = session.activeWorkItemId;
+    const workItem = workItemId ? this.contextManagement?.getWorkItem(session.id, workItemId) : undefined;
+    if (!workItemId || !workItem) return undefined;
+
+    const decisions = typeof this.contextManagement?.listDecisions === 'function'
+      ? this.contextManagement.listDecisions(session.id)
+      : [];
+    const sourceDecisionIds = decisions
+      .filter((item) => item.workItemId === workItemId && item.status === 'confirmed')
+      .map((item) => item.id);
+    const generation = this.lifecycle.generation(session.id) ?? 0;
+    const synthesis = this.discussions
+      .list(session.id)
+      .filter((run) => run.workItemId === workItemId && run.generation === generation && run.synthesis)
+      .sort((left, right) => right.revision - left.revision)[0]?.synthesis;
+
+    const published = await this.requirementDocuments.publish({
+      sessionId: session.id,
+      workItemId,
+      workItemRevision: workItem.revision,
+      publishedByAgentId: coordinator.id,
+      sourceBriefId: brief.id,
+      sourceDecisionIds,
+      sourceDelegationIds: synthesis?.sourceDelegationIds ?? [],
+      sections: {
+        goal: brief.goal,
+        scope: [...brief.scope],
+        outOfScope: [...brief.outOfScope],
+        acceptanceCriteria: [...brief.acceptanceCriteria],
+        risks: [...brief.risks],
+        pendingItems: [...new Set([...brief.openQuestions, ...(synthesis?.unresolved ?? [])])]
+      }
+    });
+    if (published.status === 'rejected') {
+      // Not fatal for the brief flow: the card simply carries no document
+      // binding, and the refusal is visible in the session as a notice.
+      this.events.create({
+        sessionId: session.id,
+        type: 'agent_status_changed',
+        fromAgentId: coordinator.id,
+        content: `需求文档未发布：${published.code}`,
+        metadata: createMetadata('system_notice', { agentId: coordinator.id, status: 'thinking', reason: published.code })
+      });
+      return undefined;
+    }
+    const document = published.document;
+    if (published.status === 'published') {
+      this.events.create({
+        sessionId: session.id,
+        type: 'agent_message',
+        fromAgentId: coordinator.id,
+        toAgentIds: [],
+        content: `需求文档 v${document.documentRevision} 已发布（需求修订 ${document.workItemRevision}）。`,
+        metadata: createMetadata('chat_message', {
+          messageKind: 'decision',
+          documentId: document.id,
+          documentRevision: document.documentRevision,
+          contentHash: document.contentHash,
+          workItemId,
+          workItemRevision: document.workItemRevision,
+          sourceBriefId: brief.id,
+          sourceDecisionIds,
+          sourceDelegationIds: document.sourceDelegationIds
+        })
+      });
+    }
+    return {
+      documentId: document.id,
+      documentRevision: document.documentRevision,
+      contentHash: document.contentHash,
+      workItemRevision: document.workItemRevision
+    };
   }
 
   /**

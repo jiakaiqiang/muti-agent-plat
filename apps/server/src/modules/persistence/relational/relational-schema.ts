@@ -1072,6 +1072,26 @@ export const RELATIONAL_SCHEMA_V13_TABLES: RelationalTableDefinition[] = [
 ];
 export const RELATIONAL_SCHEMA_V13_SQL = renderTables(RELATIONAL_SCHEMA_V13_TABLES);
 
+export const RELATIONAL_SCHEMA_V14_TABLES: RelationalTableDefinition[] = [
+  table('requirement_documents', '保存主 Agent 发布的正式需求/方案文档版本：正文不可变、按需求修订与文档修订唯一，状态只单向前进，旧版保留为历史。', [
+    column('external_id', 'text primary key', '文档版本的稳定外部标识。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '文档所属会话。'),
+    column('work_item_external_id', 'text not null', '文档所属需求的稳定外部标识。'),
+    column('work_item_revision', 'bigint not null check (work_item_revision > 0)', '撰写时绑定的需求修订号；更早修订的发布被拒绝。'),
+    column('document_revision', 'bigint not null check (document_revision > 0)', '同一需求下的文档修订号，单调递增。'),
+    column('logical_key', 'text not null unique', '需求 + 需求修订 + 文档修订组成的唯一逻辑键。'),
+    column('content_hash', 'text not null', '规范化正文的 sha256；确认必须绑定它。'),
+    column('status', 'text not null', '文档状态：draft/formal/confirmed/superseded，只单向前进。'),
+    column('published_by_agent_external_id', 'text not null', '发布文档的主 Agent 稳定外部标识。'),
+    column('source_snapshot', 'jsonb not null', '版本化文档合同完整快照，含来源引用与各节正文。'),
+    column('created_at', 'timestamptz not null', '文档发布时间。'),
+    column('updated_at', 'timestamptz not null', '文档状态最后变化时间。')
+  ], [], [
+    'create index if not exists requirement_documents_work_item_idx on agent_cluster.requirement_documents(session_id, work_item_external_id, document_revision desc)'
+  ])
+];
+export const RELATIONAL_SCHEMA_V14_SQL = renderTables(RELATIONAL_SCHEMA_V14_TABLES);
+
 export function expectedRelationalComments() {
   return [
     SCHEMA_MIGRATIONS_TABLE,
@@ -1085,7 +1105,8 @@ export function expectedRelationalComments() {
     ...RELATIONAL_SCHEMA_V10_TABLES,
     ...RELATIONAL_SCHEMA_V11_TABLES,
     ...RELATIONAL_SCHEMA_V12_TABLES,
-    ...RELATIONAL_SCHEMA_V13_TABLES
+    ...RELATIONAL_SCHEMA_V13_TABLES,
+    ...RELATIONAL_SCHEMA_V14_TABLES
   ].flatMap((definition) => [
     { table: definition.name, column: null, comment: definition.comment },
     ...definition.columns.map((item) => ({ table: definition.name, column: item.name, comment: item.comment }))

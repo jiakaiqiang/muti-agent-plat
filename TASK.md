@@ -41,16 +41,30 @@
 
 ## T1 实现正式文档版本聚合（AC1/AC2）
 
-- [ ] T1-1 shared：`RequirementDocument`（sessionId/workItemId/workItemRevision/documentRevision/
-      contentHash/status: draft|formal|confirmed|superseded/sourceBriefId/sourceDecisionIds/
-      sourceDelegationIds/sections{goal,scope,outOfScope,acceptance,risks,pendingItems}）；
-      不可变版本、修改生成新 documentRevision；纯校验 + 确定性 contentHash（浏览器安全，
-      hash 由 server 侧算——2C 教训）
-- [ ] T1-2 `requirement-document-store.ts`：`documentsBySession` 集合，逻辑键 =
-      workItemId|documentRevision 唯一，旧 workItemRevision 拒绝不落盘；发布新版 → 旧版
-      `superseded`；PostgreSQL V14 + 6 处接线 + cutover seed + COMMENT 门禁
-- [ ] T1-3 主 Agent 发布入口：由 brief + 当前有效 DecisionRecord + 讨论综合聚合成文档
-      （引用不复制正文，plan §2.1），发布事件带 documentId/documentRevision/contentHash
+落点：`packages/shared/src/requirement-document-contracts.ts` + `.spec.ts`（7 例）；
+`apps/server/src/modules/sessions/requirement-document-store.ts` + `.spec.ts`（8 例，file）；
+PG 集成 +1（临时库 13/13）；`orchestrator.service.ts publishRequirementDocument` +
+`requirement-document.spec.ts`（3 例）。
+
+- [x] T1-1 `RequirementDocument`（workItemRevision / documentRevision / contentHash / status:
+      draft|formal|confirmed|superseded / sourceBriefId / sourceDecisionIds / sourceDelegationIds /
+      confirmationId? / sections 封闭六节）；`canonicalRequirementDocumentContent` 规范化字符串
+      （字段序固定、trim、**列表顺序保留**——验收标准的顺序是语义）；hash 在 server 侧算；
+      `isRequirementDocumentSections` 拒多余键（批准不是正文）；迁移表：draft→formal→confirmed，
+      任意→superseded，confirmed 不可回 formal（改动 = 新版本）；`supersedeOlderDocuments`
+      旧版保留为历史
+- [x] T1-2 `RequirementDocumentStore.publish`：sections 先校验再进事务；workItemRevision 与当前
+      不符 → `DOCUMENT_STALE_REQUIREMENT` 不落盘；同需求同修订同 hash → `duplicate`（不产生新版）；
+      内容变化 → documentRevision+1 并把旧版（含 confirmed）标 superseded；`confirm` formal→
+      confirmed 一次、重放 idempotent、superseded 不可确认；重启可读。PostgreSQL V14
+      `requirement_documents`（logical_key unique，正文不变、status 单向 upsert），8 处 relational
+      接线 + cutover seed + COMMENT 门禁；跨实例同内容并发只留 1 行、旧修订拒绝无行、确认重放幂等
+- [x] T1-3 `publishRequirementDocument`（`REQUIREMENT_DOCUMENT_ENABLED` 闸，默认关）：在两处
+      `confirm_task_brief` 发卡前发布——sections 取自 brief，`sourceDecisionIds` 只取本需求
+      `confirmed` 的 DecisionRecord，`sourceDelegationIds` 取当前 generation 最新 `run.synthesis`，
+      `pendingItems` = brief.openQuestions ∪ synthesis.unresolved；卡片 payload 带 documentId /
+      documentRevision / contentHash / workItemRevision（T2-1 的绑定材料）；发布事件带同一组 id；
+      同 brief 重发布得同版本；store 拒绝时发 system_notice 不阻断 brief 流（orchestrator 无 logger）
 
 ## T2 实现精确确认事务（AC3）
 

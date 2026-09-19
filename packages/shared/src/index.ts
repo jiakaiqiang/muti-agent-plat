@@ -2,6 +2,7 @@ export * from './contracts.js';
 export * from './collaboration-contracts.js';
 export * from './cache-contracts.js';
 export * from './discussion-contracts.js';
+export * from './requirement-document-contracts.js';
 export * from './time.js';
 export * from './metadata.js';
 export * from './default-agents.js';
