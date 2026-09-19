@@ -42,7 +42,10 @@ import type {
   UserMessageHandlingPlan,
   WorkspaceWritebackRecord,
   WorkItem
+,
+  RequirementConfirmationBinding
 } from '@agent-cluster/shared';
+import { matchesRequirementConfirmation, requirementConfirmationFingerprint } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
 import { messages } from '../../common/messages.js';
 import { abortWithTermination, createExecutionTermination } from '../../common/execution-termination.js';
@@ -78,6 +81,7 @@ import { WorkflowsService } from '../workflows/workflows.service.js';
 import { WorktreeExecutionService } from '../worktree-execution/worktree-execution.service.js';
 import { WorkdirBriefService } from '../runtimes/streaming/workdir-brief.service.js';
 import { RuntimeService } from '../runtimes/runtime.service.js';
+import { RequirementDocumentStore } from './requirement-document-store.js';
 import { SessionLifecycleStore } from '../runtimes/session-lifecycle-store.js';
 import { LocalRuntimeConnectionService } from '../local-runtime/local-runtime-connection.service.js';
 import { WorkspaceProviderResolver } from '../workspaces/workspace-provider-resolver.js';
@@ -198,6 +202,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   private readonly workspaceOfflineSubscription?: Subscription;
   private readonly runtimeStopSubscription?: Subscription;
   private readonly lifecycle: SessionLifecycleStore;
+  /** Phase 4: immutable requirement document versions the confirmation binds to. */
+  private readonly requirementDocuments: RequirementDocumentStore;
 
   constructor(
     private readonly agents: AgentsService,
@@ -225,6 +231,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     @Optional() private readonly artifacts?: ArtifactsService
   ) {
     this.lifecycle = new SessionLifecycleStore(persistence);
+    this.requirementDocuments = new RequirementDocumentStore(persistence);
     const persisted = this.persistence.getCollection<SessionDetail[]>('sessions', []);
     let recoveredWorkspaceWriteback = false;
     for (const session of persisted) {
@@ -2777,8 +2784,22 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     if (!resolvedConfirmationId) {
       throw new BadRequestException(`Task Brief confirmation is missing: ${briefId}`);
     }
-    this.assertPendingConfirmation(sessionId, resolvedConfirmationId, 'confirm_task_brief');
+    // A replayed approval (double click, retried request) is the same
+    // confirmation: return the state it produced instead of failing (AC3).
+    if (this.isConfirmationApproved(sessionId, resolvedConfirmationId)) {
+      const current = this.orchestrator.getBrief(sessionId, briefId);
+      if (current) return current;
+    }
+    const request = this.assertPendingConfirmation(sessionId, resolvedConfirmationId, 'confirm_task_brief');
+    const binding = this.documentBindingFromCard(session, resolvedConfirmationId, request.metadata.payload);
+    if (binding) this.assertConfirmationCurrent(session, binding);
     const brief = this.orchestrator.confirmBrief(session, briefId);
+    if (binding) {
+      const confirmed = await this.requirementDocuments.confirm(binding.documentId, { confirmationId: resolvedConfirmationId });
+      if (confirmed.status === 'rejected') {
+        throw new ConflictException({ code: 'stale_confirmation', reason: confirmed.code, received: binding });
+      }
+    }
     session.currentTaskBriefId = brief.id;
     if (this.contextManagement) {
       const activeWorkItem = await this.contextManagement.ensureInitialWorkItem(
@@ -5028,6 +5049,156 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       toAgentIds: [assigneeId],
       content: `Coordinator 已分配工作流任务：${task.title}`,
       metadata: createMetadata('task_card', payload)
+    });
+  }
+
+  /** Phase 3 card: the coordinator asked to add a member; only the user can say yes. */
+  async resolveMemberAddition(
+    sessionId: string,
+    input: { discussionId: string; confirmationId: string; decision: 'approve' | 'decline' }
+  ) {
+    const session = this.get(sessionId);
+    const request = this.assertPendingConfirmation(sessionId, input.confirmationId, 'confirm_member_addition');
+    const payload = request.metadata.payload as Record<string, unknown> | undefined;
+    const targetAgentId = typeof payload?.targetAgentId === 'string' ? payload.targetAgentId : undefined;
+    if (!targetAgentId || payload?.discussionId !== input.discussionId) {
+      throw new BadRequestException('Member addition card does not match this discussion.');
+    }
+    this.events.create({
+      sessionId,
+      type: 'user_confirmation_resolved',
+      sessionUserId: session.ownerId,
+      content: input.decision === 'approve' ? `已邀请 ${String(payload?.targetAgentKey ?? targetAgentId)} 参与讨论。` : `未邀请 ${String(payload?.targetAgentKey ?? targetAgentId)}。`,
+      metadata: createMetadata('system_notice', {
+        confirmationId: input.confirmationId,
+        reason: 'confirm_member_addition',
+        status: input.decision === 'approve' ? 'approved' : 'declined',
+        selectedOptionKey: input.decision === 'approve' ? 'approve_member' : 'decline_member',
+        discussionId: input.discussionId,
+        targetAgentId
+      })
+    });
+    if (input.decision !== 'approve') return session;
+    if (!session.participatingAgentIds.includes(targetAgentId)) {
+      session.participatingAgentIds = [...session.participatingAgentIds, targetAgentId];
+      await this.persist();
+    }
+    await this.orchestrator.consultApprovedMember(session, {
+      discussionId: input.discussionId,
+      agentId: targetAgentId,
+      objective: String(payload?.objective ?? ''),
+      expectedResult: String(payload?.expectedResult ?? '')
+    });
+    return session;
+  }
+
+  /** Phase 3 card: the coordinator listed what is unresolved; the user answers in chat or proceeds as-is. */
+  async resolveDiscussionClarification(
+    sessionId: string,
+    input: { discussionId: string; confirmationId: string; decision: 'answer_in_chat' | 'proceed_anyway' }
+  ) {
+    const session = this.get(sessionId);
+    const request = this.assertPendingConfirmation(sessionId, input.confirmationId, 'discussion_clarification');
+    if ((request.metadata.payload as Record<string, unknown> | undefined)?.discussionId !== input.discussionId) {
+      throw new BadRequestException('Clarification card does not match this discussion.');
+    }
+    this.events.create({
+      sessionId,
+      type: 'user_confirmation_resolved',
+      sessionUserId: session.ownerId,
+      content: input.decision === 'proceed_anyway' ? '按现有结论继续。' : '将在对话中回复。',
+      metadata: createMetadata('system_notice', {
+        confirmationId: input.confirmationId,
+        reason: 'discussion_clarification',
+        status: 'approved',
+        selectedOptionKey: input.decision,
+        discussionId: input.discussionId
+      })
+    });
+    if (input.decision === 'proceed_anyway') {
+      await this.orchestrator.acceptDiscussionSynthesis(session, input.discussionId);
+    }
+    return session;
+  }
+
+  private isConfirmationApproved(sessionId: string, confirmationId: string) {
+    return this.events.list(sessionId).some(
+      (event) =>
+        event.type === 'user_confirmation_resolved' &&
+        (event.metadata.payload as { confirmationId?: string; status?: string } | undefined)?.confirmationId === confirmationId &&
+        (event.metadata.payload as { status?: string } | undefined)?.status === 'approved'
+    );
+  }
+
+  /**
+   * The exact version a confirmation card asked the user to approve, as the
+   * phase-0 binding. Cards issued before documents existed carry no binding
+   * and confirm the brief as before.
+   */
+  private documentBindingFromCard(
+    session: SessionDetail,
+    confirmationId: string,
+    payload: Record<string, unknown> | undefined
+  ): RequirementConfirmationBinding | undefined {
+    const documentId = payload?.documentId;
+    if (typeof documentId !== 'string' || !session.activeWorkItemId) return undefined;
+    return {
+      sessionId: session.id,
+      workItemId: session.activeWorkItemId,
+      workItemRevision: Number(payload?.workItemRevision),
+      confirmationId,
+      documentId,
+      documentRevision: Number(payload?.documentRevision),
+      contentHash: String(payload?.contentHash ?? ''),
+      businessFingerprint: String(payload?.businessFingerprint ?? '')
+    };
+  }
+
+  /**
+   * Refuses an approval of something the user is no longer looking at. The
+   * current binding is rebuilt from state — latest document version, current
+   * requirement revision, current decision ledger — and compared field by
+   * field; the response carries the current version so the client can show
+   * the new difference instead of a bare error (AC3).
+   */
+  private assertConfirmationCurrent(session: SessionDetail, received: RequirementConfirmationBinding) {
+    const workItems = this.persistence.getCollection<Record<string, Array<{ id: string; revision: number }>>>('workItemsBySession', {});
+    const workItem = (workItems[session.id] ?? []).find((item) => item.id === received.workItemId);
+    const latest = this.requirementDocuments.latest(session.id, received.workItemId);
+    const current: RequirementConfirmationBinding | undefined = workItem && latest ? {
+      sessionId: session.id,
+      workItemId: received.workItemId,
+      workItemRevision: workItem.revision,
+      confirmationId: received.confirmationId,
+      documentId: latest.id,
+      documentRevision: latest.documentRevision,
+      contentHash: latest.contentHash,
+      businessFingerprint: requirementConfirmationFingerprint({
+        workItemRevision: workItem.revision,
+        documentRevision: latest.documentRevision,
+        contentHash: latest.contentHash,
+        decisionLedgerRevision: session.decisionLedgerRevision ?? 0
+      })
+    } : undefined;
+    if (current && matchesRequirementConfirmation(received, current)) return;
+    this.events.create({
+      sessionId: session.id,
+      type: 'user_confirmation_resolved',
+      sessionUserId: session.ownerId,
+      content: '该确认对应的需求文档版本已变化，请查看最新版本后重新确认。',
+      metadata: createMetadata('system_notice', {
+        confirmationId: received.confirmationId,
+        status: 'expired',
+        resolution: 'stale_confirmation',
+        reason: 'confirm_task_brief',
+        received: { documentId: received.documentId, documentRevision: received.documentRevision, contentHash: received.contentHash },
+        ...(current ? { current: { documentId: current.documentId, documentRevision: current.documentRevision, contentHash: current.contentHash, workItemRevision: current.workItemRevision } } : {})
+      })
+    });
+    throw new ConflictException({
+      code: 'stale_confirmation',
+      received: { documentId: received.documentId, documentRevision: received.documentRevision, contentHash: received.contentHash, workItemRevision: received.workItemRevision },
+      ...(current ? { current: { documentId: current.documentId, documentRevision: current.documentRevision, contentHash: current.contentHash, workItemRevision: current.workItemRevision } } : {})
     });
   }
 

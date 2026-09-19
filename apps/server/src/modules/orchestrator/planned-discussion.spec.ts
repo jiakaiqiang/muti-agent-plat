@@ -435,3 +435,74 @@ test('a coordinator that cannot plan fails the phase for recovery and leaves no 
     await context.cleanup();
   }
 });
+
+test('an approved member addition consults that member as a coordinator delegation on the live run', async () => {
+  const context = await fixture();
+  try {
+    const seed = new DiscussionStore(context.persistence, () => '2026-09-19T00:00:00.000Z');
+    const opened = await seed.open({
+      sessionId: 'session-1', workItemId: 'wi-1', requirementRevision: 1, generation: 0,
+      coordinatorAgentId: 'coordinator', objective: 'seeded', exitCondition: 'seeded', roundLimit: 3, budgetTokens: 8_000
+    });
+    if (opened.status !== 'opened') return;
+    await seed.transitionRun(opened.run.id, { status: 'consulting' });
+    await seed.transitionRun(opened.run.id, { status: 'synthesizing' });
+    await seed.recordSynthesis(opened.run.id, {
+      summary: 'x', conflicts: [], unresolved: ['是否邀请 architect 参与讨论？'], sourceDelegationIds: [], outcome: 'needs_user', pendingConfirmationId: 'c-1'
+    });
+
+    const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+    const service = makeService([], recorder, undefined, undefined, undefined, context) as unknown as PlannedService & {
+      consultApprovedMember(session: SessionDetail, input: { discussionId: string; agentId: string; objective: string; expectedResult: string }): Promise<void>;
+    };
+    service.createContextAssembly = () => ({ budget: {}, systemRules: [] } as unknown as ContextAssembly);
+    const consulted: string[] = [];
+    service.runDiscussionRuntime = async (_session, expert, invocationId) => {
+      consulted.push(expert.key);
+      return completedRun(invocationId, createAgentMessageOutput({ messageKind: 'answer', content: 'architect view' }));
+    };
+
+    // The user approved architect; the session now lists them.
+    const approvedSession = { ...context.session(), participatingAgentIds: ['coordinator', 'backend', 'test', 'architect'] };
+    await service.consultApprovedMember(approvedSession, {
+      discussionId: opened.run.id, agentId: 'architect', objective: '评估架构', expectedResult: '风险'
+    });
+
+    assert.deepEqual(consulted, ['architect']);
+    const run = new DiscussionStore(context.persistence).get('session-1', opened.run.id)!;
+    assert.equal(run.delegations.length, 1);
+    assert.equal(run.delegations[0]?.origin, 'coordinator');
+    assert.equal(run.delegations[0]?.targetAgentId, 'architect');
+    assert.equal(run.delegations[0]?.status, 'completed');
+    assert.equal(run.roundsStarted, 2, 'the approved consultation is a new bounded round');
+    assert.equal(run.status, 'ready_for_confirmation', 'the only pending item was the addition; it is now answered');
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('proceed_anyway closes a waiting run on its current synthesis', async () => {
+  const context = await fixture();
+  try {
+    const seed = new DiscussionStore(context.persistence, () => '2026-09-19T00:00:00.000Z');
+    const opened = await seed.open({
+      sessionId: 'session-1', workItemId: 'wi-1', requirementRevision: 1, generation: 0,
+      coordinatorAgentId: 'coordinator', objective: 'seeded', exitCondition: 'seeded', roundLimit: 3, budgetTokens: 8_000
+    });
+    if (opened.status !== 'opened') return;
+    await seed.transitionRun(opened.run.id, { status: 'consulting' });
+    await seed.transitionRun(opened.run.id, { status: 'synthesizing' });
+    await seed.recordSynthesis(opened.run.id, {
+      summary: 'x', conflicts: [], unresolved: ['q'], sourceDelegationIds: [], outcome: 'needs_user', pendingConfirmationId: 'c-1'
+    });
+
+    const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+    const service = makeService([], recorder, undefined, undefined, undefined, context) as unknown as {
+      acceptDiscussionSynthesis(session: SessionDetail, discussionId: string): Promise<void>;
+    };
+    await service.acceptDiscussionSynthesis(context.session(), opened.run.id);
+    assert.equal(new DiscussionStore(context.persistence).get('session-1', opened.run.id)?.status, 'ready_for_confirmation');
+  } finally {
+    await context.cleanup();
+  }
+});

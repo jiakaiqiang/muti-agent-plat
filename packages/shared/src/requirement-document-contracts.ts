@@ -121,3 +121,24 @@ export function supersedeOlderDocuments(
     return { ...item, status: 'superseded', supersededAt: input.now };
   });
 }
+
+/**
+ * The business fingerprint a confirmation binds to. Every input is a version
+ * number or a digest the server already computed, so the string is
+ * deterministic and needs no hashing of its own. A confirmation whose
+ * fingerprint no longer matches is approving something the user did not see.
+ */
+export function requirementConfirmationFingerprint(input: {
+  workItemRevision: number;
+  documentRevision: number;
+  contentHash: string;
+  decisionLedgerRevision: number;
+}): string {
+  return [
+    REQUIREMENT_DOCUMENT_CONTRACT_VERSION,
+    `wi:${input.workItemRevision}`,
+    `doc:${input.documentRevision}`,
+    `hash:${input.contentHash}`,
+    `dl:${input.decisionLedgerRevision}`
+  ].join('|');
+}

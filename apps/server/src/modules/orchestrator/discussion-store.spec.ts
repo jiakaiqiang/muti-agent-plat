@@ -394,3 +394,21 @@ test('recordSynthesis persists the synthesis and moves the run to the outcome st
     await context.cleanup();
   }
 });
+
+test('the user can accept a synthesis as-is: waiting_user closes to ready_for_confirmation', async () => {
+  const context = await fixture();
+  try {
+    const opened = await context.store.open(openRun);
+    if (opened.status !== 'opened') return;
+    await context.store.transitionRun(opened.run.id, { status: 'consulting' });
+    await context.store.transitionRun(opened.run.id, { status: 'synthesizing' });
+    await context.store.recordSynthesis(opened.run.id, {
+      summary: 'x', conflicts: [], unresolved: ['q'], sourceDelegationIds: [], outcome: 'needs_user', pendingConfirmationId: 'c-1'
+    });
+    const accepted = await context.store.transitionRun(opened.run.id, { status: 'ready_for_confirmation' });
+    assert.equal(accepted.status, 'applied');
+    assert.equal(context.store.get('session-1', opened.run.id)?.pendingConfirmationId, undefined, 'the answered card is cleared');
+  } finally {
+    await context.cleanup();
+  }
+});

@@ -68,12 +68,34 @@ PG 集成 +1（临时库 13/13）；`orchestrator.service.ts publishRequirementD
 
 ## T2 实现精确确认事务（AC3）
 
-- [ ] T2-1 确认卡携带完整 `RequirementConfirmationBinding`；`confirmBrief` 改为消费
-      `matchesRequirementConfirmation`：workItemRevision / documentRevision / contentHash /
-      businessFingerprint 任一不匹配 → `stale_confirmation` 拒绝并展示新差异（不是静默通过）
-- [ ] T2-2 重复确认幂等；文档修订 → 旧确认失效但历史保留（plan §2.3）
-- [ ] T2-3 承接阶段 3：`confirm_member_addition` approve/decline、`discussion_clarification`
-      answer_in_chat/proceed_anyway 的选项处理；决定 `MAIN_AGENT_DISCUSSION_ENABLED` 默认值
+落点：`packages/shared/src/requirement-document-contracts.ts`（`requirementConfirmationFingerprint`，
+spec 共 8）；`sessions.service.ts confirmBrief` + `assertConfirmationCurrent` + 两个卡片决策方法；
+`sessions.controller.ts` 两条新路由；`sessions.service.spec.ts` +4（共 89）；
+`orchestrator.service.ts consultApprovedMember` / `acceptDiscussionSynthesis`（`planned-discussion.spec` 共 12）。
+
+- [x] T2-1 卡片携带完整绑定：`publishRequirementDocument` 返回 documentId / documentRevision /
+      contentHash / workItemRevision / **businessFingerprint**（= 合同版本|需求修订|文档修订|hash|
+      决策账本修订，确定性字符串，不另 hash）。**踩坑**：第一版漏了 businessFingerprint，单测因
+      fixture 手填指纹而假绿——真实流程会全部判 stale；已补并让 spec 调 helper 而非手写字符串。
+      `confirmBrief`：卡片有 `documentId` 时用 `documentBindingFromCard` 组 `received`、从当前
+      状态（最新文档版本 + `workItemsBySession` 修订 + `session.decisionLedgerRevision`）组
+      `current`，`matchesRequirementConfirmation` 逐字段比对；不匹配 → 发 `user_confirmation_resolved
+      {status:'expired', resolution:'stale_confirmation', received, current}` 事件（双端可见新版本）
+      并抛 `ConflictException{code:'stale_confirmation', received, current}`（409），会话状态不动、
+      文档不确认。匹配 → `orchestrator.confirmBrief` 后 `RequirementDocumentStore.confirm`（记
+      confirmationId）。无绑定的旧卡片走原逻辑不变
+- [x] T2-2 重复确认幂等：同 confirmationId 已 approved → 直接返回当前 brief，不再抛 400、不发第二条
+      resolved 事件；文档修订使旧确认失效由 T1-2 的 supersede 保证（旧版 superseded 不可确认，历史保留）
+- [x] T2-3 承接阶段 3 的两张卡：`POST sessions/:id/discussions/:discussionId/member-addition`
+      {confirmationId, decision: approve|decline} —— approve 把成员加入 `participatingAgentIds`
+      并调 `orchestrator.consultApprovedMember`（在活 run 上 reserve `origin:'coordinator'` 委派、
+      新一轮 consulting、dispatch、重新综合 → 唯一未决项被回答后 run 进 ready_for_confirmation）；
+      decline 只关卡。`POST …/discussions/:discussionId/clarification` {confirmationId, decision:
+      answer_in_chat|proceed_anyway} —— proceed_anyway 调 `acceptDiscussionSynthesis`（run
+      waiting_user → ready_for_confirmation，迁移表新增该边并清 `pendingConfirmationId`）；
+      answer_in_chat 只关卡，下一条 @/补充按 T4 重开一轮。同卡不可二次决定（既有
+      `assertPendingConfirmation`）。**两个开关（`MAIN_AGENT_DISCUSSION_ENABLED`、
+      `REQUIREMENT_DOCUMENT_ENABLED`）默认值留到阶段 4 验收时定**
 
 ## T3 接入只读流程选择与映射（AC4/AC5）
 

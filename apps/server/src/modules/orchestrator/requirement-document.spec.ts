@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { AgentDefinition as Agent, SessionDetail, TaskBrief } from '@agent-cluster/shared';
+import { requirementConfirmationFingerprint } from '@agent-cluster/shared';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { RequirementDocumentStore } from '../sessions/requirement-document-store.js';
 import { DiscussionStore } from './discussion-store.js';
@@ -68,7 +69,7 @@ function brief(overrides: Partial<TaskBrief> = {}): TaskBrief {
 
 type DocumentService = {
   publishRequirementDocument(session: SessionDetail, coordinator: Agent, brief: TaskBrief): Promise<
-    { documentId: string; documentRevision: number; contentHash: string; workItemRevision: number } | undefined
+    { documentId: string; documentRevision: number; contentHash: string; workItemRevision: number; businessFingerprint: string } | undefined
   >;
 };
 
@@ -111,6 +112,11 @@ test('the published document references brief, current decisions and the latest 
     assert.equal(stored.sections.goal, '实现导出功能。');
     assert.deepEqual(stored.sections.pendingItems, ['保留期？', '分页大小？'], 'open questions from brief and discussion are the pending items');
     assert.equal(stored.contentHash, binding!.contentHash);
+    assert.equal(
+      binding!.businessFingerprint,
+      requirementConfirmationFingerprint({ workItemRevision: 3, documentRevision: 1, contentHash: stored.contentHash, decisionLedgerRevision: 0 }),
+      'the card fingerprint is what confirmation recomputes from the same session state'
+    );
 
     const published = recorder.events.find((event) => event.metadata.payload?.documentId === binding!.documentId);
     assert.ok(published, 'publication is announced with the version and hash');

@@ -378,6 +378,24 @@ export class SessionsController {
     return ok(await this.sessions.resolveWorkspaceWriteback(sessionId, writebackId, body));
   }
 
+  @Post('sessions/:sessionId/discussions/:discussionId/member-addition')
+  resolveMemberAddition(
+    @Param('sessionId') sessionId: string,
+    @Param('discussionId') discussionId: string,
+    @Body() body: { confirmationId: string; decision: 'approve' | 'decline' }
+  ) {
+    return this.sessions.resolveMemberAddition(sessionId, { ...body, discussionId }).then(ok);
+  }
+
+  @Post('sessions/:sessionId/discussions/:discussionId/clarification')
+  resolveDiscussionClarification(
+    @Param('sessionId') sessionId: string,
+    @Param('discussionId') discussionId: string,
+    @Body() body: { confirmationId: string; decision: 'answer_in_chat' | 'proceed_anyway' }
+  ) {
+    return this.sessions.resolveDiscussionClarification(sessionId, { ...body, discussionId }).then(ok);
+  }
+
   @Post('sessions/:sessionId/workflow/steps/:taskId/decision')
   resolveWorkflowStep(
     @Param('sessionId') sessionId: string,

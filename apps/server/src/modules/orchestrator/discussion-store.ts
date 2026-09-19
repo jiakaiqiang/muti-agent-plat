@@ -266,6 +266,8 @@ export class DiscussionStore {
         run.roundsStarted += 1;
       }
       run.status = transition.status;
+      // The card the run waited on is answered once the run moves on from it.
+      if (transition.status === 'ready_for_confirmation' || transition.status === 'consulting') delete run.pendingConfirmationId;
       run.revision += 1;
       run.updatedAt = now;
       return { status: 'applied', run: structuredClone(run) };

@@ -119,6 +119,7 @@ import { acceptanceFingerprint, explicitTaskPreflight } from './task-acceptance-
 import { boundedConsultations, consultationConcurrency } from './bounded-consultation.js';
 import { DiscussionStore } from './discussion-store.js';
 import { RequirementDocumentStore } from '../sessions/requirement-document-store.js';
+import { requirementConfirmationFingerprint } from '@agent-cluster/shared';
 import { resolveDiscussionPlan } from './discussion-planner.js';
 import { synthesizeDiscussion } from './discussion-synthesis.js';
 import { shouldEmitHeartbeat, shouldSuppressHeartbeat } from './runtime-heartbeat-policy.js';
@@ -3450,7 +3451,7 @@ export class OrchestratorService {
     session: SessionDetail,
     coordinator: Agent,
     brief: TaskBrief
-  ): Promise<{ documentId: string; documentRevision: number; contentHash: string; workItemRevision: number } | undefined> {
+  ): Promise<{ documentId: string; documentRevision: number; contentHash: string; workItemRevision: number; businessFingerprint: string } | undefined> {
     if (!requirementDocumentEnabled()) return undefined;
     const workItemId = session.activeWorkItemId;
     const workItem = workItemId ? this.contextManagement?.getWorkItem(session.id, workItemId) : undefined;
@@ -3522,8 +3523,55 @@ export class OrchestratorService {
       documentId: document.id,
       documentRevision: document.documentRevision,
       contentHash: document.contentHash,
-      workItemRevision: document.workItemRevision
+      workItemRevision: document.workItemRevision,
+      // The card must carry the same fingerprint the confirmation recomputes
+      // from state; without it every real approval would read as stale.
+      businessFingerprint: requirementConfirmationFingerprint({
+        workItemRevision: document.workItemRevision,
+        documentRevision: document.documentRevision,
+        contentHash: document.contentHash,
+        decisionLedgerRevision: session.decisionLedgerRevision ?? 0
+      })
     };
+  }
+
+  /**
+   * The user approved adding a member the coordinator asked for. The member
+   * is consulted as a coordinator delegation on the requirement's live run —
+   * a new bounded round — and the round re-synthesises so the addition stops
+   * being an unresolved item.
+   */
+  async consultApprovedMember(
+    session: SessionDetail,
+    input: { discussionId: string; agentId: string; objective: string; expectedResult: string }
+  ): Promise<void> {
+    const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    const agent = this.participatingAgents(session).find((item) => item.id === input.agentId);
+    if (!agent) throw new Error(`MEMBER_NOT_PARTICIPATING: ${input.agentId}`);
+    const run = this.discussions.get(session.id, input.discussionId);
+    if (!run) throw new Error(`DISCUSSION_NOT_FOUND: ${input.discussionId}`);
+    const reserved = await this.discussions.reserveDelegation(run.id, {
+      targetAgentId: agent.id,
+      origin: 'coordinator',
+      objective: input.objective,
+      expectedResult: input.expectedResult,
+      budgetTokens: discussionConsultationBudgetTokens(),
+      requirementRevision: run.requirementRevision
+    });
+    if (reserved.status === 'rejected') throw new Error(`DELEGATION_REJECTED: ${reserved.code}`);
+    if (reserved.status === 'duplicate' && reserved.delegation.status !== 'pending') return;
+    const consulting = await this.discussions.transitionRun(run.id, { status: 'consulting' });
+    if (consulting.status === 'rejected') throw new Error(`DISCUSSION_ROUND_REJECTED: ${consulting.code}`);
+    await this.dispatchDelegations(session, coordinator, run.id, [{
+      delegationId: reserved.delegation.id, agent, objective: input.objective, expectedResult: input.expectedResult
+    }]);
+  }
+
+  /** The user chose to proceed on the current synthesis: the run closes as ready for confirmation. */
+  async acceptDiscussionSynthesis(session: SessionDetail, discussionId: string): Promise<void> {
+    const outcome = await this.discussions.transitionRun(discussionId, { status: 'ready_for_confirmation' });
+    if (outcome.status === 'rejected') throw new Error(`DISCUSSION_ACCEPT_REJECTED: ${outcome.code}`);
+    void session;
   }
 
   /**

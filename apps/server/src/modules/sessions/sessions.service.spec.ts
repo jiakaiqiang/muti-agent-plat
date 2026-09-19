@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentTask, SessionDetail, UserMessageHandlingPlan, WorkspaceWritebackRecord } from '@agent-cluster/shared';
+import { requirementConfirmationFingerprint } from '@agent-cluster/shared';
 import { SessionsService } from './sessions.service.js';
 
 test('failed brief resumes at generation, consumes its confirmation once and rejects a stale confirmation', async () => {
@@ -205,6 +206,8 @@ function makeService(options: {
   const discussionStarts: string[] = [];
   const followUpRecognitions: string[] = [];
   const followUpPreparations: Array<{ content: string; mentionedAgentIds: string[] }> = [];
+  const memberConsultations: Array<{ sessionId: string; discussionId: string; agentId: string }> = [];
+  const acceptedSyntheses: Array<{ sessionId: string; discussionId: string }> = [];
   const workspaceOfflineEmitters: Array<(value: { workspaceId: string; reason: string; occurredAt: string }) => void> = [];
   const eventOnceKeys = new Set<string>();
   const findAgentById = (id: string) => {
@@ -363,6 +366,12 @@ function makeService(options: {
           confirmedByUser: true,
           createdAt: '2026-07-11T00:00:00.000Z'
         };
+      },
+      async consultApprovedMember(session: SessionDetail, input: { discussionId: string; agentId: string }) {
+        memberConsultations.push({ sessionId: session.id, ...input });
+      },
+      async acceptDiscussionSynthesis(session: SessionDetail, discussionId: string) {
+        acceptedSyntheses.push({ sessionId: session.id, discussionId });
       },
       confirmBrief(session: SessionDetail, briefId: string) {
         return {
@@ -633,6 +642,9 @@ function makeService(options: {
   );
   return {
     service,
+    memberConsultations,
+    acceptedSyntheses,
+    persistedState,
     persistedSessions,
     persistedSnapshots,
     events,
@@ -3254,4 +3266,162 @@ test('intent routing recovery does not apply a shadow-mode cancel after restart'
   assert.equal(fixture.service.get(fixture.session.id).status, 'EXECUTING');
   assert.equal(recovered.some((item) => item.action === 'cancel_recovered'), false);
   assert.deepEqual(fixture.actionStatusUpdates, []);
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4 T2: the confirmation binds to the exact document version shown
+// ---------------------------------------------------------------------------
+
+function documentConfirmationFixture(input: { cardDocumentRevision: number; cardHash: string; latestRevision: number; latestHash: string }) {
+  const session: SessionDetail = {
+    id: 'session-doc-confirm',
+    dataEpoch: 'epoch-test',
+    title: 'Document confirmation',
+    originalInput: 'Confirm the current document.',
+    status: 'WAIT_USER_CONFIRM',
+    ownerId: 'local-user',
+    workspaceId: 'workspace-doc-confirm',
+    tokenUsed: 0,
+    currentTaskBriefId: 'brief-doc',
+    activeWorkItemId: 'wi-doc',
+    decisionLedgerRevision: 2,
+    participatingAgentIds: ['coordinator'],
+    createdAt: '2026-09-19T00:00:00.000Z',
+    updatedAt: '2026-09-19T00:00:00.000Z'
+  };
+  const fixture = makeService({ initialSessions: [session] });
+  fixture.persistedState.workItemsBySession = { [session.id]: [{ id: 'wi-doc', revision: 3 }] };
+  const document = (revision: number, hash: string, status: string) => ({
+    id: `doc-${revision}`, sessionId: session.id, workItemId: 'wi-doc', workItemRevision: 3, documentRevision: revision,
+    contentHash: hash, status, publishedByAgentId: 'coordinator', sourceDecisionIds: [], sourceDelegationIds: [],
+    sections: { goal: `v${revision}`, scope: [], outOfScope: [], acceptanceCriteria: [], risks: [], pendingItems: [] },
+    createdAt: '2026-09-19T00:00:00.000Z'
+  });
+  const docs = input.latestRevision > input.cardDocumentRevision
+    ? [document(input.cardDocumentRevision, input.cardHash, 'superseded'), document(input.latestRevision, input.latestHash, 'formal')]
+    : [document(input.cardDocumentRevision, input.cardHash, 'formal')];
+  fixture.persistedState.requirementDocumentsBySession = { [session.id]: docs };
+  fixture.events.push({
+    id: 'doc-confirmation-request',
+    sessionId: session.id,
+    type: 'user_confirmation_requested',
+    content: 'Confirm the document.',
+    toAgentIds: [],
+    metadata: {
+      schemaVersion: '0.1',
+      payload: {
+        confirmationId: 'doc-confirmation-1',
+        reason: 'confirm_task_brief',
+        relatedBriefId: 'brief-doc',
+        documentId: `doc-${input.cardDocumentRevision}`,
+        documentRevision: input.cardDocumentRevision,
+        contentHash: input.cardHash,
+        workItemRevision: 3,
+        businessFingerprint: requirementConfirmationFingerprint({ workItemRevision: 3, documentRevision: input.cardDocumentRevision, contentHash: input.cardHash, decisionLedgerRevision: 2 }),
+        options: [{ key: 'approve', label: 'Approve' }]
+      }
+    },
+    createdAt: '2026-09-19T00:00:00.000Z'
+  });
+  return { session, fixture };
+}
+
+test('a confirmation for a version the user no longer sees is refused as stale with the current version attached', async () => {
+  const { session, fixture } = documentConfirmationFixture({ cardDocumentRevision: 1, cardHash: 'h1', latestRevision: 2, latestHash: 'h2' });
+
+  await assert.rejects(
+    () => fixture.service.confirmBrief(session.id, 'brief-doc', 'doc-confirmation-1'),
+    (error: unknown) => {
+      const response = (error as { getResponse?: () => unknown }).getResponse?.() as { code?: string; current?: { documentRevision?: number; contentHash?: string } } | undefined;
+      return response?.code === 'stale_confirmation' && response.current?.documentRevision === 2 && response.current?.contentHash === 'h2';
+    }
+  );
+  assert.equal(fixture.service.get(session.id).status, 'WAIT_USER_CONFIRM', 'nothing was approved');
+  assert.equal(fixture.events.some((event) => event.type === 'user_confirmation_resolved' && (event.metadata as { payload?: { status?: string } }).payload?.status === 'approved'), false);
+  const docs = fixture.persistedState.requirementDocumentsBySession as Record<string, Array<{ status: string }>>;
+  assert.equal(docs[session.id]?.some((item) => item.status === 'confirmed'), false, 'no document was confirmed');
+});
+
+test('a matching confirmation confirms the exact document version once and is idempotent on replay', async () => {
+  const { session, fixture } = documentConfirmationFixture({ cardDocumentRevision: 1, cardHash: 'h1', latestRevision: 1, latestHash: 'h1' });
+
+  await fixture.service.confirmBrief(session.id, 'brief-doc', 'doc-confirmation-1');
+
+  const docs = fixture.persistedState.requirementDocumentsBySession as Record<string, Array<{ id: string; status: string; confirmationId?: string }>>;
+  assert.equal(docs[session.id]?.[0]?.status, 'confirmed');
+  assert.equal(docs[session.id]?.[0]?.confirmationId, 'doc-confirmation-1');
+  assert.equal(fixture.service.get(session.id).status, 'WAIT_WORKFLOW_SELECT');
+  const resolvedBefore = fixture.events.filter((event) => event.type === 'user_confirmation_resolved').length;
+
+  // A double click or a retried request is the same confirmation, not an error.
+  await fixture.service.confirmBrief(session.id, 'brief-doc', 'doc-confirmation-1');
+  assert.equal(fixture.events.filter((event) => event.type === 'user_confirmation_resolved').length, resolvedBefore, 'no second resolution');
+  assert.equal(fixture.service.get(session.id).status, 'WAIT_WORKFLOW_SELECT');
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4 T2-3: the two phase-3 cards get their decisions
+// ---------------------------------------------------------------------------
+
+function discussionCardFixture(card: 'confirm_member_addition' | 'discussion_clarification') {
+  const session: SessionDetail = {
+    id: 'session-cards',
+    dataEpoch: 'epoch-test',
+    title: 'Cards',
+    originalInput: 'x',
+    status: 'AGENT_DISCUSSING',
+    ownerId: 'local-user',
+    workspaceId: 'workspace-cards',
+    tokenUsed: 0,
+    activeWorkItemId: 'wi-1',
+    participatingAgentIds: ['coordinator', 'backend'],
+    createdAt: '2026-09-19T00:00:00.000Z',
+    updatedAt: '2026-09-19T00:00:00.000Z'
+  };
+  const fixture = makeService({ initialSessions: [session] });
+  fixture.events.push({
+    id: `${card}-request`,
+    sessionId: session.id,
+    type: 'user_confirmation_requested',
+    content: 'card',
+    toAgentIds: [],
+    metadata: {
+      schemaVersion: '0.1',
+      payload: card === 'confirm_member_addition'
+        ? { confirmationId: 'card-1', reason: card, discussionId: 'run-1', targetAgentId: 'architect', targetAgentKey: 'architect', objective: '评估架构', expectedResult: '风险', options: [] }
+        : { confirmationId: 'card-1', reason: card, discussionId: 'run-1', options: [] }
+    },
+    createdAt: '2026-09-19T00:00:00.000Z'
+  });
+  return { session, fixture };
+}
+
+test('approving a member addition adds the member and consults them; declining only closes the card', async () => {
+  const approved = discussionCardFixture('confirm_member_addition');
+  await approved.fixture.service.resolveMemberAddition(approved.session.id, { discussionId: 'run-1', confirmationId: 'card-1', decision: 'approve' });
+  assert.deepEqual(approved.fixture.service.get(approved.session.id).participatingAgentIds, ['coordinator', 'backend', 'architect']);
+  assert.deepEqual(approved.fixture.memberConsultations, [{ sessionId: approved.session.id, discussionId: 'run-1', agentId: 'architect', objective: '评估架构', expectedResult: '风险' }]);
+  const resolved = approved.fixture.events.find((event) => event.type === 'user_confirmation_resolved');
+  assert.equal((resolved?.metadata as { payload?: { status?: string } })?.payload?.status, 'approved');
+
+  const declined = discussionCardFixture('confirm_member_addition');
+  await declined.fixture.service.resolveMemberAddition(declined.session.id, { discussionId: 'run-1', confirmationId: 'card-1', decision: 'decline' });
+  assert.deepEqual(declined.fixture.service.get(declined.session.id).participatingAgentIds, ['coordinator', 'backend'], 'declined members are not added');
+  assert.deepEqual(declined.fixture.memberConsultations, []);
+  assert.equal((declined.fixture.events.find((event) => event.type === 'user_confirmation_resolved')?.metadata as { payload?: { status?: string } })?.payload?.status, 'declined');
+
+  // The same card cannot be decided twice.
+  await assert.rejects(() => approved.fixture.service.resolveMemberAddition(approved.session.id, { discussionId: 'run-1', confirmationId: 'card-1', decision: 'approve' }));
+});
+
+test('a clarification card is answered in chat or accepted as-is, never silently', async () => {
+  const proceed = discussionCardFixture('discussion_clarification');
+  await proceed.fixture.service.resolveDiscussionClarification(proceed.session.id, { discussionId: 'run-1', confirmationId: 'card-1', decision: 'proceed_anyway' });
+  assert.deepEqual(proceed.fixture.acceptedSyntheses, [{ sessionId: proceed.session.id, discussionId: 'run-1' }]);
+
+  const answer = discussionCardFixture('discussion_clarification');
+  await answer.fixture.service.resolveDiscussionClarification(answer.session.id, { discussionId: 'run-1', confirmationId: 'card-1', decision: 'answer_in_chat' });
+  assert.deepEqual(answer.fixture.acceptedSyntheses, [], 'answering in chat does not close the run; the next message reopens a round');
+  const resolved = answer.fixture.events.find((event) => event.type === 'user_confirmation_resolved');
+  assert.equal((resolved?.metadata as { payload?: { selectedOptionKey?: string } })?.payload?.selectedOptionKey, 'answer_in_chat');
 });

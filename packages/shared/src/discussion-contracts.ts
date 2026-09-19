@@ -117,8 +117,10 @@ const DISCUSSION_TRANSITIONS: Readonly<Record<DiscussionRunStatus, readonly Disc
   planning: ['consulting', 'paused', 'failed'],
   consulting: ['synthesizing', 'paused', 'failed'],
   synthesizing: ['waiting_user', 'ready_for_confirmation', 'consulting', 'paused', 'failed'],
-  // A user answer reopens a bounded round; it never jumps straight to confirmation.
-  waiting_user: ['consulting', 'paused', 'failed'],
+  // A user answer reopens a bounded round. The user may instead accept the
+  // current synthesis as-is (proceed_anyway): that is their explicit decision,
+  // not a skipped synthesis — the run only gets here through synthesizing.
+  waiting_user: ['consulting', 'ready_for_confirmation', 'paused', 'failed'],
   ready_for_confirmation: ['paused'],
   paused: ['planning', 'consulting', 'synthesizing', 'waiting_user', 'failed'],
   failed: ['planning', 'consulting']

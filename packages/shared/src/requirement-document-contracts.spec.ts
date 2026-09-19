@@ -5,6 +5,7 @@ import {
   canonicalRequirementDocumentContent,
   canTransitionRequirementDocument,
   isRequirementDocumentSections,
+  requirementConfirmationFingerprint,
   requirementDocumentLogicalKey,
   supersedeOlderDocuments,
   type RequirementDocument,
@@ -109,4 +110,18 @@ test('a document references its sources; it does not carry a copy of the brief',
   assert.equal(typeof doc.sourceBriefId, 'string');
   assert.ok(Array.isArray(doc.sourceDecisionIds));
   assert.ok(Array.isArray(doc.sourceDelegationIds));
+});
+
+test('the confirmation fingerprint changes with every version input and only those', () => {
+  const base = { workItemRevision: 3, documentRevision: 1, contentHash: 'h1', decisionLedgerRevision: 2 };
+  const baseline = requirementConfirmationFingerprint(base);
+  assert.equal(requirementConfirmationFingerprint({ ...base }), baseline);
+  for (const changed of [
+    { ...base, workItemRevision: 4 },
+    { ...base, documentRevision: 2 },
+    { ...base, contentHash: 'h2' },
+    { ...base, decisionLedgerRevision: 3 }
+  ]) {
+    assert.notEqual(requirementConfirmationFingerprint(changed), baseline);
+  }
 });
