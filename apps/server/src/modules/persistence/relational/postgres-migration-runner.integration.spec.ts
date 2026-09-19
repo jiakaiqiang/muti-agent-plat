@@ -16,6 +16,7 @@ import { WorkItemBudgetStore } from '../../runtimes/work-item-budget-store.js';
 import { SummaryCheckpointStore, type SummaryCheckpointDraft } from '../../memory/summary-checkpoint-store.js';
 import { DiscussionStore } from '../../orchestrator/discussion-store.js';
 import { RequirementDocumentStore } from '../../sessions/requirement-document-store.js';
+import { WorkflowStartStore } from '../../workflows/workflow-start-store.js';
 
 const databaseUrl = process.env.RELATIONAL_TEST_DATABASE_URL;
 
@@ -967,6 +968,91 @@ test('PostgreSQL publishes one requirement document per content across instances
       assert.equal(rows.rows[0].status, 'confirmed');
       assert.equal(rows.rows[0].logical_key, `${workItemId}|3|1`);
       assert.equal(rows.rows[0].content_hash, docs[0]!.contentHash);
+    } finally {
+      await pool.end();
+    }
+  } finally {
+    await first?.onModuleDestroy().catch(() => undefined);
+    await second?.onModuleDestroy().catch(() => undefined);
+    await third?.onModuleDestroy().catch(() => undefined);
+    await setupPool.query(`drop database if exists ${isolatedDatabase}`).catch(() => undefined);
+    await setupPool.end().catch(() => undefined);
+  }
+});
+
+test('PostgreSQL keeps one workflow start request per decision across instances and dispatches it once', { skip: !databaseUrl }, async () => {
+  const isolatedDatabase = `agent_cluster_ws_${process.pid}_${Date.now()}`;
+  const isolatedUrl = new URL(databaseUrl!);
+  isolatedUrl.pathname = `/${isolatedDatabase}`;
+  const setupPool = new Pool({ connectionString: databaseUrl });
+  const isolated = isolatedUrl.toString();
+  const sessionId = `workflow-start-${process.pid}-${Date.now()}`;
+  const workItemId = `${sessionId}-item`;
+  const now = new Date().toISOString();
+  const binding = {
+    sessionId, workItemId, workItemRevision: 3, confirmationId: 'confirm-1',
+    documentId: 'doc-1', documentRevision: 2, contentHash: 'hash-doc-2',
+    workflowId: 'wf-1', workflowVersion: 4, definitionHash: 'hash-wf-4'
+  };
+  let first: PersistenceService | undefined;
+  let second: PersistenceService | undefined;
+  let third: PersistenceService | undefined;
+  try {
+    await setupPool.query(`create database ${isolatedDatabase}`);
+    first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    second = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    third = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    await first.initialize();
+    await first.setCollection('sessions', [...first.getCollection<unknown[]>('sessions', []),
+      { id: sessionId, dataEpoch: first.currentDataEpoch(), title: 'Start', status: 'WAIT_WORKFLOW_SELECT', ownerId: 'test',
+        decisionLedgerRevision: 0, createdAt: now, updatedAt: now }
+    ]);
+    await second.initialize();
+
+    // Two clicks on two instances: the logical key must collapse them into one
+    // start request, or the requirement runs twice.
+    const [a, b] = await Promise.all([
+      new WorkflowStartStore(first, () => now).submit({ binding }),
+      new WorkflowStartStore(second, () => now).submit({ binding })
+    ]);
+    assert.deepEqual([a.status, b.status].sort(), ['duplicate', 'submitted']);
+
+    await third.initialize();
+    const reopened = new WorkflowStartStore(third, () => now);
+    const pending = reopened.claimable(sessionId);
+    assert.equal(pending.length, 1, 'a fresh instance sees exactly one pending request');
+    const requestId = pending[0]!.id;
+
+    // Two workers race to dispatch it.
+    const [x, y] = await Promise.all([
+      reopened.claim(requestId, { workerId: 'worker-a' }),
+      new WorkflowStartStore(first, () => now).claim(requestId, { workerId: 'worker-b' })
+    ]);
+    assert.deepEqual([x.status, y.status].sort(), ['already_claimed', 'claimed']);
+
+    await reopened.complete(requestId, { workflowRunId: 'run-1' });
+    const replay = await new WorkflowStartStore(second, () => now).submit({ binding });
+    assert.equal(replay.status, 'duplicate');
+    assert.equal(replay.status === 'duplicate' && replay.request.workflowRunId, 'run-1',
+      'a retried submit resolves to the existing run instead of starting a second one');
+
+    // A revised document is a different decision and must be its own request.
+    const revised = await reopened.submit({
+      binding: { ...binding, documentRevision: 3, contentHash: 'hash-doc-3' }
+    });
+    assert.equal(revised.status, 'submitted');
+
+    const pool = new Pool({ connectionString: isolated });
+    try {
+      const rows = await pool.query<{ logical_key: string; status: string; workflow_run_external_id: string | null }>(
+        `select logical_key,status,workflow_run_external_id from agent_cluster.workflow_start_requests
+          where session_id=(select id from agent_cluster.sessions where external_id=$1) order by logical_key`,
+        [sessionId]
+      );
+      assert.equal(rows.rows.length, 2, 'one row per distinct decision, not per click');
+      const completed = rows.rows.find((row) => row.status === 'completed');
+      assert.equal(completed?.workflow_run_external_id, 'run-1');
+      assert.equal(new Set(rows.rows.map((row) => row.logical_key)).size, 2);
     } finally {
       await pool.end();
     }

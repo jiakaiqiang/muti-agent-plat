@@ -43,7 +43,8 @@ import type {
   WorkspaceWritebackRecord,
   WorkItem
 ,
-  RequirementConfirmationBinding
+  RequirementConfirmationBinding,
+  WorkflowStartBinding
 } from '@agent-cluster/shared';
 import { matchesRequirementConfirmation, requirementConfirmationFingerprint } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
@@ -82,6 +83,7 @@ import { WorktreeExecutionService } from '../worktree-execution/worktree-executi
 import { WorkdirBriefService } from '../runtimes/streaming/workdir-brief.service.js';
 import { RuntimeService } from '../runtimes/runtime.service.js';
 import { RequirementDocumentStore } from './requirement-document-store.js';
+import { WorkflowStartStore } from '../workflows/workflow-start-store.js';
 import { evaluateWorkflowMemberMapping } from './workflow-member-mapping.js';
 import { SessionLifecycleStore } from '../runtimes/session-lifecycle-store.js';
 import { LocalRuntimeConnectionService } from '../local-runtime/local-runtime-connection.service.js';
@@ -205,6 +207,12 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   private readonly lifecycle: SessionLifecycleStore;
   /** Phase 4: immutable requirement document versions the confirmation binds to. */
   private readonly requirementDocuments: RequirementDocumentStore;
+  /**
+   * Phase 4: durable start requests. Submitting the decision and dispatching it
+   * are separate steps so a retried click resolves to the run it already made,
+   * and a dispatch that died mid-flight is recoverable instead of forking.
+   */
+  private readonly workflowStarts: WorkflowStartStore;
 
   constructor(
     private readonly agents: AgentsService,
@@ -233,6 +241,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   ) {
     this.lifecycle = new SessionLifecycleStore(persistence);
     this.requirementDocuments = new RequirementDocumentStore(persistence);
+    this.workflowStarts = new WorkflowStartStore(persistence);
     const persisted = this.persistence.getCollection<SessionDetail[]>('sessions', []);
     let recoveredWorkspaceWriteback = false;
     for (const session of persisted) {
@@ -2904,6 +2913,30 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       }
       return { session, workflow: this.workflows!.get(previousRun.workflowId), workflowRun: previousRun, createdTasks: this.tasks.list(sessionId).filter(task => task.workflowRunId === previousRun.id) };
     }
+    /**
+     * Durable replay: the start request outlives this process, so a retried
+     * selection after a restart must resolve to the recorded run instead of
+     * being refused for no longer being in WAIT_WORKFLOW_SELECT. Checked here,
+     * before the status guard, for the same reason the in-memory replay is.
+     */
+    const recordedStart = this.workflowStarts
+      .list(sessionId)
+      .find((item) => item.binding.confirmationId === input.confirmationId && item.workflowRunId);
+    if (recordedStart?.workflowRunId && this.workflows && this.workflowRuntime) {
+      if (
+        recordedStart.binding.workflowId !== input.workflowId ||
+        (input.workflowVersion !== undefined && recordedStart.binding.workflowVersion !== input.workflowVersion)
+      ) {
+        throw new BadRequestException('Confirmation already started a different workflow version.');
+      }
+      const existing = this.workflowRuntime.get(recordedStart.workflowRunId);
+      return {
+        session,
+        workflow: this.workflows.get(recordedStart.binding.workflowId),
+        workflowRun: existing,
+        createdTasks: this.tasks.list(sessionId).filter((task) => task.workflowRunId === existing.id)
+      };
+    }
     if (session.status !== 'WAIT_WORKFLOW_SELECT') {
       throw new BadRequestException(`Workflow selection requires WAIT_WORKFLOW_SELECT: ${session.status}`);
     }
@@ -2980,6 +3013,57 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       });
       return { session, workflow, workflowRun: undefined, createdTasks: [] };
     }
+    /**
+     * Submit, then dispatch. The durable request carries every version the
+     * decision depended on, so the pre-phase-4 `sessionId:confirmationId` key
+     * can no longer let a revised document replay an approval the user gave for
+     * an older one.
+     */
+    const confirmedDocument = session.activeWorkItemId
+      ? this.requirementDocuments.latest(session.id, session.activeWorkItemId)
+      : undefined;
+    const activeWorkItem = this.contextManagement?.activeWorkItem?.(session);
+    const binding: WorkflowStartBinding = {
+      sessionId: session.id,
+      workItemId: session.activeWorkItemId ?? brief.workItemId ?? brief.id,
+      workItemRevision: confirmedDocument?.workItemRevision ?? activeWorkItem?.revision ?? 1,
+      confirmationId: input.confirmationId,
+      // Without a published document the confirmed brief version is the binding:
+      // the start still refuses to replay across a revision, it just names the
+      // brief instead of a document.
+      documentId: confirmedDocument?.id ?? brief.id,
+      documentRevision: confirmedDocument?.documentRevision ?? brief.version,
+      contentHash: confirmedDocument?.contentHash ?? `brief:${brief.id}:${brief.version}`,
+      workflowId: workflow.id,
+      workflowVersion: version.version,
+      definitionHash: version.definitionHash
+    };
+    const generation = this.lifecycle.generation(session.id);
+    const submitted = await this.workflowStarts.submit({
+      binding,
+      ...(generation !== undefined ? { generation } : {})
+    });
+    if (submitted.status === 'rejected') throw new ConflictException(submitted.code);
+    const request = submitted.request;
+    if (request.workflowRunId) {
+      // Already dispatched and recorded: hand back that run rather than starting
+      // the requirement a second time.
+      const existing = this.workflowRuntime.get(request.workflowRunId);
+      session.workflowRunId = existing.id;
+      this.setStatus(session, 'EXECUTING');
+      return {
+        session,
+        workflow,
+        workflowRun: existing,
+        createdTasks: this.tasks.list(session.id).filter((task) => task.workflowRunId === existing.id)
+      };
+    }
+    const claimed = await this.workflowStarts.claim(request.id, {
+      workerId: `sessions:${process.pid}`,
+      // A request left dispatched with no run is a crashed worker, not a live one.
+      reclaimDispatched: request.status === 'dispatched'
+    });
+    if (claimed.status === 'already_claimed') throw new ConflictException('WORKFLOW_START_ALREADY_DISPATCHED');
     const run = await this.workflowRuntime.start({
       session,
       brief,
@@ -2991,8 +3075,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       // user never saw.
       definitionHash: version.definitionHash,
       confirmationId: input.confirmationId,
-      sessionGeneration: this.lifecycle.generation(session.id)
+      sessionGeneration: generation
     });
+    await this.workflowStarts.complete(request.id, { workflowRunId: run.id });
     session.workflowRunId = run.id;
     this.setStatus(session, 'EXECUTING');
     const createdTasks = this.tasks.list(session.id).filter((task) => task.workflowRunId === run.id);

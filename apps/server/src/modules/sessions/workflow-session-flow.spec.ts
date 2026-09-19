@@ -22,6 +22,7 @@ function setup(emptyWorkspace = false, confirmedByUser = true) {
     metadata: { payload: { confirmationId: 'confirm-workflow', reason: 'select_workflow' } }
   }];
   const starts: Array<Record<string, unknown>> = [];
+  const flowState: Record<string, unknown> = {};
   let runtimeSubscriber: ((update: Record<string, unknown>) => void) | undefined;
   const version = {
     id: 'version-2', workflowId: 'workflow-1', version: 2, name: '研发交付流程',
@@ -59,7 +60,17 @@ function setup(emptyWorkspace = false, confirmedByUser = true) {
     } as never,
     { cancel() {} } as never,
     { list: () => [] } as never,
-    { getCollection: () => [session], currentDataEpoch: () => 'epoch-test', setCollection() {} } as never,
+    {
+      getCollection: <T,>(key: string, fallback: T) => (key === 'sessions' ? [session] as unknown as T : fallback),
+      currentDataEpoch: () => 'epoch-test',
+      setCollection() {},
+      async mutateCollections<T>(keys: string[], mutate: (draft: Record<string, unknown>) => T) {
+        const draft: Record<string, unknown> = { sessions: [session], ...Object.fromEntries(keys.map((key) => [key, flowState[key]])) };
+        const result = mutate(draft);
+        for (const key of keys) if (key !== 'sessions') flowState[key] = draft[key];
+        return result;
+      }
+    } as never,
     { registerApprovalListener() {} } as never,
     {
       get: () => ({ id: 'workflow-1', name: version.name, status: 'published', draftRevision: 3, version: 3, currentPublishedVersion: 2, nodes: version.nodes, edges: [], createdAt: session.createdAt, updatedAt: session.updatedAt }),

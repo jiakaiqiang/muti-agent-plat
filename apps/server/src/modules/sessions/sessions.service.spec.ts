@@ -3458,11 +3458,13 @@ function workflowSelectionFixture(input: { involvedAgentIds: string[]; participa
     getVersion: () => version,
     list: () => []
   } as never;
+  const run = { id: 'run-1', workflowId: 'wf-1', workflowVersion: 1, startIdempotencyKey: 'k', status: 'running' };
   (fixture.service as unknown as { workflowRuntime: unknown }).workflowRuntime = {
     findBySession: () => undefined,
+    get: () => run,
     async start(startInput: unknown) {
       starts.push(startInput);
-      return { id: 'run-1', workflowId: 'wf-1', workflowVersion: 1, startIdempotencyKey: 'k', status: 'running' };
+      return run;
     }
   } as never;
   (fixture.service as unknown as { orchestrator: { getBrief: unknown } }).orchestrator.getBrief = () => ({
@@ -3531,4 +3533,72 @@ test('a workflow whose agent is disabled cannot be resolved by inviting and stay
 test('selection requires a confirmed brief', async () => {
   const { session, fixture } = workflowSelectionFixture({ involvedAgentIds: ['coordinator'], participating: ['coordinator'], confirmedBrief: false });
   await assert.rejects(() => fixture.service.selectWorkflow(session.id, { workflowId: 'wf-1', confirmationId: 'select-1' }), /confirmed brief/);
+});
+
+type StartStoreView = {
+  workflowStarts: {
+    list(sessionId: string): Array<{
+      id: string;
+      logicalKey: string;
+      status: string;
+      claimedBy?: string;
+      workflowRunId?: string;
+      binding: Record<string, unknown>;
+    }>;
+  };
+};
+
+test('a selection submits one durable start request bound to the document and workflow versions', async () => {
+  const { session, fixture, starts } = workflowSelectionFixture({ involvedAgentIds: ['coordinator'], participating: ['coordinator'] });
+
+  await fixture.service.selectWorkflow(session.id, { workflowId: 'wf-1', confirmationId: 'select-1' });
+
+  const requests = (fixture.service as unknown as StartStoreView).workflowStarts.list(session.id);
+  assert.equal(requests.length, 1, 'one decision is one durable start request');
+  assert.equal(requests[0].status, 'completed');
+  assert.equal(requests[0].workflowRunId, 'run-1', 'the request records the run it produced');
+  assert.ok(requests[0].claimedBy, 'the dispatching worker is attributable after a crash');
+  assert.equal(requests[0].binding.definitionHash, 'hash-wf-1');
+  assert.equal(requests[0].binding.workflowVersion, 1);
+  assert.equal(starts.length, 1);
+});
+
+test('a replayed selection resolves to the recorded run instead of starting a second one', async () => {
+  const { session, fixture, starts } = workflowSelectionFixture({ involvedAgentIds: ['coordinator'], participating: ['coordinator'] });
+  await fixture.service.selectWorkflow(session.id, { workflowId: 'wf-1', confirmationId: 'select-1' });
+  session.status = 'WAIT_WORKFLOW_SELECT';
+
+  const replay = await fixture.service.selectWorkflow(session.id, { workflowId: 'wf-1', confirmationId: 'select-1' });
+
+  assert.equal(starts.length, 1, 'a retried click must not start the requirement twice');
+  assert.equal(replay.workflowRun?.id, 'run-1');
+  assert.equal((fixture.service as unknown as StartStoreView).workflowStarts.list(session.id).length, 1);
+});
+
+test('a dispatch that crashed before recording its run is recovered without forking the request', async () => {
+  const { session, fixture, starts } = workflowSelectionFixture({ involvedAgentIds: ['coordinator'], participating: ['coordinator'] });
+  const store = (fixture.service as unknown as StartStoreView).workflowStarts as unknown as {
+    list(sessionId: string): Array<{ id: string; status: string; workflowRunId?: string }>;
+    submit(input: { binding: Record<string, unknown>; generation?: number }): Promise<{ status: string; request: { id: string } }>;
+    claim(id: string, input: { workerId: string }): Promise<{ status: string }>;
+  };
+  // A worker claimed the request and died before WorkflowRuntime recorded a run.
+  const submitted = await store.submit({
+    binding: {
+      sessionId: session.id, workItemId: 'wi-1', workItemRevision: 1, confirmationId: 'select-1',
+      documentId: 'brief-select', documentRevision: 1, contentHash: 'brief:brief-select:1',
+      workflowId: 'wf-1', workflowVersion: 1, definitionHash: 'hash-wf-1'
+    }
+  });
+  await store.claim(submitted.request.id, { workerId: 'worker-crashed' });
+  assert.equal(store.list(session.id)[0].status, 'dispatched');
+  assert.equal(store.list(session.id)[0].workflowRunId, undefined);
+
+  await fixture.service.selectWorkflow(session.id, { workflowId: 'wf-1', confirmationId: 'select-1' });
+
+  const requests = store.list(session.id);
+  assert.equal(requests.length, 1, 'recovery reuses the request rather than submitting a new one');
+  assert.equal(requests[0].status, 'completed');
+  assert.equal(requests[0].workflowRunId, 'run-1');
+  assert.equal(starts.length, 1);
 });

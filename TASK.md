@@ -125,9 +125,32 @@ session 只有 coordinator，工作流版本需要 requirements，旧代码直�
 
 ## T4 实现启动握手与持久化派发（AC6）
 
-- [ ] T4-1 启动请求绑定 confirmation binding + workflow 快照 + 需求/文档 hash；幂等键含
-      documentRevision；提交（事务内写 run + outbox）与派发（worker 领取）分离
-- [ ] T4-2 崩溃恢复不重复创建 run；停止屏障与预算在启动前再核一次（spec §5 第二条风险）
+落点：`packages/shared/src/workflow-start-contracts.ts` + `.spec.ts`（6 例）、
+`apps/server/src/modules/workflows/workflow-start-store.ts` + `.spec.ts`（11 例）、
+PostgreSQL V15 `workflow_start_requests`（集成用例 14/14）、
+`sessions.service.ts#selectWorkflow` 接线。
+
+- [x] T4-1 启动请求绑定完整版本集：`workflowStartLogicalKey` = contract 版本 + session +
+      confirmationId + workItemId/Revision + documentId/**documentRevision**/contentHash +
+      workflowId/Version/definitionHash。**关键修正**：原幂等键只有 `sessionId:confirmationId`，
+      文档改版后旧确认会复用同一键把新需求当重放；现在文档改版或工作流重新发布都是
+      **另一个** start request。`isWorkflowStartBindingCurrent` 在提交前再核一次活状态
+      （文档修订/内容 hash/图 hash/需求修订任一不符即 `WORKFLOW_START_STALE_BINDING`）。
+      提交与派发分离：`submit`（写 pending）→ `claim`（唯一领取，记 workerId）→
+      `complete`（记 runId）；两实例并发 submit 同一决策只得 1 条 pending，
+      并发 claim 只有 1 个 `claimed`
+- [x] T4-2 崩溃恢复：`recoverable()` 只返回「已 dispatched 但无 runId」的请求（崩溃的 worker），
+      `claim(reclaimDispatched:true)` 重新领取后 `complete` 不分叉；已 completed 的请求
+      永不被重领、第二次 complete 返回 `idempotent` 且首个 run 保持权威。
+      `selectWorkflow` 的持久化重放检查放在**状态守卫之前**（与既有内存态重放同因）：
+      重启后重试同一确认解析到已记录的 run，而不是因为不再处于 `WAIT_WORKFLOW_SELECT`
+      被拒。`SESSION_ADMISSION_CLOSED` / `WORKFLOW_START_STALE_GENERATION` 在 submit 时校验。
+      **未做**：预算在启动前的二次核验（2A 预算是按 invocation 结算，工作流级尚无入口）
+
+踩坑（记进 Checklist 证据）：V15 的 6 处 relational 接线用脚本批量插入时出了两处错——
+`SESSION_KEYED_COLLECTIONS` 插了两遍、`KNOWN_COLLECTIONS` 一次没插（报
+`RELATIONAL_COLLECTION_UNMAPPED`），以及 load switch 插错位置 + `readAll` 漏接
+（表现为「新实例读到 0 条」）。教训：这 6 处必须逐处核对，`grep -n` 计数比脚本断言可靠。
 
 ## T5 接入双端文档 Diff 和返工沟通（AC2/AC7）
 

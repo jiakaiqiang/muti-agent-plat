@@ -91,6 +91,7 @@ export function buildV2SeedState(): Record<string, unknown> {
     summaryCheckpointsBySession: {},
     discussionsBySession: {},
     requirementDocumentsBySession: {},
+    workflowStartRequestsBySession: {},
     artifacts: { artifactsById: {}, artifactIdsBySession: {} },
     knowledge: { knowledgeBases: {}, documentsByBase: {}, chunksByBase: {} },
     runtimeModelConfig: {},

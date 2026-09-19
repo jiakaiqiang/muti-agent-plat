@@ -1092,6 +1092,33 @@ export const RELATIONAL_SCHEMA_V14_TABLES: RelationalTableDefinition[] = [
 ];
 export const RELATIONAL_SCHEMA_V14_SQL = renderTables(RELATIONAL_SCHEMA_V14_TABLES);
 
+export const RELATIONAL_SCHEMA_V15_TABLES: RelationalTableDefinition[] = [
+  table('workflow_start_requests', '保存工作流启动请求：绑定需求/文档/工作流三方版本，提交与派发分离，按逻辑键唯一，崩溃后可恢复且不重复创建运行。', [
+    column('external_id', 'text primary key', '启动请求的稳定外部标识。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '启动请求所属会话。'),
+    column('logical_key', 'text not null unique', '会话 + 确认 + 文档版本 + 工作流版本组成的唯一逻辑键；文档改版即为新请求。'),
+    column('work_item_external_id', 'text not null', '启动所针对需求的稳定外部标识。'),
+    column('work_item_revision', 'bigint not null check (work_item_revision > 0)', '提交时绑定的需求修订号。'),
+    column('confirmation_external_id', 'text not null', '批准本次启动的用户确认标识。'),
+    column('document_external_id', 'text not null', '被确认的需求文档标识。'),
+    column('document_revision', 'bigint not null check (document_revision > 0)', '被确认的文档修订号。'),
+    column('content_hash', 'text not null', '被确认文档正文的哈希；内容变化即使修订号相同也是新请求。'),
+    column('workflow_external_id', 'text not null', '用户所选工作流的稳定外部标识。'),
+    column('workflow_version', 'bigint not null check (workflow_version > 0)', '用户所选工作流版本号。'),
+    column('definition_hash', 'text not null', '所选工作流版本的定义哈希；重新发布即为新请求。'),
+    column('status', 'text not null', '请求状态：pending/dispatched/completed，只单向前进。'),
+    column('claimed_by', 'text', '领取派发的 worker 标识；崩溃归因用。'),
+    column('workflow_run_external_id', 'text', '本请求最终创建的 WorkflowRun 标识；为空表示尚未创建。'),
+    column('generation', 'integer', '提交时绑定的会话生命周期代次；恢复后旧代次不可派发。'),
+    column('source_snapshot', 'jsonb not null', '版本化启动请求合同完整快照，只含版本与哈希，不含需求正文。'),
+    column('created_at', 'timestamptz not null', '请求提交时间。'),
+    column('updated_at', 'timestamptz not null', '请求状态最后变化时间。')
+  ], [], [
+    'create index if not exists workflow_start_requests_session_idx on agent_cluster.workflow_start_requests(session_id, status, created_at)'
+  ])
+];
+export const RELATIONAL_SCHEMA_V15_SQL = renderTables(RELATIONAL_SCHEMA_V15_TABLES);
+
 export function expectedRelationalComments() {
   return [
     SCHEMA_MIGRATIONS_TABLE,
@@ -1106,7 +1133,8 @@ export function expectedRelationalComments() {
     ...RELATIONAL_SCHEMA_V11_TABLES,
     ...RELATIONAL_SCHEMA_V12_TABLES,
     ...RELATIONAL_SCHEMA_V13_TABLES,
-    ...RELATIONAL_SCHEMA_V14_TABLES
+    ...RELATIONAL_SCHEMA_V14_TABLES,
+    ...RELATIONAL_SCHEMA_V15_TABLES
   ].flatMap((definition) => [
     { table: definition.name, column: null, comment: definition.comment },
     ...definition.columns.map((item) => ({ table: definition.name, column: item.name, comment: item.comment }))
