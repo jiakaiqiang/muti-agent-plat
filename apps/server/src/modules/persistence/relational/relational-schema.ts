@@ -1119,6 +1119,32 @@ export const RELATIONAL_SCHEMA_V15_TABLES: RelationalTableDefinition[] = [
 ];
 export const RELATIONAL_SCHEMA_V15_SQL = renderTables(RELATIONAL_SCHEMA_V15_TABLES);
 
+export const RELATIONAL_SCHEMA_V16_TABLES: RelationalTableDefinition[] = [
+  table('change_requests', '保存执行期范围变更请求：一条用户消息一个请求，绑定需求/文档/运行三方版本，影响分析与用户选择各记一次，状态只单向前进。', [
+    column('external_id', 'text primary key', '变更请求的稳定外部标识。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '变更请求所属会话。'),
+    column('logical_key', 'text not null unique', '来源消息 + 需求修订 + 文档修订 + 运行标识组成的唯一逻辑键；重复提交不会排两次。'),
+    column('source_event_external_id', 'text not null', '提出该变更的用户消息事件标识。'),
+    column('work_item_external_id', 'text not null', '变更所针对需求的稳定外部标识。'),
+    column('work_item_revision', 'bigint not null check (work_item_revision > 0)', '提出变更时绑定的需求修订号。'),
+    column('workflow_run_external_id', 'text', '提出变更时正在执行的 WorkflowRun 标识；为空表示当时没有运行。'),
+    column('document_external_id', 'text', '提出变更时已确认的文档标识。'),
+    column('document_revision', 'bigint', '提出变更时已确认的文档修订号。'),
+    column('summary', 'text not null', '用户所提变更的摘要正文；不保存模型推理过程。'),
+    column('status', 'text not null', '请求状态：received/analyzing/waiting_user/deferred/rejected/stopping/revising/waiting_confirmation/ready。'),
+    column('analysis_revision', 'bigint', '影响分析的修订号；每次重新分析递增，过期分析不得展示给用户。'),
+    column('user_choice', 'text', '用户选择：pause_and_revise/defer/reject；一旦记录不可被另一选择覆盖。'),
+    column('choice_confirmation_external_id', 'text', '记录该选择的用户确认标识；重放同一确认为幂等。'),
+    column('generation', 'integer', '提出变更时绑定的会话生命周期代次；恢复后旧代次不可继续。'),
+    column('source_snapshot', 'jsonb not null', '版本化变更请求合同完整快照，含影响分析引用，不含模型正文。'),
+    column('created_at', 'timestamptz not null', '变更请求创建时间。'),
+    column('updated_at', 'timestamptz not null', '变更请求最后变化时间。')
+  ], [], [
+    'create index if not exists change_requests_session_idx on agent_cluster.change_requests(session_id, status, created_at)'
+  ])
+];
+export const RELATIONAL_SCHEMA_V16_SQL = renderTables(RELATIONAL_SCHEMA_V16_TABLES);
+
 export function expectedRelationalComments() {
   return [
     SCHEMA_MIGRATIONS_TABLE,
@@ -1134,7 +1160,8 @@ export function expectedRelationalComments() {
     ...RELATIONAL_SCHEMA_V12_TABLES,
     ...RELATIONAL_SCHEMA_V13_TABLES,
     ...RELATIONAL_SCHEMA_V14_TABLES,
-    ...RELATIONAL_SCHEMA_V15_TABLES
+    ...RELATIONAL_SCHEMA_V15_TABLES,
+    ...RELATIONAL_SCHEMA_V16_TABLES
   ].flatMap((definition) => [
     { table: definition.name, column: null, comment: definition.comment },
     ...definition.columns.map((item) => ({ table: definition.name, column: item.name, comment: item.comment }))

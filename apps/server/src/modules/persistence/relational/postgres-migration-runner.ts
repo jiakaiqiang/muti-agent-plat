@@ -17,7 +17,8 @@ import {
   RELATIONAL_SCHEMA_V12_SQL,
   RELATIONAL_SCHEMA_V13_SQL,
   RELATIONAL_SCHEMA_V14_SQL,
-  RELATIONAL_SCHEMA_V15_SQL
+  RELATIONAL_SCHEMA_V15_SQL,
+  RELATIONAL_SCHEMA_V16_SQL
 } from './relational-schema.js';
 
 type Migration = {
@@ -101,6 +102,11 @@ const MIGRATIONS: Migration[] = [
     version: 15,
     name: 'workflow_start_requests',
     sql: RELATIONAL_SCHEMA_V15_SQL
+  },
+  {
+    version: 16,
+    name: 'change_requests',
+    sql: RELATIONAL_SCHEMA_V16_SQL
   }
 ];
 

@@ -88,7 +88,8 @@ export const SESSION_KEYED_COLLECTIONS = [
   'summaryCheckpointsBySession',
   'discussionsBySession',
   'requirementDocumentsBySession',
-  'workflowStartRequestsBySession'
+  'workflowStartRequestsBySession',
+  'changeRequestsBySession'
 ] as const;
 
 const KNOWN_COLLECTIONS = new Set([
@@ -100,6 +101,7 @@ const KNOWN_COLLECTIONS = new Set([
   'discussionsBySession',
   'requirementDocumentsBySession',
   'workflowStartRequestsBySession',
+  'changeRequestsBySession',
   'systemDataMetadata',
   'agents',
   'skills',
@@ -141,6 +143,8 @@ const DISCUSSION_RUNS_SELECT_SQL =
   `select s.external_id group_id,d.source_snapshot->'sourceRecord' value from agent_cluster.discussion_runs d join agent_cluster.sessions s on s.id=d.session_id where s.deleted_at is null order by s.id,d.created_at,d.external_id`;
 const WORKFLOW_START_REQUESTS_SELECT_SQL =
   `select s.external_id group_id,r.source_snapshot->'sourceRecord' value from agent_cluster.workflow_start_requests r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by s.id,r.created_at`;
+const CHANGE_REQUESTS_SELECT_SQL =
+  `select s.external_id group_id,c.source_snapshot->'sourceRecord' value from agent_cluster.change_requests c join agent_cluster.sessions s on s.id=c.session_id where s.deleted_at is null order by s.id,c.created_at,c.external_id`;
 const REQUIREMENT_DOCUMENTS_SELECT_SQL =
   `select s.external_id group_id,r.source_snapshot->'sourceRecord' value from agent_cluster.requirement_documents r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by s.id,r.work_item_external_id,r.document_revision`;
 const REPLACEABLE_RELATIONAL_TABLES = [
@@ -460,6 +464,9 @@ export class RelationalStateStore {
           break;
         case 'workflowStartRequestsBySession':
           state.workflowStartRequestsBySession = await groupedSources(client, WORKFLOW_START_REQUESTS_SELECT_SQL);
+          break;
+        case 'changeRequestsBySession':
+          state.changeRequestsBySession = await groupedSources(client, CHANGE_REQUESTS_SELECT_SQL);
           break;
         case 'eventsBySession':
           state.eventsBySession = await groupedSources(client, `select s.external_id group_id,e.payload->'sourceRecord' value from agent_cluster.collaboration_events e join agent_cluster.sessions s on s.id=e.session_id where s.deleted_at is null order by s.id,e.session_seq`);
@@ -910,6 +917,7 @@ export class RelationalStateStore {
       case 'discussionsBySession': return this.writeDiscussionRuns(client, record(value));
       case 'requirementDocumentsBySession': return this.writeRequirementDocuments(client, record(value));
       case 'workflowStartRequestsBySession': return this.writeWorkflowStartRequests(client, record(value));
+      case 'changeRequestsBySession': return this.writeChangeRequests(client, record(value));
       case 'workItemsBySession': return this.writeWorkItems(client, record(value));
       case 'decisionRecordsBySession': return this.writeDecisionRecords(client, record(value));
       case 'contextSnapshotsBySession': return this.writeContextSnapshots(client, record(value));
@@ -1875,6 +1883,47 @@ export class RelationalStateStore {
     }
   }
 
+  private async writeChangeRequests(client: PoolClient, value: Record<string, unknown>) {
+    for (const [sessionExternalId, values] of Object.entries(value)) {
+      const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
+      if (!sessionId) continue;
+      for (const rawRequest of array(values)) {
+        const request = record(rawRequest);
+        const externalId = text(request.id);
+        const logicalKey = text(request.logicalKey);
+        if (!externalId || !logicalKey) throw new Error('CHANGE_REQUEST_KEY_MISSING');
+        const base = record(request.base);
+        const analysis = request.analysis === undefined || request.analysis === null ? undefined : record(request.analysis);
+        // The base versions are immutable once raised; only status, analysis and
+        // the user choice advance. The unique logical key is what keeps one
+        // request per source message real across instances.
+        await client.query(
+          `insert into agent_cluster.change_requests
+             (external_id,session_id,logical_key,source_event_external_id,work_item_external_id,work_item_revision,
+              workflow_run_external_id,document_external_id,document_revision,summary,status,user_choice,
+              choice_confirmation_external_id,analysis_revision,generation,source_snapshot,created_at,updated_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+           on conflict (external_id) do update set
+             status=excluded.status,user_choice=excluded.user_choice,
+             choice_confirmation_external_id=excluded.choice_confirmation_external_id,
+             analysis_revision=excluded.analysis_revision,
+             source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at`,
+          [externalId, sessionId, logicalKey, text(request.sourceEventId), text(base.workItemId),
+            integer(base.workItemRevision, 1),
+            base.workflowRunId === undefined || base.workflowRunId === null ? null : text(base.workflowRunId),
+            base.documentId === undefined || base.documentId === null ? null : text(base.documentId),
+            base.documentRevision === undefined || base.documentRevision === null ? null : integer(base.documentRevision, 1),
+            text(request.summary), text(request.status, 'received'),
+            request.choice === undefined || request.choice === null ? null : text(request.choice),
+            request.choiceConfirmationId === undefined || request.choiceConfirmationId === null ? null : text(request.choiceConfirmationId),
+            analysis === undefined ? null : integer(analysis.analysisRevision, 1),
+            request.generation === undefined || request.generation === null ? null : integer(request.generation, 1),
+            json({ sourceRecord: request }), date(request.createdAt), date(request.updatedAt)]
+        );
+      }
+    }
+  }
+
   private async writeWorkflowStartRequests(client: PoolClient, value: Record<string, unknown>) {
     for (const [sessionExternalId, values] of Object.entries(value)) {
       const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
@@ -2326,6 +2375,7 @@ export class RelationalStateStore {
     state.discussionsBySession = await groupedSources(client, DISCUSSION_RUNS_SELECT_SQL);
     state.requirementDocumentsBySession = await groupedSources(client, REQUIREMENT_DOCUMENTS_SELECT_SQL);
     state.workflowStartRequestsBySession = await groupedSources(client, WORKFLOW_START_REQUESTS_SELECT_SQL);
+    state.changeRequestsBySession = await groupedSources(client, CHANGE_REQUESTS_SELECT_SQL);
     state.runtimeInvocationsBySession = await groupedSources(client, `select s.external_id group_id,r.profile_snapshot->'sourceRecord' value from agent_cluster.runtime_invocations r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by r.started_at`);
     state.logicalOperationsBySession = await groupedSources(client, `select s.external_id group_id,o.source_snapshot->'sourceRecord' value from agent_cluster.logical_operations o join agent_cluster.sessions s on s.id=o.session_id where s.deleted_at is null order by o.external_id`);
     state.sessionStopRequestsBySession = await groupedSources(client, `select s.external_id group_id,r.source_snapshot->'sourceRecord' value from agent_cluster.session_stop_requests r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by r.created_at,r.external_id`);
@@ -2363,7 +2413,7 @@ export class RelationalStateStore {
 }
 
 function collectionWriteOrder(state: PersistedState): string[] {
-  const order = ['systemDataMetadata','agents','systemAgentRuntimePolicies','skills','capabilities','workflowCatalog','workflows','sessions','sessionLifecyclesBySession','workItemBudgetsBySession','workItemsBySession','decisionRecordsBySession','contextSnapshotsBySession','intentRoutingRecordsBySession','followUpMessagesBySession','summaryCheckpointsBySession','discussionsBySession','requirementDocumentsBySession','workflowStartRequestsBySession','fileRevisions','workspaceWritebacks','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','localRuntimeDevices','localRuntimeOperationAudits','eventOutbox','cutoverAudits'];
+  const order = ['systemDataMetadata','agents','systemAgentRuntimePolicies','skills','capabilities','workflowCatalog','workflows','sessions','sessionLifecyclesBySession','workItemBudgetsBySession','workItemsBySession','decisionRecordsBySession','contextSnapshotsBySession','intentRoutingRecordsBySession','followUpMessagesBySession','summaryCheckpointsBySession','discussionsBySession','requirementDocumentsBySession','workflowStartRequestsBySession','changeRequestsBySession','fileRevisions','workspaceWritebacks','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','localRuntimeDevices','localRuntimeOperationAudits','eventOutbox','cutoverAudits'];
   order.push('logicalOperationsBySession', 'sessionStopRequestsBySession');
   return order.filter((key) => Object.prototype.hasOwnProperty.call(state, key));
 }

@@ -17,6 +17,7 @@ import { SummaryCheckpointStore, type SummaryCheckpointDraft } from '../../memor
 import { DiscussionStore } from '../../orchestrator/discussion-store.js';
 import { RequirementDocumentStore } from '../../sessions/requirement-document-store.js';
 import { WorkflowStartStore } from '../../workflows/workflow-start-store.js';
+import { ChangeRequestStore } from '../../sessions/change-request-store.js';
 
 const databaseUrl = process.env.RELATIONAL_TEST_DATABASE_URL;
 
@@ -1053,6 +1054,97 @@ test('PostgreSQL keeps one workflow start request per decision across instances 
       const completed = rows.rows.find((row) => row.status === 'completed');
       assert.equal(completed?.workflow_run_external_id, 'run-1');
       assert.equal(new Set(rows.rows.map((row) => row.logical_key)).size, 2);
+    } finally {
+      await pool.end();
+    }
+  } finally {
+    await first?.onModuleDestroy().catch(() => undefined);
+    await second?.onModuleDestroy().catch(() => undefined);
+    await third?.onModuleDestroy().catch(() => undefined);
+    await setupPool.query(`drop database if exists ${isolatedDatabase}`).catch(() => undefined);
+    await setupPool.end().catch(() => undefined);
+  }
+});
+
+test('PostgreSQL keeps one change request per execution-time message across instances and records one choice', { skip: !databaseUrl }, async () => {
+  const isolatedDatabase = `agent_cluster_cr_${process.pid}_${Date.now()}`;
+  const isolatedUrl = new URL(databaseUrl!);
+  isolatedUrl.pathname = `/${isolatedDatabase}`;
+  const setupPool = new Pool({ connectionString: databaseUrl });
+  const isolated = isolatedUrl.toString();
+  const sessionId = `change-request-${process.pid}-${Date.now()}`;
+  const workItemId = `${sessionId}-item`;
+  const now = new Date().toISOString();
+  const base = {
+    sessionId, workItemId, workItemRevision: 3, workflowRunId: 'run-1',
+    documentId: 'doc-1', documentRevision: 2
+  };
+  let first: PersistenceService | undefined;
+  let second: PersistenceService | undefined;
+  let third: PersistenceService | undefined;
+  try {
+    await setupPool.query(`create database ${isolatedDatabase}`);
+    first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    second = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    third = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    await first.initialize();
+    await first.setCollection('sessions', [...first.getCollection<unknown[]>('sessions', []),
+      { id: sessionId, dataEpoch: first.currentDataEpoch(), title: 'Change', status: 'EXECUTING', ownerId: 'test',
+        decisionLedgerRevision: 0, createdAt: now, updatedAt: now }
+    ]);
+    await second.initialize();
+
+    // Web and desktop forward the same execution-time message: one request.
+    const open = (service: PersistenceService) => new ChangeRequestStore(service, () => now).open({
+      base, sourceEventId: 'event-1', summary: '顺便加一个导出按钮'
+    });
+    const [a, b] = await Promise.all([open(first), open(second)]);
+    // Both clients may legitimately report `opened`: the id is derived from the
+    // logical key, so a racing write is the same row and collapses on the
+    // primary key instead of erroring. What must hold across instances is that
+    // the message produced exactly one request, which is asserted below and in
+    // the SQL check at the end. Sequential replay returning `duplicate` is
+    // covered by change-request-store.spec.ts.
+    assert.equal(a.status === 'rejected' || b.status === 'rejected', false, 'neither client may be refused');
+    const ids = [a, b]
+      .map((outcome) => (outcome.status === 'opened' || outcome.status === 'duplicate' ? outcome.request.id : ''));
+    assert.equal(new Set(ids).size, 1, `both clients must resolve to one request, got ${JSON.stringify(ids)}`);
+
+    await third.initialize();
+    const reopened = new ChangeRequestStore(third, () => now);
+    const stored = reopened.list(sessionId);
+    assert.equal(stored.length, 1, `exactly one change request persisted, got ${JSON.stringify([a.status, b.status])}`);
+    const requestId = stored[0]!.id;
+
+    await reopened.recordAnalysis(requestId, {
+      affectedTaskIds: ['task-1'], affectedFilePaths: ['src/export.ts'], affectedDocumentRevision: 2,
+      explanation: '影响前端与接口层', options: ['pause_and_revise', 'defer', 'reject']
+    });
+    const chosen = await reopened.recordChoice(requestId, { choice: 'pause_and_revise', confirmationId: 'confirm-1' });
+    assert.equal(chosen.status, 'applied');
+    // Another instance replaying the same click changes nothing.
+    const replay = await new ChangeRequestStore(first, () => now).recordChoice(requestId, {
+      choice: 'pause_and_revise', confirmationId: 'confirm-1'
+    });
+    assert.equal(replay.status, 'idempotent');
+    // A different choice on a decided request is refused, not applied.
+    const conflicting = await new ChangeRequestStore(second, () => now).recordChoice(requestId, {
+      choice: 'reject', confirmationId: 'confirm-1'
+    });
+    assert.equal(conflicting.status, 'rejected');
+
+    const pool = new Pool({ connectionString: isolated });
+    try {
+      const rows = await pool.query<{ logical_key: string; status: string; user_choice: string | null; analysis_revision: number | null }>(
+        `select logical_key,status,user_choice,analysis_revision from agent_cluster.change_requests
+          where session_id=(select id from agent_cluster.sessions where external_id=$1)`,
+        [sessionId]
+      );
+      assert.equal(rows.rows.length, 1, 'one row per message, not per client');
+      assert.equal(rows.rows[0].status, 'stopping');
+      assert.equal(rows.rows[0].user_choice, 'pause_and_revise');
+      // bigint comes back as a string from node-pg.
+      assert.equal(Number(rows.rows[0].analysis_revision), 1);
     } finally {
       await pool.end();
     }

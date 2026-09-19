@@ -1,213 +1,101 @@
-# TASK.md — 阶段 4：主 Agent 文档、精确确认与所选工作流交接
+# TASK.md — 阶段 5：执行中补充、新需求与范围变更治理
 
-状态：进行中（2026-09-19 开工）。阶段 3 已于同日验收（用户确认），准入成立。
+状态：进行中（2026-09-19 开工）。阶段 4 已于同日验收（用户确认），准入成立。
 
 依据文档（四件套，2026-09-16 生成）：
-`docs/product/main-agent-collaboration-phase-4-spec-v1.md`（AC）、
-`docs/design/main-agent-collaboration-phase-4-plan-v1.md`（设计与落点）、
-`docs/implementation/main-agent-collaboration-phase-4-tasks-v1.md`（任务）、
-`docs/quality/main-agent-collaboration-phase-4-checklist-v1.md`（验收与证据）。
+`docs/product/main-agent-collaboration-phase-5-spec-v1.md`（AC）、
+`docs/design/main-agent-collaboration-phase-5-plan-v1.md`（设计与落点）、
+`docs/implementation/main-agent-collaboration-phase-5-tasks-v1.md`（任务）、
+`docs/quality/main-agent-collaboration-phase-5-checklist-v1.md`（验收矩阵）。
 
-前置：阶段 0、1、2A、2B、2C、3 已验收（3 的记录见其 Checklist §5 与提交 `f80e27f`）。
-阶段 3 承接项（已挂在 P4-T2 / P4-T5）：两张确认卡的选项处理、双端呈现、`blocked` 写入方、
-`MAIN_AGENT_DISCUSSION_ENABLED` 默认值。
+## 已核实的代码事实（开工前读出，不是设计愿望）
 
-**纪律**：严格串行；每项先补失败用例再实现；每项结束时仓库必须绿；
-持久化改动必须同步 shared 合同 + file backend + PostgreSQL 迁移/投影；
-主 Agent 只发布/提议，确认与启动由领域事务落实；**不让模型创建/编辑/替换用户选的流程图**。
+- `SessionFollowUpMessage`（`packages/shared/src/contracts.ts:2280`）已有队列语义：
+  `status: 'queued' | 'planning' | 'executing' | 'completed' | 'failed' | 'cancelled'`、
+  `sourceEventId`、`workItemId`、`routingId`、`handlingPlan`。**没有** base 版本字段
+  （`baseWorkItemRevision` / `baseWorkflowRunId`）——这是 AC3/AC4 要补的洞。
+- 队列存在 session 投影上：`session.pendingFollowUpMessages`，写入方只有
+  `context-management.service.ts:703/727`（`applyRoutingDecision`）。
+- `UserMessageHandlingPlan.intent` 已有 `'question' | 'constraint' | 'scope_change' | 'stop' | 'other'`，
+  但 `route-application.service.ts` 的 `handlingPlanFromDecision` 把 `requiresBriefRevision`
+  简化为 `scopeRelation !== 'same_requirement'`，且 `affectedTaskIds` / `affectedAgentIds`
+  恒为空数组 —— 影响分析没有真实来源。
+- **仓库中没有任何 ChangeRequest 实体/状态机**（grep `ChangeRequest` 无业务命中），
+  plan §2.1 列的状态（received → analyzing → waiting_user → deferred/rejected/
+  stopping → revising → waiting_confirmation → ready）需要从零建。
+- 复用已具备的基础：阶段 3 `DiscussionStore`（有界只读委派、成员确认卡）、
+  阶段 4 `RequirementDocumentStore`（文档修订 + 确认绑定）、
+  `WorkflowStartStore`（逻辑键含 documentRevision，重确认后自然是新启动请求）。
 
-## 开工前已核实的代码事实（2026-09-19）
+## T1 扩展执行期消息合同（AC1/AC3/AC5/AC6）
 
-- `sessions.service.ts confirmBrief`（:2767）只检查三件事：brief 是 `currentTaskBriefId`、
-  确认卡按 confirmationId+reason 存在且未 resolved。**不检查**需求 revision、brief 正文 hash、
-  业务指纹——这正是 spec §5 第一条风险"只检查 confirmationId 会批准过期需求"（AC3 缺口）。
-- `TaskBrief` 只有 `version: number`；**没有** contentHash、状态（草稿/正式/已确认/已替代）、
-  sourceDecisionIds / sourceDelegationIds（AC1/AC2 缺口）。阶段 3 的 `run.synthesis.
-  sourceDelegationIds` 已可作为文档来源引用。
-- 阶段 0 冻结的 `RequirementConfirmationBinding`（sessionId/workItemId/workItemRevision/
-  confirmationId/documentId/documentRevision/contentHash/businessFingerprint）与
-  `matchesRequirementConfirmation` 在服务端**零消费者**——T2 的确认事务应直接消费它。
-- `selectWorkflow`（:2873）：要求 `WAIT_WORKFLOW_SELECT`、workflow published、brief
-  `confirmedByUser`、`getVersion` 取版本；**把 `version.involvedAgentIds` 静默并入
-  `participatingAgentIds`**——AC5 要求"缺成员/映射由主 Agent 解释并请求选择"，不是静默扩员。
-- `workflowRuntime.start`（`workflow-runtime.service.ts:193`）：幂等键 = `${sessionId}:
-  ${confirmationId}`（同键返回既有 run），校验 generation、published、版本；**只绑
-  confirmationId，不绑文档 hash / 需求 revision**（AC6 "绑定需求/文档快照" 缺口）。
-  是否已有事务 outbox 派发与 worker 唯一领取需在 T4 核实（plan §2.6）。
-- 桌面端已有 `HistoricalDiffDialog.vue` 只读 Diff；web 端 `SessionWorkspace.vue`。双端复用 API/store，
-  T5 只改必要展示。
-- 阶段 3 留下的可直接复用件：`DiscussionRun.synthesis`（署名结论 + sourceDelegationIds）、
-  `DecisionRecord`（2B，confirmed/superseded）、`SummaryCheckpointStore` 的"逻辑键唯一提交"模式。
+- [x] T1-1 shared 合同：ChangeRequest 聚合（sourceEventId、baseWorkItemRevision、
+      baseWorkflowRunId、affectedRefs、analysisRevision、choice、status、generation）
+      + 状态迁移表，browser-safe（不 import `node:*`），导出 index 并重建 dist
+      → `change-request-contracts.spec.ts` 8/8（版本钉死、逻辑键含需求修订、单向迁移、
+      已决状态不可重开、deferred 只能回到 analyzing、分析时效三分支）；shared 168/168；
+      5 workspace typecheck 干净
+- [x] T1-2 多意图消息拆段：一条消息含「停止 + 补充」时停止优先处理，其余持久化待办，
+      不丢段、不把整条当停止
+      → `splitExecutionMessageSegments`：停止段前置、无段丢弃、同优先级保持稳定顺序
+      （重放同计划）、空消息返回空数组而非占位段
+- [x] T1-3 持久化 store（file + PostgreSQL V16 **八处**接线 + cutover seed + schema 门禁）：
+      同一 sourceEventId 幂等、稳定排序、generation fencing
+      → `change-request-store.spec.ts` 10/10（一条消息一个请求、admission/generation 拒绝、
+      分析绑定版本、过期分析被拒且不推进、选择只记一次且冲突选择不覆盖、未提供的选项被拒、
+      deferred 需重新分析、重启保留分析与选择、不存模型正文）；
+      schema/cutover 18/18；隔离 PostgreSQL **15/15**（V16 跨实例一条消息一行、只记一个选择）；
+      四门禁全绿
 
-## T1 实现正式文档版本聚合（AC1/AC2）
+  踩坑（对比阶段 4 的 V15 教训）：接线改为**逐处 grep 核对 + 每处改完即 typecheck**，
+  八处一次到位。V16 唯一的生产缺陷是 writer 插入列名写成 `choice` 而表列为 `user_choice`。
+  另外三次 PG 失败都在**测试自身**：①并发两调用都返回 `opened` 被我误判为「去重失效」——
+  实际 PG 始终只有 1 行（主键 + `logical_key` 唯一约束保证），断言对快照重叠情形过强；
+  ②校验查询 select 了不存在的 `choice` 列；③`analysis_revision` 是 bigint，node-pg 返回字符串。
+  教训：PG 不变量要查**列值**，不要拿内存态 JSON 的 id 当证据。
 
-落点：`packages/shared/src/requirement-document-contracts.ts` + `.spec.ts`（7 例）；
-`apps/server/src/modules/sessions/requirement-document-store.ts` + `.spec.ts`（8 例，file）；
-PG 集成 +1（临时库 13/13）；`orchestrator.service.ts publishRequirementDocument` +
-`requirement-document.spec.ts`（3 例）。
+## T2 实现主 Agent 影响分流（AC1/AC2/AC3）
 
-- [x] T1-1 `RequirementDocument`（workItemRevision / documentRevision / contentHash / status:
-      draft|formal|confirmed|superseded / sourceBriefId / sourceDecisionIds / sourceDelegationIds /
-      confirmationId? / sections 封闭六节）；`canonicalRequirementDocumentContent` 规范化字符串
-      （字段序固定、trim、**列表顺序保留**——验收标准的顺序是语义）；hash 在 server 侧算；
-      `isRequirementDocumentSections` 拒多余键（批准不是正文）；迁移表：draft→formal→confirmed，
-      任意→superseded，confirmed 不可回 formal（改动 = 新版本）；`supersedeOlderDocuments`
-      旧版保留为历史
-- [x] T1-2 `RequirementDocumentStore.publish`：sections 先校验再进事务；workItemRevision 与当前
-      不符 → `DOCUMENT_STALE_REQUIREMENT` 不落盘；同需求同修订同 hash → `duplicate`（不产生新版）；
-      内容变化 → documentRevision+1 并把旧版（含 confirmed）标 superseded；`confirm` formal→
-      confirmed 一次、重放 idempotent、superseded 不可确认；重启可读。PostgreSQL V14
-      `requirement_documents`（logical_key unique，正文不变、status 单向 upsert），8 处 relational
-      接线 + cutover seed + COMMENT 门禁；跨实例同内容并发只留 1 行、旧修订拒绝无行、确认重放幂等
-- [x] T1-3 `publishRequirementDocument`（`REQUIREMENT_DOCUMENT_ENABLED` 闸，默认关）：在两处
-      `confirm_task_brief` 发卡前发布——sections 取自 brief，`sourceDecisionIds` 只取本需求
-      `confirmed` 的 DecisionRecord，`sourceDelegationIds` 取当前 generation 最新 `run.synthesis`，
-      `pendingItems` = brief.openQuestions ∪ synthesis.unresolved；卡片 payload 带 documentId /
-      documentRevision / contentHash / workItemRevision（T2-1 的绑定材料）；发布事件带同一组 id；
-      同 brief 重发布得同版本；store 拒绝时发 system_notice 不阻断 brief 流（orchestrator 无 logger）
+- [ ] T2-1 只读状态询问走确定性读投影直答，不触发讨论、不调多次模型
+- [ ] T2-2 执行中 @ 专家 → 有界只读委派（复用阶段 3 `DiscussionStore`），不重跑全部专家/节点
+- [ ] T2-3 范围变更 → 影响分析（受影响任务/文件/确认版本 + 代价），用户未选前不改当前契约
 
-## T2 实现精确确认事务（AC3）
+## T3 实现用户选择与暂停修订（AC3/AC4）
 
-落点：`packages/shared/src/requirement-document-contracts.ts`（`requirementConfirmationFingerprint`，
-spec 共 8）；`sessions.service.ts confirmBrief` + `assertConfirmationCurrent` + 两个卡片决策方法；
-`sessions.controller.ts` 两条新路由；`sessions.service.spec.ts` +4（共 89）；
-`orchestrator.service.ts consultApprovedMember` / `acceptDiscussionSynthesis`（`planned-discussion.spec` 共 12）。
+- [ ] T3-1 选择「停稳后修订」：先停稳 + 冻结未完成写回（复用现有停止屏障），再建文档新修订
+- [ ] T3-2 旧批准失效、重确认后按同一范围重新校验流程；复用已完成结果必须有版本匹配证据
+      （文件 hash + 输入/验收版本），迟到的旧调用结果不得充当新需求成果
 
-- [x] T2-1 卡片携带完整绑定：`publishRequirementDocument` 返回 documentId / documentRevision /
-      contentHash / workItemRevision / **businessFingerprint**（= 合同版本|需求修订|文档修订|hash|
-      决策账本修订，确定性字符串，不另 hash）。**踩坑**：第一版漏了 businessFingerprint，单测因
-      fixture 手填指纹而假绿——真实流程会全部判 stale；已补并让 spec 调 helper 而非手写字符串。
-      `confirmBrief`：卡片有 `documentId` 时用 `documentBindingFromCard` 组 `received`、从当前
-      状态（最新文档版本 + `workItemsBySession` 修订 + `session.decisionLedgerRevision`）组
-      `current`，`matchesRequirementConfirmation` 逐字段比对；不匹配 → 发 `user_confirmation_resolved
-      {status:'expired', resolution:'stale_confirmation', received, current}` 事件（双端可见新版本）
-      并抛 `ConflictException{code:'stale_confirmation', received, current}`（409），会话状态不动、
-      文档不确认。匹配 → `orchestrator.confirmBrief` 后 `RequirementDocumentStore.confirm`（记
-      confirmationId）。无绑定的旧卡片走原逻辑不变
-- [x] T2-2 重复确认幂等：同 confirmationId 已 approved → 直接返回当前 brief，不再抛 400、不发第二条
-      resolved 事件；文档修订使旧确认失效由 T1-2 的 supersede 保证（旧版 superseded 不可确认，历史保留）
-- [x] T2-3 承接阶段 3 的两张卡：`POST sessions/:id/discussions/:discussionId/member-addition`
-      {confirmationId, decision: approve|decline} —— approve 把成员加入 `participatingAgentIds`
-      并调 `orchestrator.consultApprovedMember`（在活 run 上 reserve `origin:'coordinator'` 委派、
-      新一轮 consulting、dispatch、重新综合 → 唯一未决项被回答后 run 进 ready_for_confirmation）；
-      decline 只关卡。`POST …/discussions/:discussionId/clarification` {confirmationId, decision:
-      answer_in_chat|proceed_anyway} —— proceed_anyway 调 `acceptDiscussionSynthesis`（run
-      waiting_user → ready_for_confirmation，迁移表新增该边并清 `pendingConfirmationId`）；
-      answer_in_chat 只关卡，下一条 @/补充按 T4 重开一轮。同卡不可二次决定（既有
-      `assertPendingConfirmation`）。**两个开关（`MAIN_AGENT_DISCUSSION_ENABLED`、
-      `REQUIREMENT_DOCUMENT_ENABLED`）默认值留到阶段 4 验收时定**
+## T4 实现新需求排队/切换（AC5/AC6）
 
-## T3 接入只读流程选择与映射（AC4/AC5）
+- [ ] T4-1 相关/独立新需求各自 WorkItem；只有显式继承的有效决定/产物进入新需求
+- [ ] T4-2 排队幂等有序可查看；当前运行 完成/失败/取消 时提示下一需求，
+      队列存在**不等于**自动获得执行授权（仍走文档 + 流程选择）
 
-落点：`apps/server/src/modules/sessions/workflow-member-mapping.ts` + `.spec.ts`（4/4）、
-`sessions.service.ts`（selectWorkflow + resolveWorkflowMemberMapping）、
-`workflows/workflow-runtime.service.ts`（start 绑定 definitionHash）。
+## T5 接入状态投影和恢复（AC6/AC7）
 
-- [x] T3-1 版本锁定落到**启动层**而非只在选择层：`StartWorkflowRunInput.definitionHash` 为
-      选择时捕获的哈希，`start()` 在 published 校验之后比对 `version.definitionHash`，
-      不一致抛 `WORKFLOW_VERSION_CHANGED` 并带 expected/actual；bootstrap 路径把哈希存进
-      `PendingBootstrapWorkflow.definitionHash` 再透传，恢复时**不重查**版本。
-      用例：workflow-runtime.spec「a republished version between selection and start is refused」
-- [x] T3-2 `selectWorkflow` 不再静默 `Array.from(new Set([...participating, ...involvedAgentIds]))`：
-      先过 `evaluateWorkflowMemberMapping` 纯函数，分三类——可邀请（active 且允许 chat）→
-      `confirm_workflow_member_mapping` 卡（含 workflowId/version/definitionHash，选择保持
-      `WAIT_WORKFLOW_SELECT` 不变）；不可用（disabled/不在目录）→ 卡上标 blocked，
-      批准也不会加入；无差异 → 直接启动。`resolveWorkflowMemberMapping` 只在 approve 时
-      并入 addable，随后同一 confirmationId 的 selectWorkflow 才能启动。
-      用例：sessions.service.spec 3 条（缺成员拒绝并出卡、批准后同一选择启动并绑定哈希、
-      disabled 成员邀请无效仍 blocked）
+- [ ] T5-1 双端共享队列/变更卡投影（shared 投影 + web/desktop 各自样式）
+- [ ] T5-2 取消/删除 fencing：删除后回调只允许审计；重启保留用户选择与已完成分析，
+      不自动重播模型
 
-踩坑（记进 Checklist 证据）：T3 守卫落地后全量 `npm run test` 报 5 条失败，均在
-`workflow-session-flow.spec.ts`（不是 `sessions.service.spec.ts`，单跑后者会误判为已绿）。
-根因不是测试环境泄漏，而是这 5 条用例的夹具依赖 T3 之前的「静默并入 involvedAgentIds」行为：
-session 只有 coordinator，工作流版本需要 requirements，旧代码直接并入。按 AC5 守卫是对的，
-已把夹具改为预置工作流所需成员，并把原「断言静默并入成功」改为「断言不发生静默扩员」。
+## T6 验证执行中交互矩阵（AC1–AC7）
 
-## T4 实现启动握手与持久化派发（AC6）
+- [ ] T6-1 多意图、重复提交、影响过期、旧结果、流程不支持恢复、同会话串行/跨会话并行
+- [ ] T6-2 独立 PostgreSQL（新集合）+ E2E + 四门禁
 
-落点：`packages/shared/src/workflow-start-contracts.ts` + `.spec.ts`（6 例）、
-`apps/server/src/modules/workflows/workflow-start-store.ts` + `.spec.ts`（11 例）、
-PostgreSQL V15 `workflow_start_requests`（集成用例 14/14）、
-`sessions.service.ts#selectWorkflow` 接线。
+## 纪律（每个任务都要做，做完才勾）
 
-- [x] T4-1 启动请求绑定完整版本集：`workflowStartLogicalKey` = contract 版本 + session +
-      confirmationId + workItemId/Revision + documentId/**documentRevision**/contentHash +
-      workflowId/Version/definitionHash。**关键修正**：原幂等键只有 `sessionId:confirmationId`，
-      文档改版后旧确认会复用同一键把新需求当重放；现在文档改版或工作流重新发布都是
-      **另一个** start request。`isWorkflowStartBindingCurrent` 在提交前再核一次活状态
-      （文档修订/内容 hash/图 hash/需求修订任一不符即 `WORKFLOW_START_STALE_BINDING`）。
-      提交与派发分离：`submit`（写 pending）→ `claim`（唯一领取，记 workerId）→
-      `complete`（记 runId）；两实例并发 submit 同一决策只得 1 条 pending，
-      并发 claim 只有 1 个 `claimed`
-- [x] T4-2 崩溃恢复：`recoverable()` 只返回「已 dispatched 但无 runId」的请求（崩溃的 worker），
-      `claim(reclaimDispatched:true)` 重新领取后 `complete` 不分叉；已 completed 的请求
-      永不被重领、第二次 complete 返回 `idempotent` 且首个 run 保持权威。
-      `selectWorkflow` 的持久化重放检查放在**状态守卫之前**（与既有内存态重放同因）：
-      重启后重试同一确认解析到已记录的 run，而不是因为不再处于 `WAIT_WORKFLOW_SELECT`
-      被拒。`SESSION_ADMISSION_CLOSED` / `WORKFLOW_START_STALE_GENERATION` 在 submit 时校验。
-      **未做**：预算在启动前的二次核验（2A 预算是按 invocation 结算，工作流级尚无入口）
-
-踩坑（记进 Checklist 证据）：V15 的 6 处 relational 接线用脚本批量插入时出了两处错——
-`SESSION_KEYED_COLLECTIONS` 插了两遍、`KNOWN_COLLECTIONS` 一次没插（报
-`RELATIONAL_COLLECTION_UNMAPPED`），以及 load switch 插错位置 + `readAll` 漏接
-（表现为「新实例读到 0 条」）。教训：这 6 处必须逐处核对，`grep -n` 计数比脚本断言可靠。
-
-## T5 接入双端文档 Diff 和返工沟通（AC2/AC7）
-
-- [x] T5-1 文档版本 Diff 复用既有 Diff 组件（web/desktop 各自样式）；确认卡/过期差异双端同状态
-      证据：`packages/shared/src/collaboration-presentation.ts` 提供唯一业务投影
-      （`documentVersionTimeline` / `documentSectionChanges` / `discussionProgressView`），
-      shared 11/11。双端各自呈现：web `apps/web/src/components/requirementDocumentPresentation.ts`
-      走既有 `buildReportDiffPreview`（行内 add/remove），desktop
-      `apps/desktop/renderer/components/workspace/requirementDocumentPresentation.ts`
-      走既有 `diffLines`/`splitDiffRows`（左右并排）。两端 `changedSections` 与
-      `staleness` 断言同一结论（`revision_superseded` / `content_changed`）。
-- [x] T5-2 承接阶段 3：讨论计划/委派进度/综合/两张卡的双端专用呈现；`blocked` 状态已映射
-      证据：`discussionProgressView` 把 `blocked` 归入 pending（"有人被卡住"），
-      不计入 answered、不让 `completeAnswer` 为真；`failed` 单列并带 `failureReason`。
-      双端 spec 各自断言同一组 headline/roundLabel/pending/answered/failures。
-      同时校验投影不携带模型私有推理（`privateReasoning` 不出现在序列化结果里）。
-      验证：`npm run test -w @project/web` 62 文件 / 299 通过（含 desktop renderer spec）。
-- [x] T5-3 质量拒绝 → 图内返工或有原因的等待，由主 Agent 对接用户
-      改动落在 `apps/server/src/modules/workflows/workflow-runtime.service.ts`：
-      1) `revisePreviousAgent` 原来按**节点数组顺序**找返工目标，与 `upstreamRerunCandidates`
-         的**按图边**口径不一致；已抽出 `reworkTarget()` 优先走 `upstreamNodeIds`（图边），
-         无边时才退回数组顺序（未画边的已发布版本仍有真实前驱）。
-      2) 无合法返工边时原来直接 `finishRun('failed')`，会把整轮已完成产物作废；
-         现在 `parkForRevisionHandoff()` 停在 `waiting_human`，记录
-         `run.pendingRevisionHandoff`（新增 `WorkflowPendingRevisionHandoff` 合同），
-         发 `workflow_gate_requested` + `workflow_revision_handoff` 确认卡
-         （选项：在群聊中补充说明 / 终止工作流），并新增
-         `awaitsRevisionHandoff()` / `pendingRevisionHandoff()` 两个读取口。
-         停住后二次决定被既有 `decideHuman` 守卫拒绝，不会被野完成走过去。
-      验证：`workflow-runtime.service.spec.ts` 32/32（新增 3 条：按图边返工、
-      无边时等待而非失败、停住后不可被走过）。
-
-## T6 验证版本竞争和完整交接（AC1–AC7）
-
-- [x] T6-1 验收矩阵已填（checklist §1 七行全部由通过证据替换「待验证」）。新增 E2E
-      `tests/e2e/requirement-document-handoff-smoke.mjs`（`npm run test:e2e:requirement-document-handoff`）
-      实测通过：A 发布 doc rev1 → 确认 → 唯一 run；B 拒绝过期绑定、拒绝同一确认换流程、
-      缺成员发映射卡且 0 次 start。矩阵里逐行标了**未覆盖**项（专家自提修订、浏览器渲染快照、
-      选后 unpublish 时序、真实进程级崩溃注入），不记为通过。
-- [x] T6-2 隔离 PostgreSQL 14/14（`agent_cluster_p4t6_18601`，含 V15
-      `workflow_start_requests` 跨实例唯一 + 只派发一次；跑完即 drop）；四门禁见下。
-
-E2E 抓到的真缺陷（不是测试问题，已修）：`assertConfirmationCurrent` 原先拿**活动 WorkItem
-的 revision 计数器**当需求版本判据，而 `WAIT_USER_CONFIRM` 状态流转本身会经
-`updateActiveWorkItemStatus` 把它 +1 —— 于是每一次正常确认都被判 `stale_confirmation`
-（E2E 第一次跑就撞到）。改为以**文档自身记录的 `workItemRevision`** 为准：状态流转不改需求
-语义，真正的需求修订会产出新文档版本，仍被 `documentRevision` + `contentHash` 捕获。
-
-顺带修掉一个潜伏缺陷：共享辅助 `createPublishedAgentWorkflow` 只设 `outputContract`，
-而发布校验要求 `index > 0` 的节点必须有 `inputContract` —— 任何两节点以上的工作流都发布不了
-（`workflow-managed-execution-smoke.mjs` 同样受影响，此前没人跑到）。已在辅助函数里补齐。
-
-两个开关默认值（T2 遗留问题的答案）：`MAIN_AGENT_DISCUSSION_ENABLED` 与
-`REQUIREMENT_DOCUMENT_ENABLED` 默认仍为 **false**，新路径只在显式开启时生效；
-旧路径逐字未动，全量套件是在两个开关关闭下绿的。
+1. 先写失败用例，再实现。
+2. 新 shared 模块：导出 `packages/shared/src/index.ts` + 重建 dist，否则 server 解析旧 dist。
+3. server spec 必须在 `apps/server` 下跑 tsx（装饰器）。
+4. 跑全量 `npm run test` 时注意失败可能在**别的 spec 文件**里（阶段 4 T3 教训：
+   单跑 `sessions.service.spec.ts` 全绿，真实回归在 `workflow-session-flow.spec.ts`）。
+5. 四门禁 + 隔离 PostgreSQL 全绿后提交并推送，用 `git status -sb` 的 ahead 标记核对推送。
 
 ## 遗留（跨阶段，未完成）
 
 - [ ] 中断会话续接 G3：`npm run dev:restart-server` + 真实场景手测（上一专项人工项）。
 - [ ] 跨实例 CAS（讨论/预算 run 的并发写守卫），阶段 3 T1-3 起延后。
+- [ ] 成本评测（冷/热缓存对比、priceVersion 来源）归阶段 6。
+- [ ] 阶段 4 带入：真实浏览器渲染快照、进程级崩溃注入、流程「已下架」时序竞争、
+      `blocked` 委派状态无写入方。
