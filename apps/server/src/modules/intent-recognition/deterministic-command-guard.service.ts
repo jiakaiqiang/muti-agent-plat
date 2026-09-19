@@ -29,6 +29,11 @@ export type WorkflowAgentDirectiveMatch = {
   reasonCode: 'ASSIGN_WORKFLOW_AGENT' | 'RERUN_UPSTREAM_WORKFLOW_NODE';
 };
 
+export type ExecutionStatusQuestionMatch = {
+  normalizedText: string;
+  reasonCode: 'EXECUTION_STATUS_QUESTION';
+};
+
 const COMMANDS: ReadonlyArray<{
   command: ExactUserCommand;
   reasonCode: ExactCommandReasonCode;
@@ -180,6 +185,31 @@ export function matchWorkflowAgentDirective(content: string): WorkflowAgentDirec
   return undefined;
 }
 
+/**
+ * Matches a read-only "where are we" question so it can be answered from the
+ * deterministic progress projection instead of a model call. The patterns are
+ * anchored on purpose: a message that also carries a requirement, names an
+ * expert or issues a control command is not a status read and must stay on the
+ * semantic router, because answering it here would skip the scope-change path.
+ */
+export function matchExecutionStatusQuestion(content: string): ExecutionStatusQuestionMatch | undefined {
+  const normalizedText = normalizeExactCommandText(content);
+  if (!normalizedText || normalizedText.length > 200) return undefined;
+  // A control command has stateful meaning; a mention is a consultation.
+  if (matchExactUserCommand(normalizedText)) return undefined;
+  if (/[@＠]/u.test(normalizedText)) return undefined;
+  // A supplement tacked onto the question still changes scope.
+  if (/(?:顺便|另外|还要|además|also|additionally|by the way)/u.test(normalizedText)) return undefined;
+
+  const chinese = /^(?:现在|目前|当前)?(?:做到|进行到|执行到)(?:哪一?步|哪里|哪个阶段|什么阶段)(?:了)?$/u;
+  const chineseProgress = /^(?:现在|目前|当前)?(?:进度|进展)(?:如何|如何了|怎么样|怎样|到哪了)$/u;
+  const english = /^(?:what(?:'s|\s+is|\s+are)?\s+(?:the\s+)?(?:progress|status)|how(?:'s|\s+is)\s+(?:it|this)\s+going|how\s+far\s+along(?:\s+are\s+we|\s+is\s+it)?|progress|status)$/i;
+  if (!chinese.test(normalizedText) && !chineseProgress.test(normalizedText) && !english.test(normalizedText)) {
+    return undefined;
+  }
+  return { normalizedText, reasonCode: 'EXECUTION_STATUS_QUESTION' };
+}
+
 @Injectable()
 export class DeterministicCommandGuardService {
   match(content: string) {
@@ -188,5 +218,9 @@ export class DeterministicCommandGuardService {
 
   matchWorkflowDirective(content: string) {
     return matchWorkflowAgentDirective(content);
+  }
+
+  matchStatusQuestion(content: string) {
+    return matchExecutionStatusQuestion(content);
   }
 }

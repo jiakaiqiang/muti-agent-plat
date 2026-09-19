@@ -48,6 +48,7 @@ import type {
 } from '@agent-cluster/shared';
 import { matchesRequirementConfirmation, requirementConfirmationFingerprint } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
+import { executionProgressView } from '@agent-cluster/shared';
 import { messages } from '../../common/messages.js';
 import { abortWithTermination, createExecutionTermination } from '../../common/execution-termination.js';
 import { extractRuntimeError } from '../../common/runtime-error.js';
@@ -63,6 +64,7 @@ import { EventsService } from '../events/events.service.js';
 import { IntentRecognitionService } from '../intent-recognition/intent-recognition.service.js';
 import {
   matchExactUserCommand,
+  matchExecutionStatusQuestion,
   matchWorkflowAgentDirective,
   matchWorkflowAgentSkipCommand,
   type ExactCommandMatch,
@@ -84,6 +86,7 @@ import { WorkdirBriefService } from '../runtimes/streaming/workdir-brief.service
 import { RuntimeService } from '../runtimes/runtime.service.js';
 import { RequirementDocumentStore } from './requirement-document-store.js';
 import { WorkflowStartStore } from '../workflows/workflow-start-store.js';
+import { ChangeRequestStore } from './change-request-store.js';
 import { evaluateWorkflowMemberMapping } from './workflow-member-mapping.js';
 import { SessionLifecycleStore } from '../runtimes/session-lifecycle-store.js';
 import { LocalRuntimeConnectionService } from '../local-runtime/local-runtime-connection.service.js';
@@ -213,6 +216,12 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
    * and a dispatch that died mid-flight is recoverable instead of forking.
    */
   private readonly workflowStarts: WorkflowStartStore;
+  /**
+   * Phase 5: execution-time scope changes. One user message is one request, bound
+   * to the requirement/document/run versions it was raised against, so a late
+   * impact analysis cannot be shown against a requirement that already moved on.
+   */
+  private readonly changeRequests: ChangeRequestStore;
 
   constructor(
     private readonly agents: AgentsService,
@@ -242,6 +251,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     this.lifecycle = new SessionLifecycleStore(persistence);
     this.requirementDocuments = new RequirementDocumentStore(persistence);
     this.workflowStarts = new WorkflowStartStore(persistence);
+    this.changeRequests = new ChangeRequestStore(persistence);
     const persisted = this.persistence.getCollection<SessionDetail[]>('sessions', []);
     let recoveredWorkspaceWriteback = false;
     for (const session of persisted) {
@@ -1709,6 +1719,13 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     if (exactCommand) {
       return this.handleExactCommandMessage(session, content, mentionedAgentIds, clientMessageId, exactCommand);
     }
+    // A plain "how far along are we" is answered from the run's own state. It
+    // carries no requirement, so routing it through the classifier would spend a
+    // model call to restate what the projection already knows (AC2).
+    const statusQuestion = matchExecutionStatusQuestion(content);
+    if (statusQuestion && !mentionedAgentIds.length) {
+      return this.handleExecutionStatusQuestion(session, content, clientMessageId);
+    }
     const routingMode = this.intentRoutingMode();
     const explicitPreference = this.intentRecognition
       .recognizeUserMessage(content, session.status).intent === 'preference_input';
@@ -2028,6 +2045,124 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       requiresUserConfirmation: false,
       coordinatorInstruction: '等待系统意图识别完成。'
     };
+  }
+
+  /**
+   * Answers a read-only progress question from the run's own state. No model is
+   * called and no contract is touched: every stage name comes from the published
+   * workflow snapshot, so the reply cannot name a stage the user never approved,
+   * and a queued scope change is reported rather than hidden behind "still
+   * running" (AC1/AC2).
+   */
+  private async handleExecutionStatusQuestion(
+    session: SessionDetail,
+    content: string,
+    clientMessageId: string | undefined
+  ) {
+    const handlingPlan: UserMessageHandlingPlan = {
+      intent: 'question',
+      requirementRelation: 'continuation',
+      failedExecutionAction: 'none',
+      priority: 'normal',
+      shouldPause: false,
+      affectedTaskIds: [],
+      affectedAgentIds: [],
+      requiresBriefRevision: false,
+      requiresUserConfirmation: false,
+      coordinatorInstruction: '按当前执行状态直接回答，不改动已确认范围。'
+    };
+    const event = this.events.create({
+      sessionId: session.id,
+      type: 'user_message',
+      sessionUserId: session.ownerId,
+      userMessageIntent: handlingPlan.intent,
+      priority: handlingPlan.priority,
+      content,
+      toAgentIds: [],
+      metadata: {
+        ...createMetadata('chat_message', { text: content, mentionedAgentIds: [], handlingPlan }),
+        ...(clientMessageId ? { idempotencyKey: this.messageIdempotencyKey(session.id, clientMessageId) } : {})
+      }
+    });
+
+    const run = this.workflowRuntime?.findBySession(session.id);
+    const view = executionProgressView({
+      ...(run
+        ? {
+            run: {
+              status: run.status,
+              ...(run.currentNodeId ? { currentNodeId: run.currentNodeId } : {}),
+              nodes: (run.definitionSnapshot?.nodes ?? []).map((node) => ({
+                id: node.id,
+                type: node.type,
+                ...(node.name ? { name: node.name } : {}),
+                order: node.order
+              })),
+              pendingRevisionHandoff: Boolean(run.pendingRevisionHandoff),
+              pendingUpstreamRerun: Boolean(run.pendingUpstreamRerun)
+            }
+          }
+        : {}),
+      tasks: this.tasks.list(session.id).map((task) => ({
+        id: task.id,
+        title: task.title,
+        status: task.status,
+        ...(task.workflowNodeId ? { workflowNodeId: task.workflowNodeId } : {})
+      })),
+      pendingChangeRequests: this.changeRequests.unresolved(session.id).map((item) => ({
+        id: item.id,
+        summary: item.summary,
+        status: item.status
+      }))
+    });
+
+    const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    const text = this.formatExecutionProgressAnswer(view);
+    this.events.create({
+      sessionId: session.id,
+      type: 'agent_message',
+      fromAgentId: coordinator.id,
+      content: text,
+      metadata: createMetadata('chat_message', {
+        messageKind: 'answer',
+        text,
+        phase: 'execution_status_answer',
+        executionProgress: view
+      })
+    });
+    this.touchSession(session);
+    return {
+      event,
+      handlingPlan,
+      deferred: false as const,
+      followUpMessageId: undefined,
+      routingId: undefined,
+      routingStatus: undefined,
+      idempotentReplay: false as const
+    };
+  }
+
+  /** Fixed phrasing over projected state; nothing here is model output. */
+  private formatExecutionProgressAnswer(view: ReturnType<typeof executionProgressView>) {
+    const lines: string[] = [view.headline];
+    if (view.currentStage) lines.push(`当前环节：${view.currentStage}`);
+    if (view.completedStages.length) lines.push(`已完成：${view.completedStages.join('、')}`);
+    if (view.remainingStages.length) lines.push(`还未开始：${view.remainingStages.join('、')}`);
+    if (view.awaitingUser) {
+      const reason = view.waitReason === 'revision_handoff'
+        ? '需要你决定如何处理返工'
+        : view.waitReason === 'upstream_rerun'
+          ? '需要你选择退回哪个上游节点'
+          : '需要你确认后才能继续';
+      lines.push(`正在等待：${reason}`);
+    }
+    for (const task of view.attentionTasks) {
+      lines.push(`需要关注：${task.title}（${task.reason === 'blocked' ? '受阻' : '失败'}）`);
+    }
+    for (const change of view.pendingChanges) {
+      lines.push(`待处理的范围变更：${change.summary}${change.awaitingUser ? '（等待你选择）' : '（已暂缓）'}`);
+    }
+    return lines.join('\n');
   }
 
   private async handleExactCommandMessage(

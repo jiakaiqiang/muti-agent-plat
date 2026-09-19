@@ -3602,3 +3602,47 @@ test('a dispatch that crashed before recording its run is recovered without fork
   assert.equal(requests[0].workflowRunId, 'run-1');
   assert.equal(starts.length, 1);
 });
+
+test('a progress question during execution is answered from state without any model call', async () => {
+  const runtimeCalls: string[] = [];
+  const fixture = makeService({ runtimeCalls });
+  const { session } = await fixture.service.create({ input: '实现订单导出。' });
+  session.status = 'EXECUTING';
+  session.workflowRunId = 'run-status';
+  (fixture.service as unknown as { workflowRuntime: unknown }).workflowRuntime = {
+    findBySession: () => ({
+      id: 'run-status', status: 'running', currentNodeId: 'develop',
+      definitionSnapshot: { nodes: [
+        { id: 'requirements', type: 'agent', name: '需求梳理', order: 0 },
+        { id: 'develop', type: 'agent', name: '开发实现', order: 1 }
+      ] }
+    })
+  } as never;
+
+  const before = fixture.followUpRecognitions.length;
+  const result = await fixture.service.sendMessage(session.id, '现在做到哪一步了？');
+
+  // The answer is a coordinator message derived from the published graph.
+  const answer = fixture.events.filter((event) => event.type === 'agent_message').at(-1);
+  assert.ok(String((answer?.metadata as { payload?: { text?: string } })?.payload?.text ?? answer?.content ?? '')
+    .includes('开发实现'), 'the answer names the current stage from the snapshot');
+  assert.equal(result.handlingPlan.intent, 'question');
+  assert.equal(result.handlingPlan.shouldPause, false);
+  assert.equal(result.handlingPlan.requiresBriefRevision, false, 'a read-only question never revises the contract');
+  // No expert discussion, no runtime invocation: the whole point of the short circuit.
+  assert.equal(runtimeCalls.length, 0, 'answering progress must not call a model');
+  assert.equal(fixture.followUpRecognitions.length, before, 'no semantic routing for a plain status read');
+  assert.equal(fixture.service.get(session.id).status, 'EXECUTING', 'the run keeps going');
+});
+
+test('a progress question that also carries a requirement is not short circuited', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: '实现订单导出。' });
+  session.status = 'EXECUTING';
+  session.workflowRunId = 'run-status-2';
+
+  const before = fixture.followUpRecognitions.length;
+  await fixture.service.sendMessage(session.id, '进度如何？顺便加一个导出按钮');
+
+  assert.ok(fixture.followUpRecognitions.length > before, 'a scope change must reach the router, not the status reply');
+});

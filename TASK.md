@@ -56,7 +56,13 @@
 
 ## T2 实现主 Agent 影响分流（AC1/AC2/AC3）
 
-- [ ] T2-1 只读状态询问走确定性读投影直答，不触发讨论、不调多次模型
+- [x] T2-1 只读状态询问走确定性读投影直答，不触发讨论、不调多次模型
+      证据：shared `execution-progress-projection.spec.ts` 10/10（措辞取自固定词表，阶段名只来自
+      发布快照，未声明的 currentNodeId 不编造阶段；blocked/failed 任务、等待原因
+      approval_gate / revision_handoff / upstream_rerun、待处理变更都进答案）；
+      `execution-status-question.spec.ts` 6/6 + 既有守卫 6/6（含「顺便加一个导出按钮」不短路、
+      控制命令与 @ 专家不短路）；`sessions.service.spec.ts` 110/110（新增 2 条：状态询问
+      runtimeCalls=0 且不进语义路由、夹带需求的消息仍进路由）。
 - [ ] T2-2 执行中 @ 专家 → 有界只读委派（复用阶段 3 `DiscussionStore`），不重跑全部专家/节点
 - [ ] T2-3 范围变更 → 影响分析（受影响任务/文件/确认版本 + 代价），用户未选前不改当前契约
 

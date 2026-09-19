@@ -5,6 +5,7 @@ export * from './discussion-contracts.js';
 export * from './requirement-document-contracts.js';
 export * from './workflow-start-contracts.js';
 export * from './change-request-contracts.js';
+export * from './execution-progress-projection.js';
 export * from './time.js';
 export * from './metadata.js';
 export * from './default-agents.js';
