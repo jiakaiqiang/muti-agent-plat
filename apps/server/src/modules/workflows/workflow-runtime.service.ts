@@ -645,6 +645,15 @@ export class WorkflowRuntimeService {
     return this.runs.get(runId)?.pendingUpstreamRerun;
   }
 
+  awaitsRevisionHandoff(runId: string) {
+    const run = this.runs.get(runId);
+    return Boolean(run && !this.isTerminal(run.status) && run.pendingRevisionHandoff);
+  }
+
+  pendingRevisionHandoff(runId: string) {
+    return this.runs.get(runId)?.pendingRevisionHandoff;
+  }
+
   /**
    * Previously executed Agent nodes the given node can be sent back to. Approval
    * gates are excluded: they hold no re-executable work of their own.
@@ -1356,17 +1365,101 @@ export class WorkflowRuntimeService {
     await this.revisePreviousAgent(run, parsed.revisionInstruction || parsed.reason);
   }
 
+  /**
+   * The Agent node a rejected gate sends work back to. Graph edges are the
+   * authority so a published rework edge is honoured; definition order is only
+   * the fallback for a version that declares no edges at all, matching how
+   * upstreamRerunCandidates resolves predecessors.
+   */
+  private reworkTarget(run: WorkflowRun) {
+    const nodes = run.definitionSnapshot.nodes;
+    const currentIndex = nodes.findIndex((node) => node.id === run.currentNodeId);
+    const upstream = run.currentNodeId ? this.upstreamNodeIds(run, run.currentNodeId) : new Set<string>();
+    if (upstream.size) {
+      // Nearest upstream Agent node: walk the definition backwards but only
+      // consider nodes the graph actually connects to the current one.
+      return [...nodes]
+        .reverse()
+        .find((node) => node.type === 'agent' && upstream.has(node.id));
+    }
+    return nodes.slice(0, currentIndex < 0 ? 0 : currentIndex).reverse().find((node) => node.type === 'agent');
+  }
+
+  /**
+   * A rejected gate with no legal rework edge. The run parks at waiting_human so
+   * the coordinator can take it to the user; nothing advances on its own and a
+   * stray completion cannot walk past it.
+   */
+  private async parkForRevisionHandoff(run: WorkflowRun, instruction: string) {
+    const nodeRun = this.currentNodeRun(run);
+    const confirmationId = `workflow-revision-handoff:${run.id}:${run.revision}`;
+    run.status = 'waiting_human';
+    run.pendingRevisionHandoff = {
+      ...(run.currentNodeId ? { nodeId: run.currentNodeId } : {}),
+      ...(nodeRun ? { nodeRunId: nodeRun.id } : {}),
+      confirmationId,
+      reason: 'WORKFLOW_REVISION_TARGET_MISSING',
+      instruction,
+      requestedAt: nowIso()
+    };
+    run.revision += 1;
+    run.updatedAt = nowIso();
+    this.persist();
+    await this.runEffect(run, 'emit_event', `${run.currentNodeId ?? 'run'}:${run.revision}:revision-handoff`, { confirmationId }, () => {
+      this.events.createOnce(`workflow-revision-blocked:${run.id}:${run.revision}`, {
+        sessionId: run.sessionId,
+        type: 'workflow_gate_requested',
+        priority: 'high',
+        content: '质量验证要求返工，但当前流程图里没有可返工的上游 Agent 节点。',
+        metadata: createMetadata('system_notice', {
+          workflowId: run.workflowId,
+          workflowVersion: run.workflowVersion,
+          workflowRunId: run.id,
+          ...(run.currentNodeId ? { workflowNodeId: run.currentNodeId } : {}),
+          ...(nodeRun ? { workflowNodeRunId: nodeRun.id } : {}),
+          reason: 'WORKFLOW_REVISION_TARGET_MISSING',
+          instruction
+        })
+      });
+      this.events.createOnce(`workflow-revision-handoff:${run.id}:${run.revision}`, {
+        sessionId: run.sessionId,
+        type: 'user_confirmation_requested',
+        priority: 'high',
+        content: '质量验证要求返工，但当前流程图里这个确认节点之前没有可返工的 Agent 节点，请选择如何处理。',
+        metadata: createMetadata('confirmation_card', {
+          confirmationId,
+          reason: 'workflow_revision_handoff',
+          title: '返工没有可执行的上游节点',
+          description: [
+            instruction,
+            '已完成的产物保持可查看。可以终止本次运行，或先在群聊中补充说明再决定。'
+          ].filter(Boolean).join('\n'),
+          workflowId: run.workflowId,
+          workflowVersion: run.workflowVersion,
+          workflowRunId: run.id,
+          ...(run.currentNodeId ? { workflowNodeId: run.currentNodeId } : {}),
+          ...(nodeRun ? { workflowNodeRunId: nodeRun.id } : {}),
+          expectedRunRevision: run.revision,
+          options: [
+            { key: 'answer_in_chat', label: '在群聊中补充说明', style: 'primary' as const },
+            { key: 'cancel', label: '终止工作流', style: 'danger' as const }
+          ]
+        })
+      });
+    });
+    await this.publishProjection(run);
+  }
+
   private async revisePreviousAgent(run: WorkflowRun, instruction: string, targetNodeId?: string) {
-    const currentIndex = run.definitionSnapshot.nodes.findIndex((node) => node.id === run.currentNodeId);
     const previous = targetNodeId
       ? run.definitionSnapshot.nodes.find((node) => node.id === targetNodeId && node.type === 'agent')
-      : run.definitionSnapshot.nodes.slice(0, currentIndex).reverse().find((node) => node.type === 'agent');
+      : this.reworkTarget(run);
     if (!previous) {
-      await this.finishRun(run, 'failed', {
-        code: 'WORKFLOW_REVISION_TARGET_NOT_FOUND',
-        message: '确认节点之前没有可返工的 Agent 节点。',
-        nodeId: run.currentNodeId
-      });
+      // No legal rework edge is a handoff to the user, not a failed run: the
+      // work already done stays reviewable and the coordinator explains what is
+      // being waited on (AC7). Failing here used to discard a whole run because
+      // the published graph had no Agent node before the gate.
+      await this.parkForRevisionHandoff(run, instruction);
       return;
     }
     run.status = 'running';

@@ -1629,6 +1629,20 @@ export type WorkflowUpstreamRerunCandidate = {
  * incomplete. While this is set the run must never resume implicitly: doing so
  * would re-run the same node against the same missing upstream output.
  */
+/**
+ * A rejected gate whose published graph has no Agent node to send the work back
+ * to. The run parks instead of failing so the finished work stays reviewable and
+ * the coordinator can take the decision to the user (phase 4 AC7).
+ */
+export type WorkflowPendingRevisionHandoff = {
+  nodeId?: UUID;
+  nodeRunId?: UUID;
+  reason: 'WORKFLOW_REVISION_TARGET_MISSING';
+  instruction: string;
+  confirmationId: string;
+  requestedAt: ISODateTime;
+};
+
 export type WorkflowPendingUpstreamRerun = {
   nodeId: UUID;
   nodeRunId: UUID;
@@ -1685,6 +1699,7 @@ export type WorkflowRun = {
   currentNodeId?: UUID;
   pendingAgentSubstitution?: WorkflowPendingAgentSubstitution;
   pendingUpstreamRerun?: WorkflowPendingUpstreamRerun;
+  pendingRevisionHandoff?: WorkflowPendingRevisionHandoff;
   revision: number;
   runtimeVersion: 'v2';
   startIdempotencyKey: string;

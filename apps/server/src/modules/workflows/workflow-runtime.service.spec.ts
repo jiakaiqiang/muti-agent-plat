@@ -1349,3 +1349,88 @@ test('a start bound to a republished version hash is refused instead of running 
   assert.equal(run.definitionSnapshot.definitionHash, 'hash');
   assert.equal(setup.taskItems.length, 1);
 });
+
+test('rework follows the published graph edges, not the node array order', async () => {
+  // The graph sends the gate back to "early", even though "late" is the closest
+  // preceding node in definition order. Rework that ignores edges would re-run a
+  // node the published graph never connected to this gate.
+  const setup = fixture([
+    { id: 'early', type: 'agent', agentId: 'requirements', order: 0 },
+    { id: 'late', type: 'agent', agentId: 'frontend', order: 1 },
+    { id: 'gate', type: 'human_approval', title: 'Check', assignee: 'session_owner', allowedDecisions: ['approve', 'revise', 'cancel'], order: 2 }
+  ], [
+    { id: 'edge:early:gate', sourceNodeId: 'early', targetNodeId: 'gate' }
+  ]);
+  const run = await setup.runtime.start({ session: setup.session, brief: setup.brief, coordinatorId: 'coordinator',
+    workflowId: 'workflow-1', confirmationId: 'rework-graph' });
+
+  const finish = async (index: number, summary: string) => {
+    setup.taskItems[index].status = 'completed';
+    setup.callbacks[index]({ kind: 'workflow_step_completed', taskId: setup.taskItems[index].id, resultSummary: summary });
+    await settle();
+  };
+  await finish(0, 'early done');
+  await finish(1, 'late done');
+
+  const gateRun = setup.runtime.listNodeRuns(run.id).find((item) => item.nodeType === 'human_approval' && item.status === 'waiting');
+  assert.ok(gateRun, 'the gate must be waiting for a human decision');
+  await setup.runtime.decideHuman({ runId: run.id, nodeRunId: gateRun.id, confirmationId: gateRun.confirmationId!,
+    userId: setup.session.ownerId, decision: 'revise', instruction: '补充验收标准' });
+  await settle();
+
+  assert.equal(run.currentNodeId, 'early', 'the graph edge decides the rework target');
+  const reworkTask = setup.taskItems[setup.taskItems.length - 1];
+  assert.equal(reworkTask.workflowNodeId, 'early');
+});
+
+test('a gate with no legal rework edge waits for explicit handling instead of failing the run', async () => {
+  // AC7: no legal edge is a reason to wait with a stated cause, not to declare the
+  // requirement failed. Failing here would lose the user's approved document.
+  const setup = fixture([
+    { id: 'gate', type: 'human_approval', title: 'Check', assignee: 'session_owner', allowedDecisions: ['approve', 'revise', 'cancel'], order: 0 }
+  ]);
+  const run = await setup.runtime.start({ session: setup.session, brief: setup.brief, coordinatorId: 'coordinator',
+    workflowId: 'workflow-1', confirmationId: 'rework-no-target' });
+  await settle();
+
+  const gateRun = setup.runtime.listNodeRuns(run.id).find((item) => item.nodeType === 'human_approval' && item.status === 'waiting');
+  assert.ok(gateRun);
+  await setup.runtime.decideHuman({ runId: run.id, nodeRunId: gateRun.id, confirmationId: gateRun.confirmationId!,
+    userId: setup.session.ownerId, decision: 'revise', instruction: '需要改上一环节' });
+  await settle();
+
+  assert.notEqual(run.status, 'failed', 'a missing rework target is a wait, not a failed requirement');
+  assert.equal(run.status, 'waiting_human');
+  assert.equal(setup.runtime.awaitsRevisionHandoff(run.id), true);
+  const handoff = setup.runtime.pendingRevisionHandoff(run.id);
+  assert.equal(handoff?.reason, 'WORKFLOW_REVISION_TARGET_MISSING');
+  assert.equal(handoff?.instruction, '需要改上一环节');
+  // The coordinator needs an event to bring the situation to the user.
+  assert.ok(setup.eventItems.some((item) => item.type === 'workflow_gate_requested' &&
+    (item.metadata as { payload?: { reason?: string } })?.payload?.reason === 'WORKFLOW_REVISION_TARGET_MISSING'),
+    'the wait must be visible as an event, not only as internal state');
+  assert.ok(setup.eventItems.some((item) => item.type === 'user_confirmation_requested' &&
+    (item.metadata as { payload?: { reason?: string } })?.payload?.reason === 'workflow_revision_handoff'),
+    'the user gets a card that names the two ways out');
+});
+
+test('a parked revision handoff cannot be walked past by a stray completion', async () => {
+  const setup = fixture([
+    { id: 'gate', type: 'human_approval', title: 'Check', assignee: 'session_owner', allowedDecisions: ['approve', 'revise', 'cancel'], order: 0 }
+  ]);
+  const run = await setup.runtime.start({ session: setup.session, brief: setup.brief, coordinatorId: 'coordinator',
+    workflowId: 'workflow-1', confirmationId: 'rework-park-guard' });
+  await settle();
+  const gateRun = setup.runtime.listNodeRuns(run.id).find((item) => item.nodeType === 'human_approval' && item.status === 'waiting')!;
+  await setup.runtime.decideHuman({ runId: run.id, nodeRunId: gateRun.id, confirmationId: gateRun.confirmationId!,
+    userId: setup.session.ownerId, decision: 'revise', instruction: 'x' });
+  await settle();
+
+  // A second decision on the same parked run must be refused rather than
+  // silently resolving the wait.
+  await assert.rejects(() => setup.runtime.decideHuman({
+    runId: run.id, nodeRunId: gateRun.id, confirmationId: gateRun.confirmationId!,
+    userId: setup.session.ownerId, decision: 'approve'
+  }));
+  assert.equal(setup.runtime.awaitsRevisionHandoff(run.id), true);
+});

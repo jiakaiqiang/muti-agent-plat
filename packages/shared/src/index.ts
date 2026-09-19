@@ -18,3 +18,4 @@ export * from './workspace-path-safety.js';
 export * from './workspace-three-way-merge.js';
 export * from './runtime-contracts/index.js';
 export * from './runtime-streaming/index.js';
+export * from './collaboration-presentation.js';

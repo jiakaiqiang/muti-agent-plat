@@ -154,9 +154,34 @@ PostgreSQL V15 `workflow_start_requests`（集成用例 14/14）、
 
 ## T5 接入双端文档 Diff 和返工沟通（AC2/AC7）
 
-- [ ] T5-1 文档版本 Diff 复用既有 Diff 组件（web/desktop 各自样式）；确认卡/过期差异双端同状态
-- [ ] T5-2 承接阶段 3：讨论计划/委派进度/综合/两张卡的双端专用呈现；`blocked` 状态是否映射
-- [ ] T5-3 质量拒绝 → 图内返工或有原因的等待，由主 Agent 对接用户
+- [x] T5-1 文档版本 Diff 复用既有 Diff 组件（web/desktop 各自样式）；确认卡/过期差异双端同状态
+      证据：`packages/shared/src/collaboration-presentation.ts` 提供唯一业务投影
+      （`documentVersionTimeline` / `documentSectionChanges` / `discussionProgressView`），
+      shared 11/11。双端各自呈现：web `apps/web/src/components/requirementDocumentPresentation.ts`
+      走既有 `buildReportDiffPreview`（行内 add/remove），desktop
+      `apps/desktop/renderer/components/workspace/requirementDocumentPresentation.ts`
+      走既有 `diffLines`/`splitDiffRows`（左右并排）。两端 `changedSections` 与
+      `staleness` 断言同一结论（`revision_superseded` / `content_changed`）。
+- [x] T5-2 承接阶段 3：讨论计划/委派进度/综合/两张卡的双端专用呈现；`blocked` 状态已映射
+      证据：`discussionProgressView` 把 `blocked` 归入 pending（"有人被卡住"），
+      不计入 answered、不让 `completeAnswer` 为真；`failed` 单列并带 `failureReason`。
+      双端 spec 各自断言同一组 headline/roundLabel/pending/answered/failures。
+      同时校验投影不携带模型私有推理（`privateReasoning` 不出现在序列化结果里）。
+      验证：`npm run test -w @project/web` 62 文件 / 299 通过（含 desktop renderer spec）。
+- [x] T5-3 质量拒绝 → 图内返工或有原因的等待，由主 Agent 对接用户
+      改动落在 `apps/server/src/modules/workflows/workflow-runtime.service.ts`：
+      1) `revisePreviousAgent` 原来按**节点数组顺序**找返工目标，与 `upstreamRerunCandidates`
+         的**按图边**口径不一致；已抽出 `reworkTarget()` 优先走 `upstreamNodeIds`（图边），
+         无边时才退回数组顺序（未画边的已发布版本仍有真实前驱）。
+      2) 无合法返工边时原来直接 `finishRun('failed')`，会把整轮已完成产物作废；
+         现在 `parkForRevisionHandoff()` 停在 `waiting_human`，记录
+         `run.pendingRevisionHandoff`（新增 `WorkflowPendingRevisionHandoff` 合同），
+         发 `workflow_gate_requested` + `workflow_revision_handoff` 确认卡
+         （选项：在群聊中补充说明 / 终止工作流），并新增
+         `awaitsRevisionHandoff()` / `pendingRevisionHandoff()` 两个读取口。
+         停住后二次决定被既有 `decideHuman` 守卫拒绝，不会被野完成走过去。
+      验证：`workflow-runtime.service.spec.ts` 32/32（新增 3 条：按图边返工、
+      无边时等待而非失败、停住后不可被走过）。
 
 ## T6 验证版本竞争和完整交接（AC1–AC7）
 
