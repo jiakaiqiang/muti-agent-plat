@@ -1,7 +1,7 @@
 # 阶段 4：主 Agent 文档、精确确认与所选工作流交接 — Plan v1
 
 > 日期：2026-09-16
-> 状态：设计与实施基线，待实施；现有能力的复用不代表本阶段验收已完成。
+> 状态：已实现并于 2026-09-19 通过用户验收；顺延缺口见阶段 5 Tasks 承接说明。
 > 依赖：阶段 3 通过，复用 1 与 2A～2C 的隔离、预算、记忆和缓存。
 
 [总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-4-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-4-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-4-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-4-checklist-v1.md)

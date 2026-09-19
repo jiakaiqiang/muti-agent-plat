@@ -1,9 +1,9 @@
 # 主 Agent 协作与长会话治理：分阶段实施总计划 v1
 
 > 日期：2026-09-16
-> 状态：阶段 0、阶段 1、阶段 2A、阶段 2B、阶段 2C 与阶段 3 已实现并验收；阶段 4 及后续业务接入待实施。
+> 状态：阶段 0、阶段 1、阶段 2A、阶段 2B、阶段 2C、阶段 3 与阶段 4 已实现并验收；阶段 5 及后续业务接入待实施。
 > 初始文档交付：1 份总计划 + 9 阶段 × 4 份文档，共 37 份新增文档，记录保留于第 11 节。
-> 当前已验收范围：阶段 0、阶段 1、阶段 2A、阶段 2B、阶段 2C、阶段 3；未调用真实付费/多模态 Provider、部署或发布。
+> 当前已验收范围：阶段 0、阶段 1、阶段 2A、阶段 2B、阶段 2C、阶段 3、阶段 4；未调用真实付费/多模态 Provider、部署或发布。
 
 ## 1. 目标与已沟通决定
 
@@ -74,7 +74,7 @@
 | 2B | 版本化长期记忆、增量摘要与历史需求召回（已完成并通过验收） | 2A | [spec](../product/main-agent-collaboration-phase-2b-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2b-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2b-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2b-checklist-v1.md) |
 | 2C | 分层缓存、失效治理与成本观测（已完成并通过验收） | 2B | [spec](../product/main-agent-collaboration-phase-2c-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2c-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2c-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2c-checklist-v1.md) |
 | 3 | 主 Agent 主持讨论与可恢复专家协作（已完成并通过验收） | 2A/2B/2C | [spec](../product/main-agent-collaboration-phase-3-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-3-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-3-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-3-checklist-v1.md) |
-| 4 | 主 Agent 文档、精确确认与所选工作流交接 | 3 | [spec](../product/main-agent-collaboration-phase-4-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-4-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-4-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-4-checklist-v1.md) |
+| 4 | 主 Agent 文档、精确确认与所选工作流交接（已完成并通过验收） | 3 | [spec](../product/main-agent-collaboration-phase-4-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-4-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-4-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-4-checklist-v1.md) |
 | 5 | 执行中补充、新需求与范围变更治理 | 4 | [spec](../product/main-agent-collaboration-phase-5-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-5-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-5-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-5-checklist-v1.md) |
 | 6 | 双端综合验收、长会话成本评测与受控上线 | 全部前置阶段 | [spec](../product/main-agent-collaboration-phase-6-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-6-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-6-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-6-checklist-v1.md) |
 
@@ -87,7 +87,7 @@
 - Tasks：有序任务、依赖、交付物及关联 AC。
 - Checklist：具体场景、预期、现有命令、必须新增的测试和证据位置。
 
-本专项共 61 条阶段 AC、54 项开发任务。阶段 0、阶段 1、阶段 2A、阶段 2B、阶段 2C 与阶段 3 的 40 条 AC、36 项任务已完成实现和验收；阶段 4 及以后仍待实施/待验证，不因前置阶段通过而自动完成。
+本专项共 61 条阶段 AC、54 项开发任务。阶段 0、阶段 1、阶段 2A、阶段 2B、阶段 2C、阶段 3 与阶段 4 的 47 条 AC、42 项任务已完成实现和验收；阶段 5 及以后仍待实施/待验证，不因前置阶段通过而自动完成。
 
 ## 5. 跨阶段架构决策与不变量
 
@@ -233,3 +233,18 @@
 - 每轮以确定性综合收口：署名逐条、不写"一致同意"、冲突 = 同问题不同结论列为待选、失败/未回复点名、`sourceDelegationIds` 可核验；有未决时主 Agent 持有一张 `discussion_clarification` 卡。
 - [阶段 3 Checklist](../quality/main-agent-collaboration-phase-3-checklist-v1.md)记录 120 余例单测、PostgreSQL 临时库 12/12、E2E `test:e2e:planned-discussion` 两场景与四门禁。
 - 已知边界与延后（归阶段 4）：双端专用呈现未做（复用既有事件类型渲染）；扩员卡与澄清卡的选项处理未接；`blocked` 委派状态无写入方；新路径由 `MAIN_AGENT_DISCUSSION_ENABLED` 闸控、默认关。跨实例 CAS 延后。未调用真实付费模型、部署或发布。
+
+## 18. 阶段 4 实施交付（2026-09-19）
+
+阶段 4 六项任务（P4-T1～P4-T6）已实现并经用户验收：正式需求文档版本化发布、确认绑定精确版本、
+只读流程选择与成员映射、持久化启动握手（提交/派发分离）、双端文档 Diff 与有原因的返工等待、
+验收矩阵。
+
+- 新增持久集合与迁移：`requirementDocumentsBySession`（V14）、`workflowStartRequestsBySession`（V15）。
+- [阶段 4 Checklist](../quality/main-agent-collaboration-phase-4-checklist-v1.md)记录 P4-AC1～AC7 的
+  单元/双端/PostgreSQL/E2E 证据与未覆盖项；PostgreSQL 隔离库 14/14，E2E
+  `test:e2e:requirement-document-handoff` 两场景通过，四门禁全绿。
+- 实施期发现并修复的真缺陷：确认过期判据原先取活动 WorkItem 的计数器，而纯状态流转
+  （`WAIT_USER_CONFIRM`）也会 +1，导致每次正常确认被误判 stale；已改为以文档自身记录的
+  需求修订为准。另修复共享 E2E 辅助只设 `outputContract`、导致两节点以上工作流无法发布。
+- 顺延到阶段 5 的缺口见阶段 5 Tasks 的承接说明，不计入本阶段通过范围。

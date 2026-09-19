@@ -1,7 +1,7 @@
 # 阶段 4：主 Agent 文档、精确确认与所选工作流交接 — Checklist v1
 
 > 日期：2026-09-16（2026-09-19 实施并填证据）
-> 状态：T1～T6 已实现并验证；AC 状态见第 1 节，未覆盖项已明确标注。
+> 状态：已实现并于 2026-09-19 通过用户验收；顺延缺口见阶段 5 Tasks 承接说明。
 > 依赖：阶段 3 已于 2026-09-19 验收通过，复用 1 与 2A～2C 的隔离、预算、记忆和缓存。
 
 [总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-4-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-4-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-4-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-4-checklist-v1.md)
