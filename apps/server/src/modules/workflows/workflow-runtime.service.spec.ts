@@ -1313,3 +1313,39 @@ test('WorkflowRuntimeService rejects an old generation outcome and adopts the re
   assert.equal(run.sessionGeneration, 3);
   assert.equal(setup.callbacks.length, 2);
 });
+
+test('a start bound to a republished version hash is refused instead of running a different graph', async () => {
+  const setup = fixture([
+    { id: 'requirements-node', type: 'agent', agentId: 'requirements', order: 0 }
+  ]);
+
+  // The user approved a member mapping against the graph they were shown. If the
+  // workflow is republished before the start lands, the same version number can
+  // carry different nodes, so the captured hash is what makes the start safe.
+  await assert.rejects(
+    () => setup.runtime.start({
+      session: setup.session,
+      brief: setup.brief,
+      coordinatorId: 'coordinator',
+      workflowId: 'workflow-1',
+      workflowVersion: 1,
+      definitionHash: 'hash-the-user-saw-earlier',
+      confirmationId: 'select-stale-hash'
+    }),
+    (error: unknown) => String((error as Error).message).includes('WORKFLOW_VERSION_CHANGED')
+  );
+  assert.equal(setup.taskItems.length, 0, 'no node may start against an unverified graph');
+
+  // The same selection with the hash it was actually evaluated against runs.
+  const run = await setup.runtime.start({
+    session: setup.session,
+    brief: setup.brief,
+    coordinatorId: 'coordinator',
+    workflowId: 'workflow-1',
+    workflowVersion: 1,
+    definitionHash: 'hash',
+    confirmationId: 'select-good-hash'
+  });
+  assert.equal(run.definitionSnapshot.definitionHash, 'hash');
+  assert.equal(setup.taskItems.length, 1);
+});

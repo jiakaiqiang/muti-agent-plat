@@ -7,7 +7,7 @@ function setup(emptyWorkspace = false, confirmedByUser = true) {
   const session: SessionDetail = {
     id: 'session-workflow', dataEpoch: 'epoch-test', title: 'Workflow session', originalInput: 'Implement and verify the requirement.',
     status: 'WAIT_WORKFLOW_SELECT', ownerId: 'local-user', workspaceId: 'workspace', tokenUsed: 0,
-    currentTaskBriefId: 'brief-1', participatingAgentIds: ['coordinator'],
+    currentTaskBriefId: 'brief-1', participatingAgentIds: ['coordinator', 'requirements'],
     ...(emptyWorkspace ? {
       workingDirectory: { kind: 'local_bridge' as const, id: 'workspace', name: 'empty-project', selectedAt: '2026-07-13T00:00:00.000Z' },
       workspaceSnapshot: {
@@ -85,6 +85,8 @@ test('workflow selection binds the exact published version and delegates executi
   });
   assert.equal(session.status, 'EXECUTING');
   assert.equal(session.workflowRunId, run.id);
+  // Selection never grows the roster on its own: a missing member raises
+  // capability_mapping_required for the user to decide (AC5).
   assert.deepEqual(session.participatingAgentIds, ['coordinator', 'requirements']);
   assert.equal(starts.length, 1);
   assert.equal(starts[0].workflowVersion, 2);

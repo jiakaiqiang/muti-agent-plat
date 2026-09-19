@@ -3425,3 +3425,110 @@ test('a clarification card is answered in chat or accepted as-is, never silently
   const resolved = answer.fixture.events.find((event) => event.type === 'user_confirmation_resolved');
   assert.equal((resolved?.metadata as { payload?: { selectedOptionKey?: string } })?.payload?.selectedOptionKey, 'answer_in_chat');
 });
+
+// ---------------------------------------------------------------------------
+// Phase 4 T3: workflow selection is read-only and never silently adds members
+// ---------------------------------------------------------------------------
+
+function workflowSelectionFixture(input: { involvedAgentIds: string[]; participating: string[]; confirmedBrief?: boolean }) {
+  const session: SessionDetail = {
+    id: 'session-select',
+    dataEpoch: 'epoch-test',
+    title: 'Select',
+    originalInput: 'x',
+    status: 'WAIT_WORKFLOW_SELECT',
+    ownerId: 'local-user',
+    workspaceId: 'workspace-select',
+    tokenUsed: 0,
+    currentTaskBriefId: 'brief-select',
+    activeWorkItemId: 'wi-1',
+    workspaceMode: 'bootstrap',
+    participatingAgentIds: input.participating,
+    createdAt: '2026-09-19T00:00:00.000Z',
+    updatedAt: '2026-09-19T00:00:00.000Z'
+  };
+  const fixture = makeService({ initialSessions: [session] });
+  const version = {
+    id: 'wf-1@1', workflowId: 'wf-1', version: 1, name: 'Delivery', nodes: [], edges: [],
+    involvedAgentIds: input.involvedAgentIds, definitionHash: 'hash-wf-1', publishedBy: 'admin', publishedAt: '2026-09-19T00:00:00.000Z'
+  };
+  const starts: unknown[] = [];
+  (fixture.service as unknown as { workflows: unknown }).workflows = {
+    get: () => ({ id: 'wf-1', name: 'Delivery', status: 'published', nodes: [], version: 1, currentPublishedVersion: 1 }),
+    getVersion: () => version,
+    list: () => []
+  } as never;
+  (fixture.service as unknown as { workflowRuntime: unknown }).workflowRuntime = {
+    findBySession: () => undefined,
+    async start(startInput: unknown) {
+      starts.push(startInput);
+      return { id: 'run-1', workflowId: 'wf-1', workflowVersion: 1, startIdempotencyKey: 'k', status: 'running' };
+    }
+  } as never;
+  (fixture.service as unknown as { orchestrator: { getBrief: unknown } }).orchestrator.getBrief = () => ({
+    id: 'brief-select', sessionId: session.id, version: 1, goal: 'g', scope: [], outOfScope: [], constraints: [],
+    acceptanceCriteria: [], risks: [], openQuestions: [], confirmedByUser: input.confirmedBrief ?? true, createdAt: '2026-09-19T00:00:00.000Z'
+  });
+  fixture.events.push({
+    id: 'select-request', sessionId: session.id, type: 'user_confirmation_requested', content: 'select', toAgentIds: [],
+    metadata: { schemaVersion: '0.1', payload: { confirmationId: 'select-1', reason: 'select_workflow', options: [] } },
+    createdAt: '2026-09-19T00:00:00.000Z'
+  });
+  return { session, fixture, starts };
+}
+
+test('selecting a workflow whose agents are not all in the session asks the user instead of adding them', async () => {
+  const { session, fixture, starts } = workflowSelectionFixture({ involvedAgentIds: ['coordinator', 'architect'], participating: ['coordinator'] });
+
+  await assert.rejects(
+    () => fixture.service.selectWorkflow(session.id, { workflowId: 'wf-1', confirmationId: 'select-1' }),
+    (error: unknown) => {
+      const response = (error as { getResponse?: () => unknown }).getResponse?.() as { code?: string } | undefined;
+      return response?.code === 'capability_mapping_required';
+    }
+  );
+  assert.deepEqual(fixture.service.get(session.id).participatingAgentIds, ['coordinator'], 'no silent member merge');
+  assert.equal(starts.length, 0, 'no run started');
+  const card = fixture.events.find((event) => (event.metadata as { payload?: { reason?: string } }).payload?.reason === 'confirm_workflow_member_mapping');
+  assert.ok(card, 'the coordinator asks the user to resolve the mapping');
+  const payload = (card!.metadata as { payload: Record<string, unknown> }).payload;
+  assert.deepEqual(payload.addableAgentIds, ['architect']);
+  assert.equal(payload.workflowId, 'wf-1');
+  assert.equal(payload.workflowVersion, 1);
+  assert.equal(payload.definitionHash, 'hash-wf-1', 'the card locks the exact version it was evaluated against');
+  assert.equal(fixture.service.get(session.id).status, 'WAIT_WORKFLOW_SELECT', 'selection stays open');
+});
+
+test('approving the mapping card adds the members and the same selection then starts against the locked version', async () => {
+  const { session, fixture, starts } = workflowSelectionFixture({ involvedAgentIds: ['coordinator', 'architect'], participating: ['coordinator'] });
+  await assert.rejects(() => fixture.service.selectWorkflow(session.id, { workflowId: 'wf-1', confirmationId: 'select-1' }));
+  const card = fixture.events.find((event) => (event.metadata as { payload?: { reason?: string } }).payload?.reason === 'confirm_workflow_member_mapping')!;
+  const mappingConfirmationId = (card.metadata as { payload: { confirmationId: string } }).payload.confirmationId;
+
+  await fixture.service.resolveWorkflowMemberMapping(session.id, { confirmationId: mappingConfirmationId, decision: 'approve' });
+  assert.deepEqual(fixture.service.get(session.id).participatingAgentIds, ['coordinator', 'architect']);
+
+  await fixture.service.selectWorkflow(session.id, { workflowId: 'wf-1', confirmationId: 'select-1' });
+  assert.equal(starts.length, 1);
+  const start = starts[0] as { workflowVersion?: number; definitionHash?: string };
+  assert.equal(start.workflowVersion, 1);
+  assert.equal(start.definitionHash, 'hash-wf-1', 'the start binds the version hash the user saw');
+});
+
+test('a workflow whose agent is disabled cannot be resolved by inviting and stays blocked', async () => {
+  const { session, fixture, starts } = workflowSelectionFixture({ involvedAgentIds: ['coordinator', 'retired-agent'], participating: ['coordinator'] });
+  (fixture.service as unknown as { agents: { findByIdOrKey: unknown } }).agents.findByIdOrKey = (id: string) =>
+    id === 'retired-agent' ? { id, key: id, name: 'Retired', status: 'disabled' } : { id, key: id, name: id, status: 'active' };
+
+  await assert.rejects(() => fixture.service.selectWorkflow(session.id, { workflowId: 'wf-1', confirmationId: 'select-1' }));
+  const card = fixture.events.find((event) => (event.metadata as { payload?: { reason?: string } }).payload?.reason === 'confirm_workflow_member_mapping')!;
+  const payload = (card.metadata as { payload: Record<string, unknown> }).payload;
+  assert.deepEqual(payload.addableAgentIds, []);
+  assert.match(String(payload.description), /Retired/);
+  assert.equal(starts.length, 0);
+});
+
+test('selection requires a confirmed brief', async () => {
+  const { session, fixture } = workflowSelectionFixture({ involvedAgentIds: ['coordinator'], participating: ['coordinator'], confirmedBrief: false });
+  await assert.rejects(() => fixture.service.selectWorkflow(session.id, { workflowId: 'wf-1', confirmationId: 'select-1' }), /confirmed brief/);
+});

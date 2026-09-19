@@ -1161,6 +1161,8 @@ export type WorkspaceMode = 'existing_project' | 'empty_pending_decision' | 'boo
 export type PendingBootstrapWorkflow = {
   workflowId: UUID;
   workflowVersion: number;
+  /** Version hash captured at selection; a republish before bootstrap resumes must not slip through. */
+  definitionHash?: string;
   selectionConfirmationId: UUID;
 };
 

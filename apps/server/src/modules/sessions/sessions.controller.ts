@@ -378,6 +378,14 @@ export class SessionsController {
     return ok(await this.sessions.resolveWorkspaceWriteback(sessionId, writebackId, body));
   }
 
+  @Post('sessions/:sessionId/workflow/member-mapping')
+  resolveWorkflowMemberMapping(
+    @Param('sessionId') sessionId: string,
+    @Body() body: { confirmationId: string; decision: 'approve' | 'decline' }
+  ) {
+    return this.sessions.resolveWorkflowMemberMapping(sessionId, body).then(ok);
+  }
+
   @Post('sessions/:sessionId/discussions/:discussionId/member-addition')
   resolveMemberAddition(
     @Param('sessionId') sessionId: string,

@@ -82,6 +82,7 @@ import { WorktreeExecutionService } from '../worktree-execution/worktree-executi
 import { WorkdirBriefService } from '../runtimes/streaming/workdir-brief.service.js';
 import { RuntimeService } from '../runtimes/runtime.service.js';
 import { RequirementDocumentStore } from './requirement-document-store.js';
+import { evaluateWorkflowMemberMapping } from './workflow-member-mapping.js';
 import { SessionLifecycleStore } from '../runtimes/session-lifecycle-store.js';
 import { LocalRuntimeConnectionService } from '../local-runtime/local-runtime-connection.service.js';
 import { WorkspaceProviderResolver } from '../workspaces/workspace-provider-resolver.js';
@@ -2915,13 +2916,46 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     if (!brief || !brief.confirmedByUser) throw new BadRequestException('Current confirmed brief is missing.');
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
     const version = this.workflows.getVersion(workflow.id, input.workflowVersion);
-    session.participatingAgentIds = Array.from(new Set([...session.participatingAgentIds, ...version.involvedAgentIds]));
+    const mapping = evaluateWorkflowMemberMapping({
+      involvedAgentIds: version.involvedAgentIds,
+      participatingAgentIds: session.participatingAgentIds,
+      findAgent: (id) => this.agents.findByIdOrKey(id)
+    });
+    if (mapping.status === 'mapping_required') {
+      const mappingConfirmationId = crypto.randomUUID();
+      this.events.create({
+        sessionId: session.id,
+        type: 'user_confirmation_requested',
+        fromAgentId: coordinator.id,
+        content: mapping.addable.length
+          ? `工作流 ${workflow.name} 需要邀请以下 Agent 参与：${mapping.gaps.map((g) => g.agentName).join('、')}。`
+          : `工作流 ${workflow.name} 涉及的部分 Agent 当前不可用：${mapping.gaps.map((g) => `${g.agentName}（${g.reason}）`).join('、')}。`,
+        metadata: createMetadata('confirmation_card', {
+          confirmationId: mappingConfirmationId,
+          reason: 'confirm_workflow_member_mapping',
+          title: mapping.addable.length ? `确认邀请 ${mapping.addable.length} 个 Agent` : '工作流成员不可用',
+          description: mapping.addable.length
+            ? `这些 Agent 尚未参与本会话，需要您明确同意后才能启动工作流。`
+            : mapping.gaps.map((g) => `${g.agentName}：${g.reason === 'disabled' ? '已禁用' : '未找到'}`).join('；'),
+          workflowId: workflow.id,
+          workflowVersion: version.version,
+          definitionHash: version.definitionHash,
+          addableAgentIds: mapping.addable,
+          gaps: mapping.gaps,
+          options: mapping.addable.length
+            ? [{ key: 'approve', label: '邀请并启动', style: 'primary' }, { key: 'decline', label: '取消', style: 'default' }]
+            : [{ key: 'acknowledge', label: '知道了', style: 'default' }]
+        })
+      });
+      throw new ConflictException({ code: 'capability_mapping_required', gaps: mapping.gaps, addable: mapping.addable });
+    }
     if (this.isEmptyWorkspace(session) && session.workspaceMode !== 'bootstrap') {
       const confirmationId = crypto.randomUUID();
       session.workspaceMode = 'empty_pending_decision';
       session.pendingBootstrapWorkflow = {
         workflowId: workflow.id,
         workflowVersion: version.version,
+        definitionHash: version.definitionHash,
         selectionConfirmationId: input.confirmationId
       };
       this.setStatus(session, 'WAIT_USER_DECISION');
@@ -2952,6 +2986,10 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       coordinatorId: coordinator.id,
       workflowId: workflow.id,
       workflowVersion: version.version,
+      // The exact version the mapping card was evaluated against. A republish
+      // between approval and start must fail loudly rather than run a graph the
+      // user never saw.
+      definitionHash: version.definitionHash,
       confirmationId: input.confirmationId,
       sessionGeneration: this.lifecycle.generation(session.id)
     });
@@ -3011,6 +3049,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       coordinatorId: coordinator.id,
       workflowId: workflow.id,
       workflowVersion: pending.workflowVersion,
+      ...(pending.definitionHash ? { definitionHash: pending.definitionHash } : {}),
       confirmationId: pending.selectionConfirmationId,
       sessionGeneration: this.lifecycle.generation(session.id)
     });
@@ -5050,6 +5089,38 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       content: `Coordinator 已分配工作流任务：${task.title}`,
       metadata: createMetadata('task_card', payload)
     });
+  }
+
+  /** Phase 4 card: the coordinator needs user approval to add the workflow's agents. */
+  async resolveWorkflowMemberMapping(
+    sessionId: string,
+    input: { confirmationId: string; decision: 'approve' | 'decline' }
+  ) {
+    const session = this.get(sessionId);
+    const request = this.assertPendingConfirmation(sessionId, input.confirmationId, 'confirm_workflow_member_mapping');
+    const payload = request.metadata.payload as Record<string, unknown> | undefined;
+    const addable = Array.isArray(payload?.addableAgentIds) ? (payload.addableAgentIds as string[]) : [];
+    this.events.create({
+      sessionId,
+      type: 'user_confirmation_resolved',
+      sessionUserId: session.ownerId,
+      content: input.decision === 'approve' ? `已邀请 ${addable.length} 个 Agent。` : '已取消。',
+      metadata: createMetadata('system_notice', {
+        confirmationId: input.confirmationId,
+        reason: 'confirm_workflow_member_mapping',
+        status: input.decision === 'approve' ? 'approved' : 'declined',
+        selectedOptionKey: input.decision,
+        addableAgentIds: addable
+      })
+    });
+    if (input.decision !== 'approve') return session;
+    for (const agentId of addable) {
+      if (!session.participatingAgentIds.includes(agentId)) {
+        session.participatingAgentIds.push(agentId);
+      }
+    }
+    if (addable.length) this.persist();
+    return session;
   }
 
   /** Phase 3 card: the coordinator asked to add a member; only the user can say yes. */

@@ -67,6 +67,12 @@ export type StartWorkflowRunInput = {
   workflowVersion?: number;
   confirmationId: string;
   sessionGeneration?: number;
+  /**
+   * The definition hash the user's selection was evaluated against. A republish
+   * between member mapping and start keeps the same version number, so without
+   * this the run would silently execute a graph the user never saw.
+   */
+  definitionHash?: string;
 };
 
 export type WorkflowHumanDecisionInput = {
@@ -201,6 +207,12 @@ export class WorkflowRuntimeService {
     const version = this.workflows.getVersion(input.workflowId, input.workflowVersion);
     const workflow = this.workflows.get(input.workflowId);
     if (workflow.status !== 'published') throw new BadRequestException('Only published workflows can be executed.');
+    // The caller pins the exact definition the user approved. A republish between
+    // selection and start changes node order and rework edges, so an unnoticed
+    // swap would execute a graph the user never saw.
+    if (input.definitionHash !== undefined && input.definitionHash !== version.definitionHash) {
+      throw new ConflictException('WORKFLOW_VERSION_CHANGED');
+    }
     const firstNode = version.nodes[0];
     if (!firstNode) throw new BadRequestException('Published workflow has no nodes.');
     const now = nowIso();

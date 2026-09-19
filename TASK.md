@@ -99,10 +99,29 @@ spec 共 8）；`sessions.service.ts confirmBrief` + `assertConfirmationCurrent`
 
 ## T3 接入只读流程选择与映射（AC4/AC5）
 
-- [ ] T3-1 只有已确认文档才进入 `WAIT_WORKFLOW_SELECT`；候选只来自 published 目录，版本快照
-      锁定 workflowId/version/hash
-- [ ] T3-2 `selectWorkflow` 不再静默并入 `involvedAgentIds`：角色/能力/目录授权差异 →
-      `capability_mapping_required`，由主 Agent 解释并请求用户选择映射或确认扩员
+落点：`apps/server/src/modules/sessions/workflow-member-mapping.ts` + `.spec.ts`（4/4）、
+`sessions.service.ts`（selectWorkflow + resolveWorkflowMemberMapping）、
+`workflows/workflow-runtime.service.ts`（start 绑定 definitionHash）。
+
+- [x] T3-1 版本锁定落到**启动层**而非只在选择层：`StartWorkflowRunInput.definitionHash` 为
+      选择时捕获的哈希，`start()` 在 published 校验之后比对 `version.definitionHash`，
+      不一致抛 `WORKFLOW_VERSION_CHANGED` 并带 expected/actual；bootstrap 路径把哈希存进
+      `PendingBootstrapWorkflow.definitionHash` 再透传，恢复时**不重查**版本。
+      用例：workflow-runtime.spec「a republished version between selection and start is refused」
+- [x] T3-2 `selectWorkflow` 不再静默 `Array.from(new Set([...participating, ...involvedAgentIds]))`：
+      先过 `evaluateWorkflowMemberMapping` 纯函数，分三类——可邀请（active 且允许 chat）→
+      `confirm_workflow_member_mapping` 卡（含 workflowId/version/definitionHash，选择保持
+      `WAIT_WORKFLOW_SELECT` 不变）；不可用（disabled/不在目录）→ 卡上标 blocked，
+      批准也不会加入；无差异 → 直接启动。`resolveWorkflowMemberMapping` 只在 approve 时
+      并入 addable，随后同一 confirmationId 的 selectWorkflow 才能启动。
+      用例：sessions.service.spec 3 条（缺成员拒绝并出卡、批准后同一选择启动并绑定哈希、
+      disabled 成员邀请无效仍 blocked）
+
+踩坑（记进 Checklist 证据）：T3 守卫落地后全量 `npm run test` 报 5 条失败，均在
+`workflow-session-flow.spec.ts`（不是 `sessions.service.spec.ts`，单跑后者会误判为已绿）。
+根因不是测试环境泄漏，而是这 5 条用例的夹具依赖 T3 之前的「静默并入 involvedAgentIds」行为：
+session 只有 coordinator，工作流版本需要 requirements，旧代码直接并入。按 AC5 守卫是对的，
+已把夹具改为预置工作流所需成员，并把原「断言静默并入成功」改为「断言不发生静默扩员」。
 
 ## T4 实现启动握手与持久化派发（AC6）
 
