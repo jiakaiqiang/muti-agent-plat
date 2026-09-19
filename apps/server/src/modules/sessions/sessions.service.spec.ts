@@ -3726,3 +3726,83 @@ test('an execution-time scope change opens one analysed change request and leave
     changeRequests: { list(sessionId: string): unknown[] };
   }).changeRequests.list(session.id).length, 1, 'a duplicate submit does not queue twice');
 });
+
+test('choosing stop-and-revise stops the run and freezes writebacks before anything is revised', async () => {
+  const abandoned: string[] = [];
+  const fixture = makeService({
+    workspaceWritebacks: {
+      list: () => [
+        { id: 'wb-1', sessionId: 'x', status: 'queued' },
+        { id: 'wb-2', sessionId: 'x', status: 'applied' }
+      ],
+      async resolve(_sessionId: string, writebackId: string) {
+        abandoned.push(writebackId);
+        return { id: writebackId };
+      }
+    } as never
+  });
+  const { session } = await fixture.service.create({ input: '实现订单导出。' });
+  session.status = 'EXECUTING';
+  session.workflowRunId = 'run-choice';
+  session.activeWorkItemId = 'wi-choice';
+  await fixture.service.sendMessage(session.id, '顺便加一个导出按钮');
+  const card = fixture.events.find((event) => event.type === 'user_confirmation_requested'
+    && (event.metadata as { payload?: { reason?: string } })?.payload?.reason === 'execution_scope_change')!;
+  const confirmationId = (card.metadata as { payload: { confirmationId: string } }).payload.confirmationId;
+
+  await fixture.service.resolveExecutionScopeChange(session.id, { confirmationId, choice: 'pause_and_revise' });
+
+  // The order matters: a revision that starts before the run stops would edit a
+  // contract other agents are still executing against.
+  assert.equal(fixture.service.get(session.id).status, 'PAUSED', 'the run is stopped first');
+  assert.deepEqual(abandoned, ['wb-1'], 'only unfinished writebacks are frozen; applied ones stay');
+  const stored = (fixture.service as unknown as {
+    changeRequests: { list(sessionId: string): Array<{ status: string; choice?: string }> };
+  }).changeRequests.list(session.id);
+  assert.equal(stored[0]?.choice, 'pause_and_revise');
+  assert.equal(stored[0]?.status, 'revising', 'a stopped run moves the change into revision');
+});
+
+test('choosing defer leaves the run alone and parks the change for later', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: '实现订单导出。' });
+  session.status = 'EXECUTING';
+  session.workflowRunId = 'run-defer';
+  session.activeWorkItemId = 'wi-defer';
+  await fixture.service.sendMessage(session.id, '顺便加一个导出按钮');
+  const card = fixture.events.find((event) => event.type === 'user_confirmation_requested'
+    && (event.metadata as { payload?: { reason?: string } })?.payload?.reason === 'execution_scope_change')!;
+  const confirmationId = (card.metadata as { payload: { confirmationId: string } }).payload.confirmationId;
+
+  await fixture.service.resolveExecutionScopeChange(session.id, { confirmationId, choice: 'defer' });
+
+  assert.equal(fixture.service.get(session.id).status, 'EXECUTING', 'deferring must not stop the run');
+  const stored = (fixture.service as unknown as {
+    changeRequests: { list(sessionId: string): Array<{ status: string }> };
+  }).changeRequests.list(session.id);
+  assert.equal(stored[0]?.status, 'deferred');
+});
+
+test('a replayed choice is the same decision and a different one is refused', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: '实现订单导出。' });
+  session.status = 'EXECUTING';
+  session.workflowRunId = 'run-replay';
+  session.activeWorkItemId = 'wi-replay';
+  await fixture.service.sendMessage(session.id, '顺便加一个导出按钮');
+  const card = fixture.events.find((event) => event.type === 'user_confirmation_requested'
+    && (event.metadata as { payload?: { reason?: string } })?.payload?.reason === 'execution_scope_change')!;
+  const confirmationId = (card.metadata as { payload: { confirmationId: string } }).payload.confirmationId;
+
+  await fixture.service.resolveExecutionScopeChange(session.id, { confirmationId, choice: 'defer' });
+  // A double click carries the same decision: it must not fail the user.
+  await fixture.service.resolveExecutionScopeChange(session.id, { confirmationId, choice: 'defer' });
+  await assert.rejects(
+    () => fixture.service.resolveExecutionScopeChange(session.id, { confirmationId, choice: 'pause_and_revise' }),
+    'a decided change cannot be silently re-decided'
+  );
+  const stored = (fixture.service as unknown as {
+    changeRequests: { list(sessionId: string): Array<{ status: string; choice?: string }> };
+  }).changeRequests.list(session.id);
+  assert.equal(stored[0]?.choice, 'defer', 'the first decision stays authoritative');
+});

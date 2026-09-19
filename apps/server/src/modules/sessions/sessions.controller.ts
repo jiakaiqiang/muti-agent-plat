@@ -378,6 +378,14 @@ export class SessionsController {
     return ok(await this.sessions.resolveWorkspaceWriteback(sessionId, writebackId, body));
   }
 
+  @Post('sessions/:sessionId/change-requests/decision')
+  resolveExecutionScopeChange(
+    @Param('sessionId') sessionId: string,
+    @Body() body: { confirmationId: string; choice: 'pause_and_revise' | 'defer' | 'reject' }
+  ) {
+    return this.sessions.resolveExecutionScopeChange(sessionId, body).then(ok);
+  }
+
   @Post('sessions/:sessionId/workflow/member-mapping')
   resolveWorkflowMemberMapping(
     @Param('sessionId') sessionId: string,

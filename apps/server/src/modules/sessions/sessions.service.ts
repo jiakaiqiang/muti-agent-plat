@@ -44,7 +44,8 @@ import type {
   WorkItem
 ,
   RequirementConfirmationBinding,
-  WorkflowStartBinding
+  WorkflowStartBinding,
+  ChangeRequestChoice
 } from '@agent-cluster/shared';
 import { matchesRequirementConfirmation, requirementConfirmationFingerprint } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
@@ -2405,6 +2406,108 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       routingStatus: undefined,
       idempotentReplay: false as const
     };
+  }
+
+  /**
+   * The user picked how to handle an execution-time scope change (AC3/AC4).
+   *
+   * `pause_and_revise` is ordered on purpose: the run stops and unfinished
+   * writebacks are frozen *before* the request moves into revision. Revising a
+   * contract while agents still execute against it would let a node finish
+   * against a requirement the user has already replaced, and an in-flight
+   * writeback would land changes nobody approved.
+   *
+   * A replayed click is the same decision (returned as-is); a different choice
+   * on a decided request is refused so the first decision stays authoritative.
+   */
+  async resolveExecutionScopeChange(
+    sessionId: string,
+    input: { confirmationId: string; choice: ChangeRequestChoice }
+  ) {
+    const session = this.get(sessionId);
+    const request = this.changeRequests
+      .list(sessionId)
+      .find((item) => item.choiceConfirmationId === input.confirmationId)
+      ?? this.pendingScopeChangeRequest(sessionId, input.confirmationId);
+    if (!request) throw new BadRequestException(`Scope change confirmation is missing: ${input.confirmationId}`);
+
+    // Replay path: a decided request answers from what it already recorded, so a
+    // double click never fails the user and never re-runs the stop.
+    if (request.choice) {
+      if (request.choice !== input.choice) {
+        throw new ConflictException({
+          code: 'CHANGE_CHOICE_ALREADY_RECORDED',
+          recorded: request.choice,
+          received: input.choice
+        });
+      }
+      return { session, changeRequest: request };
+    }
+
+    const decided = await this.changeRequests.recordChoice(request.id, {
+      choice: input.choice,
+      confirmationId: input.confirmationId
+    });
+    if (decided.status === 'rejected') throw new ConflictException({ code: decided.code });
+
+    this.events.create({
+      sessionId,
+      type: 'user_confirmation_resolved',
+      sessionUserId: session.ownerId,
+      content: input.choice === 'pause_and_revise'
+        ? '已选择停稳后修订需求。'
+        : input.choice === 'defer'
+          ? '已选择当前需求完成后再处理该变更。'
+          : '已选择不做这个变更。',
+      metadata: createMetadata('system_notice', {
+        confirmationId: input.confirmationId,
+        reason: 'execution_scope_change',
+        status: 'approved',
+        selectedOptionKey: input.choice,
+        changeRequestId: request.id
+      })
+    });
+
+    if (input.choice !== 'pause_and_revise') {
+      this.touchSession(session);
+      return { session, changeRequest: this.changeRequests.get(sessionId, request.id) ?? decided.request };
+    }
+
+    // Stop first. A pause failure leaves the request in `stopping`, which is the
+    // honest state: the user's choice is recorded and the stop can be retried.
+    await this.pause(sessionId, '用户选择停稳后修订需求范围。', input.confirmationId);
+    await this.freezeUnfinishedWritebacks(session);
+    const revising = await this.changeRequests.transition(request.id, 'revising');
+    if (revising.status === 'rejected') throw new ConflictException({ code: revising.code });
+    this.touchSession(session);
+    return { session, changeRequest: this.changeRequests.get(sessionId, request.id) ?? revising.request };
+  }
+
+  /** The open request a scope-change card belongs to, matched through its own payload. */
+  private pendingScopeChangeRequest(sessionId: string, confirmationId: string) {
+    const card = this.events.list(sessionId).find((event) =>
+      event.type === 'user_confirmation_requested' &&
+      (event.metadata.payload as { confirmationId?: string; reason?: string } | undefined)?.confirmationId === confirmationId &&
+      (event.metadata.payload as { reason?: string } | undefined)?.reason === 'execution_scope_change');
+    const changeRequestId = (card?.metadata.payload as { changeRequestId?: string } | undefined)?.changeRequestId;
+    return changeRequestId ? this.changeRequests.get(sessionId, changeRequestId) : undefined;
+  }
+
+  /**
+   * Abandons writebacks that have not landed yet. Applied ones are history and
+   * stay; anything still queued or mid-merge would otherwise write files against
+   * a requirement the user is replacing.
+   */
+  private async freezeUnfinishedWritebacks(session: SessionDetail) {
+    const unfinished = new Set(['queued', 'merging', 'applying', 'conflicted']);
+    const records = this.workspaceWritebacks?.list?.(session.id) ?? [];
+    for (const record of records) {
+      if (!unfinished.has(record.status)) continue;
+      await this.workspaceWritebacks!.resolve(session, record.id, { action: 'abandon_writeback' })
+        .catch((error: unknown) => {
+          this.logger.error(`Failed to freeze writeback ${record.id}: ${String(error)}`);
+        });
+    }
   }
 
   private async handleExactCommandMessage(

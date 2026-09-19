@@ -82,7 +82,11 @@
 
 ## T3 实现用户选择与暂停修订（AC3/AC4）
 
-- [ ] T3-1 选择「停稳后修订」：先停稳 + 冻结未完成写回（复用现有停止屏障），再建文档新修订
+- [x] T3-1 选择「停稳后修订」：先停稳 + 冻结未完成写回（复用现有停止屏障），再建文档新修订
+  证据：`resolveExecutionScopeChange`（sessions.service）+ controller 路由
+  `POST /sessions/:id/execution-scope-change`；三条新用例（停稳顺序、defer 不停运行、
+  重放幂等/改选被拒）随 `sessions.service.spec` 104/104 绿。顺序上先 `pause()` 再
+  `changeRequests.transition('revising')`，只冻结未完成写回（applied 不动）。
 - [ ] T3-2 旧批准失效、重确认后按同一范围重新校验流程；复用已完成结果必须有版本匹配证据
       （文件 hash + 输入/验收版本），迟到的旧调用结果不得充当新需求成果
 
