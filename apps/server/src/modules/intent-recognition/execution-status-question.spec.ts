@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   matchExecutionConsultationQuestion,
+  matchExecutionScopeChange,
   matchExecutionStatusQuestion
 } from './deterministic-command-guard.service.js';
 
@@ -87,4 +88,28 @@ test('a control command or a bare statement is not a consultation', () => {
 
 test('an overlong consultation message stays on the semantic router', () => {
   assert.equal(matchExecutionConsultationQuestion(`影响大吗？${'补充说明'.repeat(60)}`), undefined);
+});
+
+test('a supplement during execution is recognised as a scope change', () => {
+  for (const content of [
+    '顺便加一个导出按钮',
+    '另外把接口改成分页',
+    '还要支持退款明细',
+    'also add a CSV export',
+    'additionally the export needs refunds'
+  ]) {
+    const matched = matchExecutionScopeChange(content);
+    assert.ok(matched, `expected a scope change: ${content}`);
+    assert.equal(matched.reasonCode, 'EXECUTION_SCOPE_CHANGE');
+  }
+});
+
+test('a read-only question or a control command is not a scope change', () => {
+  for (const content of ['进度如何', '做到哪一步了', '停止', 'cancel', '这个改动影响大吗？']) {
+    assert.equal(matchExecutionScopeChange(content), undefined, `must not raise a change: ${content}`);
+  }
+});
+
+test('an overlong supplement stays on the semantic router', () => {
+  assert.equal(matchExecutionScopeChange(`顺便加一个导出按钮${'补充说明'.repeat(60)}`), undefined);
 });

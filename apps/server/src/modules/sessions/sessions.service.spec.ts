@@ -3688,3 +3688,41 @@ test('an @ message that changes scope during execution is not treated as a consu
 
   assert.deepEqual(fixture.executionConsultations, [], 'a requirement must not be answered as a read-only consultation');
 });
+
+test('an execution-time scope change opens one analysed change request and leaves the contract alone', async () => {
+  const fixture = makeService({ taskItems: [
+    { id: 'task-1', sessionId: 'x', title: '实现导出接口', status: 'running', workflowNodeId: 'develop' } as never,
+    { id: 'task-2', sessionId: 'x', title: '补充用例', status: 'pending', workflowNodeId: 'quality' } as never
+  ] });
+  const { session } = await fixture.service.create({ input: '实现订单导出。' });
+  session.status = 'EXECUTING';
+  session.workflowRunId = 'run-change';
+  session.activeWorkItemId = 'wi-change';
+
+  const plans = fixture.followUpPreparations.length;
+  const result = await fixture.service.sendMessage(session.id, '顺便加一个导出按钮');
+
+  // One durable request, analysed against the versions it was raised on.
+  const requests = (fixture.service as unknown as {
+    changeRequests: { list(sessionId: string): Array<Record<string, unknown>> };
+  }).changeRequests.list(session.id);
+  assert.equal(requests.length, 1, 'one message opens exactly one change request');
+  assert.equal(requests[0].status, 'waiting_user', 'the user must choose before anything moves');
+  const analysis = requests[0].analysis as { affectedTaskIds?: string[]; options?: string[] } | undefined;
+  assert.ok(analysis, 'the card must carry an impact analysis, not a bare ack');
+  assert.ok((analysis.options ?? []).includes('pause_and_revise'), 'the choice set is offered explicitly');
+
+  // The card is the handoff to the user; the contract is untouched until they pick.
+  const card = fixture.events.find((event) => event.type === 'user_confirmation_requested'
+    && (event.metadata as { payload?: { reason?: string } })?.payload?.reason === 'execution_scope_change');
+  assert.ok(card, 'a scope change raises its own confirmation card');
+  assert.equal(result.handlingPlan.requiresBriefRevision, false, 'nothing is revised before the user chooses');
+  assert.equal(fixture.followUpPreparations.length, plans, 'no re-planning happens on the raise');
+  assert.equal(fixture.service.get(session.id).status, 'EXECUTING', 'the run is not stopped by the raise itself');
+
+  // A replayed submit (web + desktop) is the same request.
+  await fixture.service.sendMessage(session.id, '顺便加一个导出按钮');
+  assert.equal((fixture.service as unknown as {
+    changeRequests: { list(sessionId: string): unknown[] };
+  }).changeRequests.list(session.id).length, 1, 'a duplicate submit does not queue twice');
+});

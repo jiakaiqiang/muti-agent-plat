@@ -39,6 +39,11 @@ export type ExecutionConsultationQuestionMatch = {
   reasonCode: 'EXECUTION_CONSULTATION_QUESTION';
 };
 
+export type ExecutionScopeChangeMatch = {
+  normalizedText: string;
+  reasonCode: 'EXECUTION_SCOPE_CHANGE';
+};
+
 const COMMANDS: ReadonlyArray<{
   command: ExactUserCommand;
   reasonCode: ExactCommandReasonCode;
@@ -241,10 +246,29 @@ export function matchExecutionConsultationQuestion(content: string): ExecutionCo
   return { normalizedText, reasonCode: 'EXECUTION_CONSULTATION_QUESTION' };
 }
 
+/**
+ * Matches an execution-time supplement that asks for work the confirmed scope
+ * does not cover. It only recognises the explicit supplement markers, so an
+ * ordinary question or a control command is left to its own path; anything this
+ * matches must go through impact analysis and an explicit user choice before a
+ * single node moves (AC3).
+ */
+export function matchExecutionScopeChange(content: string): ExecutionScopeChangeMatch | undefined {
+  const normalizedText = normalizeExactCommandText(content);
+  if (!normalizedText || normalizedText.length > 200) return undefined;
+  if (matchExactUserCommand(normalizedText)) return undefined;
+  if (!SCOPE_CARRYING_PHRASES.test(normalizedText)) return undefined;
+  return { normalizedText, reasonCode: 'EXECUTION_SCOPE_CHANGE' };
+}
+
 @Injectable()
 export class DeterministicCommandGuardService {
   match(content: string) {
     return matchExactUserCommand(content);
+  }
+
+  matchScopeChange(content: string) {
+    return matchExecutionScopeChange(content);
   }
 
   matchWorkflowDirective(content: string) {

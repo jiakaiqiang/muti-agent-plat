@@ -72,7 +72,13 @@
   （有界只读委派、回复落在 delegation 上进入主 Agent 综合）；`sendMessage` 在 EXECUTING +
   有 @ + 命中咨询匹配时短路。缺口：`prepareFollowUpExecution` 原先只在 @ 人数>1 或
   discussionRequired 时才走委派，单个 @ 会落到跟进执行路径（重新拆任务）。
-- [ ] T2-3 范围变更 → 影响分析（受影响任务/文件/确认版本 + 代价），用户未选前不改当前契约
+- [x] T2-3 范围变更 → 影响分析（受影响任务/文件/确认版本 + 代价），用户未选前不改当前契约
+  证据：`deterministic-command-guard.service.spec` + `execution-status-question.spec` 13/13
+  （`matchExecutionScopeChange`：补充类措辞成立；只读问句/控制命令/超长消息不成立）；
+  `sessions.service.spec` 101/101 新增「执行期范围变更开一个已分析的 ChangeRequest 且不动契约」：
+  一条消息一个请求、状态停在 `waiting_user`、卡片 reason=`execution_scope_change` 带
+  受影响任务与可选项、`requiresBriefRevision=false`、不触发跟进重规划、会话仍 `EXECUTING`、
+  重复提交不二次排队。四门禁全绿。
 
 ## T3 实现用户选择与暂停修订（AC3/AC4）
 

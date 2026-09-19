@@ -65,6 +65,7 @@ import { IntentRecognitionService } from '../intent-recognition/intent-recogniti
 import {
   matchExactUserCommand,
   matchExecutionConsultationQuestion,
+  matchExecutionScopeChange,
   matchExecutionStatusQuestion,
   matchWorkflowAgentDirective,
   matchWorkflowAgentSkipCommand,
@@ -1744,6 +1745,14 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       );
       if (consulted) return consulted;
     }
+    // A supplement that asks for work during execution is a scope change, not a
+    // silent edit of the running contract: it opens one durable request, the
+    // coordinator analyses its impact, and the user chooses (AC3). Nothing here
+    // stops the run or revises the requirement.
+    if (session.status === 'EXECUTING' && matchExecutionScopeChange(content)) {
+      const raised = await this.handleExecutionScopeChange(session, content, mentionedAgentIds, clientMessageId);
+      if (raised) return raised;
+    }
     const routingMode = this.intentRoutingMode();
     const explicitPreference = this.intentRecognition
       .recognizeUserMessage(content, session.status).intent === 'preference_input';
@@ -2233,6 +2242,159 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
     const consulted = await consult.call(this.orchestrator, session, content, mentionedAgentIds);
     if (!consulted) return undefined;
+    this.touchSession(session);
+    return {
+      event,
+      handlingPlan,
+      deferred: false as const,
+      followUpMessageId: undefined,
+      routingId: undefined,
+      routingStatus: undefined,
+      idempotentReplay: false as const
+    };
+  }
+
+  /**
+   * A supplement that asks for work while the graph runs. It becomes one durable
+   * change request carrying an impact analysis, and the user picks what happens
+   * next; the confirmed contract and the running nodes stay untouched until they
+   * do (AC3). Returns undefined when there is no requirement to raise it
+   * against, so the caller keeps its own routing.
+   */
+  private async handleExecutionScopeChange(
+    session: SessionDetail,
+    content: string,
+    mentionedAgentIds: string[],
+    clientMessageId: string | undefined
+  ) {
+    const workItemId = session.activeWorkItemId;
+    if (!workItemId) return undefined;
+    const summary = content.trim();
+    const workItemRevision = this.contextManagement?.getWorkItem?.(session.id, workItemId)?.revision ?? 1;
+    const document = this.requirementDocuments.latest(session.id, workItemId);
+    const base = {
+      sessionId: session.id,
+      workItemId,
+      workItemRevision,
+      ...(session.workflowRunId ? { workflowRunId: session.workflowRunId } : {}),
+      ...(document ? { documentId: document.id, documentRevision: document.documentRevision } : {})
+    };
+
+    const handlingPlan: UserMessageHandlingPlan = {
+      intent: 'constraint',
+      requirementRelation: 'continuation',
+      failedExecutionAction: 'none',
+      priority: 'normal',
+      shouldPause: false,
+      affectedTaskIds: [],
+      affectedAgentIds: [...mentionedAgentIds],
+      // Nothing is revised on the raise: the analysis comes first, then the user.
+      requiresBriefRevision: false,
+      requiresUserConfirmation: true,
+      coordinatorInstruction: '先给出影响分析并请用户选择，不改动正在执行的已确认范围。'
+    };
+    const event = this.events.create({
+      sessionId: session.id,
+      type: 'user_message',
+      sessionUserId: session.ownerId,
+      userMessageIntent: handlingPlan.intent,
+      priority: handlingPlan.priority,
+      content,
+      toAgentIds: mentionedAgentIds,
+      metadata: {
+        ...createMetadata('chat_message', { text: content, mentionedAgentIds, handlingPlan }),
+        ...(clientMessageId ? { idempotencyKey: this.messageIdempotencyKey(session.id, clientMessageId) } : {})
+      }
+    });
+
+    /**
+     * The same words against the same versions while still unresolved are the
+     * same request. Two clients forwarding one supplement each carry their own
+     * message event, so keying only on the event id would queue it twice.
+     */
+    const open = this.changeRequests.unresolved(session.id).find((item) =>
+      item.summary === summary &&
+      item.base.workItemId === base.workItemId &&
+      item.base.workItemRevision === base.workItemRevision &&
+      item.base.workflowRunId === base.workflowRunId &&
+      item.base.documentRevision === base.documentRevision);
+    if (open) {
+      this.touchSession(session);
+      return {
+        event,
+        handlingPlan,
+        deferred: false as const,
+        followUpMessageId: undefined,
+        routingId: undefined,
+        routingStatus: undefined,
+        idempotentReplay: false as const
+      };
+    }
+
+    const generation = this.lifecycle.generation(session.id);
+    const opened = await this.changeRequests.open({
+      base,
+      sourceEventId: event.id,
+      summary,
+      ...(generation !== undefined ? { generation } : {})
+    });
+    // A closed or restored session is not a place to queue new scope: let the
+    // ordinary routing path report that rather than inventing a card here.
+    if (opened.status === 'rejected') return undefined;
+    const request = opened.request;
+
+    const openTaskStates = new Set(['pending', 'assigned', 'accepted', 'claimed', 'running', 'waiting', 'reviewing', 'reworking']);
+    const tasks = this.tasks.list(session.id);
+    const affectedTaskIds = tasks.filter((task) => openTaskStates.has(task.status)).map((task) => task.id);
+    const affectedFilePaths = [...new Set(
+      (this.fileRevisions?.listChains?.(session.id) ?? [])
+        .map((chain) => (chain as { filePath?: string }).filePath)
+        .filter((path): path is string => Boolean(path))
+    )];
+    const analysed = await this.changeRequests.recordAnalysis(request.id, {
+      affectedTaskIds,
+      affectedFilePaths,
+      affectedDocumentRevision: document?.documentRevision ?? 0,
+      explanation: [
+        `变更请求：${summary}`,
+        affectedTaskIds.length ? `受影响的进行中任务：${affectedTaskIds.length} 项` : '当前没有进行中的任务受影响',
+        document ? `当前已确认文档版本：v${document.documentRevision}` : '当前需求尚无已发布文档版本'
+      ].join('\n'),
+      options: ['pause_and_revise', 'defer', 'reject'],
+      current: base
+    });
+    if (analysed.status === 'rejected') return undefined;
+
+    const confirmationId = crypto.randomUUID();
+    const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    this.events.create({
+      sessionId: session.id,
+      type: 'user_confirmation_requested',
+      fromAgentId: coordinator.id,
+      priority: 'high',
+      content: `「${summary}」会改变当前已确认范围，请选择如何处理。`,
+      metadata: createMetadata('confirmation_card', {
+        confirmationId,
+        reason: 'execution_scope_change',
+        title: '执行中收到范围变更',
+        description: [
+          analysed.status === 'applied' ? analysed.request.analysis?.explanation ?? '' : '',
+          '选择「停稳后修订」会先停止当前执行并冻结未完成写回，再修订需求文档并重新确认。'
+        ].filter(Boolean).join('\n'),
+        changeRequestId: request.id,
+        workItemId: base.workItemId,
+        workItemRevision: base.workItemRevision,
+        ...(base.workflowRunId ? { workflowRunId: base.workflowRunId } : {}),
+        ...(document ? { documentId: document.id, documentRevision: document.documentRevision } : {}),
+        affectedTaskIds,
+        affectedFilePaths,
+        options: [
+          { key: 'pause_and_revise', label: '停稳后修订需求', style: 'primary' as const },
+          { key: 'defer', label: '当前需求做完再处理', style: 'default' as const },
+          { key: 'reject', label: '不做这个变更', style: 'danger' as const }
+        ]
+      })
+    });
     this.touchSession(session);
     return {
       event,
