@@ -5286,7 +5286,53 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       void this.persistence.releaseWorkspaceSessionLease(session.workspaceId, session.id).catch((error) => {
         this.logger.error(`Failed to release workspace session lease for ${session.workspaceId}: ${String(error)}`);
       });
+      this.offerNextRequirement(session);
     }
+  }
+
+  /**
+   * The current requirement reached a terminal state and the user has changes
+   * parked behind it. They are offered, not started: a queued change is a
+   * request, never an execution authorisation, so picking one up still goes
+   * through its own document and workflow selection (AC6).
+   */
+  private offerNextRequirement(session: SessionDetail) {
+    const deferred = this.changeRequests.deferred(session.id);
+    if (!deferred.length) return;
+    let coordinatorId: string | undefined;
+    try {
+      coordinatorId = this.pickSessionAgent(session, ['coordinator']).id;
+    } catch {
+      // A session whose coordinator is gone still records the queue; the card
+      // simply has no author.
+    }
+    const changeRequestIds = deferred.map((item) => item.id);
+    const summaries = deferred.map((item) => item.summary);
+    // Keyed on the exact set, so a replayed terminal transition reuses this card
+    // while a later run with new parked changes gets its own.
+    const fingerprint = crypto.createHash('sha256').update(changeRequestIds.join('|')).digest('hex').slice(0, 16);
+    this.events.createOnce(`next-requirement-pending:${session.id}:${fingerprint}`, {
+      sessionId: session.id,
+      type: 'user_confirmation_requested',
+      ...(coordinatorId ? { fromAgentId: coordinatorId } : {}),
+      priority: 'high',
+      content: `当前需求已结束，还有 ${deferred.length} 个变更在排队，请选择下一步。`,
+      metadata: createMetadata('confirmation_card', {
+        confirmationId: `next-requirement:${session.id}:${fingerprint}`,
+        reason: 'next_requirement_pending',
+        title: '还有排队中的需求变更',
+        description: [
+          ...summaries.map((summary, index) => `${index + 1}. ${summary}`),
+          '排队不等于已获批执行：选择处理后仍需重新确认需求文档并选择工作流。'
+        ].join('\n'),
+        changeRequestIds,
+        summaries,
+        options: [
+          { key: 'start_next', label: '处理下一个变更', style: 'primary' as const },
+          { key: 'keep_queued', label: '暂时保留队列', style: 'default' as const }
+        ]
+      })
+    });
   }
 
   private async retryActiveWorkItemStatus(session: SessionDetail, status: WorkItem['status']) {

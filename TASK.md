@@ -112,8 +112,16 @@
   （新增 2 条：未知产物 id 被拒 / 真实产物仍可显式继承）。
   踩坑：既有用例 14 回归，根因是它的夹具依赖旧的零校验行为——产物只作为内存数组传给切片函数、
   从未落库；已改为按真实系统方式先落库再继承，守卫按 AC5 保留。
-- [ ] T4-2 排队幂等有序可查看；当前运行 完成/失败/取消 时提示下一需求，
+- [x] T4-2 排队幂等有序可查看；当前运行 完成/失败/取消 时提示下一需求，
       队列存在**不等于**自动获得执行授权（仍走文档 + 流程选择）
+  证据：`setStatus` 的终态分支（COMPLETED/FAILED/CANCELLED，且前态非终态）新增
+  `offerNextRequirement`：按 `changeRequests.deferred()` 的排队顺序发 reason=`next_requirement_pending`
+  确认卡，卡片带 `changeRequestIds` + `summaries`，文案明确「排队不等于已获批执行」。
+  用 `events.createOnce` + 队列 id 集合的 hash 做键，重放终态不会发第二张卡；队列为空不发卡。
+  `sessions.service.spec` 107/107 绿（新增 3 条：提示但不自动启动执行、幂等且顺序稳定、空队列不造卡）。
+  踩坑：我最初用 `control(session, 'COMPLETED')` 驱动终态，被 `assertControlTransition` 拒
+  （EXECUTING→COMPLETED 不是合法控制边）；生产是由执行完成路径经 `setStatus` 到达终态，
+  已改为按生产路径驱动。
 
 ## T5 接入状态投影和恢复（AC6/AC7）
 

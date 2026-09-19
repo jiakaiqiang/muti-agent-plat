@@ -3806,3 +3806,91 @@ test('a replayed choice is the same decision and a different one is refused', as
   }).changeRequests.list(session.id);
   assert.equal(stored[0]?.choice, 'defer', 'the first decision stays authoritative');
 });
+
+/** Drives the terminal transition the way the execution paths do. */
+function finishRun(service: SessionsService, session: SessionDetail, status: 'COMPLETED' | 'FAILED' | 'CANCELLED') {
+  (service as unknown as { setStatus(session: SessionDetail, status: string): void }).setStatus(session, status);
+}
+
+test('finishing a run offers the deferred change without granting it execution authority', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: '实现订单导出。' });
+  session.status = 'EXECUTING';
+  session.workflowRunId = 'run-queue';
+  session.activeWorkItemId = 'wi-queue';
+  await fixture.service.sendMessage(session.id, '顺便加一个导出按钮');
+  const card = fixture.events.find((event) => event.type === 'user_confirmation_requested'
+    && (event.metadata as { payload?: { reason?: string } })?.payload?.reason === 'execution_scope_change')!;
+  const confirmationId = (card.metadata as { payload: { confirmationId: string } }).payload.confirmationId;
+  await fixture.service.resolveExecutionScopeChange(session.id, { confirmationId, choice: 'defer' });
+
+  const startsBefore = fixture.executionStarts.length;
+  // Production reaches COMPLETED through setStatus when execution finishes, not
+  // through control(): the control map has no EXECUTING -> COMPLETED edge.
+  finishRun(fixture.service, session, 'COMPLETED');
+
+  // The user is told what is queued...
+  const prompt = fixture.events.find((event) => event.type === 'user_confirmation_requested'
+    && (event.metadata as { payload?: { reason?: string } })?.payload?.reason === 'next_requirement_pending');
+  assert.ok(prompt, 'a finished run must surface the requirement waiting behind it');
+  const payload = (prompt.metadata as { payload: { changeRequestIds: string[]; summaries: string[] } }).payload;
+  assert.equal(payload.changeRequestIds.length, 1);
+  assert.deepEqual(payload.summaries, ['顺便加一个导出按钮']);
+
+  // ...but a queued change is not an execution authorisation: nothing restarts
+  // on its own, and the next requirement still has to go through its own
+  // document and workflow selection.
+  assert.equal(fixture.executionStarts.length, startsBefore, 'a queued change must not auto-start execution');
+  assert.equal(fixture.service.get(session.id).status, 'COMPLETED', 'the session stays in its terminal state');
+  const stored = (fixture.service as unknown as {
+    changeRequests: { list(sessionId: string): Array<{ status: string }> };
+  }).changeRequests.list(session.id);
+  assert.equal(stored[0]?.status, 'deferred', 'the change stays parked until the user picks it up');
+});
+
+test('the queue prompt is emitted once and lists deferred changes in a stable order', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: '实现订单导出。' });
+  session.status = 'EXECUTING';
+  session.workflowRunId = 'run-order';
+  session.activeWorkItemId = 'wi-order';
+
+  for (const supplement of ['顺便加一个导出按钮', '另外把接口改成分页']) {
+    await fixture.service.sendMessage(session.id, supplement);
+    const card = [...fixture.events].reverse().find((event) => event.type === 'user_confirmation_requested'
+      && (event.metadata as { payload?: { reason?: string; changeRequestId?: string } })?.payload?.reason === 'execution_scope_change'
+      && !(event.metadata as { payload: { handled?: boolean } }).payload.handled)!;
+    const confirmationId = (card.metadata as { payload: { confirmationId: string } }).payload.confirmationId;
+    (card.metadata as { payload: { handled?: boolean } }).payload.handled = true;
+    await fixture.service.resolveExecutionScopeChange(session.id, { confirmationId, choice: 'defer' });
+  }
+
+  finishRun(fixture.service, session, 'FAILED');
+  // A retried run that fails again re-enters the terminal hook; the same set of
+  // parked changes must not queue a second prompt.
+  session.status = 'EXECUTING';
+  finishRun(fixture.service, session, 'FAILED');
+
+  const prompts = fixture.events.filter((event) => event.type === 'user_confirmation_requested'
+    && (event.metadata as { payload?: { reason?: string } })?.payload?.reason === 'next_requirement_pending');
+  assert.equal(prompts.length, 1, 'the prompt is idempotent across repeated terminal transitions');
+  assert.deepEqual(
+    (prompts[0].metadata as { payload: { summaries: string[] } }).payload.summaries,
+    ['顺便加一个导出按钮', '另外把接口改成分页'],
+    'queued changes are listed in the order they were raised'
+  );
+});
+
+test('a finished run with nothing queued does not invent a prompt', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: '实现订单导出。' });
+  session.status = 'EXECUTING';
+
+  finishRun(fixture.service, session, 'COMPLETED');
+
+  assert.equal(
+    fixture.events.some((event) => event.type === 'user_confirmation_requested'
+      && (event.metadata as { payload?: { reason?: string } })?.payload?.reason === 'next_requirement_pending'),
+    false
+  );
+});
