@@ -185,8 +185,27 @@ PostgreSQL V15 `workflow_start_requests`（集成用例 14/14）、
 
 ## T6 验证版本竞争和完整交接（AC1–AC7）
 
-- [ ] T6-1 旧卡/重复点击/文档修订后确认/流程下架/能力缺失/启动崩溃/质量拒绝矩阵
-- [ ] T6-2 独立 PostgreSQL（新集合）+ E2E + 四门禁
+- [x] T6-1 验收矩阵已填（checklist §1 七行全部由通过证据替换「待验证」）。新增 E2E
+      `tests/e2e/requirement-document-handoff-smoke.mjs`（`npm run test:e2e:requirement-document-handoff`）
+      实测通过：A 发布 doc rev1 → 确认 → 唯一 run；B 拒绝过期绑定、拒绝同一确认换流程、
+      缺成员发映射卡且 0 次 start。矩阵里逐行标了**未覆盖**项（专家自提修订、浏览器渲染快照、
+      选后 unpublish 时序、真实进程级崩溃注入），不记为通过。
+- [x] T6-2 隔离 PostgreSQL 14/14（`agent_cluster_p4t6_18601`，含 V15
+      `workflow_start_requests` 跨实例唯一 + 只派发一次；跑完即 drop）；四门禁见下。
+
+E2E 抓到的真缺陷（不是测试问题，已修）：`assertConfirmationCurrent` 原先拿**活动 WorkItem
+的 revision 计数器**当需求版本判据，而 `WAIT_USER_CONFIRM` 状态流转本身会经
+`updateActiveWorkItemStatus` 把它 +1 —— 于是每一次正常确认都被判 `stale_confirmation`
+（E2E 第一次跑就撞到）。改为以**文档自身记录的 `workItemRevision`** 为准：状态流转不改需求
+语义，真正的需求修订会产出新文档版本，仍被 `documentRevision` + `contentHash` 捕获。
+
+顺带修掉一个潜伏缺陷：共享辅助 `createPublishedAgentWorkflow` 只设 `outputContract`，
+而发布校验要求 `index > 0` 的节点必须有 `inputContract` —— 任何两节点以上的工作流都发布不了
+（`workflow-managed-execution-smoke.mjs` 同样受影响，此前没人跑到）。已在辅助函数里补齐。
+
+两个开关默认值（T2 遗留问题的答案）：`MAIN_AGENT_DISCUSSION_ENABLED` 与
+`REQUIREMENT_DOCUMENT_ENABLED` 默认仍为 **false**，新路径只在显式开启时生效；
+旧路径逐字未动，全量套件是在两个开关关闭下绿的。
 
 ## 遗留（跨阶段，未完成）
 

@@ -214,6 +214,10 @@ export async function createPublishedAgentWorkflow(apiBase, name, agentKeys) {
       agentId: agent.id,
       stageDescription: `Execute the ${agentKey} stage for the E2E workflow.`,
       outputContract: [`Produce an accepted ${agentKey} stage result.`],
+      // Publish validation requires every downstream stage to declare what it
+      // consumes; without this the helper could only ever build single-node
+      // workflows.
+      ...(index > 0 ? { inputContract: [`Read the ${agentKeys[index - 1]} stage result.`] } : {}),
       order: index
     };
   });

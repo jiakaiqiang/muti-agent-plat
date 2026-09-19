@@ -148,7 +148,8 @@
     "test:e2e:skill-injection": "node tests/e2e/skill-injection-smoke.mjs",
     "test:e2e:autopilot": "node tests/e2e/autopilot-smoke.mjs",
     "test:e2e:autopilot-scheduler": "node tests/e2e/autopilot-bullmq-scheduler-smoke.mjs",
-    "lint": "npm run lint --workspaces --if-present"
+    "lint": "npm run lint --workspaces --if-present",
+    "test:e2e:requirement-document-handoff": "node tests/e2e/requirement-document-handoff-smoke.mjs"
   },
   "engines": {
     "node": ">=20"

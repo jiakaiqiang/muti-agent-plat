@@ -5318,19 +5318,26 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
    * the new difference instead of a bare error (AC3).
    */
   private assertConfirmationCurrent(session: SessionDetail, received: RequirementConfirmationBinding) {
-    const workItems = this.persistence.getCollection<Record<string, Array<{ id: string; revision: number }>>>('workItemsBySession', {});
-    const workItem = (workItems[session.id] ?? []).find((item) => item.id === received.workItemId);
     const latest = this.requirementDocuments.latest(session.id, received.workItemId);
-    const current: RequirementConfirmationBinding | undefined = workItem && latest ? {
+    /**
+     * The requirement version a confirmation is judged against is the one the
+     * *document* was written for, not the live WorkItem counter. That counter
+     * also moves on pure status transitions (WAIT_USER_CONFIRM bumps it via
+     * updateActiveWorkItemStatus), which changes no requirement text — keying
+     * on it made every legitimate approval read as stale. A real requirement
+     * revision produces a new document version, which this check still catches
+     * through documentRevision and contentHash.
+     */
+    const current: RequirementConfirmationBinding | undefined = latest ? {
       sessionId: session.id,
       workItemId: received.workItemId,
-      workItemRevision: workItem.revision,
+      workItemRevision: latest.workItemRevision,
       confirmationId: received.confirmationId,
       documentId: latest.id,
       documentRevision: latest.documentRevision,
       contentHash: latest.contentHash,
       businessFingerprint: requirementConfirmationFingerprint({
-        workItemRevision: workItem.revision,
+        workItemRevision: latest.workItemRevision,
         documentRevision: latest.documentRevision,
         contentHash: latest.contentHash,
         decisionLedgerRevision: session.decisionLedgerRevision ?? 0
