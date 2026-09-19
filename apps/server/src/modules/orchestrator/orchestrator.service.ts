@@ -2433,7 +2433,8 @@ export class OrchestratorService {
             cache: { bundles: this.contextBundles, generation: this.lifecycle.generation(session.id) ?? 0 } }),
           expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' }, budget: contextAssembly.budget,
           ...(isFileRevisionTask ? { writeModeOverride: 'proposal_only' as const } : {}) });
-        inputFingerprint = acceptanceFingerprint(task, plan, this.taskDependencyArtifacts(session, task));
+        inputFingerprint = acceptanceFingerprint(task, plan, this.taskDependencyArtifacts(session, task),
+          this.requirementVersionBinding(session, task));
         const checkpoint = task.acceptanceCheckpoint;
         if (!plan.pendingApprovals?.length && checkpoint?.inputFingerprint === inputFingerprint &&
           checkpoint.agentId === candidate.id && checkpoint.decision.status === 'accepted') {
@@ -3438,6 +3439,29 @@ export class OrchestratorService {
         mentionedAgentIds: participants.map((agent) => agent.id)
       })
     });
+  }
+
+  /**
+   * The requirement versions a task's acceptance was decided against. Folding
+   * them into the acceptance fingerprint is what stops a completed result from
+   * being reused as output for a revised requirement (AC4): a new requirement
+   * revision or a republished document produces a different fingerprint, so the
+   * stored checkpoint no longer matches and the acceptance is re-decided.
+   * Returns undefined when the session has no requirement version yet, which
+   * keeps the fingerprint stable for pre-document sessions.
+   */
+  private requirementVersionBinding(session: SessionDetail, task: AgentTask) {
+    const workItemId = task.workItemId ?? session.activeWorkItemId;
+    if (!workItemId) return undefined;
+    const workItem = this.contextManagement?.getWorkItem(session.id, workItemId);
+    if (!workItem) return undefined;
+    const document = this.requirementDocuments.latest(session.id, workItemId);
+    return {
+      workItemRevision: workItem.revision,
+      ...(document
+        ? { documentRevision: document.documentRevision, contentHash: document.contentHash }
+        : {})
+    };
   }
 
   /**

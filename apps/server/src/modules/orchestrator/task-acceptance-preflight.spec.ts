@@ -27,3 +27,49 @@ test('acceptance fingerprint ignores task activity but invalidates on permission
   assert.notEqual(acceptanceFingerprint(task, { ...plan, toolCatalog: { ...plan.toolCatalog, catalogHash: 'revoked' } }, []), fingerprint);
   assert.notEqual(acceptanceFingerprint(task, plan, ['changed artifact']), fingerprint);
 });
+
+test('a revised requirement invalidates a completed acceptance so old work cannot be reused as new output', () => {
+  const plan = makeInvocationPlan();
+  const task = { id: 'task', sessionId: plan.sessionId, title: 'Implement', description: 'Scope',
+    acceptanceCriteria: ['Check'], dependsOnTaskIds: [] } as unknown as AgentTask;
+  const atRevision3 = acceptanceFingerprint(task, plan, [], { workItemRevision: 3, documentRevision: 2, contentHash: 'hash-doc-2' });
+
+  // Same task, same agent, same workspace — but the user revised the requirement.
+  // Without the version in the fingerprint the stored checkpoint would still
+  // match and the run would credit the new requirement with the old acceptance.
+  assert.notEqual(
+    acceptanceFingerprint(task, plan, [], { workItemRevision: 4, documentRevision: 2, contentHash: 'hash-doc-2' }),
+    atRevision3,
+    'a new requirement revision must invalidate the acceptance checkpoint'
+  );
+  assert.notEqual(
+    acceptanceFingerprint(task, plan, [], { workItemRevision: 3, documentRevision: 3, contentHash: 'hash-doc-3' }),
+    atRevision3,
+    'a republished document must invalidate the acceptance checkpoint'
+  );
+  // Same revision with different content is still a different document.
+  assert.notEqual(
+    acceptanceFingerprint(task, plan, [], { workItemRevision: 3, documentRevision: 2, contentHash: 'hash-other' }),
+    atRevision3
+  );
+  // Unchanged versions keep reuse working: this guard must not disable the cache.
+  assert.equal(
+    acceptanceFingerprint(task, plan, [], { workItemRevision: 3, documentRevision: 2, contentHash: 'hash-doc-2' }),
+    atRevision3
+  );
+});
+
+test('a session with no published document still produces a stable fingerprint', () => {
+  const plan = makeInvocationPlan();
+  const task = { id: 'task', sessionId: plan.sessionId, title: 'Implement', description: 'Scope',
+    acceptanceCriteria: ['Check'], dependsOnTaskIds: [] } as unknown as AgentTask;
+
+  // Callers that have no requirement version yet must not crash or collapse into
+  // the same fingerprint as a versioned one.
+  const withoutVersion = acceptanceFingerprint(task, plan, []);
+  assert.equal(acceptanceFingerprint(task, plan, []), withoutVersion);
+  assert.notEqual(
+    acceptanceFingerprint(task, plan, [], { workItemRevision: 1, documentRevision: 1, contentHash: 'hash' }),
+    withoutVersion
+  );
+});

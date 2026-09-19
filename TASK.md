@@ -87,8 +87,21 @@
   `POST /sessions/:id/execution-scope-change`；三条新用例（停稳顺序、defer 不停运行、
   重放幂等/改选被拒）随 `sessions.service.spec` 104/104 绿。顺序上先 `pause()` 再
   `changeRequests.transition('revising')`，只冻结未完成写回（applied 不动）。
-- [ ] T3-2 旧批准失效、重确认后按同一范围重新校验流程；复用已完成结果必须有版本匹配证据
-      （文件 hash + 输入/验收版本），迟到的旧调用结果不得充当新需求成果
+- [x] T3-2 旧批准失效、重确认后按同一范围重新校验流程；复用已完成结果必须有版本匹配证据
+  证据（两部分）：
+  ① shared `result-reuse-contracts.ts` 8/8：`canReuseCompletedResult` 逐项校验
+     needRevision/docRevision/contentHash/inputFingerprint/fileHashes，缺证据即不可复用
+     （absence of proof is not proof）；只校验结果自己声明过的文件，无关文件不阻断复用。
+  ② 真实缺陷已修：`acceptanceFingerprint` 原先只含任务/Agent/工具/工作区，**不含需求与文档
+     版本**，导致需求改版后 `orchestrator.service.ts:2437` 仍命中旧验收 checkpoint，把旧范围
+     的验收算作新需求成果。已把 requirementVersion 并入指纹并在编排器接线
+     （`requirementVersionBinding`，无文档的会话返回 undefined 保持指纹稳定）。
+     `task-acceptance-preflight.spec` 4/4、`orchestrator.service.spec` 69/69。
+  「旧批准失效 + 重确认后按同一范围重新校验」沿用阶段 4 已验收机制：`assertConfirmationCurrent`
+  拒过期确认，`WorkflowStartStore` 逻辑键含 documentRevision + definitionHash，重确认自然是新
+  启动请求并重走成员/版本校验，不另造一套。
+  **未接线**：`isLateResultForSupersededRevision` 目前只有合同与单测，迟到回调的实际拦截点
+  与 T5-2 的「删除后回调只允许审计」同族，统一在 T5-2 接线。
 
 ## T4 实现新需求排队/切换（AC5/AC6）
 
