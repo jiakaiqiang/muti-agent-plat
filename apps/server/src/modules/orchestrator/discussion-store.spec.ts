@@ -179,6 +179,42 @@ test('marking a delegation running then completed records the report and is idem
   }
 });
 
+test('a context-insufficient delegation persists its blocked reason for recovery', async () => {
+  const context = await fixture();
+  try {
+    const opened = await context.store.open(openRun);
+    if (opened.status !== 'opened') return;
+    const reserved = await context.store.reserveDelegation(opened.run.id, ask('expert-1'));
+    if (reserved.status !== 'reserved') return;
+    await context.store.transitionDelegation(opened.run.id, reserved.delegation.id, {
+      status: 'running',
+      invocationId: 'invocation-1'
+    });
+
+    const failure = {
+      code: 'CONTEXT_INSUFFICIENT',
+      message: 'Need the migration contract.',
+      retryable: true
+    };
+    const blocked = await context.store.transitionDelegation(opened.run.id, reserved.delegation.id, {
+      status: 'blocked',
+      failure
+    });
+
+    assert.equal(blocked.status, 'applied');
+    const stored = context.store.get('session-1', opened.run.id)?.delegations[0];
+    assert.equal(stored?.status, 'blocked');
+    assert.deepEqual(stored?.failure, failure, 'the recovery point retains why evidence is required');
+    assert.deepEqual(
+      context.store.runnableDelegations('session-1', opened.run.id, { generation: 1 }),
+      [],
+      'blocked work waits for supplemental input instead of retrying blindly'
+    );
+  } finally {
+    await context.cleanup();
+  }
+});
+
 test('a requirement revision supersedes unfinished delegations and marks finished ones stale', async () => {
   const context = await fixture();
   try {

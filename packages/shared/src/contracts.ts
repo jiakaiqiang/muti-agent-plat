@@ -20,6 +20,12 @@ import type {
   IntentRoutingDecisionOutput as RegisteredIntentRoutingDecisionOutput,
   DiscussionPlanOutput as RegisteredDiscussionPlanOutput
 } from './runtime-contracts/output-contracts.js';
+import type {
+  GroupChatAgentRef,
+  GroupChatAttachmentRef,
+  GroupChatRoutingSnapshot,
+  GroupChatSkillRef
+} from './group-chat-contracts.js';
 
 export type UUID = string;
 export type ISODateTime = string;
@@ -716,6 +722,18 @@ export type ContextL1Invocation = {
   currentContractGoal?: string;
   /** The exact message that triggered this invocation. Never reinterpret it as a constraint. */
   currentUserMessage?: string;
+  /** Immutable workspace document the Agent must read before completing this invocation. */
+  requiredDocument?: {
+    documentId: UUID;
+    revision: number;
+    relativePath: string;
+    contentHash: string;
+  };
+  /**
+   * Current-message attachment index. This is metadata only; binary contents are
+   * fetched through the attachment ID tool when the Agent explicitly needs them.
+   */
+  attachmentRefs?: GroupChatAttachmentRef[];
   phase: AgentRunPhase;
   task?: ContextL1Task;
   navigation: ContextL1NavigationManifest;
@@ -1201,6 +1219,9 @@ export type CollaborationEventType =
   | 'user_message'
   | 'agent_message'
   | 'agent_mention'
+  | 'attachment_recognition_started'
+  | 'attachment_recognition_completed'
+  | 'attachment_recognition_failed'
   | 'session_status_changed'
   | 'session_lifecycle_changed'
   | 'agent_status_changed'
@@ -1263,6 +1284,8 @@ export type CollaborationEventType =
   | 'file_revision_applied'
   | 'file_revision_stale'
   | 'file_revision_failed'
+  | 'discussion_document_published'
+  | 'discussion_document_read'
   | 'intent_clarification_required'
   | 'work_item_created'
   | 'work_item_activated'
@@ -1281,6 +1304,7 @@ export type EventRenderType =
   | 'artifact_card'
   | 'review_card'
   | 'delivery_card'
+  | 'discussion_document'
   | 'error_card';
 
 export type EventMetadata<TPayload extends Record<string, unknown> = Record<string, unknown>> = {
@@ -1397,6 +1421,8 @@ export type SessionDetail = {
   participatingAgentIds: UUID[];
   createdAt: ISODateTime;
   updatedAt: ISODateTime;
+  /** Set when the session is moved to the archive manager. Archived sessions are read-only until restored. */
+  archivedAt?: ISODateTime;
   interruption?: {
     reason:
       | 'local_runtime_disconnected'
@@ -1435,7 +1461,7 @@ export type SessionRecoveryCheckpoint = {
 
 export type SessionListItem = Pick<
   SessionDetail,
-  'id' | 'title' | 'status' | 'tokenBudget' | 'tokenUsed' | 'createdAt' | 'updatedAt'
+  'id' | 'title' | 'status' | 'tokenBudget' | 'tokenUsed' | 'createdAt' | 'updatedAt' | 'archivedAt'
 > & {
   agentCount: number;
   requiresUserAction: boolean;
@@ -1446,6 +1472,17 @@ export type SessionListItem = Pick<
   lifecycleGeneration?: number;
   lifecycleRevision?: number;
   deleteRequestId?: UUID;
+};
+
+export type SessionArchiveItem = Pick<
+  SessionListItem,
+  'id' | 'title' | 'projectId' | 'workspaceId' | 'archivedAt' | 'createdAt' | 'updatedAt'
+>;
+
+export type SessionArchiveGroup = {
+  projectKey: string;
+  projectLabel: string;
+  items: SessionArchiveItem[];
 };
 
 export type RuntimePreference = {
@@ -1527,6 +1564,34 @@ export type RobotApprovalWorkflowNode = WorkflowNodeBase & {
 };
 
 export type WorkflowNode = AgentWorkflowNode | HumanApprovalWorkflowNode | RobotApprovalWorkflowNode;
+
+/**
+ * Deterministic evidence shown when a published workflow references an Agent
+ * that is not currently participating in the session. This is intentionally
+ * structural evidence from the published graph, not a model judgement about
+ * whether the current requirement needs that Agent.
+ */
+export type WorkflowMemberMappingReason = 'not_participating' | 'disabled' | 'unknown';
+
+export type WorkflowMemberMappingNodeEvidence = {
+  nodeId: UUID;
+  nodeName?: string;
+  nodeType: 'agent' | 'robot_approval';
+  stageDescription?: string;
+  inputContract?: string[];
+  outputContract?: string[];
+  reviewPrompt?: string;
+  criteria?: string[];
+  impact: string;
+};
+
+export type WorkflowMemberMappingGap = {
+  agentId: UUID;
+  agentName: string;
+  reason: WorkflowMemberMappingReason;
+  canInvite?: boolean;
+  nodes?: WorkflowMemberMappingNodeEvidence[];
+};
 
 export type WorkflowEdge = {
   id: UUID;
@@ -1781,6 +1846,17 @@ export type SkillFile = {
   content: string;
 };
 
+export type SkillScope = 'system' | 'group' | 'personal';
+
+export type SkillCategory = {
+  id: string;
+  name: string;
+  scope: SkillScope;
+  scopeId: string;
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+};
+
 export type Skill = {
   id: UUID;
   /**
@@ -1796,6 +1872,12 @@ export type Skill = {
   status: 'active' | 'disabled';
   /** 每次内容修改递增；兼容期允许缺失，读取路径视为 1。 */
   revision: number;
+  /** 注册中心范围；旧数据缺失时按 system 读取。 */
+  scope?: SkillScope;
+  /** system/group/personal 对应的稳定范围 ID。 */
+  scopeId?: string;
+  /** 每个 Skill 只能归属一个分类；旧数据缺失时迁移到默认分类。 */
+  categoryId?: string;
   createdAt: ISODateTime;
   updatedAt: ISODateTime;
 };
@@ -1946,6 +2028,15 @@ export type AgentTask = {
   id: UUID;
   sessionId: UUID;
   workItemId?: UUID;
+  /** Immutable discussion document version used to plan this task. */
+  basedOnDiscussionDocument?: {
+    documentId: UUID;
+    revision: number;
+    contentHash: string;
+  };
+  /** Historical tasks remain visible after their source document is superseded. */
+  stale?: boolean;
+  staleReason?: 'discussion_document_superseded';
   title: string;
   description: string;
   status: AgentTaskStatus;
@@ -2020,6 +2111,7 @@ export type RagMatchedChunk = {
 export type ArtifactMetadata = {
   phase:
     | 'task_brief'
+    | 'discussion_document'
     | 'workspace_analysis'
     | 'task_execution'
     | 'post_review'
@@ -2190,6 +2282,10 @@ export type IntentContextSnapshot = {
   currentMessage: string;
   /** Server-resolved @ targets. The classifier may not add, replace or silently drop them. */
   mentionedAgentIds?: UUID[];
+  /** Stable composer references preserved for semantic routing and replay. */
+  skillRef?: GroupChatSkillRef;
+  agentRefs?: GroupChatAgentRef[];
+  attachmentRefs?: GroupChatAttachmentRef[];
   replyToEventId?: UUID;
   replyToMessage?: IntentSnapshotMessageExcerpt;
   /** Bounded recent dialogue for the current requirement, oldest first. */
@@ -2226,6 +2322,12 @@ export type IntentRoutingDecisionV2 = {
    * explicit @ target rather than trusting the classifier to repeat it.
    */
   requestedAgentIds?: UUID[];
+  /** Server-owned tag routing result; the classifier may refine intent, never targets. */
+  resolvedAgentId?: UUID;
+  resolvedAgent?: GroupChatAgentRef;
+  routingReason?: string;
+  candidateAgentIds?: UUID[];
+  distributionAgentIds?: UUID[];
   goalSegments: string[];
   missingFields: string[];
   ambiguityReasons: string[];
@@ -2282,6 +2384,11 @@ export type SessionFollowUpMessage = {
   sourceEventId: UUID;
   content: string;
   mentionedAgentIds: UUID[];
+  /** Metadata-only references attached to this message; file bytes stay out of the event log. */
+  attachmentRefs?: GroupChatAttachmentRef[];
+  skillRef?: GroupChatSkillRef;
+  agentRefs?: GroupChatAgentRef[];
+  routing?: GroupChatRoutingSnapshot;
   /** Explicit user reply target. Server-validated to the same Session; the classifier cannot invent it. */
   replyToEventId?: UUID;
   handlingPlan: UserMessageHandlingPlan;
@@ -2328,6 +2435,8 @@ export type RuntimeUsage = {
   measurement?: 'actual' | 'estimated' | 'unknown';
   /** Required before `cost` can be explained; an amount without it is not reportable. */
   priceVersion?: string;
+  /** Provider-reported amounts are actual; token-rate calculations are estimated. */
+  costBasis?: 'actual' | 'estimated';
 };
 
 /**
@@ -2456,6 +2565,16 @@ export type RuntimeModelOption = {
   persisted: boolean;
   createdAt?: ISODateTime;
   updatedAt?: ISODateTime;
+  pricing?: RuntimeModelPricing;
+};
+
+export type RuntimeModelPricing = {
+  priceVersion: string;
+  currency: 'USD';
+  inputPerMillion: number;
+  outputPerMillion: number;
+  cacheReadInputPerMillion?: number;
+  cacheWriteInputPerMillion?: number;
 };
 
 export type RuntimeModelConfig = {
@@ -2487,6 +2606,12 @@ export type RuntimeModelCreateInput =
       baseUrl: string;
       apiKey: string;
       label?: string;
+      /** Optional manual price metadata for a local relay, in USD per 1M tokens. */
+      inputPerMillion?: number;
+      outputPerMillion?: number;
+      cacheReadInputPerMillion?: number;
+      cacheWriteInputPerMillion?: number;
+      priceVersion?: string;
     };
 
 export type RuntimeModelUpdateInput = {
@@ -2498,6 +2623,12 @@ export type RuntimeModelUpdateInput = {
   deviceId?: UUID;
   /** Omit to keep the stored key unchanged. */
   apiKey?: string;
+  /** Optional manual price metadata for a local relay, in USD per 1M tokens. */
+  inputPerMillion?: number | null;
+  outputPerMillion?: number | null;
+  cacheReadInputPerMillion?: number | null;
+  cacheWriteInputPerMillion?: number | null;
+  priceVersion?: string | null;
 };
 
 export type RuntimeBudget = {
@@ -2750,6 +2881,9 @@ export type ContextAssembly = {
   currentContractGoal?: string;
   /** The exact message that triggered this invocation. */
   currentUserMessage?: string;
+  /** Current-message attachment index; never contains binary content. */
+  attachmentRefs?: GroupChatAttachmentRef[];
+  requiredDocument?: ContextL1Invocation['requiredDocument'];
   taskContext: TaskContext;
   summaryMemory: SummaryMemory;
   continuationState: TaskContinuationState;

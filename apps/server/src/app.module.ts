@@ -24,11 +24,13 @@ import { LocalRuntimeModule } from './modules/local-runtime/local-runtime.module
 import { MaintenanceModule } from './modules/persistence/maintenance.module.js';
 import { WorkflowsModule } from './modules/workflows/workflows.module.js';
 import { ContextManagementModule } from './modules/context-management/context-management.module.js';
+import { AttachmentsModule } from './modules/attachments/attachments.module.js';
 
 @Module({
   imports: [
     PersistenceModule,
     ContextManagementModule,
+    AttachmentsModule,
     CapabilitiesModule,
     AgentProfileModule,
     AgentsModule,

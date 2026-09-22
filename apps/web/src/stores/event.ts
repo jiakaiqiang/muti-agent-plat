@@ -22,6 +22,9 @@ import type {
 const eventTypeToMessageType: Partial<Record<CollaborationEvent['type'], ChatMessage['messageType']>> = {
   user_message: 'text',
   agent_message: 'text',
+  attachment_recognition_started: 'text',
+  attachment_recognition_completed: 'text',
+  attachment_recognition_failed: 'text',
   brief_created: 'brief',
   brief_updated: 'brief',
   task_created: 'task',
@@ -52,6 +55,8 @@ const eventTypeToMessageType: Partial<Record<CollaborationEvent['type'], ChatMes
   post_review_started: 'review',
   post_review_completed: 'review',
   final_delivery_created: 'delivery',
+  discussion_document_published: 'discussion_document',
+  discussion_document_read: 'text',
   follow_up_queued: 'text',
   work_item_created: 'text',
   work_item_activated: 'text',
@@ -129,6 +134,7 @@ export function shouldRenderInTimeline(event: CollaborationEvent) {
     typeof (payload as { resultSummary?: unknown }).resultSummary === 'string' &&
     (payload as { resultSummary: string }).resultSummary.includes('HUMAN_APPROVAL_REQUIRED')
   ) return false
+  if (event.type === 'discussion_document_read') return false
   if (payload.phase === 'user_message_routing' && event.type.startsWith('runtime_')) return false
   if (payload.code === 'RUNTIME_STOP_STATE_CHANGED') return false
   if (!shouldPublishRuntimeEventToCollaboration({
@@ -233,6 +239,20 @@ function confirmationStatuses(events: CollaborationEvent[]) {
   }
 
   return statuses
+}
+
+function discussionDocumentReadStates(events: CollaborationEvent[]) {
+  const states = new Map<string, { readStatus: string; readErrorCode?: string }>()
+  for (const event of events) {
+    if (event.type !== 'discussion_document_read') continue
+    const payload = payloadOf<{ documentId?: unknown; status?: unknown; errorCode?: unknown }>(event)
+    if (typeof payload.documentId !== 'string' || typeof payload.status !== 'string') continue
+    states.set(payload.documentId, {
+      readStatus: payload.status,
+      ...(typeof payload.errorCode === 'string' ? { readErrorCode: payload.errorCode } : {})
+    })
+  }
+  return states
 }
 
 const streams = new Map<string, EventSource>()
@@ -393,6 +413,7 @@ export const useEventStore = defineStore('event', {
     chatMessages: (state) => (sessionId: string): ChatMessage[] => {
       const events = state.eventsBySessionId[sessionId] ?? []
       const confirmationStatusById = confirmationStatuses(events)
+      const discussionDocumentReadStateById = discussionDocumentReadStates(events)
       return collapseLegacyStopReceipts(events.filter(shouldRenderInTimeline).map((event) => {
         const payload = event.metadata.payload ?? {}
         const confirmationId =
@@ -411,7 +432,9 @@ export const useEventStore = defineStore('event', {
           rawEventId: event.id,
           payload: confirmationId
             ? { ...payload, status: confirmationStatusById.get(confirmationId) ?? 'pending' }
-            : payload
+            : event.type === 'discussion_document_published' && typeof payload.documentId === 'string'
+              ? { ...payload, ...(discussionDocumentReadStateById.get(payload.documentId) ?? {}) }
+              : payload
         }
       }))
     },
@@ -604,6 +627,13 @@ export const useEventStore = defineStore('event', {
             stateVersion: payload.stateVersion as number | undefined,
             workflowId: payload.workflowId as string | undefined,
             workflowName: payload.workflowName as string | undefined,
+            workflowVersion: payload.workflowVersion as number | undefined,
+            definitionHash: payload.definitionHash as string | undefined,
+            selectionConfirmationId: payload.selectionConfirmationId as string | undefined,
+            sessionGeneration: payload.sessionGeneration as number | undefined,
+            briefVersion: payload.briefVersion as number | undefined,
+            memberGaps: payload.memberGaps,
+            addableAgentIds: payload.addableAgentIds,
             workflowRunId: payload.workflowRunId as string | undefined,
             workflowNodeId: payload.workflowNodeId as string | undefined,
             workflowNodeRunId: payload.workflowNodeRunId as string | undefined,

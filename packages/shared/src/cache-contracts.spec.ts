@@ -73,6 +73,23 @@ test('cost stays unknown when no price version backs it', () => {
     raw: { inputTokens: 10, outputTokens: 2, totalTokens: 12, cost: 0.5 }
   });
   assert.equal(unpriced.cost, undefined, 'an amount without a price version is not reportable');
+
+  const catalogPriced = normalizeRuntimeUsage({
+    provider: 'openai-compatible',
+    raw: {
+      inputTokens: 10,
+      outputTokens: 2,
+      totalTokens: 12,
+      cost: 0.25,
+      priceVersion: 'deployment-catalog-v1',
+      costBasis: 'estimated'
+    }
+  });
+  assert.deepEqual(catalogPriced.cost, {
+    amount: 0.25,
+    priceVersion: 'deployment-catalog-v1',
+    basis: 'estimated'
+  });
 });
 
 test('cache capability is unsupported/unknown rather than assumed', () => {

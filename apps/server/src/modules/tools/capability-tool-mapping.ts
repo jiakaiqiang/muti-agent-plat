@@ -3,6 +3,7 @@ export const PLANNED_TOOL_CAPABILITY_IDS = ['cap-file-read', 'cap-code-search'] 
 
 export const TOOL_WORKSPACE_CAPABILITY_MAPPING = {
   read_file: ['read'],
+  read_attachment: ['read'],
   search_code: ['read'],
   write_file: ['write'],
   run_test: ['command', 'test']
@@ -11,6 +12,7 @@ export const TOOL_WORKSPACE_CAPABILITY_MAPPING = {
 /** Maps runtime capability IDs to executable tool names. */
 export const CAPABILITY_TOOL_MAPPING: Record<string, string[]> = {
   'cap-file-read': ['read_file'],
+  'cap-attachment-read': ['read_attachment'],
   'cap-file-write': ['read_file', 'write_file'],
   'cap-command-run': ['run_test'],
   'cap-test-report': ['run_test'],

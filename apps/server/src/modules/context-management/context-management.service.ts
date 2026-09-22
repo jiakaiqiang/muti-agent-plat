@@ -16,7 +16,10 @@ import type {
   SessionDetail,
   SessionFollowUpMessage,
   SummaryCheckpointRecord,
-  WorkItem
+  WorkItem,
+  GroupChatAgentRef,
+  GroupChatAttachmentRef,
+  GroupChatSkillRef
 } from '@agent-cluster/shared';
 import type { MemoryItem } from '@agent-cluster/shared';
 import { PersistenceService, type PersistedState } from '../persistence/persistence.service.js';
@@ -414,6 +417,9 @@ export class ContextManagementService {
     latestEventSeq: number;
     explicitWorkItemIds?: string[];
     mentionedAgentIds?: string[];
+    skillRef?: GroupChatSkillRef;
+    agentRefs?: GroupChatAgentRef[];
+    attachmentRefs?: GroupChatAttachmentRef[];
     replyToEventId?: string;
     pendingConfirmation?: string;
     pendingConfirmationContext?: PendingConfirmationContext;
@@ -493,6 +499,9 @@ export class ContextManagementService {
         activeWorkItem: active ? workItemSummary(active) : undefined,
         currentMessage: input.currentMessage,
         mentionedAgentIds,
+        skillRef: input.skillRef,
+        agentRefs: input.agentRefs,
+        attachmentRefs: input.attachmentRefs,
         replyToEventId: replyTarget?.id,
         replyToMessage: replyTarget ? messageExcerpt(replyTarget) : undefined,
         recentRelevantMessages: recentRelevantMessages.length ? recentRelevantMessages : undefined,

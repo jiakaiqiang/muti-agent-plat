@@ -28,5 +28,6 @@ export interface DesktopBridge {
   installUpdate(): Promise<void>;
   setNotificationsEnabled(enabled: boolean): Promise<void>;
   testNotification(): Promise<void>;
+  openWebWorkflowManager(): Promise<void>;
   onOpenSession(callback: (sessionId: string) => void): () => void;
 }

@@ -1,11 +1,13 @@
 import {
   BadRequestException,
   ConflictException,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
   Optional,
   ServiceUnavailableException,
+  forwardRef,
   type BeforeApplicationShutdown,
   type OnModuleDestroy
 } from '@nestjs/common';
@@ -18,6 +20,7 @@ import type {
   AgentTask,
   CaptureFileRevisionBaselineInput,
   CollaborationEvent,
+  DiscussionDocumentView,
   CreateFileRevisionRunInput,
   DecideFileRevisionInput,
   ReprocessFileRevisionInput,
@@ -41,8 +44,11 @@ import type {
   TaskBrief,
   UserMessageHandlingPlan,
   WorkspaceWritebackRecord,
-  WorkItem
-,
+  WorkItem,
+  GroupChatAttachmentRef,
+  GroupChatAgentRef,
+  GroupChatMessageDirectives,
+  GroupChatRoutingSnapshot,
   RequirementConfirmationBinding,
   WorkflowStartBinding,
   ChangeRequestChoice
@@ -65,6 +71,7 @@ import { EventsService } from '../events/events.service.js';
 import { IntentRecognitionService } from '../intent-recognition/intent-recognition.service.js';
 import {
   matchExactUserCommand,
+  matchCompoundExecutionControl,
   matchExecutionConsultationQuestion,
   matchExecutionScopeChange,
   matchExecutionStatusQuestion,
@@ -101,8 +108,12 @@ import { ArtifactsService } from '../artifacts/artifacts.service.js';
 import { FileRevisionsService } from '../file-revisions/file-revisions.service.js';
 import { RouteApplicationService } from '../message-routing/route-application.service.js';
 import { MessageIngressService } from '../message-routing/message-ingress.service.js';
+import { DiscussionDocumentsService } from '../discussion-documents/discussion-documents.service.js';
+import { AttachmentsService } from '../attachments/attachments.service.js';
 import { resolveExactCommand } from '../message-routing/command-state-resolver.service.js';
 import { applyExactCommandResolution } from '../message-routing/command-application.service.js';
+import { resolveTagRouting } from '../message-routing/tag-routing.js';
+import { buildHistoricalMessageContext, type HistoricalSkillCandidate } from './historical-context.js';
 
 type CreateSessionInput = {
   input: string;
@@ -205,6 +216,10 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   private readonly intentRoutingWorkerId = `intent-routing:${process.pid}:${crypto.randomUUID()}`;
   private readonly deletingSessionIds = new Set<string>();
   private readonly fileRevisionDispatches = new Set<string>();
+  private readonly workflowMappingResolutionRuns = new Map<string, {
+    decision: 'approve' | 'decline';
+    promise: Promise<unknown>;
+  }>();
   private shuttingDown = false;
   private readonly runtimeInterruptingSessions = new Set<string>();
   private readonly runtimeInterruptSubscription?: Subscription;
@@ -249,7 +264,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     @Optional() private readonly semanticIntentRouter?: SemanticIntentRouterService,
     @Optional() private readonly routeApplication?: RouteApplicationService,
     @Optional() private readonly messageIngress?: MessageIngressService,
-    @Optional() private readonly artifacts?: ArtifactsService
+    @Optional() private readonly artifacts?: ArtifactsService,
+    @Optional() private readonly discussionDocuments?: DiscussionDocumentsService,
+    @Optional() @Inject(forwardRef(() => AttachmentsService)) private readonly attachments?: AttachmentsService
   ) {
     this.lifecycle = new SessionLifecycleStore(persistence);
     this.requirementDocuments = new RequirementDocumentStore(persistence);
@@ -265,6 +282,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
     if (recoveredWorkspaceWriteback) this.persist();
     for (const session of this.sessions.values()) {
+      if (session.archivedAt) continue;
       if (this.lifecycle.get(session.id)?.state !== 'active' && this.lifecycle.get(session.id)) continue;
       this.orchestrator.ensureArchitectureReportSaveConfirmation(session);
     }
@@ -327,11 +345,14 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
   }
 
-  list(visibility: 'active' | 'deleted' | 'all' = 'active') {
+  list(visibility: 'active' | 'deleted' | 'archived' | 'all' = 'active') {
     return [...this.sessions.values()]
       .filter(session => {
         const state = this.lifecycle.get(session.id)?.state ?? 'active';
-        return visibility === 'all' || (visibility === 'deleted' ? state === 'deleted' : state !== 'deleted');
+        if (visibility === 'all') return true;
+        if (visibility === 'deleted') return state === 'deleted';
+        if (visibility === 'archived') return state !== 'deleted' && Boolean(session.archivedAt);
+        return state !== 'deleted' && !session.archivedAt;
       })
       .sort((left, right) => this.compareSessionRecency(left, right))
       .map((session) => {
@@ -359,6 +380,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         lifecycleGeneration: lifecycle?.generation,
         lifecycleRevision: lifecycle?.revision,
         deleteRequestId: lifecycle?.deleteRequestId,
+        archivedAt: session.archivedAt,
         createdAt: session.createdAt,
         updatedAt: session.updatedAt
         });
@@ -368,6 +390,12 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   get(sessionId: string) {
     const session = this.getIncludingDeleted(sessionId);
     const lifecycle = this.lifecycle.get(sessionId);
+    if (session.archivedAt) {
+      throw new ConflictException({
+        code: 'SESSION_ARCHIVED',
+        message: '会话已归档，请先从归档管理中恢复。'
+      });
+    }
     if (lifecycle?.state !== undefined && lifecycle.state !== 'active') {
       throw new ConflictException({
         code: lifecycle.state === 'deleted' ? 'SESSION_DELETED' : 'SESSION_DELETING',
@@ -378,6 +406,23 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     return session;
   }
 
+  listArchivedGroups() {
+    const groups = new Map<string, { projectKey: string; projectLabel: string; items: ReturnType<SessionsService['list']> }>();
+    for (const session of this.list('archived')) {
+      const projectKey = session.projectId ?? session.workspaceId ?? 'unassigned';
+      const source = this.sessions.get(session.id);
+      const projectLabel = session.projectId
+        ? `项目 ${session.projectId}`
+        : source?.workingDirectory?.name
+          ? `工作区 ${source.workingDirectory.name}`
+          : (session.workspaceId ? `工作区 ${session.workspaceId}` : '未归属项目');
+      const group = groups.get(projectKey) ?? { projectKey, projectLabel, items: [] };
+      group.items.push(session);
+      groups.set(projectKey, group);
+    }
+    return [...groups.values()].sort((left, right) => left.projectLabel.localeCompare(right.projectLabel, 'zh-CN'));
+  }
+
   getIncludingDeleted(sessionId: string) {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -385,6 +430,134 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
     if (this.workspaceWritebacks) session.workspaceWritebacks = this.workspaceWritebacks.list(sessionId);
     return session;
+  }
+
+  /**
+   * Returns a historical message's immutable display refs plus current
+   * execution guards. The event body never contains attachment bytes; deleted
+   * or not-ready attachments remain visible as tags but are not executable.
+   */
+  getHistoricalMessageContext(sessionId: string, eventId: string) {
+    this.getIncludingDeleted(sessionId);
+    const event = this.events.list(sessionId).find((candidate) => candidate.id === eventId);
+    if (!event) throw new NotFoundException(`Message event not found: ${eventId}`);
+    if (event.type !== 'user_message') throw new ConflictException('Only user messages have historical directives.');
+    const payload = (event.metadata.payload ?? {}) as {
+      skillRef?: Parameters<typeof buildHistoricalMessageContext>[0]['skill'];
+      agentRefs?: Parameters<typeof buildHistoricalMessageContext>[0]['agents'];
+      attachmentRefs?: Parameters<typeof buildHistoricalMessageContext>[0]['attachments'];
+      deletedAt?: unknown;
+    };
+    if (typeof payload.deletedAt === 'string') {
+      return {
+        eventId: event.id,
+        createdAt: event.createdAt,
+        content: event.content,
+        deleted: true as const,
+        context: buildHistoricalMessageContext({})
+      };
+    }
+    const currentSkills = this.persistence.getCollection<HistoricalSkillCandidate[]>('skills', []);
+    const currentAgents = this.agents.list().map((agent) => ({
+      id: agent.id,
+      key: agent.key,
+      name: agent.name,
+      status: agent.status
+    }));
+    return {
+      eventId: event.id,
+      createdAt: event.createdAt,
+      content: event.content,
+      context: buildHistoricalMessageContext({
+        skill: payload.skillRef,
+        agents: payload.agentRefs,
+        attachments: payload.attachmentRefs,
+        currentSkills,
+        currentAgents
+      })
+    };
+  }
+
+  /**
+   * Redacts one user message and synchronously invalidates its attachment refs.
+   * The event id remains as a tombstone so follow-ups/routing records cannot
+   * point at a different message after deletion. Repeating the request is safe.
+   */
+  async deleteMessage(sessionId: string, eventId: string) {
+    this.persistence.assertWritable();
+    const session = this.getIncludingDeleted(sessionId);
+    const event = this.events.list(sessionId).find((candidate) => candidate.id === eventId);
+    if (!event) throw new NotFoundException(`Message event not found: ${eventId}`);
+    if (event.type !== 'user_message') {
+      throw new ConflictException('Only user messages can be deleted.');
+    }
+    const payload = (event.metadata.payload ?? {}) as {
+      deletedAt?: unknown;
+      attachmentRefs?: Array<{ id?: unknown }>;
+    };
+    const alreadyDeleted = typeof payload.deletedAt === 'string';
+    const attachmentIds = Array.isArray(payload.attachmentRefs)
+      ? [...new Set(payload.attachmentRefs.map((item) => String(item?.id ?? '').trim()).filter(Boolean))]
+      : [];
+
+    const relatedFollowUps = new Map<string, SessionFollowUpMessage>();
+    for (const followUp of session.pendingFollowUpMessages ?? []) {
+      if (followUp.sourceEventId === eventId) relatedFollowUps.set(followUp.id, followUp);
+    }
+    for (const followUp of this.contextManagement?.listFollowUps(sessionId) ?? []) {
+      if (followUp.sourceEventId === eventId) relatedFollowUps.set(followUp.id, followUp);
+    }
+    const activeFollowUp = [...relatedFollowUps.values()].find((followUp) =>
+      followUp.status === 'planning' || followUp.status === 'executing'
+    );
+    if (activeFollowUp) {
+      throw new ConflictException({
+        code: 'MESSAGE_DELETE_EXECUTION_ACTIVE',
+        message: '消息已进入执行阶段，请先停止当前任务后再删除。',
+        followUpId: activeFollowUp.id
+      });
+    }
+
+    let removedAttachmentIds: string[] = [];
+    if (!alreadyDeleted) {
+      if (this.attachments) {
+        // Resolve by durable message association even when an older event did
+        // not persist attachmentRefs in its payload.
+        removedAttachmentIds = await this.attachments.removeForMessage(sessionId, eventId);
+      } else if (attachmentIds.length) {
+        throw new ServiceUnavailableException('Attachment lifecycle service is unavailable.');
+      }
+    }
+    if (!alreadyDeleted) {
+      const redacted = await this.events.redactUserMessage(sessionId, eventId, removedAttachmentIds.length ? removedAttachmentIds : attachmentIds);
+      if (!redacted) throw new NotFoundException(`Message event not found: ${eventId}`);
+    }
+
+    const cancelledFollowUpIds = new Set<string>();
+    for (const followUp of relatedFollowUps.values()) {
+      const wasQueued = followUp.status === 'queued';
+      if (wasQueued) {
+        followUp.status = 'cancelled';
+        cancelledFollowUpIds.add(followUp.id);
+        await this.contextManagement?.updateFollowUpStatus(sessionId, followUp.id, 'cancelled').catch(() => undefined);
+      }
+    }
+    if (relatedFollowUps.size) {
+      session.pendingFollowUpMessages = (session.pendingFollowUpMessages ?? []).map((followUp) =>
+        cancelledFollowUpIds.has(followUp.id)
+          ? { ...followUp, status: 'cancelled' as const }
+          : followUp
+      );
+    }
+    this.touchSession(session);
+    return {
+      sessionId,
+      eventId,
+      deleted: true as const,
+      alreadyDeleted,
+      attachmentIds: removedAttachmentIds.length ? removedAttachmentIds : attachmentIds,
+      cancelledFollowUpIds: [...cancelledFollowUpIds]
+    };
   }
 
   lifecycleState(sessionId: string) {
@@ -684,7 +857,12 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
    * durable checkpoint and confirmation audit; it never starts execution.
    */
   async reconcileRecoveryStateOnBoot(sessionId: string) {
-    const session = this.get(sessionId);
+    // Archived sessions are intentionally dormant. They remain in durable
+    // storage for the archive manager, but must not enter the normal recovery
+    // path because `get()` correctly rejects them as user-inactive. Keeping
+    // this guard here also protects direct callers outside RecoveryService.
+    const session = this.getIncludingDeleted(sessionId);
+    if (session.archivedAt) return;
     const events = this.events.list(sessionId);
     const resolvedIds = new Set(events
       .filter((event) => event.type === 'user_confirmation_resolved')
@@ -1204,6 +1382,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   async recoverFileRevisions() {
     const recovered: Array<{ sessionId: string; revisionId: string; from: string; to: string }> = [];
     for (const session of this.listRaw()) {
+      if (session.archivedAt) continue;
       const items = await this.requireFileRevisions().recoverSession(session);
       for (const item of items) recovered.push({ sessionId: session.id, ...item });
     }
@@ -1215,6 +1394,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     const allowed = sessionIds ? new Set(sessionIds) : undefined;
     const recovered: Array<{ sessionId: string; routingId: string; action: string }> = [];
     for (const session of this.sessions.values()) {
+      if (session.archivedAt) continue;
       if (allowed && !allowed.has(session.id)) continue;
       const records = [...this.contextManagement.listRoutingRecords(session.id)]
         .sort((left, right) => left.sessionSeq - right.sessionSeq);
@@ -1340,10 +1520,13 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       throw new ServiceUnavailableException('后端正在关闭，请在服务重启后重试删除。');
     }
     const session = this.getIncludingDeleted(sessionId);
+    if (session.archivedAt) {
+      throw new ConflictException('归档会话请先恢复后再删除。');
+    }
     const existingLifecycle = this.lifecycle.get(sessionId);
     if (existingLifecycle?.state === 'deleted') {
       const view = this.lifecycleState(sessionId);
-      return { sessionId, deleted: true, ...view };
+      return { sessionId, deleted: true, endedAgentIds: [], ...view };
     }
     const begun = await this.lifecycle.beginDelete(sessionId, session.dataEpoch, deleteRequestId);
     if (begun.event) this.events.acceptCommitted(begun.event);
@@ -1374,22 +1557,115 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       });
       return { sessionId, deleted: false, ...view, blockers };
     }
+    let removedAttachmentIds: string[] = [];
+    if (this.attachments) {
+      try {
+        removedAttachmentIds = await this.attachments.removeForSession(sessionId);
+      } catch (error) {
+        this.logger.error(`Failed to clean Session attachments before deletion for ${sessionId}: ${String(error)}`);
+        const view = this.lifecycleState(sessionId);
+        return {
+          sessionId,
+          deleted: false,
+          ...view,
+          blockers: [...view.blockers, {
+            reason: 'state_query_failed' as const,
+            message: '群聊附件清理尚未完成，删除保持可重试状态。'
+          }]
+        };
+      }
+    }
     const completed = await this.lifecycle.completeDelete(sessionId);
     if (completed.event) this.events.acceptCommitted(completed.event);
     if (completed.lifecycle.state === 'deleted') {
       this.deletingSessionIds.delete(sessionId);
+      const coordinatorId = this.agents.findSystemByKey('coordinator')?.id ?? 'coordinator';
+      const endedAgentIds = session.participatingAgentIds.filter((agentId) => agentId !== coordinatorId);
+      if (endedAgentIds.length) {
+        session.participatingAgentIds = session.participatingAgentIds.filter((agentId) => agentId === coordinatorId);
+        this.touchSession(session);
+      }
       await this.persistence.releaseWorkspaceSessionLease(session.workspaceId, session.id).catch((error) => {
         this.logger.error(`Failed to release workspace session lease for ${session.workspaceId}: ${String(error)}`);
       });
+      return {
+        sessionId,
+        deleted: true,
+        lifecycle: completed.lifecycle,
+        stopSummary: completed.stopSummary,
+        blockers: completed.stopSummary.blockers,
+        attachmentIds: removedAttachmentIds,
+        endedAgentIds,
+        sessionStatus: session.status
+      };
     }
     return {
       sessionId,
-      deleted: completed.lifecycle.state === 'deleted',
+      deleted: false,
       lifecycle: completed.lifecycle,
       stopSummary: completed.stopSummary,
       blockers: completed.stopSummary.blockers,
+      attachmentIds: removedAttachmentIds,
+      endedAgentIds: [],
       sessionStatus: session.status
     };
+  }
+
+  async archive(sessionId: string, requestId: string = crypto.randomUUID()) {
+    this.persistence.assertWritable();
+    if (this.shuttingDown) throw new ServiceUnavailableException('后端正在关闭，请在服务重启后重试归档。');
+    const session = this.getIncludingDeleted(sessionId);
+    const lifecycle = this.lifecycle.get(sessionId);
+    if (lifecycle?.state === 'deleted') throw new ConflictException('已删除会话不能归档，请先恢复会话。');
+    if (session.archivedAt) return { sessionId, archived: true, lifecycle: lifecycle ?? undefined };
+
+    const begun = await this.lifecycle.closeForStop(sessionId, session.dataEpoch);
+    if (begun.event) this.events.acceptCommitted(begun.event);
+    this.deletingSessionIds.add(sessionId);
+    session.status = 'PAUSED';
+    session.pauseState = { previousStatus: session.pauseState?.previousStatus ?? 'EXECUTING', pausedAt: nowIso(), reason: 'session_archived' };
+    session.updatedAt = nowIso();
+    const termination = createExecutionTermination({
+      kind: 'user_paused', source: 'user', scope: 'session', diagnosticRef: 'session_archive'
+    });
+    this.briefGenerationSeqBySession.set(sessionId, (this.briefGenerationSeqBySession.get(sessionId) ?? 0) + 1);
+    this.cancelIntentRoutingRetries(sessionId);
+    this.intentRoutingControllers.get(sessionId)?.abort(termination);
+    const briefRun = this.briefGenerationRuns.get(sessionId);
+    if (briefRun) abortWithTermination(briefRun.controller, termination);
+    const [briefStopped, executionStopped, runtimeStopped] = await Promise.all([
+      briefRun ? settlesWithin(briefRun.done, 10_000) : Promise.resolve(true),
+      this.execution.cancelAndWait(sessionId, termination),
+      this.runtime?.cancelSessionAndWait(sessionId, termination) ?? Promise.resolve({ requested: 0, completed: 0, timedOut: false })
+    ]);
+    if (!briefStopped || executionStopped.timedOut || runtimeStopped.timedOut) {
+      const view = this.lifecycleState(sessionId);
+      const blockers = [...view.blockers];
+      if (!briefStopped) blockers.push({ reason: 'process_running' as const, message: '需求讨论仍在停止中。' });
+      if (executionStopped.timedOut) blockers.push({ reason: 'process_running' as const, message: '任务执行仍在停止中。' });
+      if (runtimeStopped.timedOut && !blockers.length) blockers.push({ reason: 'process_exit_unknown' as const, message: 'Runtime 尚未提供可信停止证据。' });
+      this.deletingSessionIds.delete(sessionId);
+      return { sessionId, archived: false, ...view, blockers };
+    }
+    try {
+      const archived = await this.lifecycle.markArchived(sessionId);
+      if (archived.event) this.events.acceptCommitted(archived.event);
+      const archivedAt = nowIso();
+      session.archivedAt = archivedAt;
+      session.status = 'PAUSED';
+      session.pauseState = { previousStatus: session.pauseState?.previousStatus ?? 'EXECUTING', pausedAt: archivedAt, reason: 'session_archived' };
+      session.updatedAt = archivedAt;
+      this.persist();
+      this.deletingSessionIds.delete(sessionId);
+      await this.persistence.releaseWorkspaceSessionLease(session.workspaceId, session.id).catch((error) => {
+        this.logger.error(`Failed to release workspace session lease for archived session ${session.workspaceId}: ${String(error)}`);
+      });
+      return { sessionId, archived: true, lifecycle: archived.lifecycle, stopSummary: this.lifecycleState(sessionId).stopSummary, sessionStatus: session.status, requestId };
+    } catch (error) {
+      this.deletingSessionIds.delete(sessionId);
+      if (String(error).includes('STOP_UNCONFIRMED')) throw new ConflictException('停止状态尚未确认，暂时不能归档。');
+      throw error;
+    }
   }
 
   async restore(sessionId: string, input: { requestId: string; expectedGeneration: number }) {
@@ -1421,6 +1697,36 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       await this.persistence.releaseWorkspaceSessionLease(session.workspaceId, session.id).catch(() => undefined);
       if (String(error).includes('STALE_GENERATION')) throw new ConflictException('会话生命周期已变化，请刷新后重试。');
       if (String(error).includes('STOP_UNCONFIRMED')) throw new ConflictException('停止状态尚未确认，不能恢复会话。');
+      throw error;
+    }
+  }
+
+  async restoreArchived(sessionId: string, requestId: string = crypto.randomUUID()) {
+    const session = this.getIncludingDeleted(sessionId);
+    if (!session.archivedAt) return { session, restored: false, lifecycle: this.lifecycle.get(sessionId) };
+    const lifecycle = this.lifecycle.get(sessionId);
+    if (!lifecycle) throw new NotFoundException(`Session lifecycle not found: ${sessionId}`);
+    if (lifecycle.state === 'deleted') throw new ConflictException('已删除会话不能从归档恢复，请使用删除列表恢复。');
+    if (session.workingDirectory?.kind === 'server_local' && (!session.workingDirectory.path || !existsSync(session.workingDirectory.path))) {
+      throw new ConflictException('会话工作目录已被移动或删除，无法安全恢复。');
+    }
+    if (session.workingDirectory?.kind === 'local_bridge' && !this.localRuntime?.getWorkspace(session.workspaceId)) {
+      throw new ConflictException('本地 Runtime 工作区当前不可用，请连接本地助手后再恢复。');
+    }
+    const leaseAcquired = await this.persistence.acquireWorkspaceSessionLease(session.workspaceId, session.id);
+    if (!leaseAcquired) throw new ConflictException('该工作区正被另一个活动会话使用，暂时无法恢复。');
+    try {
+      const restored = await this.lifecycle.restoreArchived(sessionId, requestId);
+      if (restored.event) this.events.acceptCommitted(restored.event);
+      delete session.archivedAt;
+      session.status = 'PAUSED';
+      session.pauseState = { previousStatus: session.pauseState?.previousStatus ?? 'EXECUTING', pausedAt: nowIso(), reason: 'session_archive_restored' };
+      session.updatedAt = nowIso();
+      this.persist();
+      return { session, lifecycle: restored.lifecycle, restored: true };
+    } catch (error) {
+      await this.persistence.releaseWorkspaceSessionLease(session.workspaceId, session.id).catch(() => undefined);
+      if (String(error).includes('STOP_UNCONFIRMED')) throw new ConflictException('停止状态尚未确认，不能恢复归档会话。');
       throw error;
     }
   }
@@ -1688,11 +1994,21 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     content: string,
     mentionedAgentIds: string[] = [],
     clientMessageId?: string,
-    replyToEventId?: string
+    replyToEventId?: string,
+    attachmentIds: string[] = [],
+    directives?: GroupChatMessageDirectives
   ) {
     const session = this.get(sessionId);
     const replay = this.findMessageReplay(session, clientMessageId);
     if (replay) return replay;
+    const attachmentRefs = this.resolveMessageAttachmentRefs(session.id, attachmentIds);
+    const normalizedDirectives = this.normalizeMessageDirectives(session, directives, attachmentRefs);
+    if (normalizedDirectives?.agents.length) {
+      mentionedAgentIds = [...new Set([
+        ...mentionedAgentIds,
+        ...normalizedDirectives.agents.map((agent) => agent.id)
+      ])];
+    }
     const pendingConfirmation = this.pendingConfirmationContext(session.id);
     const workflowAgentSkip = matchWorkflowAgentSkipCommand(content);
     if (workflowAgentSkip && pendingConfirmation?.reason === 'workflow_agent_substitution') {
@@ -1717,6 +2033,52 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         pendingConfirmation!,
         workflowDirective
       );
+    }
+    const compoundControl = session.status === 'EXECUTING'
+      ? matchCompoundExecutionControl(content)
+      : undefined;
+    if (compoundControl) {
+      const stopped = await this.pause(session.id, '用户要求先停止当前会话，再处理补充内容。');
+      const followUp = await this.handleExecutionScopeChange(
+        session,
+        compoundControl.remainder,
+        mentionedAgentIds,
+        clientMessageId,
+        content,
+        true
+      );
+      if (followUp) {
+        return {
+          ...followUp,
+          stopEvent: stopped.event,
+          stopConfirmationEvent: stopped.confirmationEvent
+        };
+      }
+      const event = stopped.event ?? this.events.list(session.id).at(-1);
+      if (!event) throw new ConflictException('暂停事件未能持久化。');
+      const handlingPlan: UserMessageHandlingPlan = {
+        intent: 'command',
+        requirementRelation: 'continuation',
+        failedExecutionAction: 'none',
+        priority: 'high',
+        shouldPause: true,
+        affectedTaskIds: [],
+        affectedAgentIds: [...mentionedAgentIds],
+        requiresBriefRevision: false,
+        requiresUserConfirmation: false,
+        coordinatorInstruction: '先暂停当前会话，再等待补充内容处理。'
+      };
+      return {
+        session,
+        event,
+        handlingPlan,
+        deferred: false as const,
+        followUpMessageId: undefined,
+        routingId: undefined,
+        routingStatus: undefined,
+        idempotentReplay: false as const,
+        confirmationEvent: stopped.confirmationEvent
+      };
     }
     const exactCommand = matchExactUserCommand(content);
     if (exactCommand) {
@@ -1769,14 +2131,16 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         routingMode,
         replyToEventId,
         budgetExhaustionRecovery,
-        explicitPreference
+        explicitPreference,
+        attachmentRefs,
+        normalizedDirectives
       );
     }
     const receiverRecognitionPending = session.status === 'PAUSED';
     const useLocalIntentRecognition = receiverRecognitionPending;
     let handlingPlan: UserMessageHandlingPlan = useLocalIntentRecognition
       ? this.intentRecognition.recognizeUserMessage(content, session.status)
-      : await this.recognizeFollowUpHandlingPlan(session, content, mentionedAgentIds);
+      : await this.recognizeFollowUpHandlingPlan(session, content, mentionedAgentIds, attachmentRefs);
     handlingPlan = this.normalizeFollowUpHandlingPlan(session, handlingPlan);
     const event = this.events.create({
       sessionId,
@@ -1787,7 +2151,16 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       content,
       toAgentIds: mentionedAgentIds,
       metadata: {
-        ...createMetadata('chat_message', { text: content, mentionedAgentIds }),
+        ...createMetadata('chat_message', {
+          text: content,
+          mentionedAgentIds,
+          ...(attachmentRefs.length ? { attachmentRefs: structuredClone(attachmentRefs) } : {}),
+          ...(normalizedDirectives ? {
+            skillRef: normalizedDirectives.skill,
+            agentRefs: structuredClone(normalizedDirectives.agents),
+            routing: structuredClone(normalizedDirectives.routing)
+          } : {})
+        }),
         ...(clientMessageId ? { idempotencyKey: this.messageIdempotencyKey(sessionId, clientMessageId) } : {})
       }
     });
@@ -1809,7 +2182,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         handlingPlan,
         deferred,
         receiverRecognitionPending,
-        receiverResponsibilities: ['intent_recognition', 'task_decomposition']
+        receiverResponsibilities: ['intent_recognition', 'task_decomposition'],
+        ...(normalizedDirectives ? { routing: structuredClone(normalizedDirectives.routing) } : {})
       })
     });
 
@@ -1843,6 +2217,12 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       sourceEventId: event.id,
       content,
       mentionedAgentIds: Array.from(new Set(mentionedAgentIds)),
+      ...(attachmentRefs.length ? { attachmentRefs: structuredClone(attachmentRefs) } : {}),
+      ...(normalizedDirectives ? {
+        ...(normalizedDirectives.skill ? { skillRef: structuredClone(normalizedDirectives.skill) } : {}),
+        agentRefs: structuredClone(normalizedDirectives.agents),
+        routing: structuredClone(normalizedDirectives.routing)
+      } : {}),
       handlingPlan,
       ...(replyToEventId ? { replyToEventId } : {}),
       receiverRecognitionPending: receiverRecognitionPending || undefined,
@@ -1865,6 +2245,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         currentMessage: content,
         latestEventSeq: this.events.list(session.id).length,
         mentionedAgentIds: followUp.mentionedAgentIds,
+        ...(normalizedDirectives?.skill ? { skillRef: normalizedDirectives.skill } : {}),
+        ...(normalizedDirectives?.agents.length ? { agentRefs: normalizedDirectives.agents } : {}),
+        ...(attachmentRefs.length ? { attachmentRefs: structuredClone(attachmentRefs) } : {}),
         replyToEventId: followUp.replyToEventId,
         pendingConfirmation: this.pendingConfirmationSummary(session.id),
         pendingConfirmationContext: this.pendingConfirmationContext(session.id),
@@ -1942,7 +2325,13 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     routingMode: IntentRoutingRolloutMode,
     replyToEventId?: string,
     budgetExhaustionConfirmationId?: string,
-    explicitPreference = false
+    explicitPreference = false,
+    attachmentRefs: GroupChatAttachmentRef[] = [],
+    normalizedDirectives?: {
+      skill?: GroupChatMessageDirectives['skill'];
+      agents: GroupChatAgentRef[];
+      routing: GroupChatRoutingSnapshot;
+    }
   ) {
     const handlingPlan = this.pendingIntentHandlingPlan();
     const deferred = this.hasActiveSessionWork(session);
@@ -1954,6 +2343,15 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       session,
       content,
       mentionedAgentIds,
+      ...(attachmentRefs.length ? { attachmentRefs: structuredClone(attachmentRefs) } : {}),
+      ...(normalizedDirectives ? {
+        directives: {
+          ...(normalizedDirectives.skill ? { skill: structuredClone(normalizedDirectives.skill) } : {}),
+          agents: structuredClone(normalizedDirectives.agents),
+          attachments: structuredClone(attachmentRefs)
+        },
+        routing: structuredClone(normalizedDirectives.routing)
+      } : {}),
       handlingPlan,
       routingMode,
       replyToEventId,
@@ -1976,6 +2374,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
             currentMessage: followUp.content,
             latestEventSeq: this.events.list(session.id).length,
             mentionedAgentIds: followUp.mentionedAgentIds,
+            ...(followUp.skillRef ? { skillRef: followUp.skillRef } : {}),
+            ...(followUp.agentRefs?.length ? { agentRefs: followUp.agentRefs } : {}),
+            ...(followUp.attachmentRefs?.length ? { attachmentRefs: followUp.attachmentRefs } : {}),
             replyToEventId: followUp.replyToEventId,
             pendingConfirmation: this.pendingConfirmationSummary(session.id),
             pendingConfirmationContext: this.pendingConfirmationContext(session.id),
@@ -1999,6 +2400,28 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         idempotentReplay: true as const
       };
     }
+    if (normalizedDirectives) {
+      const coordinator = this.pickSessionAgent(session, ['coordinator']);
+      const recipients = normalizedDirectives.routing.mode === 'distributed'
+        ? normalizedDirectives.routing.distributionAgentIds
+        : normalizedDirectives.routing.resolvedAgentId && normalizedDirectives.routing.resolvedAgentId !== coordinator.id
+          ? [normalizedDirectives.routing.resolvedAgentId]
+          : [];
+      this.events.create({
+        sessionId: session.id,
+        type: 'agent_message',
+        fromAgentId: coordinator.id,
+        toAgentIds: recipients,
+        content: '已解析消息中的 Skill、Agent 与附件路由；主 Agent 将保留汇总上下文。',
+        metadata: createMetadata('chat_message', {
+          messageKind: 'decision',
+          routing: structuredClone(normalizedDirectives.routing),
+          skillRef: normalizedDirectives.skill,
+          agentRefs: structuredClone(normalizedDirectives.agents),
+          attachmentRefs: structuredClone(attachmentRefs)
+        })
+      });
+    }
     let snapshot;
     try {
       snapshot = await this.contextManagement.buildIntentSnapshot({
@@ -2007,6 +2430,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         currentMessage: content,
         latestEventSeq: this.events.list(session.id).length,
         mentionedAgentIds: followUp.mentionedAgentIds,
+        ...(followUp.skillRef ? { skillRef: followUp.skillRef } : {}),
+        ...(followUp.agentRefs?.length ? { agentRefs: followUp.agentRefs } : {}),
+        ...(followUp.attachmentRefs?.length ? { attachmentRefs: followUp.attachmentRefs } : {}),
         replyToEventId: followUp.replyToEventId,
         pendingConfirmation: this.pendingConfirmationSummary(session.id),
         pendingConfirmationContext: this.pendingConfirmationContext(session.id),
@@ -2060,6 +2486,84 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       routingStatus: 'SNAPSHOT_READY' as const,
       idempotentReplay: false as const
     };
+  }
+
+  private normalizeMessageDirectives(
+    session: SessionDetail,
+    directives: GroupChatMessageDirectives | undefined,
+    attachmentRefs: GroupChatAttachmentRef[]
+  ) {
+    if (!directives) return undefined;
+    const skill = directives.skill ? this.resolveExecutableSkill(session, directives.skill) : undefined;
+    const agents = [...new Map(directives.agents.map((candidate) => {
+      const resolved = this.agents.getForSurface(candidate.id, 'mention');
+      if (!session.participatingAgentIds.includes(resolved.id)) {
+        throw new BadRequestException({
+          code: 'AGENT_NOT_SESSION_PARTICIPANT',
+          message: `Agent is not a participant in this Session: ${resolved.key}`
+        });
+      }
+      return [resolved.id, { id: resolved.id, key: resolved.key, name: resolved.name } satisfies GroupChatAgentRef];
+    })).values()];
+    const mainAgent = this.pickSessionAgent(session, ['coordinator']);
+    const candidates = agents.map((candidate) => this.agents.getForSurface(candidate.id, 'mention'));
+    const routing = resolveTagRouting({
+      skill,
+      candidates,
+      mainAgent
+    });
+    return {
+      ...(skill ? { skill } : {}),
+      agents,
+      attachments: attachmentRefs,
+      routing
+    };
+  }
+
+  /**
+   * A composer reference is only an input hint. New execution must resolve it
+   * against the durable Skill collection so a disabled/deleted Skill cannot be
+   * reintroduced by posting an old JSON reference. The returned ref is also
+   * rebuilt from server state, preventing forged display metadata from entering
+   * the routing snapshot.
+   */
+  private resolveExecutableSkill(session: SessionDetail, reference: GroupChatMessageDirectives['skill']) {
+    if (!reference) return undefined;
+    const currentSkills = this.persistence.getCollection<Array<{
+      id: string;
+      key: string;
+      name: string;
+      status?: 'active' | 'disabled';
+      revision?: number;
+      scope?: 'system' | 'group' | 'personal';
+      scopeId?: string;
+      categoryId?: string;
+    }>>('skills', []);
+    const current = currentSkills.find((candidate) => candidate.id === reference.id && candidate.key === reference.key);
+    if (!current || (current.status ?? 'active') !== 'active') {
+      throw new BadRequestException({
+        code: 'SKILL_NOT_AVAILABLE',
+        message: `Skill is not available: ${reference.key}`
+      });
+    }
+    const scope = current.scope ?? 'system';
+    const scopeId = current.scopeId ?? (scope === 'personal' ? session.ownerId : 'system');
+    if (scope === 'personal' && scopeId !== session.ownerId) {
+      throw new BadRequestException({
+        code: 'SKILL_NOT_AVAILABLE',
+        message: `Skill is not available: ${reference.key}`
+      });
+    }
+    return {
+      id: current.id,
+      key: current.key,
+      name: current.name,
+      ...(current.revision !== undefined ? { revision: current.revision } : {}),
+      scope,
+      scopeId,
+      ...(current.categoryId ? { categoryId: current.categoryId } : {}),
+      status: 'active' as const
+    } satisfies NonNullable<GroupChatMessageDirectives['skill']>;
   }
 
   private pendingIntentHandlingPlan(): UserMessageHandlingPlan {
@@ -2266,7 +2770,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     session: SessionDetail,
     content: string,
     mentionedAgentIds: string[],
-    clientMessageId: string | undefined
+    clientMessageId: string | undefined,
+    sourceContent = content,
+    allowStoppedAdmission = false
   ) {
     const workItemId = session.activeWorkItemId;
     if (!workItemId) return undefined;
@@ -2303,7 +2809,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       content,
       toAgentIds: mentionedAgentIds,
       metadata: {
-        ...createMetadata('chat_message', { text: content, mentionedAgentIds, handlingPlan }),
+        ...createMetadata('chat_message', { text: sourceContent, mentionedAgentIds, handlingPlan }),
         ...(clientMessageId ? { idempotencyKey: this.messageIdempotencyKey(session.id, clientMessageId) } : {})
       }
     });
@@ -2337,7 +2843,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       base,
       sourceEventId: event.id,
       summary,
-      ...(generation !== undefined ? { generation } : {})
+      ...(generation !== undefined ? { generation } : {}),
+      ...(allowStoppedAdmission ? { allowStoppedAdmission: true } : {})
     });
     // A closed or restored session is not a place to queue new scope: let the
     // ordinary routing path report that rather than inventing a card here.
@@ -2884,6 +3391,45 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     };
   }
 
+  /** Resolve client attachment IDs to server-owned metadata before message ingress. */
+  private resolveMessageAttachmentRefs(sessionId: string, attachmentIds: readonly string[]): GroupChatAttachmentRef[] {
+    const ids = [...new Set(attachmentIds.map((id) => String(id).trim()).filter(Boolean))];
+    if (!ids.length) return [];
+    if (ids.length > 8) throw new BadRequestException('A message may contain at most 8 attachments.');
+    const records = this.persistence.getCollection<Array<{
+      id: string;
+      messageId?: string;
+      sessionId: string;
+      kind: GroupChatAttachmentRef['kind'];
+      fileName: string;
+      mimeType: string;
+      sizeBytes: number;
+      uploadStatus: GroupChatAttachmentRef['uploadStatus'];
+      recognitionStatus?: GroupChatAttachmentRef['recognitionStatus'];
+      recognitionSummary?: string;
+      createdAt: string;
+    }>>('groupChatAttachments', []);
+    return ids.map((id) => {
+      const record = records.find((item) => item.id === id && item.sessionId === sessionId);
+      if (!record) throw new NotFoundException(`Attachment not found in Session: ${id}`);
+      if (record.uploadStatus === 'deleted') throw new NotFoundException(`Attachment is deleted: ${id}`);
+      if (record.uploadStatus !== 'ready') throw new ConflictException(`Attachment is not ready: ${id}`);
+      return {
+        id: record.id,
+        ...(record.messageId ? { messageId: record.messageId } : {}),
+        sessionId: record.sessionId,
+        kind: record.kind,
+        fileName: record.fileName,
+        mimeType: record.mimeType,
+        sizeBytes: record.sizeBytes,
+        uploadStatus: record.uploadStatus,
+        ...(record.recognitionStatus ? { recognitionStatus: record.recognitionStatus } : {}),
+        ...(record.recognitionSummary ? { recognitionSummary: record.recognitionSummary } : {}),
+        createdAt: record.createdAt
+      } satisfies GroupChatAttachmentRef;
+    });
+  }
+
   private messageIdempotencyKey(sessionId: string, clientMessageId: string) {
     return `message:${sessionId}:${clientMessageId.trim()}`;
   }
@@ -3251,10 +3797,11 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   private async recognizeFollowUpHandlingPlan(
     session: SessionDetail,
     content: string,
-    mentionedAgentIds: string[]
+    mentionedAgentIds: string[],
+    attachmentRefs: GroupChatAttachmentRef[] = []
   ): Promise<UserMessageHandlingPlan> {
     try {
-      return await this.orchestrator.recognizeFollowUpMessage(session, content, mentionedAgentIds);
+      return await this.orchestrator.recognizeFollowUpMessage(session, content, mentionedAgentIds, undefined, attachmentRefs);
     } catch (error) {
       this.logger.warn(`Receiver Runtime intent recognition failed for session ${session.id}: ${String(error)}`);
       return this.intentRecognition.recognizeUserMessage(content, session.status);
@@ -3432,35 +3979,83 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     const mapping = evaluateWorkflowMemberMapping({
       involvedAgentIds: version.involvedAgentIds,
       participatingAgentIds: session.participatingAgentIds,
-      findAgent: (id) => this.agents.findByIdOrKey(id)
+      findAgent: (id) => this.agents.findByIdOrKey(id),
+      workflowNodes: version.nodes
     });
     if (mapping.status === 'mapping_required') {
+      const allGapsAddable = mapping.gaps.length > 0 && mapping.gaps.every((gap) =>
+        gap.reason === 'not_participating' && gap.canInvite !== false
+      );
+      const existing = this.events.list(session.id).find((event) => {
+        if (event.type !== 'user_confirmation_requested') return false;
+        const payload = event.metadata.payload as Record<string, unknown> | undefined;
+        return payload?.reason === 'confirm_workflow_member_mapping' &&
+          payload.selectionConfirmationId === input.confirmationId &&
+          payload.workflowId === workflow.id &&
+          payload.workflowVersion === version.version &&
+          payload.definitionHash === version.definitionHash &&
+          !this.events.list(session.id).some((resolved) =>
+            resolved.type === 'user_confirmation_resolved' &&
+            (resolved.metadata.payload as { confirmationId?: string } | undefined)?.confirmationId === payload.confirmationId
+          );
+      });
+      if (existing) {
+        const existingPayload = existing.metadata.payload as Record<string, unknown> | undefined;
+        throw new ConflictException({
+          code: 'capability_mapping_required',
+          confirmationId: existingPayload?.confirmationId,
+          selectionConfirmationId: input.confirmationId,
+          gaps: existingPayload?.memberGaps ?? existingPayload?.gaps ?? mapping.gaps,
+          addable: existingPayload?.addableAgentIds ?? mapping.addable
+        });
+      }
       const mappingConfirmationId = crypto.randomUUID();
+      const sessionGeneration = this.lifecycle.generation(session.id);
+      const confirmedDocument = session.activeWorkItemId
+        ? this.requirementDocuments.latest(session.id, session.activeWorkItemId)
+        : undefined;
       this.events.create({
         sessionId: session.id,
         type: 'user_confirmation_requested',
         fromAgentId: coordinator.id,
-        content: mapping.addable.length
+        content: allGapsAddable
           ? `工作流 ${workflow.name} 需要邀请以下 Agent 参与：${mapping.gaps.map((g) => g.agentName).join('、')}。`
           : `工作流 ${workflow.name} 涉及的部分 Agent 当前不可用：${mapping.gaps.map((g) => `${g.agentName}（${g.reason}）`).join('、')}。`,
         metadata: createMetadata('confirmation_card', {
           confirmationId: mappingConfirmationId,
           reason: 'confirm_workflow_member_mapping',
-          title: mapping.addable.length ? `确认邀请 ${mapping.addable.length} 个 Agent` : '工作流成员不可用',
-          description: mapping.addable.length
+          title: allGapsAddable ? `确认邀请 ${mapping.addable.length} 个 Agent` : '工作流成员不可用',
+          description: allGapsAddable
             ? `这些 Agent 尚未参与本会话，需要您明确同意后才能启动工作流。`
-            : mapping.gaps.map((g) => `${g.agentName}：${g.reason === 'disabled' ? '已禁用' : '未找到'}`).join('；'),
+            : mapping.gaps.map((g) => `${g.agentName}：${g.reason === 'disabled' ? '已禁用' : g.reason === 'unknown' ? '未找到' : '尚未加入会话'}`).join('；'),
           workflowId: workflow.id,
+          workflowName: workflow.name,
           workflowVersion: version.version,
           definitionHash: version.definitionHash,
+          selectionConfirmationId: input.confirmationId,
+          ...(sessionGeneration !== undefined ? { sessionGeneration } : {}),
+          relatedBriefId: brief.id,
+          briefVersion: brief.version,
+          ...(confirmedDocument ? {
+            documentId: confirmedDocument.id,
+            documentRevision: confirmedDocument.documentRevision,
+            contentHash: confirmedDocument.contentHash
+          } : {}),
           addableAgentIds: mapping.addable,
           gaps: mapping.gaps,
-          options: mapping.addable.length
+          memberGaps: mapping.gaps,
+          options: allGapsAddable
             ? [{ key: 'approve', label: '邀请并启动', style: 'primary' }, { key: 'decline', label: '取消', style: 'default' }]
-            : [{ key: 'acknowledge', label: '知道了', style: 'default' }]
+            : [{ key: 'decline', label: '返回选择', style: 'default' }]
         })
       });
-      throw new ConflictException({ code: 'capability_mapping_required', gaps: mapping.gaps, addable: mapping.addable });
+      throw new ConflictException({
+        code: 'capability_mapping_required',
+        confirmationId: mappingConfirmationId,
+        selectionConfirmationId: input.confirmationId,
+        gaps: mapping.gaps,
+        addable: mapping.addable
+      });
     }
     if (this.isEmptyWorkspace(session) && session.workspaceMode !== 'bootstrap') {
       const confirmationId = crypto.randomUUID();
@@ -3734,7 +4329,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     return { session, task, decision: input.decision };
   }
 
-  reviseBrief(
+  async reviseBrief(
     sessionId: string,
     briefId: string,
     input: {
@@ -3753,8 +4348,25 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       throw new BadRequestException(`Brief not found: ${briefId}`);
     }
 
-    const content = (input.userMessage || input.reason || '用户要求修改当前任务契约。').trim();
+    const submittedContent = (input.userMessage || input.reason || '用户要求修改当前任务契约。').trim();
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
+    const canPublishDiscussionDocument = Boolean(session.workingDirectory && this.discussionDocuments);
+    const activeDocument = canPublishDiscussionDocument ? this.discussionDocuments?.active(session.id) : undefined;
+    const discussionDocument = canPublishDiscussionDocument && this.discussionDocuments
+      ? await this.discussionDocuments.create(session, {
+          title: `任务契约修订 v${brief.version + 1}`,
+          content: normalizeDiscussionMarkdown(submittedContent),
+          clientMessageId: input.confirmationId?.trim()
+            ? `brief-revision:${briefId}:${input.confirmationId.trim()}`
+            : `brief-revision:${briefId}:${crypto.createHash('sha256').update(normalizeDiscussionMarkdown(submittedContent)).digest('hex')}`,
+          ...(activeDocument ? { parentDocumentId: activeDocument.id } : {}),
+          ...(session.activeWorkItemId ? { workItemId: session.activeWorkItemId } : {}),
+          createdBy: 'user'
+        })
+      : undefined;
+    const content = discussionDocument
+      ? this.discussionDocumentReference(discussionDocument)
+      : submittedContent;
 
     // P1 分流:指定 Agent 定向修订 vs 全量重跑
     if (input.assignedAgentKeys && input.assignedAgentKeys.length > 0) {
@@ -3763,7 +4375,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         brief,
         content,
         input.confirmationId,
-        input.assignedAgentKeys
+        input.assignedAgentKeys,
+        discussionDocument
       );
     }
 
@@ -3778,7 +4391,12 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         text: content,
         mentionedAgentIds: [coordinator.id],
         relatedBriefId: briefId,
-        revisionOfBriefId: briefId
+        revisionOfBriefId: briefId,
+        ...(discussionDocument ? {
+          discussionDocumentId: discussionDocument.id,
+          discussionDocumentRevision: discussionDocument.revision,
+          discussionDocumentHash: discussionDocument.contentHash
+        } : {})
       })
     });
 
@@ -3802,12 +4420,29 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       metadata: createMetadata('system_notice', {
         briefId,
         reason: content,
-        coordinatorAgentId: coordinator.id
+        coordinatorAgentId: coordinator.id,
+        ...(discussionDocument ? {
+          discussionDocumentId: discussionDocument.id,
+          discussionDocumentRevision: discussionDocument.revision
+        } : {})
       })
     });
 
-    this.reopenRequirementLoop(session, content, userEvent, [coordinator.id], 'brief_revision_requested');
-    return { accepted: true, sessionId: session.id, status: session.status, event: userEvent };
+    this.reopenRequirementLoop(
+      session,
+      content,
+      userEvent,
+      [coordinator.id],
+      'brief_revision_requested',
+      discussionDocument
+    );
+    return {
+      accepted: true,
+      sessionId: session.id,
+      status: session.status,
+      event: userEvent,
+      discussionDocument
+    };
   }
 
   private reviseBriefDirected(
@@ -3815,25 +4450,34 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     brief: TaskBrief,
     userModification: string,
     confirmationId: string | undefined,
-    assignedAgentKeys: string[]
+    assignedAgentKeys: string[],
+    discussionDocument?: DiscussionDocumentView
   ) {
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
 
-    // 更新 session.latestContractGoal 为用户修改后的目标（从 userModification 提取或直接使用）
-    session.latestContractGoal = userModification;
+    // 文档发布后，正文只存在于工作区文件；Session 只保留不可逆的引用，避免
+    // 把完整方案复制进事件、Memory 或后续 Prompt。没有工作区文档时兼容旧语义。
+    const safeModification = discussionDocument
+      ? this.discussionDocumentReference(discussionDocument)
+      : userModification;
 
     const userEvent = this.events.create({
       sessionId: session.id,
       type: 'user_message',
       userMessageIntent: 'correction',
       priority: 'high',
-      content: userModification,
+      content: safeModification,
       toAgentIds: [coordinator.id],
       metadata: createMetadata('chat_message', {
-        text: userModification,
+        text: safeModification,
         mentionedAgentIds: [coordinator.id],
         relatedBriefId: brief.id,
-        revisionOfBriefId: brief.id
+        revisionOfBriefId: brief.id,
+        ...(discussionDocument ? {
+          discussionDocumentId: discussionDocument.id,
+          discussionDocumentRevision: discussionDocument.revision,
+          discussionDocumentHash: discussionDocument.contentHash
+        } : {})
       })
     });
 
@@ -3857,9 +4501,13 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       content: `当前任务契约已进入定向修订，指定的 ${assignedAgentKeys.length} 个 Agent 将审阅用户修改，最后由 Coordinator 定稿。`,
       metadata: createMetadata('system_notice', {
         briefId: brief.id,
-        reason: userModification,
+        reason: safeModification,
         coordinatorAgentId: coordinator.id,
-        assignedAgentKeys
+        assignedAgentKeys,
+        ...(discussionDocument ? {
+          discussionDocumentId: discussionDocument.id,
+          discussionDocumentRevision: discussionDocument.revision
+        } : {})
       })
     });
 
@@ -3868,12 +4516,21 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       session.id,
       createExecutionTermination({ kind: 'superseded', source: 'orchestrator', scope: 'phase' })
     );
-    this.tasks.cancelUnfinished(session.id, messages.requirementChangedCancelTasks);
+    this.tasks.cancelUnfinished(
+      session.id,
+      this.discussionDocumentSupersededReason(discussionDocument)
+    );
 
     this.setStatus(session, 'AGENT_DISCUSSING');
-    this.generateDirectedRevisionInBackground(session, brief, userModification, assignedAgentKeys, userEvent.id);
+    this.generateDirectedRevisionInBackground(session, brief, safeModification, assignedAgentKeys, userEvent.id);
 
-    return { accepted: true, sessionId: session.id, status: session.status, event: userEvent };
+    return {
+      accepted: true,
+      sessionId: session.id,
+      status: session.status,
+      event: userEvent,
+      discussionDocument
+    };
   }
 
   private generateDirectedRevisionInBackground(
@@ -4024,7 +4681,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       followUp.handlingPlan = await this.recognizeFollowUpHandlingPlan(
         session,
         followUp.content,
-        followUp.mentionedAgentIds
+        followUp.mentionedAgentIds,
+        followUp.attachmentRefs ?? []
       );
       followUp.receiverRecognitionPending = undefined;
       this.touchSession(session);
@@ -5108,6 +5766,97 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     return { session, event, confirmationEvent };
   }
 
+  async cancelCollaboration(sessionId: string, taskId?: string, reason = '用户已中止协同任务') {
+    const result = this.control(sessionId, 'CANCELLED', reason);
+    const summary = this.createCollaborationSummaryEvent(sessionId, taskId, 'temporary_cancelled');
+    return { ...result, summary };
+  }
+
+  retryCollaborationAgent(sessionId: string, agentId: string, taskId?: string) {
+    const session = this.get(sessionId);
+    const agent = this.agents.getForSurface(agentId, 'mention');
+    if (!session.participatingAgentIds.includes(agent.id)) {
+      throw new BadRequestException(`Agent is not a participant in this Session: ${agent.key}`);
+    }
+    const failedEvents = this.events.list(sessionId).slice().reverse().filter((event) => {
+      if (!['task_failed', 'runtime_failed'].includes(event.type)) return false;
+      const payload = event.metadata.payload as { agentId?: string; assignee?: { id?: string } } | undefined;
+      if (!(payload?.agentId === agent.id || payload?.assignee?.id === agent.id || event.fromAgentId === agent.id || event.toAgentIds.includes(agent.id))) return false;
+      return !taskId || event.taskId === taskId || event.metadata.payload?.taskId === taskId;
+    });
+    const failed = failedEvents[0] ?? this.events.list(sessionId).slice().reverse().find((event) => {
+      if (!['task_failed', 'runtime_failed'].includes(event.type)) return false;
+      const payload = event.metadata.payload as { agentId?: string; assignee?: { id?: string } } | undefined;
+      return payload?.agentId === agent.id || payload?.assignee?.id === agent.id || event.fromAgentId === agent.id || event.toAgentIds.includes(agent.id);
+    });
+    if (!failed) throw new BadRequestException('没有找到该 Agent 可重试的失败任务。');
+    const resolvedTaskId = taskId ?? failed.taskId ?? (failed.metadata.payload as { taskId?: string } | undefined)?.taskId;
+    const attemptId = crypto.randomUUID();
+    const event = this.events.create({
+      sessionId,
+      taskId: resolvedTaskId,
+      type: 'task_reworked',
+      toAgentIds: [agent.id],
+      content: `已为 ${agent.name} 发起新的重试 Attempt。`,
+      metadata: createMetadata('task_card', {
+        taskId: resolvedTaskId,
+        agentId: agent.id,
+        attemptId,
+        retryOfEventId: failed.id,
+        status: 'running',
+        retry: true
+      })
+    });
+    this.touchSession(session);
+    return { session, event, attemptId, taskId: resolvedTaskId, agentId: agent.id, retryOfEventId: failed.id };
+  }
+
+  resummarizeCollaboration(sessionId: string, taskId?: string) {
+    const session = this.get(sessionId);
+    const allSuccessful = this.events.list(sessionId).filter((event) => {
+      if (!['task_completed', 'runtime_completed', 'agent_message'].includes(event.type)) return false;
+      const payload = event.metadata.payload as { status?: string; summaryKind?: string } | undefined;
+      if (payload?.summaryKind === 'manual_resummary' || payload?.status === 'failed') return false;
+      return true;
+    });
+    const scoped = taskId
+      ? allSuccessful.filter((event) => event.taskId === taskId || event.metadata.payload?.taskId === taskId || event.metadata.payload?.collaborationTaskId === taskId)
+      : allSuccessful;
+    const successful = scoped.length ? scoped : allSuccessful;
+    const summary = this.createCollaborationSummaryEvent(sessionId, taskId, 'manual_resummary', successful.map((event) => event.id));
+    return { session, summary, sourceEventIds: successful.map((event) => event.id) };
+  }
+
+  private createCollaborationSummaryEvent(
+    sessionId: string,
+    taskId: string | undefined,
+    summaryKind: 'temporary_cancelled' | 'manual_resummary',
+    sourceEventIds: string[] = []
+  ) {
+    const coordinator = this.pickSessionAgent(this.getIncludingDeleted(sessionId), ['coordinator']);
+    const priorVersions = this.events.list(sessionId)
+      .map((event) => (event.metadata.payload as { summaryVersion?: unknown } | undefined)?.summaryVersion)
+      .filter((value): value is number => typeof value === 'number');
+    const summaryVersion = Math.max(0, ...priorVersions) + 1;
+    const event = this.events.create({
+      sessionId,
+      taskId,
+      fromAgentId: coordinator.id,
+      type: 'agent_message',
+      content: summaryKind === 'temporary_cancelled'
+        ? '协同任务已中止，以上已完成结果保留为当前阶段临时汇总。'
+        : `主 Agent 已生成第 ${summaryVersion} 版协同汇总。`,
+      metadata: createMetadata('chat_message', {
+        messageKind: 'summary',
+        summaryKind,
+        summaryVersion,
+        collaborationTaskId: taskId,
+        sourceEventIds: [...new Set(sourceEventIds)]
+      })
+    });
+    return { event, version: summaryVersion, kind: summaryKind, sourceEventIds: [...new Set(sourceEventIds)] };
+  }
+
   confirmMemory(
     sessionId: string,
     input: {
@@ -5229,7 +5978,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   private validateFileRevisionAgents(session: SessionDetail, agentIds: string[]) {
     const participantIds = new Set(session.participatingAgentIds);
     const agents = [...new Set(agentIds)].map((agentId) => {
-      const agent = this.agents.getByIdOrKey(agentId);
+      const agent = this.agents.getForSurface(agentId, 'workflow');
       if (!participantIds.has(agent.id)) throw new BadRequestException(`Agent is not part of this session: ${agentId}`);
       if (agent.status !== 'active') throw new BadRequestException(`Agent is not active: ${agent.name}`);
       if (agent.key === 'coordinator') throw new BadRequestException('The receiver cannot be selected as a processing Agent.');
@@ -5707,34 +6456,298 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     sessionId: string,
     input: { confirmationId: string; decision: 'approve' | 'decline' }
   ) {
+    const key = `${sessionId}:${input.confirmationId}`;
+    const active = this.workflowMappingResolutionRuns.get(key);
+    if (active) {
+      if (active.decision !== input.decision) {
+        throw new ConflictException({ code: 'workflow_member_mapping_decision_conflict' });
+      }
+      return active.promise;
+    }
+    const promise = this.resolveWorkflowMemberMappingOnce(sessionId, input);
+    this.workflowMappingResolutionRuns.set(key, { decision: input.decision, promise });
+    try {
+      return await promise;
+    } finally {
+      this.workflowMappingResolutionRuns.delete(key);
+    }
+  }
+
+  private async resolveWorkflowMemberMappingOnce(
+    sessionId: string,
+    input: { confirmationId: string; decision: 'approve' | 'decline' }
+  ) {
     const session = this.get(sessionId);
+    const previousResolution = [...this.events.list(sessionId)].reverse().find((event) => {
+      const resolution = event.metadata.payload as Record<string, unknown> | undefined;
+      return event.type === 'user_confirmation_resolved' &&
+        resolution?.confirmationId === input.confirmationId &&
+        resolution?.reason === 'confirm_workflow_member_mapping';
+    });
+    if (previousResolution) {
+      const resolution = previousResolution.metadata.payload as Record<string, unknown>;
+      if (resolution.selectedOptionKey !== input.decision) {
+        throw new ConflictException({ code: 'workflow_member_mapping_decision_conflict' });
+      }
+      const workflowRunId = typeof resolution.workflowRunId === 'string' ? resolution.workflowRunId : undefined;
+      const workflowRun = workflowRunId && this.workflowRuntime
+        ? this.workflowRuntime.get(workflowRunId)
+        : undefined;
+      return {
+        session,
+        decision: input.decision,
+        started: Boolean(workflowRun),
+        ...(workflowRun ? { workflowRun } : {}),
+        workflowId: resolution.workflowId,
+        workflowName: resolution.workflowName,
+        workflowVersion: resolution.workflowVersion,
+        selectionConfirmationId: resolution.selectionConfirmationId,
+        memberGaps: resolution.memberGaps
+      };
+    }
     const request = this.assertPendingConfirmation(sessionId, input.confirmationId, 'confirm_workflow_member_mapping');
     const payload = request.metadata.payload as Record<string, unknown> | undefined;
-    const addable = Array.isArray(payload?.addableAgentIds) ? (payload.addableAgentIds as string[]) : [];
-    this.events.create({
+    const workflowId = typeof payload?.workflowId === 'string' ? payload.workflowId : undefined;
+    const selectionConfirmationId = typeof payload?.selectionConfirmationId === 'string'
+      ? payload.selectionConfirmationId
+      : undefined;
+    const workflowVersion = Number(payload?.workflowVersion);
+    const definitionHash = typeof payload?.definitionHash === 'string' ? payload.definitionHash : undefined;
+    const workflow = workflowId && this.workflows ? this.workflows.get(workflowId) : undefined;
+    const workflowName = typeof payload?.workflowName === 'string' ? payload.workflowName : workflow?.name;
+    const memberGaps = Array.isArray(payload?.memberGaps)
+      ? payload.memberGaps
+      : Array.isArray(payload?.gaps) ? payload.gaps : [];
+
+    if (input.decision === 'decline') {
+      this.events.createOnce(`workflow-member-mapping-resolved:${input.confirmationId}:declined`, {
+        sessionId,
+        type: 'user_confirmation_resolved',
+        sessionUserId: session.ownerId,
+        content: `未邀请 ${memberGaps.map((gap) => String((gap as Record<string, unknown>).agentName ?? (gap as Record<string, unknown>).agentId)).join('、')}，原工作流未启动。`,
+        metadata: createMetadata('system_notice', {
+          confirmationId: input.confirmationId,
+          reason: 'confirm_workflow_member_mapping',
+          status: 'rejected',
+          selectedOptionKey: input.decision,
+          workflowId,
+          workflowName,
+          workflowVersion,
+          definitionHash,
+          selectionConfirmationId,
+          memberGaps,
+          declinedAgentIds: memberGaps.map((gap) => String((gap as Record<string, unknown>).agentId))
+        })
+      });
+      // Keep the session in WAIT_WORKFLOW_SELECT with a fresh, actionable
+      // selector. The original select confirmation remains bound to the
+      // declined workflow, so clients must not reuse it as an implicit retry.
+      const alreadyReissued = this.events.list(sessionId).some((event) => {
+        if (event.type !== 'user_confirmation_requested') return false;
+        const eventPayload = event.metadata.payload as Record<string, unknown> | undefined;
+        return eventPayload?.reason === 'select_workflow' &&
+          eventPayload?.reselectAfterMappingConfirmationId === input.confirmationId;
+      });
+      if (!alreadyReissued) {
+        const availableWorkflows = this.workflows?.list().filter((candidate) => candidate.status === 'published') ?? [];
+        const coordinator = this.pickSessionAgent(session, ['coordinator']);
+        const briefId = typeof payload?.relatedBriefId === 'string'
+          ? payload.relatedBriefId
+          : session.currentTaskBriefId;
+        const workflowConfirmationId = crypto.randomUUID();
+        this.events.create({
+          sessionId,
+          type: 'user_confirmation_requested',
+          priority: 'high',
+          content: '原工作流未启动，请重新选择已发布工作流。',
+          fromAgentId: coordinator.id,
+          metadata: createMetadata('confirmation_card', {
+            confirmationId: workflowConfirmationId,
+            reason: 'select_workflow',
+            title: '重新选择执行工作流',
+            description: '你拒绝了成员邀请。请选择其他已发布工作流，或在 Web 端创建并发布新流程。',
+            relatedBriefId: briefId,
+            reselectAfterMappingConfirmationId: input.confirmationId,
+            workflowOptions: availableWorkflows.map((candidate) => ({
+              id: candidate.id,
+              name: candidate.name,
+              version: candidate.currentPublishedVersion ?? candidate.version,
+              nodeCount: candidate.nodes.length,
+              agentCount: candidate.nodes.filter((node) => node.type === 'agent').length,
+              humanApprovalCount: candidate.nodes.filter((node) => node.type === 'human_approval').length,
+              robotApprovalCount: candidate.nodes.filter((node) => node.type === 'robot_approval').length,
+              status: candidate.status
+            })),
+            options: availableWorkflows.length
+              ? [{ key: 'open_workflow_selector', label: '选择工作流', style: 'primary' }]
+              : [{ key: 'manage_workflows', label: '创建工作流', style: 'primary' }]
+          })
+        });
+      }
+      return {
+        session,
+        decision: 'decline' as const,
+        workflowId,
+        workflowName,
+        workflowVersion,
+        selectionConfirmationId,
+        memberGaps
+      };
+    }
+
+    if (!workflowId || !selectionConfirmationId || !Number.isInteger(workflowVersion) || !definitionHash || !workflow || !this.workflows || !this.workflowRuntime) {
+      throw new ConflictException({ code: 'stale_workflow_member_mapping', reason: 'The mapping card is missing its workflow binding.' });
+    }
+    if (session.status !== 'WAIT_WORKFLOW_SELECT' || workflow.status !== 'published') {
+      return this.expireWorkflowMemberMapping(session, input.confirmationId, '会话或工作流状态已变化，请重新选择流程。');
+    }
+    const cardSessionGeneration = Number(payload?.sessionGeneration);
+    if (!this.lifecycle.isActive(
+      session.id,
+      Number.isInteger(cardSessionGeneration) ? cardSessionGeneration : undefined
+    )) {
+      return this.expireWorkflowMemberMapping(session, input.confirmationId, '会话已停止、删除或恢复，旧邀请不能继续启动流程。');
+    }
+    let version;
+    try {
+      version = this.workflows.getVersion(workflow.id, workflowVersion);
+    } catch {
+      return this.expireWorkflowMemberMapping(session, input.confirmationId, '发布版本已不存在，请重新选择流程。');
+    }
+    if (version.definitionHash !== definitionHash) {
+      return this.expireWorkflowMemberMapping(session, input.confirmationId, '发布版本内容已变化，请重新选择流程。');
+    }
+    const cardDocumentId = typeof payload?.documentId === 'string' ? payload.documentId : undefined;
+    const cardDocumentRevision = Number(payload?.documentRevision);
+    const cardContentHash = typeof payload?.contentHash === 'string' ? payload.contentHash : undefined;
+    if (cardDocumentId && session.activeWorkItemId) {
+      const currentDocument = this.requirementDocuments.latest(session.id, session.activeWorkItemId);
+      if (!currentDocument || currentDocument.id !== cardDocumentId || currentDocument.documentRevision !== cardDocumentRevision || currentDocument.contentHash !== cardContentHash) {
+        return this.expireWorkflowMemberMapping(session, input.confirmationId, '已确认的需求文档发生变化，请重新确认需求并选择流程。');
+      }
+    }
+    const cardBriefId = typeof payload?.relatedBriefId === 'string' ? payload.relatedBriefId : undefined;
+    const cardBriefVersion = Number(payload?.briefVersion);
+    const currentBriefId = session.currentTaskBriefId;
+    const currentBrief = currentBriefId ? this.orchestrator.getBrief(session.id, currentBriefId) : undefined;
+    if (
+      !currentBrief || !currentBrief.confirmedByUser ||
+      (cardBriefId && currentBrief.id !== cardBriefId) ||
+      (Number.isInteger(cardBriefVersion) && currentBrief.version !== cardBriefVersion)
+    ) {
+      return this.expireWorkflowMemberMapping(session, input.confirmationId, '已确认的需求版本发生变化，请重新确认需求并选择流程。');
+    }
+    const currentMapping = evaluateWorkflowMemberMapping({
+      involvedAgentIds: version.involvedAgentIds,
+      participatingAgentIds: session.participatingAgentIds,
+      findAgent: (id) => this.agents.findByIdOrKey(id),
+      workflowNodes: version.nodes
+    });
+    const cardGapIds = memberGaps.map((gap) => String((gap as Record<string, unknown>).agentId)).sort();
+    const currentGaps = currentMapping.status === 'mapping_required' ? currentMapping.gaps : [];
+    const currentGapIds = currentGaps.map((gap) => gap.agentId).sort();
+    if (
+      currentMapping.status === 'mapping_required' &&
+      (currentGaps.some((gap) => gap.reason !== 'not_participating') ||
+        JSON.stringify(cardGapIds) !== JSON.stringify(currentGapIds))
+    ) {
+      return this.expireWorkflowMemberMapping(session, input.confirmationId, currentGaps.some((gap) => gap.reason !== 'not_participating')
+        ? '工作流中的 Agent 已不可用，不能只邀请部分成员启动。'
+        : '工作流成员缺口已变化，请重新选择流程。');
+    }
+    const addableAgentIds = currentMapping.status === 'mapping_required' ? currentMapping.addable : [];
+
+    for (const agentId of addableAgentIds) {
+      if (!session.participatingAgentIds.includes(agentId)) session.participatingAgentIds.push(agentId);
+    }
+    this.persist();
+    let started: Awaited<ReturnType<SessionsService['selectWorkflow']>>;
+    try {
+      started = await this.selectWorkflow(sessionId, {
+        workflowId,
+        workflowVersion,
+        confirmationId: selectionConfirmationId
+      });
+    } catch (error) {
+      // Keep the mapping card pending: members were added, but the original
+      // selection still needs an explicit retry after the backend failure.
+      throw error;
+    }
+    this.events.createOnce(`workflow-member-mapping-resolved:${input.confirmationId}:approved`, {
       sessionId,
       type: 'user_confirmation_resolved',
       sessionUserId: session.ownerId,
-      content: input.decision === 'approve' ? `已邀请 ${addable.length} 个 Agent。` : '已取消。',
+      content: `已邀请 ${addableAgentIds.length} 个工作流 Agent，原流程已继续。`,
       metadata: createMetadata('system_notice', {
         confirmationId: input.confirmationId,
         reason: 'confirm_workflow_member_mapping',
-        status: input.decision === 'approve' ? 'approved' : 'declined',
+        status: 'approved',
         selectedOptionKey: input.decision,
-        addableAgentIds: addable
+        workflowId,
+        workflowName,
+        workflowVersion,
+        definitionHash,
+        selectionConfirmationId,
+        memberGaps,
+        addableAgentIds: memberGaps.map((gap) => String((gap as Record<string, unknown>).agentId)),
+        workflowRunId: started.workflowRun?.id
       })
     });
-    if (input.decision !== 'approve') return session;
-    for (const agentId of addable) {
-      if (!session.participatingAgentIds.includes(agentId)) {
-        session.participatingAgentIds.push(agentId);
-      }
-    }
-    if (addable.length) this.persist();
-    return session;
+    return {
+      ...started,
+      decision: 'approve' as const,
+      started: Boolean(started.workflowRun),
+      workflowId,
+      workflowName,
+      workflowVersion,
+      selectionConfirmationId,
+      memberGaps
+    };
+  }
+
+  private expireWorkflowMemberMapping(session: SessionDetail, confirmationId: string, message: string) {
+    this.events.createOnce(`workflow-member-mapping-resolved:${confirmationId}:expired`, {
+      sessionId: session.id,
+      type: 'user_confirmation_resolved',
+      sessionUserId: session.ownerId,
+      content: message,
+      metadata: createMetadata('system_notice', {
+        confirmationId,
+        reason: 'confirm_workflow_member_mapping',
+        status: 'expired',
+        resolution: 'stale_confirmation'
+      })
+    });
+    throw new ConflictException({ code: 'stale_workflow_member_mapping', message });
   }
 
   /** Phase 3 card: the coordinator asked to add a member; only the user can say yes. */
+  async joinAgent(sessionId: string, agentId: string) {
+    const session = this.get(sessionId);
+    const agent = this.agents.getForSurface(agentId, 'mention');
+    if (agent.key === 'coordinator' || agent.management?.systemRole === 'coordinator') {
+      throw new BadRequestException('The main Agent cannot be added as a mention member.');
+    }
+    const alreadyMember = session.participatingAgentIds.includes(agent.id);
+    if (!alreadyMember) {
+      session.participatingAgentIds = [...session.participatingAgentIds, agent.id];
+      this.events.create({
+        sessionId,
+        type: 'runtime_progress',
+        sessionUserId: session.ownerId,
+        content: `已邀请 ${agent.name} 加入群聊，可读取加入前的历史消息和附件索引。`,
+        metadata: createMetadata('system_notice', {
+          reason: 'agent_joined_group',
+          agentId: agent.id,
+          historyReadable: true,
+          attachmentIndexReadable: true
+        })
+      });
+      this.touchSession(session);
+    }
+    return { session, agent, added: !alreadyMember };
+  }
+
   async resolveMemberAddition(
     sessionId: string,
     input: { discussionId: string; confirmationId: string; decision: 'approve' | 'decline' }
@@ -5933,13 +6946,17 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     content: string,
     sourceEvent: CollaborationEvent,
     affectedAgentIds: string[],
-    reason: string
+    reason: string,
+    discussionDocument?: DiscussionDocumentView
   ) {
     this.execution.cancel(
       session.id,
       createExecutionTermination({ kind: 'superseded', source: 'orchestrator', scope: 'phase' })
     );
-    this.tasks.cancelUnfinished(session.id, messages.requirementChangedCancelTasks);
+    this.tasks.cancelUnfinished(
+      session.id,
+      this.discussionDocumentSupersededReason(discussionDocument)
+    );
     const relevantAgentIds = this.relevantAgentIds(session, content, affectedAgentIds);
     this.recordAgentRequirementContext(session, content, sourceEvent.id, relevantAgentIds);
     this.events.create({
@@ -5956,6 +6973,16 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     });
     this.setStatus(session, 'AGENT_DISCUSSING');
     this.generateBriefInBackground(session);
+  }
+
+  private discussionDocumentSupersededReason(document?: DiscussionDocumentView) {
+    return document
+      ? `${messages.requirementChangedCancelTasks} 当前依据为方案文档 v${document.revision}（${document.id}）。`
+      : messages.requirementChangedCancelTasks;
+  }
+
+  private discussionDocumentReference(document: DiscussionDocumentView) {
+    return `方案修订已写入工作区文件 ${document.relativePath}（文档 ${document.id}，v${document.revision}，SHA-256 ${document.contentHash}）。请先使用 read_file 读取该文件全文。`;
   }
 
   private recordAgentRequirementContext(
@@ -6390,12 +7417,35 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   }
 
   private participatingAgents(session: SessionDetail) {
+    const hasPersistedMembership = session.participatingAgentIds.length > 0;
     const agents = session.participatingAgentIds
       .map((agentId) => this.agents.findByIdOrKey(agentId))
       .filter((agent): agent is Agent => Boolean(agent))
-      .filter((agent) => agent.management?.allowedSurfaces.includes('chat') ?? true)
-      .filter((agent) => agent.status === 'active');
+      // The coordinator is the trusted main Agent and is intentionally
+      // management-only in the public Agent catalog. It still remains a
+      // valid internal Session participant. Every other participant must be
+      // explicitly allowed on the chat surface.
+      .filter((agent) => agent.key === 'coordinator' || (agent.management?.allowedSurfaces.includes('chat') ?? true))
+      // Some legacy/in-memory callers omit status on an otherwise complete
+      // Agent fixture. Treat that as unspecified, not as an explicit disabled
+      // state; persisted `disabled`/`deleted` Agents still fail closed.
+      .filter((agent) => agent.status === undefined || agent.status === 'active');
     if (agents.length) return agents;
+
+    // A persisted membership list is an authorization boundary. Do not
+    // replace a deleted/disabled participant with the whole active catalog;
+    // the only safe recovery is the trusted main Agent.
+    if (hasPersistedMembership) {
+      const coordinator = (this.agents as unknown as {
+        findSystemByKey?: (key: string) => Agent | undefined;
+      }).findSystemByKey?.('coordinator');
+      return coordinator && (coordinator.status === undefined || coordinator.status === 'active')
+        ? [coordinator]
+        : [];
+    }
+
+    // Legacy Sessions created before participant membership was persisted may
+    // still use the catalog as their initial candidate set.
     const catalog = this.agents as unknown as {
       listForSurface?: (surface: 'chat') => Agent[];
       list?: () => Agent[];
@@ -6409,7 +7459,13 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       findSystemByKey?: (key: string) => Agent | undefined;
     };
     for (const key of preferredKeys) {
-      const preferred = catalog.findSystemByKey?.(key) ?? agents.find((agent) => agent.key === key);
+      const preferred = agents.find((agent) => agent.key === key) ??
+        // Legacy Sessions without persisted membership still need their
+        // trusted coordinator. Never use this escape hatch for a non-main
+        // Agent, otherwise a caller could route directly to an unjoined one.
+        (key === 'coordinator' && !session.participatingAgentIds.length
+          ? catalog.findSystemByKey?.(key)
+          : undefined);
       if (preferred) {
         return preferred;
       }
@@ -6729,6 +7785,17 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     if (status === 'AGENT_DISCUSSING' || status === 'REVISING_BRIEF') return 'OPEN' as const;
     return undefined;
   }
+}
+
+function normalizeDiscussionMarkdown(value: string) {
+  const normalized = value.replace(/\r\n/g, '\n').trim();
+  // The editor normally supplies the complete task contract. For a short
+  // legacy/plain-text submission, wrap it as Markdown so the persisted file
+  // still has a stable document shape without changing the user's wording.
+  if (/^#{1,6}\s|^```|^[-*+]\s|^\d+\.\s|\*\*[^*]+\*\*/m.test(normalized)) {
+    return normalized;
+  }
+  return `# 任务契约修订\n\n${normalized}`;
 }
 
 function intentClarificationMetricReason(errors: string[]) {

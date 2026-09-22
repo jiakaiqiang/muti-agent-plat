@@ -292,6 +292,12 @@ type RuntimeEventPayload = {
 }
 ```
 
+### 工作流成员映射确认
+
+`user_confirmation_requested` 的 `reason=confirm_workflow_member_mapping` 必须携带 `selectionConfirmationId`、`workflowId`、`workflowName`、`workflowVersion`、`definitionHash`、`relatedBriefId`、`briefVersion` 和 `memberGaps[]`；已建立生命周期的会话还携带 `sessionGeneration`。每个缺口包含 Agent ID/名称、`not_participating | disabled | unknown`、是否可邀请，以及从对应发布快照聚合的 Agent/机器人审核节点证据。节点证据仅描述发布图的结构依赖和缺失影响，不证明当前需求在语义上必须使用该 Agent。
+
+`user_confirmation_resolved` 记录服务端已提交的 `approved | rejected | expired`；客户端本地 optimistic 事件不能作为成员新增或流程启动事实。批准事件同时记录实际 `workflowRunId`，相同决定重放必须恢复该运行；拒绝事件保留原流程、版本、缺口和原选择绑定，供 Web/桌面恢复相同结果。
+
 Runtime adapter 内部事件额外带有产品可见性：
 
 ```ts
@@ -593,3 +599,9 @@ type FileRevisionEventType =
 事件 ID 和聚合幂等键固定为 `runtime-stop:<stopRequestId>:<version>`；outbox 记录使用同一事件身份。相同回执、发布补偿或 ACK 前崩溃不得产生第二个相同版本事件。客户端按 `stopRequestId/version` 收敛，同轮旧版本不得覆盖新版本，新轮则以 `updatedAt` 判定先后。
 
 该事件驱动实时停止摘要，不进入聊天时间线。历史兼容事件 `RUNTIME_STOP_CONFIRMED` 仍可显示，但只能折叠连续、同 invocation、同状态的通知，并保留次数与每条时间；业务消息、不同 invocation 或不同状态都会截断分组。
+
+## 方案文档事件（2026-09-21）
+
+`discussion_document_published` 表示版本化方案文件已经写入工作区、完整回读并成为活动版本。`metadata.payload` 只允许包含 `documentId/artifactId/documentRole/revision/parentDocumentId/title/relativePath/contentUrl/uiUrl/contentHash/sizeBytes/readStatus`；禁止携带 Markdown 正文、`contentRef`、内部 Prompt 或工作区绝对路径。
+
+`discussion_document_read` 表示 Agent 对指定方案版本的读取回执。payload 只允许包含 `documentId/agentId/invocationId/contentHash/complete/truncated/status/errorCode`。只有精确路径、完整非截断读取、活动版本与哈希都匹配时，状态才可为 `completed`。发布和读取事件按既有 Session SSE 游标恢复，重连不得重放创建文档或 Agent 读取 mutation。

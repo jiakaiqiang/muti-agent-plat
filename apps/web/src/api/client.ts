@@ -55,10 +55,12 @@ async function request<T>(path: string, init?: ApiRequestInit) {
   const responsePromise = fetch(`${apiBaseUrl}${path}`, {
     ...requestInit,
     signal: timeoutController?.signal ?? upstreamSignal,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      ...(requestInit.headers ?? {})
-    }
+    headers: typeof FormData !== 'undefined' && requestInit.body instanceof FormData
+      ? { ...(requestInit.headers ?? {}) }
+      : {
+        'content-type': 'application/json; charset=utf-8',
+        ...(requestInit.headers ?? {})
+      }
   })
 
   let response: Response
@@ -100,12 +102,66 @@ export async function apiGet<T>(path: string, init?: ApiRequestInit) {
   return (await request<T>(path, init)).data
 }
 
+export async function apiGetText(path: string, init?: ApiRequestInit) {
+  const { timeoutMs, timeoutMessage, ...requestInit } = init ?? {}
+  const controller = new AbortController()
+  const upstreamSignal = requestInit.signal
+  const forwardAbort = () => controller.abort(upstreamSignal?.reason)
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) forwardAbort()
+    else upstreamSignal.addEventListener('abort', forwardAbort, { once: true })
+  }
+  const timeoutHandle = timeoutMs && timeoutMs > 0
+    ? setTimeout(() => controller.abort(new Error(timeoutMessage ?? `GET ${path} timed out after ${timeoutMs}ms`)), timeoutMs)
+    : undefined
+
+  try {
+    const requestUrl = path.startsWith('/api/') && apiBaseUrl.endsWith('/api')
+      ? `${apiBaseUrl.slice(0, -4)}${path}`
+      : `${apiBaseUrl}${path}`
+    const response = await fetch(requestUrl, {
+      ...requestInit,
+      method: 'GET',
+      signal: controller.signal,
+      headers: {
+        accept: 'text/markdown',
+        ...(requestInit.headers ?? {})
+      }
+    })
+    if (!response.ok) {
+      const body = await response.json().catch(() => undefined)
+      const message = body?.error?.message ?? `GET ${path} failed: ${response.status}`
+      throw new ApiRequestError(message, response.status, body?.error?.code, body?.error?.details)
+    }
+    return await response.text()
+  } catch (error) {
+    if (isAbortError(error) && !upstreamSignal?.aborted && timeoutMs) {
+      throw new Error(timeoutMessage ?? `GET ${path} timed out after ${timeoutMs}ms`)
+    }
+    throw error
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle)
+    upstreamSignal?.removeEventListener('abort', forwardAbort)
+  }
+}
+
 export async function apiPost<T>(path: string, body?: unknown, init?: ApiRequestInit) {
   return (
     await request<T>(path, {
       ...init,
       method: 'POST',
       body: body === undefined ? undefined : JSON.stringify(body),
+      headers: init?.headers
+    })
+  ).data
+}
+
+export async function apiPostMultipart<T>(path: string, body: FormData, init?: ApiRequestInit) {
+  return (
+    await request<T>(path, {
+      ...init,
+      method: 'POST',
+      body,
       headers: init?.headers
     })
   ).data

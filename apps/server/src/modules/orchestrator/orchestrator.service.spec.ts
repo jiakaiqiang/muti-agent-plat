@@ -84,6 +84,60 @@ test('task retries reuse acceptance but recheck permissions and changed scope be
   assert.equal(task.acceptanceCheckpoint?.decisionSource, 'rule');
 });
 
+test('a removed task assignee cannot be revived by the persisted task id', async () => {
+  const service = makeService() as any;
+  const activeSession = { ...session(), status: 'EXECUTING' };
+  const task = {
+    id: 'removed-agent-task',
+    sessionId: activeSession.id,
+    title: 'Do not execute for a removed Agent',
+    description: 'The old assignee is no longer a Session member.',
+    status: 'assigned',
+    assignee: { type: 'agent', id: 'removed-agent' },
+    acceptanceCriteria: [],
+    dependsOnTaskIds: [],
+    createdAt: activeSession.createdAt,
+    updatedAt: activeSession.updatedAt
+  } as AgentTask;
+
+  await assert.rejects(
+    () => service.runOneTask(activeSession, {}, task),
+    /AGENT_NOT_EXECUTABLE/
+  );
+});
+
+test('evidence-gated workflow acceptance falls back to the model with an auditable reason', async () => {
+  const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+  const service = makeService([], recorder) as any;
+  const activeSession = { ...session(), workspaceMode: 'existing_project', status: 'EXECUTING' };
+  const task = { id: 'evidence-gated-task', sessionId: activeSession.id, workflowNodeRunId: 'node-1',
+    title: 'Implementation', description: 'Implement the approved scope', status: 'assigned',
+    assignee: { type: 'agent', id: 'backend' }, acceptanceCriteria: ['Check changes'], dependsOnTaskIds: [],
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } as AgentTask;
+  service.invocationWorkspace = () => ({});
+  service.createContextAssembly = () => ({ taskContext: {
+    intent: 'implementation', requiresCodeChanges: true,
+    evidenceSelection: { strategy: 'coding_minimal' }
+  }, systemRules: [], budget: { maxInputTokens: 1000, maxOutputTokens: 800, maxTotalTokens: 1800 } });
+  service.invocationResolver = { resolve: () => makeInvocationPlan({ agent: { agentId: 'backend' } }) };
+  service.taskDependencyArtifacts = () => [];
+  let acceptanceRules: string[] | undefined;
+  service.runRuntime = async (_session: unknown, input: any) => {
+    acceptanceRules = input.contextAssembly.systemRules;
+    return {
+      invocationId: input.invocationId, runtimeType: 'mock', status: 'completed',
+      output: { kind: 'task_acceptance_decision', schemaVersion: '1.0', status: 'accepted',
+        reason: 'Evidence is available through the Runtime tools.', missingContext: [], requestedContext: null,
+        handoffSuggestion: null, confidence: null, alternativeAgentKeys: [], alternativeAgentIds: [], agentMessages: [] },
+      events: [], artifacts: [], systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, model: 'mock' }
+    };
+  };
+  const outcome = await service.resolveTaskClaim(activeSession, {}, task, agent('backend'), agent('coordinator'), undefined, new Set());
+  assert.equal(outcome.ok, true);
+  assert.ok(acceptanceRules?.some((rule) => rule.includes('EVIDENCE_GATE:evidence-empty')));
+});
+
 test('recovery with a failed submission never replays development when safe repair is unavailable or exhausted', async () => {
   for (const runtimeType of ['claude_code', 'codex'] as const) {
     const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };

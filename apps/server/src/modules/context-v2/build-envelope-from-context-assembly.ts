@@ -160,12 +160,16 @@ export function buildEnvelopeFromContextAssembly(args: {
     },
     l1: {
       sessionGoal: contextAssembly.sessionGoal,
+      ...(contextAssembly.attachmentRefs?.length
+        ? { attachmentRefs: contextAssembly.attachmentRefs.map((attachment) => ({ ...attachment })) }
+        : {}),
       ...(contextAssembly.currentContractGoal
         ? { currentContractGoal: contextAssembly.currentContractGoal }
         : {}),
       ...(args.phase === 'user_message_routing' && contextAssembly.currentUserMessage !== undefined
         ? { currentUserMessage: contextAssembly.currentUserMessage }
         : {}),
+      ...(contextAssembly.requiredDocument ? { requiredDocument: contextAssembly.requiredDocument } : {}),
       phase: args.phase,
       ...(contextAssembly.currentTask
         ? {

@@ -18,7 +18,8 @@ import {
   RELATIONAL_SCHEMA_V13_SQL,
   RELATIONAL_SCHEMA_V14_SQL,
   RELATIONAL_SCHEMA_V15_SQL,
-  RELATIONAL_SCHEMA_V16_SQL
+  RELATIONAL_SCHEMA_V16_SQL,
+  RELATIONAL_SCHEMA_V17_SQL
 } from './relational-schema.js';
 
 type Migration = {
@@ -107,6 +108,11 @@ const MIGRATIONS: Migration[] = [
     version: 16,
     name: 'change_requests',
     sql: RELATIONAL_SCHEMA_V16_SQL
+  },
+  {
+    version: 17,
+    name: 'discussion_documents',
+    sql: RELATIONAL_SCHEMA_V17_SQL
   }
 ];
 

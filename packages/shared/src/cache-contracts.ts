@@ -110,6 +110,7 @@ function positiveInteger(value: number | undefined): number | undefined {
 export function normalizeRuntimeUsage(input: NormalizeRuntimeUsageInput): NormalizedRuntimeUsage {
   const capability = input.cacheCapability ?? 'unknown';
   const inputTokensIncludeCacheRead = INPUT_INCLUDES_CACHE_READ[input.provider];
+  const priceVersion = input.priceVersion ?? input.raw?.priceVersion;
 
   if (!input.raw) {
     // No usage came back. Reporting zeros here would turn "we do not know what
@@ -148,12 +149,12 @@ export function normalizeRuntimeUsage(input: NormalizeRuntimeUsageInput): Normal
     ...(input.raw.model ? { model: input.raw.model } : {}),
     // An amount without a price version cannot be explained later, so it is not
     // reportable at all. Silence is preferable to an unattributable number.
-    ...(typeof input.raw.cost === 'number' && input.priceVersion
+    ...(typeof input.raw.cost === 'number' && priceVersion
       ? {
           cost: {
             amount: input.raw.cost,
-            priceVersion: input.priceVersion,
-            basis: input.costBasis ?? 'actual'
+            priceVersion,
+            basis: input.costBasis ?? input.raw.costBasis ?? 'actual'
           } satisfies NormalizedUsageCost
         }
       : {})

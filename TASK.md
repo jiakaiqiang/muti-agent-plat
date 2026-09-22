@@ -1,6 +1,6 @@
 # TASK.md — 阶段 5：执行中补充、新需求与范围变更治理
 
-状态：进行中（2026-09-19 开工）。阶段 4 已于同日验收（用户确认），准入成立。
+状态：实施完成，自动化验收通过，待用户确认（2026-09-19）。阶段 4 已于同日验收（用户确认），准入成立。
 
 依据文档（四件套，2026-09-16 生成）：
 `docs/product/main-agent-collaboration-phase-5-spec-v1.md`（AC）、
@@ -145,8 +145,21 @@
 
 ## T6 验证执行中交互矩阵（AC1–AC7）
 
-- [ ] T6-1 多意图、重复提交、影响过期、旧结果、流程不支持恢复、同会话串行/跨会话并行
-- [ ] T6-2 独立 PostgreSQL（新集合）+ E2E + 四门禁
+- [x] T6-1 多意图、重复提交、影响过期、旧结果、流程不支持恢复、同会话串行/跨会话并行
+      已由 shared 合同/投影、ChangeRequestStore、SessionsService、WorkflowRuntimeService
+      定向回归覆盖：停止优先、版本过期拒绝、迟到结果/旧 generation fencing、排队稳定顺序、
+      终态提示不自动授权、跨会话停止隔离、删除后只读审计。
+- [x] T6-2 独立 PostgreSQL（新集合）+ E2E + 四门禁
+      PostgreSQL `postgres-migration-runner.integration.spec.ts` 15/15；
+      `npm run test:e2e:phase-5-execution-change` exit 0；
+      `npm run typecheck`、`npm run test`、`npm run test:harness`、`npm run build` 均 exit 0。
+
+### T6 验证记录（2026-09-19）
+
+- E2E 使用隔离临时工作区和 mock Runtime，覆盖多意图停止优先、Web/Desktop 重复提交幂等、
+  暂停后修订、同会话 FIFO 排队、跨会话停止隔离和执行中 `@` Agent 定向咨询。
+- PostgreSQL 使用一次性独立数据库和独立连接，变更请求跨实例只保留一条记录并只接受一次选择。
+- 未调用真实付费模型，未执行部署或发布；真实浏览器快照、进程级崩溃注入和跨实例 CAS 仍按遗留项处理。
 
 ## 纪律（每个任务都要做，做完才勾）
 
@@ -161,6 +174,7 @@
 
 - [ ] 中断会话续接 G3：`npm run dev:restart-server` + 真实场景手测（上一专项人工项）。
 - [ ] 跨实例 CAS（讨论/预算 run 的并发写守卫），阶段 3 T1-3 起延后。
-- [ ] 成本评测（冷/热缓存对比、priceVersion 来源）归阶段 6。
+- [x] Usage 评测（冷/热缓存、输入/输出、缓存读写、TTFT/总耗时）归阶段 6并已接线；中转未返回字段保持 unknown。
+- [ ] 美元计费、priceVersion、费用预算和账单核对归后续计费专项，不阻断当前正常流程（见总计划第 21 节）。
 - [ ] 阶段 4 带入：真实浏览器渲染快照、进程级崩溃注入、流程「已下架」时序竞争、
       `blocked` 委派状态无写入方。

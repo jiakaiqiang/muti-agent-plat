@@ -15,6 +15,8 @@ import { SessionsService } from './sessions.service.js';
 import { FileRevisionsModule } from '../file-revisions/file-revisions.module.js';
 import { ContextManagementModule } from '../context-management/context-management.module.js';
 import { MessageRoutingModule } from '../message-routing/message-routing.module.js';
+import { DiscussionDocumentsModule } from '../discussion-documents/discussion-documents.module.js';
+import { AttachmentsModule } from '../attachments/attachments.module.js';
 
 @Module({
   imports: [
@@ -24,6 +26,7 @@ import { MessageRoutingModule } from '../message-routing/message-routing.module.
     MemoryModule,
     ContextManagementModule,
     MessageRoutingModule,
+    DiscussionDocumentsModule,
     IntentRecognitionModule,
     OrchestratorModule,
     RuntimeModule,
@@ -31,6 +34,7 @@ import { MessageRoutingModule } from '../message-routing/message-routing.module.
     forwardRef(() => ExecutionModule),
     TasksModule,
     FileRevisionsModule,
+    forwardRef(() => AttachmentsModule),
     forwardRef(() => WorkflowsModule)
   ],
   controllers: [SessionsController],

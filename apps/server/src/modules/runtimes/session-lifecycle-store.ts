@@ -127,6 +127,77 @@ export class SessionLifecycleStore {
     );
   }
 
+  /**
+   * Marks a safely stopped session as archived without changing the existing
+   * deleted tombstone semantics. The lifecycle remains active but admission is
+   * closed until the archive is restored.
+   */
+  async markArchived(sessionId: string): Promise<LifecycleTransition> {
+    return this.persistence.mutateCollections(
+      ['sessions', SESSION_LIFECYCLES_COLLECTION, SESSION_STOP_REQUESTS_COLLECTION, 'eventsBySession', 'eventOutbox'],
+      draft => {
+        const lifecycles = lifecycleMap(draft);
+        const lifecycle = lifecycles[sessionId];
+        if (!lifecycle) throw new Error('SESSION_LIFECYCLE_NOT_FOUND');
+        const session = findSession(draft, sessionId);
+        if (!session) throw new Error('SESSION_NOT_FOUND');
+        if (session.archivedAt) return { lifecycle: structuredClone(lifecycle), changed: false };
+        if (lifecycle.state !== 'active' || lifecycle.admission !== 'closed') {
+          throw new Error('SESSION_ARCHIVE_ADMISSION_NOT_CLOSED');
+        }
+        const stopSummary = stopSummaryFromDraft(draft, sessionId);
+        if (!stopSummary.canResume) throw new Error('SESSION_STOP_UNCONFIRMED');
+        const timestamp = new Date(this.now()).toISOString();
+        session.archivedAt = timestamp;
+        session.status = 'PAUSED';
+        session.pauseState = {
+          previousStatus: session.pauseState?.previousStatus ?? 'EXECUTING',
+          pausedAt: timestamp,
+          reason: 'session_archived'
+        };
+        session.revision = (session.revision ?? 0) + 1;
+        session.updatedAt = timestamp;
+        lifecycle.revision += 1;
+        lifecycle.stopStatus = stopSummary.status;
+        return transition(draft, lifecycle, '会话已归档，已从会话列表隐藏。', this.now());
+      }
+    );
+  }
+
+  /** Restores an archived session to the active session projection. */
+  async restoreArchived(sessionId: string, requestId: string): Promise<LifecycleTransition> {
+    return this.persistence.mutateCollections(
+      ['sessions', SESSION_LIFECYCLES_COLLECTION, SESSION_STOP_REQUESTS_COLLECTION, 'eventsBySession', 'eventOutbox'],
+      draft => {
+        const lifecycles = lifecycleMap(draft);
+        const lifecycle = lifecycles[sessionId];
+        if (!lifecycle) throw new Error('SESSION_LIFECYCLE_NOT_FOUND');
+        const session = findSession(draft, sessionId);
+        if (!session) throw new Error('SESSION_NOT_FOUND');
+        if (!session.archivedAt) return { lifecycle: structuredClone(lifecycle), changed: false };
+        const stopSummary = stopSummaryFromDraft(draft, sessionId);
+        if (!stopSummary.canResume) throw new Error('SESSION_STOP_UNCONFIRMED');
+        const timestamp = new Date(this.now()).toISOString();
+        delete session.archivedAt;
+        session.status = 'PAUSED';
+        session.pauseState = {
+          previousStatus: session.pauseState?.previousStatus ?? 'EXECUTING',
+          pausedAt: timestamp,
+          reason: 'session_archive_restored'
+        };
+        session.revision = (session.revision ?? 0) + 1;
+        session.updatedAt = timestamp;
+        lifecycle.admission = 'open';
+        lifecycle.stopStatus = stopSummary.status;
+        lifecycle.generation += 1;
+        lifecycle.revision += 1;
+        lifecycle.lastRestoreRequestId = requestId;
+        lifecycle.restoredAt = timestamp;
+        return transition(draft, lifecycle, '会话已从归档恢复到会话列表，当前处于暂停状态。', this.now());
+      }
+    );
+  }
+
   async reopen(sessionId: string): Promise<LifecycleTransition> {
     return this.persistence.mutateCollections(
       [SESSION_LIFECYCLES_COLLECTION, SESSION_STOP_REQUESTS_COLLECTION, 'eventsBySession', 'eventOutbox'],

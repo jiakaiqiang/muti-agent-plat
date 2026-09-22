@@ -27,7 +27,7 @@ it('switches the same button from send to stop immediately while sending, withou
   await wrapper.vm.$nextTick()
   const button = wrapper.get('[aria-label="发送"]').element
   await wrapper.get('[aria-label="发送"]').trigger('click')
-  expect(wrapper.emitted('send')).toEqual([['开始任务']])
+  expect(wrapper.emitted('send')?.[0]?.[0]).toBe('开始任务')
   await wrapper.setProps({ busy: true })
   expect(wrapper.get('[aria-label="停止当前会话"]').element).toBe(button)
   await wrapper.get('[aria-label="停止当前会话"]').trigger('click')
@@ -46,7 +46,7 @@ it('keeps a single action after stop and sends queued drafts without implicitly 
   useWorkspaceUiStore().messageDraft = '下一步补充'
   await wrapper.vm.$nextTick()
   await wrapper.get('[aria-label="发送"]').trigger('click')
-  expect(wrapper.emitted('send')).toEqual([['下一步补充']])
+  expect(wrapper.emitted('send')?.[0]?.[0]).toBe('下一步补充')
   expect(wrapper.emitted('resume')).toBeUndefined()
 })
 it('offers resume after confirmed stop and shows an unconfirmed stop error', async () => {

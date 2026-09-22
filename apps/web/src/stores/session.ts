@@ -16,14 +16,17 @@ import type {
   RuntimePreference,
   RuntimeStopSummary,
   SessionListItem,
+  SessionArchiveGroup,
   SessionStatus,
   SessionViewMode,
   SessionWorkingDirectory,
   CollaborationEvent,
   DeleteSessionLifecycleResult,
+  WorkflowMemberMappingResolution,
   WorkItem
 } from '@/types/contracts'
 import type { PostReviewAction } from '@/types/contracts'
+import type { GroupChatMessageDirectives } from '@agent-cluster/shared'
 
 type CreateSessionInput = {
   input: string
@@ -45,6 +48,13 @@ export const BACKEND_HEALTH_REQUEST_TIMEOUT_MS = 5_000
  */
 export const BACKEND_HEALTH_REUSE_WINDOW_MS = 2_000
 export const SESSION_DELETE_REQUEST_TIMEOUT_MS = 20_000
+export const DEFAULT_STOP_STATE_RETRY_DELAYS_MS = [250, 1_000] as const
+
+type LoadStopStateOptions = {
+  retryDelaysMs?: readonly number[]
+}
+
+const stopStateRequests = new Map<string, Promise<RuntimeStopSummary>>()
 
 function emptyFileRevisionState(): FileRevisionState {
   return { baselines: [], chains: [], runs: [], drafts: [] }
@@ -97,9 +107,15 @@ function waitForIntentRoutingPoll(delayMs: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, delayMs))
 }
 
+function waitForStopStateRetry(delayMs: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, delayMs))
+}
+
 export const useSessionStore = defineStore('session', {
   state: () => ({
     sessions: [] as SessionListItem[],
+    archivedSessionGroups: [] as SessionArchiveGroup[],
+    archivesLoading: false,
     currentSession: undefined as SessionDetail | undefined,
     currentViewMode: 'chat' as SessionViewMode,
     sessionLoadGeneration: 0,
@@ -121,7 +137,8 @@ export const useSessionStore = defineStore('session', {
     intentRoutingsById: {} as Record<string, IntentRoutingRecord>,
     intentRoutingIdsBySession: {} as Record<string, string[]>,
     stopStatesBySession: {} as Record<string, RuntimeStopSummary>,
-    stopStateErrorsBySession: {} as Record<string, string>
+    stopStateErrorsBySession: {} as Record<string, string>,
+    stopStateLoadingBySession: {} as Record<string, boolean>
   }),
   getters: {
     isFavorite: (state) => (sessionId: string) => state.favoriteSessionIds.includes(sessionId),
@@ -163,6 +180,7 @@ export const useSessionStore = defineStore('session', {
         this.runtimeHealth = undefined
         this.runtimeHealthError = error instanceof Error ? error.message : 'BACKEND_HEALTH_UNAVAILABLE'
         this.sessions = []
+        this.archivedSessionGroups = []
         this.currentSession = undefined
         throw error
       } finally {
@@ -180,6 +198,7 @@ export const useSessionStore = defineStore('session', {
       if (!reusable) await this.loadRuntimeHealth(true)
       if (!this.backendCompatible) {
         this.sessions = []
+        this.archivedSessionGroups = []
         this.currentSession = undefined
         throw new Error(this.runtimeHealthError ?? 'BACKEND_VERSION_MISMATCH')
       }
@@ -227,8 +246,9 @@ export const useSessionStore = defineStore('session', {
       const generation = ++this.sessionLoadGeneration
       await this.assertBackendCompatible()
       this.loading = true
-      const selectedSessionId = sessionId ?? this.sessions[0]?.id
-      if (!sessionId && !this.sessions.length) {
+      const firstSelectableSession = this.sessions.find((item) => item.lifecycleState !== 'deleted' && !item.archivedAt)
+      const selectedSessionId = sessionId ?? firstSelectableSession?.id
+      if (!selectedSessionId) {
         this.currentSession = undefined
         this.loading = false
         return
@@ -236,6 +256,10 @@ export const useSessionStore = defineStore('session', {
       try {
         const session = await apiGet<SessionDetail>(`/sessions/${selectedSessionId}`)
         if (generation !== this.sessionLoadGeneration) return
+        if (session.archivedAt) {
+          this.currentSession = undefined
+          return
+        }
         this.currentSession = session
         if (this.currentSession) await Promise.all([
           this.loadWorkItems(this.currentSession.id),
@@ -245,13 +269,24 @@ export const useSessionStore = defineStore('session', {
         if (generation === this.sessionLoadGeneration) this.loading = false
       }
     },
-    async sendMessage(sessionId: string, content: string, mentionedAgentIds: string[] = []) {
+    async sendMessage(
+      sessionId: string,
+      content: string,
+      mentionedAgentIds: string[] = [],
+      attachmentIds: string[] = [],
+      directives?: GroupChatMessageDirectives
+    ) {
       await this.assertBackendCompatible()
       const result = await apiPost<{
         event: CollaborationEvent
         routingId?: string
         routingStatus?: IntentRoutingStatus
-      }>(`/sessions/${sessionId}/messages`, { content, mentionedAgentIds }, {
+      }>(`/sessions/${sessionId}/messages`, {
+        content,
+        mentionedAgentIds,
+        ...(attachmentIds.length ? { attachmentIds } : {}),
+        ...(directives ? { directives } : {})
+      }, {
         headers: { 'Idempotency-Key': createMessageIdempotencyKey() }
       })
       if (result.routingId) {
@@ -271,30 +306,62 @@ export const useSessionStore = defineStore('session', {
       this.workItemsBySession[sessionId] = page.items
       return page.items
     },
-    async loadStopState(sessionId: string) {
+    async loadArchivedSessions() {
+      await this.assertBackendCompatible()
+      this.archivesLoading = true
       try {
-        const summary = await apiGet<RuntimeStopSummary>(`/sessions/${sessionId}/stop-state`)
-        this.applyStopState(summary)
-        delete this.stopStateErrorsBySession[sessionId]
-        return summary
-      } catch (error) {
-        this.stopStateErrorsBySession[sessionId] = error instanceof Error ? error.message : '停止状态查询失败'
-        const current = this.stopStatesBySession[sessionId]
-        const unknown: RuntimeStopSummary = {
-          sessionId,
-          stopRequestId: current?.stopRequestId,
-          version: current?.version ?? 0,
-          status: 'unknown',
-          requestedCount: current?.requestedCount ?? 0,
-          confirmedCount: current?.confirmedCount ?? 0,
-          targets: current?.targets ?? [],
-          blockers: [{ reason: 'state_query_failed', message: '停止状态查询失败，暂不能确认是否可继续。' }],
-          canResume: false,
-          updatedAt: current?.updatedAt
-        }
-        this.stopStatesBySession[sessionId] = unknown
-        return unknown
+        const result = await apiGet<{ groups: SessionArchiveGroup[] }>('/sessions/archives')
+        this.archivedSessionGroups = result.groups
+      } finally {
+        this.archivesLoading = false
       }
+    },
+    loadStopState(sessionId: string, options: LoadStopStateOptions = {}) {
+      const inFlight = stopStateRequests.get(sessionId)
+      if (inFlight) return inFlight
+
+      const retryDelaysMs = options.retryDelaysMs ?? DEFAULT_STOP_STATE_RETRY_DELAYS_MS
+      this.stopStateLoadingBySession[sessionId] = true
+      const request = (async () => {
+        let lastError: unknown
+        try {
+          for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+            try {
+              const summary = await apiGet<RuntimeStopSummary>(`/sessions/${sessionId}/stop-state`)
+              this.applyStopState(summary)
+              return summary
+            } catch (error) {
+              lastError = error
+              const retryDelayMs = retryDelaysMs[attempt]
+              if (retryDelayMs !== undefined) await waitForStopStateRetry(retryDelayMs)
+            }
+          }
+
+          this.stopStateErrorsBySession[sessionId] = lastError instanceof Error
+            ? lastError.message
+            : '停止状态查询失败'
+          const current = this.stopStatesBySession[sessionId]
+          const unknown: RuntimeStopSummary = {
+            sessionId,
+            stopRequestId: current?.stopRequestId,
+            version: current?.version ?? 0,
+            status: 'unknown',
+            requestedCount: current?.requestedCount ?? 0,
+            confirmedCount: current?.confirmedCount ?? 0,
+            targets: current?.targets ?? [],
+            blockers: [{ reason: 'state_query_failed', message: '停止状态查询失败，暂不能确认是否可继续。' }],
+            canResume: false,
+            updatedAt: current?.updatedAt
+          }
+          this.stopStatesBySession[sessionId] = unknown
+          return unknown
+        } finally {
+          delete this.stopStateLoadingBySession[sessionId]
+          stopStateRequests.delete(sessionId)
+        }
+      })()
+      stopStateRequests.set(sessionId, request)
+      return request
     },
     applyStopState(summary: RuntimeStopSummary) {
       const current = this.stopStatesBySession[summary.sessionId]
@@ -302,6 +369,7 @@ export const useSessionStore = defineStore('session', {
       if (current?.stopRequestId && summary.stopRequestId && current.stopRequestId !== summary.stopRequestId &&
           current.updatedAt && summary.updatedAt && Date.parse(current.updatedAt) > Date.parse(summary.updatedAt)) return false
       this.stopStatesBySession[summary.sessionId] = summary
+      delete this.stopStateErrorsBySession[summary.sessionId]
       return true
     },
     recordIntentRouting(sessionId: string, routing: IntentRoutingRecord) {
@@ -578,6 +646,14 @@ export const useSessionStore = defineStore('session', {
       await this.loadSessions()
       return result?.deleted ?? false
     },
+    async archiveSession(sessionId: string) {
+      await this.assertBackendCompatible()
+      const result = await apiPost<{ archived: boolean }>(`/sessions/${sessionId}/archive`, undefined, {
+        headers: { 'Idempotency-Key': globalThis.crypto?.randomUUID?.() ?? `archive-${sessionId}-${Date.now()}` }
+      })
+      await Promise.all([this.loadSessions(), this.loadArchivedSessions()])
+      return result.archived
+    },
     async restoreSession(sessionId: string) {
       await this.assertBackendCompatible()
       const item = this.sessions.find(session => session.id === sessionId)
@@ -645,6 +721,23 @@ export const useSessionStore = defineStore('session', {
       await apiPost(`/sessions/${sessionId}/cancel`, confirmationId ? { confirmationId } : undefined)
       this.setCurrentStatus(sessionId, 'CANCELLED')
     },
+    async joinAgent(sessionId: string, agentId: string) {
+      await this.assertBackendCompatible()
+      const result = await apiPost<{ session: SessionDetail; added: boolean }>(
+        `/sessions/${sessionId}/agents/${agentId}/join`
+      )
+      if (this.currentSession?.id === sessionId) this.currentSession = result.session
+      return result
+    },
+    async cancelCollaboration(sessionId: string, taskId?: string) {
+      return apiPost(`/sessions/${sessionId}/collaboration/cancel`, { ...(taskId ? { taskId } : {}) })
+    },
+    async retryCollaborationAgent(sessionId: string, agentId: string, taskId?: string) {
+      return apiPost(`/sessions/${sessionId}/collaboration/retry-agent`, { agentId, ...(taskId ? { taskId } : {}) })
+    },
+    async resummarizeCollaboration(sessionId: string, taskId?: string) {
+      return apiPost(`/sessions/${sessionId}/collaboration/re-summarize`, { ...(taskId ? { taskId } : {}) })
+    },
     async resolveLocalRuntimePermission(
       sessionId: string,
       input: { confirmationId: string; decision: 'approve_once' | 'cancel' }
@@ -675,6 +768,41 @@ export const useSessionStore = defineStore('session', {
     ) {
       await this.assertBackendCompatible()
       const result = await apiPost<{ session: SessionDetail }>(`/sessions/${sessionId}/workflow/select`, input)
+      await this.loadSession(sessionId)
+      return result
+    },
+    async restoreArchivedSession(sessionId: string) {
+      await this.assertBackendCompatible()
+      const result = await apiPost<{ session: SessionDetail; restored: boolean }>(
+        `/sessions/${sessionId}/archive/restore`,
+        undefined,
+        { headers: { 'Idempotency-Key': globalThis.crypto?.randomUUID?.() ?? `archive-restore-${sessionId}-${Date.now()}` } }
+      )
+      await Promise.all([this.loadSessions(), this.loadArchivedSessions()])
+      return result
+    },
+    async resolveWorkflowMemberMapping(
+      sessionId: string,
+      input: { confirmationId: string; decision: 'approve' | 'decline' }
+    ) {
+      await this.assertBackendCompatible()
+      const result = await apiPost<WorkflowMemberMappingResolution>(
+        `/sessions/${sessionId}/workflow/member-mapping`,
+        input
+      )
+      await this.loadSession(sessionId)
+      return result
+    },
+    async resolveMemberAddition(
+      sessionId: string,
+      discussionId: string,
+      input: { confirmationId: string; decision: 'approve' | 'decline' }
+    ) {
+      await this.assertBackendCompatible()
+      const result = await apiPost<{ session: SessionDetail }>(
+        `/sessions/${sessionId}/discussions/${discussionId}/member-addition`,
+        input
+      )
       await this.loadSession(sessionId)
       return result
     },

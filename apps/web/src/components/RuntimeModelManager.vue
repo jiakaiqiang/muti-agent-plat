@@ -16,13 +16,19 @@ const {
   remoteModelName,
   remoteBaseUrl,
   remoteApiKey,
+  remoteInputPerMillion,
+  remoteOutputPerMillion,
+  remotePriceVersion,
   saveMessage,
   editDialogOpen,
   editingModelId,
   editLabel,
   editModelName,
   editBaseUrl,
-  editApiKey
+  editApiKey,
+  editInputPerMillion,
+  editOutputPerMillion,
+  editPriceVersion
 } = storeToRefs(modelStore)
 
 const modelOptions = computed(() => modelStore.availableModels)
@@ -32,14 +38,28 @@ const remoteDeviceId = ref('')
 const localDevices = computed(() => localRuntimeStore.devices.filter((device) => device.connected))
 const selectedModel = computed(() => modelOptions.value.find((model) => model.id === selectedModelId.value))
 const canAddLocal = computed(() => Boolean(localModelName.value.trim()) && !modelStore.saving)
+const hasPartialRemotePricing = computed(() =>
+  (pricingFieldText(remoteInputPerMillion.value) === '') !== (pricingFieldText(remoteOutputPerMillion.value) === '')
+)
 const canAddRemote = computed(
   () =>
     Boolean(remoteModelName.value.trim()) &&
     Boolean(remoteBaseUrl.value.trim()) &&
     Boolean(remoteApiKey.value.trim()) &&
     (remoteCredentialLocation.value === 'server' || Boolean(remoteDeviceId.value)) &&
+    ((pricingFieldText(remoteInputPerMillion.value) === '' && pricingFieldText(remoteOutputPerMillion.value) === '') || (isNonNegativeNumber(remoteInputPerMillion.value) && isNonNegativeNumber(remoteOutputPerMillion.value))) &&
     !modelStore.saving
 )
+
+function pricingFieldText(value: string | number) {
+  return String(value).trim()
+}
+
+function isNonNegativeNumber(value: string | number) {
+  const normalized = pricingFieldText(value)
+  const parsed = Number(normalized)
+  return normalized !== '' && Number.isFinite(parsed) && parsed >= 0
+}
 
 function sourceLabel(source: RuntimeModelOption['source']) {
   return (
@@ -97,6 +117,8 @@ async function addRemoteModel() {
   const baseUrl = remoteBaseUrl.value.trim()
   const apiKey = remoteApiKey.value.trim()
   if (!model || !baseUrl || !apiKey) return
+  const hasPricing = pricingFieldText(remoteInputPerMillion.value) !== '' && pricingFieldText(remoteOutputPerMillion.value) !== ''
+  const priceVersion = remotePriceVersion.value.trim()
   const added = await runModelRequest(() => modelStore.addModel({
     kind: 'remote',
     label: remoteLabel.value.trim() || undefined,
@@ -105,6 +127,11 @@ async function addRemoteModel() {
     apiKey,
     provider: remoteProvider.value,
     credentialLocation: remoteCredentialLocation.value,
+    ...(hasPricing ? {
+      inputPerMillion: Number(pricingFieldText(remoteInputPerMillion.value)),
+      outputPerMillion: Number(pricingFieldText(remoteOutputPerMillion.value)),
+      ...(priceVersion ? { priceVersion } : {})
+    } : {}),
     ...(remoteCredentialLocation.value === 'local' ? { deviceId: remoteDeviceId.value } : {})
   }))
   if (!added) return
@@ -113,16 +140,25 @@ async function addRemoteModel() {
   remoteModelName.value = ''
   remoteBaseUrl.value = ''
   remoteApiKey.value = ''
+  remoteInputPerMillion.value = ''
+  remoteOutputPerMillion.value = ''
+  remotePriceVersion.value = ''
   remoteDeviceId.value = ''
   saveMessage.value = '远端模型已添加到模型列表。'
 }
 
 const editLabelInput = ref<HTMLInputElement | null>(null)
 const editingModel = computed(() => modelOptions.value.find((model) => model.id === editingModelId.value))
+const hasPartialEditPricing = computed(() =>
+  (pricingFieldText(editInputPerMillion.value) === '') !== (pricingFieldText(editOutputPerMillion.value) === '')
+)
 const canSaveEdit = computed(
   () =>
     Boolean(editModelName.value.trim()) &&
     (editingModel.value?.kind !== 'remote' || Boolean(editBaseUrl.value.trim())) &&
+    (editingModel.value?.kind !== 'remote' ||
+      ((pricingFieldText(editInputPerMillion.value) === '' && pricingFieldText(editOutputPerMillion.value) === '') ||
+        (isNonNegativeNumber(editInputPerMillion.value) && isNonNegativeNumber(editOutputPerMillion.value)))) &&
     !modelStore.saving
 )
 
@@ -132,6 +168,9 @@ function openEditDialog(model: RuntimeModelOption) {
   editModelName.value = model.model
   editBaseUrl.value = model.baseUrl ?? ''
   editApiKey.value = ''
+  editInputPerMillion.value = model.pricing?.inputPerMillion?.toString() ?? ''
+  editOutputPerMillion.value = model.pricing?.outputPerMillion?.toString() ?? ''
+  editPriceVersion.value = model.pricing?.priceVersion ?? ''
   editDialogOpen.value = true
   saveMessage.value = ''
   void nextTick(() => editLabelInput.value?.focus())
@@ -154,6 +193,16 @@ async function saveModelEdit() {
     const apiKey = editApiKey.value.trim()
     if (apiKey) {
       input.apiKey = apiKey
+    }
+    const hasPricing = pricingFieldText(editInputPerMillion.value) !== '' && pricingFieldText(editOutputPerMillion.value) !== ''
+    if (hasPricing) {
+      input.inputPerMillion = Number(pricingFieldText(editInputPerMillion.value))
+      input.outputPerMillion = Number(pricingFieldText(editOutputPerMillion.value))
+      const priceVersion = editPriceVersion.value.trim()
+      if (priceVersion && priceVersion !== model.pricing?.priceVersion) input.priceVersion = priceVersion
+    } else if (model.pricing) {
+      input.inputPerMillion = null
+      input.outputPerMillion = null
     }
   }
   if (!await runModelRequest(() => modelStore.updateModel(model.id, input))) return
@@ -261,6 +310,19 @@ onMounted(async () => {
             <span>API Key</span>
             <input v-model="remoteApiKey" type="password" autocomplete="new-password" placeholder="sk-..." />
           </label>
+          <label class="model-select-field">
+            <span>输入价格（USD / 1M tokens）</span>
+            <input v-model="remoteInputPerMillion" data-testid="remote-input-price" type="number" min="0" step="any" placeholder="可选，例如 0.10" aria-describedby="remote-price-hint" :aria-invalid="hasPartialRemotePricing" />
+          </label>
+          <label class="model-select-field">
+            <span>输出价格（USD / 1M tokens）</span>
+            <input v-model="remoteOutputPerMillion" data-testid="remote-output-price" type="number" min="0" step="any" placeholder="可选，例如 0.20" aria-describedby="remote-price-hint" :aria-invalid="hasPartialRemotePricing" />
+          </label>
+          <label class="model-select-field span-2">
+            <span>价格版本</span>
+            <input v-model="remotePriceVersion" type="text" placeholder="可选，例如 relay-pricing-2026-09" />
+            <small id="remote-price-hint" aria-live="polite">{{ hasPartialRemotePricing ? '输入价格和输出价格需要一起填写。' : '本地中转的实际费率由你配置；未填写时费用保持未知。' }}</small>
+          </label>
           <button type="button" class="primary" data-testid="add-remote-model" :disabled="!canAddRemote" @click="addRemoteModel">
             <UiIcon name="plus" :size="16" />
             添加远端模型
@@ -302,13 +364,20 @@ onMounted(async () => {
             <dt>状态</dt>
             <dd>{{ modelStore.currentModelId === model.id ? '默认模型' : '可用' }}</dd>
           </div>
+          <div v-if="model.kind === 'remote'" class="model-pricing-summary">
+            <dt>价格</dt>
+            <dd v-if="model.pricing">
+              输入 ${{ model.pricing.inputPerMillion }} / 1M · 输出 ${{ model.pricing.outputPerMillion }} / 1M
+            </dd>
+            <dd v-else data-testid="pricing-unknown">未配置，费用未知</dd>
+          </div>
         </dl>
         <div class="model-card-actions">
           <button type="button" :disabled="modelStore.saving || modelStore.currentModelId === model.id" @click.stop="switchModel(model.id)">
             <UiIcon name="check" :size="16" />
             {{ modelStore.currentModelId === model.id ? '默认模型' : '设为默认' }}
           </button>
-          <button v-if="model.persisted" type="button" :disabled="modelStore.saving" @click.stop="openEditDialog(model)">
+          <button v-if="model.persisted" data-testid="edit-model" type="button" :disabled="modelStore.saving" @click.stop="openEditDialog(model)">
             <UiIcon name="settings" :size="16" />
             编辑
           </button>
@@ -323,6 +392,7 @@ onMounted(async () => {
     <div v-if="editDialogOpen && editingModel" class="modal-backdrop" @click.self="closeEditDialog">
       <form
         class="modal-panel model-edit-dialog"
+        data-testid="model-edit-form"
         @submit.prevent="saveModelEdit"
         @keydown.esc.prevent="closeEditDialog"
       >
@@ -362,7 +432,20 @@ onMounted(async () => {
             </label>
             <label class="model-select-field span-2">
               <span>API Key</span>
-              <input v-model="editApiKey" type="password" autocomplete="new-password" placeholder="留空则保持原有 Key 不变" />
+              <input v-model="editApiKey" data-testid="edit-api-key" type="password" autocomplete="new-password" placeholder="留空则保持原有 Key 不变" />
+            </label>
+            <label class="model-select-field">
+              <span>输入价格（USD / 1M tokens）</span>
+              <input v-model="editInputPerMillion" data-testid="edit-input-price" type="number" min="0" step="any" placeholder="例如 0.10" aria-describedby="edit-price-hint" :aria-invalid="hasPartialEditPricing" />
+            </label>
+            <label class="model-select-field">
+              <span>输出价格（USD / 1M tokens）</span>
+              <input v-model="editOutputPerMillion" data-testid="edit-output-price" type="number" min="0" step="any" placeholder="例如 0.20" aria-describedby="edit-price-hint" :aria-invalid="hasPartialEditPricing" />
+            </label>
+            <label class="model-select-field span-2">
+              <span>价格版本</span>
+              <input v-model="editPriceVersion" type="text" placeholder="例如 relay-pricing-2026-09" />
+              <small id="edit-price-hint" aria-live="polite">{{ hasPartialEditPricing ? '输入价格和输出价格需要一起填写或一起清空。' : '同时清空输入价和输出价并保存，可移除模型级价格。' }}</small>
             </label>
           </template>
         </div>

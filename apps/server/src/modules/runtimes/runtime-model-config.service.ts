@@ -1,9 +1,11 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import type {
   RuntimeModelConfig,
   RuntimeModelCreateInput,
   RuntimeModelKind,
   RuntimeModelOption,
+  RuntimeModelPricing,
   RuntimeModelProvider,
   RuntimeCredentialLocation,
   RuntimeModelSource,
@@ -20,6 +22,7 @@ import {
 import { nowIso } from '../../common/time.js';
 import { decodeSecret, encodeSecret } from '../../common/secret-cipher.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
+import { parseRuntimePricingCatalog, pricingForConnection, type RuntimePricingCatalog } from './runtime-pricing.js';
 
 type PersistedRuntimeModelOption = {
   id: string;
@@ -33,6 +36,7 @@ type PersistedRuntimeModelOption = {
   baseUrl?: string;
   apiKey?: string;
   hasApiKey?: boolean;
+  pricing?: RuntimeModelPricing;
   createdAt: string;
   updatedAt: string;
 };
@@ -59,6 +63,7 @@ export type RuntimeModelConnection = {
   provider: RuntimeModelProvider;
   credentialLocation: RuntimeCredentialLocation;
   deviceId?: string;
+  pricing?: RuntimeModelPricing;
 };
 
 type RuntimeModelProvisioner = (config: RuntimeModelConfig, affectedModelId: string) => Promise<void>;
@@ -69,10 +74,12 @@ const localDefaultBaseUrl = 'http://127.0.0.1:11434/v1';
 @Injectable()
 export class RuntimeModelConfigService {
   private config: PersistedRuntimeModelConfig;
+  private readonly pricingCatalog: RuntimePricingCatalog | undefined;
   private localDiscoveredModels: string[] = [];
   private localDiscoveryLoadedAt = 0;
 
   constructor(private readonly persistence: PersistenceService) {
+    this.pricingCatalog = parseRuntimePricingCatalog();
     const stored = this.persistence.getCollection<PersistedRuntimeModelConfig>(collectionKey, {});
     this.assertCurrentSchema(stored);
     this.config = revealPersistedConfig(stored);
@@ -138,7 +145,8 @@ export class RuntimeModelConfigService {
       kind: option.kind,
       provider: option.provider,
       credentialLocation: option.credentialLocation,
-      ...(option.deviceId ? { deviceId: option.deviceId } : {})
+      ...(option.deviceId ? { deviceId: option.deviceId } : {}),
+      ...(option.pricing ? { pricing: option.pricing } : {})
     };
   }
 
@@ -199,6 +207,7 @@ export class RuntimeModelConfigService {
         model,
         label: input.label?.trim() || model,
         baseUrl,
+        pricing: manualPricingFromInput(input),
         ...(credentialLocation === 'server' ? { apiKey } : { hasApiKey: true })
       });
     } else {
@@ -264,6 +273,9 @@ export class RuntimeModelConfigService {
     }
 
     const now = nowIso();
+    const pricing = existing.kind === 'remote'
+      ? pricingForModelUpdate(existing.pricing, input)
+      : existing.pricing;
     // model/baseUrl 参与 id 生成,编辑它们会产生新 id,需要同步迁移 currentModelId
     const nextId = this.modelId(existing.kind, model, existing.kind === 'remote' ? baseUrl : existing.baseUrl, provider, credentialLocation, deviceId);
     const next: PersistedRuntimeModelOption = {
@@ -277,6 +289,7 @@ export class RuntimeModelConfigService {
       baseUrl,
       apiKey: credentialLocation === 'server' ? apiKey : undefined,
       hasApiKey: credentialLocation === 'local' ? (input.apiKey?.trim() ? true : existing.hasApiKey) : undefined,
+      pricing,
       updatedAt: now
     };
     this.config = {
@@ -349,6 +362,7 @@ export class RuntimeModelConfigService {
     baseUrl?: string;
     apiKey?: string;
     hasApiKey?: boolean;
+    pricing?: RuntimeModelPricing;
   }) {
     const now = nowIso();
     const existingModels = this.config.models ?? [];
@@ -366,6 +380,7 @@ export class RuntimeModelConfigService {
       baseUrl: input.baseUrl,
       apiKey: input.credentialLocation === 'server' ? input.apiKey : undefined,
       hasApiKey: input.hasApiKey,
+      pricing: input.pricing ?? existing?.pricing,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now
     };
@@ -417,6 +432,9 @@ export class RuntimeModelConfigService {
   }
 
   private toOption(model: PersistedRuntimeModelOption): RuntimeModelOption {
+    // Model-level pricing is authoritative for user-managed relay entries.
+    // The deployment catalog remains a fallback for env/default entries.
+    const pricing = model.pricing ?? pricingForConnection(this.pricingCatalog, model.id);
     return {
       id: model.id,
       label: model.label,
@@ -433,7 +451,8 @@ export class RuntimeModelConfigService {
         : false,
       persisted: (this.config.models ?? []).some((item) => item.id === model.id),
       createdAt: model.createdAt,
-      updatedAt: model.updatedAt
+      updatedAt: model.updatedAt,
+      ...(pricing ? { pricing } : {})
     };
   }
 
@@ -545,4 +564,95 @@ function revealPersistedConfig(config: PersistedRuntimeModelConfig): PersistedRu
       model.apiKey ? { ...model, apiKey: decodeSecret(model.apiKey) } : model
     )
   };
+}
+
+function manualPricingFromInput(input: RuntimeModelCreateInput): RuntimeModelPricing | undefined {
+  if (input.kind !== 'remote') return undefined;
+  const hasPricing = [
+    input.inputPerMillion,
+    input.outputPerMillion,
+    input.cacheReadInputPerMillion,
+    input.cacheWriteInputPerMillion,
+    input.priceVersion
+  ].some((value) => value !== undefined);
+  if (!hasPricing) return undefined;
+  if (input.inputPerMillion === undefined || input.outputPerMillion === undefined) {
+    throw new BadRequestException('Input and output prices must be configured together.');
+  }
+  const rates: Omit<RuntimeModelPricing, 'priceVersion' | 'currency'> = {
+    inputPerMillion: nonNegativeRate(input.inputPerMillion, 'inputPerMillion'),
+    outputPerMillion: nonNegativeRate(input.outputPerMillion, 'outputPerMillion'),
+    ...(input.cacheReadInputPerMillion === undefined
+      ? {}
+      : { cacheReadInputPerMillion: nonNegativeRate(input.cacheReadInputPerMillion, 'cacheReadInputPerMillion') }),
+    ...(input.cacheWriteInputPerMillion === undefined
+      ? {}
+      : { cacheWriteInputPerMillion: nonNegativeRate(input.cacheWriteInputPerMillion, 'cacheWriteInputPerMillion') })
+  };
+  return { ...rates, currency: 'USD', priceVersion: input.priceVersion?.trim() || manualPriceVersion(rates) };
+}
+
+function pricingForModelUpdate(
+  existing: RuntimeModelPricing | undefined,
+  input: RuntimeModelUpdateInput
+): RuntimeModelPricing | undefined {
+  const hasPricingInput = [
+    input.inputPerMillion,
+    input.outputPerMillion,
+    input.cacheReadInputPerMillion,
+    input.cacheWriteInputPerMillion,
+    input.priceVersion
+  ].some((value) => value !== undefined);
+  if (!hasPricingInput) return existing;
+
+  const nextInput = input.inputPerMillion === undefined ? existing?.inputPerMillion : input.inputPerMillion;
+  const nextOutput = input.outputPerMillion === undefined ? existing?.outputPerMillion : input.outputPerMillion;
+  if (nextInput === null && nextOutput === null) return undefined;
+  if (nextInput === undefined || nextInput === null || nextOutput === undefined || nextOutput === null) {
+    throw new BadRequestException('Input and output prices must be configured together.');
+  }
+
+  const rates: Omit<RuntimeModelPricing, 'priceVersion' | 'currency'> = {
+    inputPerMillion: nonNegativeRate(nextInput, 'inputPerMillion'),
+    outputPerMillion: nonNegativeRate(nextOutput, 'outputPerMillion')
+  };
+  const cacheRead = input.cacheReadInputPerMillion === undefined
+    ? existing?.cacheReadInputPerMillion
+    : input.cacheReadInputPerMillion;
+  const cacheWrite = input.cacheWriteInputPerMillion === undefined
+    ? existing?.cacheWriteInputPerMillion
+    : input.cacheWriteInputPerMillion;
+  if (cacheRead !== undefined && cacheRead !== null) {
+    rates.cacheReadInputPerMillion = nonNegativeRate(cacheRead, 'cacheReadInputPerMillion');
+  }
+  if (cacheWrite !== undefined && cacheWrite !== null) {
+    rates.cacheWriteInputPerMillion = nonNegativeRate(cacheWrite, 'cacheWriteInputPerMillion');
+  }
+  const changed = existing && (existing.inputPerMillion !== rates.inputPerMillion ||
+    existing.outputPerMillion !== rates.outputPerMillion ||
+    existing.cacheReadInputPerMillion !== rates.cacheReadInputPerMillion ||
+    existing.cacheWriteInputPerMillion !== rates.cacheWriteInputPerMillion);
+  const requestedVersion = input.priceVersion?.trim();
+  if (changed && requestedVersion && requestedVersion === existing.priceVersion) {
+    throw new BadRequestException('Price version must change when rates change.');
+  }
+  const priceVersion = requestedVersion || (changed || !existing ? manualPriceVersion(rates) : existing.priceVersion);
+  return { ...rates, currency: 'USD', priceVersion };
+}
+
+function manualPriceVersion(rates: Omit<RuntimeModelPricing, 'priceVersion' | 'currency'>): string {
+  const digest = createHash('sha256').update(JSON.stringify([
+    rates.inputPerMillion,
+    rates.outputPerMillion,
+    rates.cacheReadInputPerMillion ?? null,
+    rates.cacheWriteInputPerMillion ?? null
+  ])).digest('hex').slice(0, 16);
+  return `manual-${digest}`;
+}
+
+function nonNegativeRate(value: number, field: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new BadRequestException(`${field} must be a finite non-negative number.`);
+  }
+  return value;
 }

@@ -1,8 +1,8 @@
 # 阶段 6：双端综合验收、长会话成本评测与受控上线 — Plan v1
 
 > 日期：2026-09-16
-> 状态：设计与实施基线，待实施；现有能力的复用不代表本阶段验收已完成。
-> 依赖：阶段 0、1、2A、2B、2C、3、4、5 均完成独立退出验收。
+> 状态：实施中（2026-09-20）；已补齐可重放验收入口和 usage/缓存/耗时采集，外部数据库/真实模型/发布操作仍按授权边界保留；计费已移入后续专项。
+> 依赖：阶段 0、1、2A、2B、2C、3、4、5 均有独立验收记录；跨阶段追踪中的 partial/not-executed 项继续显式保留，不作为已完成证据。
 
 [总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-6-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-6-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-6-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-6-checklist-v1.md)
 
@@ -34,7 +34,7 @@ Token 曲线测最终序列化请求，不用数据库字节数或缓存命中�
 
 ### 2.5
 
-性能报告记录样本规模、硬件、模型/端点、上下文/策略版本、冷/热缓存与 P50/P95。Token 成本包含摘要、路由、失败尝试、缓存写；Provider 没返回字段时保留 unknown，不能由状态推测零成本。
+性能报告记录样本规模、硬件、模型/端点、上下文/策略版本、冷/热缓存与 P50/P95。Token usage 包含摘要、路由、失败尝试和缓存写；Provider 没返回字段时保留 unknown，不能由状态推测为零。美元金额、价格版本和账单核对转入后续计费专项。
 
 ### 2.6
 
@@ -56,8 +56,9 @@ UI 验证只要求业务状态、主 Agent/专家来源、确认版本、通知�
 
 - 验证报告记录版本、环境、fixture、命令、退出码、统计、跳过原因和证据路径；发布记录与测试记录分离。
 - 策略开关、预算上限、并发/轮次、缓存容量/TTL、摘要阈值均输出脱敏 effective config；禁止在报告中输出密钥和业务正文。
+- Runtime usage 不依赖价格配置：输入/输出、缓存计数和耗时在正常调用中独立采集。已有价格能力仅在显式配置时估算金额；未配置价格时省略金额并继续正常执行，显式非法配置仍 fail closed。
 
-拟新增类型、状态和接口均为设计项，不是当前可调用 API。涉及持久化时，实施必须同步 shared、API/event/data/runtime/UI-state 合同、PostgreSQL projection/迁移和 file backend，不能只加内存 Map。
+本阶段已接入 Generic LLM usage。此前新增的 `RuntimeModelPricing`、`RuntimeUsage.costBasis` 和模型选项 `pricing` 作为后续计费专项的可选基础保留；远程模型级价格复用现有 `runtimeModelConfig` 持久集合，不新增价格表或修改业务状态机。价格未配置时不得改变业务状态或阻断调用。
 
 ## 5. 修改边界
 
@@ -65,6 +66,9 @@ UI 验证只要求业务状态、主 Agent/专家来源、确认版本、通知�
 
 - `tests/e2e/`
 - `tests/harness-engineering/`
+- `apps/server/src/modules/runtimes/`
+- `packages/shared/src/`
+- `docs/contracts/`
 - `apps/server/src/modules/persistence/`
 - `packages/local-runtime-cli/src/`
 - `docs/quality/`
@@ -84,3 +88,14 @@ UI 验证只要求业务状态、主 Agent/专家来源、确认版本、通知�
 回退：先关闭新策略准入并等待/停止相关工作，再按兼容性报告回退；保留墓碑、决策、检查点、预算和运行记录。需物理恢复数据库时必须单独确认与验证备份。
 
 产品交互按总计划已沟通边界执行。模型预算、并发、缓存容量与 TTL 等环境参数不在文档中冒充现有配置；在阶段 0 冻结配置合同、相关阶段实现前记录有效值和验证依据。新增破坏性维护/外部服务采购/发布需单独确认，不影响本轮生成设计文档。
+
+## 8. 本轮执行记录
+
+- 组合层新增：追踪矩阵 Harness、长会话 fixture/评测、故障矩阵、双端组合入口、成本报告、迁移 dry-run/确认门禁。
+- 安全组合入口新增：共享准入合同 + 真实服务 E2E 串行复跑，覆盖 unknown stop、缓存预算、精确版本确认、高风险能力和停止迟到结果，防止单项旧证据被误当成本阶段组合证据。
+- Usage 来源新增：远程流式请求显式请求终止 usage 帧，读取中转实际输入/输出与缓存字段并测量 TTFT/总耗时；缺失字段保持 unknown。版本化价格目录和金额估算作为可选基础保留，真实美元计费及账单核对按用户决定转入后续专项，不参与当前正常流程准入。
+- 真实模型评估器只使用编译后的 `RuntimeService` 和隔离 file 状态；5 个合成场景分别验证早期召回、同名歧义、修订排除及相同请求冷/热缓存。连接 ID 与环境中选择的模型和端点须事先精确一致；按每次输入/输出上限、读写缓存最高费率计算调用前费用上界，超过批准值则不初始化 Runtime/不联网。运行时禁用重试、schema repair、mock fallback、BullMQ 和 HTTP 重定向；每次请求计数，provider usage 或 TTFT 缺失即停止，并在逐调用估算成本后再次校验费用上限。证据仅包含状态、计数、hash、耗时和版本，不包含正文、密钥、URL 或授权 ID。Provider 未报告缓存读写计数时分别记 unknown，不推断为零；报告不存在有效完整证据时保持 unknown。这一受控抽样不替代 100 需求/1000 消息的长会话评估或生产索引开销测量。
+- 组合入口实际结果：`client-presentation`、`desktop-render`、`workflow-managed-execution`、`rework-loop`、`phase-5-execution-change` 全部通过，并已通过 `test:e2e:phase-6-dual-client` 纳入阶段 6 总回归；`test:e2e:phase-6-backend-parity` 串行通过真实 file 6/6 故障矩阵、随机临时 PostgreSQL 15/15 集成回归和 apply/verify/rollback/reapply 等价校验。返工回归覆盖内置非模型 Runtime 的零 token 结算，避免已完成的本地步骤占用后续复盘/返工预算。
+- 受控边界：没有连接当前业务 PostgreSQL、没有调用真实付费模型、没有执行生产 `apply`/rollback 或发布；组合入口只接受显式测试库连接，并自动创建/删除随机临时数据库。迁移比较器允许关系投影补出的空集合，非空集合差异仍阻断校验；这些不属于可自动代替的本地 mock 验证。
+- 服务启动准入现与只读发布 preflight 复用同一判定：启用任一新策略时先读取完整验收矩阵、rollback 证据、构建身份和授权元数据，失败则在 HTTP 监听前拒绝启动，不能通过漏设 `NODE_ENV` 绕过。仅显式标记的仓库隔离测试可豁免；未启用新策略的服务仍可正常启动。
+- 交接工具：新增 `phase-6:release-preflight` 与阶段 6 发布交接文档。preflight 只在用户显式配置价格目录时校验其合法性；价格目录缺失属于合法的“未启用计费”状态，不阻断正常发布准入。报告只输出枚举、布尔值、AC 计数和阻断原因，不输出数据库 URL、价格正文或授权 ID，也不执行发布。

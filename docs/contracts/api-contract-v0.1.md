@@ -892,6 +892,7 @@ POST   /api/workflows/:workflowId/archive
 DELETE /api/workflows/:workflowId
 
 POST /api/sessions/:sessionId/workflow/select
+POST /api/sessions/:sessionId/workflow/member-mapping
 POST /api/sessions/:sessionId/workflow/agent-substitution
 POST /api/sessions/:sessionId/workflow/agent-skip
 POST /api/sessions/:sessionId/workflow/upstream-rerun
@@ -942,7 +943,14 @@ type WorkflowUpstreamRerunInput = {
   nodeId?: string
   instruction?: string
 }
+
+type ResolveWorkflowMemberMappingInput = {
+  confirmationId: string
+  decision: 'approve' | 'decline'
+}
 ```
+
+`workflow/member-mapping` 只处理服务端仍待决的 `confirm_workflow_member_mapping` 卡片。批准时服务端重新校验原选择的 workflow ID/version/definitionHash、需求文档或 Brief 版本绑定、Session generation/停止屏障和全部 Agent 缺口；全部可邀请后写入现有 `participatingAgentIds`，并沿原 `selectionConfirmationId` 的唯一启动路径继续。拒绝只关闭本次映射，不新增成员、不修改已发布图、不启动运行。相同决定重放幂等并返回已记录的 WorkflowRun；批准与拒绝竞争时，先提交的决定为准，另一决定返回冲突。
 
 约束：
 
@@ -1070,3 +1078,19 @@ VALIDATION_ERROR
 `GET /api/sessions/:sessionId/stop-state` 返回标准成功封装中的 `data: RuntimeStopSummary`，并设置 `Cache-Control: no-store`。该接口读取服务端权威停止轮次、监督句柄、待同步记录和 Local Runtime 未确认回执；查询不会重试、恢复或启动 Runtime。
 
 `RuntimeStopSummary.status` 为 `idle/requested/waiting/confirmed/unknown`，`canResume` 是客户端唯一可用于展示“已可继续”的聚合判断。`blockers` 必须保留稳定原因码；客户端不得根据 HTTP 成功、连接在线或本地计时器自行推断停止完成。查询或状态合并失败时必须 fail closed，返回/展示 unknown，而不是放行新的执行。
+
+## 群聊方案文档 API（2026-09-21）
+
+会话绑定工作区后，可通过以下会话级资源接口发布和读取版本化方案文档：
+
+```text
+POST /api/sessions/:sessionId/discussion-documents
+GET  /api/sessions/:sessionId/discussion-documents
+GET  /api/sessions/:sessionId/discussion-documents/active
+GET  /api/sessions/:sessionId/discussion-documents/:documentId
+GET  /api/sessions/:sessionId/discussion-documents/:documentId/content
+```
+
+创建请求使用 `{ title, content, clientMessageId?, parentDocumentId?, workItemId?, createdBy? }`；`clientMessageId` 可由 `Idempotency-Key` 请求头提供。响应包含 `documentId/revision/relativePath/contentUrl/uiUrl/contentHash/sizeBytes/status` 等元数据，正文不进入元数据事件。正文接口返回 `text/markdown; charset=utf-8`、`Cache-Control: no-store` 和 `"sha256-<contentHash>"` ETag，并且只能读取 URL 所属 Session 的文档。
+
+服务端按活动文档 parent 执行 CAS；相同幂等键与内容返回同一文档，不同内容产生不可覆盖的新版本。内容上限为 200,000 bytes，写入、Provider 回读或哈希校验失败时不发布 active 文档。

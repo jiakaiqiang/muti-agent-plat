@@ -18,6 +18,7 @@ let server;
 
 try {
   server = await startSmokeServer('work-item-budget-recovery-smoke', {
+    AGENT_CLUSTER_WORK_ITEM_BUDGET_ENFORCEMENT: 'true',
     DISCUSSION_MAX_ROUNDS: '0',
     GLOBAL_DEFAULT_RUNTIME_TYPE: 'mock'
   });

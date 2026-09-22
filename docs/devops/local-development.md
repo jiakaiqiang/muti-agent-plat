@@ -78,6 +78,39 @@ send_timeout 660s;
 
 如果缺少 `LLM_API_KEY` 或 `LLM_BASE_URL`，后端会显式返回运行时配置错误并写入事件流，不会静默回退到 mock。只有显式设置 `LLM_MOCK_FALLBACK=true` 或 mock 演示模式时，`generic_llm` 才会使用 mock fallback。
 
+### Runtime 价格目录
+
+平台不会把供应商价格硬编码到源码，也不会在缺少价格版本时猜测费用。需要估算 `generic_llm` 调用金额时，由部署侧配置 `AGENT_CLUSTER_RUNTIME_PRICING_JSON`：
+
+```json
+{
+  "priceVersion": "pricing-2026-09-20",
+  "currency": "USD",
+  "entries": [
+    {
+      "connectionId": "remote:openai-compatible:server:https-api-openai-com-v1:gpt-4-1-mini",
+      "inputPerMillion": 0.4,
+      "outputPerMillion": 1.6,
+      "cacheReadInputPerMillion": 0.2
+    }
+  ]
+}
+```
+
+示例费率仅说明格式，不代表供应商当前价格。`connectionId` 必须与模型管理接口返回的精确模型连接 ID 一致；同一目录中不能重复。目录只接受 `USD`、非空 `priceVersion` 和非负的每百万 token 费率，JSON 无效、重复 ID 或负值会导致后端启动失败，而不是静默忽略。
+
+日常接入本地中转时，也可在 Web 或桌面端的“模型管理”添加/编辑远程模型，填写中转实际输入/输出价格（USD / 1M tokens）与可选价格版本。模型级价格保存在 `runtimeModelConfig` 中，优先于上述部署目录；未填价格且目录未命中时费用为 unknown。编辑时同时清空输入价和输出价可删除模型级价格并回到目录兜底。未填版本时系统按费率生成版本，修改费率会得到新版本，手工指定版本时也应随费率更新。不要把供应商示例价当作中转的实际收费价。
+
+阶段 6 的受控真实模型评估脚本仍只接受部署侧目录的精确条目，并独立要求授权记录、`synthetic_fixture_only`、调用次数和费用上限。模型管理页面保存价格不授权进行真实评估。
+
+只有 Provider 返回实际 usage 且连接存在模型级价格或命中价格目录时，结果才包含 `cost`、`priceVersion` 和 `costBasis=estimated`。OpenAI-compatible 的 cache read 是 input 子集，不会重复计价；没有匹配价格或 usage 未知时不输出金额。更新费率时必须使用新的 `priceVersion`，并保留旧版本对应的审计说明，不能用新价格重写历史记录。
+
+### 需求累计 Token 预算临时策略
+
+当前仍记录 WorkItem 的累计 Token 预留与结算，但默认不因累计额度不足拒绝模型调用。单次请求的输入预算、模型上下文窗口和输出预留保护继续生效。
+
+`AGENT_CLUSTER_WORK_ITEM_BUDGET_ENFORCEMENT` 默认为 `false`。只有在上下文管理和需求累计预算策略重新设计并通过验证后，才应显式设为 `true` 恢复累计额度准入拦截。关闭拦截不会清空或重置已有预算账本。
+
 ## 启动基础设施
 
 ```bash

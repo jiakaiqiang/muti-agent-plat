@@ -142,6 +142,8 @@ export async function startSmokeServer(name, env = {}) {
       AGENT_CLUSTER_PERSISTENCE_BACKEND: 'file',
       AGENT_CLUSTER_DATA_FILE: dataFile,
       AGENT_CLUSTER_SEED_DEFAULT_AGENTS: 'true',
+      NODE_ENV: 'test',
+      PHASE_6_POLICY_ADMISSION_BYPASS: 'isolated_test_only',
       LLM_DRY_RUN: 'true',
       LLM_MOCK_FALLBACK: 'true',
       MOCK_RUNTIME_ENABLED: 'true',

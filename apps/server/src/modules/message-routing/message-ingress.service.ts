@@ -1,5 +1,8 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import type {
+  GroupChatAttachmentRef,
+  GroupChatMessageDirectives,
+  GroupChatRoutingSnapshot,
   IntentRoutingRolloutMode,
   SessionDetail,
   SessionFollowUpMessage,
@@ -25,6 +28,10 @@ export class MessageIngressService {
     session: SessionDetail;
     content: string;
     mentionedAgentIds: string[];
+    /** Server-resolved metadata-only attachment references for this message. */
+    attachmentRefs?: GroupChatAttachmentRef[];
+    directives?: GroupChatMessageDirectives;
+    routing?: GroupChatRoutingSnapshot;
     handlingPlan: UserMessageHandlingPlan;
     routingMode: IntentRoutingRolloutMode;
     messageIdempotencyKey?: string;
@@ -64,6 +71,9 @@ export class MessageIngressService {
         ...createMetadata('chat_message', {
           text: input.content,
           mentionedAgentIds,
+          ...(input.attachmentRefs?.length ? { attachmentRefs: structuredClone(input.attachmentRefs) } : {}),
+          ...(input.directives ? { directives: structuredClone(input.directives) } : {}),
+          ...(input.routing ? { routing: structuredClone(input.routing) } : {}),
           intentRoutingPending: true,
           ...(input.replyToEventId ? { replyToEventId: input.replyToEventId } : {})
         }),
@@ -75,6 +85,9 @@ export class MessageIngressService {
       sourceEventId: event.id,
       content: input.content,
       mentionedAgentIds,
+      ...(input.attachmentRefs?.length ? { attachmentRefs: structuredClone(input.attachmentRefs) } : {}),
+      ...(input.directives ? { skillRef: input.directives.skill, agentRefs: [...input.directives.agents] } : {}),
+      ...(input.routing ? { routing: structuredClone(input.routing) } : {}),
       ...(input.replyToEventId ? { replyToEventId: input.replyToEventId } : {}),
       handlingPlan: input.handlingPlan,
       status: 'queued',

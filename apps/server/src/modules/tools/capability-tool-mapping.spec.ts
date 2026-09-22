@@ -42,6 +42,10 @@ test('returned tool arrays are defensive copies', () => {
   assert.deepEqual(getToolsForCapability('cap-file-read'), ['read_file']);
 });
 
+test('cap-attachment-read maps to the stable-ID attachment reader', () => {
+  assert.deepEqual(getToolsForCapability('cap-attachment-read'), ['read_attachment']);
+});
+
 test('all current default capabilities have explicit mapping entries', () => {
   const defaultCapabilityIds = defaultCapabilities.map((capability) => capability.id);
 

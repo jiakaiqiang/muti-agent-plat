@@ -72,7 +72,7 @@ export type ReserveDelegationOutcome =
 export type DelegationTransition =
   | { status: 'running'; invocationId?: string }
   | { status: 'completed'; result: ExpertReport }
-  | { status: 'blocked' }
+  | { status: 'blocked'; failure: { code: string; message: string; retryable: boolean } }
   | { status: 'failed'; failure: { code: string; message: string; retryable: boolean } }
   | { status: 'cancelled' }
   | { status: 'superseded' };
@@ -242,7 +242,9 @@ export class DiscussionStore {
       delegation.status = transition.status as DelegationStatus;
       if (transition.status === 'running' && transition.invocationId) delegation.invocationId = transition.invocationId;
       if (transition.status === 'completed') delegation.result = structuredClone(transition.result);
-      if (transition.status === 'failed') delegation.failure = { ...transition.failure };
+      if (transition.status === 'failed' || transition.status === 'blocked') {
+        delegation.failure = { ...transition.failure };
+      }
       delegation.revision += 1;
       delegation.updatedAt = now;
       run.revision += 1;

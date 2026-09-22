@@ -1,7 +1,7 @@
 # 阶段 3：主 Agent 主持讨论与可恢复专家协作 — Checklist v1
 
 > 日期：2026-09-16
-> 状态：**已通过验收（2026-09-19，用户确认）**。证据见第 1 节矩阵与第 5 节；四项缺口归阶段 4。
+> 状态：**已通过验收（2026-09-19，用户确认；2026-09-20 补齐缺证阻塞态）**。证据见第 1 节矩阵与第 5 节；其余缺口归阶段 4。
 > 依赖：阶段 1、2A、2B、2C 通过；核心正确性不依赖缓存命中。
 
 [总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-3-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-3-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-3-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-3-checklist-v1.md)
@@ -15,7 +15,7 @@
 | P3-AC3 | P3-T2、P3-T6 | 模型请求陌生 Agent 或禁用 Agent 时产生主 Agent 的成员选择请求，未确认前不调用。 | **通过（单测 + E2E）**。目录内非成员 → `confirm_member_addition` 卡，未批准零委派（用例 1；E2E 场景 B）；名字不存在 → `unknownTargets` 报出不编造（`discussion-planner.spec` 用例 3）；模型无法通过多余字段自行加人（`discussion-plan-output.spec` 用例 5）。**未做**：禁用 Agent 的专门用例（`participatingAgents` 过滤 `status==='active'`，禁用者只会落到扩员/未知两条路径之一，未单独断言）；扩员卡 approve/decline 的落实。 |
 | P3-AC4 | P3-T1、P3-T3、P3-T6 | 提交后崩溃、完成事件重复、结果乱序时，同一委派最多一次有效完成，账单按实际尝试记录。 | **通过（file + PostgreSQL）**。同键（discussion|expert|revision）并发 12 个恰一个 reserved（store 用例 2）；跨实例只留一条委派（PG 集成 12/12）；完成重放 `idempotent`、终态不可回退（store 用例 6）；重启只跑未完成、不重问计划、不开第二个 run（用例 4）。账单：委派经 `runRuntime` 走 2A `budgetCategoryFor('discussion')='consultation'` 预留结算，按实际尝试记。**延后**：跨实例并发写同一 run 的 CAS（T1-3 已记）。 |
 | P3-AC5 | P3-T2、P3-T5、P3-T6 | 两个专家意见相反时，主 Agent 明确分歧和选项；必需专家失败不以完整方案结束。 | **通过（单测）**。同 objective 不同结论 → `conflicts` 列出两条待选、outcome `needs_user`、正文不含"一致同意"（`discussion-synthesis.spec` 用例 2）；专家失败点名列出且 run 进 `waiting_user`、主 Agent 发一张 `discussion_clarification` 卡（用例 9），不以完整方案结束。 |
-| P3-AC6 | P3-T1、P3-T2、P3-T3、P3-T6 | 专家超时、拒绝、缺证、主 Agent 失败分别有固定状态与恢复点；停止后所有派生咨询停稳。 | **部分通过**。超时/失败 → 委派 `failed{code,retryable}`（用例 2 用 RUNTIME_INVOCATION_ERROR、用例 9 用 RUNTIME_TIMEOUT）；主 Agent 出计划失败 → 抛 runtimeError 交既有 `retry_failed_execution` 恢复、不咨询不落 run（用例 10）；停止 → run `paused`、委派保持 `running` 可续（用例 5）；恢复点 = 持久化 run + `findResumable`。**未做**："拒绝/缺证"未映射到合同里已定义的 `blocked` 状态（专家 CONTEXT_INSUFFICIENT 目前落为 failed），`blocked` 尚无写入方。 |
+| P3-AC6 | P3-T1、P3-T2、P3-T3、P3-T6 | 专家超时、拒绝、缺证、主 Agent 失败分别有固定状态与恢复点；停止后所有派生咨询停稳。 | **通过（单测）**。普通调用失败/超时 → 委派 `failed{code,retryable}`；缺少证据 `CONTEXT_INSUFFICIENT` → `blocked{failure}`，原因持久化且不盲目重派，Agent 投影为 `waiting`，主 Agent 只发一张澄清卡并将 run 置为 `waiting_user`。主 Agent 规划失败仍抛 `runtimeError` 交 `retry_failed_execution`，不咨询、不落半开 run；停止仍令 run `paused`、运行中委派可续。恢复点 = 持久化 run/delegation + `findResumable`，定向 36/36 通过。 |
 | P3-AC7 | P3-T1、P3-T4、P3-T5、P3-T6 | 专家执行期间修订需求，旧版本结果只留历史；刷新任一端不会将过期建议当新结论。 | **通过（服务端）**。需求修订 → `reviseRequirement`：旧修订未完成委派 `superseded`、已完成保留但 `stale:true`（store 用例 7），综合只读当前 revision 非 stale（synthesis 用例 3），同一 run 重规划（用例 7）。**未做**：双端刷新的验证（未改前端；事件带 requirementRevision 供前端判旧）。 |
 
 ## 2. 现有验证入口
@@ -37,7 +37,7 @@ npm run test:e2e:planned-discussion   # 2026-09-19 新增：主 Agent 规划讨�
 
 ## 3. 必须补充的测试
 
-- [x] 持久化主 Agent 讨论/委派恢复测试（2026-09-19：`discussion-store.spec` 14 例、PG 集成 1 例、`planned-discussion.spec` 用例 4/5）。
+- [x] 持久化主 Agent 讨论/委派恢复测试（2026-09-20：`discussion-store.spec` 15 例、PG 集成 1 例，并覆盖 `blocked.failure` 恢复点；`planned-discussion.spec` 覆盖重启、停止与缺证阻塞）。
 - [ ] 用户中途 @ 与成员外邀请双端 E2E（待新增；不能用现有冒烟脚本代替）。
   进度：成员外邀请的**服务端** E2E 已有（`planned-discussion-smoke` 场景 B）；@ 的 E2E 与双端展示未做。
 - [x] 专家分歧及必需咨询失败不得假成功测试（2026-09-19：`discussion-synthesis.spec` 用例 2/4/6、`planned-discussion.spec` 用例 2/9）。
@@ -80,7 +80,19 @@ npm run test:e2e:planned-discussion   # 2026-09-19 新增：主 Agent 规划讨�
 - **阶段结论：已验收（2026-09-19，用户确认）。** 阶段退出条件（用户 @、按需咨询、主 Agent 实质汇总、统一澄清、
   成员授权、版本与重启恢复、讨论无源码写副作用）均有服务端证据。**需用户决定的缺口**：(1) 双端专用呈现未做
   （复用既有事件类型渲染）；(2) 扩员卡与澄清卡的选项处理未接（approve 后加人并补委派 / proceed_anyway）；
-  (3) `blocked` 委派状态无写入方；(4) 开关默认关，是否在验收时置为默认开。
+  (3) 开关默认关，是否在验收时置为默认开。
+
+### 2026-09-20 P3-AC6 补充验收
+
+- `CONTEXT_INSUFFICIENT` 已从普通 Provider 失败中分离，写入 `Delegation.status='blocked'` 并持久化
+  `{code,message,retryable}`；普通 `RUNTIME_INVOCATION_ERROR` / `RUNTIME_TIMEOUT` 仍为 `failed`。
+- 综合结果单列 `blocked` 与 `blockedDelegationIds`，缺证文案不再显示为“尚未回复”；主 Agent 发一张
+  `discussion_clarification` 卡，run 进入 `waiting_user`。
+- 命令：`node node_modules/tsx/dist/cli.mjs --test --tsconfig apps/server/tsconfig.json
+  apps/server/src/modules/orchestrator/discussion-store.spec.ts
+  apps/server/src/modules/orchestrator/discussion-synthesis.spec.ts
+  apps/server/src/modules/orchestrator/planned-discussion.spec.ts`，36/36 通过；
+  `npm run typecheck -w @agent-cluster/server` 通过。
 
 ### TASK.md 记录归档（2026-09-19）
 

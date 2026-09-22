@@ -18,7 +18,14 @@ function makeService(responseBody: unknown) {
   return makeServiceWithCurrentFetch();
 }
 
-function makeServiceWithCurrentFetch() {
+function makeServiceWithCurrentFetch(pricing?: {
+  priceVersion: string;
+  currency: 'USD';
+  inputPerMillion: number;
+  outputPerMillion: number;
+  cacheReadInputPerMillion?: number;
+  cacheWriteInputPerMillion?: number;
+}) {
   return new GenericLlmRuntimeService(
     {} as never,
     {
@@ -28,7 +35,10 @@ function makeServiceWithCurrentFetch() {
           model: 'test-model',
           baseUrl: 'http://llm.test/v1',
           apiKey: 'test-key',
-          kind: 'remote'
+          kind: 'remote',
+          provider: 'openai-compatible',
+          credentialLocation: 'server',
+          ...(pricing ? { pricing } : {})
         };
       }
     } as never,
@@ -255,7 +265,30 @@ test('requests strict json_schema output for remote models in auto mode', async 
   const schema = jsonSchema?.schema as { properties?: { kind?: { const?: string } } } | undefined;
   assert.equal(schema?.properties?.kind?.const, 'task_execution_result');
   assert.equal(requestBody?.stream, true);
+  assert.deepEqual(requestBody?.stream_options, { include_usage: true });
   assert.equal(requestBody?.max_tokens, 500);
+});
+
+test('attaches versioned estimated cost only when the selected connection has pricing', async () => {
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    ...completedTaskExecutionContent(),
+    usage: {
+      prompt_tokens: 1_000_000,
+      completion_tokens: 100_000,
+      total_tokens: 1_100_000,
+      prompt_tokens_details: { cached_tokens: 900_000 }
+    }
+  }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+  const result = await runWithService('task_execution_result', () => makeServiceWithCurrentFetch({
+    priceVersion: 'pricing-v1',
+    currency: 'USD',
+    inputPerMillion: 2,
+    outputPerMillion: 8,
+    cacheReadInputPerMillion: 0.5
+  }));
+  assert.equal(result.usage.cost, 1.45);
+  assert.equal(result.usage.priceVersion, 'pricing-v1');
+  assert.equal(result.usage.costBasis, 'estimated');
 });
 
 test('rejects legacy GLM Artifacts instead of normalizing them', async () => {
@@ -349,6 +382,9 @@ test('caps remote max_tokens by LLM_REMOTE_MAX_OUTPUT_TOKENS', async () => {
 
   assert.equal(result.status, 'completed');
   assert.equal(requestBody?.max_tokens, 128);
+  assert.equal(result.streamMetrics?.frameCount, 1);
+  assert.ok((result.streamMetrics?.durationMs ?? -1) >= 0);
+  assert.equal(result.streamMetrics?.firstFrameLatencyMs, result.streamMetrics?.durationMs);
 });
 
 test('aggregates OpenAI-compatible streaming chunks before runtime output parsing', async () => {
@@ -383,9 +419,13 @@ test('aggregates OpenAI-compatible streaming chunks before runtime output parsin
   }) as typeof fetch);
 
   assert.equal(requestBody?.stream, true);
+  assert.deepEqual(requestBody?.stream_options, { include_usage: true });
   assert.equal(result.status, 'completed');
   assert.equal(result.output.kind, 'task_execution_result');
   assert.equal(result.output.summary, 'Streamed output');
+  assert.equal(result.streamMetrics?.frameCount, 2);
+  assert.ok((result.streamMetrics?.firstFrameLatencyMs ?? -1) >= 0);
+  assert.ok((result.streamMetrics?.durationMs ?? -1) >= (result.streamMetrics?.firstFrameLatencyMs ?? 0));
 });
 
 test('falls back to json_object when the gateway rejects json_schema', async () => {

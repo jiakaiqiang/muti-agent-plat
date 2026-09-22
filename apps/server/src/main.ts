@@ -11,6 +11,7 @@ import { bullMqEnabled, bullMqPrefix } from './common/redis.js';
 import { PersistenceService } from './modules/persistence/persistence.service.js';
 import { installProcessLifecycleLogging } from './common/process-lifecycle.js';
 import { assertLocalRuntimeAdminConfiguration } from './modules/local-runtime/local-runtime-admin.guard.js';
+import { assertPhase6ProductionPolicyAdmission } from './common/phase-6-release-admission.js';
 
 loadLocalEnv();
 
@@ -48,6 +49,7 @@ function runtimeMode() {
 async function bootstrap() {
   const logger = bootstrapLogger;
   assertLocalRuntimeAdminConfiguration();
+  assertPhase6ProductionPolicyAdmission();
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false, logger });
   app.enableShutdownHooks();
   const requestBodyLimit = process.env.HTTP_JSON_BODY_LIMIT ?? '2mb';

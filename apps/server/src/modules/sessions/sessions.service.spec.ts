@@ -193,6 +193,9 @@ function makeService(options: {
     actionStatusUpdates?: string[];
     followUpStatusUpdates?: string[];
   };
+  attachments?: {
+    removeForMessage(sessionId: string, messageId: string): Promise<string[]>;
+  };
 } = {}) {
   const persistedSessions: SessionDetail[] = structuredClone(options.initialSessions ?? []);
   const persistedState: Record<string, unknown> = { sessions: persistedSessions };
@@ -274,6 +277,26 @@ function makeService(options: {
       },
       list() {
         return events;
+      },
+      async redactUserMessage(_sessionId: string, eventId: string, attachmentIds: string[]) {
+        const event = events.find((item) => item.id === eventId) as {
+          content: string;
+          metadata: { payload?: Record<string, unknown> };
+        } | undefined;
+        if (!event) return undefined;
+        const payload = event.metadata.payload ?? {};
+        if (typeof payload.deletedAt === 'string') {
+          return { event, deleted: true, alreadyDeleted: true };
+        }
+        event.content = '消息已删除';
+        event.metadata = {
+          payload: {
+            deleted: true,
+            deletedAt: '2026-09-22T00:00:00.000Z',
+            ...(attachmentIds.length ? { deletedAttachmentIds: attachmentIds } : {})
+          }
+        };
+        return { event, deleted: true, alreadyDeleted: false };
       },
       deleteSession() {}
     } as never,
@@ -643,7 +666,9 @@ function makeService(options: {
       deleteSession(sessionId: string) {
         options.cleanupCalls?.push(`artifacts:${sessionId}`);
       }
-    } as never
+    } as never,
+    undefined,
+    options.attachments as never
   );
   return {
     service,
@@ -1558,12 +1583,15 @@ test('deleting a Session keeps directories, artifacts and persisted history reco
   const cleanupCalls: string[] = [];
   const { service, persistedSessions } = makeService({ cleanupCalls });
   const { session } = await service.create({ input: 'Delete this Session later' });
+  await service.joinAgent(session.id, 'backend');
 
   const result = await service.delete(session.id);
 
   assert.deepEqual(cleanupCalls, [`terminate:${session.id}`]);
   assert.equal(result.deleted, true);
   assert.equal(result.lifecycle.state, 'deleted');
+  assert.deepEqual(result.endedAgentIds, ['backend']);
+  assert.deepEqual(service.getIncludingDeleted(session.id).participatingAgentIds, ['coordinator']);
   assert.equal(persistedSessions.length, 1);
   assert.throws(() => service.get(session.id), /会话已删除/);
   assert.equal(service.getIncludingDeleted(session.id).id, session.id);
@@ -1596,6 +1624,133 @@ test('recoverable deletion never calls the physical purge path', async () => {
   );
 });
 
+test('persisted Agent membership does not broaden routing to the active catalog after a member disappears', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Keep routing inside the Session boundary' });
+  const agents = (fixture.service as any).agents as {
+    findByIdOrKey: (id: string) => unknown;
+  };
+  const originalFindByIdOrKey = agents.findByIdOrKey.bind(agents);
+  agents.findByIdOrKey = (id: string) => id === 'retired-agent' ? undefined : originalFindByIdOrKey(id);
+  session.participatingAgentIds = ['retired-agent'];
+
+  const selected = (fixture.service as any).pickSessionAgent(session, ['test']);
+  assert.equal(selected.key, 'coordinator', 'a disappeared member may only fall back to the trusted main Agent');
+});
+
+test('new message directives cannot execute a disabled or deleted Skill reference', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Reject stale Skill references' });
+  fixture.persistedState.skills = [{
+    id: 'skill-disabled',
+    key: 'old-review',
+    name: 'Old Review',
+    status: 'disabled',
+    revision: 2,
+    scope: 'system',
+    scopeId: 'system'
+  }];
+  const normalize = (fixture.service as any).normalizeMessageDirectives.bind(fixture.service);
+
+  assert.throws(
+    () => normalize(session, {
+      skill: { id: 'skill-disabled', key: 'old-review', name: 'Forged label' },
+      agents: [],
+      attachments: []
+    }, []),
+    (error: unknown) => (error as { response?: { code?: string } }).response?.code === 'SKILL_NOT_AVAILABLE'
+  );
+  assert.throws(
+    () => normalize(session, {
+      skill: { id: 'skill-deleted', key: 'deleted-review', name: 'Deleted Review' },
+      agents: [],
+      attachments: []
+    }, []),
+    (error: unknown) => (error as { response?: { code?: string } }).response?.code === 'SKILL_NOT_AVAILABLE'
+  );
+});
+
+test('deleting a user message tombstones its refs, cancels queued follow-ups, and is idempotent', async () => {
+  const removedAttachmentIds: string[] = [];
+  const fixture = makeService({
+    attachments: {
+      async removeForMessage(_sessionId, _messageId) {
+        removedAttachmentIds.push('file-1');
+        return ['file-1'];
+      }
+    }
+  });
+  const { session } = await fixture.service.create({ input: 'Delete a message with an attachment' });
+  const eventId = 'user-message-delete-1';
+  fixture.events.push({
+    id: eventId,
+    sessionId: session.id,
+    type: 'user_message',
+    content: '待删除的消息',
+    toAgentIds: ['coordinator'],
+    metadata: {
+      schemaVersion: '0.1',
+      renderAs: 'chat_message',
+      payload: {
+        text: '待删除的消息',
+        attachmentRefs: [{ id: 'file-1', name: 'secret.txt' }]
+      }
+    },
+    createdAt: '2026-09-22T00:00:00.000Z'
+  });
+  session.pendingFollowUpMessages = [{
+    id: 'queued-follow-up-delete-1',
+    sourceEventId: eventId,
+    content: 'queued follow-up',
+    mentionedAgentIds: [],
+    handlingPlan: {
+      intent: 'command',
+      priority: 'normal',
+      shouldPause: false,
+      affectedTaskIds: [],
+      affectedAgentIds: [],
+      requiresBriefRevision: false,
+      requiresUserConfirmation: false,
+      coordinatorInstruction: 'dispatch'
+    },
+    status: 'queued',
+    queuedAt: '2026-09-22T00:00:00.000Z'
+  }] as never;
+
+  const first = await fixture.service.deleteMessage(session.id, eventId);
+  assert.equal(first.deleted, true);
+  assert.equal(first.alreadyDeleted, false);
+  assert.deepEqual(first.attachmentIds, ['file-1']);
+  assert.deepEqual(first.cancelledFollowUpIds, ['queued-follow-up-delete-1']);
+  assert.deepEqual(removedAttachmentIds, ['file-1']);
+  const deletedEvent = fixture.events.find((event) => event.id === eventId)!;
+  assert.equal(deletedEvent.content, '消息已删除');
+  const deletedPayload = (deletedEvent.metadata as { payload: Record<string, unknown> }).payload;
+  assert.equal(deletedPayload.deleted, true);
+  assert.equal('attachmentRefs' in deletedPayload, false);
+  assert.equal((session.pendingFollowUpMessages as Array<{ status?: string }>)[0]?.status, 'cancelled');
+
+  fixture.persistedState.groupChatAttachments = [{
+    id: 'file-1',
+    sessionId: session.id,
+    kind: 'file',
+    fileName: 'secret.txt',
+    mimeType: 'text/plain',
+    sizeBytes: 6,
+    uploadStatus: 'deleted',
+    createdAt: '2026-09-22T00:00:00.000Z'
+  }];
+  await assert.rejects(
+    fixture.service.sendMessage(session.id, '引用已删除附件', [], undefined, undefined, ['file-1']),
+    /Attachment is deleted/
+  );
+
+  const second = await fixture.service.deleteMessage(session.id, eventId);
+  assert.equal(second.alreadyDeleted, true);
+  assert.deepEqual(second.cancelledFollowUpIds, []);
+  assert.deepEqual(removedAttachmentIds, ['file-1']);
+});
+
 test('restoring a deleted Session returns it paused without starting a model or losing history', async () => {
   const fixture = makeService();
   const { session } = await fixture.service.create({ input: 'Keep this history through restore' });
@@ -1613,6 +1768,45 @@ test('restoring a deleted Session returns it paused without starting a model or 
   assert.equal(fixture.discussionStarts.length, discussionCount);
   assert.equal(fixture.service.list('active').some(item => item.id === session.id), true);
   assert.equal(fixture.events.some(event => event.content === 'Keep this history through restore'), true);
+});
+
+test('archiving hides a Session from the active list and restores it through project groups', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Archive this history', projectId: 'project-archive' });
+
+  const archived = await fixture.service.archive(session.id, 'archive-request-1');
+  assert.equal(archived.archived, true);
+  assert.equal(fixture.service.list('active').some(item => item.id === session.id), false);
+  assert.equal(fixture.service.list('archived').some(item => item.id === session.id), true);
+  assert.equal(fixture.service.listArchivedGroups()[0]?.projectKey, 'project-archive');
+  assert.equal((fixture.persistedState.sessions as SessionDetail[])[0]?.archivedAt, session.archivedAt);
+  assert.throws(() => fixture.service.get(session.id), /SESSION_ARCHIVED|会话已归档/);
+
+  const restored = await fixture.service.restoreArchived(session.id, 'archive-restore-1');
+  assert.equal(restored.restored, true);
+  assert.equal(restored.session.archivedAt, undefined);
+  assert.equal((fixture.persistedState.sessions as SessionDetail[])[0]?.archivedAt, undefined);
+  assert.equal(fixture.service.list('active').some(item => item.id === session.id), true);
+  assert.equal(fixture.service.list('archived').some(item => item.id === session.id), false);
+});
+
+test('duplicate archive and restore requests are idempotent and keep one Session projection', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Archive idempotency', projectId: 'project-idempotency' });
+
+  const archiveResults = await Promise.all([
+    fixture.service.archive(session.id, 'archive-duplicate-a'),
+    fixture.service.archive(session.id, 'archive-duplicate-b')
+  ]);
+  assert.equal(archiveResults.every(result => result.archived), true);
+  assert.equal(fixture.service.list('archived').filter(item => item.id === session.id).length, 1);
+
+  const restoreResults = await Promise.all([
+    fixture.service.restoreArchived(session.id, 'restore-duplicate-a'),
+    fixture.service.restoreArchived(session.id, 'restore-duplicate-b')
+  ]);
+  assert.equal(restoreResults.some(result => result.restored), true);
+  assert.equal(fixture.service.list('active').filter(item => item.id === session.id).length, 1);
 });
 
 test('deleting one Session blocks its late outcome without changing a sibling Session', async () => {
@@ -1862,6 +2056,41 @@ test('an idle existing Session routes a new message through receiver decompositi
     event.type === 'session_status_changed' &&
     (event.metadata as { payload?: { status?: string } }).payload?.status === 'AGENT_DISCUSSING'
   ), false);
+});
+
+test('collaboration retry is isolated and manual re-summary appends a new version', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Retry one collaboration Agent', agentIds: ['backend', 'test'] });
+  session.status = 'EXECUTING';
+  fixture.events.push({
+    id: 'failed-backend-1', sessionId: session.id, type: 'task_failed', taskId: 'task-1',
+    fromAgentId: 'backend', toAgentIds: ['backend'], content: 'backend failed',
+    metadata: { schemaVersion: '0.1', payload: { taskId: 'task-1', agentId: 'backend', status: 'failed' } },
+    createdAt: '2026-09-22T00:00:00.000Z'
+  } as never);
+  const retry = fixture.service.retryCollaborationAgent(session.id, 'backend', 'task-1');
+  assert.equal(retry.agentId, 'backend');
+  assert.notEqual(retry.attemptId, retry.retryOfEventId);
+  assert.equal((retry.event.metadata.payload as { retry?: boolean }).retry, true);
+
+  fixture.events.push({
+    id: 'completed-backend-1', sessionId: session.id, type: 'task_completed', taskId: 'task-1',
+    fromAgentId: 'backend', toAgentIds: [], content: 'backend completed',
+    metadata: { schemaVersion: '0.1', payload: { taskId: 'task-1', agentId: 'backend', status: 'completed' } },
+    createdAt: '2026-09-22T00:00:01.000Z'
+  } as never);
+  const summary = fixture.service.resummarizeCollaboration(session.id, 'task-1');
+  assert.equal((summary.summary.event.metadata.payload as { summaryKind?: string }).summaryKind, 'manual_resummary');
+  assert.deepEqual(summary.sourceEventIds, ['completed-backend-1']);
+});
+
+test('collaboration cancellation retains a temporary summary event', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Cancel collaboration', agentIds: ['backend'] });
+  session.status = 'EXECUTING';
+  const result = await fixture.service.cancelCollaboration(session.id, 'task-1');
+  assert.equal(session.status, 'CANCELLED');
+  assert.equal((result.summary.event.metadata.payload as { summaryKind?: string }).summaryKind, 'temporary_cancelled');
 });
 
 test('a message received during execution is recognized immediately but deferred without interrupting the task', async () => {
@@ -3420,6 +3649,25 @@ test('approving a member addition adds the member and consults them; declining o
   await assert.rejects(() => approved.fixture.service.resolveMemberAddition(approved.session.id, { discussionId: 'run-1', confirmationId: 'card-1', decision: 'approve' }));
 });
 
+test('direct Agent join is persisted with historical-context visibility and is idempotent', async () => {
+  const card = discussionCardFixture('discussion_clarification');
+  const first = await card.fixture.service.joinAgent(card.session.id, 'architect');
+  const second = await card.fixture.service.joinAgent(card.session.id, 'architect');
+  assert.equal(first.added, true);
+  assert.equal(second.added, false);
+  assert.deepEqual(card.fixture.service.get(card.session.id).participatingAgentIds, ['coordinator', 'backend', 'architect']);
+  const joinEvents = card.fixture.events.filter((event) =>
+    (event.metadata as { payload?: { reason?: string } })?.payload?.reason === 'agent_joined_group'
+  );
+  assert.equal(joinEvents.length, 1);
+  assert.deepEqual((joinEvents[0].metadata as { payload?: Record<string, unknown> }).payload, {
+    reason: 'agent_joined_group',
+    agentId: 'architect',
+    historyReadable: true,
+    attachmentIndexReadable: true
+  });
+});
+
 test('a clarification card is answered in chat or accepted as-is, never silently', async () => {
   const proceed = discussionCardFixture('discussion_clarification');
   await proceed.fixture.service.resolveDiscussionClarification(proceed.session.id, { discussionId: 'run-1', confirmationId: 'card-1', decision: 'proceed_anyway' });
@@ -3454,13 +3702,14 @@ function workflowSelectionFixture(input: { involvedAgentIds: string[]; participa
     updatedAt: '2026-09-19T00:00:00.000Z'
   };
   const fixture = makeService({ initialSessions: [session] });
+  const workflow = { id: 'wf-1', name: 'Delivery', status: 'published', nodes: [], version: 1, currentPublishedVersion: 1 };
   const version = {
     id: 'wf-1@1', workflowId: 'wf-1', version: 1, name: 'Delivery', nodes: [], edges: [],
     involvedAgentIds: input.involvedAgentIds, definitionHash: 'hash-wf-1', publishedBy: 'admin', publishedAt: '2026-09-19T00:00:00.000Z'
   };
   const starts: unknown[] = [];
   (fixture.service as unknown as { workflows: unknown }).workflows = {
-    get: () => ({ id: 'wf-1', name: 'Delivery', status: 'published', nodes: [], version: 1, currentPublishedVersion: 1 }),
+    get: () => workflow,
     getVersion: () => version,
     list: () => []
   } as never;
@@ -3473,16 +3722,17 @@ function workflowSelectionFixture(input: { involvedAgentIds: string[]; participa
       return run;
     }
   } as never;
-  (fixture.service as unknown as { orchestrator: { getBrief: unknown } }).orchestrator.getBrief = () => ({
+  const brief = {
     id: 'brief-select', sessionId: session.id, version: 1, goal: 'g', scope: [], outOfScope: [], constraints: [],
     acceptanceCriteria: [], risks: [], openQuestions: [], confirmedByUser: input.confirmedBrief ?? true, createdAt: '2026-09-19T00:00:00.000Z'
-  });
+  };
+  (fixture.service as unknown as { orchestrator: { getBrief: unknown } }).orchestrator.getBrief = () => brief;
   fixture.events.push({
     id: 'select-request', sessionId: session.id, type: 'user_confirmation_requested', content: 'select', toAgentIds: [],
     metadata: { schemaVersion: '0.1', payload: { confirmationId: 'select-1', reason: 'select_workflow', options: [] } },
     createdAt: '2026-09-19T00:00:00.000Z'
   });
-  return { session, fixture, starts };
+  return { session, fixture, starts, workflow, version, brief };
 }
 
 test('selecting a workflow whose agents are not all in the session asks the user instead of adding them', async () => {
@@ -3507,7 +3757,7 @@ test('selecting a workflow whose agents are not all in the session asks the user
   assert.equal(fixture.service.get(session.id).status, 'WAIT_WORKFLOW_SELECT', 'selection stays open');
 });
 
-test('approving the mapping card adds the members and the same selection then starts against the locked version', async () => {
+test('approving the mapping card adds the members and automatically continues the locked selection once', async () => {
   const { session, fixture, starts } = workflowSelectionFixture({ involvedAgentIds: ['coordinator', 'architect'], participating: ['coordinator'] });
   await assert.rejects(() => fixture.service.selectWorkflow(session.id, { workflowId: 'wf-1', confirmationId: 'select-1' }));
   const card = fixture.events.find((event) => (event.metadata as { payload?: { reason?: string } }).payload?.reason === 'confirm_workflow_member_mapping')!;
@@ -3515,12 +3765,52 @@ test('approving the mapping card adds the members and the same selection then st
 
   await fixture.service.resolveWorkflowMemberMapping(session.id, { confirmationId: mappingConfirmationId, decision: 'approve' });
   assert.deepEqual(fixture.service.get(session.id).participatingAgentIds, ['coordinator', 'architect']);
-
-  await fixture.service.selectWorkflow(session.id, { workflowId: 'wf-1', confirmationId: 'select-1' });
   assert.equal(starts.length, 1);
   const start = starts[0] as { workflowVersion?: number; definitionHash?: string };
   assert.equal(start.workflowVersion, 1);
   assert.equal(start.definitionHash, 'hash-wf-1', 'the start binds the version hash the user saw');
+
+  const replay = await fixture.service.resolveWorkflowMemberMapping(session.id, {
+    confirmationId: mappingConfirmationId,
+    decision: 'approve'
+  }) as { workflowRun?: { id: string } };
+  assert.equal(starts.length, 1, 'a repeated client decision is idempotent');
+  assert.equal(replay.workflowRun?.id, 'run-1', 'an approval replay returns the authoritative run, not only a boolean');
+});
+
+test('reselecting the same locked workflow reuses one pending mapping card', async () => {
+  const { session, fixture } = workflowSelectionFixture({ involvedAgentIds: ['coordinator', 'architect'], participating: ['coordinator'] });
+  await assert.rejects(() => fixture.service.selectWorkflow(session.id, { workflowId: 'wf-1', confirmationId: 'select-1' }));
+  await assert.rejects(() => fixture.service.selectWorkflow(session.id, { workflowId: 'wf-1', confirmationId: 'select-1' }));
+  const cards = fixture.events.filter((event) =>
+    (event.metadata as { payload?: { reason?: string } }).payload?.reason === 'confirm_workflow_member_mapping'
+  );
+  assert.equal(cards.length, 1);
+});
+
+test('declining a mapping is idempotent and never adds members or starts the workflow', async () => {
+  const { session, fixture, starts } = workflowSelectionFixture({ involvedAgentIds: ['coordinator', 'architect'], participating: ['coordinator'] });
+  await assert.rejects(() => fixture.service.selectWorkflow(session.id, { workflowId: 'wf-1', confirmationId: 'select-1' }));
+  const card = fixture.events.find((event) => (event.metadata as { payload?: { reason?: string } }).payload?.reason === 'confirm_workflow_member_mapping')!;
+  const confirmationId = (card.metadata as { payload: { confirmationId: string } }).payload.confirmationId;
+
+  await fixture.service.resolveWorkflowMemberMapping(session.id, { confirmationId, decision: 'decline' });
+  await fixture.service.resolveWorkflowMemberMapping(session.id, { confirmationId, decision: 'decline' });
+
+  assert.deepEqual(fixture.service.get(session.id).participatingAgentIds, ['coordinator']);
+  assert.equal(starts.length, 0);
+  const reselectCards = fixture.events.filter((event) => {
+    const payload = (event.metadata as { payload?: { reason?: string; reselectAfterMappingConfirmationId?: string } }).payload;
+    return payload?.reason === 'select_workflow' && payload.reselectAfterMappingConfirmationId === confirmationId;
+  });
+  assert.equal(reselectCards.length, 1, 'declining must issue one actionable workflow selector');
+  await assert.rejects(
+    () => fixture.service.resolveWorkflowMemberMapping(session.id, { confirmationId, decision: 'approve' }),
+    (error: unknown) => {
+      const response = (error as { getResponse?: () => unknown }).getResponse?.() as { code?: string } | undefined;
+      return response?.code === 'workflow_member_mapping_decision_conflict';
+    }
+  );
 });
 
 test('a workflow whose agent is disabled cannot be resolved by inviting and stays blocked', async () => {
@@ -3534,6 +3824,108 @@ test('a workflow whose agent is disabled cannot be resolved by inviting and stay
   assert.deepEqual(payload.addableAgentIds, []);
   assert.match(String(payload.description), /Retired/);
   assert.equal(starts.length, 0);
+});
+
+test('a mixed inviteable and disabled mapping cannot approve only part of the published graph', async () => {
+  const { session, fixture, starts } = workflowSelectionFixture({
+    involvedAgentIds: ['coordinator', 'architect', 'retired-agent'],
+    participating: ['coordinator']
+  });
+  (fixture.service as unknown as { agents: { findByIdOrKey: unknown } }).agents.findByIdOrKey = (id: string) =>
+    id === 'retired-agent' ? { id, key: id, name: 'Retired', status: 'disabled' } : { id, key: id, name: id, status: 'active' };
+
+  await assert.rejects(() => fixture.service.selectWorkflow(session.id, { workflowId: 'wf-1', confirmationId: 'select-1' }));
+  const card = fixture.events.find((event) => (event.metadata as { payload?: { reason?: string } }).payload?.reason === 'confirm_workflow_member_mapping')!;
+  const payload = (card.metadata as { payload: { confirmationId: string; options: Array<{ key: string }> } }).payload;
+  assert.deepEqual(payload.options.map((option) => option.key), ['decline'], 'mixed gaps do not offer a partial approve action');
+  await assert.rejects(
+    () => fixture.service.resolveWorkflowMemberMapping(session.id, { confirmationId: payload.confirmationId, decision: 'approve' }),
+    (error: unknown) => ((error as { getResponse?: () => { code?: string } }).getResponse?.())?.code === 'stale_workflow_member_mapping'
+  );
+  assert.deepEqual(fixture.service.get(session.id).participatingAgentIds, ['coordinator']);
+  assert.equal(starts.length, 0);
+});
+
+test('mapping approval fails closed when the published workflow version changes or is archived', async () => {
+  const changed = workflowSelectionFixture({ involvedAgentIds: ['coordinator', 'architect'], participating: ['coordinator'] });
+  await assert.rejects(() => changed.fixture.service.selectWorkflow(changed.session.id, { workflowId: 'wf-1', confirmationId: 'select-1' }));
+  const changedCard = changed.fixture.events.find((event) => (event.metadata as { payload?: { reason?: string } }).payload?.reason === 'confirm_workflow_member_mapping')!;
+  changed.version.definitionHash = 'hash-wf-1-republished';
+  await assert.rejects(
+    () => changed.fixture.service.resolveWorkflowMemberMapping(changed.session.id, {
+      confirmationId: (changedCard.metadata as { payload: { confirmationId: string } }).payload.confirmationId,
+      decision: 'approve'
+    }),
+    (error: unknown) => ((error as { getResponse?: () => { code?: string } }).getResponse?.())?.code === 'stale_workflow_member_mapping'
+  );
+  assert.equal(changed.starts.length, 0);
+  assert.deepEqual(changed.fixture.service.get(changed.session.id).participatingAgentIds, ['coordinator']);
+
+  const archived = workflowSelectionFixture({ involvedAgentIds: ['coordinator', 'architect'], participating: ['coordinator'] });
+  await assert.rejects(() => archived.fixture.service.selectWorkflow(archived.session.id, { workflowId: 'wf-1', confirmationId: 'select-1' }));
+  const archivedCard = archived.fixture.events.find((event) => (event.metadata as { payload?: { reason?: string } }).payload?.reason === 'confirm_workflow_member_mapping')!;
+  archived.workflow.status = 'archived';
+  await assert.rejects(() => archived.fixture.service.resolveWorkflowMemberMapping(archived.session.id, {
+    confirmationId: (archivedCard.metadata as { payload: { confirmationId: string } }).payload.confirmationId,
+    decision: 'approve'
+  }));
+  assert.equal(archived.starts.length, 0);
+});
+
+test('mapping approval fails closed after brief revision, Agent disablement, or a closed Session generation', async () => {
+  const revised = workflowSelectionFixture({ involvedAgentIds: ['coordinator', 'architect'], participating: ['coordinator'] });
+  await assert.rejects(() => revised.fixture.service.selectWorkflow(revised.session.id, { workflowId: 'wf-1', confirmationId: 'select-1' }));
+  const revisedCard = revised.fixture.events.find((event) => (event.metadata as { payload?: { reason?: string } }).payload?.reason === 'confirm_workflow_member_mapping')!;
+  revised.brief.version = 2;
+  await assert.rejects(() => revised.fixture.service.resolveWorkflowMemberMapping(revised.session.id, {
+    confirmationId: (revisedCard.metadata as { payload: { confirmationId: string } }).payload.confirmationId,
+    decision: 'approve'
+  }));
+  assert.equal(revised.starts.length, 0);
+
+  const disabled = workflowSelectionFixture({ involvedAgentIds: ['coordinator', 'architect'], participating: ['coordinator'] });
+  await assert.rejects(() => disabled.fixture.service.selectWorkflow(disabled.session.id, { workflowId: 'wf-1', confirmationId: 'select-1' }));
+  const disabledCard = disabled.fixture.events.find((event) => (event.metadata as { payload?: { reason?: string } }).payload?.reason === 'confirm_workflow_member_mapping')!;
+  (disabled.fixture.service as unknown as { agents: { findByIdOrKey: unknown } }).agents.findByIdOrKey = (id: string) => ({
+    id, key: id, name: id, status: id === 'architect' ? 'disabled' : 'active'
+  });
+  await assert.rejects(() => disabled.fixture.service.resolveWorkflowMemberMapping(disabled.session.id, {
+    confirmationId: (disabledCard.metadata as { payload: { confirmationId: string } }).payload.confirmationId,
+    decision: 'approve'
+  }));
+  assert.deepEqual(disabled.fixture.service.get(disabled.session.id).participatingAgentIds, ['coordinator']);
+  assert.equal(disabled.starts.length, 0);
+
+  const stopped = workflowSelectionFixture({ involvedAgentIds: ['coordinator', 'architect'], participating: ['coordinator'] });
+  stopped.fixture.persistedState.sessionLifecyclesBySession = {
+    [stopped.session.id]: {
+      contractVersion: '1.0', sessionId: stopped.session.id, dataEpoch: 'epoch-test', generation: 4,
+      revision: 1, state: 'active', admission: 'open', stopStatus: 'idle'
+    }
+  };
+  await assert.rejects(() => stopped.fixture.service.selectWorkflow(stopped.session.id, { workflowId: 'wf-1', confirmationId: 'select-1' }));
+  const stoppedCard = stopped.fixture.events.find((event) => (event.metadata as { payload?: { reason?: string } }).payload?.reason === 'confirm_workflow_member_mapping')!;
+  (stopped.fixture.persistedState.sessionLifecyclesBySession as Record<string, { admission: string }>)[stopped.session.id].admission = 'closed';
+  await assert.rejects(() => stopped.fixture.service.resolveWorkflowMemberMapping(stopped.session.id, {
+    confirmationId: (stoppedCard.metadata as { payload: { confirmationId: string } }).payload.confirmationId,
+    decision: 'approve'
+  }));
+  assert.equal(stopped.starts.length, 0);
+});
+
+test('simultaneous opposite mapping decisions have one winner and an explicit conflict', async () => {
+  const { session, fixture, starts } = workflowSelectionFixture({ involvedAgentIds: ['coordinator', 'architect'], participating: ['coordinator'] });
+  await assert.rejects(() => fixture.service.selectWorkflow(session.id, { workflowId: 'wf-1', confirmationId: 'select-1' }));
+  const card = fixture.events.find((event) => (event.metadata as { payload?: { reason?: string } }).payload?.reason === 'confirm_workflow_member_mapping')!;
+  const confirmationId = (card.metadata as { payload: { confirmationId: string } }).payload.confirmationId;
+
+  const approval = fixture.service.resolveWorkflowMemberMapping(session.id, { confirmationId, decision: 'approve' });
+  await assert.rejects(
+    () => fixture.service.resolveWorkflowMemberMapping(session.id, { confirmationId, decision: 'decline' }),
+    (error: unknown) => ((error as { getResponse?: () => { code?: string } }).getResponse?.())?.code === 'workflow_member_mapping_decision_conflict'
+  );
+  await approval;
+  assert.equal(starts.length, 1);
 });
 
 test('selection requires a confirmed brief', async () => {
@@ -3893,4 +4285,38 @@ test('a finished run with nothing queued does not invent a prompt', async () => 
       && (event.metadata as { payload?: { reason?: string } })?.payload?.reason === 'next_requirement_pending'),
     false
   );
+});
+
+test('a message carrying a stop and a supplement handles the stop first and keeps the supplement', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: '实现订单导出。' });
+  session.status = 'EXECUTING';
+  session.workflowRunId = 'run-multi';
+  session.activeWorkItemId = 'wi-multi';
+
+  // One message, two intents. The stop has stateful meaning and must win; the
+  // supplement is a scope change that must survive as a queued request rather
+  // than being swallowed by the stop (AC1).
+  await fixture.service.sendMessage(session.id, '先停下来，另外把接口改成分页');
+
+  assert.equal(fixture.service.get(session.id).status, 'PAUSED', 'the stop is handled first');
+  const requests = (fixture.service as unknown as {
+    changeRequests: { list(sessionId: string): Array<{ summary: string; status: string }> };
+  }).changeRequests.list(session.id);
+  assert.equal(requests.length, 1, 'the supplement is persisted, not dropped');
+  assert.match(requests[0].summary, /分页/, 'the queued request keeps the user own wording');
+});
+
+test('a bare stop does not invent a queued change', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: '实现订单导出。' });
+  session.status = 'EXECUTING';
+  session.activeWorkItemId = 'wi-stop';
+
+  await fixture.service.sendMessage(session.id, '暂停');
+
+  assert.equal(fixture.service.get(session.id).status, 'PAUSED');
+  assert.equal((fixture.service as unknown as {
+    changeRequests: { list(sessionId: string): unknown[] };
+  }).changeRequests.list(session.id).length, 0, 'a pure control message queues nothing');
 });

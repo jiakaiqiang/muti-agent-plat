@@ -12,6 +12,7 @@ import type {
 } from '@/types/contracts'
 import ConfirmationCard from './ConfirmationCard.vue'
 import UiIcon from './UiIcon.vue'
+import CollaborationTaskPanel from './CollaborationTaskPanel.vue'
 import { summarizeContextSupplement } from './contextSupplementSummary'
 
 const props = defineProps<{
@@ -24,9 +25,19 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   resolveConfirmation: [optionKey: string]
+  retryAgent: [agentId: string, taskId: string]
+  resummarize: [taskId: string]
 }>()
 
-const isCollapsed = ref(true)
+function retryAgent(agentId: string, taskId: string) {
+  emit('retryAgent', agentId, taskId)
+}
+
+function resummarize(taskId: string) {
+  emit('resummarize', taskId)
+}
+
+const isCollapsed = ref(false)
 const isActivityDetailOpen = ref(false)
 const completedTaskCount = computed(() => props.tasks.filter((task) => task.status === 'completed').length)
 const waitingTaskCount = computed(() => props.tasks.filter((task) => task.status === 'waiting').length)
@@ -371,6 +382,7 @@ function formatActivityTime(value: string) {
     </header>
 
     <div v-show="!isCollapsed" id="task-board-content" class="task-board-content">
+      <CollaborationTaskPanel :events="events" :agents="agents" @retry-agent="retryAgent" @resummarize="resummarize" />
       <div class="task-board-summary">
         <article :class="{ active: activeConfirmation?.relatedBriefId }">
           <UiIcon name="message" :size="17" />

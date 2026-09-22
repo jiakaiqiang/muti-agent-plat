@@ -251,6 +251,33 @@ type WorkflowRobotDecision = {
 
 四个字段全部必填，不接受额外字段。`revise` 必须携带非空 `revisionInstruction`，表示普通、可修复的质量问题；`approve/reject` 的 `revisionInstruction` 必须为 `null`。`reject` 仅用于不可恢复或政策性拒绝，并会终止整个 Workflow。非法 JSON、错误字段、机器人运行异常或超过返工上限统一转人工确认，不允许 Adapter 或编排器猜测、补写或修复模型决策。
 
+### 9.3 Usage 与版本化价格
+
+`RuntimeUsage.cost` 只有同时携带可追溯的 `priceVersion` 时才可进入成本报告。`costBasis` 区分 Provider 返回的 `actual` 金额和平台按 token 费率计算的 `estimated` 金额；缺少 usage、价格版本或精确连接匹配时必须省略金额，不能用 `0` 表示未知。
+
+部署侧价格目录由 `AGENT_CLUSTER_RUNTIME_PRICING_JSON` 提供，合同为：
+
+```ts
+type RuntimeModelPricing = {
+  priceVersion: string
+  currency: 'USD'
+  inputPerMillion: number
+  outputPerMillion: number
+  cacheReadInputPerMillion?: number
+  cacheWriteInputPerMillion?: number
+}
+```
+
+目录条目以完整 `RuntimeModelOption.id` 作为 `connectionId` 精确匹配，不允许按模型名模糊套价。目录必须包含非空版本、`USD` 币种和非负费率，重复连接或非法配置 fail closed。模型管理只返回当前连接的脱敏费率元数据，不返回凭据。
+
+远程模型新增/编辑还可设置 `inputPerMillion`、`outputPerMillion`、`cacheReadInputPerMillion`、`cacheWriteInputPerMillion` 和 `priceVersion`。输入与输出价格必须成对出现，均为有限非负数；`0` 表示明确免费，未配置表示费用 unknown。编辑时省略价格字段表示保留，将输入与输出同时置为 `null` 表示清除模型级价格。模型级价格保存在现有 `runtimeModelConfig` 集合中，优先于部署目录；清除后回退至精确匹配的目录条目，未命中则保持 unknown。价格变更不改变 connection id；响应仅包含脱敏价格元数据，不暴露 API Key。
+
+未显式填写版本时根据费率生成确定性 `manual-<hash>` 版本，修改费率会生成不同版本；显式沿用旧版本却修改费率时拒绝。Web 和桌面模型管理共用表单。受控真实模型评估脚本仍独立要求部署侧目录精确条目，以及授权、合成数据范围、调用次数和费用上限；页面保存价格不会解除该门禁。
+
+Generic LLM 在 Provider usage 的 `measurement='actual'` 且当前连接有模型级价格或命中目录时计算估算金额，并写入同一 `RuntimeUsage` 的 `priceVersion` 与 `costBasis='estimated'`。OpenAI-compatible 的 cached input 是 prompt input 子集，计算时先从普通 input 中扣除 cache read，避免重复计价；其他 Provider 按其已归一化语义处理。跨轮次只有价格版本和 cost basis 一致时才能合并金额，否则总金额保持未知并保留逐次 usage。
+
+远程流式请求必须发送 `stream_options.include_usage=true`，并从中转站返回的终止 usage 帧读取 `prompt_tokens`/`completion_tokens`、`prompt_tokens_details.cached_tokens`，或 Anthropic 兼容的 `cache_read_input_tokens`/`cache_creation_input_tokens`。平台另行测量 TTFT 和总耗时。上述字段只反映中转实际返回的可核验数据；中转没有返回的缓存计数必须保持 unknown，平台不得从模型名称或命中体验推测。价格仍来自用户配置的中转实际费率，不能以模型官方价格自动代填。
+
 ## 10. Resume
 
 Resume 只允许通过 Plan 中的窄合同表达：
@@ -369,3 +396,9 @@ Runtime 结束路径无条件清理监督句柄、计时器和 Abort 监听器�
 Session 停止先在事务中冻结目标，再向当时监督中的 invocation 发送取消。`result` 与 `local_runtime.invocation.stopped` 共享可信结束入口：必须精确匹配 invocation、device、workspace 和 runtime；先到的 stopped 可以结束 handle 并 ACK，但不应用业务结果或 ChangeSet，后到的 result 只能用于幂等核对，不能翻转终态或更新 workspace revision。
 
 重复回执只返回 ACK。停止通知仅在目标状态实际推进时生成，正常完成保持静默；服务端不得因为发布失败、ACK 丢失或客户端重传而产生第二次用户通知。
+
+## 方案文档强制读取（2026-09-21）
+
+存在活动方案文档时，`ContextAssembly.requiredDocument` 携带不可变的 `documentId/revision/relativePath/contentHash` 引用，Markdown 正文不复制到 Prompt。参与讨论的 Runtime 必须通过 WorkspaceProvider 路由的 `read_file` 读取精确相对路径；`server_local` 与 `local_bridge` 使用相同输入合同。
+
+RuntimeService 在流式和非流式结果的统一收口处校验读取回执。缺少回执、错误路径、分段或截断读取、活动版本已变化、文件缺失或 SHA-256 不一致时 fail closed，返回 `CONTEXT_INSUFFICIENT` / `DOCUMENT_READ_REQUIRED` 或对应文档读取错误，不能进入讨论成功分支。新文档只失效绑定旧版本的普通未完成任务；带 `workflowRunId` 的任务继续遵守已有 WorkflowRun 停止和返工合同。

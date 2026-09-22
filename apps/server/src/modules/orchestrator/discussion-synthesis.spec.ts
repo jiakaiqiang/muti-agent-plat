@@ -114,6 +114,32 @@ test('failed and unanswered experts are listed explicitly, not glossed over', ()
   assert.equal(synthesis.outcome, 'needs_user');
 });
 
+test('blocked experts are attributed with their evidence gap instead of being reported as unanswered', () => {
+  const synthesis = synthesizeDiscussion(
+    run([
+      delegation({
+        id: 'b',
+        targetAgentId: 'backend',
+        status: 'blocked',
+        failure: { code: 'CONTEXT_INSUFFICIENT', message: 'Need the migration contract.', retryable: true }
+      })
+    ]),
+    { agentNames: names }
+  );
+
+  assert.deepEqual(synthesis.failed, []);
+  assert.deepEqual(synthesis.unanswered, []);
+  assert.deepEqual(synthesis.blocked, [{
+    delegationId: 'b',
+    agentName: 'Backend',
+    code: 'CONTEXT_INSUFFICIENT',
+    message: 'Need the migration contract.',
+    retryable: true
+  }]);
+  assert.match(synthesis.summary, /Backend[\s\S]*CONTEXT_INSUFFICIENT[\s\S]*Need the migration contract/);
+  assert.equal(synthesis.outcome, 'needs_user');
+});
+
 test('a single clean answer with nothing open is ready for confirmation', () => {
   const synthesis = synthesizeDiscussion(
     run([

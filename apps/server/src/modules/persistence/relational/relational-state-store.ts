@@ -13,6 +13,7 @@ import {
   RELATIONAL_SCHEMA_V8_TABLES,
   RELATIONAL_SCHEMA_V9_TABLES,
   RELATIONAL_SCHEMA_V10_TABLES,
+  RELATIONAL_SCHEMA_V17_TABLES,
   RELATIONAL_TABLES
 } from './relational-schema.js';
 
@@ -88,6 +89,7 @@ export const SESSION_KEYED_COLLECTIONS = [
   'summaryCheckpointsBySession',
   'discussionsBySession',
   'requirementDocumentsBySession',
+  'discussionDocumentsBySession',
   'workflowStartRequestsBySession',
   'changeRequestsBySession'
 ] as const;
@@ -100,6 +102,7 @@ const KNOWN_COLLECTIONS = new Set([
   'summaryCheckpointsBySession',
   'discussionsBySession',
   'requirementDocumentsBySession',
+  'discussionDocumentsBySession',
   'workflowStartRequestsBySession',
   'changeRequestsBySession',
   'systemDataMetadata',
@@ -147,6 +150,8 @@ const CHANGE_REQUESTS_SELECT_SQL =
   `select s.external_id group_id,c.source_snapshot->'sourceRecord' value from agent_cluster.change_requests c join agent_cluster.sessions s on s.id=c.session_id where s.deleted_at is null order by s.id,c.created_at,c.external_id`;
 const REQUIREMENT_DOCUMENTS_SELECT_SQL =
   `select s.external_id group_id,r.source_snapshot->'sourceRecord' value from agent_cluster.requirement_documents r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by s.id,r.work_item_external_id,r.document_revision`;
+const DISCUSSION_DOCUMENTS_SELECT_SQL =
+  `select s.external_id group_id,d.source_snapshot->'sourceRecord' value from agent_cluster.discussion_documents d join agent_cluster.sessions s on s.id=d.session_id where s.deleted_at is null order by s.id,d.document_revision`;
 const REPLACEABLE_RELATIONAL_TABLES = [
   ...RELATIONAL_TABLES,
   ...RELATIONAL_SCHEMA_V2_TABLES,
@@ -155,7 +160,8 @@ const REPLACEABLE_RELATIONAL_TABLES = [
   ...RELATIONAL_SCHEMA_V5_TABLES,
   ...RELATIONAL_SCHEMA_V8_TABLES,
   ...RELATIONAL_SCHEMA_V9_TABLES,
-  ...RELATIONAL_SCHEMA_V10_TABLES
+  ...RELATIONAL_SCHEMA_V10_TABLES,
+  ...RELATIONAL_SCHEMA_V17_TABLES
 ]
   .map((definition) => definition.name)
   .filter((name) => !RETAINED_OPERATIONAL_TABLES.has(name))
@@ -461,6 +467,9 @@ export class RelationalStateStore {
           break;
         case 'requirementDocumentsBySession':
           state.requirementDocumentsBySession = await groupedSources(client, REQUIREMENT_DOCUMENTS_SELECT_SQL);
+          break;
+        case 'discussionDocumentsBySession':
+          state.discussionDocumentsBySession = await groupedSources(client, DISCUSSION_DOCUMENTS_SELECT_SQL);
           break;
         case 'workflowStartRequestsBySession':
           state.workflowStartRequestsBySession = await groupedSources(client, WORKFLOW_START_REQUESTS_SELECT_SQL);
@@ -916,6 +925,7 @@ export class RelationalStateStore {
       case 'summaryCheckpointsBySession': return this.writeSummaryCheckpoints(client, record(value));
       case 'discussionsBySession': return this.writeDiscussionRuns(client, record(value));
       case 'requirementDocumentsBySession': return this.writeRequirementDocuments(client, record(value));
+      case 'discussionDocumentsBySession': return this.writeDiscussionDocuments(client, record(value));
       case 'workflowStartRequestsBySession': return this.writeWorkflowStartRequests(client, record(value));
       case 'changeRequestsBySession': return this.writeChangeRequests(client, record(value));
       case 'workItemsBySession': return this.writeWorkItems(client, record(value));
@@ -1988,6 +1998,30 @@ export class RelationalStateStore {
     }
   }
 
+  private async writeDiscussionDocuments(client: PoolClient, value: Record<string, unknown>) {
+    for (const [sessionExternalId, values] of Object.entries(value)) {
+      const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
+      if (!sessionId) continue;
+      for (const rawDocument of array(values)) {
+        const document = record(rawDocument);
+        const externalId = text(document.id);
+        if (!externalId) throw new Error('DISCUSSION_DOCUMENT_ID_MISSING');
+        await client.query(
+          `insert into agent_cluster.discussion_documents
+             (external_id,session_id,work_item_external_id,parent_document_external_id,document_revision,
+              idempotency_key,content_hash,content_ref,relative_path,status,source_snapshot,created_at,updated_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+           on conflict (external_id) do update set
+             status=excluded.status,source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at`,
+          [externalId, sessionId, nullableText(document.workItemId), nullableText(document.parentDocumentId),
+            integer(document.revision, 1), text(document.idempotencyKey), text(document.contentHash),
+            text(document.contentRef), text(document.relativePath), text(document.status),
+            json({ sourceRecord: document }), date(document.createdAt), date(document.updatedAt)]
+        );
+      }
+    }
+  }
+
   private async writeDiscussionRuns(client: PoolClient, value: Record<string, unknown>) {
     for (const [sessionExternalId, values] of Object.entries(value)) {
       const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
@@ -2374,6 +2408,7 @@ export class RelationalStateStore {
     state.summaryCheckpointsBySession = await groupedSources(client, SUMMARY_CHECKPOINTS_SELECT_SQL);
     state.discussionsBySession = await groupedSources(client, DISCUSSION_RUNS_SELECT_SQL);
     state.requirementDocumentsBySession = await groupedSources(client, REQUIREMENT_DOCUMENTS_SELECT_SQL);
+    state.discussionDocumentsBySession = await groupedSources(client, DISCUSSION_DOCUMENTS_SELECT_SQL);
     state.workflowStartRequestsBySession = await groupedSources(client, WORKFLOW_START_REQUESTS_SELECT_SQL);
     state.changeRequestsBySession = await groupedSources(client, CHANGE_REQUESTS_SELECT_SQL);
     state.runtimeInvocationsBySession = await groupedSources(client, `select s.external_id group_id,r.profile_snapshot->'sourceRecord' value from agent_cluster.runtime_invocations r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by r.started_at`);
@@ -2413,7 +2448,7 @@ export class RelationalStateStore {
 }
 
 function collectionWriteOrder(state: PersistedState): string[] {
-  const order = ['systemDataMetadata','agents','systemAgentRuntimePolicies','skills','capabilities','workflowCatalog','workflows','sessions','sessionLifecyclesBySession','workItemBudgetsBySession','workItemsBySession','decisionRecordsBySession','contextSnapshotsBySession','intentRoutingRecordsBySession','followUpMessagesBySession','summaryCheckpointsBySession','discussionsBySession','requirementDocumentsBySession','workflowStartRequestsBySession','changeRequestsBySession','fileRevisions','workspaceWritebacks','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','localRuntimeDevices','localRuntimeOperationAudits','eventOutbox','cutoverAudits'];
+  const order = ['systemDataMetadata','agents','systemAgentRuntimePolicies','skills','capabilities','workflowCatalog','workflows','sessions','sessionLifecyclesBySession','workItemBudgetsBySession','workItemsBySession','decisionRecordsBySession','contextSnapshotsBySession','intentRoutingRecordsBySession','followUpMessagesBySession','summaryCheckpointsBySession','discussionsBySession','requirementDocumentsBySession','discussionDocumentsBySession','workflowStartRequestsBySession','changeRequestsBySession','fileRevisions','workspaceWritebacks','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','localRuntimeDevices','localRuntimeOperationAudits','eventOutbox','cutoverAudits'];
   order.push('logicalOperationsBySession', 'sessionStopRequestsBySession');
   return order.filter((key) => Object.prototype.hasOwnProperty.call(state, key));
 }

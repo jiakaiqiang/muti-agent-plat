@@ -213,6 +213,7 @@ const server = spawn(process.execPath, ['apps/server/dist/apps/server/src/main.j
   env: {
     ...process.env,
     SERVER_PORT: serverPort,
+    AGENT_CLUSTER_PERSISTENCE_BACKEND: 'file',
     AGENT_CLUSTER_DATA_FILE: dataFile,
     AGENT_CLUSTER_SECRET_KEY: 'runtime-model-switch-smoke-master-key',
     GLOBAL_DEFAULT_RUNTIME_TYPE: 'generic_llm',
@@ -271,7 +272,10 @@ try {
       label: 'Remote Smoke Model',
       model: 'remote-smoke-model',
       baseUrl: `http://127.0.0.1:${remotePort}/v1`,
-      apiKey: 'remote-smoke-key'
+      apiKey: 'remote-smoke-key',
+      inputPerMillion: 2,
+      outputPerMillion: 8,
+      priceVersion: 'relay-smoke-v1'
     })
   });
   if (
@@ -281,10 +285,20 @@ try {
   ) {
     throw new Error(`Remote model was not added as the active model: ${JSON.stringify(remoteConfig.data)}`);
   }
+  if (remoteConfig.data.currentModelOption.pricing?.priceVersion !== 'relay-smoke-v1') {
+    throw new Error('Remote model pricing was not returned from model management.');
+  }
 
   const remoteSmoke = await api(apiBase, '/runtimes/generic-llm/smoke');
   if (remoteSmoke.data.usage?.model !== 'remote-smoke-model') {
     throw new Error(`Remote runtime usage did not report remote model: ${JSON.stringify(remoteSmoke.data.usage)}`);
+  }
+  if (
+    remoteSmoke.data.usage?.cost !== (5 * 2 + 7 * 8) / 1_000_000 ||
+    remoteSmoke.data.usage?.priceVersion !== 'relay-smoke-v1' ||
+    remoteSmoke.data.usage?.costBasis !== 'estimated'
+  ) {
+    throw new Error(`Remote runtime did not apply model-level pricing: ${JSON.stringify(remoteSmoke.data.usage)}`);
   }
   if (remoteRequests.length !== 1 || remoteRequests[0].model !== 'remote-smoke-model') {
     throw new Error(`Remote LLM endpoint was not used: ${JSON.stringify({ llmRequests, remoteRequests })}`);
@@ -316,7 +330,7 @@ try {
     method: 'POST',
     body: JSON.stringify({
       input: '分析并记录本次会话实际使用的运行时模型，仅输出说明。',
-      agentIds: ['coordinator', 'backend', 'test', 'review', 'notification'],
+      agentIds: ['requirements', 'backend', 'test', 'review', 'notification'],
       runtimePreference: { preferredRuntimeType: 'generic_llm', allowedRuntimeTypes: ['generic_llm'] },
       tokenBudget: 50_000
     })

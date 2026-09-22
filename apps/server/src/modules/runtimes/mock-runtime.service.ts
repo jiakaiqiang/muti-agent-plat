@@ -69,6 +69,25 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
     const output = this.outputFor(input);
     const artifacts = output.kind === 'task_execution_result' ? output.changedArtifacts : [];
     const usage = this.usageFor(input, output);
+    const requiredDocument = input.contextEnvelope.L1.requiredDocument;
+    const documentToolEvents = requiredDocument ? [
+      {
+        invocationId: input.invocationId,
+        type: 'tool_called' as const,
+        visibility: 'debug' as const,
+        content: `read_file ${requiredDocument.relativePath}`,
+        metadata: { toolCallId: `required-document:${requiredDocument.documentId}`, name: 'read_file', input: { path: requiredDocument.relativePath } },
+        createdAt: nowIso()
+      },
+      {
+        invocationId: input.invocationId,
+        type: 'tool_completed' as const,
+        visibility: 'debug' as const,
+        content: `read_file completed ${requiredDocument.relativePath}`,
+        metadata: { toolCallId: `required-document:${requiredDocument.documentId}`, name: 'read_file', input: { path: requiredDocument.relativePath }, truncated: false },
+        createdAt: nowIso()
+      }
+    ] : [];
     return {
       invocationId: input.invocationId,
       runtimeType: this.type,
@@ -82,6 +101,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
           content: `${input.agent.name} started ${input.phase}`,
           createdAt: startedAt
         },
+        ...documentToolEvents,
         ...artifacts.map((artifact) => ({
           invocationId: input.invocationId,
           type: 'artifact_created' as const,

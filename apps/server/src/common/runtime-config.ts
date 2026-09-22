@@ -154,6 +154,16 @@ export function cliContextRotationInputTokens() {
 }
 
 /**
+ * Requirement-level cumulative token accounting remains available for
+ * observability, but admission blocking is disabled until the context-management
+ * policy is redesigned. Set this explicitly to restore the previous fail-closed
+ * behavior.
+ */
+export function workItemBudgetEnforcementEnabled() {
+  return envFlag('AGENT_CLUSTER_WORK_ITEM_BUDGET_ENFORCEMENT', false);
+}
+
+/**
  * Phase 3 admission gate for coordinator-planned discussions. Off means the
  * legacy every-participant round loop; on means the coordinator proposes a
  * plan and only the experts it names are consulted. Rollback is unsetting it.

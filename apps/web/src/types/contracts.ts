@@ -50,6 +50,7 @@ import type {
   IntentRoutingStatus,
   SessionDetail,
   SessionListItem,
+  SessionArchiveGroup,
   SessionWorkingDirectory,
   CollaborationLifecycleSnapshot,
   DeleteSessionLifecycleResult,
@@ -57,7 +58,9 @@ import type {
   SessionStatus,
   SupplementalContextResolution,
   Skill,
+  SkillCategory,
   SkillFile,
+  SkillScope,
   SuggestedAgentTask,
   WorkspaceFileSnapshot,
   WorkspaceSnapshot,
@@ -71,7 +74,8 @@ import type {
   WorkItem,
   SystemAgentRole,
   SystemAgentRuntimePolicy,
-  WorkflowStatus
+  WorkflowStatus,
+  WorkflowMemberMappingGap
 } from '@agent-cluster/shared'
 
 export type {
@@ -132,6 +136,7 @@ export type {
   IntentRoutingStatus,
   SessionDetail,
   SessionListItem,
+  SessionArchiveGroup,
   SessionWorkingDirectory,
   CollaborationLifecycleSnapshot,
   DeleteSessionLifecycleResult,
@@ -139,7 +144,9 @@ export type {
   SessionStatus,
   SupplementalContextResolution,
   Skill,
+  SkillCategory,
   SkillFile,
+  SkillScope,
   SuggestedAgentTask,
   WorkspaceFileSnapshot,
   WorkspaceSnapshot,
@@ -164,7 +171,10 @@ export type {
   WorkflowNodeRun,
   WorkflowApprovalRecord,
   WorkflowRunState,
-  WorkflowStatus
+  WorkflowStatus,
+  WorkflowMemberMappingGap,
+  WorkflowMemberMappingNodeEvidence,
+  WorkflowMemberMappingReason
 } from '@agent-cluster/shared'
 
 export { DEFAULT_CONTEXT_PIPELINE_VERSION, SUPPORTED_CONTEXT_PIPELINE_VERSIONS } from '@agent-cluster/shared'
@@ -174,6 +184,8 @@ export type SessionViewMode = 'chat' | 'collaboration_graph' | 'workflow' | 'wor
 export type ConfirmationReason =
   | 'confirm_task_brief'
   | 'select_workflow'
+  | 'confirm_workflow_member_mapping'
+  | 'confirm_member_addition'
   | 'initialize_empty_workspace'
   | 'confirm_workflow_step'
   | 'confirm_workflow_human_gate'
@@ -255,6 +267,16 @@ export type ConfirmationRequestedPayload = {
   stateVersion?: number
   workflowId?: string
   workflowName?: string
+  workflowVersion?: number
+  definitionHash?: string
+  selectionConfirmationId?: string
+  sessionGeneration?: number
+  briefVersion?: number
+  memberGaps?: WorkflowMemberMappingGap[]
+  addableAgentIds?: string[]
+  discussionId?: string
+  targetAgentId?: string
+  targetAgentKey?: string
   workflowRunId?: string
   workflowNodeId?: string
   workflowNodeRunId?: string
@@ -457,6 +479,7 @@ export type ChatMessage = {
     | 'artifact'
     | 'review'
     | 'delivery'
+    | 'discussion_document'
     | 'error'
   content: string
   createdAt: string
@@ -514,6 +537,16 @@ export type ConfirmationCardState = {
   stateVersion?: number
   workflowId?: string
   workflowName?: string
+  workflowVersion?: number
+  definitionHash?: string
+  selectionConfirmationId?: string
+  sessionGeneration?: number
+  briefVersion?: number
+  memberGaps?: WorkflowMemberMappingGap[]
+  addableAgentIds?: string[]
+  discussionId?: string
+  targetAgentId?: string
+  targetAgentKey?: string
   workflowRunId?: string
   workflowNodeId?: string
   workflowNodeRunId?: string
@@ -526,6 +559,17 @@ export type ConfirmationCardState = {
   routingId?: string
   followUpMessageId?: string
   reasonCodes?: string[]
+}
+
+export type WorkflowMemberMappingResolution = {
+  session: SessionDetail
+  decision: 'approve' | 'decline'
+  started?: boolean
+  workflowId?: string
+  workflowName?: string
+  workflowVersion?: number
+  selectionConfirmationId?: string
+  memberGaps?: WorkflowMemberMappingGap[]
 }
 
 export type TaskViewState = {

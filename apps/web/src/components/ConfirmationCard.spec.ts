@@ -25,6 +25,34 @@ afterEach(() => {
 })
 
 describe('ConfirmationCard', () => {
+  it('shows published-node evidence and blocks approval when any Agent is unavailable', async () => {
+    const confirmation: ConfirmationCardState = {
+      confirmationId: 'mapping-1', reason: 'confirm_workflow_member_mapping', title: '确认邀请 Agent',
+      description: '以下 Agent 尚未参与本会话。', status: 'pending', workflowId: 'wf-1', workflowName: '交付流程',
+      workflowVersion: 3, options: [{ key: 'approve', label: '邀请并启动', style: 'primary' }, { key: 'decline', label: '取消' }],
+      memberGaps: [
+        { agentId: 'frontend', agentName: '前端工程师', reason: 'not_participating', canInvite: true, nodes: [{
+          nodeId: 'develop', nodeName: '前端开发', nodeType: 'agent', stageDescription: '实现界面', inputContract: ['设计稿'],
+          outputContract: ['前端代码'], impact: '未加入则所选流程的「前端开发」节点无法按发布图执行。'
+        }] },
+        { agentId: 'quality', agentName: '质量工程师', reason: 'disabled', canInvite: false, nodes: [{
+          nodeId: 'review', nodeName: '质量审核', nodeType: 'robot_approval', reviewPrompt: '检查交付质量', criteria: ['测试通过'],
+          impact: '未加入则所选流程的「质量审核」质量审核节点无法按发布图执行。'
+        }] }
+      ]
+    }
+    const wrapper = mount(ConfirmationCard, { props: { confirmation }, global: { plugins: [createPinia()] } })
+    expect(wrapper.text()).toContain('交付流程 · v3')
+    expect(wrapper.text()).toContain('前端工程师')
+    expect(wrapper.text()).toContain('前端代码')
+    expect(wrapper.text()).toContain('质量审核')
+    expect(wrapper.text()).toContain('测试通过')
+    expect(wrapper.text()).toContain('不能只邀请部分成员后启动')
+    expect((wrapper.get('.action-button.primary').element as HTMLButtonElement).disabled).toBe(true)
+    await wrapper.get('.action-button.default').trigger('click')
+    expect(wrapper.emitted('resolve')).toEqual([['decline']])
+  })
+
   it('does not duplicate the file revision candidate confirmation', () => {
     const wrapper = mount(ConfirmationCard, {
       props: {

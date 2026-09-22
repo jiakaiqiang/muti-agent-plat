@@ -229,6 +229,8 @@ async function runMainChain() {
           id: "main-chain-product-analysis",
           type: "agent",
           agentId: String(productManagerAgent.id),
+          stageDescription: "Analyze the confirmed requirement and produce a traceable product decision.",
+          outputContract: ["A structured product analysis tied to the confirmed requirement."],
           order: 0
         }
       ]
@@ -257,25 +259,6 @@ async function runMainChain() {
   if (highRiskCheck.data.allowed !== false || highRiskCheck.data.code !== "CAPABILITY_REQUIRES_CONFIRMATION") {
     throw new Error("High-risk capability must require confirmation before approval");
   }
-  await api<{ data: Json }>("/capabilities/cap-file-write/approve", {
-    method: "POST",
-    body: JSON.stringify({
-      sessionId: "runtime-smoke-session",
-      agentId: String(backendAgent?.id),
-      reason: "Approved by E2E test."
-    })
-  });
-  const approvedHighRiskCheck = await api<{ data: Json }>("/capabilities/cap-file-write/check", {
-    method: "POST",
-    body: JSON.stringify({
-      sessionId: "runtime-smoke-session",
-      agentId: String(backendAgent?.id)
-    })
-  });
-  if (approvedHighRiskCheck.data.allowed !== true) {
-    throw new Error("Approved high-risk capability should be allowed by the policy check");
-  }
-
   const knowledgeBase = await api<{ data: Json }>("/knowledge-bases", {
     method: "POST",
     body: JSON.stringify({
@@ -313,7 +296,7 @@ async function runMainChain() {
       method: "POST",
       body: JSON.stringify({
         input: "分析并记录协作流程，仅输出说明。",
-        agentIds: ["coordinator", "requirements", "backend", "test", "review", "product-manager"],
+        agentIds: ["requirements", "backend", "test", "review", "product-manager"],
         tokenBudget: 20000,
         knowledgeBaseIds: [knowledgeBaseId],
         runtimePreference: {

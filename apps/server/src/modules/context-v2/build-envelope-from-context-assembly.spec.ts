@@ -9,6 +9,10 @@ test('buildEnvelopeFromContextAssembly creates the authoritative grounded v2 lay
     systemRules: ['Stay grounded.'],
     sessionGoal: 'Inspect the repository',
     currentUserMessage: '继续',
+    attachmentRefs: [{
+      id: 'attachment-1', sessionId: 'session-v2', kind: 'file', fileName: 'notes.txt',
+      mimeType: 'text/plain', sizeBytes: 12, uploadStatus: 'ready', createdAt: '2026-07-12T00:00:00.000Z'
+    }],
     budget: { maxInputTokens: 10_000 },
     selectedEvidenceContents: [{
       type: 'workspace_file',
@@ -48,6 +52,7 @@ test('buildEnvelopeFromContextAssembly creates the authoritative grounded v2 lay
   });
   assert.equal(envelope.version, 'v2');
   assert.equal(envelope.L1.currentUserMessage, undefined);
+  assert.equal(envelope.L1.attachmentRefs?.[0]?.fileName, 'notes.txt');
   assert.equal('currentUserMessage' in envelope.L0, false);
   assert.equal(envelope.L3.files[0]?.path, 'src/main.ts');
   assert.equal(envelope.L3.totalByteLength > 0, true);

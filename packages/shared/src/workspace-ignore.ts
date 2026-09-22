@@ -10,6 +10,7 @@ export const GENERATED_WORKSPACE_DIRECTORIES = [
   '.vite',
   '.turbo',
   '.cache',
+  '.agent-cluster',
   'coverage'
 ] as const;
 

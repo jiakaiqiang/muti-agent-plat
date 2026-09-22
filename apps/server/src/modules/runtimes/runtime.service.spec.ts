@@ -41,7 +41,8 @@ function createService(
     serverWorker?: unknown | null;
     workspaceBindings?: unknown;
   } = {},
-  initialInvocations?: Record<string, unknown[]>
+  initialInvocations?: Record<string, unknown[]>,
+  discussionDocuments?: unknown
 ) {
   const persisted = new Map<string, unknown>();
   if (initialInvocations) persisted.set('runtimeInvocationsBySession', initialInvocations);
@@ -96,10 +97,50 @@ function createService(
     executions.worktree as never,
     executions.localRuntime as never,
     serverWorker as never,
-    workspaceBindings as never
+    workspaceBindings as never,
+    undefined,
+    undefined,
+    discussionDocuments as never
   );
   return { service, persisted, persistence };
 }
+
+test('fails closed when a required discussion document has no complete read receipt', async () => {
+  const requiredDocument = {
+    documentId: 'document-required',
+    revision: 1,
+    relativePath: '.agent-cluster/discussion-documents/session-1/plan-revision-001.md',
+    contentHash: 'a'.repeat(64)
+  };
+  const selected = adapter('mock', async plan => ({
+    ...completed(plan),
+    events: [{
+      invocationId: plan.invocationId,
+      type: 'tool_completed',
+      visibility: 'debug',
+      content: 'read_file completed',
+      createdAt: new Date().toISOString(),
+      metadata: {
+        name: 'read_file',
+        toolCallId: 'read-file-1',
+        input: { path: requiredDocument.relativePath },
+        truncated: false
+      }
+    }]
+  }));
+  const { service } = createService([selected], undefined, {}, undefined, {
+    hasCompleteReceipt: () => false,
+    recordAgentRead: async () => undefined
+  });
+  const result = await service.run(makeInvocationPlan({
+    executionTarget: { runtimeType: 'mock' },
+    contextEnvelope: { L1: { requiredDocument } }
+  }));
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'CONTEXT_INSUFFICIENT');
+  assert.equal(result.error?.details?.documentId, requiredDocument.documentId);
+  assert.equal(result.error?.details?.documentRevision, requiredDocument.revision);
+});
 
 test('dispatches by InvocationPlan.executionTarget', async () => {
   const codex = adapter('codex');
@@ -834,6 +875,34 @@ test('a requirement is charged before the call and settled from reported usage',
   assert.equal(ledger?.settlements[0]?.outcome, 'reported');
 });
 
+test('known non-model runtimes release a zero-token reservation', async () => {
+  const reader = adapter('code_reader', async plan => ({
+    ...completed(plan, 'code_reader'),
+    usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: 'code_reader' }
+  }));
+  const { service, persisted } = createService([reader]);
+  persisted.set('sessions', [{ id: 'session-1', tokenBudget: 1_000 }]);
+
+  const plan = makeInvocationPlan({
+    sessionId: 'session-1',
+    workItemId: 'work-item-non-model',
+    executionTarget: { runtimeType: 'code_reader' },
+    budget: { maxInputTokens: 700, maxOutputTokens: 200, maxTotalTokens: 1_000 }
+  });
+  const result = await service.run(plan);
+
+  assert.equal(result.status, 'completed');
+  await waitForSettlement(
+    () => service.workItemBudgets.get('session-1', 'work-item-non-model')?.settlements.length === 1,
+    'known non-model usage must settle as actual zero'
+  );
+  const ledger = service.workItemBudgets.get('session-1', 'work-item-non-model');
+  assert.equal(ledger?.reservedTokens, 0);
+  assert.equal(ledger?.actualTokens, 0);
+  assert.equal(ledger?.unknownTokens, 0);
+  assert.equal(service.workItemBudgets.available('session-1', 'work-item-non-model'), 1_000);
+});
+
 test('a late result after cancellation settles the WorkItem ledger once without republishing success', async () => {
   let finish: (result: AgentRunResult) => void = () => {
     throw new Error('late result resolver was not initialized');
@@ -920,7 +989,7 @@ test('a non-billable mock cancellation releases its reservation instead of exhau
   assert.equal(service.workItemBudgets.available('session-1', 'work-item-restored-session'), 1_000);
 });
 
-test('a requirement without allowance left is refused before the adapter starts', async () => {
+test('a requirement without allowance left proceeds while cumulative enforcement is disabled', async () => {
   const seen: InvocationPlan[] = [];
   const mock = adapter('mock', async plan => {
     seen.push(plan);
@@ -952,13 +1021,53 @@ test('a requirement without allowance left is refused before the adapter starts'
     budget: { maxInputTokens: 400, maxOutputTokens: 200, maxTotalTokens: 500 }
   }));
 
-  assert.equal(second.status, 'failed');
-  assert.equal(second.error?.code, 'WORK_ITEM_BUDGET_EXHAUSTED');
-  assert.match(String(second.error?.message), /累计模型预算已不足/, 'the refusal must be explained in Chinese');
-  assert.equal(seen.length, 1, 'the refused call must not reach the adapter');
-  assert.equal(second.error?.details?.availableTokens, 100);
-  assert.equal(second.error?.details?.requestedTokens, 400);
-  assert.equal(second.error?.details?.retryable, false);
+  assert.equal(second.status, 'completed');
+  assert.equal(seen.length, 2, 'cumulative exhaustion must not block the adapter by default');
+});
+
+test('a requirement without allowance left is refused when cumulative enforcement is explicitly enabled', async () => {
+  const previous = process.env.AGENT_CLUSTER_WORK_ITEM_BUDGET_ENFORCEMENT;
+  process.env.AGENT_CLUSTER_WORK_ITEM_BUDGET_ENFORCEMENT = 'true';
+  try {
+    const seen: InvocationPlan[] = [];
+    const mock = adapter('mock', async plan => {
+      seen.push(plan);
+      return { ...completed(plan), usage: { inputTokens: 400, outputTokens: 5, totalTokens: 405, model: 'mock' } };
+    });
+    const { service, persisted } = createService([mock]);
+    persisted.set('sessions', [{ id: 'session-1', tokenBudget: 500 }]);
+
+    const first = await service.run(makeInvocationPlan({
+      invocationId: '00000000-0000-4000-8000-0000000009b1',
+      sessionId: 'session-1',
+      workItemId: 'work-item-enforced',
+      executionTarget: { runtimeType: 'mock' },
+      budget: { maxInputTokens: 400, maxOutputTokens: 200, maxTotalTokens: 500 }
+    }));
+    assert.equal(first.status, 'completed');
+    await waitForSettlement(
+      () => service.workItemBudgets.get('session-1', 'work-item-enforced')?.actualTokens === 400,
+      'the first enforced call must settle before admission is checked again'
+    );
+
+    const second = await service.run(makeInvocationPlan({
+      invocationId: '00000000-0000-4000-8000-0000000009b2',
+      sessionId: 'session-1',
+      workItemId: 'work-item-enforced',
+      executionTarget: { runtimeType: 'mock' },
+      budget: { maxInputTokens: 400, maxOutputTokens: 200, maxTotalTokens: 500 }
+    }));
+
+    assert.equal(second.status, 'failed');
+    assert.equal(second.error?.code, 'WORK_ITEM_BUDGET_EXHAUSTED');
+    assert.match(String(second.error?.message), /累计模型预算已不足/);
+    assert.equal(seen.length, 1, 'explicit enforcement must stop the second adapter call');
+    assert.equal(second.error?.details?.availableTokens, 100);
+    assert.equal(second.error?.details?.requestedTokens, 400);
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_CLUSTER_WORK_ITEM_BUDGET_ENFORCEMENT;
+    else process.env.AGENT_CLUSTER_WORK_ITEM_BUDGET_ENFORCEMENT = previous;
+  }
 });
 
 test('an invocation without a work item is not charged to any requirement', async () => {

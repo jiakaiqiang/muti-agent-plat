@@ -51,6 +51,13 @@ export const defaultCapabilities: RuntimeCapabilityDefinition[] = [
     description: '写入或修改工作区文件，需要用户明确确认。'
   },
   {
+    id: 'cap-attachment-read',
+    key: 'tool.attachment_read',
+    name: '读取群聊附件',
+    riskLevel: 'low',
+    description: '通过当前消息提供的稳定附件 ID 按需读取文件内容。'
+  },
+  {
     id: 'cap-command-run',
     key: 'tool.command_run',
     name: '命令执行',

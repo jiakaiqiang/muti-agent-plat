@@ -119,6 +119,7 @@
 | `docs/implementation/agent-team-implementation-breakdown-v1.md` | Agent 团队实现拆解 |
 | `docs/analysis/feature-inventory-and-status-v1.md` | 功能清单与当前状态 |
 | `docs/analysis/project-analysis.md` | 项目分析 |
+| `docs/analysis/project-architecture.md` | 当前代码对应的整体项目架构 |
 | `docs/analysis/multica-runtime-comparison-v1.md` | Multica 运行时架构对比与优化建议 |
 | `docs/product/multica-refactor-production-readiness-requirements-v1.md` | Multica P0/P1 统一闭环需求与 P2 冻结边界 |
 | `docs/devops/watchdog-baseline.md` | Codex/Claude Watchdog 真实采样、参数分析与回滚手册 |

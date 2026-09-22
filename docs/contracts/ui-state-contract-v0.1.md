@@ -78,6 +78,8 @@ const sessionStatusLabel = {
 - `COMPLETED`：展示接受结果、查看产物。
 - `FAILED`：展示重试、查看错误。
 
+工作流成员缺口卡由同一服务端事件派生，Web 与桌面必须展示流程名/版本、缺少的 Agent、所有关联执行或机器人审核节点、已配置的职责/输入/输出/审核标准和结构性影响。`disabled/unknown` 或混合缺口禁用批准，不能部分邀请。批准/拒绝均调用真实 `workflow/member-mapping` 接口；拒绝后显示“选择其他已发布流程”和“前往 Web 创建新流程”，关闭结果对话框不得自动重开选择器。桌面目录保持只读，Web 管理入口也不自动选择或启动新流程。
+
 ## 4. Agent 状态
 
 ```ts
@@ -463,3 +465,11 @@ Web 与 Electron desktop 共用 `useSessionStore` 中按 sessionId 隔离的权�
 SSE `RUNTIME_STOP_STATE_CHANGED` 与快照按停止轮次收敛：同 `stopRequestId` 只接受更大 `version`，不同轮次按 `updatedAt` 选择较新事实。`waiting/unknown` 展示确认计数和 blocker；只有 `canResume=true` 才显示停止已确认。详情可展开查看目标，但诊断不得包含凭据、完整业务正文或本地绝对路径。
 
 实时停止状态不堆入 ChatTimeline。历史 `RUNTIME_STOP_CONFIRMED` 的连续折叠只是一种展示压缩，不能改变事件数组、服务端状态、通知次数或恢复判断；展开后必须能看到原始次数和时间。
+
+## 15. 群聊方案文档状态
+
+`discussion_document_published` 投影为独立的 `discussion_document` 时间线消息。Web 与 Electron renderer 使用同一 `documentId/revision/relativePath/contentUrl/contentHash/readStatus` 语义，并通过 `contentUrl` 拉取完整 Markdown；各端保留独立样式，桌面端不新增流程编辑或文档写入入口。
+
+正文加载状态按消息和 Session 隔离为 `loading/loaded/failed`。切换 Session 时递增 generation 并清理旧映射，迟到响应不得写入新会话；加载完成后在客户端复算 SHA-256，不匹配时显示错误且不渲染为可信正文。正文使用文本节点/`pre` 展示，不使用未经消毒的 `v-html`。刷新和 SSE 重连只能恢复事件与正文读请求，不能重新发布文档。
+
+方案消息展示标题、版本、工作区相对路径、内容 URL、哈希、完整 Markdown 和 Agent 读取状态。`discussion_document_read` 只更新同一 documentId 的读取投影；失败状态必须展示可访问错误提示。

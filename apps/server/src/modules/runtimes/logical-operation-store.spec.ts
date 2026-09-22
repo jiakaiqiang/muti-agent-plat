@@ -4,8 +4,31 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PersistenceService } from '../persistence/persistence.service.js';
-import { LogicalOperationStore } from './logical-operation-store.js';
+import { LogicalOperationStore, operationPolicy } from './logical-operation-store.js';
 import { SessionStopStateStore } from './session-stop-state-store.js';
+
+function withEnv(name: string, value: string | undefined, fn: () => void) {
+  const previous = process.env[name];
+  if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  try { fn(); } finally {
+    if (previous === undefined) delete process.env[name]; else process.env[name] = previous;
+  }
+}
+
+test('task acceptance uses a configurable phase budget instead of the old hard-coded 120 seconds', () => {
+  withEnv('PHASE_TIMEOUT_TASK_ACCEPTANCE_MS', '240000', () => {
+    assert.equal(operationPolicy('task_acceptance').timeoutMs, 240_000);
+    assert.deepEqual(operationPolicy('task_acceptance').diagnostics, []);
+  });
+  withEnv('PHASE_TIMEOUT_TASK_ACCEPTANCE_MS', undefined, () => {
+    assert.equal(operationPolicy('task_acceptance').timeoutMs, 300_000);
+  });
+  withEnv('PHASE_TIMEOUT_TASK_ACCEPTANCE_MS', '0', () => {
+    const policy = operationPolicy('task_acceptance');
+    assert.equal(policy.timeoutMs, 300_000);
+    assert.deepEqual(policy.diagnostics, ['INVALID_OR_DISABLED_PHASE_TIMEOUT_USING_FINITE_DEFAULT']);
+  });
+});
 
 test('pause keeps unused active time and only a matching receipt releases the barrier', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'operation-pause-'));

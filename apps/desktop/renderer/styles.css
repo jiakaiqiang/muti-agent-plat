@@ -576,6 +576,30 @@ textarea:disabled {
   color: #b91c1c;
 }
 
+.session-more-button {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--light-faint);
+  opacity: 0;
+  transition: 160ms ease;
+}
+
+.session-list-item:hover .session-more-button,
+.session-list-item.active .session-more-button,
+.session-more-button:focus-visible { opacity: 1; }
+.session-more-button:hover { background: #eef5ff; color: #365487; }
+.session-archive-manager { display: grid; gap: 12px; min-width: 0; }
+.session-archive-group { display: grid; gap: 6px; }
+.session-archive-group h3 { margin: 4px 6px; color: var(--light-muted); font-size: 12px; font-weight: 800; }
+.session-archive-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 8px 10px 12px; border: 1px solid var(--light-border); border-radius: 8px; background: #fbfdff; }
+.session-archive-item__title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--light-text); font-size: 13px; font-weight: 700; }
+.session-archive-restore { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; border: 0; border-radius: 6px; padding: 5px 8px; color: #2563eb; background: #eff6ff; font-size: 12px; font-weight: 700; }
+
 .session-empty-state {
   margin: 18px 6px 0;
   color: var(--light-muted);
@@ -626,6 +650,9 @@ textarea:disabled {
 .session-context-menu button.danger:hover {
   background: #fee2e2;
 }
+
+.session-context-menu button.warning { color: #8a5a00; background: #fffbeb; border-color: #fde68a; }
+.session-context-menu button.warning:hover { background: #fef3c7; }
 
 .workspace-main {
   display: grid;
@@ -2052,6 +2079,43 @@ textarea:disabled {
   word-break: break-word;
 }
 
+.discussion-document-block {
+  border-left: 3px solid var(--primary);
+  background: #f9fafb;
+}
+
+.discussion-document-meta {
+  display: grid;
+  gap: 6px;
+}
+
+.discussion-document-meta > div {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+.discussion-document-meta code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.discussion-document-content {
+  max-height: 520px;
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid #dbe4ef;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #1f2937;
+  font: inherit;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .error-block {
   border-color: #fecaca;
   background: #fff7f7;
@@ -2607,6 +2671,54 @@ textarea:disabled {
 
 .confirmation-card__structured-actions {
   display: grid;
+}
+
+.confirmation-card__member-mapping {
+  display: grid;
+  gap: 8px;
+}
+
+.confirmation-card__workflow-context {
+  margin: 0;
+  color: #92400e;
+  font-size: 12px;
+}
+
+.confirmation-card__member-gap {
+  border: 1px solid #fcd34d;
+  border-radius: 6px;
+  padding: 9px;
+  background: #ffffff;
+}
+
+.confirmation-card__member-gap > header,
+.confirmation-card__node-evidence > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.confirmation-card__member-gap > header span,
+.confirmation-card__node-evidence span {
+  color: #92400e;
+  font-size: 11px;
+}
+
+.confirmation-card__node-evidence {
+  margin-top: 7px;
+  border-top: 1px solid #fde68a;
+  padding-top: 7px;
+}
+
+.confirmation-card__node-evidence p {
+  margin: 3px 0 0;
+  line-height: 1.45;
+}
+
+.confirmation-card__impact,
+.confirmation-card__blocking-note {
+  color: var(--warning-color, #b45309);
 }
 
 .confirmation-card__structured-action {

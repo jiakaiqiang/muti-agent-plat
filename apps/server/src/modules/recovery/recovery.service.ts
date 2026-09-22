@@ -76,17 +76,21 @@ export class RecoveryService implements OnApplicationBootstrap {
         this.logger.log(`Legacy WorkItem ownership ${migrationMode}: sessions=${report.sessionCount}, planned=${report.plannedRecordCount}, issues=${report.issues.length}, revision=${report.revision}.`);
       }
     }
-    for (const session of sessions) {
+    // Archived sessions are historical records, not recoverable work. They
+    // must stay out of interruption/checkpoint rebuilding and workspace lease
+    // reconciliation until the user explicitly restores them.
+    const recoverableSessions = sessions.filter((session) => !session.archivedAt);
+    for (const session of recoverableSessions) {
       this.interruptSessionFromPreviousProcess(session);
       await this.sessions.reconcileRecoveryStateOnBoot?.(session.id);
     }
 
-    const routingRecoveries = await this.sessions.recoverIntentRoutings?.(sessions.map((session) => session.id)) ?? [];
+    const routingRecoveries = await this.sessions.recoverIntentRoutings?.(recoverableSessions.map((session) => session.id)) ?? [];
     if (routingRecoveries.length > 0) {
       this.logger.log(`Intent routing recovery reconciled ${routingRecoveries.length} record(s).`);
     }
 
-    await this.reconcileWorkspaceLeases(sessions);
+    await this.reconcileWorkspaceLeases(recoverableSessions);
   }
 
   private async reconcileWorkspaceLeases(sessions: SessionDetail[]) {
@@ -94,6 +98,7 @@ export class RecoveryService implements OnApplicationBootstrap {
     const activeSessionsByWorkspace = new Map<string, string>();
 
     for (const session of sessions) {
+      if (session.archivedAt) continue;
       if (!terminalStatuses.includes(session.status)) {
         const existing = activeSessionsByWorkspace.get(session.workspaceId);
         if (existing) {
@@ -112,6 +117,7 @@ export class RecoveryService implements OnApplicationBootstrap {
   }
 
   private interruptSessionFromPreviousProcess(session: SessionDetail) {
+    if (session.archivedAt) return;
     if (!INTERRUPT_ON_BOOT_STATUSES.has(session.status)) return;
 
     const previousStatus = session.status;

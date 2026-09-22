@@ -1,9 +1,9 @@
 # 主 Agent 协作与长会话治理：分阶段实施总计划 v1
 
 > 日期：2026-09-16
-> 状态：阶段 0、阶段 1、阶段 2A、阶段 2B、阶段 2C、阶段 3 与阶段 4 已实现并验收；阶段 5 及后续业务接入待实施。
+> 状态：阶段 0、阶段 1、阶段 2A、阶段 2B、阶段 2C、阶段 3 与阶段 4 已实现并验收；阶段 5 已实现并通过自动化验收，待用户确认；阶段 6 已进入实施，当前为 partial，尚未退出。
 > 初始文档交付：1 份总计划 + 9 阶段 × 4 份文档，共 37 份新增文档，记录保留于第 11 节。
-> 当前已验收范围：阶段 0、阶段 1、阶段 2A、阶段 2B、阶段 2C、阶段 3、阶段 4；未调用真实付费/多模态 Provider、部署或发布。
+> 当前已验收范围：阶段 0、阶段 1、阶段 2A、阶段 2B、阶段 2C、阶段 3、阶段 4；阶段 5 已完成自动化验收但待用户确认。未调用真实付费/多模态 Provider、部署或发布。
 
 ## 1. 目标与已沟通决定
 
@@ -75,7 +75,7 @@
 | 2C | 分层缓存、失效治理与成本观测（已完成并通过验收） | 2B | [spec](../product/main-agent-collaboration-phase-2c-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-2c-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-2c-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-2c-checklist-v1.md) |
 | 3 | 主 Agent 主持讨论与可恢复专家协作（已完成并通过验收） | 2A/2B/2C | [spec](../product/main-agent-collaboration-phase-3-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-3-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-3-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-3-checklist-v1.md) |
 | 4 | 主 Agent 文档、精确确认与所选工作流交接（已完成并通过验收） | 3 | [spec](../product/main-agent-collaboration-phase-4-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-4-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-4-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-4-checklist-v1.md) |
-| 5 | 执行中补充、新需求与范围变更治理 | 4 | [spec](../product/main-agent-collaboration-phase-5-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-5-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-5-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-5-checklist-v1.md) |
+| 5 | 执行中补充、新需求与范围变更治理（已实现并通过自动化验收，待用户确认） | 4 | [spec](../product/main-agent-collaboration-phase-5-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-5-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-5-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-5-checklist-v1.md) |
 | 6 | 双端综合验收、长会话成本评测与受控上线 | 全部前置阶段 | [spec](../product/main-agent-collaboration-phase-6-spec-v1.md) · [plan](../design/main-agent-collaboration-phase-6-plan-v1.md) · [tasks](../implementation/main-agent-collaboration-phase-6-tasks-v1.md) · [checklist](../quality/main-agent-collaboration-phase-6-checklist-v1.md) |
 
 默认执行次序：0 → 1 → 2A → 2B → 2C → 3 → 4 → 5 → 6。先保证隔离、预算和记忆，再扩大主 Agent 协作能力；不能以缓存可用替代基础正确性。
@@ -87,7 +87,7 @@
 - Tasks：有序任务、依赖、交付物及关联 AC。
 - Checklist：具体场景、预期、现有命令、必须新增的测试和证据位置。
 
-本专项共 61 条阶段 AC、54 项开发任务。阶段 0、阶段 1、阶段 2A、阶段 2B、阶段 2C、阶段 3 与阶段 4 的 47 条 AC、42 项任务已完成实现和验收；阶段 5 及以后仍待实施/待验证，不因前置阶段通过而自动完成。
+本专项共 61 条阶段 AC、54 项开发任务。阶段 0～4 的 47 条 AC、42 项任务已完成实现和验收；阶段 5 的 7 条 AC、6 项任务已实现并通过自动化验收，待用户确认；阶段 6 已进入 partial：跨阶段矩阵当前 passed 57、partial 3、deferred 1、not-executed 0，多模态接入经用户确认延期为后续专项，usage/缓存/耗时采集和本地可重放验收已实现，真实模型质量评估和受控上线尚未完成；计费另入第 21 节且不阻断正常流程。
 
 ## 5. 跨阶段架构决策与不变量
 
@@ -179,7 +179,7 @@
 
 ## 11. 初始文档交付记录（历史记录）
 
-- 已生成各阶段 Spec/Plan/Tasks/Checklist，开发项保持待实施/待验证。
+- 初始生成各阶段 Spec/Plan/Tasks/Checklist 时，开发项保持待实施/待验证；后续实施结果以各阶段交付章节和 Checklist 为准。
 - 已将长会话、累计预算、缓存失效与真实成本观测纳入前置阶段，不留到最后做性能优化。
 - 仅做文档链接/追踪/格式与仓库文档规则验证；业务代码、真实模型、生产数据库与运行服务不在本轮执行范围。
 
@@ -232,7 +232,7 @@
 - 专家失败只标该委派、整场继续；重启续跑只运行未完成项且不重问计划；停止时 run 暂停、委派保留可续；用户 @ 成为有归属的 `user_mention` 委派；需求修订就地 supersede 旧委派并在同一 run 重规划。
 - 每轮以确定性综合收口：署名逐条、不写"一致同意"、冲突 = 同问题不同结论列为待选、失败/未回复点名、`sourceDelegationIds` 可核验；有未决时主 Agent 持有一张 `discussion_clarification` 卡。
 - [阶段 3 Checklist](../quality/main-agent-collaboration-phase-3-checklist-v1.md)记录 120 余例单测、PostgreSQL 临时库 12/12、E2E `test:e2e:planned-discussion` 两场景与四门禁。
-- 已知边界与延后（归阶段 4）：双端专用呈现未做（复用既有事件类型渲染）；扩员卡与澄清卡的选项处理未接；`blocked` 委派状态无写入方；新路径由 `MAIN_AGENT_DISCUSSION_ENABLED` 闸控、默认关。跨实例 CAS 延后。未调用真实付费模型、部署或发布。
+- 已知边界与延后（归阶段 4）：双端专用呈现未做（复用既有事件类型渲染）；扩员卡与澄清卡的选项处理未接；新路径由 `MAIN_AGENT_DISCUSSION_ENABLED` 闸控、默认关。`blocked` 委派写入方已于 2026-09-20 补齐。跨实例 CAS 延后。未调用真实付费模型、部署或发布。
 
 ## 18. 阶段 4 实施交付（2026-09-19）
 
@@ -248,3 +248,47 @@
   （`WAIT_USER_CONFIRM`）也会 +1，导致每次正常确认被误判 stale；已改为以文档自身记录的
   需求修订为准。另修复共享 E2E 辅助只设 `outputContract`、导致两节点以上工作流无法发布。
 - 顺延到阶段 5 的缺口见阶段 5 Tasks 的承接说明，不计入本阶段通过范围。
+
+## 19. 阶段 5 实施交付（2026-09-19）
+
+阶段 5 六项任务（P5-T1～P5-T6）已实现，并通过自动化验收：
+
+- 执行中消息先做确定性分流：状态询问不误中断，停止优先，带补充内容的消息形成唯一 ChangeRequest。
+- 主 Agent 只做有界影响分析和定向 `@` 咨询；用户选择前不修改当前需求契约。
+- `pause_and_revise` 先经过停止屏障，旧确认/旧需求版本/旧验收结果不能为新范围背书。
+- 新需求按 WorkItem 隔离并 FIFO 排队；终态只提示下一需求，不跳过文档确认和工作流选择。
+- shared、Web、Desktop 共用变更队列状态投影；删除/恢复 generation fencing 防止迟到回调写入，重启不自动重播模型。
+- 验收证据：阶段 5 专项 E2E `npm run test:e2e:phase-5-execution-change` exit 0；独立 PostgreSQL
+  变更请求集成测试 15/15；`npm run typecheck`、`npm run test`、`npm run test:harness`、
+  `npm run build` 全部 exit 0。
+- 明确延后：真实浏览器渲染快照、进程级崩溃注入、跨实例 CAS、流程下架时序竞争、`blocked` 委派写入方，
+  以及真实付费模型验证。这些不计入阶段 5 自动化通过。
+
+阶段 5 状态：实施完成，自动化验收通过，待用户确认后进入阶段 6。
+
+## 20. 阶段 6 实施进展（2026-09-20）
+
+- 已实现阶段 6 的追踪矩阵 Harness、100 WorkItem/1000 messages 合成长会话 fixture、真实 file backend 组件级故障矩阵、Web/Desktop 组合入口、冷热 mock 成本报告和迁移 dry-run/确认门禁。
+- 已通过：阶段 6 Harness 追踪、长会话受控输入 1.0 倍增长、6 个真实流程启动/讨论/预算/缓存组件故障场景、Web/Desktop 呈现与桌面渲染、workflow managed execution、阶段 5 变更队列、成本报告和迁移 dry-run。
+- 已修复并通过：`rework-loop` 的 WorkItem 预算结算误把内置 `code_reader`/其他已知非模型 Runtime 的零 token 结果记为 unknown，导致后续复盘被错误拒绝；现按实际零成本结算，并通过 `npm run test:e2e:phase-6-dual-client`。
+- 已执行：`test:e2e:phase-6-backend-parity` 组合门（真实 file 6/6、随机临时 PostgreSQL 15/15、migration apply/verify/rollback/reapply 等价校验）、真实子进程 crash/reclaim smoke。仍未执行：真实付费模型、策略准入和发布交接。阶段 6 当前不能标记为完成；后续只需在授权后补齐这些外部资源验证，不自动连接生产数据库或真实付费模型。
+- 已补齐阶段 2C 顺延的价格来源：`AGENT_CLUSTER_RUNTIME_PRICING_JSON` 由部署侧维护版本化 USD 费率，按完整 Runtime connection id 精确匹配；Generic LLM 仅对 Provider 实际 usage 生成带 `priceVersion`、`costBasis=estimated` 的金额，缺失条件时保持 unknown。示例价格不作为真实供应商价格承诺。
+- 已新增 `test:e2e:phase-6-safety-gates` 组合入口，串行证明 unknown stop、缓存预算、精确版本确认、高风险能力和停止迟到结果均由确定性门禁控制，不能被摘要、缓存命中或模型输出绕过。
+- 已新增阶段 6 只读发布 preflight、脱敏 PostgreSQL rollback 证据格式与交接文档；准入只在 AC 全完成、rollback 证据存在、构建身份完整且有授权记录时放行。当前实际结果为 `blocked`，未执行发布。
+- 已将同一准入判定接入生产服务启动：任一新策略启用时，追踪矩阵汇总与 AC 行、rollback、构建身份和授权均须通过；否则在 HTTP 监听前拒绝。非生产隔离 mock E2E 保持可运行，不作为生产授权证据。
+
+## 21. 后续专项：Runtime 计费与账单核对
+
+2026-09-20 用户确认将计费能力移入后续计划，不作为当前阶段正常会话、Agent 协作、工作流执行或 usage 采集的前置条件。
+
+当前阶段保留并验收 Provider 实际返回的输入/输出 token、缓存读写、调用数、TTFT 和总耗时；中转未返回的字段保持 `unknown`。已经实现的可选价格目录、模型级费率和估算金额代码继续保持默认关闭：没有价格配置时不得阻断服务启动、模型调用、会话执行或策略准入，也不得把未知费用记作 `0`；显式配置了非法价格时仍 fail closed，避免产生错误账单。
+
+后续计费专项至少包含：
+
+- 中转实际费率的生效时间、币种、模型别名与最终模型映射。
+- 输入、输出、缓存读取、缓存写入的计价语义及版本化价格。
+- Provider 返回金额与平台估算金额的区分、账单对账和误差处理。
+- 按会话、WorkItem、Agent、模型和时间范围聚合，以及退款、失败调用和重试计费。
+- 费用预算、预警和停用策略；启用前需独立授权与真实中转验证。
+
+该专项未完成不影响当前业务流程；只有用户以后明确启用计费、费用预算或账单能力时，才恢复其开发和验收。

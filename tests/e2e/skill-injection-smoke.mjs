@@ -6,6 +6,10 @@ try {
   server = await startSmokeServer('skill-injection-smoke', { DISCUSSION_MAX_ROUNDS: '1', REQUIRE_USER_CONFIRMATION: 'false' });
   const created = await api(server.apiBase, '/skills', {
     method: 'POST',
+    headers: {
+      'x-user-id': 'e2e-system-admin',
+      'x-skill-role': 'system_admin'
+    },
     body: JSON.stringify({ name: 'Contract Review', content: 'Always verify shared contracts before delivery.', files: [{ path: 'checklist.md', content: 'Run typecheck.' }] })
   });
   const skill = created.data;

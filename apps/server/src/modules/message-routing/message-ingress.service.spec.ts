@@ -206,6 +206,69 @@ test('a budget-exhaustion recovery message atomically creates a clean related Wo
   }
 });
 
+test('message ingress persists attachment metadata references without file bytes', async () => {
+  const harness = await fixture();
+  try {
+    const result = await harness.service.commit({
+      session: harness.session,
+      content: '',
+      mentionedAgentIds: [],
+      attachmentRefs: [{
+        id: 'attachment-1', sessionId: harness.session.id, kind: 'file', fileName: 'notes.txt',
+        mimeType: 'text/plain', sizeBytes: 12, uploadStatus: 'ready', createdAt: '2026-09-22T00:00:00.000Z'
+      }],
+      handlingPlan,
+      routingMode: 'shadow'
+    });
+    assert.equal(result.event.content, '');
+    const payload = result.event.metadata.payload as { attachmentRefs?: Array<{ id: string }>; bytes?: unknown } | undefined;
+    assert.equal(payload?.attachmentRefs?.[0]?.id, 'attachment-1');
+    assert.equal(result.followUp.attachmentRefs?.[0]?.fileName, 'notes.txt');
+    assert.equal('bytes' in (payload ?? {}), false);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('message ingress persists structured Skill, Agent and resolved routing snapshots', async () => {
+  const harness = await fixture();
+  try {
+    const result = await harness.service.commit({
+      session: harness.session,
+      content: '请由质量 Agent 执行这个 Skill',
+      mentionedAgentIds: ['agent-quality'],
+      directives: {
+        skill: { id: 'skill-1', key: 'qa', name: '质量检查', revision: 2 },
+        agents: [{ id: 'agent-quality', key: 'quality', name: '质量 Agent' }],
+        attachments: []
+      },
+      routing: {
+        mode: 'single',
+        reason: 'skill_agent_semantically_matched',
+        candidateAgentIds: ['agent-quality'],
+        distributionAgentIds: [],
+        resolvedAgentId: 'agent-quality',
+        resolvedAgent: { id: 'agent-quality', key: 'quality', name: '质量 Agent' },
+        skill: { id: 'skill-1', key: 'qa', name: '质量检查', revision: 2 }
+      },
+      handlingPlan,
+      routingMode: 'shadow'
+    });
+    const payload = result.event.metadata.payload as {
+      directives?: { skill?: { id: string }; agents?: Array<{ id: string }> };
+      routing?: { resolvedAgentId?: string };
+    };
+    assert.equal(payload.directives?.skill?.id, 'skill-1');
+    assert.equal(payload.directives?.agents?.[0]?.id, 'agent-quality');
+    assert.equal(payload.routing?.resolvedAgentId, 'agent-quality');
+    assert.equal(result.followUp.skillRef?.revision, 2);
+    assert.equal(result.followUp.agentRefs?.[0]?.id, 'agent-quality');
+    assert.equal(result.followUp.routing?.mode, 'single');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test('a preference message atomically requests confirmation and replay does not create a second card', async () => {
   const harness = await fixture();
   try {

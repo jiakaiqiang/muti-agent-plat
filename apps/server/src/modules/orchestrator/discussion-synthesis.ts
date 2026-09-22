@@ -9,7 +9,8 @@ export type DiscussionSynthesis = {
   unresolved: string[];
   risks: string[];
   failed: Array<{ delegationId: string; agentName: string; code: string; retryable: boolean }>;
-  unanswered: Array<{ delegationId: string; agentName: string; status: Delegation['status'] }>;
+  blocked: Array<{ delegationId: string; agentName: string; code: string; message: string; retryable: boolean }>;
+  unanswered: Array<{ delegationId: string; agentName: string; status: 'pending' | 'running' }>;
   /** Exactly the delegations whose results were read. "Summarised" is checkable against this. */
   sourceDelegationIds: string[];
   outcome: 'ready' | 'needs_user';
@@ -39,8 +40,17 @@ export function synthesizeDiscussion(
       code: item.failure?.code ?? 'UNKNOWN',
       retryable: item.failure?.retryable ?? false
     }));
+  const blocked = current
+    .filter((item) => item.status === 'blocked')
+    .map((item) => ({
+      delegationId: item.id,
+      agentName: name(item.targetAgentId),
+      code: item.failure?.code ?? 'UNKNOWN',
+      message: item.failure?.message ?? '需要补充上下文证据。',
+      retryable: item.failure?.retryable ?? false
+    }));
   const unanswered = current
-    .filter((item) => item.status === 'pending' || item.status === 'running' || item.status === 'blocked')
+    .filter((item): item is Delegation & { status: 'pending' | 'running' } => item.status === 'pending' || item.status === 'running')
     .map((item) => ({ delegationId: item.id, agentName: name(item.targetAgentId), status: item.status }));
 
   const unresolved = [
@@ -77,6 +87,9 @@ export function synthesizeDiscussion(
   for (const item of failed) {
     lines.push(`【${item.agentName}】未能给出结论：${item.code}${item.retryable ? '（可重试）' : ''}`);
   }
+  for (const item of blocked) {
+    lines.push(`【${item.agentName}】需要补充证据：${item.code} - ${item.message}${item.retryable ? '（补充后可重试）' : ''}`);
+  }
   for (const item of unanswered) {
     lines.push(`【${item.agentName}】尚未回复（${item.status}）`);
   }
@@ -84,7 +97,7 @@ export function synthesizeDiscussion(
   if (unresolved.length) lines.push(`待你回答：${unresolved.map((text, index) => `(${index + 1}) ${text}`).join(' ')}`);
 
   const outcome: DiscussionSynthesis['outcome'] =
-    answered.length > 0 && failed.length === 0 && unanswered.length === 0 && conflicts.length === 0 && unresolved.length === 0
+    answered.length > 0 && failed.length === 0 && blocked.length === 0 && unanswered.length === 0 && conflicts.length === 0 && unresolved.length === 0
       ? 'ready'
       : 'needs_user';
 
@@ -94,6 +107,7 @@ export function synthesizeDiscussion(
     unresolved,
     risks,
     failed,
+    blocked,
     unanswered,
     sourceDelegationIds: answered.map((item) => item.id),
     outcome

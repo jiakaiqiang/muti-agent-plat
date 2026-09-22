@@ -15,6 +15,7 @@ import { RuntimeService } from './runtime.service.js';
 import { TestRunnerRuntimeAdapterService } from './test-runner-runtime-adapter.service.js';
 import { CodeSearchTool } from '../tools/builtin/code-search.tool.js';
 import { FileReaderTool } from '../tools/builtin/file-reader.tool.js';
+import { AttachmentReaderTool } from '../tools/builtin/attachment-reader.tool.js';
 import { FileWriterTool } from '../tools/builtin/file-writer.tool.js';
 import { TestRunnerTool } from '../tools/builtin/test-runner.tool.js';
 import { ToolRegistryService } from '../tools/tool-registry.service.js';
@@ -28,9 +29,10 @@ import { PersistenceService } from '../persistence/persistence.service.js';
 import { CAPABILITY_TOOL_MAPPING } from '../tools/capability-tool-mapping.js';
 import { ServerRuntimeWorkerService } from './server-runtime-worker.service.js';
 import { EventsModule } from '../events/events.module.js';
+import { DiscussionDocumentsModule } from '../discussion-documents/discussion-documents.module.js';
 
 @Module({
-  imports: [AgentsModule, AgentProfileModule, CapabilitiesModule, WorktreeExecutionModule, EventsModule],
+  imports: [AgentsModule, AgentProfileModule, CapabilitiesModule, WorktreeExecutionModule, EventsModule, DiscussionDocumentsModule],
   controllers: [RuntimeController],
   providers: [
     RuntimeService,
@@ -44,6 +46,7 @@ import { EventsModule } from '../events/events.module.js';
     InvocationResolverService,
     CodeSearchTool,
     FileReaderTool,
+    AttachmentReaderTool,
     FileWriterTool,
     TestRunnerTool,
     RuntimeModelConfigService,
@@ -67,6 +70,7 @@ import { EventsModule } from '../events/events.module.js';
     InvocationResolverService,
     CodeSearchTool,
     FileReaderTool,
+    AttachmentReaderTool,
     FileWriterTool,
     TestRunnerTool,
     CodeReaderRuntimeAdapterService,
@@ -79,12 +83,13 @@ export class RuntimeModule implements OnModuleInit {
   constructor(
     private readonly registry: ToolRegistryService,
     fileReader: FileReaderTool,
+    attachmentReader: AttachmentReaderTool,
     fileWriter: FileWriterTool,
     codeSearch: CodeSearchTool,
     testRunner: TestRunnerTool,
     private readonly persistence: PersistenceService
   ) {
-    [fileReader, fileWriter, codeSearch, testRunner].forEach((tool) => registry.registerTool(tool));
+    [fileReader, attachmentReader, fileWriter, codeSearch, testRunner].forEach((tool) => registry.registerTool(tool));
   }
 
   async onModuleInit(): Promise<void> {

@@ -46,7 +46,14 @@ try {
     body: JSON.stringify({
       name: 'Workflow smoke sequence',
       nodes: [
-        { id: 'workflow-node-requirements', type: 'agent', agentId: requirements.id, order: 0 },
+        {
+          id: 'workflow-node-requirements',
+          type: 'agent',
+          agentId: requirements.id,
+          stageDescription: 'Analyze the requirement before the human gate.',
+          outputContract: ['Produce a structured requirement analysis.'],
+          order: 0
+        },
         {
           id: 'workflow-gate-requirements',
           type: 'human_approval',
@@ -56,7 +63,15 @@ try {
           allowedDecisions: ['approve', 'revise', 'cancel'],
           order: 1
         },
-        { id: 'workflow-node-product', type: 'agent', agentId: product.id, order: 2 },
+        {
+          id: 'workflow-node-product',
+          type: 'agent',
+          agentId: product.id,
+          stageDescription: 'Independently validate the final conclusion.',
+          inputContract: ['Read the approved requirement analysis.'],
+          outputContract: ['Produce an independent validation result.'],
+          order: 2
+        },
         {
           id: 'workflow-gate-test',
           type: 'human_approval',

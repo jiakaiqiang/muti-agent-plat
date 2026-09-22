@@ -196,7 +196,13 @@ async function refreshData() {
 
 function contentSummary(skill: Skill) {
   const fileLabel = skill.files.length === 1 ? '1 个文件' : `${skill.files.length} 个文件`
-  return `${skill.content.length.toLocaleString()} 字符 · ${fileLabel}`
+  return `${scopeLabel(skill)} · ${skill.content.length.toLocaleString()} 字符 · ${fileLabel}`
+}
+
+function scopeLabel(skill: Skill) {
+  if (skill.scope === 'personal') return '个人'
+  if (skill.scope === 'group') return `群聊${skill.scopeId ? ` · ${skill.scopeId}` : ''}`
+  return '系统'
 }
 
 onMounted(() => void refreshData())
@@ -332,6 +338,14 @@ onMounted(() => void refreshData())
             <span>{{ contentSummary(selectedSkill) }}</span>
           </header>
           <dl>
+            <div>
+              <dt>来源层级</dt>
+              <dd>{{ scopeLabel(selectedSkill) }}</dd>
+            </div>
+            <div>
+              <dt>状态</dt>
+              <dd>{{ selectedSkill.status === 'active' ? '启用' : '停用' }}</dd>
+            </div>
             <div>
               <dt>稳定引用</dt>
               <dd><code>${skill:{{ selectedSkill.key }}}</code></dd>

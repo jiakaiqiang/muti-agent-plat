@@ -1,10 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  matchCompoundExecutionControl,
   matchExactUserCommand,
   matchWorkflowAgentDirective,
   matchWorkflowAgentSkipCommand
 } from './deterministic-command-guard.service.js';
+
+test('a compound pause keeps the non-control suffix for the follow-up path', () => {
+  assert.deepEqual(matchCompoundExecutionControl('先停下来，另外把接口改成分页'), {
+    command: 'pause',
+    remainder: '另外把接口改成分页',
+    normalizedText: '先停下来,另外把接口改成分页',
+    reasonCode: 'COMPOUND_PAUSE_BEFORE_FOLLOW_UP'
+  });
+  assert.equal(matchCompoundExecutionControl('暂停'), undefined);
+  assert.equal(matchCompoundExecutionControl('请不要暂停，继续执行'), undefined);
+});
 
 test('matches exact command aliases after bounded normalization', () => {
   assert.equal(matchExactUserCommand('继续')?.command, 'resume');

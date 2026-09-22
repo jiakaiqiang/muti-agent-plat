@@ -17,7 +17,11 @@ import type {
   SessionDetail
 } from '@agent-cluster/shared';
 import { createAgentMessageOutput, classifyProviderFailure, ProviderCircuit, usefulRuntimeActivity, runtimeActivityKind } from '@agent-cluster/shared';
-import { cliContextRotationInputTokens, runtimeStreamingEnabledFor } from '../../common/runtime-config.js';
+import {
+  cliContextRotationInputTokens,
+  runtimeStreamingEnabledFor,
+  workItemBudgetEnforcementEnabled
+} from '../../common/runtime-config.js';
 import { buildBudget } from '../../common/token.js';
 import { nowIso } from '../../common/time.js';
 import { workspaceMetrics } from '../../common/workspace-metrics.js';
@@ -101,6 +105,16 @@ export type RuntimeInvocationLog = {
   startedAt: string;
   completedAt: string;
 };
+
+/**
+ * These adapters are deterministic, in-process helpers rather than paid model
+ * providers. A zero-token result from them is an actual zero-cost settlement;
+ * treating it as unknown would retain the pre-call reservation and block later
+ * workflow stages such as post-review and rework.
+ */
+function isKnownNonModelRuntime(runtimeType: RuntimeType): boolean {
+  return runtimeType === 'mock' || runtimeType === 'code_reader' || runtimeType === 'test_runner';
+}
 
 export type RuntimeExecutionHandle = AgentRuntimeRunHandle & {
   hasStreamingEvents: boolean;
@@ -1140,6 +1154,7 @@ export class RuntimeService implements OnModuleInit {
       limitTokens
     });
     if (outcome.status === 'reserved') return undefined;
+    if (!workItemBudgetEnforcementEnabled()) return undefined;
     const message = workItemBudgetExhaustedMessage({
       availableTokens: outcome.availableTokens,
       requestedTokens: outcome.requestedTokens,
@@ -1182,7 +1197,7 @@ export class RuntimeService implements OnModuleInit {
     const hasReportedUsage =
       typeof reportedTokens === 'number' &&
       usage?.measurement !== 'unknown' &&
-      (reportedTokens > 0 || usage?.measurement === 'actual' || result.runtimeType === 'mock');
+      (reportedTokens > 0 || usage?.measurement === 'actual' || isKnownNonModelRuntime(input.executionTarget.runtimeType));
     await this.workItemBudgets.settle({
       sessionId: input.sessionId,
       workItemId,

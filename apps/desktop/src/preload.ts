@@ -11,6 +11,7 @@ const bridge: DesktopBridge = {
   installUpdate: () => ipcRenderer.invoke('desktop:update:install'),
   setNotificationsEnabled: enabled => ipcRenderer.invoke('desktop:notifications:enabled', enabled),
   testNotification: () => ipcRenderer.invoke('desktop:notifications:test'),
+  openWebWorkflowManager: () => ipcRenderer.invoke('desktop:web:workflow-manager'),
   onOpenSession: callback => {
     const listener = (_event: Electron.IpcRendererEvent, sessionId: unknown) => {
       if (typeof sessionId === 'string' && /^[a-zA-Z0-9-]{1,128}$/.test(sessionId)) callback(sessionId);

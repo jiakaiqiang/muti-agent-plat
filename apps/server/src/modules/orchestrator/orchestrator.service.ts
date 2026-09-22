@@ -5,6 +5,7 @@ import type {
   AgentDefinition as Agent,
   AgentMessageOutput,
   AgentRunPhase,
+  GroupChatAttachmentRef,
   AgentRunResult,
   AgentTask,
   Artifact,
@@ -115,7 +116,7 @@ import { ContextRouterService } from './context-router.service.js';
 import { ProjectMapService } from './project-map.service.js';
 import { consumeRuntimeEvents } from './runtime-stream-consumer.js';
 import { structuredOutputGuard } from './structured-output-guard.js';
-import { acceptanceFingerprint, explicitTaskPreflight } from './task-acceptance-preflight.js';
+import { acceptanceFingerprint, evaluateExplicitTaskPreflight } from './task-acceptance-preflight.js';
 import { boundedConsultations, consultationConcurrency } from './bounded-consultation.js';
 import { DiscussionStore } from './discussion-store.js';
 import { RequirementDocumentStore } from '../sessions/requirement-document-store.js';
@@ -245,6 +246,20 @@ function agentIdFromActor(actor?: ActorRef): string | undefined {
   return actor?.type === 'agent' ? actor.id : undefined;
 }
 
+function attachmentRefsFromLatestUserMessage(events: CollaborationEvent[]): GroupChatAttachmentRef[] {
+  const latest = [...events].reverse().find((event) => event.type === 'user_message');
+  const payload = latest?.metadata?.payload as { attachmentRefs?: unknown } | undefined;
+  if (!Array.isArray(payload?.attachmentRefs)) return [];
+  return payload.attachmentRefs.filter((item): item is GroupChatAttachmentRef => {
+    if (!item || typeof item !== 'object') return false;
+    const value = item as Partial<GroupChatAttachmentRef>;
+    return typeof value.id === 'string' && typeof value.sessionId === 'string' &&
+      (value.kind === 'file' || value.kind === 'image') && typeof value.fileName === 'string' &&
+      typeof value.mimeType === 'string' && typeof value.sizeBytes === 'number' &&
+      typeof value.uploadStatus === 'string' && typeof value.createdAt === 'string';
+  }).map((item) => ({ ...item }));
+}
+
 export function usableAgentMessageOutput(value: unknown): value is AgentMessageOutput {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Partial<AgentMessageOutput>;
@@ -363,10 +378,7 @@ export class OrchestratorService {
     session: SessionDetail,
     inv: PendingInvocation
   ): Promise<AgentRunResult> {
-    const taskAgent = await this.agents.findByIdOrKey(inv.agentId);
-    if (!taskAgent) {
-      throw new Error(`Agent ${inv.agentId} not found for retry`);
-    }
+    const taskAgent = this.requireExecutableSessionAgent(session, inv.agentId);
 
     const task = inv.taskId ? this.tasks.find(inv.sessionId, inv.taskId) : undefined;
     const brief = this.briefsBySession.get(inv.sessionId)?.[0];
@@ -538,7 +550,8 @@ export class OrchestratorService {
     session: SessionDetail,
     content: string,
     mentionedAgentIds: string[],
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    attachmentRefs: GroupChatAttachmentRef[] = []
   ): Promise<UserMessageHandlingPlan> {
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
     const contextAssembly = this.createContextAssembly(
@@ -557,6 +570,7 @@ export class OrchestratorService {
       'A currently running task must not be interrupted. Set shouldPause=false; execution deferral is controlled by the session queue.'
     ];
     contextAssembly.currentUserMessage = content;
+    contextAssembly.attachmentRefs = attachmentRefs.map((attachment) => ({ ...attachment }));
     contextAssembly.constraints = [
       ...contextAssembly.constraints,
       `Explicitly mentioned agent ids: ${mentionedAgentIds.join(', ') || '(none)'}`
@@ -1913,7 +1927,9 @@ export class OrchestratorService {
       return { ok: false, message };
     }
     const taskAssigneeId = agentIdFromActor(task.assignee);
-    const taskAgent = taskAssigneeId ? this.agents.getByIdOrKey(taskAssigneeId) : backend;
+    const taskAgent = taskAssigneeId
+      ? this.requireExecutableSessionAgent(session, taskAssigneeId)
+      : backend;
     const claim = await this.resolveTaskClaim(
       session,
       brief,
@@ -2448,13 +2464,27 @@ export class OrchestratorService {
           requiresEvidence: session.workspaceMode !== 'bootstrap' && requiresGroundedRuntimeEvidence('task_execution',
             contextAssembly.taskContext.requiresCodeChanges, contextAssembly.taskContext.evidenceSelection.strategy) });
         const dependenciesReady = task.dependsOnTaskIds.every(id => this.tasks.find(session.id, id)?.status === 'completed');
+        const preflight = evaluateExplicitTaskPreflight(task, plan, dependenciesReady);
+        const fallbackReasons = [
+          ...preflight.reasonCodes,
+          ...(grounded.ok ? [] : [`EVIDENCE_GATE:${grounded.reason}` as const]),
+          ...(isFileRevisionTask ? ['FILE_REVISION_REQUIRES_MODEL_ACCEPTANCE' as const] : []),
+          ...(checkpoint?.decision.status === 'blocked' ? ['PREVIOUS_ACCEPTANCE_BLOCKED' as const] : []),
+          ...(checkpoint?.decision.status === 'rejected' ? ['PREVIOUS_ACCEPTANCE_REJECTED' as const] : [])
+        ];
         const decision = grounded.ok && !isFileRevisionTask && checkpoint?.decision.status !== 'blocked' && checkpoint?.decision.status !== 'rejected'
-          ? explicitTaskPreflight(task, plan, dependenciesReady) : undefined;
+          ? preflight.decision : undefined;
         if (decision) {
           this.tasks.update(task, { acceptanceCheckpoint: { inputFingerprint, agentId: candidate.id,
             decisionSource: 'rule', decision, invocationId, createdAt: nowIso() } });
           this.emitTaskAcceptanceDecisionEvent(session, task, candidate, coordinator, decision, invocationId, plan.executionTarget.runtimeType);
           return { ok: true, agent: candidate, decision, invocationId };
+        }
+        if (fallbackReasons.length > 0) {
+          contextAssembly.systemRules = [
+            ...(contextAssembly.systemRules ?? []),
+            `Acceptance preflight fallback reason codes: ${fallbackReasons.join(', ')}. Resolve only the assigned acceptance decision; do not implement or test.`
+          ];
         }
       } catch (error) {
         if (error instanceof InvocationResolutionError) return { ok: false, message: error.message,
@@ -4035,7 +4065,11 @@ export class OrchestratorService {
           const failure = result.error
             ? { code: result.error.code, message: result.error.message, retryable: result.error.retryable }
             : { code: 'RUNTIME_OUTPUT_CONTRACT_VIOLATION', message: 'Expert returned an invalid or empty agent_message output.', retryable: false };
-          await this.discussions.transitionDelegation(discussionId, delegationId, { status: 'failed', failure });
+          if (failure.code === 'CONTEXT_INSUFFICIENT') {
+            await this.discussions.transitionDelegation(discussionId, delegationId, { status: 'blocked', failure });
+          } else {
+            await this.discussions.transitionDelegation(discussionId, delegationId, { status: 'failed', failure });
+          }
           this.recordDelegationOutcome(session, coordinator, agent, invocationId, discussionId, delegationId, undefined, failure);
           return;
         }
@@ -4097,6 +4131,7 @@ export class OrchestratorService {
         conflicts: synthesis.conflicts,
         unresolved: synthesis.unresolved,
         failedDelegationIds: synthesis.failed.map((item) => item.delegationId),
+        blockedDelegationIds: synthesis.blocked.map((item) => item.delegationId),
         outcome: synthesis.outcome
       })
     });
@@ -4105,6 +4140,7 @@ export class OrchestratorService {
     const description = [
       ...synthesis.unresolved.map((text, index) => `${index + 1}. ${text}`),
       ...synthesis.failed.map((item) => `${item.agentName} 未能回复（${item.code}${item.retryable ? '，可重试' : ''}）`),
+      ...synthesis.blocked.map((item) => `${item.agentName} 需要补充证据（${item.code}：${item.message}）`),
       ...synthesis.unanswered.map((item) => `${item.agentName} 尚未回复`),
       ...(synthesis.conflicts.length ? [`专家结论不一致：${synthesis.conflicts.join(' / ')}`] : [])
     ].join('\n');
@@ -4138,18 +4174,27 @@ export class OrchestratorService {
     output: AgentMessageOutput | undefined,
     failure: { code: string; message: string; retryable: boolean } | undefined
   ) {
-    const failed = Boolean(failure);
+    const blocked = failure?.code === 'CONTEXT_INSUFFICIENT';
+    const failed = Boolean(failure) && !blocked;
     this.events.create({
       sessionId: session.id,
       type: 'agent_status_changed',
       fromAgentId: agent.id,
-      content: failed ? messages.discussionFailedStatus(agent.name) : messages.discussionCompletedStatus(agent.name),
+      content: blocked
+        ? messages.discussionBlockedStatus(agent.name)
+        : failed
+          ? messages.discussionFailedStatus(agent.name)
+          : messages.discussionCompletedStatus(agent.name),
       metadata: createMetadata('system_notice', {
         agentId: agent.id,
-        status: failed ? 'failed' : 'thinking',
+        status: blocked ? 'waiting' : failed ? 'failed' : 'thinking',
         discussionId,
         delegationId,
-        thoughtSummary: failed ? messages.discussionFailedThought : messages.discussionCompletedThought,
+        thoughtSummary: blocked
+          ? messages.discussionBlockedThought
+          : failed
+            ? messages.discussionFailedThought
+            : messages.discussionCompletedThought,
         actionSummary: output?.content ?? failure?.message ?? '',
         waitingFor: [],
         ...(failure ? { runtimeError: { ...failure } } : {})
@@ -4160,7 +4205,9 @@ export class OrchestratorService {
       type: 'agent_message',
       fromAgentId: agent.id,
       toAgentIds: [coordinator.id],
-      content: output?.content ?? messages.discussionFailedMessage(agent.name, failure?.message ?? 'failed'),
+      content: output?.content ?? (blocked
+        ? messages.discussionBlockedMessage(agent.name, failure?.message ?? '需要补充证据')
+        : messages.discussionFailedMessage(agent.name, failure?.message ?? 'failed')),
       metadata: createMetadata('chat_message', {
         messageKind: output?.messageKind ?? 'risk',
         mentionedAgentIds: output?.mentionedAgentIds ?? [],
@@ -5381,6 +5428,7 @@ export class OrchestratorService {
       : undefined;
     const scopedArtifacts = contextSlice.artifacts;
     const scopedEvents = contextSlice.events;
+    const attachmentRefs = attachmentRefsFromLatestUserMessage(scopedEvents);
     const ragSnippets = task
       ? this.searchAgentKnowledge(session, agent, this.taskKnowledgeQuery(session, brief, task))
       : [];
@@ -5489,6 +5537,7 @@ export class OrchestratorService {
             }
           }
         : {}),
+      ...(attachmentRefs.length ? { attachmentRefs } : {}),
       taskContext,
       summaryMemory,
       continuationState: this.createContinuationState(
@@ -8511,6 +8560,25 @@ export class OrchestratorService {
       .filter((agent) => agent.status === 'active');
   }
 
+  /**
+   * Resolve a persisted task target inside the current Session boundary. A
+   * task record is durable state, not an authorization grant: an Agent that
+   * was disabled or removed after planning must not be revived by retrying the
+   * old assignee id.
+   */
+  private requireExecutableSessionAgent(session: SessionDetail, agentId: string) {
+    const participant = this.participatingAgents(session).find((agent) => agent.id === agentId);
+    if (participant) return participant;
+    const catalog = this.agents as unknown as {
+      findSystemByKey?: (key: string) => Agent | undefined;
+    };
+    const coordinator = catalog.findSystemByKey?.('coordinator');
+    if (coordinator?.id === agentId && (coordinator.status === undefined || coordinator.status === 'active')) {
+      return coordinator;
+    }
+    throw new Error(`AGENT_NOT_EXECUTABLE: the selected Agent is unavailable for this Session (${agentId}).`);
+  }
+
   private requireDefaultFileRevisionReceiver() {
     const receiver = this.agents.findByIdOrKey('coordinator');
     if (!receiver || receiver.status !== 'active') {
@@ -8529,7 +8597,14 @@ export class OrchestratorService {
   private pickSessionAgent(session: SessionDetail, preferredKeys: string[], fallbackIndex = 0) {
     const agents = this.participatingAgents(session);
     for (const key of preferredKeys) {
-      const preferred = this.agents.findSystemByKey(key) ?? agents.find((agent) => agent.key === key);
+      const preferred = agents.find((agent) => agent.key === key) ??
+        // The coordinator is the trusted main Agent and may be absent from
+        // the public chat participant list because it is management-only.
+        // No other system lookup is allowed here: preferred Agent routing
+        // must remain within the Session's persisted membership boundary.
+        (key === 'coordinator'
+          ? this.agents.findSystemByKey(key)
+          : undefined);
       if (preferred) {
         return preferred;
       }

@@ -54,3 +54,28 @@ test('addable gaps are the ones the user can resolve by inviting', () => {
   if (result.status !== 'mapping_required') return;
   assert.deepEqual(result.addable, ['architect']);
 });
+
+test('published agent and robot-review nodes become deterministic evidence without requirement claims', () => {
+  const result = evaluateWorkflowMemberMapping({
+    involvedAgentIds: ['architect'],
+    participatingAgentIds: [],
+    findAgent: lookup,
+    workflowNodes: [
+      {
+        id: 'design', type: 'agent', agentId: 'architect', order: 0, name: '架构设计',
+        stageDescription: '定义接口边界', inputContract: [], outputContract: ['系统设计']
+      },
+      {
+        id: 'review', type: 'robot_approval', reviewerAgentId: 'architect', order: 1, name: '架构审核',
+        reviewPrompt: '检查边界是否完整', criteria: ['接口可追踪'], maxRevisionAttempts: 2, fallback: 'human_approval'
+      }
+    ]
+  });
+  assert.equal(result.status, 'mapping_required');
+  if (result.status !== 'mapping_required') return;
+  assert.equal(result.gaps[0].canInvite, true);
+  assert.deepEqual(result.gaps[0].nodes?.map((node) => node.nodeType), ['agent', 'robot_approval']);
+  assert.deepEqual(result.gaps[0].nodes?.[0].outputContract, ['系统设计']);
+  assert.deepEqual(result.gaps[0].nodes?.[1].criteria, ['接口可追踪']);
+  assert.match(result.gaps[0].nodes?.[1].impact ?? '', /质量审核节点无法按发布图执行/);
+});

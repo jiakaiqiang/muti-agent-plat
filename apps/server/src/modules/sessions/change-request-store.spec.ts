@@ -98,6 +98,57 @@ test('a closed session cannot open a change request', async () => {
   }
 });
 
+test('a compound stop may persist its already-received suffix, but deletion still wins', async () => {
+  const context = await fixture();
+  try {
+    await context.persistence.setCollection('sessionLifecyclesBySession', {
+      'session-1': {
+        contractVersion: 'main-agent-collaboration/v1',
+        sessionId: 'session-1',
+        dataEpoch: 'epoch',
+        generation: 2,
+        revision: 2,
+        state: 'active',
+        admission: 'closed',
+        stopStatus: 'stopping'
+      }
+    });
+
+    const accepted = await context.store.open({
+      base: base(),
+      sourceEventId: 'compound-event',
+      summary: '另外把接口改成分页',
+      generation: 2,
+      allowStoppedAdmission: true
+    });
+    assert.equal(accepted.status, 'opened');
+
+    await context.persistence.setCollection('sessionLifecyclesBySession', {
+      'session-1': {
+        contractVersion: 'main-agent-collaboration/v1',
+        sessionId: 'session-1',
+        dataEpoch: 'epoch',
+        generation: 2,
+        revision: 3,
+        state: 'deleting',
+        admission: 'closed',
+        stopStatus: 'requested'
+      }
+    });
+    const refused = await context.store.open({
+      base: base(),
+      sourceEventId: 'deleted-event',
+      summary: '不应进入删除会话',
+      generation: 2,
+      allowStoppedAdmission: true
+    });
+    assert.equal(refused.status, 'rejected');
+    assert.equal(refused.status === 'rejected' && refused.code, 'SESSION_ADMISSION_CLOSED');
+  } finally {
+    await context.cleanup();
+  }
+});
+
 test('a stale generation cannot open: a restored session must not replay a pre-restore message', async () => {
   const context = await fixture();
   try {

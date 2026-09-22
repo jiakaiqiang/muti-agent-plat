@@ -108,6 +108,16 @@ withDefaults(
       <path d="M10 11v6" />
       <path d="M14 11v6" />
     </template>
+    <template v-else-if="name === 'more'">
+      <circle cx="5" cy="12" r="1.3" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none" />
+      <circle cx="19" cy="12" r="1.3" fill="currentColor" stroke="none" />
+    </template>
+    <template v-else-if="name === 'archive'">
+      <path d="M4 7h16v12H4z" />
+      <path d="M3 4h18v3H3z" />
+      <path d="M9 12h6" />
+    </template>
     <template v-else-if="name === 'x'">
       <path d="M18 6 6 18" />
       <path d="m6 6 12 12" />

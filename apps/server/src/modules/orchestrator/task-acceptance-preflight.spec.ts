@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { AgentTask } from '@agent-cluster/shared';
 import { makeInvocationPlan } from '../runtimes/invocation-plan.fixture.js';
-import { acceptanceFingerprint, explicitTaskPreflight } from './task-acceptance-preflight.js';
+import { acceptanceFingerprint, evaluateExplicitTaskPreflight, explicitTaskPreflight } from './task-acceptance-preflight.js';
 
 test('explicit workflow assignment can start without a model acceptance but cannot bypass permissions or dependencies', () => {
   const plan = makeInvocationPlan();
@@ -14,6 +14,22 @@ test('explicit workflow assignment can start without a model acceptance but cann
   assert.equal(explicitTaskPreflight({ ...task, assignee: { type: 'agent', id: 'other' } }, plan, true), undefined);
   const blocked = { ...plan, pendingApprovals: [{ toolId: 'write', toolKey: 'file_writer', approvalId: 'approval', reasons: ['HUMAN_APPROVAL_REQUIRED'] }] };
   assert.equal(explicitTaskPreflight(task, blocked, true), undefined);
+});
+
+test('explicit preflight exposes stable reasons without changing the legacy decision helper', () => {
+  const plan = makeInvocationPlan({
+    pendingApprovals: [{ toolId: 'write', toolKey: 'file_writer', approvalId: 'approval', reasons: ['HUMAN_APPROVAL_REQUIRED'] }]
+  });
+  const task = { id: 'task', sessionId: plan.sessionId, workflowNodeRunId: 'node-run', title: 'Implement',
+    description: '', acceptanceCriteria: [], dependsOnTaskIds: [],
+    assignee: { type: 'agent', id: 'other' }, status: 'assigned', createdAt: 'now', updatedAt: 'now' } satisfies AgentTask;
+  const result = evaluateExplicitTaskPreflight(task, plan, false);
+  assert.deepEqual(result.reasonCodes, [
+    'ASSIGNEE_MISMATCH', 'TASK_DESCRIPTION_MISSING', 'ACCEPTANCE_CRITERIA_MISSING',
+    'DEPENDENCIES_NOT_READY', 'PENDING_APPROVAL'
+  ]);
+  assert.equal(result.decision, undefined);
+  assert.equal(explicitTaskPreflight(task, plan, false), undefined);
 });
 
 test('acceptance fingerprint ignores task activity but invalidates on permission, agent, evidence and task changes', () => {

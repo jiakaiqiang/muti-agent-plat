@@ -9,6 +9,21 @@ export type AcceptanceRequirementVersion = {
   contentHash?: string;
 };
 
+export type ExplicitTaskPreflightReason =
+  | 'WORKFLOW_NODE_MISSING'
+  | 'ASSIGNEE_NOT_AGENT'
+  | 'ASSIGNEE_MISMATCH'
+  | 'TASK_DESCRIPTION_MISSING'
+  | 'ACCEPTANCE_CRITERIA_MISSING'
+  | 'DEPENDENCIES_NOT_READY'
+  | 'PENDING_APPROVAL'
+  | 'TOOL_AUTHORITY_BLOCKED';
+
+export type ExplicitTaskPreflightResult = {
+  decision?: TaskAcceptanceDecisionOutput;
+  reasonCodes: ExplicitTaskPreflightReason[];
+};
+
 export function acceptanceFingerprint(
   task: AgentTask,
   plan: InvocationPlan,
@@ -31,12 +46,29 @@ export function acceptanceFingerprint(
   })).digest('hex');
 }
 
-export function explicitTaskPreflight(task: AgentTask, plan: InvocationPlan, dependenciesReady: boolean): TaskAcceptanceDecisionOutput | undefined {
-  if (!task.workflowNodeRunId || task.assignee?.type !== 'agent' || task.assignee.id !== plan.agent.agentId ||
-    !task.description.trim() || !task.acceptanceCriteria.length || !dependenciesReady ||
-    plan.pendingApprovals?.length || plan.toolCatalog.decisions.some(item => item.status === 'blocked' &&
-      item.reasons.some(reason => !['PHASE_BLOCKED', 'INVOCATION_POLICY_BLOCKED'].includes(reason)))) return;
-  return { kind: 'task_acceptance_decision', schemaVersion: '1.0', status: 'accepted',
+export function evaluateExplicitTaskPreflight(
+  task: AgentTask,
+  plan: InvocationPlan,
+  dependenciesReady: boolean
+): ExplicitTaskPreflightResult {
+  const reasonCodes: ExplicitTaskPreflightReason[] = [];
+  if (!task.workflowNodeRunId) reasonCodes.push('WORKFLOW_NODE_MISSING');
+  if (task.assignee?.type !== 'agent') reasonCodes.push('ASSIGNEE_NOT_AGENT');
+  else if (task.assignee.id !== plan.agent.agentId) reasonCodes.push('ASSIGNEE_MISMATCH');
+  if (!task.description.trim()) reasonCodes.push('TASK_DESCRIPTION_MISSING');
+  if (!task.acceptanceCriteria.length) reasonCodes.push('ACCEPTANCE_CRITERIA_MISSING');
+  if (!dependenciesReady) reasonCodes.push('DEPENDENCIES_NOT_READY');
+  if (plan.pendingApprovals?.length) reasonCodes.push('PENDING_APPROVAL');
+  if (plan.toolCatalog.decisions.some(item => item.status === 'blocked' &&
+    item.reasons.some(reason => !['PHASE_BLOCKED', 'INVOCATION_POLICY_BLOCKED'].includes(reason)))) {
+    reasonCodes.push('TOOL_AUTHORITY_BLOCKED');
+  }
+  if (reasonCodes.length > 0) return { reasonCodes };
+  return { reasonCodes: [], decision: { kind: 'task_acceptance_decision', schemaVersion: '1.0', status: 'accepted',
     reason: '已确认工作流指派、任务范围、依赖与执行权限，可以开始执行。', missingContext: [],
-    requestedContext: null, handoffSuggestion: null, confidence: null, alternativeAgentKeys: [], alternativeAgentIds: [], agentMessages: [] };
+    requestedContext: null, handoffSuggestion: null, confidence: null, alternativeAgentKeys: [], alternativeAgentIds: [], agentMessages: [] } };
+}
+
+export function explicitTaskPreflight(task: AgentTask, plan: InvocationPlan, dependenciesReady: boolean): TaskAcceptanceDecisionOutput | undefined {
+  return evaluateExplicitTaskPreflight(task, plan, dependenciesReady).decision;
 }

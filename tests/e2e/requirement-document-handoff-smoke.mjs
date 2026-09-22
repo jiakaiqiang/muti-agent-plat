@@ -211,6 +211,16 @@ try {
   if (!payload(mappingCard).definitionHash) {
     throw new Error('The mapping card must lock the workflow version it was evaluated against');
   }
+  if (payload(mappingCard).selectionConfirmationId !== payload(secondSelectionCard).confirmationId) {
+    throw new Error('The mapping card must bind the original workflow selection confirmation');
+  }
+  const testWorkflowNode = needsMembers.nodes?.find((node) => node.id.endsWith('-test'));
+  const testAgentId = testWorkflowNode?.agentId;
+  if (!testAgentId) throw new Error('The published test workflow must expose the quality Agent id');
+  const firstGap = payload(mappingCard).memberGaps?.find((gap) => gap.agentId === testAgentId);
+  if (!firstGap?.nodes?.length || !firstGap.nodes.every((node) => node.impact && node.nodeType === 'agent')) {
+    throw new Error('The mapping card must expose deterministic published-node evidence for the missing Agent');
+  }
   const secondDetail = await api(server.apiBase, `/sessions/${second.sessionId}`);
   if (secondDetail.data.status !== 'WAIT_WORKFLOW_SELECT') {
     throw new Error(`Selection must stay open while mapping is pending, got ${secondDetail.data.status}`);
@@ -219,9 +229,58 @@ try {
     throw new Error('A refused selection must not leave a workflow run behind');
   }
 
+  // WAI reject path: the backend closes only this mapping decision. It does
+  // not add a member, start a run or mutate the published workflow.
+  const declined = await post(server.apiBase, `/sessions/${second.sessionId}/workflow/member-mapping`, {
+    confirmationId: payload(mappingCard).confirmationId,
+    decision: 'decline'
+  });
+  if (declined.data.decision !== 'decline') throw new Error('The mapping decision must be recorded by the backend');
+  const replayedDecline = await post(server.apiBase, `/sessions/${second.sessionId}/workflow/member-mapping`, {
+    confirmationId: payload(mappingCard).confirmationId,
+    decision: 'decline'
+  });
+  if (replayedDecline.data.decision !== 'decline') throw new Error('A repeated decline must be idempotent');
+  const afterDecline = await api(server.apiBase, `/sessions/${second.sessionId}`);
+  if (afterDecline.data.participatingAgentIds.includes(testAgentId) || afterDecline.data.workflowRunId) {
+    throw new Error('Declining a missing Agent must neither add it nor start the workflow');
+  }
+
+  // The user explicitly selects the workflow again. This creates a fresh
+  // mapping decision; approving it must add the member and continue the exact
+  // locked selection without a second client-side workflow-select call.
+  await expectRefusal('missing workflow member after explicit reselect', () =>
+    post(server.apiBase, `/sessions/${second.sessionId}/workflow/select`, {
+      workflowId: needsMembers.id,
+      workflowVersion: needsMembers.version,
+      confirmationId: payload(secondSelectionCard).confirmationId
+    })
+  );
+  const mappingCards = (await listEvents(server.apiBase, second.sessionId)).filter(
+    (event) => event.type === 'user_confirmation_requested' && payload(event).reason === 'confirm_workflow_member_mapping'
+  );
+  if (mappingCards.length !== 2) throw new Error(`Expected one new card after explicit reselect, got ${mappingCards.length}`);
+  const approved = await post(server.apiBase, `/sessions/${second.sessionId}/workflow/member-mapping`, {
+    confirmationId: payload(mappingCards[1]).confirmationId,
+    decision: 'approve'
+  });
+  const approvedRunId = approved.data.workflowRun?.id;
+  if (!approved.data.started || !approvedRunId) throw new Error('Approval must continue and start the locked workflow');
+  const replayedApproval = await post(server.apiBase, `/sessions/${second.sessionId}/workflow/member-mapping`, {
+    confirmationId: payload(mappingCards[1]).confirmationId,
+    decision: 'approve'
+  });
+  if (replayedApproval.data.workflowRun?.id !== approvedRunId && replayedApproval.data.started !== true) {
+    throw new Error('A repeated approval must resolve to the already-started decision');
+  }
+  const startedEvents = (await listEvents(server.apiBase, second.sessionId)).filter(
+    (event) => event.type === 'workflow_run_started' && payload(event).workflowRunId === approvedRunId
+  );
+  if (startedEvents.length !== 1) throw new Error(`Approval must start at most once, got ${startedEvents.length} events`);
+
   console.log(
     `requirement document handoff ok: A published doc rev ${document.documentRevision} -> confirmed -> one run ${runId}; ` +
-      'B refused a stale binding, a switched workflow and a missing member'
+      `B rejected then explicitly reselected and approved missing members -> one run ${approvedRunId}`
   );
 } finally {
   await stopSmokeServer(server);

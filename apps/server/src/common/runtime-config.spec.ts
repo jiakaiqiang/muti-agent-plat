@@ -8,7 +8,8 @@ import {
   optionalRuntimeTimeoutMs,
   positiveRuntimeTimeoutMs,
   projectPolicyRuntimeType,
-  runtimeStreamingMode
+  runtimeStreamingMode,
+  workItemBudgetEnforcementEnabled
 } from './runtime-config.js';
 
 function withNamedEnv(name: string, value: string | undefined, fn: () => void) {
@@ -61,6 +62,18 @@ test('projectPolicyRuntimeType is optional and validates RuntimeType', () => {
   withNamedEnv('PROJECT_POLICY_RUNTIME_TYPE', undefined, () => assert.equal(projectPolicyRuntimeType(), undefined));
   withNamedEnv('PROJECT_POLICY_RUNTIME_TYPE', 'claude_code', () => assert.equal(projectPolicyRuntimeType(), 'claude_code'));
   withNamedEnv('PROJECT_POLICY_RUNTIME_TYPE', 'invalid', () => assert.equal(projectPolicyRuntimeType(), undefined));
+});
+
+test('WorkItem cumulative token budget enforcement is opt-in', () => {
+  withNamedEnv('AGENT_CLUSTER_WORK_ITEM_BUDGET_ENFORCEMENT', undefined, () => {
+    assert.equal(workItemBudgetEnforcementEnabled(), false);
+  });
+  withNamedEnv('AGENT_CLUSTER_WORK_ITEM_BUDGET_ENFORCEMENT', 'true', () => {
+    assert.equal(workItemBudgetEnforcementEnabled(), true);
+  });
+  withNamedEnv('AGENT_CLUSTER_WORK_ITEM_BUDGET_ENFORCEMENT', 'false', () => {
+    assert.equal(workItemBudgetEnforcementEnabled(), false);
+  });
 });
 
 test('llmInputSafetyMarginRatio provides a safe default', () => {

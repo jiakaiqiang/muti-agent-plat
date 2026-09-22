@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, reactive, watch } from 'vue'
 import ChatScrollArea from './ChatScrollArea.vue'
+import { apiGetText } from '@/api/client'
 import { useAgentStore } from '@/stores/agent'
 import { actorAgentId } from '@/composables/useActor'
 import type {
@@ -39,6 +40,49 @@ const emit = defineEmits<{
 
 const agentStore = useAgentStore()
 const timeline = computed(() => collapseDuplicateFailureMessages(props.messages))
+type DiscussionDocumentState = { status: 'loading' | 'loaded' | 'failed'; content?: string; error?: string }
+const discussionDocuments = reactive<Record<string, DiscussionDocumentState>>({})
+let discussionDocumentGeneration = 0
+let discussionDocumentSessionId: string | undefined
+
+function discussionDocumentPayload(message: ChatMessage) {
+  return message.messageType === 'discussion_document'
+    ? message.payload as { title?: string; revision?: number; relativePath?: string; contentUrl?: string; contentHash?: string; readStatus?: string; readErrorCode?: string } | undefined
+    : undefined
+}
+
+async function sha256Hex(content: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(content))
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+function loadDiscussionDocument(message: ChatMessage, generation: number) {
+  const payload = discussionDocumentPayload(message)
+  const contentUrl = payload?.contentUrl
+  if (!contentUrl || discussionDocuments[message.id]?.status === 'loaded' || discussionDocuments[message.id]?.status === 'loading') return
+  discussionDocuments[message.id] = { status: 'loading' }
+  apiGetText(contentUrl)
+    .then(async (content) => {
+      if (payload?.contentHash && await sha256Hex(content) !== payload.contentHash) {
+        throw new Error('方案文档内容校验失败，请刷新后重试。')
+      }
+      if (generation === discussionDocumentGeneration) discussionDocuments[message.id] = { status: 'loaded', content }
+    })
+    .catch((error) => {
+      if (generation === discussionDocumentGeneration) discussionDocuments[message.id] = { status: 'failed', error: error instanceof Error ? error.message : '文档加载失败' }
+    })
+}
+
+watch(timeline, (messages) => {
+  const sessionId = props.sessionId ?? messages[0]?.sessionId
+  if (sessionId !== discussionDocumentSessionId) {
+    discussionDocumentSessionId = sessionId
+    discussionDocumentGeneration += 1
+    for (const key of Object.keys(discussionDocuments)) delete discussionDocuments[key]
+  }
+  const generation = discussionDocumentGeneration
+  messages.filter((message) => message.messageType === 'discussion_document').forEach((message) => loadDiscussionDocument(message, generation))
+}, { immediate: true })
 
 function collapseDuplicateFailureMessages(messages: ChatMessage[]) {
   const seenFailureKeys = new Set<string>()
@@ -128,6 +172,14 @@ function confirmationFromMessage(message: ChatMessage): ConfirmationCardState | 
     relatedArtifactId: payload.relatedArtifactId as string | undefined,
     workflowId: payload.workflowId as string | undefined,
     workflowName: payload.workflowName as string | undefined,
+    workflowVersion: payload.workflowVersion as number | undefined,
+    definitionHash: payload.definitionHash as string | undefined,
+    selectionConfirmationId: payload.selectionConfirmationId as string | undefined,
+    memberGaps: payload.memberGaps,
+    addableAgentIds: payload.addableAgentIds,
+    discussionId: payload.discussionId as string | undefined,
+    targetAgentId: payload.targetAgentId as string | undefined,
+    targetAgentKey: payload.targetAgentKey as string | undefined,
     workflowRunId: payload.workflowRunId as string | undefined,
     workflowNodeId: payload.workflowNodeId as string | undefined,
     workflowNodeRunId: payload.workflowNodeRunId as string | undefined,
@@ -753,7 +805,26 @@ function yesNo(value?: boolean) {
             capabilityApprovalFromMessage(message)!.pendingApprovals.map((approval) => approval.toolId),
             message.senderAgentId
           )"
-        />
+          />
+
+        <section v-else-if="message.messageType === 'discussion_document'" class="structured-block discussion-document-block">
+          <div class="structured-block__heading">
+            <h3>{{ discussionDocumentPayload(message)?.title ?? '群聊方案文档' }}</h3>
+            <span class="status-pill" :class="discussionDocuments[message.id]?.status === 'failed' ? 'failed' : discussionDocuments[message.id]?.status === 'loaded' ? 'completed' : 'running'">
+              {{ discussionDocuments[message.id]?.status === 'failed' ? '加载失败' : discussionDocuments[message.id]?.status === 'loaded' ? '已加载' : '加载中' }}
+            </span>
+          </div>
+          <dl class="discussion-document-meta">
+            <div><dt>版本</dt><dd>v{{ discussionDocumentPayload(message)?.revision ?? '-' }}</dd></div>
+            <div><dt>路径</dt><dd><code>{{ discussionDocumentPayload(message)?.relativePath ?? '-' }}</code></dd></div>
+            <div><dt>地址</dt><dd><code>{{ discussionDocumentPayload(message)?.contentUrl ?? '-' }}</code></dd></div>
+            <div><dt>哈希</dt><dd><code>{{ discussionDocumentPayload(message)?.contentHash ?? '-' }}</code></dd></div>
+            <div><dt>主 Agent</dt><dd>{{ discussionDocumentPayload(message)?.readStatus === 'completed' ? '已读取' : discussionDocumentPayload(message)?.readStatus === 'failed' ? `读取失败：${discussionDocumentPayload(message)?.readErrorCode ?? '未知错误'}` : '正在读取' }}</dd></div>
+          </dl>
+          <p v-if="discussionDocuments[message.id]?.status === 'failed'" class="error-text">{{ discussionDocuments[message.id]?.error }}</p>
+          <pre v-else-if="discussionDocuments[message.id]?.status === 'loaded'" class="discussion-document-content">{{ discussionDocuments[message.id]?.content }}</pre>
+          <p v-else class="muted-text">正在加载方案 Markdown...</p>
+        </section>
 
         <template v-else>
           <div v-if="discussionRound(message)" class="discussion-message-meta">

@@ -20,6 +20,7 @@
 - `user-file-revision-candidate-iteration-development-design-v2.md`：文件修订候选版本循环的目标开发设计；候选只在统一产物编辑器展示和修改，下一轮内部比较上一候选与当前用户稿，由默认 Receiver 生成唯一候选，最终确认后才写回 Workspace。
 - `workflow-management-and-runtime-system-design-v1.md`：工作流 Catalog、低代码创建器、三类节点、独立 Runtime、版本快照、幂等恢复与迁移设计。
 - `ui-style-guide-v1.md`：前端界面风格规范。
+- `group-chat-attachment-skill-agent-t01-contracts-plan-v1.md` ～ `group-chat-attachment-skill-agent-t14-acceptance-plan-v1.md`：群聊附件、Skill、Agent 协同需求的 14 个 SDD 实施计划。
 
 建议阅读顺序：
 

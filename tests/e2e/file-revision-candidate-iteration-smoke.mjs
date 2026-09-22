@@ -36,7 +36,10 @@ try {
     server.apiBase,
     'Process confirmed edits to docs/result.md.',
     {
-      agentIds: ['coordinator', 'backend', 'architect'],
+      // coordinator is a management-surface receiver and cannot be selected
+      // as a chat participant; the file-revision service resolves it through
+      // the system-agent registry.
+      agentIds: ['backend', 'architect'],
       workingDirectory,
       runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] }
     }

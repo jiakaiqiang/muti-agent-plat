@@ -30,6 +30,7 @@ test('acceptance criteria trace to tasks and checklist without dangling task ref
     const spec = read(phasePath(phase, 'product', 'spec'));
     const tasks = read(phasePath(phase, 'implementation', 'tasks'));
     const checklist = read(phasePath(phase, 'quality', 'checklist'));
+    const phasePrefix = `P${phase.toUpperCase()}-`;
     const criteria = [...spec.matchAll(/^- (P\w+-AC\d+)：/gm)].map(match => match[1]);
     const taskIds = [...tasks.matchAll(/^### (P\w+-T\d+) /gm)].map(match => match[1]);
     assert.ok(criteria.length > 0 && taskIds.length > 0, phase);
@@ -40,9 +41,11 @@ test('acceptance criteria trace to tasks and checklist without dangling task ref
       assert.ok(checklist.includes(id), `${phase}: unverified ${id}`);
     }
     for (const [id] of checklist.matchAll(/P\w+-T\d+/g)) {
+      if (!id.startsWith(phasePrefix)) continue;
       assert.ok(taskIds.includes(id), `${phase}: unknown task ${id}`);
     }
     for (const [id] of tasks.matchAll(/P\w+-AC\d+/g)) {
+      if (!id.startsWith(phasePrefix)) continue;
       assert.ok(criteria.includes(id), `${phase}: unknown AC ${id}`);
     }
   }

@@ -14,6 +14,7 @@ import { OrchestratorService } from './orchestrator.service.js';
 import { ProjectMapService } from './project-map.service.js';
 import { FileRevisionsModule } from '../file-revisions/file-revisions.module.js';
 import { ContextManagementModule } from '../context-management/context-management.module.js';
+import { DiscussionDocumentsModule } from '../discussion-documents/discussion-documents.module.js';
 
 @Module({
   imports: [
@@ -28,7 +29,8 @@ import { ContextManagementModule } from '../context-management/context-managemen
     CapabilitiesModule,
     SkillsModule,
     FileRevisionsModule,
-    ContextManagementModule
+    ContextManagementModule,
+    DiscussionDocumentsModule
   ],
   providers: [ContextRouterService, ProjectMapService, OrchestratorService],
   exports: [ContextRouterService, ProjectMapService, OrchestratorService]

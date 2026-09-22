@@ -90,6 +90,14 @@ function actionStyle(action: PostReviewAction) {
   if (action.action === 'cancel') return 'danger'
   return 'default'
 }
+
+function gapReason(reason: string) {
+  return ({ not_participating: '尚未加入当前会话', disabled: 'Agent 已禁用', unknown: 'Agent 不存在' } as Record<string, string>)[reason] ?? reason
+}
+
+function nodeTypeLabel(type: string) {
+  return type === 'robot_approval' ? '机器人质量审核' : 'Agent 执行'
+}
 </script>
 
 <template>
@@ -101,6 +109,23 @@ function actionStyle(action: PostReviewAction) {
       <p>{{ availableWorkflows.length }} 个已发布工作流可用</p>
       <div class="confirmation-card__actions"><button class="action-button default" type="button" @click="manageWorkflows">管理工作流</button><button class="action-button primary" type="button" @click="showWorkflowDialog = true">选择工作流</button></div>
       <WorkflowSelectionDialog v-if="showWorkflowDialog" :workflows="availableWorkflows" @select="selectWorkflow" @manage="manageWorkflows" @close="showWorkflowDialog = false" />
+    </div>
+
+    <div v-else-if="confirmation.status === 'pending' && confirmation.reason === 'confirm_workflow_member_mapping'" class="confirmation-card__member-mapping">
+      <p class="confirmation-card__workflow-context">{{ confirmation.workflowName ?? confirmation.workflowId }} · v{{ confirmation.workflowVersion ?? '未知' }}</p>
+      <article v-for="gap in confirmation.memberGaps ?? []" :key="gap.agentId" class="confirmation-card__member-gap">
+        <header><strong>{{ gap.agentName }}</strong><span>{{ gapReason(gap.reason) }}</span></header>
+        <div v-for="node in gap.nodes ?? []" :key="node.nodeId" class="confirmation-card__node-evidence">
+          <div><b>{{ node.nodeName ?? node.nodeId }}</b><span>{{ nodeTypeLabel(node.nodeType) }}</span></div>
+          <p>{{ node.stageDescription || node.reviewPrompt || '流程未提供职责说明' }}</p>
+          <p v-if="node.inputContract?.length">输入：{{ node.inputContract.join('；') }}</p><p v-else-if="node.nodeType === 'agent'">输入：流程未提供</p>
+          <p v-if="node.outputContract?.length">输出：{{ node.outputContract.join('；') }}</p><p v-else-if="node.nodeType === 'agent'">输出：流程未提供</p>
+          <p v-if="node.criteria?.length">审核标准：{{ node.criteria.join('；') }}</p><p v-else-if="node.nodeType === 'robot_approval'">审核标准：流程未提供</p>
+          <p class="confirmation-card__impact">{{ node.impact }}</p>
+        </div>
+      </article>
+      <p v-if="(confirmation.memberGaps ?? []).some(gap => gap.reason !== 'not_participating')" class="confirmation-card__blocking-note">存在不可邀请的 Agent，不能只邀请部分成员后启动。</p>
+      <div class="confirmation-card__actions"><button v-for="option in confirmation.options" :key="option.key" :class="['action-button', option.style ?? 'default']" type="button" :disabled="option.key === 'approve' && (confirmation.memberGaps ?? []).some(gap => gap.reason !== 'not_participating')" @click="emit('resolve', option.key)">{{ option.label }}</button></div>
     </div>
 
     <div v-else-if="confirmation.status === 'pending' && confirmation.actions?.length" class="confirmation-card__structured-actions">

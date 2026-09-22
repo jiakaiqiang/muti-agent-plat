@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, dialog, session, net, Tray, Notification } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, dialog, session, net, Tray, Notification, shell } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import { readFile, mkdir, writeFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -240,6 +240,10 @@ else {
       'desktop:notifications:test': () => {
         if (!notificationsEnabled) throw new Error('请先开启任务完成通知。');
         showDesktopNotification('任务通知测试', '通知已开启。会话任务完成后，将在这里提醒你。');
+      },
+      'desktop:web:workflow-manager': async () => {
+        if (!serverUrl) throw new Error('请先连接 Web 平台。');
+        await shell.openExternal(new URL('/workflows', serverUrl).toString());
       },
       'desktop:runtime:stop': () => exclusive(() => runtime.stop()),
       'desktop:update:check': () => updates.check(),

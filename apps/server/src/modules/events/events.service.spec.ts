@@ -149,3 +149,46 @@ test('file history keeps only a bounded number of cached pages and invalidates t
     await service.onModuleDestroy();
   }
 });
+
+test('redacting a user message keeps an auditable tombstone and removes executable references', async () => {
+  const event: CollaborationEvent = {
+    id: 'user-message-to-delete',
+    sessionId: 'session-1',
+    type: 'user_message',
+    actor: { type: 'user', id: 'local-user' },
+    toAgentIds: ['coordinator'],
+    content: '包含机密附件的原始消息',
+    metadata: {
+      schemaVersion: '0.1',
+      renderAs: 'chat_message',
+      payload: {
+        text: '包含机密附件的原始消息',
+        attachmentRefs: [{ id: 'file-1', name: 'secret.txt' }],
+        skillRef: { key: 'review', revision: 1, label: 'Review' },
+        agentRefs: [{ id: 'agent-1', key: 'reviewer', label: 'Reviewer' }]
+      }
+    },
+    createdAt: '2026-09-22T00:00:00.000Z'
+  };
+  const { service, calls } = makeService([], { 'session-1': [event] });
+  try {
+    const first = await service.redactUserMessage('session-1', event.id, ['file-1']);
+    assert.equal(first?.alreadyDeleted, false);
+    assert.equal(first?.event.content, '消息已删除');
+    const tombstone = service.list('session-1')[0];
+    assert.equal(tombstone.content, '消息已删除');
+    const payload = tombstone.metadata.payload as Record<string, unknown>;
+    assert.equal(payload.deleted, true);
+    assert.equal(typeof payload.deletedAt, 'string');
+    assert.deepEqual(payload.deletedAttachmentIds, ['file-1']);
+    assert.equal('attachmentRefs' in payload, false);
+    assert.equal('skillRef' in payload, false);
+    assert.equal('agentRefs' in payload, false);
+
+    const second = await service.redactUserMessage('session-1', event.id, ['file-1']);
+    assert.equal(second?.alreadyDeleted, true);
+    assert.equal(calls.replaced, 1);
+  } finally {
+    await service.onModuleDestroy();
+  }
+});

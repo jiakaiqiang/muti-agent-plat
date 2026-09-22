@@ -116,6 +116,39 @@ describe('timeline runtime diagnostics boundary', () => {
     })).toBe(false)
   })
 
+  it('folds document read receipts into the published document card', () => {
+    setActivePinia(createPinia())
+    const store = useEventStore()
+    const base = eventWithoutContent()
+    store.appendEvent({
+      ...base,
+      id: 'document-published',
+      type: 'discussion_document_published',
+      content: '方案文档已发布。',
+      metadata: {
+        schemaVersion: '0.1',
+        renderAs: 'discussion_document',
+        payload: { documentId: 'document-1', readStatus: 'reading' }
+      }
+    } as CollaborationEvent)
+    store.appendEvent({
+      ...base,
+      id: 'document-read',
+      type: 'discussion_document_read',
+      content: '主 Agent 已读取当前方案文档。',
+      metadata: {
+        schemaVersion: '0.1',
+        renderAs: 'system_notice',
+        payload: { documentId: 'document-1', status: 'completed' }
+      }
+    } as CollaborationEvent)
+
+    const messages = store.chatMessages('session-1')
+    expect(messages).toHaveLength(1)
+    expect(messages[0]?.messageType).toBe('discussion_document')
+    expect(messages[0]?.payload?.readStatus).toBe('completed')
+  })
+
   it('folds only adjacent legacy receipts for the same invocation and state', () => {
     setActivePinia(createPinia())
     const store = useEventStore()
@@ -208,5 +241,29 @@ describe('intent clarification projection', () => {
       createdAt: '2026-08-07T00:00:01.000Z'
     })
     expect(store.activeConfirmation('session-1')).toBeUndefined()
+  })
+})
+
+describe('workflow member mapping projection', () => {
+  it('preserves the locked selection and published-node evidence across refresh', () => {
+    setActivePinia(createPinia())
+    const store = useEventStore()
+    store.appendEvent({
+      id: 'mapping-card', sessionId: 'session-1', type: 'user_confirmation_requested',
+      content: '需要邀请 Agent。', priority: 'high', toAgentIds: [],
+      metadata: { schemaVersion: '0.1', renderAs: 'confirmation_card', payload: {
+        confirmationId: 'mapping-1', reason: 'confirm_workflow_member_mapping', title: '确认邀请', description: '结构缺口',
+        workflowId: 'wf-1', workflowName: '交付流程', workflowVersion: 2, definitionHash: 'hash-2',
+        selectionConfirmationId: 'select-1', addableAgentIds: ['frontend'], options: [], memberGaps: [{
+          agentId: 'frontend', agentName: '前端工程师', reason: 'not_participating', canInvite: true,
+          nodes: [{ nodeId: 'develop', nodeName: '前端开发', nodeType: 'agent', impact: '该节点无法执行。' }]
+        }]
+      } }, createdAt: '2026-09-20T00:00:00.000Z'
+    } as CollaborationEvent)
+
+    expect(store.activeConfirmation('session-1')).toMatchObject({
+      workflowId: 'wf-1', workflowVersion: 2, definitionHash: 'hash-2', selectionConfirmationId: 'select-1',
+      memberGaps: [{ agentId: 'frontend', nodes: [{ nodeId: 'develop' }] }]
+    })
   })
 })

@@ -12,6 +12,7 @@ import type {
   RuntimeArtifactOutput,
   RuntimeContextRequest,
   RuntimeOutput,
+  RuntimeStreamMetrics,
   RuntimeTokenEstimationBreakdown,
   RuntimeTokenEstimationDiagnostic,
   RuntimeUsage,
@@ -41,6 +42,7 @@ import { MockRuntimeService } from './mock-runtime.service.js';
 import { POST_REVIEW_CONTEXT_ACTION_INSTRUCTION } from './post-review-action-normalizer.js';
 import { declaredCacheCapability } from './runtime-cache-capability.js';
 import { RuntimeModelConfigService, type RuntimeModelConnection } from './runtime-model-config.service.js';
+import { estimateRuntimeUsageCost } from './runtime-pricing.js';
 import {
   runtimeOutputExample,
   runtimeOutputSchema,
@@ -48,7 +50,9 @@ import {
 } from './runtime-output-schema.js';
 import { WorkspaceToolsService } from './workspace-tools.service.js';
 import { ToolInvocationAuditService } from '../tools/tool-invocation-audit.service.js';
+import { AttachmentReaderTool } from '../tools/builtin/attachment-reader.tool.js';
 import { InvocationWorkspaceBindingsService } from './invocation-workspace-bindings.service.js';
+import { DiscussionDocumentsService } from '../discussion-documents/discussion-documents.service.js';
 import {
   abortWithTermination,
   createExecutionTermination,
@@ -133,9 +137,31 @@ function mergeUsageMeasurement(
   return 'actual';
 }
 
+function mergeRuntimeStreamMetrics(
+  left: RuntimeStreamMetrics,
+  right: RuntimeStreamMetrics
+): RuntimeStreamMetrics {
+  const boundaryGapMs = Math.max(0, Date.parse(right.startedAt) - Date.parse(left.lastActivityAt));
+  return {
+    startedAt: left.startedAt,
+    completedAt: right.completedAt,
+    durationMs: Math.max(0, Date.parse(right.completedAt) - Date.parse(left.startedAt)),
+    frameCount: left.frameCount + right.frameCount,
+    ...((left.firstFrameAt ?? right.firstFrameAt)
+      ? { firstFrameAt: left.firstFrameAt ?? right.firstFrameAt }
+      : {}),
+    ...((left.firstFrameLatencyMs ?? right.firstFrameLatencyMs) !== undefined
+      ? { firstFrameLatencyMs: left.firstFrameLatencyMs ?? right.firstFrameLatencyMs }
+      : {}),
+    lastActivityAt: right.lastActivityAt,
+    maxInterFrameGapMs: Math.max(left.maxInterFrameGapMs, right.maxInterFrameGapMs, boundaryGapMs)
+  };
+}
+
 type CompletionResponse = {
   rawBody: unknown;
   body: GenericLlmResponseBody;
+  streamMetrics: RuntimeStreamMetrics;
 };
 
 type RuntimeOutputDiagnostics = {
@@ -180,10 +206,10 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     version: '2.0.0',
     category: 'external' as const,
     provider: 'openai-compatible',
-    capabilityIds: ['cap-file-read', 'cap-code-search'] as const,
+    capabilityIds: ['cap-file-read', 'cap-attachment-read', 'cap-code-search'] as const,
     supportedWorkspaceCapabilities: ['read'] as const,
     supportedWorkspaceProviderKinds: ['server_local'] as const,
-    supportedToolNames: ['read_file', 'search_code'] as const
+    supportedToolNames: ['read_file', 'read_attachment', 'search_code'] as const
   };
   private readonly structuredOutputCapabilities = new Map<string, ActiveStructuredOutputMode>();
 
@@ -192,7 +218,9 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     private readonly modelConfig: RuntimeModelConfigService,
     private readonly workspaceTools: WorkspaceToolsService,
     private readonly workspaceBindings: InvocationWorkspaceBindingsService,
-    @Optional() private readonly toolAudit?: ToolInvocationAuditService
+    @Optional() private readonly toolAudit?: ToolInvocationAuditService,
+    @Optional() private readonly discussionDocuments?: DiscussionDocumentsService,
+    @Optional() private readonly attachmentReader?: AttachmentReaderTool
   ) {}
 
   maxStructuredOutputTokens(input: { modelId?: string }) {
@@ -430,7 +458,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           controller.signal,
           'LLM request'
         );
-        let usage = this.toUsage(completion.body.usage, selectedModel);
+        let streamMetrics = completion.streamMetrics;
+        let usage = this.toUsage(completion.body.usage, selectedConnection);
         let evaluated = this.evaluateRuntimeOutput(completion.body, input.expectedOutput.kind);
         let repairAttempts = 0;
 
@@ -443,7 +472,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
             controller.signal,
             `LLM schema repair ${repairAttempts}`
           );
-          usage = this.mergeUsage(usage, this.toUsage(completion.body.usage, selectedModel));
+          streamMetrics = mergeRuntimeStreamMetrics(streamMetrics, completion.streamMetrics);
+          usage = this.mergeUsage(usage, this.toUsage(completion.body.usage, selectedConnection));
           evaluated = this.evaluateRuntimeOutput(completion.body, input.expectedOutput.kind);
         }
 
@@ -494,7 +524,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           ],
           artifacts: output.kind === 'task_execution_result' ? output.changedArtifacts : [],
           systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
-          usage
+          usage,
+          streamMetrics
         };
       } catch (error) {
         const isAbort = error instanceof Error && (error.name === 'AbortError' || Boolean(signal?.aborted));
@@ -553,6 +584,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
 
     for (;;) {
       const requestBody = this.completionRequestBody(input, connection, messages, activeMode);
+      const requestStartedAt = nowIso();
+      const requestStartedMs = Date.now();
       const response = await fetch(this.chatCompletionsUrl(connection.baseUrl), {
         method: 'POST',
         signal,
@@ -585,13 +618,14 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       if (connection.kind === 'remote' && configuredMode === 'auto' && activeMode) {
         this.structuredOutputCapabilities.set(this.structuredOutputCapabilityKey(connection), activeMode);
       }
-      const rawBody =
-        requestBody.stream === true && this.isEventStreamResponse(response)
-          ? await this.parseStreamingResponse(response, context)
-          : await this.parseJsonResponse(response, context);
+      const parsed = requestBody.stream === true && this.isEventStreamResponse(response)
+        ? await this.parseStreamingResponse(response, context, requestStartedAt, requestStartedMs)
+        : await this.parseBufferedResponse(response, context, requestStartedAt, requestStartedMs);
+      const rawBody = parsed.body;
       return {
         rawBody,
-        body: this.asResponseBody(rawBody)
+        body: this.asResponseBody(rawBody),
+        streamMetrics: parsed.streamMetrics
       };
     }
   }
@@ -608,6 +642,11 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       temperature: 0.2,
       messages
     };
+    if (requestBody.stream === true) {
+      // OpenAI-compatible gateways normally omit usage from SSE unless the
+      // client explicitly asks for the terminal usage frame.
+      requestBody.stream_options = { include_usage: true };
+    }
     if (connection.kind === 'remote' && structuredOutputMode) {
       requestBody.max_tokens = Math.min(
         input.budget.maxOutputTokens ?? llmRemoteMaxOutputTokens(),
@@ -884,6 +923,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         temperature: 0.2,
         messages
       };
+      if (requestBody.stream === true) requestBody.stream_options = { include_usage: true };
 
       if (selectedConnection.kind === 'remote') {
         requestBody.max_tokens = Math.min(
@@ -958,13 +998,13 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
 
           const rawBody =
             requestBody.stream === true && this.isEventStreamResponse(response)
-              ? await this.parseStreamingResponse(response, 'Tool-loop LLM request')
+              ? (await this.parseStreamingResponse(response, 'Tool-loop LLM request')).body
               : await this.parseJsonResponse(response, 'Tool-loop LLM request');
           const body = this.asResponseBody(rawBody);
           rawResponse = this.extractTextFromBody(body);
           // Provider-reported usage is the only measurement the estimate can be
           // checked against, so accumulate it instead of discarding it.
-          const roundUsage = this.toUsage(body.usage, selectedModel);
+          const roundUsage = this.toUsage(body.usage, selectedConnection);
           actualInputTokens += roundUsage.inputTokens;
           loopUsage = loopUsage ? this.mergeUsage(loopUsage, roundUsage) : roundUsage;
           break;
@@ -1130,6 +1170,18 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
             startedAt: toolStartedAt,
             completedAt: nowIso()
           });
+          const requiredDocument = input.contextEnvelope.L1.requiredDocument;
+          const requestedPath = (call.input as { path?: string })?.path;
+          if (requiredDocument && requestedPath === requiredDocument.relativePath && result.ok) {
+            await this.discussionDocuments?.recordAgentRead({
+              sessionId: input.sessionId,
+              documentId: requiredDocument.documentId,
+              agentId: input.agent.agentId,
+              invocationId: input.invocationId,
+              relativePath: requestedPath,
+              reportedTruncated: result.truncated
+            });
+          }
           const truncated = result.truncated ? 'true' : 'false';
           const error = result.ok ? '' : ` error="${result.errorCode}"`;
           toolResults.push(
@@ -1144,6 +1196,46 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           }));
           totalToolOutputChars += output.length;
           toolCallHistory.push({ name: call.name, input: call.input, output, error: result.ok ? undefined : result.errorCode });
+        } else if (call.name === 'read_attachment') {
+          const toolStartedAt = nowIso();
+          const result = this.attachmentReader
+            ? await this.attachmentReader.execute(call.input, {
+                workingDirectory: rootPath,
+                sessionId: input.sessionId,
+                agentId: input.agent.agentId,
+                ...(input.taskId ? { taskId: input.taskId } : {})
+              })
+            : { success: false, output: null, error: 'ATTACHMENT_TOOL_UNAVAILABLE' };
+          const output = result.success ? JSON.stringify(result.output) : `ERROR: ${result.error ?? 'attachment read failed'}`;
+          const resultPayload = result.output as { truncated?: boolean } | null;
+          const truncated = result.success && resultPayload?.truncated === true;
+          await this.toolAudit?.record({
+            externalId: `tool:${input.invocationId}:${totalToolCalls}`,
+            runtimeInvocationExternalId: input.invocationId,
+            toolName: call.name,
+            providerCallId: `${input.invocationId}:${totalToolCalls}`,
+            provider: 'generic_llm',
+            arguments: call.input,
+            result,
+            success: result.success,
+            errorCode: result.success ? undefined : result.error,
+            errorMessage: result.success ? undefined : result.error,
+            agentExternalId: input.agent.agentId,
+            startedAt: toolStartedAt,
+            completedAt: nowIso()
+          });
+          const attachmentId = (call.input as { attachmentId?: string })?.attachmentId ?? 'unknown';
+          toolResults.push(
+            `<<TOOL_RESULT name="read_attachment" attachmentId="${attachmentId}" truncated="${truncated}"${result.success ? '' : ` error="${result.error ?? 'READ_FAILED'}"`}>>\n${output}\n<<END_TOOL_RESULT>>`
+          );
+          toolResultReferences.push(this.toolResultReference({
+            name: 'read_attachment',
+            content: output,
+            truncated,
+            ...(result.success ? {} : { error: result.error ?? 'READ_FAILED' })
+          }));
+          totalToolOutputChars += output.length;
+          toolCallHistory.push({ name: call.name, input: call.input, output, error: result.success ? undefined : result.error });
         } else {
           const content = `Unknown tool: ${call.name}`;
           toolResults.push(
@@ -1653,7 +1745,12 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     return `${baseUrl}/chat/completions`;
   }
 
-  private async parseStreamingResponse(response: Response, context: string): Promise<unknown> {
+  private async parseStreamingResponse(
+    response: Response,
+    context: string,
+    startedAt = nowIso(),
+    startedMs = Date.now()
+  ): Promise<{ body: GenericLlmResponseBody; streamMetrics: RuntimeStreamMetrics }> {
     if (!response.body) {
       throw Object.assign(new Error(`${context} returned an empty streaming response body.`), { retryable: true });
     }
@@ -1664,6 +1761,36 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     let content = '';
     let usage: GenericLlmUsage | undefined;
     let model: string | undefined;
+    let frameCount = 0;
+    let firstFrameAt: string | undefined;
+    let firstFrameLatencyMs: number | undefined;
+    let lastFrameMs = startedMs;
+    let maxInterFrameGapMs = 0;
+
+    const acceptChunk = (chunk: GenericLlmStreamingChunk) => {
+      const observedMs = Date.now();
+      frameCount += 1;
+      maxInterFrameGapMs = Math.max(maxInterFrameGapMs, observedMs - lastFrameMs);
+      lastFrameMs = observedMs;
+      const delta = chunk.choices?.[0]?.delta;
+      const message = chunk.choices?.[0]?.message;
+      const text = chunk.choices?.[0]?.text;
+      const outputText = chunk.output_text;
+      const responseText = chunk.response;
+      const frameContent =
+        (typeof delta?.content === 'string' ? delta.content : '') ||
+        (typeof message?.content === 'string' ? message.content : '') ||
+        (typeof text === 'string' ? text : '') ||
+        (typeof outputText === 'string' ? outputText : '') ||
+        (typeof responseText === 'string' ? responseText : '');
+      if (frameContent && firstFrameAt === undefined) {
+        firstFrameAt = new Date(observedMs).toISOString();
+        firstFrameLatencyMs = Math.max(0, observedMs - startedMs);
+      }
+      content += frameContent;
+      usage = chunk.usage ?? usage;
+      model = chunk.model ?? model;
+    };
 
     for (;;) {
       const { done, value } = await reader.read();
@@ -1688,19 +1815,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         } catch {
           continue;
         }
-        const delta = chunk.choices?.[0]?.delta;
-        const message = chunk.choices?.[0]?.message;
-        const text = chunk.choices?.[0]?.text;
-        const outputText = chunk.output_text;
-        const responseText = chunk.response;
-        content +=
-          (typeof delta?.content === 'string' ? delta.content : '') ||
-          (typeof message?.content === 'string' ? message.content : '') ||
-          (typeof text === 'string' ? text : '') ||
-          (typeof outputText === 'string' ? outputText : '') ||
-          (typeof responseText === 'string' ? responseText : '');
-        usage = chunk.usage ?? usage;
-        model = chunk.model ?? model;
+        acceptChunk(chunk);
       }
     }
 
@@ -1719,10 +1834,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       }
       try {
         const chunk = JSON.parse(data) as GenericLlmStreamingChunk;
-        const delta = chunk.choices?.[0]?.delta;
-        content += typeof delta?.content === 'string' ? delta.content : '';
-        usage = chunk.usage ?? usage;
-        model = chunk.model ?? model;
+        acceptChunk(chunk);
       } catch {
         // Ignore malformed trailing stream lines. The accumulated content is still useful.
       }
@@ -1732,7 +1844,9 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       throw Object.assign(new Error(`${context} returned an empty streaming response.`), { retryable: true });
     }
 
+    const completedAt = nowIso();
     return {
+      body: {
       choices: [
         {
           message: { content },
@@ -1741,7 +1855,42 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       ],
       usage,
       model
-    } satisfies GenericLlmResponseBody;
+      },
+      streamMetrics: {
+        startedAt,
+        completedAt,
+        durationMs: Math.max(0, Date.parse(completedAt) - startedMs),
+        frameCount,
+        ...(firstFrameAt ? { firstFrameAt } : {}),
+        ...(firstFrameLatencyMs !== undefined ? { firstFrameLatencyMs } : {}),
+        lastActivityAt: new Date(lastFrameMs).toISOString(),
+        maxInterFrameGapMs
+      }
+    };
+  }
+
+  private async parseBufferedResponse(
+    response: Response,
+    context: string,
+    startedAt: string,
+    startedMs: number
+  ): Promise<{ body: unknown; streamMetrics: RuntimeStreamMetrics }> {
+    const body = await this.parseJsonResponse(response, context);
+    const completedAt = nowIso();
+    const durationMs = Math.max(0, Date.parse(completedAt) - startedMs);
+    return {
+      body,
+      streamMetrics: {
+        startedAt,
+        completedAt,
+        durationMs,
+        frameCount: 1,
+        firstFrameAt: completedAt,
+        firstFrameLatencyMs: durationMs,
+        lastActivityAt: completedAt,
+        maxInterFrameGapMs: 0
+      }
+    };
   }
 
   private async parseJsonResponse(response: Response, context: string): Promise<unknown> {
@@ -1916,6 +2065,10 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     const cacheRead = sumOptionalTokens(left.cacheReadInputTokens, right.cacheReadInputTokens);
     const cacheWrite = sumOptionalTokens(left.cacheWriteInputTokens, right.cacheWriteInputTokens);
     const logicalInput = sumOptionalTokens(left.logicalInputTokens, right.logicalInputTokens);
+    const mergeableCost =
+      left.cost !== undefined && right.cost !== undefined &&
+      left.priceVersion !== undefined && left.priceVersion === right.priceVersion &&
+      left.costBasis !== undefined && left.costBasis === right.costBasis;
     return {
       inputTokens: left.inputTokens + right.inputTokens,
       outputTokens: left.outputTokens + right.outputTokens,
@@ -1926,11 +2079,15 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       ...(cacheRead === undefined ? {} : { cacheReadInputTokens: cacheRead }),
       ...(cacheWrite === undefined ? {} : { cacheWriteInputTokens: cacheWrite }),
       ...(logicalInput === undefined ? {} : { logicalInputTokens: logicalInput }),
+      ...(mergeableCost
+        ? { cost: left.cost! + right.cost!, priceVersion: left.priceVersion, costBasis: left.costBasis }
+        : {}),
       model: right.model || left.model
     };
   }
 
-  private toUsage(usage: GenericLlmUsage | undefined, model: string): RuntimeUsage {
+  private toUsage(usage: GenericLlmUsage | undefined, modelOrConnection: string | RuntimeModelConnection): RuntimeUsage {
+    const model = typeof modelOrConnection === 'string' ? modelOrConnection : modelOrConnection.model;
     const reportedInput = usage?.prompt_tokens ?? usage?.input_tokens;
     // OpenAI-compatible reports cached_tokens as a subset of prompt_tokens;
     // Anthropic-compatible reports cache reads alongside a smaller input_tokens.
@@ -1946,7 +2103,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           ? reportedInput
           : reportedInput + (anthropicCacheRead ?? 0);
 
-    return {
+    const result: RuntimeUsage = {
       inputTokens: reportedInput ?? 0,
       outputTokens: usage?.completion_tokens ?? usage?.output_tokens ?? 0,
       totalTokens: usage?.total_tokens ?? 0,
@@ -1957,6 +2114,12 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       ...(cacheWrite === undefined ? {} : { cacheWriteInputTokens: cacheWrite }),
       ...(logicalInputTokens === undefined ? {} : { logicalInputTokens }),
       model
+    };
+    return {
+      ...result,
+      ...(typeof modelOrConnection === 'string'
+        ? {}
+        : estimateRuntimeUsageCost(modelOrConnection.provider ?? 'openai-compatible', result, modelOrConnection.pricing))
     };
   }
 }

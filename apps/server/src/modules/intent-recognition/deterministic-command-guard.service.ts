@@ -16,6 +16,14 @@ export type ExactCommandMatch = {
   reasonCode: ExactCommandReasonCode;
 };
 
+export type CompoundExecutionControlMatch = {
+  command: 'pause';
+  /** The non-control part must continue through the normal execution-change path. */
+  remainder: string;
+  normalizedText: string;
+  reasonCode: 'COMPOUND_PAUSE_BEFORE_FOLLOW_UP';
+};
+
 export type WorkflowAgentSkipCommandMatch = {
   normalizedText: string;
   reasonCode: 'SKIP_CURRENT_WORKFLOW_AGENT_AND_CONTINUE';
@@ -97,6 +105,32 @@ export function matchExactUserCommand(content: string): ExactCommandMatch | unde
   return matched
     ? { command: matched.command, normalizedText, reasonCode: matched.reasonCode }
     : undefined;
+}
+
+/**
+ * Matches a deterministic stop prefix followed by additional user content.
+ * Exact-command matching intentionally stays strict for ordinary messages, but
+ * execution control must win when a user says "先停下来，另外...". The suffix
+ * is returned separately so it is not swallowed by the stop operation.
+ */
+export function matchCompoundExecutionControl(content: string): CompoundExecutionControlMatch | undefined {
+  const normalizedText = content
+    .normalize('NFKC')
+    .trim()
+    .replace(/[。！？!?；;：:]+$/u, '')
+    .trim();
+  if (!normalizedText || normalizedText.length > 500) return undefined;
+  const matched = normalizedText.match(
+    /^(?:请)?(?:先\s*)?(?:暂停|停下来|停一下|停止|pause|stop)\s*(?:[，,、；;：:]\s*|\s+)(.+)$/iu
+  );
+  const remainder = matched?.[1]?.trim();
+  if (!remainder) return undefined;
+  return {
+    command: 'pause',
+    remainder,
+    normalizedText: normalizedText.toLowerCase(),
+    reasonCode: 'COMPOUND_PAUSE_BEFORE_FOLLOW_UP'
+  };
 }
 
 /**

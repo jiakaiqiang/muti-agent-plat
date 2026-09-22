@@ -148,6 +148,53 @@ test('an expert failure marks only its delegation failed and the round still com
   }
 });
 
+test('an evidence gap blocks only its delegation and produces one coordinator clarification', async () => {
+  const context = await fixture();
+  try {
+    const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+    const service = makeService([], recorder, undefined, undefined, undefined, context) as unknown as PlannedService;
+    service.createContextAssembly = () => ({ budget: {}, systemRules: [] } as unknown as ContextAssembly);
+    service.runRuntime = async () => completedRun('plan-1', discussionPlan([{ targetAgentKey: 'backend' }]));
+    service.runDiscussionRuntime = async (_session, _expert, invocationId) => ({
+      ...completedRun(invocationId, createAgentMessageOutput({ messageKind: 'risk', content: 'missing evidence' })),
+      status: 'failed',
+      error: {
+        code: 'CONTEXT_INSUFFICIENT',
+        message: 'Need the migration contract.',
+        retryable: true
+      }
+    });
+
+    await service.runDiscussion(context.session(), agent('coordinator'));
+
+    const run = new DiscussionStore(context.persistence).list('session-1')[0]!;
+    assert.equal(run.delegations[0]?.status, 'blocked');
+    assert.equal(run.delegations[0]?.failure?.code, 'CONTEXT_INSUFFICIENT');
+    assert.equal(run.status, 'waiting_user');
+
+    const cards = recorder.events.filter((event) => event.metadata.payload?.reason === 'discussion_clarification');
+    assert.equal(cards.length, 1, 'the coordinator owns one clarification for the evidence gap');
+    assert.match(String(cards[0]?.metadata.payload?.description), /backend agent[\s\S]*CONTEXT_INSUFFICIENT/);
+
+    const summary = recorder.events.find(
+      (event) => event.type === 'agent_message' && event.fromAgentId === 'coordinator' && event.metadata.payload?.messageKind === 'summary'
+    );
+    assert.deepEqual(summary?.metadata.payload?.blockedDelegationIds, [run.delegations[0]?.id]);
+    assert.deepEqual(summary?.metadata.payload?.failedDelegationIds, []);
+
+    const expertStatus = recorder.events.find(
+      (event) => event.type === 'agent_status_changed'
+        && event.fromAgentId === 'backend'
+        && event.metadata.payload?.delegationId === run.delegations[0]?.id
+        && event.metadata.payload?.status === 'waiting'
+    );
+    assert.equal(expertStatus?.metadata.payload?.status, 'waiting');
+    assert.match(expertStatus?.content ?? '', /补充证据/);
+  } finally {
+    await context.cleanup();
+  }
+});
+
 test('with the flag off the legacy loop is untouched', async () => {
   const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
   const service = makeService([], recorder) as unknown as PlannedService;

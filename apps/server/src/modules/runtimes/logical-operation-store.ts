@@ -17,9 +17,16 @@ export function operationPolicy(phase: AgentRunPhase) {
   const control = phase === 'user_message_routing' || phase === 'task_acceptance';
   const configured = phaseTimeoutMs(phase);
   const raw = process.env[`PHASE_TIMEOUT_${phase.toUpperCase()}_MS`]?.trim();
+  const finiteConfigured = configured > 0 && configured <= 2_147_483_647 ? configured : undefined;
+  // Acceptance may need to let a local CLI inspect a workspace before it can
+  // return task_acceptance_decision. The old control-phase branch hard-coded
+  // 120s and silently ignored PHASE_TIMEOUT_TASK_ACCEPTANCE_MS, which turned a
+  // slow-but-progressing local call into a workflow failure.
+  const finiteDefault = phase === 'task_acceptance' ? 300_000 : control ? 120_000 : 1_200_000;
+  const invalidOrDisabled = raw !== undefined && raw !== '' && finiteConfigured === undefined;
   return { policyVersion: 'execution-reliability-v1' as const,
-    timeoutMs: control ? 120_000 : configured > 0 && configured <= 2_147_483_647 ? configured : 1_200_000,
-    diagnostics: !control && raw && !(Number(raw) > 0 && Number(raw) <= 2_147_483_647)
+    timeoutMs: finiteConfigured ?? finiteDefault,
+    diagnostics: invalidOrDisabled
       ? ['INVALID_OR_DISABLED_PHASE_TIMEOUT_USING_FINITE_DEFAULT'] : [],
     maxAttempts: control ? 2 : 3 };
 }

@@ -1145,6 +1145,31 @@ export const RELATIONAL_SCHEMA_V16_TABLES: RelationalTableDefinition[] = [
 ];
 export const RELATIONAL_SCHEMA_V16_SQL = renderTables(RELATIONAL_SCHEMA_V16_TABLES);
 
+export const RELATIONAL_SCHEMA_V17_TABLES: RelationalTableDefinition[] = [
+  table('discussion_documents', '保存用户在群聊提交并写入工作区的不可变 Markdown 方案版本；正文位于内容存储和工作区，表内只保存引用、哈希和读取回执。', [
+    column('external_id', 'text primary key', '方案文档版本的稳定外部标识。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '方案文档所属会话。'),
+    column('work_item_external_id', 'text', '可选的需求标识；为空表示会话级方案。'),
+    column('parent_document_external_id', 'text', '上一方案文档版本标识。'),
+    column('document_revision', 'bigint not null check (document_revision > 0)', '会话内单调递增的文档版本号。'),
+    column('idempotency_key', 'text not null unique', '会话、父版本、正文哈希和客户端消息组成的幂等键。'),
+    column('content_hash', 'text not null', '完整 UTF-8 Markdown 正文的 SHA-256。'),
+    column('content_ref', 'text not null', 'LocalContentStore 的不可变正文引用。'),
+    column('relative_path', 'text not null', '当前工作区内的规范化相对路径。'),
+    column('status', 'text not null', '文档状态：published/active/superseded/failed。'),
+    column('source_snapshot', 'jsonb not null', '文档元数据及读取回执完整快照，不含 Markdown 正文。'),
+    column('created_at', 'timestamptz not null', '文档首次保留版本号的时间。'),
+    column('updated_at', 'timestamptz not null', '文档状态或读取回执最后变化时间。')
+  ], [
+    'unique (session_id, document_revision)',
+    'unique (session_id, relative_path)'
+  ], [
+    'create index if not exists discussion_documents_session_idx on agent_cluster.discussion_documents(session_id, document_revision desc)',
+    "create unique index if not exists discussion_documents_active_idx on agent_cluster.discussion_documents(session_id) where status='active'"
+  ])
+];
+export const RELATIONAL_SCHEMA_V17_SQL = renderTables(RELATIONAL_SCHEMA_V17_TABLES);
+
 export function expectedRelationalComments() {
   return [
     SCHEMA_MIGRATIONS_TABLE,
@@ -1161,7 +1186,8 @@ export function expectedRelationalComments() {
     ...RELATIONAL_SCHEMA_V13_TABLES,
     ...RELATIONAL_SCHEMA_V14_TABLES,
     ...RELATIONAL_SCHEMA_V15_TABLES,
-    ...RELATIONAL_SCHEMA_V16_TABLES
+    ...RELATIONAL_SCHEMA_V16_TABLES,
+    ...RELATIONAL_SCHEMA_V17_TABLES
   ].flatMap((definition) => [
     { table: definition.name, column: null, comment: definition.comment },
     ...definition.columns.map((item) => ({ table: definition.name, column: item.name, comment: item.comment }))

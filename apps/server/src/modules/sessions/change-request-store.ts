@@ -50,6 +50,12 @@ export type OpenChangeRequestInput = {
   sourceEventId: string;
   summary: string;
   generation?: number;
+  /**
+   * A single compound user message may close execution admission first and then
+   * persist its non-control suffix. This is allowed only while the lifecycle is
+   * still active; deletion and restore fencing remain enforced.
+   */
+  allowStoppedAdmission?: boolean;
 };
 
 export type RecordAnalysisInput = {
@@ -129,7 +135,12 @@ export class ChangeRequestStore {
         const existing = sessionRequests.find((item) => item.logicalKey === logicalKey);
         if (existing) return { status: 'duplicate', request: structuredClone(existing) };
 
-        const refusal = this.admissionRefusal(draft, input.base.sessionId, input.generation);
+        const refusal = this.admissionRefusal(
+          draft,
+          input.base.sessionId,
+          input.generation,
+          input.allowStoppedAdmission === true
+        );
         if (refusal) return { status: 'rejected', code: refusal };
 
         const request: ChangeRequestRecord = {
@@ -278,11 +289,14 @@ export class ChangeRequestStore {
   private admissionRefusal(
     draft: Record<string, unknown>,
     sessionId: string,
-    generation?: number
+    generation?: number,
+    allowStoppedAdmission = false
   ): string | undefined {
     const lifecycle = ((draft[SESSION_LIFECYCLES_COLLECTION] ?? {}) as SessionLifecyclesBySession)[sessionId];
     if (!lifecycle) return undefined;
-    if (lifecycle.admission === 'closed') return 'SESSION_ADMISSION_CLOSED';
+    if (lifecycle.admission === 'closed' && !(allowStoppedAdmission && lifecycle.state === 'active')) {
+      return 'SESSION_ADMISSION_CLOSED';
+    }
     if (generation !== undefined && lifecycle.generation !== generation) return 'CHANGE_REQUEST_STALE_GENERATION';
     return undefined;
   }

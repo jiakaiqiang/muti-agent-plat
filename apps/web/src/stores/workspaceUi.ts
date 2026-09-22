@@ -5,7 +5,7 @@ import type { RuntimeType } from '@/types/contracts'
 export type WorkspaceKind = 'local_bridge' | 'server_local'
 export type WorkspaceBindingStatus = 'idle' | 'binding' | 'bound' | 'failed'
 export type UiMessageType = 'success' | 'warning' | 'error' | 'info'
-export type SessionListTab = 'all' | 'mine' | 'favorites' | 'deleted'
+export type SessionListTab = 'all' | 'mine' | 'favorites' | 'deleted' | 'archives'
 export type WorkflowStageKey = 'intake' | 'brief' | 'dispatch' | 'execution' | 'review'
 
 export type WorkspaceUiMessage = {

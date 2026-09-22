@@ -1,7 +1,7 @@
 # 阶段 5：执行中补充、新需求与范围变更治理 — Spec v1
 
 > 日期：2026-09-16
-> 状态：设计与实施基线，待实施；现有能力的复用不代表本阶段验收已完成。
+> 状态：需求已实现，自动化验收记录见 Checklist（2026-09-19）；待用户确认。
 > 依赖：阶段 4 通过；使用 2A 意图、2B 决策版本和 3 主 Agent 协作。
 
 [总计划](../roadmap/main-agent-collaboration-roadmap-v1.md) | [spec](../product/main-agent-collaboration-phase-5-spec-v1.md) | [plan](../design/main-agent-collaboration-phase-5-plan-v1.md) | [tasks](../implementation/main-agent-collaboration-phase-5-tasks-v1.md) | [checklist](../quality/main-agent-collaboration-phase-5-checklist-v1.md)
@@ -26,7 +26,7 @@
 - 已有执行期消息与中断/恢复入口，应复用而非新增旁路执行。 [源码/既有文档](../../apps/server/src/modules/sessions/sessions.service.ts)
 - 已有决策版本与需求继承 ID，支持将相关新需求与独立新需求隔离。 [源码/既有文档](../../apps/server/src/modules/context-management/context-management.service.ts)
 
-以上为现状定位，不等于本专项测试结果；实施前复核当前工作树，不覆盖无关改动。
+以上为实施前现状定位；实施结果与自动化验收证据以同阶段 Tasks/Checklist 为准，不覆盖无关改动。
 
 ## 4. 验收条件
 

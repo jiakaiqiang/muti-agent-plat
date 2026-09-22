@@ -42,7 +42,8 @@ function mountSidebar(sessions: SessionListItem[]) {
     props: {
       sessions,
       favoriteSessionIds: [],
-      deletingSessionIds: []
+      deletingSessionIds: [],
+      archiveGroups: []
     },
     global: {
       plugins: [createPinia()],
@@ -76,12 +77,13 @@ describe('SessionSidebar status badges', () => {
     expect(wrapper.get('.session-status-badge').classes()).toContain('status-completed')
   })
 
-  it('emits the selected session id when the delete button is clicked', async () => {
+  it('opens the session actions from the three-dot button', async () => {
     const wrapper = mountSidebar([session('COMPLETED', 1)])
 
-    await wrapper.get('.session-delete-button').trigger('click')
+    await wrapper.get('.session-more-button').trigger('click')
 
-    expect(wrapper.emitted('delete')).toEqual([['session-1']])
+    expect(document.body.textContent).toContain('归档会话')
+    expect(document.body.textContent).toContain('删除会话')
   })
 
   it('shows deleted Sessions only in the deleted tab and emits restore', async () => {
@@ -95,8 +97,24 @@ describe('SessionSidebar status badges', () => {
     expect(wrapper.text()).not.toContain('会话 1')
     expect(wrapper.text()).toContain('会话 2')
     expect(wrapper.get('.session-status-badge').text()).toBe('已删除')
-    await wrapper.get('.session-delete-button').trigger('click')
+    await wrapper.get('.session-more-button').trigger('click')
+    const restoreButton = Array.from(document.body.querySelectorAll('.session-context-menu button')).find((button) => button.textContent?.includes('恢复会话')) as HTMLElement | undefined
+    restoreButton?.click()
     expect(wrapper.emitted('restore')).toEqual([['session-2']])
     expect(wrapper.emitted('select')).toBeUndefined()
+  })
+
+  it('shows archive groups and emits archive restore', async () => {
+    const wrapper = mount(SessionSidebar, {
+      props: {
+        sessions: [], favoriteSessionIds: [], deletingSessionIds: [],
+        archiveGroups: [{ projectKey: 'p1', projectLabel: '项目一', items: [{ id: 'archived-1', title: '历史会话', projectId: 'p1', archivedAt: '2026-09-21T00:00:00.000Z', createdAt: '2026-09-20T00:00:00.000Z', updatedAt: '2026-09-21T00:00:00.000Z' }] }]
+      },
+      global: { plugins: [createPinia()], stubs: { UiIcon: true } }
+    })
+    await wrapper.findAll('.session-tabs button')[4]!.trigger('click')
+    expect(wrapper.text()).toContain('历史会话')
+    await wrapper.get('.session-archive-restore').trigger('click')
+    expect(wrapper.emitted('restoreArchive')).toEqual([['archived-1']])
   })
 })

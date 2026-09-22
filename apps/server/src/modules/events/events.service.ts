@@ -116,6 +116,52 @@ export class EventsService implements OnModuleDestroy {
   }
 
   /**
+   * Redacts a user message in place while keeping an auditable tombstone.
+   *
+   * A message id is referenced by follow-ups, routing snapshots and attachment
+   * records, so physically removing the event would leave dangling references
+   * (and cannot be represented by the relational collection writer).  The
+   * tombstone keeps the stable id, removes user content and executable refs,
+   * and is safe to apply repeatedly.
+   */
+  async redactUserMessage(sessionId: string, eventId: string, attachmentIds: readonly string[] = []) {
+    const events = this.eventsBySession.get(sessionId) ?? [];
+    const index = events.findIndex((event) => event.id === eventId);
+    if (index < 0) return undefined;
+    const current = events[index];
+    if (current.type !== 'user_message') return undefined;
+    const currentPayload = (current.metadata?.payload ?? {}) as Record<string, unknown>;
+    const existingDeletedAt = typeof currentPayload.deletedAt === 'string' ? currentPayload.deletedAt : undefined;
+    if (existingDeletedAt) {
+      return { event: current, deleted: true as const, alreadyDeleted: true as const };
+    }
+
+    const updated = {
+      ...current,
+      content: '消息已删除',
+      metadata: {
+        ...current.metadata,
+        summary: '消息已删除',
+        payload: {
+          deleted: true,
+          deletedAt: new Date().toISOString(),
+          ...(attachmentIds.length ? { deletedAttachmentIds: [...new Set(attachmentIds)] } : {})
+        }
+      }
+    } satisfies typeof current;
+    events[index] = updated;
+    this.invalidatePages(sessionId);
+    try {
+      await this.persistAll();
+    } catch (error) {
+      events[index] = current;
+      this.invalidatePages(sessionId);
+      throw error;
+    }
+    return { event: updated, deleted: true as const, alreadyDeleted: false as const };
+  }
+
+  /**
    * Cursor page over the durable event log so a long Session can be read in
    * bounded slices instead of one full-history load. `limit` is clamped to
    * [1, EVENT_PAGE_MAX] so a client cannot request the whole log through it.

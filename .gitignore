@@ -29,6 +29,7 @@ yarn-error.log*
 .codex-run/
 .playwright-cli/
 output/
+.tmp/
 tmp/
 temp/
 uploads/
@@ -45,6 +46,9 @@ db-export/
 
 # AgentRoom runtime state (sessions/worktrees/probes) — never commit
 .agentroom/
+
+# WorkBuddy tool local memory/state — never commit
+.workbuddy/
 
 # IDE and OS
 .DS_Store

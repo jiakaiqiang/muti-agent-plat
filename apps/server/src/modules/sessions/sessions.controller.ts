@@ -1,5 +1,6 @@
-import { BadRequestException, Body, Controller, Delete, Get, Header, Headers, HttpCode, Param, Post, Put, Query, Res } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Header, Headers, HttpCode, Optional, Param, Post, Put, Query, Res, ServiceUnavailableException } from '@nestjs/common';
 import crypto from 'node:crypto';
+import type { ServerResponse } from 'node:http';
 import { ok } from '../../common/api-response.js';
 import type {
   CaptureFileRevisionBaselineInput,
@@ -12,23 +13,34 @@ import type {
   SaveFileRevisionDraftInput,
   PostReviewAction,
   RuntimePreference,
-  SessionWorkingDirectory
+  SessionWorkingDirectory,
+  CreateDiscussionDocumentInput
 } from '@agent-cluster/shared';
 import { SessionsService } from './sessions.service.js';
+import type { GroupChatMessageDirectives } from '@agent-cluster/shared';
+import { DiscussionDocumentsService } from '../discussion-documents/discussion-documents.service.js';
 
 @Controller()
 export class SessionsController {
-  constructor(private readonly sessions: SessionsService) {}
+  constructor(
+    private readonly sessions: SessionsService,
+    @Optional() private readonly discussionDocuments?: DiscussionDocumentsService
+  ) {}
 
   @Get('sessions')
-  list(@Query('visibility') visibility?: 'active' | 'deleted' | 'all') {
-    if (visibility && !['active', 'deleted', 'all'].includes(visibility)) {
-      throw new BadRequestException('visibility must be active, deleted or all.');
+  list(@Query('visibility') visibility?: 'active' | 'deleted' | 'archived' | 'all') {
+    if (visibility && !['active', 'deleted', 'archived', 'all'].includes(visibility)) {
+      throw new BadRequestException('visibility must be active, deleted, archived or all.');
     }
     return ok({
       items: this.sessions.list(visibility ?? 'active'),
       hasMore: false
     });
+  }
+
+  @Get('sessions/archives')
+  archives() {
+    return ok({ groups: this.sessions.listArchivedGroups() });
   }
 
   @Post('sessions')
@@ -51,6 +63,69 @@ export class SessionsController {
   @Get('sessions/:sessionId')
   detail(@Param('sessionId') sessionId: string) {
     return ok(this.sessions.getIncludingDeleted(sessionId));
+  }
+
+  @Get('sessions/:sessionId/messages/:eventId/historical-context')
+  historicalMessageContext(
+    @Param('sessionId') sessionId: string,
+    @Param('eventId') eventId: string
+  ) {
+    return ok(this.sessions.getHistoricalMessageContext(sessionId, eventId));
+  }
+
+  @Post('sessions/:sessionId/discussion-documents')
+  async createDiscussionDocument(
+    @Param('sessionId') sessionId: string,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Body() body: Omit<CreateDiscussionDocumentInput, 'clientMessageId'> & { clientMessageId?: string }
+  ) {
+    const session = this.sessions.get(sessionId);
+    return ok(await this.requireDiscussionDocuments().create(session, {
+      ...body,
+      clientMessageId: body.clientMessageId?.trim() || idempotencyKey?.trim() || ''
+    }));
+  }
+
+  @Get('sessions/:sessionId/discussion-documents')
+  listDiscussionDocuments(@Param('sessionId') sessionId: string) {
+    this.sessions.getIncludingDeleted(sessionId);
+    return ok({ items: this.requireDiscussionDocuments().list(sessionId), hasMore: false });
+  }
+
+  @Get('sessions/:sessionId/discussion-documents/active')
+  @Header('Cache-Control', 'no-store')
+  activeDiscussionDocument(@Param('sessionId') sessionId: string) {
+    this.sessions.getIncludingDeleted(sessionId);
+    return ok(this.requireDiscussionDocuments().active(sessionId) ?? null);
+  }
+
+  @Get('sessions/:sessionId/discussion-documents/:documentId')
+  @Header('Cache-Control', 'no-store')
+  discussionDocument(
+    @Param('sessionId') sessionId: string,
+    @Param('documentId') documentId: string
+  ) {
+    this.sessions.getIncludingDeleted(sessionId);
+    return ok(this.requireDiscussionDocuments().get(sessionId, documentId));
+  }
+
+  @Get('sessions/:sessionId/discussion-documents/:documentId/content')
+  @Header('Content-Type', 'text/markdown; charset=utf-8')
+  @Header('Cache-Control', 'no-store')
+  discussionDocumentContent(
+    @Param('sessionId') sessionId: string,
+    @Param('documentId') documentId: string,
+    @Res({ passthrough: true }) response: ServerResponse
+  ) {
+    this.sessions.getIncludingDeleted(sessionId);
+    const result = this.requireDiscussionDocuments().content(sessionId, documentId);
+    response.setHeader('ETag', `"sha256-${result.contentHash}"`);
+    return result.content;
+  }
+
+  private requireDiscussionDocuments() {
+    if (!this.discussionDocuments) throw new ServiceUnavailableException('Discussion document service is unavailable.');
+    return this.discussionDocuments;
   }
 
   @Get('sessions/:sessionId/lifecycle')
@@ -221,6 +296,14 @@ export class SessionsController {
     return ok(result);
   }
 
+  @Post('sessions/:sessionId/archive')
+  async archive(
+    @Param('sessionId') sessionId: string,
+    @Headers('idempotency-key') requestId?: string
+  ) {
+    return ok(await this.sessions.archive(sessionId, requestId || crypto.randomUUID()));
+  }
+
   @Post('sessions/:sessionId/restore')
   async restore(
     @Param('sessionId') sessionId: string,
@@ -232,16 +315,38 @@ export class SessionsController {
     return ok(await this.sessions.restore(sessionId, body));
   }
 
+  @Post('sessions/:sessionId/archive/restore')
+  async restoreArchive(
+    @Param('sessionId') sessionId: string,
+    @Headers('idempotency-key') requestId?: string
+  ) {
+    return ok(await this.sessions.restoreArchived(sessionId, requestId || crypto.randomUUID()));
+  }
+
   @Post('sessions/:sessionId/messages')
   @HttpCode(202)
   sendMessage(
     @Param('sessionId') sessionId: string,
-    @Body() body: { content: string; mentionedAgentIds?: string[]; replyToEventId?: string },
+    @Body() body: {
+      content: string;
+      mentionedAgentIds?: string[];
+      replyToEventId?: string;
+      attachmentIds?: string[];
+      directives?: GroupChatMessageDirectives;
+    },
     @Headers('idempotency-key') idempotencyKey?: string
   ) {
     return this.sessions
-      .sendMessage(sessionId, body.content, body.mentionedAgentIds, idempotencyKey, body.replyToEventId)
+      .sendMessage(sessionId, body.content, body.mentionedAgentIds, idempotencyKey, body.replyToEventId, body.attachmentIds, body.directives)
       .then(ok);
+  }
+
+  @Delete('sessions/:sessionId/messages/:eventId')
+  async deleteMessage(
+    @Param('sessionId') sessionId: string,
+    @Param('eventId') eventId: string
+  ) {
+    return ok(await this.sessions.deleteMessage(sessionId, eventId));
   }
 
   @Post('sessions/:sessionId/memories/confirm')
@@ -265,6 +370,31 @@ export class SessionsController {
   @Post('sessions/:sessionId/cancel')
   cancel(@Param('sessionId') sessionId: string, @Body() body: { reason?: string; confirmationId?: string }) {
     return ok(this.sessions.control(sessionId, 'CANCELLED', body?.reason ?? '用户已取消会话', body?.confirmationId));
+  }
+
+  @Post('sessions/:sessionId/collaboration/cancel')
+  async cancelCollaboration(
+    @Param('sessionId') sessionId: string,
+    @Body() body: { taskId?: string; reason?: string }
+  ) {
+    return ok(await this.sessions.cancelCollaboration(sessionId, body?.taskId, body?.reason));
+  }
+
+  @Post('sessions/:sessionId/collaboration/retry-agent')
+  retryCollaborationAgent(
+    @Param('sessionId') sessionId: string,
+    @Body() body: { agentId: string; taskId?: string }
+  ) {
+    if (!body?.agentId) throw new BadRequestException('agentId is required.');
+    return ok(this.sessions.retryCollaborationAgent(sessionId, body.agentId, body.taskId));
+  }
+
+  @Post('sessions/:sessionId/collaboration/re-summarize')
+  resummarizeCollaboration(
+    @Param('sessionId') sessionId: string,
+    @Body() body: { taskId?: string }
+  ) {
+    return ok(this.sessions.resummarizeCollaboration(sessionId, body?.taskId));
   }
 
   @Post('sessions/:sessionId/local-runtime/permissions/decision')
@@ -391,6 +521,9 @@ export class SessionsController {
     @Param('sessionId') sessionId: string,
     @Body() body: { confirmationId: string; decision: 'approve' | 'decline' }
   ) {
+    if (!body?.confirmationId || !['approve', 'decline'].includes(body.decision)) {
+      throw new BadRequestException('confirmationId and a valid mapping decision are required.');
+    }
     return this.sessions.resolveWorkflowMemberMapping(sessionId, body).then(ok);
   }
 
@@ -401,6 +534,11 @@ export class SessionsController {
     @Body() body: { confirmationId: string; decision: 'approve' | 'decline' }
   ) {
     return this.sessions.resolveMemberAddition(sessionId, { ...body, discussionId }).then(ok);
+  }
+
+  @Post('sessions/:sessionId/agents/:agentId/join')
+  joinAgent(@Param('sessionId') sessionId: string, @Param('agentId') agentId: string) {
+    return this.sessions.joinAgent(sessionId, agentId).then(ok);
   }
 
   @Post('sessions/:sessionId/discussions/:discussionId/clarification')
@@ -432,7 +570,7 @@ export class SessionsController {
       assignedAgentKeys?: string[];
     }
   ) {
-    return ok(this.sessions.reviseBrief(sessionId, briefId, body));
+    return this.sessions.reviseBrief(sessionId, briefId, body).then(ok);
   }
 
   @Post('sessions/:sessionId/notifications/feishu/decision')

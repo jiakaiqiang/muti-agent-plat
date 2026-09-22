@@ -16,7 +16,7 @@ function makePersistence() {
   };
 }
 
-const ENV_KEYS = ['LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL', 'AGENT_CLUSTER_SECRET_KEY'] as const;
+const ENV_KEYS = ['LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL', 'AGENT_CLUSTER_SECRET_KEY', 'AGENT_CLUSTER_RUNTIME_PRICING_JSON'] as const;
 
 function withRemoteEnv() {
   const saved = new Map<string, string | undefined>(ENV_KEYS.map((key) => [key, process.env[key]]));
@@ -25,6 +25,7 @@ function withRemoteEnv() {
   process.env.LLM_API_KEY = 'sk-test';
   process.env.LLM_MODEL = 'test-remote-model';
   process.env.AGENT_CLUSTER_SECRET_KEY = 'runtime-model-config-test-master-key';
+  delete process.env.AGENT_CLUSTER_RUNTIME_PRICING_JSON;
   return () => {
     for (const [key, value] of saved) {
       if (value === undefined) {
@@ -186,6 +187,138 @@ test('update/delete reject non-persisted entries (env and discovered models)', a
 
     await assert.rejects(() => service.updateModel(envModel.id, { label: 'x' }), /model management/);
     await assert.rejects(() => service.deleteModel(discovered.id), /model management/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv();
+  }
+});
+
+test('versioned deployment pricing is exposed on the exact configured connection', () => {
+  const restoreEnv = withRemoteEnv();
+  try {
+    const initial = new RuntimeModelConfigService(makePersistence() as never);
+    const connectionId = initial.getConfigSnapshot().currentModelId;
+    process.env.AGENT_CLUSTER_RUNTIME_PRICING_JSON = JSON.stringify({
+      priceVersion: 'pricing-2026-09-20',
+      currency: 'USD',
+      entries: [{ connectionId, inputPerMillion: 2, outputPerMillion: 8 }]
+    });
+    const service = new RuntimeModelConfigService(makePersistence() as never);
+    assert.equal(service.currentConnection().pricing?.priceVersion, 'pricing-2026-09-20');
+    assert.equal(service.getConfigSnapshot().currentModelOption.pricing?.inputPerMillion, 2);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test('model-managed relay pricing persists, overrides the deployment catalog, and can be cleared', async () => {
+  const restoreEnv = withRemoteEnv();
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ models: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    })) as typeof fetch;
+  const persistence = makePersistence();
+  const connectionId = 'remote:openai-compatible:server:https-relay-test-v1:priced-model';
+  process.env.AGENT_CLUSTER_RUNTIME_PRICING_JSON = JSON.stringify({
+    priceVersion: 'deployment-v1',
+    currency: 'USD',
+    entries: [{ connectionId, inputPerMillion: 9, outputPerMillion: 10 }]
+  });
+
+  try {
+    const service = new RuntimeModelConfigService(persistence as never);
+    const added = await service.addModel({
+      kind: 'remote',
+      model: 'priced-model',
+      baseUrl: 'https://relay.test/v1',
+      apiKey: 'sk-secret-value',
+      inputPerMillion: 0.12,
+      outputPerMillion: 0.34,
+      priceVersion: 'relay-v1'
+    });
+
+    assert.equal(added.currentModelId, connectionId);
+    assert.deepEqual(added.currentModelOption.pricing, {
+      priceVersion: 'relay-v1',
+      currency: 'USD',
+      inputPerMillion: 0.12,
+      outputPerMillion: 0.34
+    });
+    assert.ok(!JSON.stringify(added).includes('sk-secret-value'), 'public model config must not expose API keys');
+
+    const reloaded = new RuntimeModelConfigService(persistence as never);
+    assert.equal(reloaded.currentConnection().pricing?.priceVersion, 'relay-v1');
+    assert.equal(reloaded.currentConnection().apiKey, 'sk-secret-value');
+
+    const updated = await reloaded.updateModel(connectionId, {
+      inputPerMillion: 0.2,
+      outputPerMillion: 0.5,
+      priceVersion: 'relay-v2'
+    });
+    assert.equal(updated.currentModelId, connectionId, 'price changes must not change connection identity');
+    assert.equal(updated.currentModelOption.pricing?.priceVersion, 'relay-v2');
+
+    await assert.rejects(
+      () => reloaded.updateModel(connectionId, {
+        inputPerMillion: 0.3,
+        outputPerMillion: 0.5,
+        priceVersion: 'relay-v2'
+      }),
+      /version must change/
+    );
+
+    const autoVersioned = await reloaded.updateModel(connectionId, {
+      inputPerMillion: 0.3,
+      outputPerMillion: 0.5
+    });
+    assert.match(autoVersioned.currentModelOption.pricing?.priceVersion ?? '', /^manual-[a-f0-9]{16}$/);
+    assert.notEqual(autoVersioned.currentModelOption.pricing?.priceVersion, 'relay-v2');
+
+    const cleared = await reloaded.updateModel(connectionId, {
+      inputPerMillion: null,
+      outputPerMillion: null
+    });
+    assert.equal(cleared.currentModelOption.pricing?.priceVersion, 'deployment-v1');
+    assert.equal(cleared.currentModelOption.pricing?.inputPerMillion, 9);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv();
+  }
+});
+
+test('model-managed relay pricing rejects partial and invalid rates', async () => {
+  const restoreEnv = withRemoteEnv();
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ models: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    })) as typeof fetch;
+
+  try {
+    const service = new RuntimeModelConfigService(makePersistence() as never);
+    const baseInput = {
+      kind: 'remote' as const,
+      model: 'invalid-price-model',
+      baseUrl: 'https://relay.test/v1',
+      apiKey: 'sk-test'
+    };
+    await assert.rejects(
+      () => service.addModel({ ...baseInput, inputPerMillion: 1 }),
+      /configured together/
+    );
+    await assert.rejects(
+      () => service.addModel({ ...baseInput, inputPerMillion: -1, outputPerMillion: 1 }),
+      /finite non-negative/
+    );
+    await assert.rejects(
+      () => service.addModel({ ...baseInput, inputPerMillion: Number.NaN, outputPerMillion: 1 }),
+      /finite non-negative/
+    );
+    await assert.rejects(
+      () => service.addModel({ ...baseInput, inputPerMillion: 1, outputPerMillion: Number.POSITIVE_INFINITY }),
+      /finite non-negative/
+    );
   } finally {
     globalThis.fetch = originalFetch;
     restoreEnv();

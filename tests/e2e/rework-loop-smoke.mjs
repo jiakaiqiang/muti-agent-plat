@@ -9,25 +9,36 @@ import {
   stopSmokeServer,
   waitForStatus
 } from './smoke-server.mjs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 await buildServer();
 
 let server;
+let platformRoot;
 
 try {
+  platformRoot = await mkdtemp(join(tmpdir(), 'agent-cluster-rework-workspace-'));
   server = await startSmokeServer('rework-loop-smoke', {
     DISCUSSION_MAX_ROUNDS: '0',
     GLOBAL_DEFAULT_RUNTIME_TYPE: 'mock',
     MOCK_REVIEW_RECOMMENDATION: 'rework',
     PROJECT_POLICY_RUNTIME_TYPE: '',
-    REWORK_MAX_ROUNDS: '1'
+    REWORK_MAX_ROUNDS: '1',
+    AGENT_CLUSTER_WORKDIR_BRIEF: 'false',
+    AGENT_CLUSTER_PLATFORM_ROOT: platformRoot
   });
 
   const workflow = await createPublishedAgentWorkflow(server.apiBase, 'Rework loop workflow', ['product-manager']);
 
   const { sessionId, briefId } = await createSessionAndWaitForBrief(
     server.apiBase,
-    '验证复盘返工自动重跑与上限保护链路'
+    '验证复盘返工自动重跑与上限保护链路',
+    {
+      tokenBudget: 1_000_000,
+      runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] }
+    }
   );
   await confirmBriefAndSelectWorkflow(server.apiBase, sessionId, briefId, workflow);
 
@@ -35,6 +46,7 @@ try {
   await waitForStatus(server.apiBase, sessionId, 'WAIT_USER_DECISION', 60_000);
 
   const events = await listEvents(server.apiBase, sessionId);
+
 
   const reworkOutcomes = events.filter(
     (event) => event.type === 'session_status_changed' && event.metadata?.payload?.outcome === 'rework'
@@ -94,4 +106,5 @@ try {
   if (server) {
     await stopSmokeServer(server);
   }
+  if (platformRoot) await rm(platformRoot, { recursive: true, force: true });
 }

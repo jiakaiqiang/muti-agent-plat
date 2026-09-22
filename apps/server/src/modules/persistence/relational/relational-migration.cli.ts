@@ -63,7 +63,7 @@ export async function runRelationalMigrationCli(argv = process.argv.slice(2), en
         rollbackExport = { outputPath, outputSha256: sha256(readFileSync(outputPath)) };
       }
       await store.replaceState(source.state, (loaded) => {
-        const comparison = compareState(source.state, loaded);
+        const comparison = compareRelationalMigrationState(source.state, loaded);
         if (comparison.mismatchedCollections.length) {
           throw new Error(`MIGRATION_VERIFY_FAILED: ${comparison.mismatchedCollections.join(', ')}`);
         }
@@ -75,7 +75,7 @@ export async function runRelationalMigrationCli(argv = process.argv.slice(2), en
     if (command === 'verify') {
       if (!source) throw new Error('MIGRATION_SOURCE_REQUIRED: verify requires --source <state.v3.json>.');
       const loaded = await store.loadState();
-      const comparison = compareState(source.state, loaded);
+      const comparison = compareRelationalMigrationState(source.state, loaded);
       if (comparison.mismatchedCollections.length) {
         throw new Error(`MIGRATION_VERIFY_FAILED: ${comparison.mismatchedCollections.join(', ')}`);
       }
@@ -134,14 +134,29 @@ function inventory(state: PersistedState) {
   };
 }
 
-function compareState(source: PersistedState, loaded: PersistedState) {
+export function compareRelationalMigrationState(source: PersistedState, loaded: PersistedState) {
   const sourceInventory = inventory(source);
   const loadedInventory = inventory(loaded);
   const keys = Array.from(new Set([...Object.keys(source), ...Object.keys(loaded)])).sort();
-  const mismatchedCollections = keys.filter(
-    (key) => sourceInventory.canonicalSha256ByCollection[key] !== loadedInventory.canonicalSha256ByCollection[key]
-  );
+  const mismatchedCollections = keys.filter((key) => {
+    const sourceHasKey = Object.prototype.hasOwnProperty.call(source, key);
+    const loadedHasKey = Object.prototype.hasOwnProperty.call(loaded, key);
+    if (!sourceHasKey || !loadedHasKey) {
+      const presentValue = sourceHasKey ? source[key] : loaded[key];
+      return !isEmptyProjection(presentValue);
+    }
+    return sourceInventory.canonicalSha256ByCollection[key] !== loadedInventory.canonicalSha256ByCollection[key];
+  });
   return { source: sourceInventory, loaded: loadedInventory, mismatchedCollections };
+}
+
+function isEmptyProjection(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (Array.isArray(value)) return value.length === 0;
+  if (!value || typeof value !== 'object') return false;
+  return Object.entries(value as Record<string, unknown>).every(
+    ([key, nested]) => key === 'schemaVersion' || isEmptyProjection(nested)
+  );
 }
 
 function entityCount(value: unknown): number {

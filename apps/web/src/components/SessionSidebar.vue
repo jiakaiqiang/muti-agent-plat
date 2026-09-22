@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useWorkspaceUiStore } from '@/stores/workspaceUi'
-import type { SessionListItem, SessionStatus } from '@/types/contracts'
+import type { SessionArchiveGroup, SessionListItem, SessionStatus } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
 import UiIcon from './UiIcon.vue'
 
@@ -28,18 +28,21 @@ const sessionStatusPresentation: Record<SessionStatus, { label: string; tone: Se
   CANCELLED: { label: '已取消', tone: 'cancelled' }
 }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   sessions: SessionListItem[]
   currentSessionId?: string
   favoriteSessionIds: string[]
   deletingSessionIds: string[]
-}>()
+  archiveGroups?: SessionArchiveGroup[]
+}>(), { archiveGroups: () => [] })
 
 const emit = defineEmits<{
   select: [sessionId: string]
   create: []
   delete: [sessionId: string]
+  archive: [sessionId: string]
   restore: [sessionId: string]
+  restoreArchive: [sessionId: string]
   toggleFavorite: [sessionId: string]
 }>()
 
@@ -54,7 +57,9 @@ const filteredSessions = computed(() => {
   const query = search.value.trim().toLowerCase()
   return props.sessions.filter((session) => {
     const deleted = session.lifecycleState === 'deleted'
+    if (activeTab.value === 'archives') return false
     if (activeTab.value === 'deleted' ? !deleted : deleted) return false
+    if (activeTab.value !== 'deleted' && session.archivedAt) return false
     if (activeTab.value === 'favorites' && !favoriteIds.value.has(session.id)) return false
     if (query && !`${session.title} ${session.latestEventSummary ?? ''}`.toLowerCase().includes(query)) return false
     return true
@@ -85,9 +90,19 @@ function deleteSession(sessionId: string) {
   closeContextMenu()
 }
 
+function archiveSession(sessionId: string) {
+  if (isDeletingSession(sessionId)) return
+  emit('archive', sessionId)
+  closeContextMenu()
+}
+
 function restoreSession(sessionId: string) {
   emit('restore', sessionId)
   closeContextMenu()
+}
+
+function restoreArchive(sessionId: string) {
+  emit('restoreArchive', sessionId)
 }
 
 function isFavorite(sessionId: string) {
@@ -148,16 +163,32 @@ onBeforeUnmount(() => {
       <button type="button" :class="{ active: activeTab === 'mine' }" @click="activeTab = 'mine'">我创建的</button>
       <button type="button" :class="{ active: activeTab === 'favorites' }" @click="activeTab = 'favorites'">收藏</button>
       <button type="button" :class="{ active: activeTab === 'deleted' }" @click="activeTab = 'deleted'">已删除</button>
+      <button type="button" :class="{ active: activeTab === 'archives' }" @click="activeTab = 'archives'">归档管理</button>
     </div>
 
-    <article
-      v-for="(session, index) in filteredSessions"
-      :key="session.id"
-      class="session-list-item"
-      :class="{ active: session.id === currentSessionId, favorite: isFavorite(session.id) }"
-      @click="session.lifecycleState !== 'deleted' && emit('select', session.id)"
-      @contextmenu="openContextMenu($event, session.id)"
-    >
+    <section v-if="activeTab === 'archives'" class="session-archive-manager" aria-label="归档管理">
+      <section v-for="group in props.archiveGroups" :key="group.projectKey" class="session-archive-group">
+        <h3>{{ group.projectLabel }}</h3>
+        <article v-for="item in group.items" :key="item.id" class="session-archive-item">
+          <span class="session-archive-item__title" :title="item.title">{{ item.title }}</span>
+          <button type="button" class="session-archive-restore" title="恢复归档" @click="restoreArchive(item.id)">
+            <UiIcon name="refresh-cw" :size="15" />
+            恢复
+          </button>
+        </article>
+      </section>
+      <p v-if="!props.archiveGroups.length" class="session-empty-state">暂无归档会话。</p>
+    </section>
+
+    <template v-if="activeTab !== 'archives'">
+      <article
+        v-for="(session, index) in filteredSessions"
+        :key="session.id"
+        class="session-list-item"
+        :class="{ active: session.id === currentSessionId, favorite: isFavorite(session.id) }"
+        @click="session.lifecycleState !== 'deleted' && emit('select', session.id)"
+        @contextmenu="openContextMenu($event, session.id)"
+      >
       <span class="session-avatar">
         <AgentPortrait :tone="(index % 5) + 1" :label="session.title" size="md" />
         <span
@@ -172,17 +203,18 @@ onBeforeUnmount(() => {
         <span class="session-title">{{ session.title }}</span>
       </span>
       <button
-        class="session-delete-button"
+        class="session-more-button"
         type="button"
-        :title="session.lifecycleState === 'deleted' ? '恢复会话' : '删除会话'"
+        title="更多操作"
         :disabled="isDeletingSession(session.id)"
-        @click.stop="session.lifecycleState === 'deleted' ? restoreSession(session.id) : deleteSession(session.id)"
+        @click.stop="openContextMenu($event, session.id)"
       >
-        <UiIcon :name="session.lifecycleState === 'deleted' ? 'refresh-cw' : 'trash'" :size="16" />
+        <UiIcon name="more" :size="16" />
       </button>
-    </article>
+      </article>
+    </template>
 
-    <p v-if="!filteredSessions.length" class="session-empty-state">当前筛选下没有会话。</p>
+    <p v-if="activeTab !== 'archives' && !filteredSessions.length" class="session-empty-state">当前筛选下没有会话。</p>
 
     <teleport to="body">
       <div
@@ -193,6 +225,15 @@ onBeforeUnmount(() => {
         <button type="button" @click="toggleFavorite(contextMenu.sessionId)">
           <UiIcon name="sparkles" :size="15" />
           {{ isFavorite(contextMenu.sessionId) ? '取消收藏' : '收藏会话' }}
+        </button>
+        <button v-if="props.sessions.find(item => item.id === contextMenu?.sessionId)?.lifecycleState !== 'deleted'"
+          type="button"
+          class="warning"
+          :disabled="isDeletingSession(contextMenu.sessionId)"
+          @click="archiveSession(contextMenu.sessionId)"
+        >
+          <UiIcon name="archive" :size="15" />
+          归档会话
         </button>
         <button v-if="props.sessions.find(item => item.id === contextMenu?.sessionId)?.lifecycleState !== 'deleted'"
           type="button"

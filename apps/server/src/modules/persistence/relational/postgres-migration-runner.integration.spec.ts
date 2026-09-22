@@ -21,6 +21,44 @@ import { ChangeRequestStore } from '../../sessions/change-request-store.js';
 
 const databaseUrl = process.env.RELATIONAL_TEST_DATABASE_URL;
 
+test('PostgreSQL runtime model projection preserves versioned relay pricing across reloads', { skip: !databaseUrl }, async () => {
+  const first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const restored = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const pool = new Pool({ connectionString: databaseUrl });
+  const model = {
+    id: 'relay:phase-6-pricing', kind: 'remote', source: 'remote', provider: 'openai-compatible',
+    model: 'phase-6-relay', label: 'Phase 6 relay', baseUrl: 'https://relay.invalid/v1',
+    pricing: { currency: 'USD', priceVersion: 'relay-v1', inputPerMillion: 0.75,
+      outputPerMillion: 2.5, cacheReadInputPerMillion: 0.1, cacheWriteInputPerMillion: 0.8 }
+  };
+  try {
+    await first.initialize();
+    await first.setCollection('runtimeModelConfig', { currentModelId: model.id, models: [model] });
+    const row = await pool.query<{ pricing: typeof model.pricing }>(
+      `select configuration->'sourceRecord'->'models'->0->'pricing' pricing
+         from agent_cluster.runtime_model_configs where deleted_at is null limit 1`
+    );
+    assert.deepEqual(row.rows[0]?.pricing, model.pricing);
+
+    await restored.initialize();
+    const saved = restored.getCollection<{ models: typeof model[] }>('runtimeModelConfig', { models: [] });
+    assert.deepEqual(saved.models[0]?.pricing, model.pricing);
+    const updated = { ...model, pricing: { ...model.pricing, priceVersion: 'relay-v2', outputPerMillion: 3 } };
+    await restored.setCollection('runtimeModelConfig', { currentModelId: model.id, models: [updated] });
+    await first.onModuleDestroy();
+    const again = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+    try {
+      await again.initialize();
+      assert.deepEqual(again.getCollection<{ models: typeof updated[] }>('runtimeModelConfig', { models: [] }).models[0]?.pricing,
+        updated.pricing);
+    } finally {
+      await again.onModuleDestroy();
+    }
+  } finally {
+    await Promise.all([first.onModuleDestroy(), restored.onModuleDestroy(), pool.end()]);
+  }
+});
+
 test('PostgreSQL serializes delete admission against reserve and restores only a paused generation', { skip: !databaseUrl }, async () => {
   const first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
   const second = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
@@ -901,6 +939,82 @@ test('PostgreSQL reserves one delegation per expert and revision across instance
     await first?.onModuleDestroy().catch(() => undefined);
     await second?.onModuleDestroy().catch(() => undefined);
     await third?.onModuleDestroy().catch(() => undefined);
+    await setupPool.query(`drop database if exists ${isolatedDatabase}`).catch(() => undefined);
+    await setupPool.end().catch(() => undefined);
+  }
+});
+
+test('PostgreSQL restores discussion document metadata and read receipts across instances', { skip: !databaseUrl }, async () => {
+  const isolatedDatabase = `agent_cluster_ddr_${process.pid}_${Date.now()}`;
+  const isolatedUrl = new URL(databaseUrl!);
+  isolatedUrl.pathname = `/${isolatedDatabase}`;
+  const setupPool = new Pool({ connectionString: databaseUrl });
+  const isolated = isolatedUrl.toString();
+  const sessionId = `discussion-document-${process.pid}-${Date.now()}`;
+  const now = new Date().toISOString();
+  let first: PersistenceService | undefined;
+  let restored: PersistenceService | undefined;
+  try {
+    await setupPool.query(`create database ${isolatedDatabase}`);
+    first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    restored = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    await first.initialize();
+    const session = {
+      id: sessionId,
+      dataEpoch: first.currentDataEpoch(),
+      title: 'Discussion document',
+      status: 'AGENT_DISCUSSING',
+      ownerId: 'test',
+      createdAt: now,
+      updatedAt: now
+    };
+    await first.setCollection('sessions', [session]);
+    const contentStore = new LocalContentStore({
+      rootDir: join(process.env.AGENT_CLUSTER_DATA_DIR ?? tmpdir(), 'content-store')
+    });
+    const stored = contentStore.put('# PostgreSQL 方案\n', 'text/markdown; charset=utf-8', 'plan.md');
+    const document = {
+      id: `doc-${sessionId}`,
+      dataEpoch: session.dataEpoch,
+      sessionId,
+      revision: 1,
+      title: '方案 v1',
+      relativePath: `.agent-cluster/discussion-documents/${sessionId}/plan-revision-001.md`,
+      contentRef: stored.contentRef,
+      contentHash: stored.sha256,
+      sizeBytes: stored.sizeBytes,
+      status: 'active',
+      createdBy: 'user',
+      idempotencyKey: `idempotency-${sessionId}`,
+      createdAt: now,
+      updatedAt: now,
+      readReceipts: [{
+        id: `receipt-${sessionId}`,
+        documentId: `doc-${sessionId}`,
+        sessionId,
+        agentId: 'coordinator',
+        invocationId: `invocation-${sessionId}`,
+        relativePath: `.agent-cluster/discussion-documents/${sessionId}/plan-revision-001.md`,
+        contentHash: stored.sha256,
+        workspaceRevision: { id: 'workspace-1', observedAt: now },
+        complete: true,
+        truncated: false,
+        status: 'completed',
+        readAt: now
+      }]
+    };
+    await first.setCollection('discussionDocumentsBySession', { [sessionId]: [document] });
+    await restored.initialize();
+    const documents = restored.getCollection<Record<string, any[]>>('discussionDocumentsBySession', {});
+    const reopened = documents[sessionId]?.[0];
+    assert.equal(reopened?.id, document.id);
+    assert.equal(reopened?.contentRef, stored.contentRef);
+    assert.equal(reopened?.contentHash, stored.sha256);
+    assert.equal(reopened?.readReceipts?.[0]?.complete, true);
+    assert.equal(reopened?.readReceipts?.[0]?.invocationId, `invocation-${sessionId}`);
+  } finally {
+    await first?.onModuleDestroy().catch(() => undefined);
+    await restored?.onModuleDestroy().catch(() => undefined);
     await setupPool.query(`drop database if exists ${isolatedDatabase}`).catch(() => undefined);
     await setupPool.end().catch(() => undefined);
   }

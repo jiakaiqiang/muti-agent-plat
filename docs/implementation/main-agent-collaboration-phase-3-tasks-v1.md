@@ -25,7 +25,7 @@
 - 验证：执行 Checklist 对应场景，记录命令/环境/结果；失败时保留证据并回到所属任务。
 - 证据（2026-09-19）：`packages/shared/src/discussion-contracts.ts`（8/8）：DiscussionRun /
   Delegation 生命周期、迁移表、逻辑键、`delegationsToRun`、`supersedeStaleDelegations`、封闭的
-  `ExpertReport`。`apps/server/src/modules/orchestrator/discussion-store.ts`（14/14）+ PostgreSQL V13
+  `ExpertReport`。`apps/server/src/modules/orchestrator/discussion-store.ts`（15/15，含 `blocked.failure` 恢复原因）+ PostgreSQL V13
   `discussion_runs`（临时库集成 12/12：跨实例同键只留一条委派、旧修订 ask 拒绝不落盘）。
 
 ### P3-T2 实现主 Agent 规划与派发
@@ -38,7 +38,7 @@
 - 证据（2026-09-19）：新 RuntimeOutput kind `discussion_plan`（封闭 schema，5/5）；
   `discussion-planner.resolveDiscussionPlan`（8/8）：参与者→委派、目录内非成员→用户确认、
   未知名→报出不编造、自咨询/重复丢弃；`orchestrator.runPlannedDiscussion`（`planned-discussion.spec`
-  10/10）：计划持久化后才派发，只跑被点名的专家。闸：`MAIN_AGENT_DISCUSSION_ENABLED`。
+  11/11）：计划持久化后才派发，只跑被点名的专家；缺证只阻塞对应委派并统一澄清。闸：`MAIN_AGENT_DISCUSSION_ENABLED`。
 
 ### P3-T3 实现持久化专家执行
 
@@ -47,7 +47,8 @@
 - 交付：复用有界咨询和逻辑操作；租约/幂等/乱序/重启恢复只运行未完成项。
 - 覆盖：P3-AC4、P3-AC6。
 - 验证：执行 Checklist 对应场景，记录命令/环境/结果；失败时保留证据并回到所属任务。
-- 证据（2026-09-19）：`dispatchDelegations` 逐条 reserve→running→completed/failed，失败不中止；
+- 证据（2026-09-20）：`dispatchDelegations` 逐条 reserve→running→completed/failed/blocked，失败不中止；
+  `CONTEXT_INSUFFICIENT` 落 `blocked{failure}`，普通调用失败/超时保持 `failed`，受阻委派不被盲目重派；
   `findResumable` + 入口续跑：重启不重问计划、只跑 pending|running、已完成不重跑、不开第二个 run；
   abort → run paused、委派保持 running 可续。**延后**：跨实例 CAS（`revision <` + 0 行回滚），
   当前守卫与既有 budgets 一致。
@@ -70,8 +71,8 @@
 - 交付：真实汇总专家结果、冲突和失败显式呈现、双端同状态各自样式。
 - 覆盖：P3-AC1、P3-AC2、P3-AC5、P3-AC7。
 - 验证：执行 Checklist 对应场景，记录命令/环境/结果；失败时保留证据并回到所属任务。
-- 证据（2026-09-19）：`discussion-synthesis.synthesizeDiscussion`（6/6）确定性综合——署名逐条、
-  不合并成共识、冲突=同 objective 不同结论、失败/未回复点名、`sourceDelegationIds` 可核验；
+- 证据（2026-09-20）：`discussion-synthesis.synthesizeDiscussion`（7/7）确定性综合——署名逐条、
+  不合并成共识、冲突=同 objective 不同结论、失败/受阻/未回复分别点名、`sourceDelegationIds` 可核验；
   `recordSynthesis` 持久化并转 ready_for_confirmation / waiting_user；`needs_user` 时主 Agent
   持 confirmationId 发一张 `discussion_clarification` 卡。事件带 discussionId/requirementRevision/
   sourceDelegationIds，双端共用（未改渲染）。**未做**：卡片选项处理、综合喂 brief（归阶段 4）。
@@ -83,7 +84,7 @@
 - 交付：@、扩员拒绝、专家失败、冲突、主 Agent 失败、重启、停止/删除及 Token 累计测试。
 - 覆盖：P3-AC1、P3-AC2、P3-AC3、P3-AC4、P3-AC5、P3-AC6、P3-AC7。
 - 验证：执行 Checklist 对应场景，记录命令/环境/结果；失败时保留证据并回到所属任务。
-- 证据（2026-09-19）：单测矩阵覆盖 @/扩员拒绝/专家失败/冲突/主 Agent 失败/重启/停止/删除；
+- 证据（2026-09-20）：单测矩阵覆盖 @/扩员拒绝/专家失败/缺证阻塞/冲突/主 Agent 失败/重启/停止/删除；
   Token 累计复用 2A（`budgetCategoryFor('discussion')='consultation'`）。E2E
   `npm run test:e2e:planned-discussion`（真服务 + mock）：场景 A 只咨询被点名者并综合 1 条真实结果，
   场景 B 扩员卡 + 一张澄清卡且零委派运行。独立 PostgreSQL 12/12。四门禁全绿。

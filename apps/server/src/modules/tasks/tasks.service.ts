@@ -1,5 +1,12 @@
 import { Injectable } from '@nestjs/common';
-import type { ActorRef, AgentTask, SuggestedAgentTask, TaskRoutingMode, UUID } from '@agent-cluster/shared';
+import type {
+  ActorRef,
+  AgentTask,
+  DiscussionDocument,
+  SuggestedAgentTask,
+  TaskRoutingMode,
+  UUID
+} from '@agent-cluster/shared';
 import { nowIso } from '../../common/time.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 
@@ -18,7 +25,12 @@ export class TasksService {
     sessionId: UUID,
     suggestions: SuggestedAgentTask[],
     agentIdByKey: Map<string, string>,
-    options: { assignedBy?: ActorRef; routingMode?: TaskRoutingMode; workItemId?: UUID } = {}
+    options: {
+      assignedBy?: ActorRef;
+      routingMode?: TaskRoutingMode;
+      workItemId?: UUID;
+      discussionDocument?: Pick<DiscussionDocument, 'id' | 'revision' | 'contentHash'>;
+    } = {}
   ) {
     const titleToId = new Map<string, string>();
     const tasks: AgentTask[] = suggestions.map((suggestion) => {
@@ -29,6 +41,13 @@ export class TasksService {
         id: crypto.randomUUID(),
         sessionId,
         workItemId: options.workItemId,
+        ...(options.discussionDocument ? {
+          basedOnDiscussionDocument: {
+            documentId: options.discussionDocument.id,
+            revision: options.discussionDocument.revision,
+            contentHash: options.discussionDocument.contentHash
+          }
+        } : {}),
         title: suggestion.title,
         description: suggestion.description,
         status: 'assigned',
@@ -113,6 +132,26 @@ export class TasksService {
     }
   }
 
+  markDiscussionDocumentSuperseded(
+    sessionId: string,
+    activeDocument: Pick<DiscussionDocument, 'id' | 'revision'>
+  ) {
+    let changed = false;
+    for (const task of this.list(sessionId)) {
+      const binding = task.basedOnDiscussionDocument;
+      if (!binding || binding.documentId === activeDocument.id || task.workflowRunId) continue;
+      task.stale = true;
+      task.staleReason = 'discussion_document_superseded';
+      if (this.isUnfinished(task.status)) {
+        task.status = 'cancelled';
+        task.resultSummary = `方案文档 v${binding.revision} 已被 v${activeDocument.revision} 替代，任务未继续派发。`;
+      }
+      task.updatedAt = nowIso();
+      changed = true;
+    }
+    if (changed) this.persist();
+  }
+
   deleteSession(sessionId: string) {
     this.tasksBySession.delete(sessionId);
     this.persist();
@@ -130,6 +169,10 @@ export class TasksService {
     for (const task of this.unfinished(sessionId)) {
       this.update(task, { status: 'waiting', resultSummary: reason });
     }
+  }
+
+  private isUnfinished(status: AgentTask['status']) {
+    return ['pending', 'assigned', 'accepted', 'claimed', 'running', 'waiting', 'blocked', 'reworking'].includes(status);
   }
 
 }

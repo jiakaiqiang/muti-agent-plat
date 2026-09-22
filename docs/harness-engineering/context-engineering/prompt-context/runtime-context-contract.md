@@ -23,6 +23,7 @@ Top-level fields currently covered by this contract:
 | sessionGoal | User's original or current goal. | Always present. |
 | currentContractGoal | Latest authoritative task-contract goal. | Keeps a revised brief goal distinct from the immutable original Session input. |
 | currentUserMessage | Exact user message that triggered the current routing invocation. | Untrusted invocation input; it is projected to L1 only and must not be reclassified as an authority rule or constraint. |
+| attachmentRefs | Metadata-only references attached to the current user message. | Carries stable attachment/session identifiers and display metadata without binary contents; Runtime must use the attachment capability for any explicit read. |
 | taskContext | Task Context Pack for the current invocation. | Carries task domain/intent, current stage, Project Map or Domain Map, stage plan, evidence selection, evidence refs, validation rules, and Execution/Validation/Review responsibilities. |
 | summaryMemory | Compact continuation memory for long chains. | Carries current goal, current state, confirmed facts, completed work, decisions, open questions, risks, and next steps. |
 | continuationState | Structured runtime continuation state. | Carries current phase/status, active task/agent, task queues, latest checkpoint, handoff refs, source refs, next agents, and resume hints. |
@@ -32,6 +33,7 @@ Top-level fields currently covered by this contract:
 | workspaceManifest | Runtime-facing workspace structure and file metadata. | Preferred structure input. Exposes tree, paths, sizes, readability, content length, stack, and entrypoints without file bodies. |
 | selectedEvidenceContents | Runtime-readable selected evidence content. | Preferred content input. Derived from selected evidence refs and trimmed by token budget. |
 | fileRevisionEvidence | Immutable evidence for one confirmed user-file revision. | Present only for `file_revision` and `revision_synthesis` tasks; carries bounded original/revised/Diff evidence and successful Agent proposals into L3. |
+| requiredDocument | Immutable discussion-document reference that the invocation must read. | Carries only `documentId`, `revision`, workspace-relative `relativePath`, and `contentHash`; Markdown正文不进入 Prompt。Runtime 必须调用 `read_file` 完整读取精确路径，且读取回执、活动版本和哈希全部匹配后才可成功。 |
 | workspaceSnapshot | Compatibility workspace tree/files fallback. | Runtime-facing snapshots are manifest-style and may omit all file bodies. New runtime behavior should not rely on `files[].content`. |
 | workspaceFocus | Relevance summary for the current requirement. | Contains `relevantFiles`, `impactedFiles`, `testFiles`, `configFiles`, `possibleEntryPoints`, `detectedStack`, `validationCommands`, and `rationale`. |
 | relevantFiles | Workspace files likely related to the requirement. | Nested under `workspaceFocus`. |
@@ -63,7 +65,7 @@ Phase filtering must remain consistent with the grounded-evidence gate. Discussi
 
 | AgentRunPhase | Should see | 不应该看到 |
 | --- | --- | --- |
-| discussion | sessionGoal, taskContext, summaryMemory, continuationState, agentProfile, constraints, relevantEvents, workingDirectory, workspaceManifest, selectedEvidenceContents, workspaceFocus | Full implementation logs, full workspace file bodies, or unrelated artifacts. |
+| discussion | sessionGoal, taskContext, summaryMemory, continuationState, agentProfile, constraints, relevantEvents, workingDirectory, workspaceManifest, selectedEvidenceContents, workspaceFocus, requiredDocument when a discussion plan is active | Full implementation logs, full workspace file bodies, discussion-document正文 copied into Prompt, or unrelated artifacts. |
 | brief_generation | sessionGoal, taskContext, summaryMemory, continuationState, relevantEvents, relevantMemories, ragSnippets, workingDirectory, workspaceManifest, selectedEvidenceContents, workspaceFocus | Unconfirmed implementation details, full workspace file bodies, or hidden side effects. |
 | brief_revision | previous taskBrief, user feedback, taskContext, summaryMemory, continuationState, relevantEvents, relevantMemories, workspaceFocus | Unrelated tool output. |
 | brief_consultation | currentContractGoal, taskBrief, user question, taskContext, summaryMemory, relevantEvents, workspaceFocus | Unrelated execution output or authority to bypass brief confirmation. |
@@ -119,6 +121,7 @@ Phase filtering must remain consistent with the grounded-evidence gate. Discussi
 - `workspaceManifest` can include tree, file metadata, summaries, detected stack, and entrypoints. It must not include file bodies.
 - `selectedEvidenceContents` is the only default workspace-derived readable content channel for runtime prompts. It must be derived from `taskContext.evidenceSelection.selectedRefs`, token-trimmed, and traceable by source/ref.
 - `fileRevisionEvidence` is a dedicated exception for a confirmed file-revision task: the user-revised snapshot is authoritative, while the original snapshot and deterministic Diff are comparison evidence. The envelope builder must bound this evidence inside L3 and preserve content references when bodies are truncated.
+- `requiredDocument` is a mandatory tool-read gate, not an evidence-body channel. It exposes only the active discussion document identity, version, relative path, and expected hash. A missing, truncated, wrong-path, superseded, or hash-mismatched `read_file` receipt must fail closed with `DOCUMENT_READ_REQUIRED` or the corresponding document-read error and must not be converted into a successful Agent result.
 - Every Agent selected for one revision receives the same frozen `revisionId`, file path, original Hash, revised Hash, and Diff. A synthesis invocation may additionally receive completed Agent proposals from that same revision; unrelated revision runs must never be mixed.
 - File-revision evidence does not grant write authority. Revision tasks use proposal-only execution, and the live file can change only after a matching user confirmation and expected-Hash check.
 - `workspaceSnapshot` is retained for compatibility as a manifest-style fallback. Runtime prompts must not assume `workspaceSnapshot.files[].content` is present.

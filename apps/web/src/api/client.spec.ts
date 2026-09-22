@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apiGet } from './client'
+import { apiGet, apiGetText, apiPostMultipart } from './client'
 
 describe('API client cancellation handling', () => {
   const fetchMock = vi.fn()
@@ -50,5 +50,38 @@ describe('API client cancellation handling', () => {
     fetchMock.mockRejectedValue(new DOMException('signal is aborted without reason', 'AbortError'))
 
     await expect(apiGet('/events')).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('reads a Markdown response without requiring the JSON API envelope', async () => {
+    fetchMock.mockResolvedValue(new Response('# plan\n', {
+      status: 200,
+      headers: { 'content-type': 'text/markdown; charset=utf-8' }
+    }))
+
+    await expect(apiGetText('/sessions/session-1/discussion-documents/document-1/content')).resolves.toBe('# plan\n')
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/sessions/session-1/discussion-documents/document-1/content'),
+      expect.objectContaining({ method: 'GET', headers: expect.objectContaining({ accept: 'text/markdown' }) })
+    )
+  })
+
+  it('does not duplicate the API prefix when a published event supplies an absolute API path', async () => {
+    fetchMock.mockResolvedValue(new Response('# plan\n', { status: 200 }))
+    await apiGetText('/api/sessions/session-1/discussion-documents/document-1/content')
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/sessions/session-1/discussion-documents/document-1/content')
+  })
+
+  it('sends multipart uploads without overriding the browser boundary header', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ data: { accepted: 1 }, requestId: 'request-1' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    }))
+    const form = new FormData()
+    form.append('file', new Blob(['bytes'], { type: 'text/plain' }), 'notes.txt')
+
+    await expect(apiPostMultipart('/sessions/session-1/attachments', form)).resolves.toEqual({ accepted: 1 })
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(init.body).toBe(form)
+    expect(init.headers).not.toHaveProperty('content-type')
   })
 })

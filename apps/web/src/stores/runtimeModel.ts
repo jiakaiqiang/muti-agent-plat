@@ -23,13 +23,19 @@ export const useRuntimeModelStore = defineStore('runtimeModel', {
     remoteModelName: '',
     remoteBaseUrl: '',
     remoteApiKey: '',
+    remoteInputPerMillion: '',
+    remoteOutputPerMillion: '',
+    remotePriceVersion: '',
     saveMessage: '',
     editDialogOpen: false,
     editingModelId: '',
     editLabel: '',
     editModelName: '',
     editBaseUrl: '',
-    editApiKey: ''
+    editApiKey: '',
+    editInputPerMillion: '',
+    editOutputPerMillion: '',
+    editPriceVersion: ''
   }),
   getters: {
     currentModel: (state) => state.config?.currentModel ?? '',

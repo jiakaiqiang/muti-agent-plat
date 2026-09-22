@@ -61,7 +61,7 @@ const leftOpen = ref(false)
 const rightOpen = ref(false)
 const savedViews = new Map<string, SessionViewMode>()
 
-const { deletingSessionIds } = storeToRefs(sessionStore)
+const { deletingSessionIds, archivedSessionGroups } = storeToRefs(sessionStore)
 const pendingDeleteSessionId = ref<string>()
 const deleteSessionError = ref('')
 const sessionControls = ref<Record<string, 'stop' | 'resume'>>({})
@@ -244,6 +244,7 @@ onMounted(async () => {
       agentStore.loadAgentsForSurface('chat'),
       agentStore.loadCapabilities(),
       sessionStore.loadSessions(),
+      sessionStore.loadArchivedSessions(),
       runtimeModelStore.loadAvailability()
     ])
     await sessionStore.loadSession(routeSessionId())
@@ -405,6 +406,26 @@ const tasks = computed(() => eventStore.taskStates(currentSessionId.value))
 const confirmationBeingHandled = ref<ConfirmationCardState>()
 const confirmationSessionId = ref('')
 const activeConfirmation = computed(() => (confirmationSessionId.value === currentSessionId.value ? confirmationBeingHandled.value : undefined) ?? eventStore.activeConfirmation(currentSessionId.value))
+const suppressWorkflowAutoOpen = ref(false)
+const workflowMappingRejection = ref<{
+  workflowName?: string
+  workflowId?: string
+  workflowVersion?: number
+  memberGaps: NonNullable<ConfirmationCardState['memberGaps']>
+}>()
+
+async function openWebWorkflowManager() {
+  workflowMappingRejection.value = undefined
+  try {
+    await window.agentClusterDesktop?.openWebWorkflowManager()
+  } catch (error) {
+    showMessage(error instanceof Error ? error.message : '无法打开 Web 流程管理，请检查平台连接。', 'error')
+  }
+}
+watch(
+  () => activeConfirmation.value?.reason,
+  (reason) => { if (reason === 'confirm_workflow_member_mapping') suppressWorkflowAutoOpen.value = true }
+)
 const activeWorkItem = computed(() => sessionStore.activeWorkItem)
 const pendingIntentRoutingCount = computed(() =>
   currentSessionId.value ? sessionStore.pendingIntentRoutingCount(currentSessionId.value) : 0
@@ -521,12 +542,20 @@ const canResumeStoppedSession = computed(() => sessionControls.value[currentSess
 ))
 const runtimeStopSummary = computed(() => sessionStore.stopStatesBySession[currentSessionId.value])
 const runtimeStopStateError = computed(() => sessionStore.stopStateErrorsBySession[currentSessionId.value])
+const runtimeStopStateRetrying = computed(() => Boolean(sessionStore.stopStateLoadingBySession[currentSessionId.value]))
+
+async function retryRuntimeStopState() {
+  const sessionId = currentSessionId.value
+  if (!sessionId || sessionStore.stopStateLoadingBySession[sessionId]) return
+  await sessionStore.loadStopState(sessionId)
+}
 
 watch(
   () => [eventStore.sseConnectionState, eventStore.lastSseErrorAt] as const,
   ([state]) => {
     if (state === 'connected') {
       backendReachability.value = 'reachable'
+      if (runtimeStopStateError.value) void retryRuntimeStopState()
       return
     }
     if (state === 'reconnecting' || state === 'degraded') void probeBackendReachability()
@@ -605,6 +634,10 @@ watch(
   () => events.value.at(-1)?.id,
   () => {
     const latest = events.value.at(-1)
+    const stopSummary = latest?.metadata.payload?.stopSummary
+    if (stopSummary && typeof stopSummary === 'object') {
+      sessionStore.applyStopState(stopSummary as import('@/types/contracts').RuntimeStopSummary)
+    }
     if (!latest || (!latest.type.startsWith('file_revision_') && latest.type !== 'user_confirmation_requested')) return
     const sessionId = currentSessionId.value
     if (!sessionId) return
@@ -615,9 +648,11 @@ watch(
 async function syncSessionEventConnection(sessionId: string, status?: SessionStatus) {
   if (status && terminalSessionStatuses.has(status)) {
     await eventStore.finalizeSessionEvents(sessionId)
+    if (sessionStore.stopStateErrorsBySession[sessionId]) await sessionStore.loadStopState(sessionId)
     return
   }
   await eventStore.ensureConnectedAndReconcile(sessionId)
+  if (sessionStore.stopStateErrorsBySession[sessionId]) await sessionStore.loadStopState(sessionId)
 }
 
 async function reconcileSessionEvents(sessionId: string) {
@@ -715,6 +750,37 @@ async function restoreDeletedSession(sessionId: string) {
     showMessage('会话已恢复为暂停状态', 'success')
   } catch (error) {
     showErrorMessage(error, '恢复会话失败')
+  }
+}
+
+async function archiveSessionFromSidebar(sessionId: string) {
+  const archivingCurrent = sessionStore.currentSession?.id === sessionId
+  try {
+    const archived = await sessionStore.archiveSession(sessionId)
+    if (!archived) {
+      showMessage('会话仍在停止中，暂未归档，请稍后重试', 'warning')
+      return
+    }
+    if (archivingCurrent) {
+      eventStore.disconnectSse()
+      const nextSessionId = sessionStore.sessions.find((item) => item.lifecycleState !== 'deleted' && !item.archivedAt)?.id
+      if (nextSessionId) await selectSession(nextSessionId)
+      else await router.replace({ name: 'workspace' })
+    }
+    showMessage('会话已归档，可在归档管理中恢复', 'success')
+  } catch (error) {
+    showErrorMessage(error, '归档会话失败')
+  }
+}
+
+async function restoreArchivedSession(sessionId: string) {
+  try {
+    await sessionStore.restoreArchivedSession(sessionId)
+    workspaceUiStore.sessionListTab = 'all'
+    await selectSession(sessionId)
+    showMessage('会话已恢复到会话列表', 'success')
+  } catch (error) {
+    showErrorMessage(error, '恢复归档失败')
   }
 }
 
@@ -1322,6 +1388,32 @@ async function resolveConfirmationAction(optionKey: string) {
       return
     }
   }
+  if (activeConfirmation.value.reason === 'confirm_workflow_member_mapping' && (optionKey === 'approve' || optionKey === 'decline')) {
+    const snapshot = activeConfirmation.value
+    let result
+    try {
+      result = await sessionStore.resolveWorkflowMemberMapping(sessionId, {
+        confirmationId: snapshot.confirmationId,
+        decision: optionKey
+      })
+      await reconcileSessionEvents(sessionId)
+    } catch (error) {
+      await reconcileSessionEvents(sessionId).catch(() => undefined)
+      showErrorMessage(error, '工作流成员决定失败，请以最新状态为准')
+      return
+    }
+    if (optionKey === 'decline') {
+      workflowMappingRejection.value = {
+        workflowName: result.workflowName ?? snapshot.workflowName,
+        workflowId: result.workflowId ?? snapshot.workflowId,
+        workflowVersion: result.workflowVersion ?? snapshot.workflowVersion,
+        memberGaps: result.memberGaps ?? snapshot.memberGaps ?? []
+      }
+    } else {
+      showMessage(result.started ? 'Agent 已加入，工作流已启动' : 'Agent 已加入，正在等待工作流继续', result.started ? 'success' : 'info')
+    }
+    return
+  }
 
   if (
     activeConfirmation.value.reason === 'workflow_agent_substitution' &&
@@ -1589,31 +1681,36 @@ function appendOptimisticConfirmationResolution(sessionId: string, confirmationI
 
 function formatBriefForRevision(brief?: BriefEventPayload) {
   if (!brief) {
-    return sessionStore.currentSession?.originalInput ?? ''
+    return `# 任务契约修订\n\n${sessionStore.currentSession?.originalInput ?? ''}`
   }
   return [
-    `目标：${brief.goal}`,
+    '# 任务契约修订',
     '',
-    '范围：',
-    ...brief.scope.map((item) => `- ${item}`),
+    '## 目标',
+    brief.goal,
     '',
-    '不在范围：',
-    ...brief.outOfScope.map((item) => `- ${item}`),
+    '## 范围',
+    ...(brief.scope.length ? brief.scope.map((item) => `- ${item}`) : ['- （未指定）']),
     '',
-    '约束：',
-    ...brief.constraints.map((item) => `- ${item}`),
+    '## 不在范围',
+    ...(brief.outOfScope.length ? brief.outOfScope.map((item) => `- ${item}`) : ['- （未指定）']),
     '',
-    '验收标准：',
-    ...brief.acceptanceCriteria.map((item) => `- ${item}`),
+    '## 约束',
+    ...(brief.constraints.length ? brief.constraints.map((item) => `- ${item}`) : ['- （未指定）']),
     '',
-    '风险：',
-    ...brief.risks.map((item) => `- ${item}`),
+    '## 验收标准',
+    ...(brief.acceptanceCriteria.length ? brief.acceptanceCriteria.map((item) => `- ${item}`) : ['- （未指定）']),
     '',
-    '未决问题：',
-    ...brief.openQuestions.map((item) => `- ${item}`),
+    '## 风险',
+    ...(brief.risks.length ? brief.risks.map((item) => `- ${item}`) : ['- （未指定）']),
     '',
-    '任务拆分：',
-    ...(brief.suggestedTasks ?? []).map((task, index) => `${index + 1}. ${task.title}：${task.description}`)
+    '## 未决问题',
+    ...(brief.openQuestions.length ? brief.openQuestions.map((item) => `- ${item}`) : ['- （未指定）']),
+    '',
+    '## 任务拆分',
+    ...((brief.suggestedTasks ?? []).length
+      ? (brief.suggestedTasks ?? []).map((task) => `- **${task.title}**：${task.description}`)
+      : ['- （未指定）'])
   ].join('\n')
 }
 
@@ -1712,10 +1809,13 @@ async function submitWorkflowStepRevision() {
       :current-session-id="sessionStore.currentSession?.id"
       :favorite-session-ids="sessionStore.favoriteSessionIds"
       :deleting-session-ids="deletingSessionIds"
+      :archive-groups="archivedSessionGroups"
       @select="selectSession"
       @create="openCreateSessionDialog"
       @delete="requestDeleteSession"
+      @archive="archiveSessionFromSidebar"
       @restore="restoreDeletedSession"
+      @restore-archive="restoreArchivedSession"
       @toggle-favorite="sessionStore.toggleFavoriteSession"
     />
 
@@ -1823,7 +1923,12 @@ async function submitWorkflowStepRevision() {
           </footer>
         </section>
         <div v-show="currentMode === 'chat'" class="chat-pane">
-          <RuntimeStopStatePanel :summary="runtimeStopSummary" :query-error="runtimeStopStateError" />
+          <RuntimeStopStatePanel
+            :summary="runtimeStopSummary"
+            :query-error="runtimeStopStateError"
+            :retrying="runtimeStopStateRetrying"
+            @retry="retryRuntimeStopState"
+          />
           <ChatTimeline
             :session-id="currentSessionId"
             :status="derivedStatus"
@@ -1884,10 +1989,19 @@ async function submitWorkflowStepRevision() {
       :capabilities="agentStore.capabilities"
       :tasks="tasks"
       :active-confirmation="activeConfirmation"
-      :auto-open-workflow-dialog="!showCreateSessionDialog && !showCreateConfirmDialog"
+      :auto-open-workflow-dialog="!showCreateSessionDialog && !showCreateConfirmDialog && !suppressWorkflowAutoOpen"
       :connected="eventStore.sseConnected"
       @resolve-confirmation="resolveConfirmation"
     />
+
+    <section v-if="workflowMappingRejection" class="modal-backdrop" aria-label="工作流未启动">
+      <div class="modal-panel workflow-mapping-result-dialog" role="dialog" aria-modal="true">
+        <header><div><h2>原工作流未启动</h2><p>{{ workflowMappingRejection.workflowName ?? workflowMappingRejection.workflowId }} · v{{ workflowMappingRejection.workflowVersion ?? '未知' }}</p></div><button type="button" class="modal-close-button" aria-label="关闭" @click="workflowMappingRejection = undefined"><UiIcon name="x" :size="18" /></button></header>
+        <p>你拒绝邀请以下 Agent，因此发布图中的关联节点无法执行。系统未添加成员、未修改节点，也未启动该工作流。</p>
+        <ul><li v-for="gap in workflowMappingRejection.memberGaps" :key="gap.agentId"><strong>{{ gap.agentName }}</strong><span>{{ (gap.nodes ?? []).map(node => node.nodeName ?? node.nodeId).join('、') || '流程未提供节点名称' }}</span></li></ul>
+        <footer class="confirmation-card__actions"><button type="button" class="action-button default" @click="workflowMappingRejection = undefined; suppressWorkflowAutoOpen = false; showCatalog = true">选择其他已发布流程</button><button type="button" class="action-button primary" @click="openWebWorkflowManager">前往 Web 创建新流程</button></footer>
+      </div>
+    </section>
 
     <section v-if="showCreateSessionDialog" class="modal-backdrop" aria-label="新建会话">
       <form class="modal-panel session-create-dialog" @submit.prevent="createSessionFromDialog">
@@ -2251,7 +2365,7 @@ async function submitWorkflowStepRevision() {
           </button>
         </header>
         <label class="dialog-field">
-          <span>修改后的需求</span>
+          <span>修改后的方案 Markdown</span>
           <textarea v-model="briefRevisionInput" rows="14" />
         </label>
         <label class="dialog-field">

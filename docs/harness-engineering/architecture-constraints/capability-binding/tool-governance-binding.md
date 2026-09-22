@@ -15,6 +15,7 @@
 | review.post | medium | 允许执行，需要独立的评审决策。 |
 | notification.feishu_draft | medium | 只允许生成草稿，发送必须由人工确认。 |
 | tool.file_write | high | 必须经过确认，并限定在工作区边界内。 |
+| tool.attachment_read | medium | 仅允许在当前 Session 边界内按稳定附件 ID 读取，必须留存引用审计，不得直接暴露二进制内容。 |
 | tool.command_run | high | 必须确认命令、cwd 与副作用。 |
 
 ## resolve 与 checkInvocation
