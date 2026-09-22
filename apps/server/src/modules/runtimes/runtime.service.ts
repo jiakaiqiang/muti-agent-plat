@@ -53,6 +53,7 @@ import {
 import { WorkItemBudgetStore } from './work-item-budget-store.js';
 import { SessionLifecycleStore } from './session-lifecycle-store.js';
 import { EventsService } from '../events/events.service.js';
+import { DiscussionDocumentsService } from '../discussion-documents/discussion-documents.service.js';
 
 export type RuntimeInvocationLog = {
   operationTelemetry?: AgentRunResult['operationTelemetry'];
@@ -149,7 +150,8 @@ export class RuntimeService implements OnModuleInit {
     @Optional() private readonly serverRuntimeWorker?: ServerRuntimeWorkerService,
     @Optional() private readonly workspaceBindings?: InvocationWorkspaceBindingsService,
     @Optional() private readonly modelConfig?: RuntimeModelConfigService,
-    @Optional() private readonly events?: EventsService
+    @Optional() private readonly events?: EventsService,
+    @Optional() private readonly discussionDocuments?: DiscussionDocumentsService
   ) {
     this.operations = new LogicalOperationStore(persistence);
     this.stopStates = new SessionStopStateStore(persistence);
@@ -392,6 +394,27 @@ export class RuntimeService implements OnModuleInit {
               }));
             }).catch(failSupervision);
           }
+          const requiredDocument = input.contextEnvelope.L1.requiredDocument;
+          if (event.type === 'tool_completed' && event.metadata?.name === 'read_file' && requiredDocument) {
+            const toolInput = event.metadata.input && typeof event.metadata.input === 'object'
+              ? event.metadata.input as Record<string, unknown>
+              : undefined;
+            const path = typeof toolInput?.path === 'string'
+              ? toolInput.path
+              : typeof event.metadata.path === 'string' ? event.metadata.path : undefined;
+            if (path === requiredDocument.relativePath) {
+              bookkeeping = bookkeeping.then(async () => {
+                await this.discussionDocuments?.recordAgentRead({
+                  sessionId: input.sessionId,
+                  documentId: requiredDocument.documentId,
+                  agentId: input.agent.agentId,
+                  invocationId: input.invocationId,
+                  relativePath: path,
+                  reportedTruncated: event.metadata?.truncated === true
+                });
+              }).catch(failSupervision);
+            }
+          }
           publishedEvents.add(JSON.stringify(event));
           if (isUseful(event)) firstUsefulOutputAt ??= nowIso();
           queue.push({ ...event, metadata: { ...event.metadata, operationId: operation.id,
@@ -478,6 +501,7 @@ export class RuntimeService implements OnModuleInit {
         }
       }
     })().then(async resolved => {
+      resolved = await this.enforceRequiredDiscussionDocument(input, resolved);
       if (stopStatePersistenceError) {
         const original = resolved;
         resolved = {
@@ -535,6 +559,67 @@ export class RuntimeService implements OnModuleInit {
     session.set(input.invocationId, handle);
     this.supervised.set(input.sessionId, session);
     return handle;
+  }
+
+  private async enforceRequiredDiscussionDocument(
+    input: InvocationPlan,
+    result: AgentRunResult
+  ): Promise<AgentRunResult> {
+    const requiredDocument = input.contextEnvelope.L1.requiredDocument;
+    // A local bridge performs the authoritative document read in its Runtime
+    // preflight before the Agent process starts. The local Agent does not have
+    // the server-side read_file tool, so do not apply the server receipt gate
+    // to this execution target. Preflight failures are returned before this
+    // supervisor receives a result.
+    if (!requiredDocument || !this.discussionDocuments || input.executionTarget.workspaceProviderKind === 'local_bridge') {
+      return result;
+    }
+
+    for (const event of result.events ?? []) {
+      if (event.type !== 'tool_completed' || event.metadata?.name !== 'read_file') continue;
+      const toolInput = event.metadata.input && typeof event.metadata.input === 'object'
+        ? event.metadata.input as Record<string, unknown>
+        : undefined;
+      const path = typeof toolInput?.path === 'string'
+        ? toolInput.path
+        : typeof event.metadata.path === 'string' ? event.metadata.path : undefined;
+      if (path !== requiredDocument.relativePath) continue;
+      await this.discussionDocuments.recordAgentRead({
+        sessionId: input.sessionId,
+        documentId: requiredDocument.documentId,
+        agentId: input.agent.agentId,
+        invocationId: input.invocationId,
+        relativePath: path,
+        reportedTruncated: event.metadata.truncated === true
+      });
+    }
+
+    if (result.status !== 'completed' || this.discussionDocuments.hasCompleteReceipt(
+      requiredDocument.documentId,
+      input.agent.agentId,
+      input.invocationId
+    )) return result;
+
+    return {
+      ...result,
+      status: 'failed',
+      error: {
+        code: 'CONTEXT_INSUFFICIENT',
+        message: 'DOCUMENT_READ_REQUIRED: Agent 未完整读取当前方案文档，已停止本次结果提交。',
+        retryable: true,
+        requestedContext: {
+          requestedRefs: [],
+          requestedFiles: [{ path: requiredDocument.relativePath, maxBytes: 200_000 }],
+          reason: 'DOCUMENT_READ_REQUIRED',
+          followUpInstruction: 'Read the active discussion document completely before continuing.'
+        },
+        details: {
+          documentId: requiredDocument.documentId,
+          documentRevision: requiredDocument.revision,
+          contentHash: requiredDocument.contentHash
+        }
+      }
+    };
   }
 
   private providerIdentity(input: InvocationPlan): NonNullable<ResolvedExecutionTarget['providerIdentity']> {

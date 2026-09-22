@@ -36,8 +36,14 @@ export type ToolResultFrame = {
   kind: 'tool_result';
   toolCallId: string;
   tool: string;
+  /** Original tool arguments retained for completion-event auditing. */
+  input?: unknown;
   output: string;
   isError?: boolean;
+  /** Whether the returned tool output is incomplete. */
+  truncated?: boolean;
+  /** Runtime/provider provenance for the completed tool call. */
+  source?: string;
 };
 export type ResultFrame = {
   kind: 'result';

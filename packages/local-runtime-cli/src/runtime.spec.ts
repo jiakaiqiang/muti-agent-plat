@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -141,6 +142,175 @@ test('local Runtime executes in staging and returns an isolated ChangeSet for pl
     else process.env.AGENT_RUNTIME_CODEX_ARGS_JSON = previousArgs;
     await rm(root, { recursive: true, force: true });
     await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test('local Runtime preflights the required discussion document before starting the adapter', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-runtime-required-document-'));
+  const requiredPath = '.agent-cluster/discussion-documents/session-required/plan-revision-001.md';
+  const content = '# Current contract\n\nUse the revised acceptance criteria.\n';
+  const previousExecute = getLocalRuntimeAdapter('codex').execute;
+  const timeline: string[] = [];
+  const emitted: AgentRuntimeEvent[] = [];
+  try {
+    await mkdir(join(root, '.agent-cluster/discussion-documents/session-required'), { recursive: true });
+    await writeFile(join(root, requiredPath), content, 'utf8');
+    const state = await createWorkspaceState(root, 'required-document-test');
+    const workspace = new LocalWorkspace(state, { watch: false, index: false });
+    const adapter = getLocalRuntimeAdapter('codex');
+    adapter.execute = async () => {
+      timeline.push('adapter_start');
+      return {
+        output: {
+          schemaVersion: '1.0',
+          kind: 'agent_message',
+          messageKind: 'progress',
+          content: 'done',
+          targetAgentIds: [],
+          targetAgentKeys: [],
+          mentionedAgentIds: [],
+          relatedTaskIds: []
+        },
+        usage: { model: 'test-stub', inputTokens: 1, outputTokens: 1, totalTokens: 2 }
+      };
+    };
+    const request = await invocationRequest(workspace);
+    request.plan.contextEnvelope = {
+      ...request.plan.contextEnvelope,
+      L1: {
+        ...request.plan.contextEnvelope.L1,
+        requiredDocument: requiredDocument(requiredPath, sha256(content))
+      }
+    };
+    const result = await executeLocalInvocation(
+      request,
+      workspace,
+      new AbortController().signal,
+      event => {
+        emitted.push(event);
+        timeline.push(`event:${event.type}:${String(event.metadata?.name ?? '')}`);
+      }
+    );
+
+    assert.equal(result.status, 'completed', result.error?.message);
+    const calledIndex = timeline.indexOf('event:tool_called:read_file');
+    const completedIndex = timeline.indexOf('event:tool_completed:read_file');
+    const adapterIndex = timeline.indexOf('adapter_start');
+    assert.ok(calledIndex >= 0, `expected required-document tool_called event, got ${timeline.join(', ')}`);
+    assert.ok(completedIndex > calledIndex, `expected tool_completed after tool_called, got ${timeline.join(', ')}`);
+    assert.ok(adapterIndex > completedIndex, `required document must be read before adapter start, got ${timeline.join(', ')}`);
+    const readCompleted = emitted.find(event => event.type === 'tool_completed' && event.metadata?.name === 'read_file');
+    assert.deepEqual(readCompleted?.metadata?.input, { path: requiredPath });
+    assert.equal(readCompleted?.metadata?.truncated, false);
+    assert.equal(readCompleted?.metadata?.source, 'runtime_preflight');
+  } finally {
+    getLocalRuntimeAdapter('codex').execute = previousExecute;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('local Runtime fails fast when the required discussion document is missing', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-runtime-required-document-missing-'));
+  const requiredPath = '.agent-cluster/discussion-documents/session-required/missing.md';
+  const adapter = getLocalRuntimeAdapter('codex');
+  const previousExecute = adapter.execute;
+  let adapterCalls = 0;
+  try {
+    const state = await createWorkspaceState(root, 'required-document-missing-test');
+    const workspace = new LocalWorkspace(state, { watch: false, index: false });
+    adapter.execute = async () => {
+      adapterCalls++;
+      return {
+        output: {
+          schemaVersion: '1.0',
+          kind: 'agent_message',
+          messageKind: 'progress',
+          content: 'must not run',
+          targetAgentIds: [],
+          targetAgentKeys: [],
+          mentionedAgentIds: [],
+          relatedTaskIds: []
+        },
+        usage: { model: 'test-stub', inputTokens: 0, outputTokens: 0, totalTokens: 0 }
+      };
+    };
+    const request = await invocationRequest(workspace);
+    const document = requiredDocument(requiredPath, '0'.repeat(64));
+    request.plan.contextEnvelope = {
+      ...request.plan.contextEnvelope,
+      L1: { ...request.plan.contextEnvelope.L1, requiredDocument: document }
+    };
+    const result = await executeLocalInvocation(request, workspace, new AbortController().signal, () => {});
+    assert.equal(result.status, 'failed');
+    assertRequiredDocumentPreflightFailure(result, document);
+    assert.equal(adapterCalls, 0);
+  } finally {
+    adapter.execute = previousExecute;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('local Runtime fails fast when the required discussion document is truncated', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-runtime-required-document-truncated-'));
+  const requiredPath = '.agent-cluster/discussion-documents/session-required/large.md';
+  const content = 'x'.repeat(200_001);
+  const adapter = getLocalRuntimeAdapter('codex');
+  const previousExecute = adapter.execute;
+  let adapterCalls = 0;
+  try {
+    await mkdir(join(root, '.agent-cluster/discussion-documents/session-required'), { recursive: true });
+    await writeFile(join(root, requiredPath), content, 'utf8');
+    const state = await createWorkspaceState(root, 'required-document-truncated-test');
+    const workspace = new LocalWorkspace(state, { watch: false, index: false });
+    adapter.execute = async () => {
+      adapterCalls++;
+      throw new Error('adapter must not start');
+    };
+    const request = await invocationRequest(workspace);
+    const document = requiredDocument(requiredPath, sha256(content));
+    request.plan.contextEnvelope = {
+      ...request.plan.contextEnvelope,
+      L1: { ...request.plan.contextEnvelope.L1, requiredDocument: document }
+    };
+    const result = await executeLocalInvocation(request, workspace, new AbortController().signal, () => {});
+    assert.equal(result.status, 'failed');
+    assertRequiredDocumentPreflightFailure(result, document);
+    assert.equal(adapterCalls, 0);
+  } finally {
+    adapter.execute = previousExecute;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('local Runtime fails fast when the required discussion document hash does not match', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-runtime-required-document-hash-'));
+  const requiredPath = '.agent-cluster/discussion-documents/session-required/hash.md';
+  const content = '# Actual revision\n';
+  const adapter = getLocalRuntimeAdapter('codex');
+  const previousExecute = adapter.execute;
+  let adapterCalls = 0;
+  try {
+    await mkdir(join(root, '.agent-cluster/discussion-documents/session-required'), { recursive: true });
+    await writeFile(join(root, requiredPath), content, 'utf8');
+    const state = await createWorkspaceState(root, 'required-document-hash-test');
+    const workspace = new LocalWorkspace(state, { watch: false, index: false });
+    adapter.execute = async () => {
+      adapterCalls++;
+      throw new Error('adapter must not start');
+    };
+    const request = await invocationRequest(workspace);
+    const document = requiredDocument(requiredPath, 'f'.repeat(64));
+    request.plan.contextEnvelope = {
+      ...request.plan.contextEnvelope,
+      L1: { ...request.plan.contextEnvelope.L1, requiredDocument: document }
+    };
+    const result = await executeLocalInvocation(request, workspace, new AbortController().signal, () => {});
+    assert.equal(result.status, 'failed');
+    assertRequiredDocumentPreflightFailure(result, document);
+    assert.equal(adapterCalls, 0);
+  } finally {
+    adapter.execute = previousExecute;
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -820,6 +990,35 @@ async function invocationRequest(
     workspaceRevision,
     permissions: workspace.state.permissions
   };
+}
+
+function sha256(content: string) {
+  return createHash('sha256').update(content).digest('hex');
+}
+
+function requiredDocument(relativePath: string, contentHash: string) {
+  return {
+    documentId: `document-${sha256(relativePath).slice(0, 12)}`,
+    revision: 1,
+    relativePath,
+    contentHash
+  } as NonNullable<InvocationPlan['contextEnvelope']['L1']['requiredDocument']>;
+}
+
+function assertRequiredDocumentPreflightFailure(
+  result: Awaited<ReturnType<typeof executeLocalInvocation>>,
+  document: NonNullable<InvocationPlan['contextEnvelope']['L1']['requiredDocument']>
+) {
+  assert.equal(result.error?.code, 'CONTEXT_INSUFFICIENT');
+  assert.match(result.error?.message ?? '', /DOCUMENT_READ_PRECHECK_FAILED/);
+  assert.deepEqual(result.error?.requestedContext?.requestedFiles, [{ path: document.relativePath, maxBytes: 200_000 }]);
+  assert.equal(result.error?.requestedContext?.reason, 'DOCUMENT_READ_PRECHECK_FAILED');
+  assert.deepEqual(result.error?.details, {
+    documentId: document.documentId,
+    documentRevision: document.revision,
+    relativePath: document.relativePath,
+    contentHash: document.contentHash
+  });
 }
 
 test('failed submission preserves a candidate, repairs without development tools and rejects cross-task reuse', async () => {

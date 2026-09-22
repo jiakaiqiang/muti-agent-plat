@@ -145,6 +145,7 @@ import {
 import { InvocationWorkspaceBindingsService } from '../runtimes/invocation-workspace-bindings.service.js';
 import { FileRevisionsService } from '../file-revisions/file-revisions.service.js';
 import { applyRuntimeWriteModeOverride } from './runtime-write-mode-policy.js';
+import { DiscussionDocumentsService } from '../discussion-documents/discussion-documents.service.js';
 
 export type ExecutionOutcome =
   | { kind: 'delivered' }
@@ -330,7 +331,8 @@ export class OrchestratorService {
     @Optional() private readonly workspaceWritebacks?: WorkspaceWritebackService,
     @Optional() private readonly worktreeExecution?: WorktreeExecutionService,
     @Optional() private readonly contextManagement?: ContextManagementService,
-    @Optional() private readonly systemAgentPolicies?: SystemAgentRuntimePolicyService
+    @Optional() private readonly systemAgentPolicies?: SystemAgentRuntimePolicyService,
+    @Optional() private readonly discussionDocuments?: DiscussionDocumentsService
   ) {
     this.lifecycle = new SessionLifecycleStore(persistence);
     this.discussions = new DiscussionStore(persistence);
@@ -1155,10 +1157,12 @@ export class OrchestratorService {
     const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
     const agentIdByKey = new Map(this.participatingAgents(session).map((agent) => [agent.key, agent.id]));
     const suggestions = this.suggestedTasksByBriefId.get(brief.id) ?? this.defaultSuggestedTasks(session);
+    const discussionDocument = this.discussionDocuments?.active(session.id);
     const tasks = this.tasks.createFromSuggestions(session.id, suggestions, agentIdByKey, {
       assignedBy: { type: 'agent', id: coordinator.id },
       routingMode: 'coordinator_controlled',
-      workItemId: session.activeWorkItemId
+      workItemId: session.activeWorkItemId,
+      ...(discussionDocument ? { discussionDocument } : {})
     });
     if (options.eligibleAgentIds?.length) {
       const eligibleAgentIds = Array.from(new Set(options.eligibleAgentIds));
@@ -5429,6 +5433,8 @@ export class OrchestratorService {
     const summaryMemory = this.createSummaryMemory(session, brief, task, phase, contextSlice);
     const compiledIdentity = this.compileAgentIdentity(agent);
     const coverageRule = buildCoverageSystemRule(session.workspaceSnapshot);
+    const requiredDiscussionDocument = this.discussionDocuments?.active(session.id);
+    const localBridgeWorkspace = workspaceProviderKindForDirectory(session.workingDirectory?.kind) === 'local_bridge';
     const bootstrapRules = session.workspaceMode === 'bootstrap'
       ? [
           'The selected workspace is intentionally empty and the user authorized creating a new project from scratch.',
@@ -5442,6 +5448,16 @@ export class OrchestratorService {
         'Do not perform external side effects unless explicitly allowed by capability policy.',
         'Use workspaceManifest for project structure and selectedEvidenceContents for readable evidence content.',
         'Treat taskContext.evidenceRefs as the selected minimal evidence set; request more context instead of inferring omitted file contents.',
+        ...(requiredDiscussionDocument
+          ? localBridgeWorkspace
+            ? [
+                `The local Runtime preflight has already read and verified the active discussion document at ${requiredDiscussionDocument.relativePath} (v${requiredDiscussionDocument.revision}, SHA-256 ${requiredDiscussionDocument.contentHash}); use that full Markdown as authoritative context and do not request a read_file tool call.`,
+              ]
+            : [
+                `Before completing this invocation, call read_file for exactly ${requiredDiscussionDocument.relativePath}. Do not rely on an older revision or a copied prompt body.`,
+                `The active discussion document is the authoritative user-submitted plan revision (v${requiredDiscussionDocument.revision}, SHA-256 ${requiredDiscussionDocument.contentHash}); use its full Markdown after the read_file receipt and never request or reconstruct its body from event text.`
+              ]
+          : []),
         compiledIdentity.systemPrompt,
         ...bootstrapRules,
         ...(coverageRule ? [coverageRule] : [])
@@ -5463,6 +5479,16 @@ export class OrchestratorService {
         phase === 'brief_consultation'
           ? undefined
           : session.latestContractGoal,
+      ...(requiredDiscussionDocument
+        ? {
+            requiredDocument: {
+              documentId: requiredDiscussionDocument.id,
+              revision: requiredDiscussionDocument.revision,
+              relativePath: requiredDiscussionDocument.relativePath,
+              contentHash: requiredDiscussionDocument.contentHash
+            }
+          }
+        : {}),
       taskContext,
       summaryMemory,
       continuationState: this.createContinuationState(
@@ -7977,6 +8003,35 @@ export class OrchestratorService {
     try {
       let result = await execution.result;
       await streamConsumer;
+      const requiredDocument = plan.contextEnvelope.L1.requiredDocument;
+      if (
+        requiredDocument &&
+        plan.executionTarget.workspaceProviderKind !== 'local_bridge' &&
+        result.status === 'completed' &&
+        !this.discussionDocuments?.hasCompleteReceipt(requiredDocument.documentId, plan.agent.agentId, plan.invocationId)
+      ) {
+        result = {
+          ...result,
+          status: 'failed',
+          error: {
+            code: 'CONTEXT_INSUFFICIENT',
+            message: 'DOCUMENT_READ_REQUIRED: Agent 未完整读取当前方案文档，已停止本次结果提交。',
+            retryable: true,
+            requestedContext: {
+              requestedRefs: [],
+              requestedFiles: [{ path: requiredDocument.relativePath, maxBytes: 200_000 }],
+              reason: 'DOCUMENT_READ_REQUIRED',
+              followUpInstruction: 'Read the active discussion document completely before continuing.'
+            },
+            details: {
+              phase: plan.phase,
+              documentId: requiredDocument.documentId,
+              documentRevision: requiredDocument.revision,
+              contentHash: requiredDocument.contentHash
+            }
+          }
+        };
+      }
       if (outputGuardError && !signal?.aborted && !result.error?.details?.stopUnconfirmed) {
         result = { ...result, status: 'failed', error: { ...outputGuardError,
           details: { ...outputGuardError.details, phase: plan.phase } } };

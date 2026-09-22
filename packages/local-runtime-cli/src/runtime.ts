@@ -18,7 +18,7 @@ import type {
 import { createAgentMessageOutput, isSensitiveWorkspacePath, materializeTaskSubmission } from '@agent-cluster/shared';
 import { getLocalRuntimeAdapter } from './adapters/registry.js';
 export { buildRuntimeProcessEnv } from './runtime-process.js';
-import { extractLocalRuntimeError } from './runtime-error.js';
+import { extractLocalRuntimeError, localRuntimeError } from './runtime-error.js';
 import { LocalWorkspace } from './workspace.js';
 import { captureExecutionCandidate, validateExecutionCandidate } from './execution-candidate.js';
 import { SubmissionError } from './adapters/submission-error.js';
@@ -86,6 +86,7 @@ export async function executeLocalInvocation(
       createdAt: startedAt
     };
     emit(started);
+    await preflightRequiredDiscussionDocument(plan, workspace, emit);
     const executionPlan = plan.submissionRepair ? { ...plan,
       toolCatalog: { tools: [], decisions: [], catalogHash: 'submission-repair-no-tools' },
       executionTarget: { ...plan.executionTarget, writeMode: 'none' as const, requiredCapabilities: [], requiredToolIds: [] },
@@ -230,6 +231,89 @@ export async function executeLocalInvocation(
   } finally {
     if (stagingContainer) await rm(stagingContainer, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+const requiredDiscussionDocumentMaxBytes = 200_000;
+
+async function preflightRequiredDiscussionDocument(
+  plan: InvocationPlan,
+  workspace: LocalWorkspace,
+  emit: (event: AgentRuntimeEvent) => void
+) {
+  const requiredDocument = plan.contextEnvelope.L1.requiredDocument;
+  if (!requiredDocument) return;
+
+  let read: Awaited<ReturnType<LocalWorkspace['readFile']>>;
+  try {
+    read = await workspace.readFile({
+      path: requiredDocument.relativePath,
+      maxBytes: requiredDiscussionDocumentMaxBytes
+    });
+  } catch (error) {
+    throw requiredDocumentPreflightError(
+      plan,
+      `${requiredDocument.relativePath}: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  if (
+    read.truncated
+    || read.hash?.algorithm !== 'sha256'
+    || read.hash.value !== requiredDocument.contentHash
+    || contentHash(read.content).value !== requiredDocument.contentHash
+  ) {
+    throw requiredDocumentPreflightError(
+      plan,
+      `${requiredDocument.relativePath}: content is truncated or hash does not match.`
+    );
+  }
+
+  const toolCallId = `required-document:${requiredDocument.documentId}`;
+  const metadata = {
+    toolCallId,
+    name: 'read_file',
+    input: { path: requiredDocument.relativePath },
+    source: 'runtime_preflight'
+  };
+  emit({
+    invocationId: plan.invocationId,
+    type: 'tool_called',
+    visibility: 'debug',
+    content: `read_file ${requiredDocument.relativePath}`,
+    metadata,
+    createdAt: new Date().toISOString()
+  });
+  emit({
+    invocationId: plan.invocationId,
+    type: 'tool_completed',
+    visibility: 'debug',
+    content: `read_file completed ${requiredDocument.relativePath}`,
+    metadata: { ...metadata, truncated: false },
+    createdAt: new Date().toISOString()
+  });
+}
+
+function requiredDocumentPreflightError(plan: InvocationPlan, detail: string) {
+  const requiredDocument = plan.contextEnvelope.L1.requiredDocument;
+  if (!requiredDocument) throw new Error(`DOCUMENT_READ_PRECHECK_FAILED: ${detail}`);
+  const message = `DOCUMENT_READ_PRECHECK_FAILED: ${detail}`;
+  return localRuntimeError({
+    code: 'CONTEXT_INSUFFICIENT',
+    message,
+    retryable: true,
+    requestedContext: {
+      requestedRefs: [],
+      requestedFiles: [{ path: requiredDocument.relativePath, maxBytes: requiredDiscussionDocumentMaxBytes }],
+      reason: 'DOCUMENT_READ_PRECHECK_FAILED',
+      followUpInstruction: 'Verify that the active discussion document exists and matches the required SHA-256 before retrying.'
+    },
+    details: {
+      documentId: requiredDocument.documentId,
+      documentRevision: requiredDocument.revision,
+      relativePath: requiredDocument.relativePath,
+      contentHash: requiredDocument.contentHash
+    }
+  });
 }
 
 export function shouldApplyStagedChangeSet(writeMode: InvocationPlan['executionTarget']['writeMode']) {

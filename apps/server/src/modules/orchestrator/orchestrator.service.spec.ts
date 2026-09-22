@@ -3346,3 +3346,95 @@ test('brief deadline is shared by provider attempts and is cleaned up after comp
     else process.env.PHASE_TIMEOUT_BRIEF_GENERATION_MS = old;
   }
 });
+
+const requiredDiscussionDocumentForRuntimePolicy = {
+  documentId: '00000000-0000-4000-8000-000000009101',
+  revision: 1,
+  relativePath: '.agent-cluster/discussion-documents/session-1/plan-revision-001.md',
+  contentHash: 'a'.repeat(64)
+};
+
+test('local_bridge runtime pre-read satisfies required document policy without an Agent read_file receipt', async () => {
+  const service = makeService() as any;
+  service.invocationResolver = {
+    resolve: () => makeInvocationPlan({
+      invocationId: 'local-bridge-pre-read',
+      executionTarget: {
+        runtimeType: 'codex',
+        workspaceProviderKind: 'local_bridge',
+        executionLocation: 'local'
+      },
+      contextEnvelope: {
+        L0: { workspace: { providerKind: 'local_bridge' } },
+        L1: { requiredDocument: requiredDiscussionDocumentForRuntimePolicy }
+      }
+    })
+  };
+  service.discussionDocuments = {
+    // The local Runtime performs and audits the pre-read before Codex starts;
+    // this deliberately remains false to prove the orchestrator does not ask
+    // the local Codex process to manufacture a server-side read_file receipt.
+    hasCompleteReceipt: () => false
+  };
+
+  const result = await service.runRuntimeAttempt(session(), {
+    invocationId: 'local-bridge-pre-read',
+    sessionId: 'session-1',
+    phase: 'task_execution',
+    agent: agent('backend'),
+    contextAssembly: {
+      taskContext: {
+        intent: 'implementation',
+        requiresCodeChanges: false,
+        evidenceSelection: { strategy: 'coding_minimal' },
+        evidenceRefs: [],
+        taskMap: { items: [] }
+      }
+    },
+    expectedOutput: { kind: 'agent_message', schemaVersion: '1.0' },
+    budget: {}
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.equal(result.error, undefined);
+});
+
+test('non-local runtime still requires a complete required document read receipt', async () => {
+  const service = makeService() as any;
+  service.invocationResolver = {
+    resolve: () => makeInvocationPlan({
+      invocationId: 'server-local-missing-read',
+      executionTarget: {
+        runtimeType: 'mock',
+        workspaceProviderKind: 'server_local',
+        executionLocation: 'server'
+      },
+      contextEnvelope: {
+        L1: { requiredDocument: requiredDiscussionDocumentForRuntimePolicy }
+      }
+    })
+  };
+  service.discussionDocuments = { hasCompleteReceipt: () => false };
+
+  const result = await service.runRuntimeAttempt(session(), {
+    invocationId: 'server-local-missing-read',
+    sessionId: 'session-1',
+    phase: 'task_execution',
+    agent: agent('backend'),
+    contextAssembly: {
+      taskContext: {
+        intent: 'implementation',
+        requiresCodeChanges: false,
+        evidenceSelection: { strategy: 'coding_minimal' },
+        evidenceRefs: [],
+        taskMap: { items: [] }
+      }
+    },
+    expectedOutput: { kind: 'agent_message', schemaVersion: '1.0' },
+    budget: {}
+  });
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'CONTEXT_INSUFFICIENT');
+  assert.match(result.error?.message ?? '', /DOCUMENT_READ_REQUIRED/);
+});

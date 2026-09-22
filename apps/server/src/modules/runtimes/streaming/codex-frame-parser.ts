@@ -148,6 +148,7 @@ export function parseCodexNotification(msg: JsonRpcMessage): RuntimeStreamFrame 
         kind: 'tool_result',
         toolCallId: id,
         tool: itemToolName(item),
+        input: itemInput(item),
         output: itemOutput(item),
         isError: status === 'failed' || status === 'declined'
       };

@@ -37,6 +37,28 @@ test('official item lifecycle maps command execution to tool frames', () => {
   if (completed.kind === 'tool_result') assert.equal(completed.output, 'ok');
 });
 
+test('dynamicToolCall completion keeps arguments as tool_result input', () => {
+  const path = '.agent-cluster/discussion-documents/session-1/plan-revision-001.md';
+  const frame = parseCodexNotification({
+    method: 'item/completed',
+    params: {
+      item: {
+        type: 'dynamicToolCall',
+        id: 'call-1',
+        tool: 'read_file',
+        arguments: { path },
+        contentItems: [{ type: 'text', text: '# revised plan' }],
+        status: 'completed'
+      }
+    }
+  });
+
+  assert.equal(frame.kind, 'tool_result');
+  if (frame.kind !== 'tool_result') return;
+  assert.deepEqual(frame.input, { path });
+  assert.equal(frame.tool, 'read_file');
+});
+
 test('official completed agentMessage is the authoritative provider output', () => {
   const payload = {
     kind: 'agent_message',

@@ -36,8 +36,11 @@ export function frameToRuntimeEvent(invocationId: UUID, frame: RuntimeStreamFram
       metadata: {
         toolCallId: frame.toolCallId,
         name: frame.tool,
+        ...(frame.input === undefined ? {} : { input: frame.input }),
         output: frame.output,
-        isError: frame.isError === true
+        isError: frame.isError === true,
+        ...(typeof frame.truncated === 'boolean' ? { truncated: frame.truncated } : {}),
+        ...(frame.source === undefined ? {} : { source: frame.source })
       },
       createdAt
     };
