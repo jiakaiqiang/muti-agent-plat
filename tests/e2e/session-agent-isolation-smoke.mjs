@@ -26,7 +26,10 @@ try {
     server.apiBase,
     '分析隔离会话中的 Agent 参与范围并输出说明。',
     {
-      agentIds: ['coordinator', 'requirements'],
+      // Coordinator is a trusted internal Agent and is intentionally hidden
+      // from the public chat surface; only chat-surface members are supplied
+      // to Session creation.
+      agentIds: ['requirements'],
       runtimePreference: { preferredRuntimeType: 'mock', allowedRuntimeTypes: ['mock'] }
     }
   );
@@ -36,6 +39,11 @@ try {
 
   const session = await api(server.apiBase, `/sessions/${sessionId}`);
   const allowed = new Set(session.data.participatingAgentIds);
+  // Internal coordination events/tasks may still be authored by the trusted
+  // main Agent even though it is not persisted as a chat participant.
+  const coordinator = (await api(server.apiBase, '/agents')).data.find((agent) => agent.key === 'coordinator');
+  if (!coordinator) throw new Error('Coordinator Agent is required for the isolation smoke.');
+  allowed.add(coordinator.id);
   const events = await listEvents(server.apiBase, sessionId);
   const leakedEvents = events.filter(
     (event) => event.actor?.type === 'agent' && !allowed.has(event.actor.id)

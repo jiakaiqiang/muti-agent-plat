@@ -201,6 +201,10 @@ test('WorkflowRuntimeService pauses only at an explicit human approval node', as
   assert.equal(setup.callbacks.length, 1);
   assert.deepEqual(setup.taskItems[0].eligibleAgentIds, ['requirements']);
   assert.equal(setup.taskItems[0].workflowAgentOverride, false);
+  const taskEvents = setup.eventItems.filter((event) => event.type === 'task_created' || event.type === 'task_assigned');
+  assert.deepEqual(taskEvents.map((event) => event.type), ['task_created', 'task_assigned']);
+  const assignmentMetadata = taskEvents[1].metadata as { payload?: { assignee?: { id?: string } } };
+  assert.equal(assignmentMetadata.payload?.assignee?.id, 'requirements');
 
   setup.taskItems[0].status = 'completed';
   setup.callbacks[0]({ kind: 'workflow_step_completed', taskId: setup.taskItems[0].id, resultSummary: '需求完成' });

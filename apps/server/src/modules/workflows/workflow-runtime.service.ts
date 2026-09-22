@@ -1020,6 +1020,7 @@ export class WorkflowRuntimeService {
     nodeRun.relatedTaskId = taskId;
     this.persist();
     await this.runEffect(run, 'create_agent_task', `${node.id}:${attempt}:create`, { taskId }, () => this.tasks.add(task));
+    this.emitWorkflowTaskAssignmentEvents(run, task);
     await this.emitNodeStarted(run, nodeRun, task.title);
     await this.scheduleTaskExecution(run, nodeRun, task);
   }
@@ -1080,8 +1081,54 @@ export class WorkflowRuntimeService {
     nodeRun.relatedTaskId = taskId;
     this.persist();
     await this.runEffect(run, 'create_agent_task', `${node.id}:${attempt}:create`, { taskId }, () => this.tasks.add(task));
+    this.emitWorkflowTaskAssignmentEvents(run, task);
     await this.emitNodeStarted(run, nodeRun, task.title);
     await this.scheduleTaskExecution(run, nodeRun, task);
+  }
+
+  private emitWorkflowTaskAssignmentEvents(run: WorkflowRun, task: AgentTask) {
+    const assigneeId = task.assignee?.type === 'agent' ? task.assignee.id : undefined;
+    const toAgentIds = assigneeId ? [assigneeId] : [];
+    const payload = {
+      taskId: task.id,
+      title: task.title,
+      description: task.description,
+      status: task.status,
+      assignedBy: task.assignedBy,
+      assignee: task.assignee,
+      eligibleAgentIds: task.eligibleAgentIds,
+      routingMode: task.routingMode,
+      autoResolutionAttempted: task.autoResolutionAttempted,
+      assignmentReason: task.assignmentReason,
+      contextRequirements: task.contextRequirements,
+      verificationPlan: task.verificationPlan,
+      riskNotes: task.riskNotes,
+      requiresUserConfirmation: task.requiresUserConfirmation,
+      dependsOnTaskIds: task.dependsOnTaskIds,
+      acceptanceCriteria: task.acceptanceCriteria,
+      workflowRunId: task.workflowRunId,
+      workflowNodeId: task.workflowNodeId,
+      workflowNodeRunId: task.workflowNodeRunId,
+      workflowNodeType: task.workflowNodeType
+    };
+    this.events.createOnce(`workflow-task-created:${task.id}`, {
+      sessionId: run.sessionId,
+      type: 'task_created',
+      taskId: task.id,
+      fromAgentId: task.assignedBy?.type === 'agent' ? task.assignedBy.id : undefined,
+      toAgentIds,
+      content: `已创建工作流任务：${task.title}`,
+      metadata: createMetadata('task_card', payload)
+    });
+    this.events.createOnce(`workflow-task-assigned:${task.id}`, {
+      sessionId: run.sessionId,
+      type: 'task_assigned',
+      taskId: task.id,
+      fromAgentId: task.assignedBy?.type === 'agent' ? task.assignedBy.id : undefined,
+      toAgentIds,
+      content: `接收者已分配工作流任务：${task.title}`,
+      metadata: createMetadata('task_card', payload)
+    });
   }
 
   private async activateHuman(
