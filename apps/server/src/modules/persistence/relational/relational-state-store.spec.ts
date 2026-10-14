@@ -279,3 +279,259 @@ test('100 appendEvent calls insert only new events and outbox records without up
   assert.equal(outboxWrites[0]?.parameters?.[0], 'outbox:event-8');
   assert.equal(queries.some(({ sql }) => /^\s*update agent_cluster\.collaboration_events/i.test(sql)), false);
 });
+
+function collectionMutationHarness(input: {
+  eventsBySession: Record<string, Array<Record<string, unknown>>>;
+  eventOutbox: Array<Record<string, unknown>>;
+}) {
+  const queries: Array<{ sql: string; values?: unknown[] }> = [];
+  const client = {
+    async query(sql: string, values?: unknown[]) {
+      queries.push({ sql, values });
+      if (sql.includes('from agent_cluster.collaboration_events e join agent_cluster.sessions s')) {
+        return { rows: Object.entries(input.eventsBySession).flatMap(([group_id, events]) =>
+          events.map(value => ({ group_id, value }))) };
+      }
+      if (sql.includes('from agent_cluster.event_outbox outbox order by id')) {
+        return { rows: input.eventOutbox.map(value => ({ value })) };
+      }
+      if (sql.includes('select id::text from agent_cluster.sessions')) return { rows: [{ id: `pk-${values?.[0]}` }] };
+      return { rows: [] };
+    },
+    release() {}
+  };
+  const pool = { async connect() { return client; } };
+  const codec = { externalize: (value: unknown) => ({ value, contents: [] }), hydrate: (value: unknown) => value };
+  return { queries, store: new RelationalStateStore(pool as never, codec as never) };
+}
+
+function storedEvent(sessionId: string, id: string) {
+  return { id, sessionId, type: 'agent_message', actor: { type: 'agent', id: 'agent-1' },
+    content: id, metadata: { schemaVersion: '0.1', payload: {} }, createdAt: '2026-10-13T00:00:00.000Z' };
+}
+
+function storedOutbox(eventId: string, sessionId: string) {
+  return { id: `outbox:${eventId}`, idempotencyKey: `session:${sessionId}:event:${eventId}`, aggregateType: 'session',
+    aggregateId: sessionId, eventType: 'agent_message', status: 'published', attempts: 0, createdAt: '2026-10-13T00:00:00.000Z' };
+}
+
+test('collection mutations write only new or changed events and outbox records', async () => {
+  const { queries, store } = collectionMutationHarness({
+    eventsBySession: {
+      'session-a': [storedEvent('session-a', 'a-1'), storedEvent('session-a', 'a-2')],
+      'session-b': [storedEvent('session-b', 'b-1')]
+    },
+    eventOutbox: [storedOutbox('a-1', 'session-a'), storedOutbox('a-2', 'session-a'), storedOutbox('b-1', 'session-b')]
+  });
+
+  await store.mutateCollections(['eventsBySession', 'eventOutbox'], draft => {
+    const events = draft.eventsBySession as Record<string, Array<Record<string, unknown>>>;
+    events['session-a']!.push(storedEvent('session-a', 'a-3'));
+    (draft.eventOutbox as Array<Record<string, unknown>>).push({ ...storedOutbox('a-3', 'session-a'), status: 'pending' });
+  });
+
+  const eventWrites = queries.filter(({ sql }) => /insert into agent_cluster\.collaboration_events/i.test(sql));
+  const outboxUpserts = queries.filter(({ sql }) => /insert into agent_cluster\.event_outbox as outbox/i.test(sql));
+  assert.deepEqual(eventWrites.map(({ values }) => values?.[0]), ['a-3']);
+  assert.deepEqual(outboxUpserts.map(({ values }) => values?.[0]), ['outbox:a-3']);
+  assert.equal(queries.at(-1)?.sql, 'commit');
+});
+
+test('collection mutations rewrite an edited event but leave other Sessions untouched', async () => {
+  const { queries, store } = collectionMutationHarness({
+    eventsBySession: {
+      'session-a': [storedEvent('session-a', 'a-1'), storedEvent('session-a', 'a-2')],
+      'session-b': [storedEvent('session-b', 'b-1')]
+    },
+    eventOutbox: []
+  });
+
+  const { state } = await store.mutateCollections(['eventsBySession'], draft => {
+    const events = draft.eventsBySession as Record<string, Array<Record<string, unknown>>>;
+    events['session-a']![1] = { ...events['session-a']![1], content: 'edited' };
+  });
+
+  const eventWrites = queries.filter(({ sql }) => /insert into agent_cluster\.collaboration_events/i.test(sql));
+  assert.deepEqual(eventWrites.map(({ values }) => values?.[0]), ['a-2']);
+  assert.equal(eventWrites[0]?.values?.[6], 'edited');
+  // The caller still receives the complete committed collection for its in-memory cache.
+  const committed = state.eventsBySession as Record<string, unknown[]>;
+  assert.equal(committed['session-a']?.length, 2);
+  assert.equal(committed['session-b']?.length, 1);
+});
+
+test('event projection numbers new events after the stored sequence instead of by array position', async () => {
+  const queries: Array<{ sql: string; values?: unknown[] }> = [];
+  const client = { async query(sql: string, values?: unknown[]) {
+    queries.push({ sql, values });
+    return { rows: sql.includes('select id::text from agent_cluster.sessions') ? [{ id: '7' }] : [] };
+  } };
+  const store = new RelationalStateStore({} as never, {} as never) as any;
+
+  // An incremental write hands over only the newest event; position 1 would collide
+  // with the existing first row on unique (session_id, session_seq).
+  await store.writeEvents(client, { 'session-a': [storedEvent('session-a', 'a-9')] });
+
+  const insert = queries.find(({ sql }) => /insert into agent_cluster\.collaboration_events/i.test(sql))!;
+  assert.match(insert.sql, /coalesce\(max\(session_seq\),\s*0\)\s*\+\s*1/i);
+  assert.equal(insert.values?.includes(1), false);
+  assert.match(insert.sql, /on conflict \(external_id\) do update set content=excluded\.content,payload=excluded\.payload/);
+});
+
+test('session-scoped mutations load only that Session\'s events and outbox records', async () => {
+  const { queries, store } = collectionMutationHarness({
+    eventsBySession: { 'session-a': [storedEvent('session-a', 'a-1')] },
+    eventOutbox: [storedOutbox('a-1', 'session-a')]
+  });
+
+  await store.mutateCollections(['eventsBySession', 'eventOutbox'], draft => {
+    (draft.eventsBySession as Record<string, unknown[]>)['session-a']!.push(storedEvent('session-a', 'a-2'));
+  }, { sessionIds: ['session-a'] });
+
+  const eventLoad = queries.find(({ sql }) => /from agent_cluster\.collaboration_events e join agent_cluster\.sessions s/.test(sql))!;
+  const outboxLoad = queries.find(({ sql }) => /from agent_cluster\.event_outbox outbox/.test(sql) && /select/i.test(sql))!;
+  assert.match(eventLoad.sql, /s\.external_id\s*=\s*any\(\$1::text\[\]\)/);
+  assert.deepEqual(eventLoad.values, [['session-a']]);
+  assert.match(outboxLoad.sql, /outbox\.aggregate_external_id\s*=\s*any\(\$1::text\[\]\)/);
+  assert.deepEqual(outboxLoad.values, [['session-a']]);
+});
+
+test('session-scoped mutations reject writes to another Session and roll back', async () => {
+  const { queries, store } = collectionMutationHarness({ eventsBySession: {}, eventOutbox: [] });
+
+  await assert.rejects(store.mutateCollections(['eventsBySession'], draft => {
+    (draft.eventsBySession as Record<string, unknown[]>)['session-b'] = [storedEvent('session-b', 'b-1')];
+  }, { sessionIds: ['session-a'] }), /COLLECTION_SCOPE_VIOLATION: eventsBySession:session-b/);
+  await assert.rejects(store.mutateCollections(['eventOutbox'], draft => {
+    (draft.eventOutbox as unknown[]).push(storedOutbox('b-1', 'session-b'));
+  }, { sessionIds: ['session-a'] }), /COLLECTION_SCOPE_VIOLATION: eventOutbox:session-b/);
+
+  assert.equal(queries.some(({ sql }) => /insert into agent_cluster\.collaboration_events/i.test(sql)), false);
+  assert.equal(queries.filter(({ sql }) => sql === 'rollback').length, 2);
+});
+
+function sqlHarness(respond: (sql: string, values?: unknown[]) => unknown[] | undefined) {
+  const queries: Array<{ sql: string; values?: unknown[] }> = [];
+  const client = {
+    async query(sql: string, values?: unknown[]) {
+      queries.push({ sql, values });
+      return { rows: respond(sql, values) ?? [] };
+    },
+    release() {}
+  };
+  const pool = { async connect() { return client; } };
+  const codec = { externalize: (value: unknown) => ({ value, contents: [] }), hydrate: (value: unknown) => value };
+  return { queries, store: new RelationalStateStore(pool as never, codec as never) };
+}
+
+function storedSession(id: string, title = id) {
+  return { id, title, status: 'PAUSED', ownerId: 'local-user', dataEpoch: 'epoch', revision: 1,
+    participatingAgentIds: [], createdAt: '2026-10-13T00:00:00.000Z', updatedAt: '2026-10-13T00:00:00.000Z' };
+}
+
+function sessionRows(sessions: Array<Record<string, unknown>>) {
+  return (sql: string, values?: unknown[]) => {
+    if (sql.includes("select metadata->'sourceRecord' value from agent_cluster.sessions")) return sessions.map(value => ({ value }));
+    if (/insert into agent_cluster\.sessions .*returning id::text/s.test(sql)) return [{ id: `pk-${values?.[0]}` }];
+    if (sql.includes('select id::text from agent_cluster.sessions')) return [{ id: `pk-${values?.[0]}` }];
+    return undefined;
+  };
+}
+
+const sessionUpserts = (queries: Array<{ sql: string; values?: unknown[] }>) =>
+  queries.filter(({ sql }) => /insert into agent_cluster\.sessions /.test(sql)).map(({ values }) => values?.[0]);
+const sessionSoftDeletes = (queries: Array<{ sql: string; values?: unknown[] }>) =>
+  queries.filter(({ sql }) => /update agent_cluster\.sessions set deleted_at=now\(\)/.test(sql));
+
+test('editing one Session writes only that Session and soft-deletes nothing', async () => {
+  const { queries, store } = sqlHarness(sessionRows([storedSession('s1'), storedSession('s2'), storedSession('s3')]));
+
+  await store.mutateCollections(['sessions'], draft => {
+    (draft.sessions as Array<Record<string, unknown>>)[1]!.title = 'renamed';
+  });
+
+  assert.deepEqual(sessionUpserts(queries), ['s2']);
+  assert.deepEqual(sessionSoftDeletes(queries), []);
+});
+
+test('a Session removed from the collection soft-deletes only that Session', async () => {
+  const { queries, store } = sqlHarness(sessionRows([storedSession('s1'), storedSession('s2'), storedSession('s3')]));
+
+  await store.mutateCollections(['sessions'], draft => {
+    draft.sessions = (draft.sessions as Array<{ id: string }>).filter(item => item.id !== 's3');
+  });
+
+  assert.deepEqual(sessionUpserts(queries), []);
+  const softDeletes = sessionSoftDeletes(queries);
+  assert.equal(softDeletes.length, 1);
+  assert.match(softDeletes[0]!.sql, /external_id = any\(\$1::text\[\]\)/);
+  assert.doesNotMatch(softDeletes[0]!.sql, /not \(/);
+  assert.deepEqual(softDeletes[0]!.values, [['s3']]);
+});
+
+test('the full-collection Session writer keeps soft-deleting Sessions it was not given', async () => {
+  const { queries, store } = sqlHarness(sessionRows([]));
+  await (store as any).writeSessions({ query: (sql: string, values?: unknown[]) => {
+    queries.push({ sql, values });
+    return Promise.resolve({ rows: sessionRows([])(sql, values) ?? [] });
+  } }, [storedSession('s1')]);
+
+  const softDeletes = sessionSoftDeletes(queries);
+  assert.equal(softDeletes.length, 1);
+  assert.match(softDeletes[0]!.sql, /not \(external_id = any\(\$1::text\[\]\)\)/);
+  assert.deepEqual(softDeletes[0]!.values, [['s1']]);
+});
+
+test('Session lifecycle, stop request and logical operation writes skip unchanged Sessions', async () => {
+  const lifecycle = (id: string) => ({ sessionId: id, generation: 1, revision: 1, state: 'active', admission: 'open', stopStatus: 'idle' });
+  const stopRequest = (sessionId: string, id: string) => ({ id, sessionId, version: 1, status: 'confirmed',
+    createdAt: '2026-10-13T00:00:00.000Z', updatedAt: '2026-10-13T00:00:00.000Z' });
+  const operation = (id: string) => ({ id, stopState: 'confirmed', invocationIds: [] });
+  const { queries, store } = sqlHarness((sql, values) => {
+    if (sql.includes('from agent_cluster.session_lifecycles l join')) {
+      return ['s1', 's2', 's3'].map(external_id => ({ external_id, value: lifecycle(external_id) }));
+    }
+    if (sql.includes('from agent_cluster.session_stop_requests r join')) {
+      return ['s1', 's2'].map(group_id => ({ group_id, value: stopRequest(group_id, `${group_id}-stop-1`) }));
+    }
+    if (sql.includes('from agent_cluster.logical_operations o join')) {
+      return ['s1', 's2'].map(group_id => ({ group_id, value: operation(`${group_id}-op`) }));
+    }
+    if (sql.includes('select id::text from agent_cluster.sessions')) return [{ id: `pk-${values?.[0]}` }];
+    return undefined;
+  });
+
+  await store.mutateCollections(['sessionLifecyclesBySession', 'sessionStopRequestsBySession', 'logicalOperationsBySession'], draft => {
+    (draft.sessionLifecyclesBySession as Record<string, Record<string, unknown>>).s2!.revision = 2;
+    (draft.sessionStopRequestsBySession as Record<string, unknown[]>).s1!.push(stopRequest('s1', 's1-stop-2'));
+    ((draft.logicalOperationsBySession as Record<string, Array<Record<string, unknown>>>).s2![0]!).stopState = 'requested';
+  });
+
+  const writes = (table: string) => queries.filter(({ sql }) => new RegExp(`insert into agent_cluster\.${table}`).test(sql));
+  assert.deepEqual(writes('session_lifecycles').map(({ values }) => values?.[0]), ['pk-s2']);
+  assert.deepEqual(writes('session_stop_requests').map(({ values }) => values?.[0]), ['s1-stop-2']);
+  assert.deepEqual(writes('logical_operations').map(({ values }) => values?.[0]), ['s2-op']);
+});
+
+test('atomic whole-state writes also touch only edited and removed Sessions', async () => {
+  const sessions = [storedSession('s1'), storedSession('s2'), storedSession('s3')];
+  const respond = sessionRows(sessions);
+  const { queries, store } = sqlHarness((sql, values) =>
+    /from agent_cluster\.sessions/.test(sql) && /sourceRecord/.test(sql) && !/join/.test(sql)
+      ? sessions.map(value => ({ value }))
+      : respond(sql, values));
+  const loaded = await store.loadState();
+  const { computePersistenceRevision } = await import('../postgres-cutover-transaction.js');
+  queries.length = 0;
+
+  const next = (loaded.sessions as Array<Record<string, unknown>>)
+    .filter(item => item.id !== 's3')
+    .map(item => item.id === 's1' ? { ...item, title: 'renamed' } : item);
+  await store.writeCollectionsAtomically(computePersistenceRevision(loaded), { sessions: next });
+
+  assert.deepEqual(sessionUpserts(queries), ['s1']);
+  const softDeletes = sessionSoftDeletes(queries);
+  assert.equal(softDeletes.length, 1);
+  assert.deepEqual(softDeletes[0]!.values, [['s3']]);
+  assert.equal(queries.at(-1)?.sql, 'commit');
+});

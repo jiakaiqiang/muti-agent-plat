@@ -271,7 +271,8 @@ export class LogicalOperationStore {
           const result = mutation(all[sessionId] ??= [], stopRequests[sessionId] ??= [], draft);
           committed = structuredClone(all);
           return result;
-        }
+        },
+        { sessionIds: [sessionId] }
       );
       if (committed) this.cache = committed;
       return result;

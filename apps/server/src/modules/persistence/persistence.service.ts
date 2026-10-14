@@ -26,6 +26,10 @@ import {
 import { ContentReferenceCodec } from './content-reference-codec.js';
 import { LocalContentStore } from './local-content-store.js';
 import { applyStateDelta } from './state-delta.js';
+import {
+  assertWithinCollectionScope, mergeScopedCollection, scopedSessionIds, SESSION_SCOPED_COLLECTIONS,
+  type CollectionScope
+} from './collection-scope.js';
 
 export type PersistedState = Record<string, unknown>;
 export type PersistenceBackend = 'file' | 'postgres';
@@ -224,15 +228,19 @@ export class PersistenceService implements OnModuleDestroy {
   }
 
   /** Online transactions accept only synchronous, side-effect-free data mutations.
-   * A SQL serialization failure may run the callback again; never call a model here. */
-  async mutateCollections<T>(keys: string[], mutator: (draft: PersistedState) => T): Promise<T> {
+   * A SQL serialization failure may run the callback again; never call a model here.
+   * `scope.sessionIds` limits the event projections to those Sessions: PostgreSQL
+   * loads only their rows, and both backends reject edits to any other Session. */
+  async mutateCollections<T>(keys: string[], mutator: (draft: PersistedState) => T, scope?: CollectionScope): Promise<T> {
     this.assertWritable();
     const run = async () => {
       if (!this.enabled || this.backend === 'file') {
-        const draft = structuredClone(Object.fromEntries(keys.filter(key => this.state[key] !== undefined).map(key => [key, this.state[key]])));
+        const before = Object.fromEntries(keys.filter(key => this.state[key] !== undefined).map(key => [key, this.state[key]]));
+        const draft = structuredClone(before);
         const result = mutator(draft);
         if (result && typeof (result as { then?: unknown }).then === 'function') throw new Error('ATOMIC_MUTATOR_MUST_BE_SYNCHRONOUS');
         for (const key of Object.keys(draft)) if (!keys.includes(key)) throw new Error(`ATOMIC_MUTATION_OUTSIDE_SCOPE: ${key}`);
+        assertWithinCollectionScope(before, draft, scope);
         for (const key of keys) if (key in this.state && !(key in draft)) throw new Error(`ATOMIC_COLLECTION_DELETE_UNSUPPORTED: ${key}`);
         const next = { ...this.state, ...draft };
         if (this.enabled) this.writeFileState(next);
@@ -240,10 +248,16 @@ export class PersistenceService implements OnModuleDestroy {
         return result;
       }
       if (!this.relationalStore) throw new Error('RELATIONAL_PERSISTENCE_UNAVAILABLE: relational state store is not initialized.');
-      const committed = await this.retryCollectionTransaction(keys, () => this.relationalStore!.mutateCollections(keys, mutator));
+      const committed = await this.retryCollectionTransaction(keys, () => this.relationalStore!.mutateCollections(keys, mutator, scope));
+      const sessionIds = scopedSessionIds(scope);
       for (const key of keys) {
         if (key in committed.state || key in this.state) {
-          this.state[key] = this.overlayPendingChanges(key, committed.state[key]);
+          // A scoped load holds only the scoped Sessions, so it is merged into the
+          // cache rather than replacing it.
+          const value = sessionIds && SESSION_SCOPED_COLLECTIONS.has(key)
+            ? mergeScopedCollection(key, this.state[key], committed.state[key], sessionIds)
+            : committed.state[key];
+          this.state[key] = this.overlayPendingChanges(key, value);
         }
       }
       return committed.result;

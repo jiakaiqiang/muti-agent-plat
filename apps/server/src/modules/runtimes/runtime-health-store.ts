@@ -159,7 +159,7 @@ export class RuntimeHealthStore {
             emitted.push(event);
           }
           return emitted;
-        });
+        }, { sessionIds: batch.map(snapshot => snapshot.sessionId) });
         for (const event of committed) this.events?.acceptCommitted(event);
         this.syncFailures = 0;
         for (const snapshot of batch) {

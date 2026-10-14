@@ -291,7 +291,9 @@ export class RuntimeSwitchStore {
           payload: { event: structuredClone(event) }, status: 'pending', attempts: 0, createdAt: event.createdAt
         });
         return { session: structuredClone(session), request: structuredClone(request), event };
-      });
+      },
+      // The switch event belongs to the switched Session; the scope guard rejects any mismatch.
+      { sessionIds: [event.sessionId] });
   }
 
   private applyBindings(request: RuntimeSwitchRequestRecord, input: TransitionRuntimeSwitchInput) {

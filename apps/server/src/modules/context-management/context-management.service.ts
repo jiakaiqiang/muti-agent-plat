@@ -970,7 +970,7 @@ export class ContextManagementService {
           draft.eventsBySession = events;
         }
         applied = { ...route, followUp, committedEvent, committedEvents };
-      });
+      }, input.session.id);
       if (stale) throw new BadRequestException('SNAPSHOT_STALE: intent route must be rebuilt before apply.');
       if (!applied) throw new BadRequestException('Intent route apply produced no result.');
       if (!applied.deferredActivation) input.session.activeWorkItemId = applied.workItem.id;
@@ -1161,12 +1161,13 @@ export class ContextManagementService {
     return this.persistence.getCollection<BySession<T>>(key, {});
   }
 
+  /** With `sessionId`, events and outbox load for that Session only; writes to others are rejected. */
   private async mutate<T>(mutator: (draft: PersistedState) => T, sessionId?: string): Promise<T> {
     return this.persistence.mutateCollections([
       'workItemsBySession', 'decisionRecordsBySession', 'contextSnapshotsBySession',
       'intentRoutingRecordsBySession', 'followUpMessagesBySession', 'sessions',
       'tasksBySession', 'eventsBySession', 'eventOutbox'
-    ], mutator);
+    ], mutator, sessionId ? { sessionIds: [sessionId] } : undefined);
   }
 
   private serialized<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {

@@ -3,6 +3,9 @@ import type { CollaborationEvent } from '@agent-cluster/shared';
 import type { Pool, PoolClient } from 'pg';
 import { computePersistenceRevision } from '../postgres-cutover-transaction.js';
 import { ContentReferenceCodec } from '../content-reference-codec.js';
+import {
+  assertWithinCollectionScope, changedById, isPlainRecord, scopedSessionIds, type CollectionScope
+} from '../collection-scope.js';
 import type { StoredContent } from '../local-content-store.js';
 import {
   RELATIONAL_SCHEMA_NAME,
@@ -267,24 +270,28 @@ export class RelationalStateStore {
     }
   }
 
-  async mutateCollections<T>(keys: string[], mutator: (draft: PersistedState) => T): Promise<{ result: T; state: PersistedState }> {
+  /** With `scope.sessionIds`, the event projections are loaded and returned for those Sessions only. */
+  async mutateCollections<T>(
+    keys: string[],
+    mutator: (draft: PersistedState) => T,
+    scope?: CollectionScope
+  ): Promise<{ result: T; state: PersistedState }> {
     const client = await this.pool.connect();
     try {
       await client.query('begin');
       await this.lockCollections(client, keys);
-      const loaded = await this.loadCollectionsWithClient(client, keys);
+      const loaded = await this.loadCollectionsWithClient(client, keys, scopedSessionIds(scope));
       const state = Object.fromEntries(keys.filter(key => loaded[key] !== undefined).map(key => [key, loaded[key]]));
       const draft = structuredClone(state);
       const result = mutator(draft);
       if (result && typeof (result as { then?: unknown }).then === 'function') throw new Error('ATOMIC_MUTATOR_MUST_BE_SYNCHRONOUS');
+      assertWithinCollectionScope(state, draft, scope);
       const changes = Object.fromEntries(Object.entries(draft).filter(([key, value]) => {
         if (!keys.includes(key)) throw new Error(`ATOMIC_MUTATION_OUTSIDE_SCOPE: ${key}`);
         return JSON.stringify(value) !== JSON.stringify(state[key]);
       }));
       for (const key of Object.keys(state)) if (!(key in draft)) throw new Error(`ATOMIC_COLLECTION_DELETE_UNSUPPORTED: ${key}`);
-      const externalized = this.codec.externalize(changes);
-      await this.registerContents(client, externalized.contents);
-      for (const key of collectionWriteOrder(externalized.value)) await this.writeCollectionWithClient(client, key, externalized.value[key]);
+      await this.writeChangedRecords(client, state, changes);
       await client.query('commit');
       return { result, state: draft };
     } catch (error) {
@@ -420,11 +427,8 @@ export class RelationalStateStore {
       if (computePersistenceRevision(current) !== expectedRevision) {
         throw new Error('PERSISTENCE_REVISION_CONFLICT: PostgreSQL state changed before atomic mutation.');
       }
-      const externalized = this.codec.externalize(changes);
-      await this.registerContents(client, externalized.contents);
-      for (const key of collectionWriteOrder(externalized.value)) {
-        await this.writeCollectionWithClient(client, key, externalized.value[key]);
-      }
+      // The revision matched, so `current` is the state the caller's changes were made against.
+      await this.writeChangedRecords(client, current, changes);
       await client.query('commit');
     } catch (error) {
       await client.query('rollback').catch(() => undefined);
@@ -459,7 +463,7 @@ export class RelationalStateStore {
     }
   }
 
-  private async loadCollectionsWithClient(client: PoolClient, keys: string[]): Promise<PersistedState> {
+  private async loadCollectionsWithClient(client: PoolClient, keys: string[], sessionIds?: string[]): Promise<PersistedState> {
     const state: PersistedState = {};
     for (const key of keys) {
       switch (key) {
@@ -510,7 +514,9 @@ export class RelationalStateStore {
           state.runtimeSwitchRequestsBySession = await groupedSources(client, RUNTIME_SWITCH_REQUESTS_SELECT_SQL);
           break;
         case 'eventsBySession':
-          state.eventsBySession = await groupedSources(client, `select s.external_id group_id,e.payload->'sourceRecord' value from agent_cluster.collaboration_events e join agent_cluster.sessions s on s.id=e.session_id where s.deleted_at is null order by s.id,e.session_seq`);
+          state.eventsBySession = sessionIds
+            ? await groupedSources(client, `select s.external_id group_id,e.payload->'sourceRecord' value from agent_cluster.collaboration_events e join agent_cluster.sessions s on s.id=e.session_id where s.deleted_at is null and s.external_id = any($1::text[]) order by s.id,e.session_seq`, [sessionIds])
+            : await groupedSources(client, `select s.external_id group_id,e.payload->'sourceRecord' value from agent_cluster.collaboration_events e join agent_cluster.sessions s on s.id=e.session_id where s.deleted_at is null order by s.id,e.session_seq`);
           break;
         case 'briefsBySession':
           state.briefsBySession = await groupedSources(client, `select s.external_id group_id,b.source_snapshot->'sourceRecord' value from agent_cluster.briefs b join agent_cluster.sessions s on s.id=b.session_id where s.deleted_at is null order by s.id,b.created_at`);
@@ -567,7 +573,9 @@ export class RelationalStateStore {
           state.cutoverAudits = await sourceRecords(client, `select summary->'sourceRecord' value from agent_cluster.cutover_audits order by id`);
           break;
         case 'eventOutbox':
-          state.eventOutbox = await sourceRecords(client, `select ${eventOutboxRecordSql('outbox')} value from agent_cluster.event_outbox outbox order by id`);
+          state.eventOutbox = sessionIds
+            ? await sourceRecords(client, `select ${eventOutboxRecordSql('outbox')} value from agent_cluster.event_outbox outbox where outbox.aggregate_type='session' and outbox.aggregate_external_id = any($1::text[]) order by id`, [sessionIds])
+            : await sourceRecords(client, `select ${eventOutboxRecordSql('outbox')} value from agent_cluster.event_outbox outbox order by id`);
           break;
         default: {
           // Composite catalog projections retain their established loader.
@@ -1232,99 +1240,136 @@ export class RelationalStateStore {
     return workflowVersionId;
   }
 
+  /**
+   * Writes only what changed between `before` (the locked, loaded state) and the
+   * changed collections. `sessions` is narrowed to edited records, so the
+   * full-collection writer would soft-delete the rest; removals go explicitly.
+   */
+  private async writeChangedRecords(client: PoolClient, before: PersistedState, changed: PersistedState) {
+    const narrowed = Object.fromEntries(Object.entries(changed).map(([key, value]) =>
+      [key, changedRecordsOnly(key, before[key], value)]));
+    const removedSessions = 'sessions' in changed ? removedSessionIds(before.sessions, changed.sessions) : [];
+    const externalized = this.codec.externalize(narrowed);
+    await this.registerContents(client, externalized.contents);
+    for (const key of collectionWriteOrder(externalized.value)) {
+      if (key === 'sessions') await this.writeSessionChanges(client, array(externalized.value.sessions), removedSessions);
+      else await this.writeCollectionWithClient(client, key, externalized.value[key]);
+    }
+  }
+
+  /**
+   * Full-collection write: any live Session not in `values` is soft-deleted.
+   * Only replaceState hands over the complete collection; transactional writes
+   * go through writeChangedRecords.
+   */
   private async writeSessions(client: PoolClient, values: unknown[]) {
     const active = new Set<string>();
     for (const item of values.map(record)) {
-      const externalId = text(item.id);
-      active.add(externalId);
-      const previousStatus = await client.query<{ status: string }>(
-        'select status from agent_cluster.sessions where external_id=$1',
-        [externalId]
-      );
-      const currentStatus = text(item.status, 'USER_INPUT');
-      const activeWorkItemId = item.activeWorkItemId
-        ? await idByExternal(client, 'work_items', text(item.activeWorkItemId))
-        : null;
-      const sessionId = await upsertId(client, 'sessions', externalId, {
-        title: text(item.title, externalId), status: currentStatus, owner_id: text(item.ownerId, 'local-user'),
-        project_id: nullableText(item.projectId), context_pipeline_version: text(item.contextPipelineVersion, 'v2'),
-        data_epoch: text(item.dataEpoch), revision: integer(item.revision, 1),
-        active_work_item_id: activeWorkItemId,
-        working_directory: item.workingDirectory ? JSON.stringify(item.workingDirectory) : null,
-        metadata: json({ sourceRecord: item }), created_at: date(item.createdAt), updated_at: date(item.updatedAt), deleted_at: null
-      });
-      if (item.sourceBinding) {
-        const binding = record(item.sourceBinding);
-        if (text(binding.sessionId) !== externalId) throw new Error('GITHUB_SOURCE_SESSION_MISMATCH');
-        await client.query(
-          `insert into agent_cluster.github_source_bindings
-           (session_id,repository_id,repository_url,execution_location,device_id,authorization_ref,
-            workspace_id,base_branch,base_sha,state,version,source_snapshot,created_at,updated_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-           on conflict (session_id) do update set repository_id=excluded.repository_id,
-             repository_url=excluded.repository_url,execution_location=excluded.execution_location,
-             device_id=excluded.device_id,authorization_ref=excluded.authorization_ref,
-             workspace_id=excluded.workspace_id,base_branch=excluded.base_branch,
-             base_sha=excluded.base_sha,state=excluded.state,version=excluded.version,
-             source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at`,
-          [sessionId, text(binding.repositoryId), text(binding.repositoryUrl), text(binding.executionLocation),
-            nullableText(binding.deviceId), nullableText(binding.authorizationRef), nullableText(binding.workspaceId),
-            nullableText(binding.baseBranch), nullableText(binding.baseSha), text(binding.state),
-            integer(binding.version, 1), json({ sourceRecord: binding }), date(binding.createdAt), date(binding.updatedAt)]
-        );
-      }
-      if (item.delivery) {
-        const delivery = record(item.delivery);
-        if (text(delivery.sessionId) !== externalId) throw new Error('GITHUB_DELIVERY_SESSION_MISMATCH');
-        await client.query(
-          `insert into agent_cluster.github_deliveries
-           (session_id,round,state,version,task_branch,pull_request_number,reviewed_head_sha,
-            merged_commit_sha,source_snapshot,created_at,updated_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-           on conflict (session_id,round) do update set state=excluded.state,version=excluded.version,
-             task_branch=excluded.task_branch,pull_request_number=excluded.pull_request_number,
-             reviewed_head_sha=excluded.reviewed_head_sha,merged_commit_sha=excluded.merged_commit_sha,
-             source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at`,
-          [sessionId, integer(delivery.round, 1), text(delivery.state), integer(delivery.version, 1),
-            nullableText(delivery.taskBranch), delivery.pullRequestNumber == null ? null : integer(delivery.pullRequestNumber),
-            nullableText(delivery.reviewedHeadSha), nullableText(delivery.mergedCommitSha),
-            json({ sourceRecord: delivery }), date(delivery.createdAt), date(delivery.updatedAt)]
-        );
-      }
-      for (const agentExternalId of array(item.participatingAgentIds).map((value) => text(value))) {
-        await client.query(
-          `insert into agent_cluster.session_participants
-           (session_id,actor_type,actor_external_id,display_name_snapshot,agent_version_id,role)
-           values ($1,'agent',$2,$2,$3,'participant')
-           on conflict (session_id,actor_type,actor_external_id) do update set agent_version_id=excluded.agent_version_id,left_at=null`,
-          [sessionId, agentExternalId, await currentVersionId(client, 'agents', agentExternalId)]
-        );
-      }
-      const fromStatus = previousStatus.rows[0]?.status ?? null;
-      if (fromStatus !== currentStatus) {
-        await client.query(
-          `insert into agent_cluster.session_status_history
-           (session_id,from_status,to_status,reason,actor_type,actor_external_id,created_at)
-           values ($1,$2,$3,$4,'system','persistence-projection',$5)`,
-          [sessionId, fromStatus, currentStatus, nullableText(item.statusReason ?? item.failureReason), date(item.updatedAt ?? item.createdAt)]
-        );
-      }
-      const progress = sessionProgress(currentStatus);
-      await client.query(
-        `insert into agent_cluster.session_progress
-         (session_id,phase,progress_percent,current_task_external_id,blocked_reason,details,updated_at)
-         values ($1,$2,$3,$4,$5,$6,$7)
-         on conflict (session_id) do update set phase=excluded.phase,progress_percent=excluded.progress_percent,
-           current_task_external_id=excluded.current_task_external_id,blocked_reason=excluded.blocked_reason,
-           details=excluded.details,updated_at=excluded.updated_at`,
-        [sessionId, progress.phase, progress.percent, nullableText(item.currentTaskId),
-          nullableText(item.blockedReason ?? item.failureReason),
-          json({ status: currentStatus, currentTaskBriefId: item.currentTaskBriefId ?? null, tokenUsed: item.tokenUsed ?? 0 }),
-          date(item.updatedAt ?? item.createdAt)]
-      );
-      await this.writeSupplementalContextRequests(client, sessionId, item);
+      active.add(text(item.id));
+      await this.writeSession(client, item);
     }
     await softDeleteMissing(client, 'sessions', active);
+  }
+
+  /** Incremental write: upserts the changed Sessions and soft-deletes only the removed ids. */
+  private async writeSessionChanges(client: PoolClient, upserts: unknown[], removedIds: string[]) {
+    for (const item of upserts.map(record)) await this.writeSession(client, item);
+    if (removedIds.length) {
+      await client.query(
+        'update agent_cluster.sessions set deleted_at=now() where deleted_at is null and external_id = any($1::text[])',
+        [removedIds]
+      );
+    }
+  }
+
+  private async writeSession(client: PoolClient, item: Record<string, unknown>) {
+    const externalId = text(item.id);
+    const previousStatus = await client.query<{ status: string }>(
+      'select status from agent_cluster.sessions where external_id=$1',
+      [externalId]
+    );
+    const currentStatus = text(item.status, 'USER_INPUT');
+    const activeWorkItemId = item.activeWorkItemId
+      ? await idByExternal(client, 'work_items', text(item.activeWorkItemId))
+      : null;
+    const sessionId = await upsertId(client, 'sessions', externalId, {
+      title: text(item.title, externalId), status: currentStatus, owner_id: text(item.ownerId, 'local-user'),
+      project_id: nullableText(item.projectId), context_pipeline_version: text(item.contextPipelineVersion, 'v2'),
+      data_epoch: text(item.dataEpoch), revision: integer(item.revision, 1),
+      active_work_item_id: activeWorkItemId,
+      working_directory: item.workingDirectory ? JSON.stringify(item.workingDirectory) : null,
+      metadata: json({ sourceRecord: item }), created_at: date(item.createdAt), updated_at: date(item.updatedAt), deleted_at: null
+    });
+    if (item.sourceBinding) {
+      const binding = record(item.sourceBinding);
+      if (text(binding.sessionId) !== externalId) throw new Error('GITHUB_SOURCE_SESSION_MISMATCH');
+      await client.query(
+        `insert into agent_cluster.github_source_bindings
+         (session_id,repository_id,repository_url,execution_location,device_id,authorization_ref,
+          workspace_id,base_branch,base_sha,state,version,source_snapshot,created_at,updated_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         on conflict (session_id) do update set repository_id=excluded.repository_id,
+           repository_url=excluded.repository_url,execution_location=excluded.execution_location,
+           device_id=excluded.device_id,authorization_ref=excluded.authorization_ref,
+           workspace_id=excluded.workspace_id,base_branch=excluded.base_branch,
+           base_sha=excluded.base_sha,state=excluded.state,version=excluded.version,
+           source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at`,
+        [sessionId, text(binding.repositoryId), text(binding.repositoryUrl), text(binding.executionLocation),
+          nullableText(binding.deviceId), nullableText(binding.authorizationRef), nullableText(binding.workspaceId),
+          nullableText(binding.baseBranch), nullableText(binding.baseSha), text(binding.state),
+          integer(binding.version, 1), json({ sourceRecord: binding }), date(binding.createdAt), date(binding.updatedAt)]
+      );
+    }
+    if (item.delivery) {
+      const delivery = record(item.delivery);
+      if (text(delivery.sessionId) !== externalId) throw new Error('GITHUB_DELIVERY_SESSION_MISMATCH');
+      await client.query(
+        `insert into agent_cluster.github_deliveries
+         (session_id,round,state,version,task_branch,pull_request_number,reviewed_head_sha,
+          merged_commit_sha,source_snapshot,created_at,updated_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         on conflict (session_id,round) do update set state=excluded.state,version=excluded.version,
+           task_branch=excluded.task_branch,pull_request_number=excluded.pull_request_number,
+           reviewed_head_sha=excluded.reviewed_head_sha,merged_commit_sha=excluded.merged_commit_sha,
+           source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at`,
+        [sessionId, integer(delivery.round, 1), text(delivery.state), integer(delivery.version, 1),
+          nullableText(delivery.taskBranch), delivery.pullRequestNumber == null ? null : integer(delivery.pullRequestNumber),
+          nullableText(delivery.reviewedHeadSha), nullableText(delivery.mergedCommitSha),
+          json({ sourceRecord: delivery }), date(delivery.createdAt), date(delivery.updatedAt)]
+      );
+    }
+    for (const agentExternalId of array(item.participatingAgentIds).map((value) => text(value))) {
+      await client.query(
+        `insert into agent_cluster.session_participants
+         (session_id,actor_type,actor_external_id,display_name_snapshot,agent_version_id,role)
+         values ($1,'agent',$2,$2,$3,'participant')
+         on conflict (session_id,actor_type,actor_external_id) do update set agent_version_id=excluded.agent_version_id,left_at=null`,
+        [sessionId, agentExternalId, await currentVersionId(client, 'agents', agentExternalId)]
+      );
+    }
+    const fromStatus = previousStatus.rows[0]?.status ?? null;
+    if (fromStatus !== currentStatus) {
+      await client.query(
+        `insert into agent_cluster.session_status_history
+         (session_id,from_status,to_status,reason,actor_type,actor_external_id,created_at)
+         values ($1,$2,$3,$4,'system','persistence-projection',$5)`,
+        [sessionId, fromStatus, currentStatus, nullableText(item.statusReason ?? item.failureReason), date(item.updatedAt ?? item.createdAt)]
+      );
+    }
+    const progress = sessionProgress(currentStatus);
+    await client.query(
+      `insert into agent_cluster.session_progress
+       (session_id,phase,progress_percent,current_task_external_id,blocked_reason,details,updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7)
+       on conflict (session_id) do update set phase=excluded.phase,progress_percent=excluded.progress_percent,
+         current_task_external_id=excluded.current_task_external_id,blocked_reason=excluded.blocked_reason,
+         details=excluded.details,updated_at=excluded.updated_at`,
+      [sessionId, progress.phase, progress.percent, nullableText(item.currentTaskId),
+        nullableText(item.blockedReason ?? item.failureReason),
+        json({ status: currentStatus, currentTaskBriefId: item.currentTaskBriefId ?? null, tokenUsed: item.tokenUsed ?? 0 }),
+        date(item.updatedAt ?? item.createdAt)]
+    );
+    await this.writeSupplementalContextRequests(client, sessionId, item);
   }
 
   private async writeSupplementalContextRequests(client: PoolClient, sessionId: string, session: Record<string, unknown>) {
@@ -1381,18 +1426,19 @@ export class RelationalStateStore {
     for (const [sessionExternalId, events] of Object.entries(value)) {
       const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
       if (!sessionId) continue;
-      let sequence = 0;
       for (const item of array(events).map(record)) {
-        sequence += 1;
         const actor = record(item.actor);
         const eventExternalId = text(item.id);
+        // Callers may hand over only new or changed events, so a new row continues
+        // the stored sequence; an existing row keeps its original session_seq.
         await client.query(
           `insert into agent_cluster.collaboration_events
            (external_id,session_id,session_seq,event_type,actor_type,actor_external_id,actor_display_name,
             content,payload,correlation_id,causation_id,created_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+           values ($1,$2,(select coalesce(max(session_seq),0)+1 from agent_cluster.collaboration_events where session_id=$2),
+            $3,$4,$5,$6,$7,$8,$9,$10,$11)
            on conflict (external_id) do update set content=excluded.content,payload=excluded.payload`,
-          [eventExternalId, sessionId, sequence, text(item.type), text(actor.type, item.fromAgentId ? 'agent' : 'system'),
+          [eventExternalId, sessionId, text(item.type), text(actor.type, item.fromAgentId ? 'agent' : 'system'),
             nullableText(actor.id ?? item.fromAgentId), nullableText(actor.displayName), nullableText(item.content),
             json({ sourceRecord: item }), nullableText(item.correlationId), nullableText(item.causationId), date(item.createdAt)]
         );
@@ -2843,7 +2889,45 @@ function eventOutboxRecordSql(alias: string): string {
     'publishedAt',to_jsonb(${alias}.published_at)
   )`;
 }
-async function sourceRecords(client:PoolClient,sql:string):Promise<unknown[]>{const r=await client.query<{value:unknown}>(sql);return r.rows.map(x=>x.value).filter(v=>v!==null);}
-async function groupedSources(client:PoolClient,sql:string):Promise<Record<string,unknown[]>>{const r=await client.query<{group_id:string|null;value:unknown}>(sql);return r.rows.reduce<Record<string,unknown[]>>((a,x)=>{if(x.group_id&&x.value!==null)(a[x.group_id]??=[]).push(x.value);return a;},{});}
+/** Per-Session record lists whose writers only upsert by record id. */
+const UPSERT_ONLY_GROUPED_COLLECTIONS = new Set(['eventsBySession', 'sessionStopRequestsBySession', 'logicalOperationsBySession']);
+
+/**
+ * Narrows a changed collection to the records a transaction actually added or
+ * edited. Only upsert-only projections qualify: their writers never treat an
+ * absent record as deleted, so skipping unchanged records cannot remove data.
+ * `sessions` is narrowed too, but its removals are written separately (see
+ * removedSessionIds). Every other collection is still written whole.
+ */
+function changedRecordsOnly(key: string, before: unknown, after: unknown): unknown {
+  if (UPSERT_ONLY_GROUPED_COLLECTIONS.has(key) && isPlainRecord(after)) {
+    const previous = isPlainRecord(before) ? before : {};
+    const changed: Record<string, unknown[]> = {};
+    for (const [sessionId, records] of Object.entries(after)) {
+      const delta = changedById(Array.isArray(previous[sessionId]) ? previous[sessionId] : [], array(records));
+      if (delta.length) changed[sessionId] = delta;
+    }
+    return changed;
+  }
+  if (key === 'sessionLifecyclesBySession' && isPlainRecord(after)) {
+    // One lifecycle snapshot per Session, keyed by Session id.
+    const previous = isPlainRecord(before) ? before : {};
+    return Object.fromEntries(Object.entries(after).filter(([sessionId, lifecycle]) =>
+      JSON.stringify(lifecycle) !== JSON.stringify(previous[sessionId])));
+  }
+  if ((key === 'eventOutbox' || key === 'sessions') && Array.isArray(after)) {
+    return changedById(Array.isArray(before) ? before : [], after);
+  }
+  return after;
+}
+
+/** Ids of live Sessions the transaction dropped from the `sessions` collection. */
+function removedSessionIds(before: unknown, after: unknown): string[] {
+  const kept = new Set(array(after).map(item => text(record(item).id)));
+  return array(before).map(item => text(record(item).id)).filter(id => id && !kept.has(id));
+}
+
+async function sourceRecords(client:PoolClient,sql:string,values?:unknown[]):Promise<unknown[]>{const r=await client.query<{value:unknown}>(sql,values);return r.rows.map(x=>x.value).filter(v=>v!==null);}
+async function groupedSources(client:PoolClient,sql:string,values?:unknown[]):Promise<Record<string,unknown[]>>{const r=await client.query<{group_id:string|null;value:unknown}>(sql,values);return r.rows.reduce<Record<string,unknown[]>>((a,x)=>{if(x.group_id&&x.value!==null)(a[x.group_id]??=[]).push(x.value);return a;},{});}
 async function keyedSources(client:PoolClient,sql:string):Promise<Record<string,unknown>>{const r=await client.query<{external_id:string;value:unknown}>(sql);return Object.fromEntries(r.rows.filter(x=>x.value!==null).map(x=>[x.external_id,x.value]));}
 function groupRows(rows:Array<{workflow_id:string;value:unknown}>,key:'workflow_id'):Record<string,unknown[]>{return rows.reduce<Record<string,unknown[]>>((a,x)=>{(a[x[key]]??=[]).push(x.value);return a;},{});}

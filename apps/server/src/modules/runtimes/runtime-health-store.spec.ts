@@ -153,3 +153,30 @@ test('live and durable health share faults, safe retry facts and fallback cause 
   assert.equal(JSON.stringify(persisted).includes('secret'), false);
   store.dispose();
 });
+
+test('one flush covering several Sessions commits each Session\'s events within its scope', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'runtime-health-scope-'));
+  try {
+    const persistence = new PersistenceService({ enabled: true, backend: 'file', filePath: join(directory, 'state.json') });
+    await persistence.initialize();
+    const store = new RuntimeHealthStore(persistence);
+    const first = makeInvocationPlan();
+    const second = makeInvocationPlan({
+      invocationId: '00000000-0000-4000-8000-000000000911', sessionId: '00000000-0000-4000-8000-000000000912'
+    });
+    // Both snapshots land in the same coalesced batch, so the scope must name both Sessions.
+    store.begin(first, 1, 50);
+    store.begin(second, 1, 50);
+    await store.flush();
+    const events = persistence.getCollection<Record<string, any[]>>('eventsBySession', {});
+    assert.equal(events[first.sessionId]?.length, 1);
+    assert.equal(events[second.sessionId]?.length, 1);
+    assert.equal(store.snapshot(first.invocationId)?.pendingSync, false);
+    assert.equal(store.snapshot(second.invocationId)?.pendingSync, false);
+    store.dispose();
+  } finally {
+    // Only the unique test directory created above, never a workspace or user directory.
+    assert.ok(resolve(directory).startsWith(resolve(tmpdir()) + '\\'));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

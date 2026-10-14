@@ -71,3 +71,45 @@ test('scoped file mutations reject async callbacks and out-of-scope writes, and 
   await assert.rejects(service.mutateCollections(['sessions'], draft => { draft.eventOutbox = []; }), /OUTSIDE_SCOPE/);
   assert.equal(service.getCollection<any[]>('sessions', [])[0].title, 'before');
 });
+
+test('a session-scoped commit merges that Session into the cache without dropping other Sessions', async () => {
+  const service = new PersistenceService({ enabled: true, backend: 'postgres' });
+  const internals = service as any;
+  const event = (sessionId: string, id: string) => ({ id, sessionId, type: 'agent_message' });
+  const outbox = (sessionId: string, id: string) => ({ id: `outbox:${id}`, aggregateType: 'session', aggregateId: sessionId });
+  internals.state = {
+    eventsBySession: { a: [event('a', 'a-1')], b: [event('b', 'b-1')] },
+    eventOutbox: [outbox('a', 'a-1'), outbox('b', 'b-1')]
+  };
+  internals.pool = {};
+  internals.relationalStore = {
+    // A scoped relational load returns only the requested Session.
+    async mutateCollections<T>(_keys: string[], mutate: (draft: PersistedState) => T) {
+      const draft: PersistedState = { eventsBySession: { a: [event('a', 'a-1')] }, eventOutbox: [outbox('a', 'a-1')] };
+      const result = mutate(draft);
+      return { state: draft, result };
+    }
+  };
+
+  await service.mutateCollections(['eventsBySession', 'eventOutbox'], draft => {
+    (draft.eventsBySession as Record<string, unknown[]>).a!.push(event('a', 'a-2'));
+    (draft.eventOutbox as unknown[]).push(outbox('a', 'a-2'));
+  }, { sessionIds: ['a'] });
+
+  const events = service.getCollection<Record<string, Array<{ id: string }>>>('eventsBySession', {});
+  assert.deepEqual(events.a?.map(item => item.id), ['a-1', 'a-2']);
+  assert.deepEqual(events.b?.map(item => item.id), ['b-1']);
+  const ids = service.getCollection<Array<{ id: string }>>('eventOutbox', []).map(item => item.id).sort();
+  assert.deepEqual(ids, ['outbox:a-1', 'outbox:a-2', 'outbox:b-1']);
+});
+
+test('session-scoped file mutations reject writes to another Session', async () => {
+  const service = new PersistenceService({ enabled: true, backend: 'file' });
+  const internals = service as any;
+  internals.state = { eventsBySession: { a: [], b: [] } };
+  internals.writeFileState = () => undefined;
+  await assert.rejects(service.mutateCollections(['eventsBySession'], draft => {
+    (draft.eventsBySession as Record<string, unknown[]>).b!.push({ id: 'b-1' });
+  }, { sessionIds: ['a'] }), /COLLECTION_SCOPE_VIOLATION: eventsBySession:b/);
+  assert.deepEqual(service.getCollection('eventsBySession', {}), { a: [], b: [] });
+});

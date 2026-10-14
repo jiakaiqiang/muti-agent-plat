@@ -63,7 +63,8 @@ export class SessionLifecycleStore {
         };
         lifecycles[sessionId] = lifecycle;
         return transition(draft, lifecycle, '会话生命周期已启用。', this.now());
-      }
+      },
+      { sessionIds: [sessionId] }
     );
   }
 
@@ -98,7 +99,8 @@ export class SessionLifecycleStore {
           session.updatedAt = timestamp;
         }
         return transition(draft, lifecycle, '会话删除已开始，新的执行准入已关闭。', this.now());
-      }
+      },
+      { sessionIds: [sessionId] }
     );
   }
 
@@ -123,7 +125,8 @@ export class SessionLifecycleStore {
         };
         lifecycles[sessionId] = lifecycle;
         return transition(draft, lifecycle, '会话停止中，新的执行准入已关闭。', this.now());
-      }
+      },
+      { sessionIds: [sessionId] }
     );
   }
 
@@ -160,7 +163,8 @@ export class SessionLifecycleStore {
         lifecycle.revision += 1;
         lifecycle.stopStatus = stopSummary.status;
         return transition(draft, lifecycle, '会话已归档，已从会话列表隐藏。', this.now());
-      }
+      },
+      { sessionIds: [sessionId] }
     );
   }
 
@@ -194,7 +198,8 @@ export class SessionLifecycleStore {
         lifecycle.lastRestoreRequestId = requestId;
         lifecycle.restoredAt = timestamp;
         return transition(draft, lifecycle, '会话已从归档恢复到会话列表，当前处于暂停状态。', this.now());
-      }
+      },
+      { sessionIds: [sessionId] }
     );
   }
 
@@ -213,7 +218,8 @@ export class SessionLifecycleStore {
         lifecycle.stopStatus = status;
         lifecycle.revision += 1;
         return transition(draft, lifecycle, '会话执行准入已恢复。', this.now());
-      }
+      },
+      { sessionIds: [sessionId] }
     );
   }
 
@@ -240,7 +246,8 @@ export class SessionLifecycleStore {
           ...transition(draft, lifecycle, '会话已安全隐藏，可在删除列表中恢复。', this.now()),
           stopSummary
         };
-      }
+      },
+      { sessionIds: [sessionId] }
     );
   }
 
@@ -278,7 +285,8 @@ export class SessionLifecycleStore {
         session.revision = (session.revision ?? 0) + 1;
         session.updatedAt = timestamp;
         return transition(draft, lifecycle, '会话已恢复为暂停状态，需要用户显式继续。', this.now());
-      }
+      },
+      { sessionIds: [sessionId] }
     );
   }
 }

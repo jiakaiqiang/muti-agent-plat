@@ -67,7 +67,8 @@ export class SessionStopStateStore {
         (requests[sessionId] ??= []).push(request);
         syncLifecycleStopStatus(draft, sessionId, request.status);
         return { request: structuredClone(request), event: appendRuntimeStopStateEvent(draft, request) };
-      }
+      },
+      { sessionIds: [sessionId] }
     );
   }
 
