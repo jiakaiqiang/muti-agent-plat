@@ -1,3 +1,4 @@
+import { isUsableWorkspaceEvidencePath, isWorkspaceTextContent } from '@agent-cluster/shared';
 import type { AgentRunPhase, ContextEnvelopeV2, EvidenceSelectionStrategy } from '@agent-cluster/shared';
 
 export function requiresGroundedRuntimeEvidence(
@@ -43,7 +44,9 @@ export function evaluateGroundedEvidenceGate(
   const usablePaths = evidencePaths.filter((path) => {
     const manifestEntry = manifestByPath.get(path);
     if (!manifestEntry) return false;
-    return !manifestEntry.generated && !manifestEntry.sensitive;
+    const file = files.find(item => item.path === path);
+    return !manifestEntry.generated && !manifestEntry.sensitive && isUsableWorkspaceEvidencePath(path) &&
+      (!file || isWorkspaceTextContent(file.content));
   });
 
   if (usablePaths.length === 0) {
@@ -55,7 +58,8 @@ export function evaluateGroundedEvidenceGate(
         ? 'evidence-not-navigable'
         : anyGenerated
           ? 'evidence-only-generated'
-          : 'evidence-only-sensitive'
+          : evidencePaths.some(path => manifestByPath.get(path)?.sensitive)
+            ? 'evidence-only-sensitive' : 'evidence-empty'
     };
   }
   return { ok: true };

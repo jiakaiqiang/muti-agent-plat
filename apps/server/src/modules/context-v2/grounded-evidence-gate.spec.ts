@@ -167,3 +167,15 @@ test('gate preserves generated and sensitive restrictions for file revision evid
     reason: 'evidence-only-sensitive'
   });
 });
+
+
+test('gate rejects binary dependencies even when persisted navigation incorrectly marks them as source', () => {
+  for (const path of ['python/.venv/analysis.py', 'lib/analysis.pyd']) {
+    const envelope = makeEnvelope([{ path, kind: 'file', generated: false, sensitive: false, size: 10 }],
+      [{ path, content: 'MZ\0binary', byteLength: 9 }]);
+    assert.deepEqual(evaluateGroundedEvidenceGate({ envelope, requiresEvidence: true }), { ok: false, reason: 'evidence-empty' });
+  }
+  const envelope = makeEnvelope([{ path: 'src/main.ts', kind: 'file', generated: false, sensitive: false, size: 1 }],
+    [{ path: 'src/main.ts', content: ' ', byteLength: 1 }]);
+  assert.equal(evaluateGroundedEvidenceGate({ envelope, requiresEvidence: true }).ok, false);
+});
