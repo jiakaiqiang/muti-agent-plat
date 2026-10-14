@@ -48,7 +48,8 @@
   .workspace-shell.task-workspace { grid-template-columns: minmax(0,1fr) 320px; }
   .workspace-shell.task-workspace.catalog-open { grid-template-columns: minmax(0,1fr); }
   .task-workspace .session-sidebar { display: none; }
-  .task-workspace.left-open .session-sidebar { display: flex; position: fixed; z-index: 100; top: 58px; left: 0; bottom: 0; width: 260px; box-shadow: 4px 0 18px #0002; }
+  /* Opens beside the 92px AppShell navigation rail instead of covering it. */
+  .task-workspace.left-open .session-sidebar { display: flex; position: fixed; z-index: 100; top: 58px; left: 92px; bottom: 0; width: 260px; box-shadow: 4px 0 18px #0002; }
   .task-workspace .workspace-panel-toggle { display: inline-block; padding: 5px; border: 1px solid #dcdfe6; background: #fff; color: #303133; border-radius: 4px; cursor: pointer; }
 }
 @media (max-width: 760px) {

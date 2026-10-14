@@ -97,8 +97,8 @@ onUnmounted(() => unsubscribeUpdateStatus?.())
 </script>
 
 <template>
-  <div class="application-shell" :class="{ 'task-application': route.meta.section === 'session' }">
-    <aside v-if="route.meta.section !== 'session'" class="application-rail" aria-label="主导航">
+  <div class="application-shell">
+    <aside class="application-rail" aria-label="主导航">
       <div class="application-brand" aria-label="Agent Cluster">
         <span></span><span></span><span></span><span></span><span></span><span></span>
       </div>
@@ -152,8 +152,6 @@ onUnmounted(() => unsubscribeUpdateStatus?.())
   overflow: hidden;
   background: var(--el-bg-color-page, #f5f7fa);
 }
-
-.application-shell.task-application { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
 
 .application-rail {
   display: grid;
