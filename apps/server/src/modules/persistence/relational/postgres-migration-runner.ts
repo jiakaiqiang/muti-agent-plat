@@ -23,7 +23,8 @@ import {
   RELATIONAL_SCHEMA_V18_SQL,
   RELATIONAL_SCHEMA_V19_SQL,
   RELATIONAL_SCHEMA_V20_SQL,
-  RELATIONAL_SCHEMA_V21_SQL
+  RELATIONAL_SCHEMA_V21_SQL,
+  RELATIONAL_SCHEMA_V22_SQL
 } from './relational-schema.js';
 
 type Migration = {
@@ -137,6 +138,11 @@ const MIGRATIONS: Migration[] = [
     version: 21,
     name: 'runtime_request_health_snapshots',
     sql: RELATIONAL_SCHEMA_V21_SQL
+  },
+  {
+    version: 22,
+    name: 'event_outbox_session_lookup',
+    sql: RELATIONAL_SCHEMA_V22_SQL
   }
 ];
 

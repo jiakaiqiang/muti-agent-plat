@@ -34,6 +34,7 @@ import {
   RELATIONAL_SCHEMA_V19_SQL,
   RELATIONAL_SCHEMA_V20_SQL,
   RELATIONAL_SCHEMA_V21_SQL,
+  RELATIONAL_SCHEMA_V22_SQL,
   RELATIONAL_SCHEMA_V14_TABLES,
   RELATIONAL_SCHEMA_V15_TABLES,
   RELATIONAL_SCHEMA_V16_TABLES,
@@ -178,4 +179,9 @@ test('v19 stores GitHub source, delivery, conflict and encrypted authorization s
   assert.match(RELATIONAL_SCHEMA_V19_SQL, /secret_envelope text/);
   assert.match(RELATIONAL_SCHEMA_V19_SQL, /version bigint not null check \(version > 0\)/);
   assert.doesNotMatch(RELATIONAL_SCHEMA_V19_SQL, /alter table agent_cluster\.sessions/);
+});
+
+test('v22 migration indexes outbox records by Session for scoped collection loads', () => {
+  assert.match(RELATIONAL_SCHEMA_V22_SQL,
+    /create index if not exists event_outbox_aggregate_idx on agent_cluster\.event_outbox \(aggregate_type, aggregate_external_id\);/);
 });

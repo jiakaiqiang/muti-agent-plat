@@ -1276,6 +1276,11 @@ export const RELATIONAL_SCHEMA_V21_TABLES: RelationalTableDefinition[] = [
 ];
 export const RELATIONAL_SCHEMA_V21_SQL = renderTables(RELATIONAL_SCHEMA_V21_TABLES);
 
+// Session-scoped collection transactions load one Session's outbox records.
+export const RELATIONAL_SCHEMA_V22_SQL = [
+  'create index if not exists event_outbox_aggregate_idx on agent_cluster.event_outbox (aggregate_type, aggregate_external_id)'
+].map((statement) => statement.endsWith(';') ? statement : `${statement};`).join('\n\n');
+
 export function expectedRelationalComments() {
   return [
     SCHEMA_MIGRATIONS_TABLE,
