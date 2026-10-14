@@ -59,3 +59,12 @@ test('concurrent install clicks use one handshake and one installer', async () =
   release(); await first;
   assert.equal(updater.installed, 1);
 });
+
+test('upgrade orchestrates check, download and install through the same busy gate', async () => {
+  const updater = new FakeUpdater();
+  let stopped = 0;
+  const controller = new UpdateController(updater, true, async () => { stopped += 1; }, () => {});
+  await controller.upgrade();
+  assert.equal(stopped, 1);
+  assert.equal(updater.installed, 1);
+});
