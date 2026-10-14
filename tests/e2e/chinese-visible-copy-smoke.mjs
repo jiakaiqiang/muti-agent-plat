@@ -16,6 +16,10 @@ const files = [
   'apps/web/index.html',
   'apps/server/src/main.ts',
   'apps/server/src/common/messages.ts',
+  'apps/server/src/modules/runtimes/mock-runtime.service.ts',
+  'apps/server/src/modules/runtimes/code-reader-runtime-adapter.service.ts',
+  'apps/server/src/modules/runtimes/test-runner-runtime-adapter.service.ts',
+  'packages/local-runtime-cli/src/runtime.ts',
   'apps/server/src/modules/capabilities/default-capabilities.ts',
   'apps/server/src/modules/orchestrator/orchestrator.service.ts',
   'apps/server/src/modules/sessions/sessions.service.ts',
@@ -50,7 +54,14 @@ const forbiddenVisibleCopy = [
   /marked the user update as relevant/,
   /User input changed the working requirement/,
   /Cannot resume execution/,
-  /Current session has no available Agent/
+  /Current session has no available Agent/,
+  /Supplemental context (hydrated for retry|was partially hydrated|request was cancelled|could not be hydrated):/,
+  /Read at least one non-sensitive source file and retry/,
+  /Receiver is synthesizing the complete file revision candidate/,
+  /File revision Agent processing failed/,
+  /Task acceptance Runtime ended with status/,
+  /title: ['"]Validate task output/,
+  /summary: ['"]Task contract confirmed/
 ];
 
 const requiredCopy = [
