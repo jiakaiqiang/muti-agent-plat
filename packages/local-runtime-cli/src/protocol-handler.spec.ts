@@ -31,6 +31,18 @@ test('only launches the server registered in local state', () => {
   ), /does not match/);
 });
 
+test('routes upgrade launch URLs only to the trusted server and validates the upgrade id', () => {
+  const trusted = 'https://agent.example.com';
+  assert.deepEqual(parseLocalRuntimeLaunchUrl(
+    'agent-runtime://upgrade?server=https%3A%2F%2Fagent.example.com&upgradeId=0123456789abcdef&nonce=0123456789abcdef',
+    trusted
+  ), { kind: 'upgrade', serverUrl: trusted, upgradeId: '0123456789abcdef', nonce: '0123456789abcdef' });
+  assert.throws(() => parseLocalRuntimeLaunchUrl(
+    'agent-runtime://upgrade?server=https%3A%2F%2Fagent.example.com&upgradeId=not-valid',
+    trusted
+  ), /upgrade ID is invalid/);
+});
+
 test('clears credentials when the explicitly configured server changes', () => {
   const state = { serverUrl: 'https://old.example.com', tokens: { accessToken: 'secret' } };
   updateTrustedLocalRuntimeServer(state, 'https://new.example.com');

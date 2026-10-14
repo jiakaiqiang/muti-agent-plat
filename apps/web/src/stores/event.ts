@@ -1,10 +1,12 @@
 import { defineStore } from 'pinia'
 import { apiGet, apiPage, eventStreamUrl, parseSseEvent } from '@/api/client'
 import { useAgentStore } from '@/stores/agent'
+import { useSessionStore } from '@/stores/session'
 import { useKnowledgeStore } from '@/stores/knowledge'
 import { actorAgentId, eventAgentId } from '@/composables/useActor'
 import { applicableArtifactFileChanges } from '@/components/artifactFileChangeModel'
 import { shouldPublishRuntimeEventToCollaboration } from '@agent-cluster/shared'
+import { eventNoticeText } from '@/utils/userFacingCopy'
 import type {
   AgentCardState,
   ArtifactEventPayload,
@@ -136,7 +138,7 @@ export function shouldRenderInTimeline(event: CollaborationEvent) {
   ) return false
   if (event.type === 'discussion_document_read') return false
   if (payload.phase === 'user_message_routing' && event.type.startsWith('runtime_')) return false
-  if (payload.code === 'RUNTIME_STOP_STATE_CHANGED') return false
+  if (payload.code === 'RUNTIME_STOP_STATE_CHANGED' || payload.code === 'RUNTIME_REQUEST_HEALTH_CHANGED') return false
   if (!shouldPublishRuntimeEventToCollaboration({
     type: event.type,
     visibility: unsafeVisibility ?? payload.visibility,
@@ -312,17 +314,14 @@ function optimisticEventMatches(optimistic: CollaborationEvent, committed: Colla
 }
 
 function mergeUniqueEvents(...groups: CollaborationEvent[][]) {
-  const seen = new Set<string>()
-  const merged: CollaborationEvent[] = []
+  const merged = new Map<string, CollaborationEvent>()
   for (const group of groups) {
     for (const rawEvent of group) {
       const event = normalizeCollaborationEvent(rawEvent)
-      if (seen.has(event.id)) continue
-      seen.add(event.id)
-      merged.push(event)
+      merged.set(event.id, event)
     }
   }
-  return merged
+  return [...merged.values()]
 }
 
 function visibleEvents(
@@ -396,6 +395,8 @@ function shouldApplyDerivedStatus(current: AgentCardState, nextStatus: AgentCard
   return current.status !== 'failed'
 }
 
+const messageProjections = new WeakMap<CollaborationEvent[], ChatMessage[]>()
+
 export const useEventStore = defineStore('event', {
   state: () => ({
     eventsBySessionId: {} as Record<string, CollaborationEvent[]>,
@@ -405,16 +406,21 @@ export const useEventStore = defineStore('event', {
     sseConnected: false,
     sseConnectionState: 'idle' as SseConnectionState,
     lastSseErrorAt: undefined as string | undefined,
-    lastCommittedServerEventIdBySessionId: {} as Record<string, string>
+    lastCommittedServerEventIdBySessionId: {} as Record<string, string>,
+    incompleteHistory: {} as Record<string, boolean>,
+    cacheRecency: [] as string[],
+    cacheReads: {} as Record<string, number>
   }),
   getters: {
     eventsForSession: (state) => (sessionId: string) => state.eventsBySessionId[sessionId] ?? [],
     discussionProgress: (state) => (sessionId: string) => discussionProgress(state.eventsBySessionId[sessionId] ?? []),
     chatMessages: (state) => (sessionId: string): ChatMessage[] => {
       const events = state.eventsBySessionId[sessionId] ?? []
+      const cached = messageProjections.get(events)
+      if (cached) return cached
       const confirmationStatusById = confirmationStatuses(events)
       const discussionDocumentReadStateById = discussionDocumentReadStates(events)
-      return collapseLegacyStopReceipts(events.filter(shouldRenderInTimeline).map((event) => {
+      const messages = collapseLegacyStopReceipts(events.filter(shouldRenderInTimeline).map((event) => {
         const payload = event.metadata.payload ?? {}
         const confirmationId =
           event.type === 'user_confirmation_requested' || event.type === 'intent_clarification_required'
@@ -427,7 +433,7 @@ export const useEventStore = defineStore('event', {
           senderAgentId: senderAgentIdOf(event),
           toAgentIds: event.toAgentIds,
           messageType: messageTypeOf(event),
-          content: event.content,
+          content: eventNoticeText(event),
           createdAt: event.createdAt,
           rawEventId: event.id,
           payload: confirmationId
@@ -437,6 +443,8 @@ export const useEventStore = defineStore('event', {
               : payload
         }
       }))
+      messageProjections.set(events, messages)
+      return messages
     },
     agentCards: (state) => (sessionId: string, participantAgentIds?: string[]): AgentCardState[] => {
       const agentStore = useAgentStore()
@@ -665,6 +673,25 @@ export const useEventStore = defineStore('event', {
     }
   },
   actions: {
+    trimEventCache() {
+      const sessions = useSessionStore()
+      const protectedIds = new Set([
+        sessions.currentSession?.id, this.connectedSessionId,
+        ...Object.keys(sessions.pendingWritesBySession), ...Object.keys(this.cacheReads),
+        ...Object.keys(this.optimisticEventsBySessionId).filter(id => this.optimisticEventsBySessionId[id].length)
+      ])
+      const candidates = this.cacheRecency.filter(id => !protectedIds.has(id))
+      while (this.cacheRecency.length > 3 && candidates.length) {
+        const id = candidates.shift()!
+        this.cacheRecency = this.cacheRecency.filter(value => value !== id)
+        delete this.serverEventsBySessionId[id]
+        delete this.eventsBySessionId[id]
+        delete this.optimisticEventsBySessionId[id]
+        // Cursor and history are one atomic cache entry: a return must fetch the full log.
+        delete this.lastCommittedServerEventIdBySessionId[id]
+        delete this.incompleteHistory[id]
+      }
+    },
     refreshVisibleEvents(sessionId: string) {
       this.eventsBySessionId[sessionId] = visibleEvents(
         this.serverEventsBySessionId,
@@ -673,6 +700,7 @@ export const useEventStore = defineStore('event', {
       )
     },
     commitServerEvents(sessionId: string, events: CollaborationEvent[], replace = false) {
+      if (!replace && events.length === 0) return
       const normalized = events.map(normalizeCollaborationEvent).filter((event) => !isOptimisticEvent(event))
       const nextServerEvents = replace
         ? mergeUniqueEvents(normalized)
@@ -685,6 +713,8 @@ export const useEventStore = defineStore('event', {
         (candidate) => !normalized.some((committed) => optimisticEventMatches(candidate, committed))
       )
       this.refreshVisibleEvents(sessionId)
+      this.cacheRecency = [...this.cacheRecency.filter(id => id !== sessionId), sessionId]
+      this.trimEventCache()
     },
     removeEvent(sessionId: string, eventId: string) {
       if (eventId.startsWith('evt-local-')) {
@@ -701,15 +731,27 @@ export const useEventStore = defineStore('event', {
       this.refreshVisibleEvents(sessionId)
     },
     async loadEvents(sessionId: string, options: { append?: boolean; afterEventId?: string } = {}) {
-      const afterEventId = options.afterEventId ?? (
-        options.append ? this.lastCommittedServerEventIdBySessionId[sessionId] : undefined
-      )
-      const suffix = afterEventId ? `?afterEventId=${encodeURIComponent(afterEventId)}` : ''
-      const page = await apiPage<CollaborationEvent>(`/sessions/${sessionId}/events${suffix}`)
-      this.commitServerEvents(sessionId, page.items, !options.append)
+      this.cacheReads[sessionId] = (this.cacheReads[sessionId] ?? 0) + 1
+      try {
+        const afterEventId = this.incompleteHistory[sessionId] ? undefined : options.afterEventId ?? (
+          options.append ? this.lastCommittedServerEventIdBySessionId[sessionId] : undefined
+        )
+        const suffix = afterEventId ? `?afterEventId=${encodeURIComponent(afterEventId)}` : ''
+        const page = await apiPage<CollaborationEvent>(`/sessions/${sessionId}/events${suffix}`)
+        const incomingIds = new Set(page.items.map(item => item.id))
+        const incoming = !afterEventId && options.append
+          ? [...page.items, ...(this.serverEventsBySessionId[sessionId] ?? []).filter(event => !incomingIds.has(event.id))]
+          : page.items
+        this.commitServerEvents(sessionId, incoming, !afterEventId || !options.append)
+        if (!afterEventId) delete this.incompleteHistory[sessionId]
+      } finally {
+        if (--this.cacheReads[sessionId] === 0) delete this.cacheReads[sessionId]
+        this.trimEventCache()
+      }
     },
     appendEvent(event: CollaborationEvent) {
       const normalizedEvent = normalizeCollaborationEvent(event)
+      if (!this.serverEventsBySessionId[event.sessionId]) this.incompleteHistory[event.sessionId] = true
       if (isOptimisticEvent(normalizedEvent)) {
         const optimistic = this.optimisticEventsBySessionId[normalizedEvent.sessionId] ?? []
         if (optimistic.some((item) => item.id === normalizedEvent.id)) return
@@ -737,7 +779,7 @@ export const useEventStore = defineStore('event', {
       coordinator.bufferedEvents = []
       const abort = new AbortController()
       coordinator.backfillAbort = abort
-      const baseCursor = this.lastCommittedServerEventIdBySessionId[sessionId]
+      const baseCursor = this.incompleteHistory[sessionId] ? undefined : this.lastCommittedServerEventIdBySessionId[sessionId]
       const suffix = baseCursor ? `?afterEventId=${encodeURIComponent(baseCursor)}` : ''
       const recovery = (async () => {
         const page = await apiPage<CollaborationEvent>(`/sessions/${sessionId}/events${suffix}`, {
@@ -747,6 +789,7 @@ export const useEventStore = defineStore('event', {
         const buffered = coordinator.bufferedEvents
         coordinator.bufferedEvents = []
         this.commitServerEvents(sessionId, [...page.items, ...buffered])
+        if (!baseCursor) delete this.incompleteHistory[sessionId]
         coordinator.recovering = false
         coordinator.backfillAbort = undefined
       })()
@@ -898,6 +941,7 @@ export const useEventStore = defineStore('event', {
       this.openSseAttempt(sessionId, coordinator.generation)
     },
     async finalizeSessionEvents(sessionId: string) {
+      const generation = coordinator.generation
       try {
         const stream = streams.get(sessionId)
         if (
@@ -910,7 +954,7 @@ export const useEventStore = defineStore('event', {
           await this.loadEvents(sessionId, { append: true })
         }
       } finally {
-        if (this.connectedSessionId === sessionId) this.disconnectSse()
+        if (this.connectedSessionId === sessionId && coordinator.generation === generation) this.disconnectSse()
       }
     },
     async probeBackendReachability() {

@@ -16,10 +16,13 @@ import {
 } from '@element-plus/icons-vue'
 import { useAgentStore } from '@/stores/agent'
 import { useAppUiStore } from '@/stores/appUi'
+import { useLocalRuntimeStore } from '@/stores/localRuntime'
+import RuntimeUpgradeDialog from './RuntimeUpgradeDialog.vue'
 
 const route = useRoute()
 const agentStore = useAgentStore()
 const appUiStore = useAppUiStore()
+const localRuntimeStore = useLocalRuntimeStore()
 const { routeRenderError } = storeToRefs(appUiStore)
 
 const navigation = [
@@ -61,6 +64,10 @@ onMounted(() => {
   if (!agentStore.agents.length) {
     void agentStore.loadAgents().catch(() => undefined)
   }
+  void Promise.all([
+    localRuntimeStore.loadDevices(),
+    localRuntimeStore.resolveLaunchServerUrl()
+  ]).catch(() => undefined)
 })
 </script>
 
@@ -103,9 +110,10 @@ onMounted(() => {
         </template>
       </el-result>
       <RouterView v-else v-slot="{ Component, route: viewRoute }">
-        <component :is="Component" :key="viewRoute.fullPath" />
+        <component :is="Component" :key="viewRoute.meta.section === 'session' ? 'task-workspace' : viewRoute.path" />
       </RouterView>
     </main>
+    <RuntimeUpgradeDialog />
   </div>
 </template>
 

@@ -5,6 +5,7 @@ export function structuredOutputGuard(input: {
   maxCorrections: number;
   timeoutMs: number;
   fail: (error: RuntimeError) => void;
+  observeTimeout?: () => void;
 }) {
   const seen = new Set<string>();
   let failures = 0;
@@ -32,8 +33,7 @@ export function structuredOutputGuard(input: {
         stop({ code: 'RUNTIME_OUTPUT_CONTRACT_VIOLATION', message: '输出格式仍未通过校验，已停止本次调用，可从检查点重新尝试。', retryable: false,
           details: { structuredOutputGuard: true, failureCount: failures, maxCorrections: input.maxCorrections } });
       } else if (!timer) {
-        timer = setTimeout(() => stop({ code: 'RUNTIME_TIMEOUT', message: '输出格式纠正超时，已请求停止本次调用。', retryable: false,
-          details: { structuredOutputGuard: true, failureCount: failures, timeoutMs: input.timeoutMs } }), input.timeoutMs);
+        timer = setTimeout(() => input.observeTimeout?.(), input.timeoutMs);
       }
     },
     dispose() { stopped = true; clearTimeout(timer); }

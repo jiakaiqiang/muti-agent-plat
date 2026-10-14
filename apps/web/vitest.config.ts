@@ -12,6 +12,8 @@ export default mergeConfig(
         'src/components/**/*.spec.ts',
         '../desktop/renderer/components/**/*.spec.ts',
         'src/router/**/*.spec.ts',
+        'src/composables/**/*.spec.ts',
+        'src/stores/session-navigation.spec.ts',
         'src/stores/event-connection.spec.ts',
         'src/stores/event-normalization.spec.ts',
         'src/stores/localRuntime.spec.ts',

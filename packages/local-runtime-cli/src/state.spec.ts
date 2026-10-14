@@ -114,6 +114,60 @@ test('workspace indexes persist outside state.json and are restored on load', as
   }
 });
 
+test('workspace IDs with filename-unsafe characters persist their index under a hashed file name', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-runtime-unsafe-id-'));
+  const stateFile = join(directory, 'state.json');
+  const previousStateFile = process.env.AGENT_RUNTIME_STATE_FILE;
+  process.env.AGENT_RUNTIME_STATE_FILE = stateFile;
+  try {
+    const workspaceId = 'github-session:93505070-e897-479b-90fc-947154485aee';
+    const entries = [{ path: 'README.md', kind: 'file' as const, size: 1, generated: false, sensitive: false }];
+    const state = defaultState();
+    state.workspaces.push({
+      workspaceId,
+      displayName: 'github-session',
+      rootPath: directory,
+      permissions,
+      permissionPolicyVersion: 2,
+      registeredAt: '2026-10-08T00:00:00.000Z',
+      index: {
+        workspaceId,
+        revision: { id: 'revision-github', observedAt: '2026-10-08T00:00:00.000Z' },
+        generation: 1,
+        status: 'ready',
+        complete: true,
+        entries,
+        entrypoints: ['README.md'],
+        detectedStack: [],
+        indexedEntries: 1,
+        truncated: false,
+        updatedAt: '2026-10-08T00:00:00.000Z',
+        coverage: {
+          visitedEntries: 1,
+          indexedEntries: 1,
+          excludedGenerated: 0,
+          sensitiveEntries: 0,
+          skippedSymlinks: 0,
+          failedEntries: 0
+        }
+      }
+    });
+    await writeFile(stateFile, JSON.stringify(state), 'utf8');
+
+    assert.equal((await loadState()).workspaces[0]?.index?.entries[0]?.path, 'README.md');
+    await saveWorkspaceIndex(workspaceId, entries);
+    assert.equal((await loadState()).workspaces[0]?.index?.entries[0]?.path, 'README.md');
+    const persisted = JSON.parse(await readFile(stateFile, 'utf8')) as {
+      workspaces: Array<{ index?: { entries?: unknown } }>;
+    };
+    assert.equal(persisted.workspaces[0]?.index?.entries, undefined);
+  } finally {
+    if (previousStateFile === undefined) delete process.env.AGENT_RUNTIME_STATE_FILE;
+    else process.env.AGENT_RUNTIME_STATE_FILE = previousStateFile;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('loadState falls back to legacy inline index entries', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'agent-runtime-inline-index-'));
   const stateFile = join(directory, 'state.json');

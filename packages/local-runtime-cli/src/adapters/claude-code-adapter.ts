@@ -62,6 +62,7 @@ export class ClaudeCodeLocalRuntimeAdapter implements LocalRuntimeAdapter {
       throw new Error('MODEL_PROTOCOL_MISMATCH: Claude Code requires an Anthropic-compatible connection.');
     }
     const { stdout, stderr, exitCode } = await runRuntimeCommand({
+      invocationId: plan.invocationId,
       command: command.executable,
       args,
       stdin: encodeClaudeUserMessage(prompt),
@@ -91,7 +92,7 @@ export class ClaudeCodeLocalRuntimeAdapter implements LocalRuntimeAdapter {
           }
         });
       }
-      throw new Error(processFailure);
+      throw localRuntimeError(confirmedRuntimeExit({ code: 'MODEL_ERROR', message: processFailure, retryable: false }, exitCode));
     }
     const result = parseClaudeOutput(stdout, plan.expectedOutput.kind, plan.expectedOutput.schemaVersion);
     return {
@@ -141,6 +142,7 @@ export function buildClaudeArgs(plan: InvocationPlan, permissions: LocalRuntimeP
     '--output-format', 'stream-json',
     '--input-format', 'stream-json',
     '--verbose',
+    '--include-partial-messages',
     '--strict-mcp-config',
     // Safe mode disables hooks/plugins/custom commands without replacing configured auth.
     // Older CLIs reject this flag and fail closed instead of attempting an unsafe repair.
@@ -296,3 +298,4 @@ function asRecord(value: unknown): Record<string, unknown> {
 function numericValue(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
+import { confirmedRuntimeExit } from '@agent-cluster/shared';

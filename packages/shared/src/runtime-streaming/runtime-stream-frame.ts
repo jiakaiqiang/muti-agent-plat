@@ -14,7 +14,7 @@ export type RawUsage = {
   cacheWriteInputTokens?: number;
 };
 
-export type AssistantTextFrame = { kind: 'assistant_text'; text: string };
+export type AssistantTextFrame = { kind: 'assistant_text'; text: string; eventId?: string; progressReplay?: boolean };
 /**
  * Authoritative structured output emitted by a provider before its terminal
  * lifecycle notification. Codex app-server v2 sends this as the completed
@@ -62,6 +62,10 @@ export type SystemFrame = {
   disposition: 'debug_only' | 'runtime_error';
 };
 export type StderrTailFrame = { kind: 'stderr_tail'; text: string };
+export type RuntimeObservationFrame = {
+  kind: 'observation'; observationKind: import('../runtime-request-health.js').RuntimeObservationKind | 'observation_due';
+  sequence?: number; eventId?: string; count?: number; toolCallId?: string;
+};
 
 export type RuntimeStreamFrame =
   | AssistantTextFrame
@@ -71,6 +75,7 @@ export type RuntimeStreamFrame =
   | UsageFrame
   | ResultFrame
   | SystemFrame
+  | RuntimeObservationFrame
   | StderrTailFrame;
 
 export const isAssistantTextFrame = (f: RuntimeStreamFrame): f is AssistantTextFrame =>
@@ -92,4 +97,6 @@ export const isStderrTailFrame = (f: RuntimeStreamFrame): f is StderrTailFrame =
  * must not keep the idle watchdog alive forever.
  */
 export const isRuntimeActivityFrame = (frame: RuntimeStreamFrame): boolean =>
-  frame.kind !== 'system' && frame.kind !== 'stderr_tail';
+  frame.kind === 'assistant_text' || frame.kind === 'tool_use' || frame.kind === 'tool_result' ||
+  frame.kind === 'provider_output' || frame.kind === 'result' ||
+  (frame.kind === 'observation' && ['text_progress', 'reasoning_progress', 'tool_input_progress', 'tool_progress'].includes(frame.observationKind) && frame.count !== 0);

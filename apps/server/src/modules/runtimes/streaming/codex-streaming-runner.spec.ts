@@ -98,28 +98,25 @@ test('codex streaming runner: cancel via handle → status cancelled', async () 
   assert.equal(result.error?.code, 'RUNTIME_CANCELLED');
 });
 
-test('codex streaming runner: watchdog first_frame timeout kills silent stub', async () => {
+for (const reason of ['first_frame', 'idle', 'absolute'] as const) {
+test(`codex streaming runner: ${reason} observation preserves late success`, async () => {
   const input = makeInput();
   const handle = startCodexStreaming(input, {
     command: process.execPath,
     args: [stubPath],
-    env: { ...process.env, STUB_FIRST_DELAY_MS: '5000' },
-    firstFrameTimeoutMs: 200,
-    idleTimeoutMs: 5_000
+    env: { ...process.env, STUB_FIRST_DELAY_MS: reason === 'idle' ? '0' : '400', STUB_PROGRESS_GAP_MS: reason === 'idle' ? '400' : '0' },
+    firstFrameTimeoutMs: reason === 'first_frame' ? 40 : 5_000,
+    absoluteTimeoutMs: reason === 'absolute' ? 70 : 5_000,
+    idleTimeoutMs: reason === 'idle' ? 40 : 5_000
   });
-  (async () => { for await (const _ of handle.channel) void _; })();
+  let observation = false;
+  const pump = (async () => { for await (const frame of handle.channel) if (frame.kind === 'observation' && frame.eventId === `watchdog:${reason}`) observation = true; })();
   const result = await handle.result;
-  assert.equal(result.status, 'failed');
-  assert.equal(result.error?.code, 'RUNTIME_TIMEOUT');
-  const details = result.error?.details as Record<string, unknown> | undefined;
-  assert.equal(details?.watchdog, 'first_frame');
-  assert.equal(details?.runtimeType, 'codex');
-  assert.equal(details?.invocationId, input.invocationId);
-  assert.equal(details?.phase, input.phase);
-  assert.equal(details?.thresholdMs, 200);
-  assert.equal(typeof details?.lastActivityAt, 'string');
-  assert.equal(result.streamMetrics?.frameCount, 0);
+  await pump;
+  assert.equal(result.status, 'completed');
+  assert.equal(observation, true);
 });
+}
 
 test('codex streaming runner: AbortSignal aborts run', async () => {
   const input = makeInput();

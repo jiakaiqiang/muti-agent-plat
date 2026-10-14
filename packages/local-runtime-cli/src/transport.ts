@@ -14,10 +14,12 @@ import type {
   WorkspaceOperationRequest,
   WorkspaceOperationResult
 } from '@agent-cluster/shared';
-import { LOCAL_RUNTIME_PROTOCOL_VERSION, runtimeTypesForModelProvider } from '@agent-cluster/shared';
+import { LOCAL_RUNTIME_PROTOCOL_VERSION, canonicalWorkspaceChangeSetJson, runtimeTypesForModelProvider } from '@agent-cluster/shared';
 import WebSocket from 'ws';
 import { detectAvailableLocalRuntimes, probeLocalRuntimeCapabilities } from './adapters/registry.js';
 import { executeLocalInvocation } from './runtime.js';
+import { runtimeProcessObservation } from './runtime-process.js';
+const invocationHealthBindings = new WeakMap<AbortController, import('@agent-cluster/shared').RuntimeHealthIdentity & { workspaceId: string }>();
 import type { LocalRuntimeState } from './state.js';
 import {
   loadPersistedWorkspaceIds,
@@ -28,6 +30,10 @@ import {
 import { createWorkspaceState, LocalWorkspace } from './workspace.js';
 import { selectWorkspaceDirectory } from './directory-picker.js';
 import { LocalSecretStore } from './local-secret-store.js';
+import { LocalGitHubAuthorizationStore, handleLocalGitHubAuthorizationRequest } from './github-authorization-store.js';
+import { LocalGitHubSourcePreparer } from './github-source-preparation.js';
+import { LocalGitHubDelivery } from './github-delivery.js';
+import { GitRepositoryWorkspaceManager } from '@agent-cluster/shared/node/repository-workspace-manager';
 
 export async function createDeviceCode(state: LocalRuntimeState, cliVersion: string) {
   const runtimes = await detectAvailableLocalRuntimes();
@@ -129,6 +135,13 @@ export async function runBridge(state: LocalRuntimeState, cliVersion: string, si
       });
     } catch (error) {
       if (signal.aborted) break;
+      // A protocol mismatch cannot recover by reconnecting: the process has
+      // already loaded an incompatible contract. Stop the bridge so the
+      // launcher can surface the upgrade dialog instead of retrying forever.
+      if (isProtocolIncompatibility(error)) {
+        lifecycle.onConnectionError?.(error);
+        throw error;
+      }
       const canRecover = Boolean(state.tokens && lifecycle.authorizeMissingTokens);
       if (isAuthorizationFailure(error) && state.tokens) {
         delete state.tokens;
@@ -160,11 +173,16 @@ async function runBridgeConnection(
   const workspaceAuthorizations = new Map<string, AbortController>();
   const workspaceInitializations = new Map<string, Promise<void>>();
   const secrets = new LocalSecretStore();
+  const githubAuthorizations = new LocalGitHubAuthorizationStore(state, secrets);
   const indexPersistence = createWorkspaceIndexPersistence(state);
   const workspaces = new Map(state.workspaces.map((workspace) => [
     workspace.workspaceId,
     new LocalWorkspace(workspace, { onIndexUpdated: indexPersistence.onIndexUpdated })
   ]));
+  const githubWorkspaceManager = new GitRepositoryWorkspaceManager();
+  const githubSources = new LocalGitHubSourcePreparer(state, githubAuthorizations,
+    githubWorkspaceManager, workspaces, saveState, indexPersistence.onIndexUpdated);
+  const githubDelivery = new LocalGitHubDelivery(githubWorkspaceManager, githubAuthorizations);
   let heartbeat: NodeJS.Timeout | undefined;
   let stopReceiptProtocol = false;
   const send = (message: LocalRuntimeClientMessage) => {
@@ -206,6 +224,7 @@ async function runBridgeConnection(
           kind: 'local_runtime.hello',
           payload: {
             outputContractVersions: ['1.0', '2.0'],
+            requestHealthProtocol: 1,
             deviceId: state.deviceId,
             cliVersion,
             protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
@@ -259,11 +278,21 @@ async function runBridgeConnection(
         workspaceInitializations,
         writebackAuthorizations,
         secrets,
+        githubAuthorizations,
+        githubSources,
+        githubDelivery,
         indexPersistence,
         send,
         reportActivity
       )
-        .catch((error) => process.stderr.write(`Local Runtime request failed: ${error instanceof Error ? error.message : String(error)}\n`))
+        .catch((error) => {
+          if (isProtocolIncompatibility(error)) {
+            reject(error);
+            socket.close(4406, 'protocol_incompatible');
+            return;
+          }
+          process.stderr.write(`Local Runtime request failed: ${error instanceof Error ? error.message : String(error)}\n`);
+        })
         .finally(() => { pendingMessages--; reportActivity(); });
     });
     socket.on('unexpected-response', (_, response) => reject(new Error(`WebSocket upgrade rejected with HTTP ${response.statusCode}.`)));
@@ -298,10 +327,28 @@ async function handleServerMessage(
   workspaceInitializations: Map<string, Promise<void>>,
   writebackAuthorizations: LocalWritebackAuthorizationStore,
   secrets: LocalSecretStore,
+  githubAuthorizations: LocalGitHubAuthorizationStore,
+  githubSources: LocalGitHubSourcePreparer,
+  githubDelivery: LocalGitHubDelivery,
   indexPersistence: WorkspaceIndexPersistence,
   send: (message: LocalRuntimeClientMessage) => void,
   reportActivity: () => void = () => undefined
 ) {
+  if (message.kind === 'local_runtime.github.authorization.request') {
+    send({ kind: 'local_runtime.github.authorization.result',
+      payload: await handleLocalGitHubAuthorizationRequest(message.payload, githubAuthorizations) });
+    return;
+  }
+  if (message.kind === 'local_runtime.github.source.request') {
+    send({ kind: 'local_runtime.github.source.result',
+      payload: await githubSources.handle(message.payload) });
+    return;
+  }
+  if (message.kind === 'local_runtime.github.delivery.request') {
+    send({ kind: 'local_runtime.github.delivery.result',
+      payload: await githubDelivery.handle(message.payload) });
+    return;
+  }
   if (message.kind === 'local_runtime.capabilities.request') {
     const capabilities = await probeLocalRuntimeCapabilities();
     send({
@@ -456,8 +503,16 @@ async function handleServerMessage(
       return;
     }
     try {
-      workspace.grantPermission(permission, scope);
-      await saveState(state);
+      if (message.payload.writeback) {
+        if (permission !== 'workspace_delete' || scope !== 'once') {
+          throw new Error('Only a one-time workspace_delete grant can bind a writeback result.');
+        }
+        writebackAuthorizations.authorizeDigest(workspaceId,
+          message.payload.writeback.changeSetId, message.payload.writeback.digest);
+      } else {
+        workspace.grantPermission(permission, scope);
+        await saveState(state);
+      }
       send({
         kind: 'local_runtime.workspace.permission.grant.result',
         payload: {
@@ -501,6 +556,7 @@ async function handleServerMessage(
     if (consumedPermissions.length) await saveState(state);
     const controller = new AbortController();
     active.set(plan.invocationId, controller);
+    if (plan.requestHealth) invocationHealthBindings.set(controller, { ...plan.requestHealth, workspaceId });
     reportActivity();
     const emit = (event: Parameters<typeof send>[0] extends never ? never : import('@agent-cluster/shared').AgentRuntimeEvent) => {
       send({ kind: 'local_runtime.invocation.event', payload: event });
@@ -551,6 +607,19 @@ async function handleServerMessage(
       .finally(() => { active.delete(plan.invocationId); reportActivity(); });
     return;
   }
+  if (message.kind === 'local_runtime.invocation.probe') {
+    const p = message.payload;
+    const controller = active.get(p.invocationId);
+    const binding = controller ? invocationHealthBindings.get(controller) : undefined;
+    const matches = p.deviceId === state.deviceId && workspaces.has(p.workspaceId) && binding &&
+      binding.sessionId === p.sessionId && binding.operationId === p.operationId &&
+      binding.workspaceId === p.workspaceId &&
+      binding.sessionGeneration === p.sessionGeneration && binding.observerEpoch === p.observerEpoch;
+    send({ kind: 'local_runtime.invocation.probe.result', payload: { ...p,
+      status: matches ? 'ok' : 'unsupported', requestStatus: 'unknown',
+      ...(matches ? runtimeProcessObservation(p.invocationId) : { processStatus: 'unknown' }) } });
+    return;
+  }
   if (message.kind === 'local_runtime.invocation.cancel') {
     active.get(message.payload.invocationId)?.abort(message.payload.termination);
     return;
@@ -561,7 +630,12 @@ async function handleServerMessage(
     return;
   }
   if (message.kind === 'local_runtime.protocol.error') {
-    throw new Error(`${message.payload.code}: ${message.payload.message}`);
+    const error = new Error(
+      `${message.payload.code}: ${message.payload.message}`
+      + (message.payload.upgradeInfo?.toVersion ? ` 请升级到 ${message.payload.upgradeInfo.toVersion}。` : '')
+    );
+    if (message.payload.code.startsWith('LOCAL_RUNTIME_PROTOCOL')) error.name = 'LocalRuntimeProtocolError';
+    throw error;
   }
   if (message.kind === 'local_runtime.workspace.registration_rejected') {
     throw new Error(`${message.payload.code}: ${message.payload.message}`);
@@ -795,8 +869,15 @@ export class LocalWritebackAuthorizationStore {
   ) {}
 
   authorizeDelete(workspaceId: string, changeSet: import('@agent-cluster/shared').WorkspaceChangeSet) {
+    this.authorizeDigest(workspaceId, changeSet.id, canonicalChangeSetDigest(changeSet));
+  }
+
+  authorizeDigest(workspaceId: string, changeSetId: string, digest: string) {
+    if (!/^[a-f0-9]{64}$/i.test(digest) || !changeSetId) {
+      throw new Error('INVALID_WRITEBACK_AUTHORIZATION_DIGEST');
+    }
     const authorized = this.deleteAuthorizations.get(workspaceId) ?? new Map<string, { digest: string; expiresAt: number }>();
-    authorized.set(changeSet.id, { digest: canonicalChangeSetDigest(changeSet), expiresAt: this.now() + this.ttlMs });
+    authorized.set(changeSetId, { digest: digest.toLowerCase(), expiresAt: this.now() + this.ttlMs });
     this.deleteAuthorizations.set(workspaceId, authorized);
   }
 
@@ -833,18 +914,7 @@ export class LocalWritebackAuthorizationStore {
 }
 
 function canonicalChangeSetDigest(changeSet: import('@agent-cluster/shared').WorkspaceChangeSet) {
-  return createHash('sha256').update(stableJson(changeSet)).digest('hex');
-}
-
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  if (value && typeof value === 'object') {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value);
+  return createHash('sha256').update(canonicalWorkspaceChangeSetJson(changeSet)).digest('hex');
 }
 
 function intersectOperationPermissions(
@@ -904,6 +974,12 @@ async function ensureAccessToken(state: LocalRuntimeState) {
 function isAuthorizationFailure(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   return /HTTP 401|HTTP 403|access token is invalid|refresh token is (invalid|unavailable)/i.test(message);
+}
+
+function isProtocolIncompatibility(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return error instanceof Error && ['LocalRuntimeProtocolError', 'LocalRuntimeProtocolIncompatibilityError'].includes(error.name)
+    || /LOCAL_RUNTIME_PROTOCOL_INCOMPATIBLE|Protocol .* unsupported|CLI .* older than the required/i.test(message);
 }
 
 async function apiJson<T>(serverUrl: string, path: string, init: RequestInit = {}): Promise<T> {

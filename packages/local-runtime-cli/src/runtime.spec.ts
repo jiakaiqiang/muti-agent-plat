@@ -10,6 +10,7 @@ import { buildClaudeArgs, ClaudeCodeLocalRuntimeAdapter } from './adapters/claud
 import { buildCodexArgs, parseCodexOutput, withCodexOutputSchema } from './adapters/codex-adapter.js';
 import {
   buildRuntimeProcessEnv,
+  revalidateReadOnlyEvidence,
   executeLocalInvocation,
   intersectPermissionPolicies,
   shouldApplyStagedChangeSet
@@ -17,12 +18,69 @@ import {
 import { createWorkspaceState, LocalWorkspace } from './workspace.js';
 import { getLocalRuntimeAdapter } from './adapters/registry.js';
 import { SubmissionError } from './adapters/submission-error.js';
+import { GitRepositoryWorkspaceManager } from '@agent-cluster/shared/node/repository-workspace-manager';
+import { execFileSync } from 'node:child_process';
 
 test('proposal_only keeps staged edits as evidence without applying them to the user workspace', () => {
   assert.equal(shouldApplyStagedChangeSet('proposal_only'), false);
   assert.equal(shouldApplyStagedChangeSet('none'), false);
   assert.equal(shouldApplyStagedChangeSet('propose_changes'), true);
   assert.equal(shouldApplyStagedChangeSet('direct_audited'), true);
+});
+
+test('local GitHub invocation preserves Git and captures binary edits as a task candidate', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-runtime-github-'));
+  const source = join(root, 'source');
+  const remote = join(root, 'remote.git');
+  const previousRoot = process.env.AGENT_CLUSTER_GITHUB_WORKSPACES_ROOT;
+  const previousCommand = process.env.AGENT_RUNTIME_CODEX_COMMAND;
+  const previousArgs = process.env.AGENT_RUNTIME_CODEX_ARGS_JSON;
+  const sessionId = '11111111-1111-4111-8111-111111111111';
+  const taskId = '22222222-2222-4222-8222-222222222222';
+  try {
+    await mkdir(source);
+    execFileSync('git', ['init', '-b', 'main', source]);
+    execFileSync('git', ['-C', source, 'config', 'user.name', 'Fixture']);
+    execFileSync('git', ['-C', source, 'config', 'user.email', 'fixture@example.invalid']);
+    await writeFile(join(source, 'binary.dat'), Buffer.from([0, 1, 255]));
+    execFileSync('git', ['-C', source, 'add', '-A']);
+    execFileSync('git', ['-C', source, 'commit', '-m', 'base']);
+    execFileSync('git', ['clone', '--bare', source, remote]);
+    process.env.AGENT_CLUSTER_GITHUB_WORKSPACES_ROOT = join(root, 'managed');
+    const manager = new GitRepositoryWorkspaceManager(join(root, 'managed'), () => remote);
+    const prepared = await manager.prepare(sessionId, '42',
+      'https://github.com/example/project', '73', 'fixture-token', 'main');
+    const fixture = join(root, 'edit.cjs');
+    await writeFile(fixture, [
+      "const fs = require('node:fs');",
+      "fs.writeFileSync('binary.dat', Buffer.from([0, 2, 255]));",
+      "process.stdout.write(JSON.stringify({schemaVersion:'1.0',kind:'agent_message',messageKind:'progress',content:'done',targetAgentIds:[],targetAgentKeys:[],mentionedAgentIds:[],relatedTaskIds:[]}) + '\\n');"
+    ].join('\n'));
+    process.env.AGENT_RUNTIME_CODEX_COMMAND = process.execPath;
+    process.env.AGENT_RUNTIME_CODEX_ARGS_JSON = JSON.stringify([fixture]);
+    const state = await createWorkspaceState(prepared.workspacePath, 'fixture');
+    state.workspaceId = prepared.workspaceId;
+    const workspace = new LocalWorkspace(state, { watch: false, index: false });
+    const request = await invocationRequest(workspace);
+    request.plan.sessionId = sessionId;
+    request.plan.taskId = taskId;
+    const result = await executeLocalInvocation(request, workspace, new AbortController().signal, () => {});
+    assert.equal(result.status, 'completed', result.error?.message);
+    assert.deepEqual(result.githubCandidate?.changedPaths, ['binary.dat']);
+    assert.equal(result.workspaceExecution, undefined);
+    assert.equal((await readFile(join(prepared.workspacePath, 'binary.dat')))[1], 1);
+    assert.equal(execFileSync('git', ['-C', prepared.workspacePath,
+      'show', `${result.githubCandidate?.ref}:binary.dat`])[1], 2);
+    workspace.close();
+  } finally {
+    if (previousRoot === undefined) delete process.env.AGENT_CLUSTER_GITHUB_WORKSPACES_ROOT;
+    else process.env.AGENT_CLUSTER_GITHUB_WORKSPACES_ROOT = previousRoot;
+    if (previousCommand === undefined) delete process.env.AGENT_RUNTIME_CODEX_COMMAND;
+    else process.env.AGENT_RUNTIME_CODEX_COMMAND = previousCommand;
+    if (previousArgs === undefined) delete process.env.AGENT_RUNTIME_CODEX_ARGS_JSON;
+    else process.env.AGENT_RUNTIME_CODEX_ARGS_JSON = previousArgs;
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('Codex local adapter permits the managed staging directory without relying on repository trust', () => {
@@ -1102,5 +1160,66 @@ test('failed submission preserves a candidate, repairs without development tools
     assert.equal(mutated.executionCandidate, undefined);
     assert.equal(mutated.workspaceExecution, undefined);
     assert.equal(await readFile(join(root, 'README.md'), 'utf8'), 'original');
+  } finally { adapter.execute = previousExecute; workspace.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+
+test('read-only revision recovery requires unchanged evidence hashes and never relaxes writes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-runtime-evidence-revision-'));
+  const workspace = new LocalWorkspace(await createWorkspaceState(root), { watch: false, index: false });
+  try {
+    await writeFile(join(root, 'main.py'), 'print(1)');
+    const request = await invocationRequest(workspace);
+    const plan = request.plan;
+    plan.phase = 'discussion';
+    plan.executionTarget.writeMode = 'none';
+    plan.contextEnvelope.L3.files = [{ path: 'main.py', content: 'print(1)', byteLength: 8,
+      hash: { algorithm: 'sha256', value: sha256('print(1)') } }];
+    workspace.refreshRevision();
+    assert.equal(await revalidateReadOnlyEvidence(plan, workspace), true);
+    plan.executionTarget.writeMode = 'propose_changes';
+    assert.equal(await revalidateReadOnlyEvidence(plan, workspace), false);
+    plan.executionTarget.writeMode = 'none';
+    await writeFile(join(root, 'main.py'), 'print(2)');
+    assert.equal(await revalidateReadOnlyEvidence(plan, workspace), false);
+    plan.contextEnvelope.L3.files = [];
+    assert.equal(await revalidateReadOnlyEvidence(plan, workspace), false);
+  } finally { workspace.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+
+test('read-only invocation reaches the adapter after unrelated revision changes, but changed evidence stops before it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-runtime-readonly-invocation-'));
+  const workspace = new LocalWorkspace(await createWorkspaceState(root), { watch: false, index: false });
+  const adapter = getLocalRuntimeAdapter('codex');
+  const previousExecute = adapter.execute;
+  let calls = 0;
+  try {
+    await writeFile(join(root, 'main.py'), 'print(1)');
+    const request = await invocationRequest(workspace);
+    request.plan.phase = 'discussion';
+    request.plan.executionTarget.writeMode = 'none';
+    request.plan.executionTarget.requiredCapabilities = ['read'];
+    request.plan.contextEnvelope.L3.files = [{ path: 'main.py', content: 'print(1)', byteLength: 8,
+      hash: { algorithm: 'sha256', value: sha256('print(1)') } }];
+    adapter.execute = async ({ cwd }) => {
+      calls++;
+      assert.equal(await readFile(join(cwd, 'main.py'), 'utf8'), 'print(1)');
+      return { output: { schemaVersion: '1.0', kind: 'agent_message', messageKind: 'progress', content: 'verified',
+        targetAgentIds: [], targetAgentKeys: [], mentionedAgentIds: [], relatedTaskIds: [] },
+        usage: { model: 'test-stub', inputTokens: 0, outputTokens: 0, totalTokens: 0 } };
+    };
+    workspace.refreshRevision();
+    const events: AgentRuntimeEvent[] = [];
+    const completed = await executeLocalInvocation(request, workspace, new AbortController().signal, event => events.push(event));
+    assert.equal(completed.status, 'completed', completed.error?.message);
+    assert.equal(calls, 1);
+    assert.ok(events.some(event => event.metadata?.evidenceRevalidated === true));
+    await writeFile(join(root, 'main.py'), 'print(2)');
+    workspace.refreshRevision();
+    const failed = await executeLocalInvocation(request, workspace, new AbortController().signal, () => {});
+    assert.equal(failed.status, 'failed');
+    assert.match(failed.error?.message ?? '', /LOCAL_WORKSPACE_REVISION_CONFLICT/);
+    assert.equal(calls, 1);
   } finally { adapter.execute = previousExecute; workspace.close(); await rm(root, { recursive: true, force: true }); }
 });

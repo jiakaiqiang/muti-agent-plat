@@ -1,7 +1,8 @@
+import { runtimePhaseLabel, isUsableWorkspaceEvidencePath } from "@agent-cluster/shared";
 import { createHash, randomUUID } from 'node:crypto';
 import { cp, lstat, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, relative } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { TextDecoder } from 'node:util';
 import type {
   AgentRunResult,
@@ -22,6 +23,8 @@ import { extractLocalRuntimeError, localRuntimeError } from './runtime-error.js'
 import { LocalWorkspace } from './workspace.js';
 import { captureExecutionCandidate, validateExecutionCandidate } from './execution-candidate.js';
 import { SubmissionError } from './adapters/submission-error.js';
+import { GitRepositoryWorkspaceManager } from '@agent-cluster/shared/node/repository-workspace-manager';
+import { captureGitTaskCandidate } from '@agent-cluster/shared/node/git-task-candidate';
 
 const ignoredDirectories = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.cache', 'coverage']);
 const maximumChangeSetTextBytes = 1_000_000;
@@ -47,23 +50,56 @@ export async function executeLocalInvocation(
   let captureState: { stagingRoot: string; before: Map<string, WorkspaceFileSnapshot>; revision: import('@agent-cluster/shared').WorkspaceRevision;
     permissions: LocalRuntimePermissionPolicy } | undefined;
   let executionCandidate: AgentRunResult['executionCandidate'];
+  let githubCandidate: AgentRunResult['githubCandidate'];
   let repairBaseline: Map<string, WorkspaceFileSnapshot> | undefined;
   try {
     if (providerConnectionError) throw new Error(providerConnectionError);
     if (request.workspaceId !== workspace.state.workspaceId) throw new Error('Invocation workspaceId mismatch.');
     const currentRevision = await workspace.revision();
-    if (currentRevision.id !== request.workspaceRevision.id) {
+    const revisionChanged = currentRevision.id !== request.workspaceRevision.id;
+    if (revisionChanged && !await revalidateReadOnlyEvidence(plan, workspace)) {
       throw new Error('LOCAL_WORKSPACE_REVISION_CONFLICT: workspace changed after invocation planning.');
     }
     const effectivePermissions = intersectPermissionPolicies(request.permissions, localPermissions);
     assertInvocationPermissions(plan, effectivePermissions);
-    const before = await snapshotWorkspaceFiles(workspace.state.rootPath, false);
-    stagingContainer = await mkdtemp(join(tmpdir(), 'agent-runtime-invocation-'));
-    // fs.cp(errorOnExist) in the desktop's Node runtime also rejects an existing
-    // destination directory. Keep the private container, copy into a new child.
-    const stagingRoot = join(stagingContainer, 'workspace');
-    await copyAuthorizedWorkspace(workspace.state.rootPath, stagingRoot);
-    captureState = { stagingRoot, before, revision: currentRevision, permissions: effectivePermissions };
+    const githubSessionId = /^github-session:([0-9a-f-]{36})$/i.exec(workspace.state.workspaceId)?.[1];
+    const githubTask = githubSessionId && plan.phase === 'task_execution' && plan.taskId &&
+      githubSessionId === plan.sessionId ? { sessionId: githubSessionId, taskId: plan.taskId } : undefined;
+    let stagingRoot: string;
+    let githubBaseCommit: string | undefined;
+    if (githubTask) {
+      const manager = new GitRepositoryWorkspaceManager();
+      const expected = resolve(manager.sessionWorkspacePath(githubTask.sessionId));
+      const actual = resolve(workspace.state.rootPath);
+      if ((process.platform === 'win32' ? actual.toLowerCase() : actual) !==
+          (process.platform === 'win32' ? expected.toLowerCase() : expected)) {
+        throw new Error('GITHUB_SESSION_WORKSPACE_MISMATCH');
+      }
+      if (plan.recoveryCandidate) throw new Error('GITHUB_TEXT_CANDIDATE_UNSUPPORTED');
+      const task = await manager.prepareTask(githubTask.sessionId, githubTask.taskId);
+      stagingRoot = task.workspacePath;
+      githubBaseCommit = task.baseCommit;
+    } else {
+      const before = await snapshotWorkspaceFiles(workspace.state.rootPath, false);
+      stagingContainer = await mkdtemp(join(tmpdir(), 'agent-runtime-invocation-'));
+      // fs.cp(errorOnExist) in the desktop's Node runtime also rejects an existing
+      // destination directory. Keep the private container, copy into a new child.
+      stagingRoot = join(stagingContainer, 'workspace');
+      await copyAuthorizedWorkspace(workspace.state.rootPath, stagingRoot);
+      captureState = { stagingRoot, before, revision: currentRevision, permissions: effectivePermissions };
+    }
+    if (revisionChanged) {
+      // The envelope stays immutable. Verify the copied bytes too, closing the read/copy race.
+      for (const file of plan.contextEnvelope.L3.files) {
+        const bytes = await readFile(join(stagingRoot, file.path));
+        if (createHash('sha256').update(bytes).digest('hex') !== file.hash?.value) {
+          throw new Error('LOCAL_WORKSPACE_REVISION_CONFLICT: evidence changed while preparing the read-only workspace.');
+        }
+      }
+      emit({ invocationId: plan.invocationId, type: 'runtime_progress', visibility: 'user',
+        content: '工作区版本已变化；已校验本次只读分析的证据文件内容未变，继续调用。',
+        createdAt: new Date().toISOString(), metadata: { evidenceRevalidated: true } });
+    }
     if (plan.recoveryCandidate) {
       validateExecutionCandidate(plan, plan.recoveryCandidate, effectivePermissions);
       if (plan.recoveryCandidate.baseRevision.id !== currentRevision.id) throw new Error('CANDIDATE_BASELINE_CHANGED');
@@ -81,7 +117,7 @@ export async function executeLocalInvocation(
       invocationId: plan.invocationId,
       type: 'runtime_started',
       visibility: 'user',
-      content: `${plan.agent.name} started ${plan.phase} on the local device.`,
+      content: `${plan.agent.name} 已在本机开始 ${runtimePhaseLabel(plan.phase)}。`,
       metadata: { executionLocation: 'local', workspaceId: request.workspaceId },
       createdAt: startedAt
     };
@@ -106,16 +142,21 @@ export async function executeLocalInvocation(
       emit,
       ...(providerConnection ? { providerConnection } : {})
     });
-    const after = await snapshotWorkspaceFiles(stagingRoot, true);
-    if (repairBaseline && (repairBaseline.size !== after.size ||
+    const after = githubTask ? undefined : await snapshotWorkspaceFiles(stagingRoot, true);
+    if (repairBaseline && after && (repairBaseline.size !== after.size ||
       [...repairBaseline].some(([path, snapshot]) => snapshot.hash.value !== after.get(path)?.hash.value))) {
       throw new Error('CANDIDATE_REPAIR_SIDE_EFFECT_DETECTED');
     }
-    const changeSet = buildChangeSet(currentRevision, before, after);
+    const changeSet = captureState && after ? buildChangeSet(currentRevision, captureState.before, after) : null;
+    if (githubTask && githubBaseCommit) {
+      githubCandidate = await captureGitTaskCandidate({ worktreePath: stagingRoot,
+        sessionId: githubTask.sessionId, taskId: githubTask.taskId, baseCommit: githubBaseCommit });
+    }
     if (changeSet) executionCandidate = captureExecutionCandidate(plan, changeSet, effectivePermissions);
     const output = adapterResult.output.schemaVersion === '2.0'
-      ? materializeTaskSubmission(adapterResult.output, (changeSet?.changes ?? []).flatMap(change =>
-        change.operation === 'move' ? [change.fromPath, change.toPath] : [change.path]))
+      ? materializeTaskSubmission(adapterResult.output, githubCandidate?.changedPaths ??
+        (changeSet?.changes ?? []).flatMap(change =>
+          change.operation === 'move' ? [change.fromPath, change.toPath] : [change.path]))
       : adapterResult.output;
     if (changeSet?.changes.some((change) => change.operation === 'delete' || change.operation === 'move')) {
       const permission = effectivePermissions.workspace_delete;
@@ -127,7 +168,7 @@ export async function executeLocalInvocation(
       invocationId: plan.invocationId,
       type: 'runtime_completed',
       visibility: 'user',
-      content: `${plan.agent.name} completed ${plan.phase} on the local device.`,
+      content: `${plan.agent.name} 已在本机完成 ${runtimePhaseLabel(plan.phase)}。`,
       metadata: { executionLocation: 'local', changedFileCount: changeSet?.changes.length ?? 0 },
       createdAt: new Date().toISOString()
     };
@@ -135,6 +176,7 @@ export async function executeLocalInvocation(
     if (executionCandidate) executionCandidate.stage = 'submission_validated';
     return {
       executionCandidate,
+      githubCandidate,
       invocationId: plan.invocationId,
       runtimeType: plan.executionTarget.runtimeType,
       status: 'completed',
@@ -168,7 +210,9 @@ export async function executeLocalInvocation(
       try {
         const after = await snapshotWorkspaceFiles(captureState.stagingRoot, true);
         const changeSet = buildChangeSet(captureState.revision, captureState.before, after);
-        if (changeSet) executionCandidate = captureExecutionCandidate(plan, changeSet, captureState.permissions);
+        executionCandidate = captureExecutionCandidate(plan, changeSet ?? {
+          id: randomUUID(), baseRevision: captureState.revision, changes: [], createdAt: new Date().toISOString()
+        }, captureState.permissions);
       } catch { /* Unsupported or incomplete snapshots cannot be advertised as recoverable. */ }
     }
     if (executionCandidate && error instanceof SubmissionError) {
@@ -201,7 +245,7 @@ export async function executeLocalInvocation(
       invocationId: plan.invocationId,
       type: 'runtime_failed',
       visibility: 'user',
-      content: cancelled ? 'Local Runtime invocation was interrupted.' : 'Local Runtime invocation failed.',
+      content: cancelled ? '本机 Runtime 调用已中断。' : '本机 Runtime 调用失败。',
       metadata: { message, executionLocation: 'local' },
       createdAt: new Date().toISOString()
     };
@@ -231,6 +275,22 @@ export async function executeLocalInvocation(
   } finally {
     if (stagingContainer) await rm(stagingContainer, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+/** A changed global revision is recoverable only for hash-verified, read-only evidence. */
+export async function revalidateReadOnlyEvidence(plan: InvocationPlan, workspace: LocalWorkspace): Promise<boolean> {
+  const files = plan.contextEnvelope.L3.files ?? [];
+  if (plan.executionTarget.writeMode !== 'none' || plan.phase === 'task_execution' || plan.recoveryCandidate ||
+      plan.contextEnvelope.L3.fileRevisions?.length || files.length === 0 || files.length > 32) return false;
+  const revision = await workspace.revision();
+  try {
+    for (const file of files) {
+      if (!file.hash || !isUsableWorkspaceEvidencePath(file.path)) return false;
+      const metadata = await workspace.statFile({ path: file.path });
+      if (metadata.kind !== 'file' || metadata.hash?.value !== file.hash.value) return false;
+    }
+    return (await workspace.revision()).id === revision.id;
+  } catch { return false; }
 }
 
 const requiredDiscussionDocumentMaxBytes = 200_000;
@@ -287,7 +347,7 @@ async function preflightRequiredDiscussionDocument(
     invocationId: plan.invocationId,
     type: 'tool_completed',
     visibility: 'debug',
-    content: `read_file completed ${requiredDocument.relativePath}`,
+    content: `已读取文件：${requiredDocument.relativePath}`,
     metadata: { ...metadata, truncated: false },
     createdAt: new Date().toISOString()
   });
@@ -305,7 +365,7 @@ function requiredDocumentPreflightError(plan: InvocationPlan, detail: string) {
       requestedRefs: [],
       requestedFiles: [{ path: requiredDocument.relativePath, maxBytes: requiredDiscussionDocumentMaxBytes }],
       reason: 'DOCUMENT_READ_PRECHECK_FAILED',
-      followUpInstruction: 'Verify that the active discussion document exists and matches the required SHA-256 before retrying.'
+      followUpInstruction: '重试前请确认当前讨论文档存在，且 SHA-256 与要求一致。'
     },
     details: {
       documentId: requiredDocument.documentId,

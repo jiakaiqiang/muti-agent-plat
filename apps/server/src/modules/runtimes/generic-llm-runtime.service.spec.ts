@@ -8,6 +8,78 @@ import { makeInvocationPlan } from './invocation-plan.fixture.js';
 
 const originalFetch = globalThis.fetch;
 
+test('generic local, remote and tool-loop submissions require Chinese without rewriting model output', async () => {
+  const service = makeServiceWithCurrentFetch();
+  const builders = service as unknown as {
+    buildLocalSystemPrompt(input: InvocationPlan): string;
+    buildRemoteSystemPrompt(input: InvocationPlan): string;
+  };
+  const input = makeInput('task_execution_result');
+  assert.match(builders.buildLocalSystemPrompt(input), /所有面向用户的自然语言必须使用简体中文/);
+  assert.match(builders.buildRemoteSystemPrompt(input), /所有面向用户的自然语言必须使用简体中文/);
+  input.toolCatalog.tools = [{ name: 'read_file', description: '读取文件', inputSchema: { type: 'object' } }];
+  globalThis.fetch = async (_url, init) => {
+    const request = JSON.parse(String(init?.body)) as { messages: { role: string; content: string }[] };
+    assert.match(request.messages.find(message => message.role === 'system')?.content ?? '', /所有面向用户的自然语言必须使用简体中文/);
+    return new Response(JSON.stringify(completedTaskExecutionContent('原样保留模型响应。')), { status: 200 });
+  };
+  try {
+    const result = await service.start(input).result;
+    assert.equal(result.status, 'completed');
+    assert.equal(result.output.kind, 'task_execution_result');
+    if (result.output.kind !== 'task_execution_result') throw new Error('Unexpected output kind');
+    assert.equal(result.output.summary, '原样保留模型响应。');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('ordinary non-streaming model remains pending beyond the observation timer and completes once', async () => {
+  const previous = process.env.LLM_TIMEOUT_MS;
+  process.env.LLM_TIMEOUT_MS = '20';
+  let requests = 0;
+  globalThis.fetch = async (_url, init) => {
+    requests++;
+    await new Promise(resolve => setTimeout(resolve, 80));
+    assert.equal(init?.signal?.aborted, false);
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(runtimeOutputExamples.agent_message) } }] }),
+      { headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    const handle = makeServiceWithCurrentFetch().start(makeInput('agent_message'));
+    const observations: unknown[] = [];
+    const pump = (async () => { for await (const event of handle.events) observations.push(event.metadata?.observationKind); })();
+    assert.equal((await handle.result).status, 'completed'); await pump;
+    assert.equal(requests, 1);
+    assert.ok(observations.includes('observation_due'));
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previous === undefined) delete process.env.LLM_TIMEOUT_MS; else process.env.LLM_TIMEOUT_MS = previous;
+  }
+});
+
+test('a real provider failure cannot create a recovery request after the immutable operation deadline', async () => {
+  const previous = process.env.LLM_MAX_RETRIES;
+  process.env.LLM_MAX_RETRIES = '2';
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests++; await new Promise(resolve => setTimeout(resolve, 50));
+    return new Response(JSON.stringify({ error: { message: 'temporary upstream failure' } }), { status: 502 });
+  };
+  try {
+    const input = makeInput('agent_message');
+    input.operation = { id: 'operation', policyVersion: 'execution-reliability-v1', maxAttempts: 3,
+      deadlineAt: new Date(Date.now() + 10).toISOString() };
+    const result = await makeServiceWithCurrentFetch().start(input).result;
+    assert.equal(result.status, 'failed');
+    assert.equal(requests, 1);
+    assert.equal(result.error?.details?.recoveryAdmission, 'operation_deadline_exhausted');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previous === undefined) delete process.env.LLM_MAX_RETRIES; else process.env.LLM_MAX_RETRIES = previous;
+  }
+});
+
 function makeService(responseBody: unknown) {
   globalThis.fetch = async () =>
     new Response(JSON.stringify(responseBody), {
@@ -766,7 +838,7 @@ test('maps HTTP 401 to a non-retryable model error', async () => {
   assert.equal(result.error?.details?.httpStatus, 401);
 });
 
-test('tool-loop aborts a hung LLM request after LLM_TIMEOUT_MS', async () => {
+test('tool-loop observes a hung LLM request without aborting it and still supports explicit cancellation', async () => {
   const previousTimeout = process.env.LLM_TIMEOUT_MS;
   const previousRetries = process.env.LLM_MAX_RETRIES;
   const previousFallback = process.env.LLM_MOCK_FALLBACK;
@@ -801,12 +873,15 @@ test('tool-loop aborts a hung LLM request after LLM_TIMEOUT_MS', async () => {
   input.toolCatalog.tools = [{ name: 'read_file', description: 'read', inputSchema: { type: 'object' } }];
 
   try {
-    const result = await service.start(input).result;
-
-    assert.equal(result.status, 'failed');
-    assert.equal(result.error?.code, 'RUNTIME_TIMEOUT');
-    assert.match(result.error?.message ?? '', /运行时执行超时/);
-    assert.equal(result.termination?.kind, 'runtime_timeout');
+    const handle = service.start(input);
+    let settled = false;
+    void handle.result.then(() => { settled = true; });
+    await new Promise(resolve => setTimeout(resolve, 140));
+    assert.equal(settled, false, 'observation timeout must not abort the pending provider request');
+    await handle.cancel();
+    const result = await handle.result;
+    assert.equal(result.status, 'cancelled');
+    assert.equal(result.termination?.kind, 'user_cancelled');
   } finally {
     globalThis.fetch = originalFetch;
     if (previousTimeout === undefined) {

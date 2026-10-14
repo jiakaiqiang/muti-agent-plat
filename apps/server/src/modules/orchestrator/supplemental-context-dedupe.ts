@@ -3,6 +3,7 @@ import type { RuntimeContextRequest, SessionDetail, TaskEvidenceRef } from '@age
 export type SeenContextSignatures = {
   refs: Set<string>;
   paths: Set<string>;
+  files: Set<string>;
   directories: Set<string>;
   searches: Set<string>;
   commands: Set<string>;
@@ -19,6 +20,7 @@ export function collectSeenContextSignatures(
 ): SeenContextSignatures {
   const refs = new Set<string>();
   const paths = new Set<string>();
+  const files = new Set<string>();
   const directories = new Set<string>();
   const searches = new Set<string>();
   const commands = new Set<string>();
@@ -49,7 +51,12 @@ export function collectSeenContextSignatures(
           ...(entry.requestedContext.requestedPaths ?? [])
         ];
     for (const path of providedPaths) {
-      if (path) paths.add(path);
+      const requests = (entry.resolution?.hydratedFiles ?? entry.requestedContext.requestedFiles ?? [])
+        .filter(file => file.path === path);
+      if (requests.length) {
+        for (const file of requests) files.add(fileRequestSignature(file));
+        if (requests.some(file => file.startLine === undefined && file.endLine === undefined && file.maxBytes === undefined)) paths.add(path);
+      } else if (path) paths.add(path);
     }
     for (const directory of entry.requestedContext.requestedDirectories ?? []) {
       const evidencePath = `${directory.path.replace(/\/+$/, '') || '.'}/`;
@@ -68,7 +75,7 @@ export function collectSeenContextSignatures(
       if (command) commands.add(command);
     }
   }
-  return { refs, paths, directories, searches, commands };
+  return { refs, paths, files, directories, searches, commands };
 }
 
 export type RequestedContextDiff = {
@@ -90,11 +97,12 @@ export function diffRequestedContext(
   for (const ref of candidate.requestedRefs ?? []) {
     if (!seen.refs.has(refSignature(ref))) novelRefs.push(ref);
   }
-  const candidateFiles = Array.from(new Map([
+  const candidateFiles: NonNullable<RuntimeContextRequest['requestedFiles']> = Array.from(new Map([
     ...(candidate.requestedFiles ?? []),
     ...(candidate.requestedPaths ?? []).map((path) => ({ path }))
   ].map((item) => [JSON.stringify(item), item])).values());
-  const novelFiles = candidateFiles.filter((item) => item.path && !seen.paths.has(item.path));
+  const novelFiles = candidateFiles.filter((item) => item.path && !seen.files.has(fileRequestSignature(item)) &&
+    !(item.startLine === undefined && item.endLine === undefined && item.maxBytes === undefined && seen.paths.has(item.path)));
   const novelPaths = novelFiles.map((item) => item.path);
   const novelCommands = (candidate.requestedCommands ?? []).filter(
     (command) => command && !seen.commands.has(command)
@@ -129,6 +137,10 @@ export function trimToNovelContext(
 
 function directorySignature(directory: NonNullable<RuntimeContextRequest['requestedDirectories']>[number]): string {
   return `${directory.path}:${directory.depth ?? 1}`;
+}
+
+function fileRequestSignature(file: NonNullable<RuntimeContextRequest['requestedFiles']>[number]): string {
+  return JSON.stringify([file.path, file.startLine ?? null, file.endLine ?? null, file.maxBytes ?? null]);
 }
 
 function searchSignature(search: NonNullable<RuntimeContextRequest['requestedSearches']>[number]): string {

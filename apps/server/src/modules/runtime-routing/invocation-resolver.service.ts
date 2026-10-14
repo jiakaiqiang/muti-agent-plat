@@ -89,6 +89,26 @@ export class InvocationResolverService {
     private readonly localRuntime?: LocalRuntimeConnectionService
   ) {}
 
+  preflightTarget(input: Pick<ResolveInvocationInput, 'sessionId' | 'taskId' | 'agent' | 'phase' | 'taskRequiresCodeChanges' | 'workspace' | 'sessionPreference'>,
+    target: RuntimeType) {
+    const identity = this.profileCompiler.compileIdentity({ agent: input.agent });
+    const requiredTools = getToolsForCapabilities(identity.requestedToolIds.filter(id =>
+      !getToolsForCapability(id).some(tool => isToolBlockedByPhase(input.phase, tool))));
+    const resolveInput = input as ResolveInvocationInput;
+    const requiredCapabilities = this.requiredWorkspaceCapabilities(resolveInput, requiredTools);
+    const candidate = this.runtimeCandidates(resolveInput).find(item => item.runtimeType === target);
+    if (!candidate || !this.isCandidateEligible(candidate, resolveInput, requiredCapabilities, requiredTools)) {
+      throw new Error('RUNTIME_SWITCH_TARGET_INELIGIBLE');
+    }
+    const tools = this.toolAuthority.resolve({ identity, phase: input.phase,
+      workspaceCapabilities: input.workspace.capabilities, runtimeSupportedToolNames: candidate.supportedToolNames,
+      sessionId: input.sessionId, taskId: input.taskId });
+    if (tools.decisions.some(item => item.status === 'blocked' &&
+      item.reasons.some(reason => !['PHASE_BLOCKED', 'INVOCATION_POLICY_BLOCKED'].includes(reason)))) {
+      throw new Error('RUNTIME_SWITCH_TOOL_PERMISSION_REQUIRED');
+    }
+  }
+
   resolve(input: ResolveInvocationInput): InvocationPlan {
     if (input.expectedOutput.schemaVersion === '2.0' && (input.expectedOutput.kind !== 'task_execution_result' ||
       input.phase !== 'task_execution' || input.workspace.providerKind !== 'local_bridge' ||

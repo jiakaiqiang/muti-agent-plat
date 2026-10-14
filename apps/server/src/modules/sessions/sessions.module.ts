@@ -17,6 +17,11 @@ import { ContextManagementModule } from '../context-management/context-managemen
 import { MessageRoutingModule } from '../message-routing/message-routing.module.js';
 import { DiscussionDocumentsModule } from '../discussion-documents/discussion-documents.module.js';
 import { AttachmentsModule } from '../attachments/attachments.module.js';
+import { GitHubAuthorizationService } from '../code-hosts/github-authorization.service.js';
+import { GitHubCodeHostAdapter } from '../code-hosts/github-code-host.adapter.js';
+import { GitRepositoryWorkspaceManager } from '../repository-workspaces/repository-workspace-manager.js';
+import { SourcePreparationCoordinator } from './source-preparation-coordinator.js';
+import { DeliveryCoordinator } from '../delivery/delivery-coordinator.js';
 
 @Module({
   imports: [
@@ -38,7 +43,14 @@ import { AttachmentsModule } from '../attachments/attachments.module.js';
     forwardRef(() => WorkflowsModule)
   ],
   controllers: [SessionsController],
-  providers: [SessionsService],
+  providers: [
+    SessionsService,
+    GitHubCodeHostAdapter,
+    GitHubAuthorizationService,
+    { provide: GitRepositoryWorkspaceManager, useFactory: () => new GitRepositoryWorkspaceManager() },
+    SourcePreparationCoordinator,
+    DeliveryCoordinator
+  ],
   exports: [SessionsService]
 })
 export class SessionsModule {}

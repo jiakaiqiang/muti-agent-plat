@@ -1,3 +1,4 @@
+import { runtimeRecoveryContext } from '@agent-cluster/shared';
 import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import {
@@ -244,6 +245,7 @@ export class WorkdirBriefService {
         role: input.agent.role
       },
       expectedOutput: input.expectedOutput,
+      recovery: runtimeRecoveryContext(input),
       contextEnvelope: input.contextEnvelope
     };
   }

@@ -1,4 +1,6 @@
 import type { DecisionRecord, SummaryMemory } from '@agent-cluster/shared';
+import { briefQuestionKey } from '@agent-cluster/shared';
+import { confirmedQuestionAnswers } from './brief-question-answers.js';
 
 export type SummaryMemoryDerivationInput = {
   goal: string;
@@ -76,11 +78,14 @@ export function reconcileOpenQuestions(input: {
 }): { open: string[]; added: string[]; resolved: string[] } {
   const previous = unique(input.previous, Number.POSITIVE_INFINITY);
   const current = unique(input.current, Number.POSITIVE_INFINITY);
+  const answered = confirmedQuestionAnswers(input.resolvedBy);
   const resolved = previous.filter((question) =>
-    !current.includes(question) && input.resolvedBy.some((decision) => answers(decision.content, question))
+    answered.has(briefQuestionKey(question)) ||
+    (!current.includes(question) && input.resolvedBy.some((decision) => answers(decision.content, question)))
   );
-  const open = unique([...previous.filter((question) => !resolved.includes(question)), ...current], Number.POSITIVE_INFINITY);
-  const added = current.filter((question) => !previous.includes(question));
+  const open = unique([...previous.filter((question) => !resolved.includes(question)),
+    ...current.filter((question) => !answered.has(briefQuestionKey(question)))], Number.POSITIVE_INFINITY);
+  const added = current.filter((question) => !previous.includes(question) && !answered.has(briefQuestionKey(question)));
   return { open, added, resolved };
 }
 

@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useAgentStore } from '@/stores/agent'
 import { useEventStore } from '@/stores/event'
 import { useKnowledgeStore } from '@/stores/knowledge'
 import { useRuntimeModelStore } from '@/stores/runtimeModel'
 import { useSessionStore } from '@/stores/session'
 import { apiBaseUrl, runtimeModeLabel } from '@/config/runtime'
+import { formatDateTime } from '@/utils/dateTime'
 import AgentManager from '@/components/AgentManager.vue'
 import RuntimeModelManager from '@/components/RuntimeModelManager.vue'
 import RuntimeVersionSummary from '@/components/RuntimeVersionSummary.vue'
@@ -22,7 +23,8 @@ const knowledgeStore = useKnowledgeStore()
 const runtimeModelStore = useRuntimeModelStore()
 const sessionStore = useSessionStore()
 
-const currentSessionId = computed(() => sessionStore.currentSession?.id ?? '')
+const fallbackSessionId = ref('')
+const currentSessionId = computed(() => sessionStore.currentSession?.id ?? fallbackSessionId.value)
 const events = computed(() => eventStore.eventsForSession(currentSessionId.value))
 const notificationEvents = computed(() =>
   events.value.filter(
@@ -43,10 +45,10 @@ onMounted(async () => {
   ])
 
   if (!sessionStore.currentSession && sessionStore.sessions.length) {
-    await sessionStore.loadSession().catch(() => undefined)
+    fallbackSessionId.value = sessionStore.sessions[0].id
   }
-  if (sessionStore.currentSession && !events.value.length) {
-    await eventStore.loadEvents(sessionStore.currentSession.id).catch(() => undefined)
+  if (currentSessionId.value && !events.value.length) {
+    await eventStore.loadEvents(currentSessionId.value).catch(() => undefined)
   }
 })
 
@@ -96,7 +98,7 @@ function riskTagType(riskLevel: string) {
           <p>{{ base.description ?? '暂无描述' }}</p>
           <el-descriptions :column="1" size="small" border>
             <el-descriptions-item label="Embedding 模型">{{ base.embeddingModel }}</el-descriptions-item>
-            <el-descriptions-item label="更新时间">{{ base.updatedAt }}</el-descriptions-item>
+            <el-descriptions-item label="更新时间">{{ formatDateTime(base.updatedAt) }}</el-descriptions-item>
           </el-descriptions>
         </el-card>
       </div>

@@ -19,7 +19,11 @@ import {
   RELATIONAL_SCHEMA_V14_SQL,
   RELATIONAL_SCHEMA_V15_SQL,
   RELATIONAL_SCHEMA_V16_SQL,
-  RELATIONAL_SCHEMA_V17_SQL
+  RELATIONAL_SCHEMA_V17_SQL,
+  RELATIONAL_SCHEMA_V18_SQL,
+  RELATIONAL_SCHEMA_V19_SQL,
+  RELATIONAL_SCHEMA_V20_SQL,
+  RELATIONAL_SCHEMA_V21_SQL
 } from './relational-schema.js';
 
 type Migration = {
@@ -113,6 +117,26 @@ const MIGRATIONS: Migration[] = [
     version: 17,
     name: 'discussion_documents',
     sql: RELATIONAL_SCHEMA_V17_SQL
+  },
+  {
+    version: 18,
+    name: 'runtime_switch_requests',
+    sql: RELATIONAL_SCHEMA_V18_SQL
+  },
+  {
+    version: 19,
+    name: 'github_session_delivery',
+    sql: RELATIONAL_SCHEMA_V19_SQL
+  },
+  {
+    version: 20,
+    name: 'github_oauth_states',
+    sql: RELATIONAL_SCHEMA_V20_SQL
+  },
+  {
+    version: 21,
+    name: 'runtime_request_health_snapshots',
+    sql: RELATIONAL_SCHEMA_V21_SQL
   }
 ];
 

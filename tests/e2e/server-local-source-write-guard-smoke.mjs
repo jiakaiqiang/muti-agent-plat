@@ -60,7 +60,10 @@ try {
     method: 'POST',
     body: JSON.stringify({
       name: 'Server-local source write guard workflow',
-      nodes: [{ id: 'source-guard-node', type: 'agent', agentId: backend.id, order: 0 }]
+      nodes: [{ id: 'source-guard-node', type: 'agent', agentId: backend.id,
+        stageDescription: 'Produce isolated server-local source updates for writeback.',
+        outputContract: ['Capture changed source files and apply them through platform writeback.'],
+        order: 0 }]
     })
   })).data;
   const workflow = (await api(server.apiBase, `/workflows/${draft.id}/publish`, {
@@ -115,7 +118,14 @@ try {
   const session = (await api(server.apiBase, `/sessions/${sessionId}`)).data;
   const writeback = session.workspaceWritebacks?.at(-1);
   if (writeback?.status !== 'applied') {
-    throw new Error(`Expected an applied workspace writeback record. Got: ${JSON.stringify(writeback)}`);
+    const invocations = (await api(server.apiBase,
+      `/sessions/${sessionId}/debug/runtime-invocations`)).data.items;
+    throw new Error(`Expected an applied workspace writeback record. Got: ${JSON.stringify({
+      writeback, invocations: invocations.map((invocation) => ({
+        phase: invocation.phase, status: invocation.status,
+        executionTarget: invocation.executionTarget
+      }))
+    })}`);
   }
 
   const observedSourceChange = events

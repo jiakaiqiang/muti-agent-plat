@@ -36,6 +36,8 @@
 
 本专题“会话归档管理”按 SDD 四件套阅读：[Spec](product/session-archive-management-spec-v1.md) → [Plan](design/session-archive-management-plan-v1.md) → [Tasks](implementation/session-archive-management-tasks-v1.md) → [Checklist](quality/session-archive-management-checklist-v1.md)。安全停止、归档、项目分组、恢复，以及真实 PostgreSQL 重启恢复和原生 Electron smoke 均已通过；多窗口冲突/批量操作和接入独立项目目录后的正式项目名称解析仍延期。
 
+跨会话切换卡顿与并发稳定性专项（2026-09-29，待实施）：[Spec](product/session-navigation-performance-spec-v1.md) → [Plan](design/session-navigation-performance-plan-v1.md) → [Task](implementation/session-navigation-performance-tasks-v1.md) → [Checklist](quality/session-navigation-performance-checklist-v1.md)。覆盖导航重建、迟到请求与业务回调隔离、群聊执行保护、滚动/渲染及双端回归；文档生成不表示故障已修复，不包含后端 Runtime 切换改造。
+
 ## 归档原则
 
 - 产品目标和范围放入 `product/`。

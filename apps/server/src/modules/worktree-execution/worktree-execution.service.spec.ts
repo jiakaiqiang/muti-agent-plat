@@ -10,6 +10,28 @@ import { createRuntimeArtifactOutput, createRuntimeArtifactSystemEvidence } from
 import { makeInvocationPlan } from '../runtimes/invocation-plan.fixture.js';
 import { InvocationWorkspaceBindingsService } from '../runtimes/invocation-workspace-bindings.service.js';
 import { WorktreeExecutionService } from './worktree-execution.service.js';
+import { GitRepositoryWorkspaceManager } from '@agent-cluster/shared/node/repository-workspace-manager';
+
+test('a failed Runtime candidate survives a switch and rejects changed bytes before the backup starts', async () => {
+  await withRepository(async ({ repository, bindings }) => {
+    const service = new WorktreeExecutionService(bindings);
+    const original = plan(bindings, repository);
+    const lease = await service.prepare(original);
+    await writeFile(join(lease.manifest.executionWorkDir, 'tracked.txt'), 'unfinished change\n');
+    const failure = await service.capture(lease, { ...completed(original), status: 'failed',
+      error: { code: 'MODEL_ERROR', message: 'CLI exited', retryable: true } });
+    lease.release();
+    assert.ok(failure.executionCandidate);
+    const backup = { ...original, invocationId: 'backup', recoveryCandidate: failure.executionCandidate,
+      executionTarget: { ...original.executionTarget, runtimeType: 'claude_code' as const } };
+    const resumed = await service.prepare(backup);
+    assert.equal(await readFile(join(resumed.manifest.executionWorkDir, 'tracked.txt'), 'utf8'), 'unfinished change\n');
+    assert.equal(await readFile(join(repository, 'tracked.txt'), 'utf8'), 'base\n');
+    resumed.release();
+    await writeFile(join(resumed.manifest.executionWorkDir, 'tracked.txt'), 'untrusted edit\n');
+    await assert.rejects(service.prepare({ ...backup, invocationId: 'stale' }), /CANDIDATE_RESTORE_CONFLICT/);
+  });
+});
 
 async function withRepository(
   callback: (input: { root: string; repository: string; staging: string; bindings: InvocationWorkspaceBindingsService }) => Promise<void>
@@ -151,6 +173,29 @@ test('runs a task in an isolated worktree and captures an authoritative ChangeSe
   });
 });
 
+test('read-only Codex tasks stay isolated and never auto-write their file changes', async () => {
+  await withRepository(async ({ repository, bindings }) => {
+    const input = plan(bindings, repository);
+    input.executionTarget.writeMode = 'none';
+    const service = new WorktreeExecutionService(bindings);
+    assert.equal(service.shouldManage(input), true);
+
+    const lease = await service.prepare(input);
+    assert.notEqual(lease.manifest.executionWorkDir, repository);
+    await writeFile(join(lease.manifest.executionWorkDir, 'tracked.txt'), 'unapproved change\n', 'utf8');
+    const result = await service.capture(lease, completed(input));
+    lease.release();
+
+    assert.equal(await readFile(join(repository, 'tracked.txt'), 'utf8'), 'base\n');
+    assert.equal(result.workspaceExecution?.requiresUserConfirmation, true);
+    assert.deepEqual(result.workspaceExecution?.changeSet.changes.map((change) =>
+      change.operation === 'move' ? change.toPath : change.path), ['tracked.txt']);
+
+    const writeInput = plan(bindings, repository);
+    await assert.rejects(() => service.prepare(writeInput), /WORKTREE_WRITE_MODE_MISMATCH/);
+  });
+});
+
 test('creates separate worktrees for different sessions using the same repository', async () => {
   await withRepository(async ({ repository, bindings }) => {
     const service = new WorktreeExecutionService(bindings);
@@ -257,6 +302,48 @@ test('refuses to copy sensitive untracked files into a managed worktree', async 
       /sensitive untracked paths/i
     );
   });
+});
+
+test('GitHub task execution keeps Git objects and returns a binary-safe candidate without writeback', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-cluster-github-execution-'));
+  const previousRoot = process.env.AGENT_CLUSTER_GITHUB_WORKSPACES_ROOT;
+  const sessionId = '11111111-1111-4111-8111-111111111111';
+  const taskId = '22222222-2222-4222-8222-222222222222';
+  try {
+    const source = join(root, 'source');
+    const remote = join(root, 'remote.git');
+    await mkdir(source);
+    git(source, ['init', '-b', 'main']);
+    git(source, ['config', 'user.name', 'Fixture']);
+    git(source, ['config', 'user.email', 'fixture@example.invalid']);
+    await writeFile(join(source, 'binary.dat'), Buffer.from([0, 1, 255]));
+    git(source, ['add', '-A']);
+    git(source, ['commit', '-m', 'base']);
+    execFileSync('git', ['clone', '--bare', source, remote], { windowsHide: true });
+    const manager = new GitRepositoryWorkspaceManager(join(root, 'managed'), () => remote);
+    process.env.AGENT_CLUSTER_GITHUB_WORKSPACES_ROOT = join(root, 'managed');
+    const prepared = await manager.prepare(sessionId, '42',
+      'https://github.com/example/project', '73', 'fixture-token', 'main');
+    const bindings = new InvocationWorkspaceBindingsService();
+    const input = plan(bindings, prepared.workspacePath, { sessionId, taskId });
+    const service = new WorktreeExecutionService(bindings);
+    const lease = await service.prepare(input, { github: true });
+    assert.equal(lease.manifest.mode, 'github_task');
+    assert.equal(await readFile(join(lease.manifest.executionWorkDir, 'binary.dat')).then((bytes) => bytes[2]), 255);
+    await writeFile(join(prepared.workspacePath, 'external.txt'), 'not controlled');
+    await writeFile(join(lease.manifest.executionWorkDir, 'binary.dat'), Buffer.from([0, 2, 255]));
+    const result = await service.capture(lease, completed(input));
+    lease.release();
+    assert.deepEqual(result.githubCandidate?.changedPaths, ['binary.dat']);
+    assert.equal(result.workspaceExecution, undefined);
+    assert.equal(execFileSync('git', ['-C', prepared.workspacePath, 'show',
+      `${result.githubCandidate?.ref}:binary.dat`])[1], 2);
+    assert.equal(await readFile(join(prepared.workspacePath, 'binary.dat')).then((bytes) => bytes[1]), 1);
+  } finally {
+    if (previousRoot === undefined) delete process.env.AGENT_CLUSTER_GITHUB_WORKSPACES_ROOT;
+    else process.env.AGENT_CLUSTER_GITHUB_WORKSPACES_ROOT = previousRoot;
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 function git(cwd: string, args: string[]) {

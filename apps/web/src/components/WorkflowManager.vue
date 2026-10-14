@@ -5,6 +5,7 @@ import { useAgentStore } from '@/stores/agent'
 import { useWorkflowStore } from '@/stores/workflow'
 import type { AgentDefinition, WorkflowDefinition, WorkflowNode, WorkflowStatus } from '@/types/contracts'
 import UiIcon from './UiIcon.vue'
+import { formatDateTime } from '@/utils/dateTime'
 import WorkflowResourcePanel from './workflow/WorkflowResourcePanel.vue'
 import WorkflowCanvas from './workflow/WorkflowCanvas.vue'
 import WorkflowNodeInspector from './workflow/WorkflowNodeInspector.vue'
@@ -260,10 +261,7 @@ function statusLabel(status: WorkflowStatus) {
 }
 
 function formatDate(value: string) {
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false
-  }).format(date)
+  return formatDateTime(value)
 }
 
 function messageOf(error: unknown, fallback: string) {

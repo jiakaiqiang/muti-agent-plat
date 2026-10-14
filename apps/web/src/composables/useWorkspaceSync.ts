@@ -7,6 +7,7 @@ import type { SessionStatus } from '@/types/contracts'
 export function useWorkspaceSync(options: {
   syncEvents: (id: string, status?: SessionStatus) => Promise<void>
   refreshDetails?: (id: string) => Promise<unknown>
+  isSwitching?: () => boolean
 }) {
   const sessions = useSessionStore()
   const events = useEventStore()
@@ -16,16 +17,17 @@ export function useWorkspaceSync(options: {
   let interval: ReturnType<typeof setInterval> | undefined
 
   async function refresh() {
-    if (disposed || refreshing || document.visibilityState === 'hidden' ||
-        !sessions.backendCompatible || !sessions.runtimeHealthChecked || sessions.loading) return
+    if (disposed || refreshing || options.isSwitching?.() || document.visibilityState === 'hidden' ||
+        !sessions.backendCompatible || !sessions.runtimeHealthChecked || sessions.loading || sessions.switching) return
     refreshing = true
     const id = sessions.currentSession?.id
+    const generation = sessions.sessionLoadGeneration
     try {
       const results: PromiseSettledResult<unknown>[] = await Promise.allSettled([
         sessions.loadSessions(),
         ...(id ? [sessions.refreshCurrentSession(id)] : [])
       ])
-      if (disposed || sessions.currentSession?.id !== id) return
+      if (disposed || sessions.currentSession?.id !== id || sessions.sessionLoadGeneration !== generation) return
       if (id) {
         results.push(...await Promise.allSettled([
           options.syncEvents(id, sessions.currentSession?.status),

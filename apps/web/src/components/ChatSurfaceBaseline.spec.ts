@@ -133,9 +133,10 @@ describe('群聊基线：右侧面板挂载归属', () => {
   })
 
   it('Web 保持原有群聊与工作流视图，不挂载桌面工作区', () => {
-    expect(source).toContain("<div v-if=\"currentMode === 'chat'\" class=\"chat-pane\">")
+    expect(source).toContain("<div v-else-if=\"currentMode === 'chat'\" class=\"chat-pane\">")
     expect(source).toContain('<ChatTimeline')
     expect(source).toContain('<WorkflowRuntimeView')
+    expect(source).not.toContain('<CollaborationTaskBoard')
     expect(source).not.toContain('task-workspace')
   })
 })

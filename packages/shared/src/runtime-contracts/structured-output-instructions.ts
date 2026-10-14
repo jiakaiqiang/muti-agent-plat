@@ -1,4 +1,5 @@
 import { RUNTIME_OUTPUT_SCHEMA_VERSION, type RuntimeOutputKind } from './contract-types.js';
+import { CHINESE_RUNTIME_OUTPUT_INSTRUCTION } from '../user-facing-language.js';
 
 export type StructuredOutputInstructionOptions = {
   /**
@@ -25,6 +26,7 @@ export function buildStructuredOutputInstructions(
 ) {
   const target = rootTarget(options.submissionToolName);
   const instructions = [
+    CHINESE_RUNTIME_OUTPUT_INSTRUCTION,
     'STRUCTURED OUTPUT CONTRACT:',
     `Pass every schema property directly as ${target}.`,
     'Never wrap the result in content, output, result, payload, artifact, or metadata.',

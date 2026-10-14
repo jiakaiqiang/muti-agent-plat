@@ -1,5 +1,6 @@
 import type { CollaborationEvent } from '@/types/contracts'
 import { apiBaseUrl, sseBaseUrl } from '@/config/runtime'
+import { localizeSystemError } from '@agent-cluster/shared'
 
 type ApiResponse<T> = {
   data: T
@@ -38,11 +39,30 @@ export function isAbortError(error: unknown) {
     (typeof candidate.message === 'string' && /signal is aborted without reason/i.test(candidate.message))
 }
 
+export function isNetworkRequestError(error: unknown) {
+  return error instanceof Error && (
+    (error instanceof ApiRequestError && error.code === 'NETWORK_ERROR') ||
+    /Failed to fetch|fetch failed|NetworkError|Load failed|ERR_CONNECTION_REFUSED|ECONNREFUSED/i.test(error.message)
+  )
+}
+
+export function isSessionNotFoundError(error: unknown) {
+  return error instanceof Error && (
+    (error instanceof ApiRequestError && error.code === 'SESSION_NOT_FOUND') ||
+    error.message.includes('Session not found')
+  )
+}
+
+function localizedRequestFailure(error: unknown) {
+  const message = localizeSystemError(error instanceof Error ? error.message : String(error))
+  return isNetworkRequestError(error) ? new ApiRequestError(message, 0, 'NETWORK_ERROR') : new Error(message)
+}
+
 async function request<T>(path: string, init?: ApiRequestInit) {
   const { timeoutMs, timeoutMessage, ...requestInit } = init ?? {}
   const resolvedTimeoutMs = timeoutMs && timeoutMs > 0 ? timeoutMs : undefined
   const resolvedTimeoutMessage =
-    timeoutMessage ?? `${requestInit.method ?? 'GET'} ${path} timed out after ${timeoutMs}ms`
+    timeoutMessage ?? `请求超时（${timeoutMs} 毫秒），请稍后重试。`
   const timeoutController = resolvedTimeoutMs ? new AbortController() : undefined
   const upstreamSignal = requestInit.signal
   const forwardAbort = () => timeoutController?.abort(upstreamSignal?.reason)
@@ -83,7 +103,8 @@ async function request<T>(path: string, init?: ApiRequestInit) {
     if (timeoutController && isAbortError(error) && !upstreamSignal?.aborted) {
       throw new Error(resolvedTimeoutMessage)
     }
-    throw error
+    if (isAbortError(error) || upstreamSignal?.aborted) throw error
+    throw localizedRequestFailure(error)
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle)
     upstreamSignal?.removeEventListener('abort', forwardAbort)
@@ -91,7 +112,7 @@ async function request<T>(path: string, init?: ApiRequestInit) {
 
   if (!response.ok) {
     const body = await response.json().catch(() => undefined)
-    const message = body?.error?.message ?? `${requestInit.method ?? 'GET'} ${path} failed: ${response.status}`
+    const message = localizeSystemError(body?.error?.message ?? '', body?.error?.code, response.status)
     throw new ApiRequestError(message, response.status, body?.error?.code, body?.error?.details)
   }
 
@@ -112,7 +133,7 @@ export async function apiGetText(path: string, init?: ApiRequestInit) {
     else upstreamSignal.addEventListener('abort', forwardAbort, { once: true })
   }
   const timeoutHandle = timeoutMs && timeoutMs > 0
-    ? setTimeout(() => controller.abort(new Error(timeoutMessage ?? `GET ${path} timed out after ${timeoutMs}ms`)), timeoutMs)
+    ? setTimeout(() => controller.abort(new Error(timeoutMessage ?? `请求超时（${timeoutMs} 毫秒），请稍后重试。`)), timeoutMs)
     : undefined
 
   try {
@@ -130,15 +151,16 @@ export async function apiGetText(path: string, init?: ApiRequestInit) {
     })
     if (!response.ok) {
       const body = await response.json().catch(() => undefined)
-      const message = body?.error?.message ?? `GET ${path} failed: ${response.status}`
+      const message = localizeSystemError(body?.error?.message ?? '', body?.error?.code, response.status)
       throw new ApiRequestError(message, response.status, body?.error?.code, body?.error?.details)
     }
     return await response.text()
   } catch (error) {
     if (isAbortError(error) && !upstreamSignal?.aborted && timeoutMs) {
-      throw new Error(timeoutMessage ?? `GET ${path} timed out after ${timeoutMs}ms`)
+      throw new Error(timeoutMessage ?? `请求超时（${timeoutMs} 毫秒），请稍后重试。`)
     }
-    throw error
+    if (error instanceof ApiRequestError || isAbortError(error) || upstreamSignal?.aborted) throw error
+    throw localizedRequestFailure(error)
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle)
     upstreamSignal?.removeEventListener('abort', forwardAbort)

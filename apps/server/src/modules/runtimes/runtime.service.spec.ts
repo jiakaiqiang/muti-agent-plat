@@ -5,6 +5,7 @@ import { createAgentMessageOutput, createRuntimeArtifactSystemEvidence } from '@
 import { makeInvocationPlan } from './invocation-plan.fixture.js';
 import { RuntimeService } from './runtime.service.js';
 import { createExecutionTermination } from '../../common/execution-termination.js';
+import { WorktreeExecutionService } from '../worktree-execution/worktree-execution.service.js';
 
 function completed(plan: InvocationPlan, runtimeType: RuntimeType = plan.executionTarget.runtimeType): AgentRunResult {
   return {
@@ -170,6 +171,301 @@ function submissionFailure(plan: InvocationPlan, toolCallId: string): AgentRunti
     content: 'Invalid submission', createdAt: new Date().toISOString(),
     metadata: { toolCallId, name: 'StructuredOutput', isError: true } };
 }
+
+async function* healthyProgress(plan: InvocationPlan) {
+  for (let sequence = 0; sequence < 6; sequence++) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    yield { invocationId: plan.invocationId, type: 'runtime_progress' as const, visibility: 'debug' as const,
+      content: `working ${sequence}`, metadata: { code: 'STREAM_TEXT', sequence }, createdAt: new Date().toISOString() };
+  }
+}
+
+test('an admitted task finishes and repairs its submission after its time budget expires', async () => {
+  const old = process.env.PHASE_TIMEOUT_TASK_EXECUTION_MS;
+  process.env.PHASE_TIMEOUT_TASK_EXECUTION_MS = '50';
+  let cancelCount = 0;
+  const selected = adapter('mock');
+  selected.start = plan => {
+    let finish!: (result: AgentRunResult) => void;
+    const result = new Promise<AgentRunResult>(resolve => { finish = resolve; });
+    const timer = setTimeout(() => finish({ ...completed(plan), events: [submissionFailure(plan, 'late-repair')] }), 100);
+    return {
+      events: healthyProgress(plan), result,
+      async cancel() { cancelCount++; clearTimeout(timer); finish(completed(plan)); }
+    };
+  };
+  const { service } = createService([selected]);
+  const plan = makeInvocationPlan({ phase: 'task_execution', executionTarget: { runtimeType: 'mock' } });
+  try {
+    const result = await service.run(plan);
+    assert.equal(cancelCount, 0, 'the operation deadline must not cancel an already running task');
+    assert.equal(result.status, 'completed');
+    const operation = service.operations.list(plan.sessionId)[0];
+    assert.equal(operation.remainingActiveMs, 0);
+    assert.equal(operation.correctionsUsed, 1, 'the active call retains its single submission correction');
+    const retry = await service.run({ ...plan, invocationId: 'expired-task-retry' });
+    assert.equal(retry.error?.details?.operationFailure, 'OPERATION_BUDGET_EXHAUSTED');
+    assert.equal(retry.error?.retryable, false);
+    assert.equal(retry.termination, undefined, 'exhaustion must not become a synthetic 1ms timeout');
+  } finally {
+    if (old === undefined) delete process.env.PHASE_TIMEOUT_TASK_EXECUTION_MS;
+    else process.env.PHASE_TIMEOUT_TASK_EXECUTION_MS = old;
+  }
+});
+
+test('a control phase with no output remains active past budget until explicit user stop', async () => {
+  const old = process.env.PHASE_TIMEOUT_TASK_ACCEPTANCE_MS;
+  process.env.PHASE_TIMEOUT_TASK_ACCEPTANCE_MS = '30';
+  let cancelCount = 0;
+  const selected = adapter('mock');
+  selected.start = plan => {
+    let finish!: (result: AgentRunResult) => void;
+    return {
+      events: (async function* () {})(),
+      result: new Promise<AgentRunResult>(resolve => { finish = resolve; }),
+      async cancel() { cancelCount++; finish(completed(plan)); }
+    };
+  };
+  const { service } = createService([selected]);
+  try {
+    const handle = service.start(makeInvocationPlan({ phase: 'task_acceptance', executionTarget: { runtimeType: 'mock' } }));
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(cancelCount, 0);
+    await handle.cancel();
+    const result = await handle.result;
+    assert.equal(cancelCount, 1);
+    assert.equal(result.termination?.kind, 'user_cancelled');
+  } finally {
+    if (old === undefined) delete process.env.PHASE_TIMEOUT_TASK_ACCEPTANCE_MS;
+    else process.env.PHASE_TIMEOUT_TASK_ACCEPTANCE_MS = old;
+  }
+});
+
+test('an over-budget active task can still be stopped by the user', async () => {
+  const old = process.env.PHASE_TIMEOUT_TASK_EXECUTION_MS;
+  process.env.PHASE_TIMEOUT_TASK_EXECUTION_MS = '50';
+  let cancelCount = 0;
+  const selected = adapter('mock');
+  selected.start = plan => {
+    let finish!: (result: AgentRunResult) => void;
+    return {
+      events: healthyProgress(plan),
+      result: new Promise<AgentRunResult>(resolve => { finish = resolve; }),
+      async cancel() { cancelCount++; finish(completed(plan)); }
+    };
+  };
+  const { service } = createService([selected]);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(createExecutionTermination({
+    kind: 'user_paused', source: 'user', scope: 'session'
+  })), 100);
+  try {
+    const result = await service.run(makeInvocationPlan({ phase: 'task_execution', executionTarget: { runtimeType: 'mock' } }), controller.signal);
+    assert.equal(cancelCount, 1);
+    assert.equal(result.termination?.kind, 'user_paused');
+    assert.notEqual(result.status, 'completed');
+  } finally {
+    clearTimeout(timer);
+    if (old === undefined) delete process.env.PHASE_TIMEOUT_TASK_EXECUTION_MS;
+    else process.env.PHASE_TIMEOUT_TASK_EXECUTION_MS = old;
+  }
+});
+
+test('an over-budget task still reports a Runtime idle watchdog termination', async () => {
+  const old = process.env.PHASE_TIMEOUT_TASK_EXECUTION_MS;
+  process.env.PHASE_TIMEOUT_TASK_EXECUTION_MS = '50';
+  const termination = createExecutionTermination({
+    kind: 'runtime_timeout', source: 'runtime', scope: 'invocation',
+    timeout: { mode: 'idle', timeoutMs: 100 }
+  });
+  const selected = adapter('mock', async plan => {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    return { ...completed(plan), status: 'failed', termination,
+      error: { code: 'RUNTIME_TIMEOUT', message: 'Runtime idle timeout', retryable: true, termination } };
+  });
+  const { service } = createService([selected]);
+  const originalStart = selected.start.bind(selected);
+  selected.start = plan => ({ ...originalStart(plan), events: healthyProgress(plan) });
+  try {
+    const result = await service.run(makeInvocationPlan({ phase: 'task_execution', executionTarget: { runtimeType: 'mock' } }));
+    assert.equal(result.status, 'failed');
+    assert.equal(result.termination?.kind, 'runtime_timeout');
+    assert.equal(result.termination?.timeout?.mode, 'idle');
+  } finally {
+    if (old === undefined) delete process.env.PHASE_TIMEOUT_TASK_EXECUTION_MS;
+    else process.env.PHASE_TIMEOUT_TASK_EXECUTION_MS = old;
+  }
+});
+
+for (const phase of ['discussion', 'brief_generation', 'brief_revision', 'brief_consultation',
+  'task_acceptance', 'task_execution', 'revision_synthesis', 'post_review', 'final_delivery', 'user_message_routing'] as const) {
+  test(`${phase} keeps a healthy Runtime executing beyond its budget`, async () => {
+    const key = `PHASE_TIMEOUT_${phase.toUpperCase()}_MS`;
+    const old = process.env[key];
+    process.env[key] = '60';
+    let cancelled = false;
+    const selected = adapter('mock');
+    selected.start = plan => {
+      let finish!: (result: AgentRunResult) => void;
+      const result = new Promise<AgentRunResult>(resolve => { finish = resolve; });
+      const timer = setTimeout(() => finish(completed(plan)), 110);
+      return { result, events: healthyProgress(plan),
+        async cancel() { cancelled = true; clearTimeout(timer); finish(completed(plan)); } };
+    };
+    const { service } = createService([selected]);
+    try {
+      assert.equal((await service.run(makeInvocationPlan({ phase, executionTarget: { runtimeType: 'mock' } }))).status, 'completed');
+      assert.equal(cancelled, false);
+    } finally {
+      if (old === undefined) delete process.env[key]; else process.env[key] = old;
+    }
+  });
+  test(`${phase} keeps a silent Runtime executing beyond the observation threshold`, async () => {
+    const key = `PHASE_TIMEOUT_${phase.toUpperCase()}_MS`;
+    const oldPhase = process.env[key];
+    const oldObservation = process.env.RUNTIME_SILENCE_OBSERVATION_MS;
+    process.env[key] = '60';
+    process.env.RUNTIME_SILENCE_OBSERVATION_MS = '40';
+    let cancelled = false;
+    const selected = adapter('mock');
+    selected.start = plan => {
+      let finish!: (result: AgentRunResult) => void;
+      const result = new Promise<AgentRunResult>(resolve => { finish = resolve; });
+      const timer = setTimeout(() => finish(completed(plan)), 110);
+      return { result, events: (async function* () {})(),
+        async cancel() { cancelled = true; clearTimeout(timer); finish(completed(plan)); } };
+    };
+    const { service } = createService([selected]);
+    try {
+      const plan = makeInvocationPlan({ phase, executionTarget: { runtimeType: 'mock' } });
+      assert.equal((await service.run(plan)).status, 'completed');
+      assert.equal(cancelled, false);
+    } finally {
+      if (oldPhase === undefined) delete process.env[key]; else process.env[key] = oldPhase;
+      if (oldObservation === undefined) delete process.env.RUNTIME_SILENCE_OBSERVATION_MS;
+      else process.env.RUNTIME_SILENCE_OBSERVATION_MS = oldObservation;
+      service.onModuleDestroy();
+    }
+  });
+}
+
+test('a local call continues past budget while connected, then falls back when the connection becomes unhealthy', async () => {
+  const old = process.env.PHASE_TIMEOUT_TASK_ACCEPTANCE_MS;
+  process.env.PHASE_TIMEOUT_TASK_ACCEPTANCE_MS = '60';
+  let connected = true;
+  let cancelled = false;
+  const localRuntime = {
+    invocationBinding: () => ({ deviceId: 'device', workspaceId: 'workspace-test', runtimeType: 'claude_code' }),
+    isInvocationConnected: () => connected,
+    startInvocation(plan: InvocationPlan) {
+      let finish!: (result: AgentRunResult) => void;
+      return {
+        result: new Promise<AgentRunResult>(resolve => { finish = resolve; }),
+        events: (async function* () {
+          let sequence = 0;
+          for await (const event of healthyProgress(plan)) {
+            if (++sequence === 5) {
+              assert.equal(cancelled, false, 'normal local activity must survive the initial deadline');
+              connected = false;
+            }
+            yield event;
+          }
+        })(),
+        async cancel() { cancelled = true; finish(completed(plan)); }
+      };
+    }
+  };
+  const { service } = createService([], [], { localRuntime, serverWorker: null });
+  try {
+    const result = await service.run(makeInvocationPlan({ phase: 'task_acceptance', executionTarget: {
+      runtimeType: 'claude_code', executionLocation: 'local', workspaceProviderKind: 'local_bridge'
+    } }));
+    assert.equal(cancelled, true);
+    assert.equal(result.termination?.kind, 'phase_timeout');
+    assert.equal(result.termination?.diagnosticRef, 'operation_budget_fallback:runtime_disconnected');
+  } finally {
+    if (old === undefined) delete process.env.PHASE_TIMEOUT_TASK_ACCEPTANCE_MS;
+    else process.env.PHASE_TIMEOUT_TASK_ACCEPTANCE_MS = old;
+  }
+});
+
+for (const metadata of [
+  { code: 'STREAM_SYSTEM', subtype: 'api_retry', raw: { status_code: 429, attempt: 7 } },
+  { code: 'RUNTIME_REQUEST_OBSERVATION', observationKind: 'provider_retry' },
+  { code: 'RUNTIME_REQUEST_OBSERVATION', observationKind: 'provider_error' }
+]) {
+  test(`expired local invocation falls back once for ${metadata.subtype ?? metadata.observationKind}, despite live Runtime and weak signals`, async t => {
+    const oldPhase = process.env.PHASE_TIMEOUT_TASK_ACCEPTANCE_MS;
+    const oldSilence = process.env.RUNTIME_SILENCE_OBSERVATION_MS;
+    process.env.PHASE_TIMEOUT_TASK_ACCEPTANCE_MS = '40';
+    process.env.RUNTIME_SILENCE_OBSERVATION_MS = '20';
+    const originalTimeout = globalThis.setTimeout;
+    // Accelerate only the supervisor's five-second polling, not the stop confirmation barrier.
+    t.mock.method(globalThis, 'setTimeout', ((callback: Parameters<typeof setTimeout>[0], delay?: number, ...args: unknown[]) =>
+      originalTimeout(callback, delay === 5000 ? 5 : delay, ...args)) as typeof setTimeout);
+    let starts = 0, cancels = 0;
+    let safetyTimer: ReturnType<typeof setTimeout> | undefined;
+    const localRuntime = {
+      invocationBinding: () => ({ deviceId: 'device', workspaceId: 'workspace-test', runtimeType: 'claude_code' }),
+      isInvocationConnected: () => true,
+      supportsInvocationProbe: () => false,
+      startInvocation(plan: InvocationPlan) {
+        starts++;
+        let finish!: (result: AgentRunResult) => void;
+        const result = new Promise<AgentRunResult>(resolve => { finish = resolve; });
+        safetyTimer = originalTimeout(() => finish(completed(plan)), 800);
+        return { result, events: (async function* () {
+          await new Promise(resolve => setTimeout(resolve, 65));
+          assert.equal(cancels, 0, 'silent but connected call survives its expired budget before any fault');
+          yield { invocationId: plan.invocationId, type: 'runtime_progress' as const, visibility: 'debug' as const,
+            content: '', metadata, createdAt: new Date().toISOString() };
+          for (const observationKind of ['request_started', 'request_acknowledged', 'transport_alive']) {
+            yield { invocationId: plan.invocationId, type: 'runtime_progress' as const, visibility: 'debug' as const,
+              content: '', metadata: { code: 'RUNTIME_REQUEST_OBSERVATION', observationKind }, createdAt: new Date().toISOString() };
+          }
+        })(), async cancel() { cancels++; clearTimeout(safetyTimer); finish(completed(plan)); } };
+      }
+    };
+    const { service } = createService([], [], { localRuntime, serverWorker: null });
+    try {
+      const plan = makeInvocationPlan({ phase: 'task_acceptance', executionTarget: {
+        runtimeType: 'claude_code', executionLocation: 'local', workspaceProviderKind: 'local_bridge'
+      } });
+      const result = await service.run(plan);
+      assert.equal(starts, 1);
+      assert.equal(cancels, 1);
+      assert.notEqual(result.status, 'completed', 'a successful result delivered after cancellation cannot advance the task');
+      assert.equal(result.termination?.diagnosticRef, 'operation_budget_fallback:provider_or_tool_error');
+      const snapshot = service.requestHealth.list(plan.sessionId).find(item => item.invocationId === plan.invocationId)!;
+      assert.equal(snapshot.budgetFallbackReason, 'provider_or_tool_error');
+      assert.equal(snapshot.capabilities.processProbe, 'unsupported');
+      assert.equal(snapshot.stage, 'terminal');
+      assert.equal(service.operations.list(plan.sessionId)[0].stopState, 'confirmed');
+    } finally {
+      clearTimeout(safetyTimer); service.onModuleDestroy(); t.mock.restoreAll();
+      if (oldPhase === undefined) delete process.env.PHASE_TIMEOUT_TASK_ACCEPTANCE_MS;
+      else process.env.PHASE_TIMEOUT_TASK_ACCEPTANCE_MS = oldPhase;
+      if (oldSilence === undefined) delete process.env.RUNTIME_SILENCE_OBSERVATION_MS;
+      else process.env.RUNTIME_SILENCE_OBSERVATION_MS = oldSilence;
+    }
+  });
+}
+
+test('local process probe capability comes from negotiated connection, without starting a probe or model', async () => {
+  let probes = 0;
+  const localRuntime = {
+    isInvocationConnected: () => true, supportsInvocationProbe: () => true,
+    probeInvocation: async () => { probes++; return undefined; },
+    startInvocation: (plan: InvocationPlan) => ({ result: Promise.resolve(completed(plan)), events: (async function* () {})(), async cancel() {} })
+  };
+  const { service } = createService([], [], { localRuntime, serverWorker: null });
+  try {
+    const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'claude_code', executionLocation: 'local', workspaceProviderKind: 'local_bridge' } });
+    await service.run(plan);
+    assert.equal(service.requestHealth.list(plan.sessionId)[0].capabilities.processProbe, 'supported');
+    assert.equal(probes, 0);
+  } finally { service.onModuleDestroy(); }
+});
 
 test('buffered submission errors share the durable correction limit and duplicate events do not spend twice', async () => {
   const selected = adapter('mock', async plan => {
@@ -475,6 +771,84 @@ test('fails closed instead of running Codex in the Nest process when the Worker 
   const result = await service.run(plan);
   assert.equal(result.status, 'failed');
   assert.match(result.error?.message ?? '', /Worker is unavailable; in-process execution is forbidden/i);
+});
+
+test('server GitHub task execution cannot bypass an unavailable isolated worktree', async () => {
+  const previous = process.env.AGENT_CLUSTER_WORKTREE_EXECUTION;
+  process.env.AGENT_CLUSTER_WORKTREE_EXECUTION = 'false';
+  try {
+    let starts = 0;
+    const codex = adapter('codex', async plan => {
+      starts += 1;
+      return completed(plan);
+    });
+    const plan = makeInvocationPlan({ taskId: 'task-1', executionTarget: { runtimeType: 'codex' } });
+    const session = {
+      id: plan.sessionId,
+      codeSource: { kind: 'remote_repository', provider: 'github', repositoryUrl: 'https://github.com/example/repo' },
+      sourceBinding: { state: 'ready', workspaceId: plan.contextEnvelope.workspaceId }
+    };
+
+    for (const worktree of [undefined, new WorktreeExecutionService({} as never)]) {
+      const { service, persisted } = createService([codex], undefined, { worktree });
+      persisted.set('sessions', [session]);
+      const result = await service.run(plan);
+      assert.equal(result.status, 'failed');
+      assert.equal(result.error?.message, 'GITHUB_TASK_REQUIRES_ISOLATED_WORKTREE');
+      assert.equal(starts, 0);
+    }
+
+    const { service } = createService([codex], undefined, {
+      worktree: new WorktreeExecutionService({} as never)
+    });
+    const ordinary = await service.run({ ...plan, sessionId: 'ordinary-session', invocationId: 'ordinary-invocation' });
+    assert.equal(ordinary.status, 'completed');
+    assert.equal(starts, 1, 'the setting still permits existing server directory sessions');
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_CLUSTER_WORKTREE_EXECUTION;
+    else process.env.AGENT_CLUSTER_WORKTREE_EXECUTION = previous;
+  }
+});
+
+test('server GitHub task execution prepares a GitHub worktree only after source binding is ready', async () => {
+  let prepares = 0;
+  let starts = 0;
+  const codex = adapter('codex', async plan => {
+    starts += 1;
+    return completed(plan);
+  });
+  const worktree = {
+    shouldManage: () => true,
+    async prepare(_plan: InvocationPlan, options: { github?: boolean }) {
+      prepares += 1;
+      assert.deepEqual(options, { github: true });
+      return {
+        manifest: { repositoryId: 'repository-1', baseRevision: { id: 'revision-1' },
+          dirtyBaseline: false, executionWorkDir: 'C:/isolated-github-task' },
+        release() {}
+      };
+    },
+    async capture(_lease: unknown, result: AgentRunResult) { return result; }
+  };
+  const plan = makeInvocationPlan({ taskId: 'task-1', executionTarget: { runtimeType: 'codex' } });
+  const { service, persisted } = createService([codex], undefined, { worktree });
+  const session = {
+    id: plan.sessionId,
+    codeSource: { kind: 'remote_repository', provider: 'github', repositoryUrl: 'https://github.com/example/repo' },
+    sourceBinding: { state: 'awaiting_base_branch', workspaceId: plan.contextEnvelope.workspaceId }
+  };
+  persisted.set('sessions', [session]);
+  const blocked = await service.run(plan);
+  assert.equal(blocked.status, 'failed');
+  assert.equal(blocked.error?.message, 'GITHUB_SOURCE_NOT_READY');
+  assert.equal(prepares, 0);
+  assert.equal(starts, 0);
+
+  persisted.set('sessions', [{ ...session, sourceBinding: { ...session.sourceBinding, state: 'ready' } }]);
+  const ready = await service.run({ ...plan, invocationId: 'ready-invocation' });
+  assert.equal(ready.status, 'completed', ready.error?.message);
+  assert.equal(prepares, 1);
+  assert.equal(starts, 1);
 });
 
 test('normalizes adapter promise rejection into a failed result', async () => {

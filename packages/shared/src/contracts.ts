@@ -35,6 +35,7 @@ export const FILE_REVISION_MAX_BYTES = 200_000;
 
 export type SessionStatus =
   | 'DRAFT_INPUT'
+  | 'WAIT_SOURCE_PREPARATION'
   | 'AGENT_DISCUSSING'
   | 'WAIT_USER_CONFIRM'
   | 'WAIT_WORKFLOW_SELECT'
@@ -88,6 +89,27 @@ export type RuntimeType =
   | 'claude_code'
   | 'mcp_tool'
   | 'human';
+
+/**
+ * The runtime values, so a persisted or user-supplied string can be validated
+ * without a second hand-maintained list. RuntimeType is a union, which has no
+ * runtime representation; keeping the values next to the type is what stops the
+ * server copy and a browser copy from drifting apart.
+ */
+export const RUNTIME_TYPES = [
+  'mock',
+  'generic_llm',
+  'code_reader',
+  'test_runner',
+  'codex',
+  'claude_code',
+  'mcp_tool',
+  'human'
+] as const satisfies readonly RuntimeType[];
+
+export function isRuntimeType(value: unknown): value is RuntimeType {
+  return typeof value === 'string' && (RUNTIME_TYPES as readonly string[]).includes(value);
+}
 
 export type ContextPipelineVersion = 'v2';
 
@@ -526,6 +548,7 @@ export type WorkspaceWritebackResolutionAction =
   | 'resolve_with_agent'
   | 'keep_workspace'
   | 'use_session'
+  | 'apply_conflict'
   | 'abandon_writeback';
 
 export type WorkspaceWritebackRecord = {
@@ -542,6 +565,8 @@ export type WorkspaceWritebackRecord = {
   resultSummary?: string;
   status: WorkspaceWritebackStatus;
   conflicts: WorkspaceConflictError[];
+  /** A resumable editor snapshot exists; its content is returned only by the conflict endpoint. */
+  hasConflictDraft?: boolean;
   createdAt: ISODateTime;
   updatedAt: ISODateTime;
   appliedRevision?: WorkspaceRevision;
@@ -553,6 +578,8 @@ export type ResolveWorkspaceWritebackInput = {
   action: WorkspaceWritebackResolutionAction;
   /** Required when `action` is `use_session`, which can overwrite current files. */
   confirmationId?: UUID;
+  /** Required when applying individually confirmed conflict results. */
+  expectedConflictVersion?: number;
 };
 
 export type RuntimeWorkspaceExecution = {
@@ -1108,6 +1135,148 @@ export type SessionWorkingDirectory = {
   selectedAt: ISODateTime;
 };
 
+export type SessionExecutionLocation = 'local' | 'server';
+
+export type SessionCodeSource =
+  | { kind: 'local_directory' }
+  | { kind: 'remote_repository'; provider: 'github'; repositoryUrl: string; deviceId?: string };
+
+export type SourcePreparationState =
+  | 'awaiting_auth' | 'cloning' | 'awaiting_base_branch' | 'binding'
+  | 'ready' | 'blocked' | 'failed';
+
+export type SourceBinding = {
+  sessionId: UUID;
+  provider: 'github';
+  repositoryUrl: string;
+  repositoryId: string;
+  executionLocation: SessionExecutionLocation;
+  deviceId?: string;
+  authorizationRef?: UUID;
+  cacheKey?: string;
+  workspaceId?: UUID;
+  defaultBranch?: string;
+  baseBranch?: string;
+  baseSha?: string;
+  state: SourcePreparationState;
+  version: number;
+  errorCode?: string;
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+};
+
+export type DeliveryState =
+  | 'idle' | 'awaiting_validation_input' | 'validating' | 'needs_fix'
+  | 'preparing_push' | 'resolving_conflict' | 'pushing' | 'pr_open'
+  | 'awaiting_ci' | 'merge_ready' | 'merging' | 'merged' | 'blocked';
+
+export type DeliveryValidation = {
+  candidateSha: string;
+  command: string;
+  exitCode: number;
+  durationMs: number;
+  outputSummary: string;
+  completedAt: ISODateTime;
+};
+
+export type RepositoryValidationCommand = {
+  program: string;
+  args: string[];
+  relativeCwd: string;
+};
+
+export type DeliveryRecord = {
+  sessionId: UUID;
+  round: number;
+  state: DeliveryState;
+  version: number;
+  baseBranch: string;
+  taskBranch?: string;
+  commitSha?: string;
+  publishParentSha?: string;
+  pullRequestNumber?: number;
+  pullRequestUrl?: string;
+  reviewedHeadSha?: string;
+  mergedCommitSha?: string;
+  mergeOperationKey?: string;
+  mergeExpectedHeadSha?: string;
+  validation?: DeliveryValidation;
+  validationCommand?: RepositoryValidationCommand;
+  candidateTreeSha?: string;
+  changedPaths?: string[];
+  conflictPaths?: string[];
+  conflictId?: UUID;
+  /** Device-local Git object references; no file contents or credentials. */
+  candidates?: GitTaskCandidate[];
+  ciStatus?: 'not_configured' | 'pending' | 'failed' | 'passed';
+  mergeable?: boolean | null;
+  operationKeys?: string[];
+  errorCode?: string;
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+};
+
+export type DeliveryDiffFile = {
+  path: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch?: string;
+  previousPath?: string;
+};
+
+export type DeliveryDiff = {
+  kind: 'pull_request' | 'merged_commit';
+  sha: string;
+  files: DeliveryDiffFile[];
+  page: number;
+  hasMore: boolean;
+};
+
+export type GitTaskCandidate = {
+  id: UUID;
+  sessionId: UUID;
+  taskId: UUID;
+  baseCommit: string;
+  treeSha: string;
+  ref: string;
+  changedPaths: string[];
+  createdAt: ISODateTime;
+};
+
+export type ConflictFileKind = 'text' | 'binary' | 'deleted' | 'renamed' | 'mode';
+
+export type ConflictFileView = {
+  fileId: UUID;
+  path: string;
+  previousPath?: string;
+  kind: ConflictFileKind;
+  status: 'unresolved' | 'draft' | 'confirmed';
+  version: number;
+  baseObjectId?: string;
+  oursObjectId?: string;
+  theirsObjectId?: string;
+  oursContent?: string;
+  theirsContent?: string;
+  resultContent?: string;
+  binaryChoice?: 'ours' | 'theirs';
+};
+
+export type ConflictView = {
+  id: UUID;
+  sessionId: UUID;
+  deliveryRound: number;
+  source: 'git' | 'workspace_writeback';
+  targetOperation: 'integrate_task_branch' | 'merge_pull_request' | 'writeback';
+  sourceHeadSha?: string;
+  targetBranch?: string;
+  targetHeadSha?: string;
+  version: number;
+  files: ConflictFileView[];
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+};
+
 export type WorkspaceSkippedReason =
   | 'ignored_directory'
   | 'binary'
@@ -1132,6 +1301,8 @@ export type WorkspaceFileSnapshot = {
   revision?: WorkspaceRevision;
   startLine?: number;
   endLine?: number;
+  /** Whether the cached body omits bytes from the requested file/range. */
+  truncated?: boolean;
 };
 
 export type WorkspaceSkippedFile = {
@@ -1370,6 +1541,11 @@ export type SessionDetail = {
   currentTaskBriefId?: UUID;
   knowledgeBaseIds?: UUID[];
   workingDirectory?: SessionWorkingDirectory;
+  /** Absent on Sessions created before code-source selection was introduced. */
+  codeSource?: SessionCodeSource;
+  executionLocation?: SessionExecutionLocation;
+  sourceBinding?: SourceBinding;
+  delivery?: DeliveryRecord;
   workspaceContext?: SessionWorkspaceContext;
   /** Provider-owned metadata index projection; never contains file content. */
   workspaceIndex?: WorkspaceIndexSnapshot;
@@ -1377,11 +1553,14 @@ export type SessionDetail = {
   workspaceMode?: WorkspaceMode;
   pendingBootstrapWorkflow?: PendingBootstrapWorkflow;
   runtimePreference?: RuntimePreference;
+  runtimeSwitchOverride?: { workItemId?: string; preference: RuntimePreference; switchRequestId: string };
+  runtimeFailover?: { workItemId?: string; runtimeType: RuntimeType; preferenceRevision: number };
   workflowRunId?: UUID;
   workflowRun?: WorkflowRunState;
   supplementalContextRequests?: Array<{
     id: UUID;
     taskId?: UUID;
+    workItemId?: UUID;
     agentId: UUID;
     phase?: AgentRunPhase;
     requestedContext: RuntimeContextRequest;
@@ -1444,6 +1623,20 @@ export type SessionDetail = {
   };
 };
 
+export function canStartSessionAgent(
+  session: Pick<SessionDetail, 'codeSource' | 'sourceBinding' | 'workingDirectory'>
+): boolean {
+  if (session.codeSource?.kind !== 'remote_repository') return true;
+  const binding = session.sourceBinding;
+  const directory = session.workingDirectory;
+  return Boolean(binding?.state === 'ready' &&
+    binding.provider === session.codeSource.provider &&
+    binding.repositoryUrl === session.codeSource.repositoryUrl &&
+    binding.workspaceId && binding.baseBranch && binding.baseSha &&
+    directory?.id === binding.workspaceId &&
+    directory.kind === (binding.executionLocation === 'local' ? 'local_bridge' : 'server_local'));
+}
+
 export type SessionRecoveryCheckpoint = {
   confirmationId: UUID;
   reason:
@@ -1476,7 +1669,7 @@ export type SessionListItem = Pick<
 
 export type SessionArchiveItem = Pick<
   SessionListItem,
-  'id' | 'title' | 'projectId' | 'workspaceId' | 'archivedAt' | 'createdAt' | 'updatedAt'
+  'id' | 'title' | 'status' | 'projectId' | 'workspaceId' | 'archivedAt' | 'createdAt' | 'updatedAt' | 'lifecycleState'
 >;
 
 export type SessionArchiveGroup = {
@@ -1488,7 +1681,16 @@ export type SessionArchiveGroup = {
 export type RuntimePreference = {
   preferredRuntimeType?: RuntimeType;
   preferredModelId?: string;
+  /** Unordered authorization set. Membership grants permission, position means nothing. */
   allowedRuntimeTypes?: RuntimeType[];
+  /**
+   * Ordered degradation chain, a subset of allowedRuntimeTypes that excludes the
+   * preferred Runtime. Order is the only thing this field carries; it can never
+   * widen authorization, which is why it is kept separate from the allowed set.
+   */
+  fallbackRuntimeTypes?: RuntimeType[];
+  /** Incremented on every accepted policy change, so a stale switch is refused rather than silently applied. */
+  revision?: number;
 };
 
 export type AgentDefinition = {
@@ -2204,6 +2406,9 @@ export type DecisionRecord = {
   kind: DecisionRecordKind;
   status: DecisionRecordStatus;
   content: string;
+  /** Exact Brief question answered by this user-confirmed decision. */
+  question?: string;
+  answer?: string;
   sourceEventId: UUID;
   supersedesDecisionId?: UUID;
   revision: number;
@@ -3087,6 +3292,8 @@ export type RuntimeExecutionCandidate = {
 };
 
 export type InvocationPlan = {
+  /** Supervisor observation identity only; not part of the model's output contract. */
+  requestHealth?: import('./runtime-request-health.js').RuntimeHealthIdentity;
   recoveryOriginTaskId?: UUID;
   recoveryCandidate?: RuntimeExecutionCandidate;
   submissionRepair?: boolean;
@@ -3107,12 +3314,26 @@ export type InvocationPlan = {
   operation?: Pick<LogicalOperation, 'id' | 'deadlineAt' | 'policyVersion' | 'maxAttempts' | 'sessionGeneration'>;
 };
 
+/**
+ * Why this physical call exists. A user switch and a provider fallback both end
+ * up calling a different Runtime, but they are different facts: the switch is an
+ * explicit choice that opens a fresh attempt group, while a fallback is the
+ * system degrading inside an existing one (Spec I4).
+ */
+export type RuntimeAttemptTrigger = 'initial' | 'retry' | 'fallback' | 'manual_switch';
+
 export type RuntimeAttemptTrace = {
   attemptGroupId: UUID;
   attempt: number;
+  /** Absent on records written before the trigger was tracked; read as 'initial'. */
+  trigger?: RuntimeAttemptTrigger;
   retryOfInvocationId?: UUID;
   fallbackFromRuntimeType?: RuntimeType;
   fallbackReason?: string;
+  /** Set only when trigger is 'manual_switch', linking the attempt to its request. */
+  switchRequestId?: UUID;
+  /** The Runtime the user switched away from, kept apart from fallbackFromRuntimeType. */
+  switchFromRuntimeType?: RuntimeType;
   supplementalContextAttempt?: number;
   supplementalContextDurationMs?: number;
 };
@@ -3218,6 +3439,8 @@ export type SupplementalContextOutcome =
 
 export type SupplementalContextResolution = {
   requestedFiles: RuntimeContextFileRequest[];
+  /** Exact file/range requests materialized in this batch, excluding deferred operations. */
+  hydratedFiles?: RuntimeContextFileRequest[];
   hydratedPaths: string[];
   /** Canonical evidence references that were found and can be promoted to L3. */
   resolvedRefs?: TaskEvidenceRef[];
@@ -3242,6 +3465,8 @@ export type SupplementalContextResolution = {
   }>;
   deferredPaths: string[];
   contentBytes: number;
+  cachedPaths?: string[];
+  readPaths?: string[];
   outcome: SupplementalContextOutcome;
   attempt: number;
   maxAttempts: number;
@@ -3251,6 +3476,13 @@ export type ExecutionTerminationKind =
   | 'output_contract_failure'
   | 'user_cancelled'
   | 'user_paused'
+  /**
+   * The user asked another Runtime to take over. Audited apart from
+   * `user_cancelled` and `user_paused` because the work is not being abandoned
+   * or parked: a replacement invocation is expected once the stop is confirmed
+   * (Spec I4).
+   */
+  | 'runtime_switch'
   | 'frontend_disconnected'
   | 'runtime_disconnected'
   | 'phase_timeout'
@@ -3367,6 +3599,7 @@ export type AgentRunResult<TOutput = RuntimeOutput> = {
     billableTokens: null;
   };
   executionCandidate?: RuntimeExecutionCandidate;
+  githubCandidate?: GitTaskCandidate;
   invocationId: UUID;
   runtimeType: RuntimeType;
   status: RuntimeInvocationStatus;

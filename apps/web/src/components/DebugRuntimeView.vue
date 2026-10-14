@@ -4,6 +4,7 @@ import { storeToRefs } from 'pinia'
 import { useDebugStore } from '@/stores/debug'
 import type { CollaborationEvent } from '@/types/contracts'
 import { runtimeTypeLabel } from '@/utils/runtimeLabels'
+import { formatDateTime } from '@/utils/dateTime'
 import UiIcon from './UiIcon.vue'
 
 const props = defineProps<{
@@ -23,7 +24,7 @@ const blockedToolCount = computed(
 const runtimeEventCount = computed(() => props.events.filter((event) => event.type.startsWith('runtime_')).length)
 const latestUpdatedAt = computed(() => {
   const value = invocations.value.map((item) => item.completedAt || item.startedAt).filter(Boolean).sort().at(-1)
-  return value ? new Date(value).toLocaleTimeString() : '未同步'
+  return formatDateTime(value, '未同步')
 })
 
 async function loadDebugData() {
@@ -178,7 +179,7 @@ watch(() => props.sessionId, loadDebugData, { immediate: true })
         <section class="debug-panel">
           <header>
             <h3>ContextEnvelope v2</h3>
-            <span>{{ selectedInvocation.contextEnvelope.workspaceId }} · {{ selectedInvocation.contextEnvelope.createdAt }}</span>
+            <span>{{ selectedInvocation.contextEnvelope.workspaceId }} · {{ formatDateTime(selectedInvocation.contextEnvelope.createdAt) }}</span>
           </header>
           <div class="context-grid">
             <article>

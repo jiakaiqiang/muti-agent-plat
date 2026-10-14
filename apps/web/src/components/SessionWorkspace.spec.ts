@@ -3,6 +3,47 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { PostReviewAction } from '@/types/contracts'
 import { resolveSessionWorkspacePostReviewAction } from './session-workspace-post-review-action'
+import { truncateSessionTitle } from './session-title'
+
+describe('SessionWorkspace compact header', () => {
+  const source = readFileSync(resolve(process.cwd(), 'src/components/SessionWorkspace.vue'), 'utf8')
+  const header = source.match(/<header class="workspace-header">([\s\S]*?)<\/header>/)?.[1] ?? ''
+
+  it('limits the visible session title to ten characters and keeps the full title in a tooltip', () => {
+    expect(truncateSessionTitle('给当前的贪吃蛇添加撞击音效')).toBe('给当前的贪吃蛇添加撞...')
+    expect(truncateSessionTitle('刚好十个字的会话名呀')).toBe('刚好十个字的会话名呀')
+    expect(header).toContain(':content="workspaceLabel"')
+    expect(header).toContain('{{ truncatedSessionTitle }}')
+  })
+
+  it('shows the read-only collaboration plan before the four existing view entries', () => {
+    expect(header).toContain('{{ sessionStatusLabel[derivedStatus] }}')
+    expect(header).toContain('v-for="mode in headerViewModes"')
+    expect(header).not.toMatch(/chat-agent-menu|workspace-directory-chip|work-item-chip|progress-chip|runtime-chip|session-control-button/)
+    expect(source).toContain("const headerViewModes: SessionViewMode[] = ['chat', 'workflow', 'collaboration_graph', 'debug']")
+    expect(header).toContain("switchWorkspaceView('collaboration_plan')")
+    expect(header.indexOf("switchWorkspaceView('collaboration_plan')")).toBeLessThan(header.indexOf('v-for="mode in headerViewModes"'))
+  })
+
+  it('mounts a dedicated read-only collaboration plan without confirmation actions', () => {
+    expect(source).toContain('<CollaborationPlanView')
+    expect(source).toContain("v-if=\"currentMode === 'collaboration_plan'\"")
+    expect(source).toContain("v-else-if=\"currentMode === 'chat'\"")
+    expect(source).not.toContain('<CollaborationTaskBoard')
+  })
+})
+
+describe('SessionWorkspace Brief revision answers', () => {
+  const source = readFileSync(resolve(process.cwd(), 'src/components/SessionWorkspace.vue'), 'utf8')
+
+  it('collects each open question as a labeled answer and sends structured answers', () => {
+    expect(source).toContain('activeBriefPayload.value?.openQuestions')
+    expect(source).toContain('v-model="item.answer"')
+    expect(source).toContain('questionAnswers: briefQuestionAnswers.value')
+    expect(source).toContain('item.answer.trim() !== item.originalAnswer')
+    expect(source).toContain('briefQuestionAnswers.value.some((item) => !item.answer.trim())')
+  })
+})
 
 describe('SessionWorkspace Post Review action routing', () => {
   it('routes each action to its own recovery handler instead of resume', async () => {
@@ -58,8 +99,10 @@ describe('SessionWorkspace Session stop controls', () => {
   it('waits for the server pause and resume operations before reconciling state', () => {
     expect(source).toContain('await sessionStore.pauseSession(sessionId)')
     expect(source).toContain('await sessionStore.resumeSession(sessionId)')
-    expect(source).toContain('title="停止会话"')
-    expect(source).toContain('title="继续会话"')
+    expect(source).toContain(':can-stop="canStopSession"')
+    expect(source).toContain(':can-resume="canResumeStoppedSession"')
+    expect(source).toContain('@stop="stopCurrentSession"')
+    expect(source).toContain('@resume="resumeStoppedSession"')
   })
 })
 
@@ -80,7 +123,8 @@ describe('SessionWorkspace workflow Agent substitution', () => {
   const source = readFileSync(resolve(process.cwd(), 'src/components/SessionWorkspace.vue'), 'utf8')
 
   it('routes an explicit Agent option through the dedicated substitution API', () => {
-    expect(source).toContain("activeConfirmation.value.reason === 'workflow_agent_substitution'")
+    expect(source).toContain('const confirmation = activeConfirmation.value')
+    expect(source).toContain("confirmation.reason === 'workflow_agent_substitution'")
     expect(source).toContain("optionKey.startsWith('agent:')")
     expect(source).toContain('await sessionStore.resolveWorkflowAgentSubstitution(sessionId')
     expect(source).toContain("if (optionKey === 'skip_agent')")

@@ -1,8 +1,14 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
+import { randomUUID } from 'node:crypto';
+import { sanitizeRuntimeLine, RuntimeDiagnosticCapture } from '@agent-cluster/shared';
 
 const execFileAsync = promisify(execFile);
 const maximumCapturedOutputBytes = 8 * 1024 * 1024;
+const processInstances = new Map<string, { processInstanceId: string; processStatus: 'alive' | 'exited' | 'unknown' }>();
+export function runtimeProcessObservation(invocationId: string) {
+  return processInstances.get(invocationId) ?? { processStatus: 'unknown' as const };
+}
 
 const runtimeEnvironmentAllowlist = new Set([
   'appdata',
@@ -41,6 +47,7 @@ export function buildRuntimeProcessEnv(source: NodeJS.ProcessEnv): NodeJS.Proces
 
 export function runRuntimeCommand(input: {
   command: string;
+  invocationId?: string;
   args: string[];
   stdin: string;
   cwd: string;
@@ -65,6 +72,9 @@ export function runRuntimeCommand(input: {
     let stdout = '';
     let stderr = '';
     let pendingLine = '';
+    const stderrCapture = new RuntimeDiagnosticCapture(line => { stderr = appendBounded(stderr, line); });
+    const instance = { processInstanceId: randomUUID(), processStatus: child.pid ? 'alive' as const : 'unknown' as const };
+    if (input.invocationId) processInstances.set(input.invocationId, instance);
     const emitLine = (line: string) => {
       if (!input.onStdoutLine || !line) return;
       try {
@@ -76,26 +86,40 @@ export function runRuntimeCommand(input: {
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
-      stdout = appendBounded(stdout, chunk);
-      if (!input.onStdoutLine) return;
       const segments = (pendingLine + chunk).split(/\r?\n/);
       pendingLine = segments.pop() ?? '';
-      for (const segment of segments) emitLine(segment);
+      if (pendingLine.length > maximumCapturedOutputBytes) pendingLine = '';
+      for (const segment of segments) {
+        emitLine(segment);
+        stdout = appendBounded(stdout, sanitizeRuntimeLine(segment) + '\n');
+      }
     });
-    child.stderr.on('data', (chunk: string) => { stderr = appendBounded(stderr, chunk); });
+    child.stderr.on('data', (chunk: string) => stderrCapture.feed(chunk));
     const abort = () => { void terminateProcessTree(child); };
     if (input.signal.aborted) abort();
     else input.signal.addEventListener('abort', abort, { once: true });
     child.on('error', (error) => {
+      stderrCapture.flush();
+      if (input.invocationId) processInstances.set(input.invocationId, { ...instance, processStatus: 'exited' });
       input.signal.removeEventListener('abort', abort);
       reject(error);
     });
     child.on('close', (exitCode) => {
+      stderrCapture.flush();
       input.signal.removeEventListener('abort', abort);
       // 末行可能没有换行符结尾。
       const trailing = pendingLine;
       pendingLine = '';
       emitLine(trailing);
+      if (trailing) stdout = appendBounded(stdout, sanitizeRuntimeLine(trailing));
+      if (input.invocationId) {
+        processInstances.set(input.invocationId, { processInstanceId: instance.processInstanceId, processStatus: 'exited' });
+        while (processInstances.size > 256) {
+          const ended = [...processInstances].find(([, observation]) => observation.processStatus === 'exited');
+          if (!ended) break;
+          processInstances.delete(ended[0]);
+        }
+      }
       resolve({ stdout, stderr, exitCode });
     });
     child.stdin.end(input.stdin, 'utf8');

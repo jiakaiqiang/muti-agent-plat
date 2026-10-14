@@ -1,5 +1,6 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import type { ApiError } from './api-response.js';
+import { localizeSystemError } from '@agent-cluster/shared';
 
 type JsonResponse = {
   status: (statusCode: number) => { json: (body: unknown) => void };
@@ -14,10 +15,11 @@ export class ApiExceptionFilter implements ExceptionFilter {
     const status = this.statusFor(exception);
     const message = this.messageFor(exception);
     const structured = this.structuredResponse(exception);
+    const code = structured?.code ?? this.codeFor(status, message);
     const error: ApiError = {
       error: {
-        code: structured?.code ?? this.codeFor(status, message),
-        message,
+        code,
+        message: localizeSystemError(message, code, status),
         ...(structured?.details ? { details: structured.details } : {})
       },
       requestId: crypto.randomUUID()
@@ -66,6 +68,8 @@ export class ApiExceptionFilter implements ExceptionFilter {
   }
 
   private codeFor(status: number, message: string) {
+    const diagnosticCode = /^([A-Z][A-Z0-9_]+)(?::|$)/.exec(message)?.[1];
+    if (diagnosticCode) return diagnosticCode;
     if (message.includes('Session not found')) return 'SESSION_NOT_FOUND';
     if (message.includes('Invalid session transition')) return 'INVALID_SESSION_TRANSITION';
     if (message.includes('Brief not found')) return 'BRIEF_NOT_FOUND';

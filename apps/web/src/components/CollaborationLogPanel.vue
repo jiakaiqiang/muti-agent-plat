@@ -2,6 +2,8 @@
 import { computed } from 'vue'
 import type { AgentCardState, CollaborationEvent } from '@/types/contracts'
 import { eventAgentId, resolveActor } from '@/composables/useActor'
+import { eventNoticeText } from '@/utils/userFacingCopy'
+import { formatDateTime } from '@/utils/dateTime'
 import AgentPortrait from './AgentPortrait.vue'
 import UiIcon from './UiIcon.vue'
 
@@ -45,12 +47,12 @@ const visibleEvents = computed<LogEntry[]>(() => {
     const previousHeartbeat = previous ? heartbeatOf(previous.event) : undefined
     if (heartbeat && previousHeartbeat && previousHeartbeat.invocationId === heartbeat.invocationId) {
       if (heartbeat.elapsedMs >= previousHeartbeat.elapsedMs) {
-        entries[entries.length - 1] = { key: previous!.key, event, agentId, content: event.content }
+        entries[entries.length - 1] = { key: previous!.key, event, agentId, content: eventNoticeText(event) }
       }
       continue
     }
 
-    entries.push({ key: event.id, event, agentId, content: event.content })
+    entries.push({ key: event.id, event, agentId, content: eventNoticeText(event) })
   }
   return entries.slice(-8)
 })
@@ -81,7 +83,7 @@ function agentRole(agentId?: string) {
 }
 
 function eventTime(event: CollaborationEvent) {
-  return new Date(event.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  return formatDateTime(event.createdAt)
 }
 </script>
 

@@ -1,5 +1,6 @@
 import type { AgentRuntimeEvent, UUID } from '../contracts.js';
 import { nowIso } from '../time.js';
+import { sanitizeRuntimeDiagnostic } from '../runtime-diagnostic-sanitizer.js';
 import {
   isAssistantTextFrame,
   isProviderOutputFrame,
@@ -17,6 +18,11 @@ import {
  */
 export function frameToRuntimeEvent(invocationId: UUID, frame: RuntimeStreamFrame): AgentRuntimeEvent | undefined {
   const createdAt = nowIso();
+  if (frame.kind === 'observation') return {
+    invocationId, type: 'runtime_progress', visibility: 'debug', content: '', createdAt,
+    metadata: { code: 'RUNTIME_REQUEST_OBSERVATION', observationKind: frame.observationKind,
+      sequence: frame.sequence, eventId: frame.eventId, count: frame.count, toolCallId: frame.toolCallId }
+  };
   if (isToolUseFrame(frame)) {
     return {
       invocationId,
@@ -52,7 +58,8 @@ export function frameToRuntimeEvent(invocationId: UUID, frame: RuntimeStreamFram
       type: 'runtime_progress',
       content: frame.text,
       visibility: 'debug',
-      metadata: { code: 'STREAM_TEXT' },
+      metadata: { code: 'STREAM_TEXT', ...(frame.eventId ? { eventId: frame.eventId } : {}),
+        ...(frame.progressReplay ? { progressReplay: true } : {}) },
       createdAt
     };
   }
@@ -64,13 +71,13 @@ export function frameToRuntimeEvent(invocationId: UUID, frame: RuntimeStreamFram
       return {
         invocationId,
         type: 'runtime_failed',
-        content: 'Runtime provider reported an internal service startup failure.',
+        content: '模型服务报告内部服务启动失败。',
         visibility: 'user',
         metadata: {
           code: 'RUNTIME_PROVIDER_NOTIFICATION_ERROR',
           runtimeError: {
             code: 'MODEL_ERROR',
-            message: `Runtime provider notification failed: ${frame.subtype}`,
+            message: `模型服务通知处理失败：${frame.subtype}`,
             retryable: true,
             details: { providerMethod: frame.subtype }
           }
@@ -83,7 +90,7 @@ export function frameToRuntimeEvent(invocationId: UUID, frame: RuntimeStreamFram
       type: 'runtime_progress',
       content: frame.subtype,
       visibility: 'debug',
-      metadata: { code: 'STREAM_SYSTEM', subtype: frame.subtype, raw: frame.raw },
+      metadata: { code: 'STREAM_SYSTEM', subtype: frame.subtype, raw: sanitizeRuntimeDiagnostic(frame.raw) },
       createdAt
     };
   }

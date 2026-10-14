@@ -57,6 +57,42 @@ function deferred<T>() {
 }
 
 describe('event stream recovery coordinator', () => {
+  it('does not close a newer A stream when an old A terminal sync finishes after A → B → A', async () => {
+    const store = useEventStore()
+    const oldRead = deferred<Response>()
+    vi.mocked(fetch).mockReturnValueOnce(oldRead.promise)
+    const finishing = store.finalizeSessionEvents('session-1')
+    store.ensureConnected('session-2')
+    store.ensureConnected('session-1')
+    const latest = FakeEventSource.instances.at(-1)!
+    oldRead.resolve(response([]))
+    await finishing
+    expect(store.connectedSessionId).toBe('session-1')
+    expect(latest.closed).toBe(false)
+    expect(FakeEventSource.instances.filter(stream => !stream.closed)).toHaveLength(1)
+  })
+
+  it('retains event and message references on an empty incremental sync', () => {
+    const store = useEventStore()
+    store.commitServerEvents('session-1', [event('one')])
+    const events = store.eventsForSession('session-1')
+    const messages = store.chatMessages('session-1')
+    store.commitServerEvents('session-1', [])
+    expect(store.eventsForSession('session-1')).toBe(events)
+    expect(store.chatMessages('session-1')).toBe(messages)
+  })
+  it('evicts history and its cursor together and fully rebuilds after a late write receipt', async () => {
+    const store = useEventStore()
+    for (const id of ['A', 'B', 'C', 'D']) store.commitServerEvents(id, [{ ...event(`${id}-old`), sessionId: id }])
+    expect(store.serverEventsBySessionId.A).toBeUndefined()
+    expect(store.lastCommittedServerEventIdBySessionId.A).toBeUndefined()
+    store.appendEvent({ ...event('A-new'), sessionId: 'A' })
+    vi.mocked(fetch).mockResolvedValueOnce(response([{ ...event('A-old'), sessionId: 'A' }, { ...event('A-new'), sessionId: 'A' }]))
+    await store.loadEvents('A', { append: true })
+    expect(String(vi.mocked(fetch).mock.calls.at(-1)?.[0])).not.toContain('afterEventId')
+    expect(store.eventsForSession('A').map(item => item.id)).toEqual(['A-old', 'A-new'])
+    expect(Object.keys(store.serverEventsBySessionId)).toHaveLength(3)
+  })
   beforeEach(() => {
     setActivePinia(createPinia())
     FakeEventSource.instances = []
@@ -171,7 +207,7 @@ describe('event stream recovery coordinator', () => {
 
   it('keeps optimistic events outside the server cursor and reconciles confirmations', async () => {
     const store = useEventStore()
-    store.appendEvent(event('server-event'))
+    store.commitServerEvents('session-1', [event('server-event')], true)
     store.appendEvent({
       ...event('evt-local-confirmation-1', 'user_confirmation_resolved'),
       metadata: { schemaVersion: '0.1', payload: { confirmationId: 'confirmation-1' } }

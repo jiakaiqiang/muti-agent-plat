@@ -52,6 +52,9 @@ import type {
   SessionListItem,
   SessionArchiveGroup,
   SessionWorkingDirectory,
+  SessionCodeSource,
+  SessionExecutionLocation,
+  SourceBinding,
   CollaborationLifecycleSnapshot,
   DeleteSessionLifecycleResult,
   RestoreSessionLifecycleInput,
@@ -138,6 +141,9 @@ export type {
   SessionListItem,
   SessionArchiveGroup,
   SessionWorkingDirectory,
+  SessionCodeSource,
+  SessionExecutionLocation,
+  SourceBinding,
   CollaborationLifecycleSnapshot,
   DeleteSessionLifecycleResult,
   RestoreSessionLifecycleInput,
@@ -179,7 +185,7 @@ export type {
 
 export { DEFAULT_CONTEXT_PIPELINE_VERSION, SUPPORTED_CONTEXT_PIPELINE_VERSIONS } from '@agent-cluster/shared'
 
-export type SessionViewMode = 'chat' | 'collaboration_graph' | 'workflow' | 'workflow_details' | 'debug'
+export type SessionViewMode = 'collaboration_plan' | 'chat' | 'collaboration_graph' | 'workflow' | 'workflow_details' | 'debug'
 
 export type ConfirmationReason =
   | 'confirm_task_brief'
@@ -272,6 +278,9 @@ export type ConfirmationRequestedPayload = {
   selectionConfirmationId?: string
   sessionGeneration?: number
   briefVersion?: number
+  revisionAttempts?: number
+  maxRevisionAttempts?: number
+  allowProceedWithOpenQuestions?: boolean
   memberGaps?: WorkflowMemberMappingGap[]
   addableAgentIds?: string[]
   discussionId?: string
@@ -602,6 +611,7 @@ export type TaskArtifactSummary = {
 
 export const sessionStatusLabel: Record<SessionStatus, string> = {
   DRAFT_INPUT: '待理解',
+  WAIT_SOURCE_PREPARATION: '等待仓库准备',
   AGENT_DISCUSSING: 'Agent 讨论中',
   WAIT_USER_CONFIRM: '等待确认',
   WAIT_WORKFLOW_SELECT: '选择工作流',

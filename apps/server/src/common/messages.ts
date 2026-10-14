@@ -1,3 +1,5 @@
+import { localizeSystemError, runtimePhaseLabel } from '@agent-cluster/shared';
+
 export const messages = {
   briefCreated: 'Agent 团队已生成任务契约，请确认后开始执行。',
   briefCardTitle: '任务契约',
@@ -14,7 +16,7 @@ export const messages = {
   taskNeedsReviewNotice: (agentName: string, title: string, summary: string) =>
     `${agentName} 提交任务「${title}」并请求复盘重点检查。摘要：${summary}`,
   taskFailed: (title: string) => `任务执行失败：${title}`,
-  runtimeStarted: (agentName: string, runtimeLabel: string) => `${agentName} 已通过 ${runtimeLabel} 开始执行任务。`,
+  runtimeStarted: (agentName: string, runtimeLabel: string) => `${agentName} 正在准备 ${runtimeLabel} 调用，等待本地校验或模型启动。`,
   runtimeCompleted: (agentName: string, runtimeLabel: string) => `${agentName} 已通过 ${runtimeLabel} 完成任务。`,
   runtimeHeartbeat: (agentName: string, seconds: number) => `${agentName} 的模型调用仍在进行中（已等待 ${seconds} 秒）。`,
   runtimeFailed: (title: string) => `运行时执行任务失败：${title}`,
@@ -51,8 +53,8 @@ export const messages = {
   discussionCheckingThought: '正在评估需求相关性。',
   discussionCheckingAction: '在生成任务契约前审阅用户需求。',
   discussionTimedOutMessage: (name: string) => `${name} 讨论超时，Coordinator 将基于已有上下文继续。`,
-  discussionFailedMessage: (name: string, detail: string) => `${name} 未能完成讨论：${detail}`,
-  discussionBlockedMessage: (name: string, detail: string) => `${name} 需要补充证据后继续讨论：${detail}`,
+  discussionFailedMessage: (name: string, detail: string) => `${name} 未能完成讨论：${localizeSystemError(detail)}`,
+  discussionBlockedMessage: (name: string, detail: string) => `${name} 需要补充证据后继续讨论：${localizeSystemError(detail)}`,
   discussionTimedOutStatus: (name: string) => `${name} 未在讨论超时前响应。`,
   discussionCompletedStatus: (name: string) => `${name} 已完成需求相关性评估。`,
   discussionFailedStatus: (name: string) => `${name} 需求相关性评估失败。`,
@@ -92,19 +94,9 @@ export const messages = {
   agentUpdateThought: '已将相关需求更新加入 Agent 上下文。',
   agentUpdateAction: '将在下一轮理解与执行中使用该更新。',
   noAvailableAgent: '当前会话没有可用的 Agent。',
-  phaseLabel: (phase: string) =>
-    ({
-      discussion: 'Agent 讨论',
-      brief_generation: '任务契约生成',
-      brief_revision: '任务契约修订',
-      task_brief: '任务契约生成',
-      task_execution: '任务执行',
-      post_review: '复盘',
-      final_delivery: '最终交付',
-      user_message_routing: '消息路由'
-    })[phase] ?? phase,
+  phaseLabel: runtimePhaseLabel,
   runtimeError: (runtimeType: string, phase: string, message: string) =>
-    `${runtimeType} 在 ${messages.phaseLabel(phase)} 阶段失败：${message}`,
+    `${runtimeType} 在 ${messages.phaseLabel(phase)} 阶段失败：${localizeSystemError(message)}`,
   defaultTaskExecuteTitle: '执行已确认任务契约',
   defaultTaskExecuteDescription: '按任务契约执行结构化 dry-run。',
   defaultTaskExecuteAcceptance: '运行时返回结构化 task_execution_result 输出。',

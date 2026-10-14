@@ -42,6 +42,11 @@ import type {
 import {
   DEFAULT_LOCAL_RUNTIME_PERMISSION_POLICY,
   isGeneratedWorkspaceDirectory,
+  isUsableWorkspaceEvidencePath,
+  isBinaryWorkspacePath,
+  isWorkspaceTextContent,
+  deriveWorkspaceIndexEntrypoints,
+  queryWorkspaceNavigation,
   isSensitiveWorkspacePath,
   mergeWorkspaceText,
   WORKSPACE_MERGE_CONFLICT
@@ -199,34 +204,7 @@ export class LocalWorkspace {
     this.assertPermission('workspace_read');
     const snapshot = this.state.index ?? this.emptyIndexSnapshot('building');
     if (!this.state.index) this.state.index = snapshot;
-    if (input.generation !== undefined && input.generation !== snapshot.generation) {
-      return { ...snapshot, entries: [], matched: 0 };
-    }
-    const terms = [
-      ...(input.pathHints ?? []),
-      ...(input.symbols ?? []),
-      ...(input.intent ? input.intent.split(/[^a-zA-Z0-9_./-]+/) : []),
-      ...(input.query ? input.query.split(/[^a-zA-Z0-9_./-]+/) : [])
-    ].map((term) => term.trim().toLowerCase()).filter((term) => term.length >= 2);
-    const limit = Math.min(200, Math.max(1, input.limit ?? 50));
-    const entrypoints = new Set(snapshot.entrypoints.map((path) => path.toLowerCase()));
-    const ranked = snapshot.entries
-      .map((entry, order) => {
-        const path = entry.path.toLowerCase();
-        const matches = terms.filter((term) => path.includes(term) || term.includes(path));
-        const score = matches.length * 10 + (entry.kind === 'file' ? 1 : 0) + (entrypoints.has(path) ? 5 : 0);
-        return { entry, order, score, matchedTerms: matches.length };
-      })
-      .filter((item) => terms.length === 0 || item.matchedTerms > 0)
-      .sort((left, right) => right.score - left.score || left.order - right.order);
-    const candidates = Array.from(new Map(
-      snapshot.entries
-        .filter((entry) => entrypoints.has(entry.path.toLowerCase()))
-        .concat(ranked.map((item) => item.entry))
-        .concat(ranked.length ? [] : snapshot.entries)
-        .map((entry) => [entry.path, entry])
-    ).values());
-    return { ...snapshot, entries: candidates.slice(0, limit), matched: ranked.length };
+    return queryWorkspaceNavigation(snapshot, input);
   }
 
   async listDirectory(input: ListDirectoryInput): Promise<ListDirectoryResult> {
@@ -290,6 +268,7 @@ export class LocalWorkspace {
 
   async readFile(input: ReadFileInput): Promise<ReadFileResult> {
     this.assertPermission('workspace_read');
+    if (isBinaryWorkspacePath(input.path)) throw new Error('WORKSPACE_EVIDENCE_UNSUPPORTED: binary file.');
     const absolute = await this.resolveExisting(input.path);
     const metadata = await stat(absolute);
     if (!metadata.isFile()) throw new Error('Requested path is not a file.');
@@ -336,6 +315,11 @@ export class LocalWorkspace {
       startLine = targetStart;
       endLine = Math.max(targetStart, targetStart + selected.length - 1);
     }
+    const metadataAfter = await stat(absolute);
+    if (metadataAfter.size !== metadata.size || metadataAfter.mtimeMs !== metadata.mtimeMs) {
+      throw new Error('WORKSPACE_REVISION_UNSTABLE: file changed during read operation.');
+    }
+    if (content.trim() && !isWorkspaceTextContent(content)) throw new Error('WORKSPACE_EVIDENCE_UNSUPPORTED: binary content cannot be read as text.');
     const returnedBuffer = Buffer.from(content, 'utf8');
     const fullRead = !lineRange && !truncated && returnedBuffer.byteLength === metadata.size;
     return {
@@ -907,12 +891,11 @@ function languageForPath(path: string): string | undefined {
 }
 
 function deriveIndexEntrypoints(entries: WorkspaceNavigationEntry[]): string[] {
-  const preferred = new Set(['package.json', 'README.md', 'readme.md', 'pom.xml', 'build.gradle', 'build.gradle.kts', 'Cargo.toml', 'go.mod', 'pyproject.toml', 'requirements.txt']);
-  return entries.filter((entry) => entry.kind === 'file' && preferred.has(entry.path)).map((entry) => entry.path).slice(0, 32);
+  return deriveWorkspaceIndexEntrypoints(entries);
 }
 
 function detectStack(entries: WorkspaceNavigationEntry[]): string[] {
-  const paths = new Set(entries.filter((entry) => entry.kind === 'file').map((entry) => entry.path));
+  const paths = new Set(entries.filter((entry) => entry.kind === 'file' && isUsableWorkspaceEvidencePath(entry.path)).map((entry) => entry.path.split('/').at(-1)!));
   return [
     ...(paths.has('package.json') ? ['node'] : []),
     ...(paths.has('pom.xml') || paths.has('build.gradle') || paths.has('build.gradle.kts') ? ['jvm'] : []),

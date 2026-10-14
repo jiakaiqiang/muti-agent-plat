@@ -9,6 +9,7 @@ import {
 } from '@/stores/skill'
 import type { Skill } from '@/types/contracts'
 import UiIcon from './UiIcon.vue'
+import { formatDateTime } from '@/utils/dateTime'
 
 const skillStore = useSkillStore()
 const { selectedSkillId, formMode, form, fieldErrors, operationError, pendingDeleteSkillId } = storeToRefs(skillStore)
@@ -356,7 +357,7 @@ onMounted(() => void refreshData())
             </div>
             <div>
               <dt>最后更新</dt>
-              <dd>{{ selectedSkill.updatedAt }}</dd>
+              <dd>{{ formatDateTime(selectedSkill.updatedAt) }}</dd>
             </div>
           </dl>
           <div class="skill-file-summary">

@@ -22,13 +22,15 @@ test('allows one correction, ignores duplicates, and fails once on a second reje
     assert.equal(failures[0].retryable, false);
   } finally { guard.dispose(); }
 });
-test('heartbeats do not extend correction deadline', async () => {
+test('correction observation deadline does not fail a silent request', async () => {
   const failures: RuntimeError[] = [];
-  const guard = structuredOutputGuard({ maxCorrections: 1, timeoutMs: 15, fail: e => failures.push(e) });
+  let observations = 0;
+  const guard = structuredOutputGuard({ maxCorrections: 1, timeoutMs: 15, fail: e => failures.push(e), observeTimeout: () => observations++ });
   guard.observe(frame('first', true));
   guard.observe({ ...frame('heartbeat', false), type: 'runtime_progress' });
   await new Promise(resolve => setTimeout(resolve, 30));
-  assert.equal(failures[0]?.code, 'RUNTIME_TIMEOUT');
+  assert.equal(observations, 1);
+  assert.deepEqual(failures, []);
   guard.dispose();
 });
 test('successful correction and disposal clear pending deadlines', async () => {

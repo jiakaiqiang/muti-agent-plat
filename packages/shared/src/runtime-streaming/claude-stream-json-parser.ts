@@ -1,4 +1,5 @@
 import type { RuntimeStreamFrame } from './runtime-stream-frame.js';
+import { sanitizeRuntimeDiagnostic } from '../runtime-diagnostic-sanitizer.js';
 
 /**
  * 把 Claude Code CLI `--output-format stream-json` 的一行 JSON 事件翻译成
@@ -15,6 +16,9 @@ export function parseClaudeLine(line: string): RuntimeStreamFrame[] {
 
 export class ClaudeStreamJsonParser {
   private readonly toolNames = new Map<string, string>();
+  private sequence = 0;
+  private readonly streamedMessages = new Set<string>();
+  private currentMessage = '';
 
   feedLine(line: string): RuntimeStreamFrame[] {
     const trimmed = line.trim();
@@ -29,6 +33,8 @@ export class ClaudeStreamJsonParser {
     }
     const type = typeof msg.type === 'string' ? msg.type : '';
     switch (type) {
+      case 'stream_event':
+        return this.fromStreamEvent(msg);
       case 'assistant':
         return this.fromAssistant(msg);
       case 'user':
@@ -40,7 +46,7 @@ export class ClaudeStreamJsonParser {
           {
             kind: 'system',
             subtype: typeof msg.subtype === 'string' ? msg.subtype : 'unknown',
-            raw: msg,
+            raw: sanitizeRuntimeDiagnostic(msg),
             disposition: 'debug_only'
           }
         ];
@@ -49,18 +55,54 @@ export class ClaudeStreamJsonParser {
     }
   }
 
+  private fromStreamEvent(msg: Record<string, unknown>): RuntimeStreamFrame[] {
+    const event = (msg.event ?? {}) as Record<string, unknown>;
+    const message = (event.message ?? {}) as Record<string, unknown>;
+    if (event.type === 'message_start') {
+      this.currentMessage = typeof message.id === 'string' ? message.id : '';
+      return [this.activity('request_acknowledged', msg)];
+    }
+    if (event.type !== 'content_block_delta') return [];
+    const delta = (event.delta ?? {}) as Record<string, unknown>;
+    const key = delta.type === 'text_delta' ? 'text' : delta.type === 'input_json_delta' ? 'partial_json'
+      : delta.type === 'thinking_delta' ? 'thinking' : undefined;
+    if (!key || typeof delta[key] !== 'string' || !delta[key]) return [];
+    if (this.currentMessage) {
+      if (this.streamedMessages.size >= 4096) this.streamedMessages.delete(this.streamedMessages.values().next().value!);
+      this.streamedMessages.add(this.currentMessage);
+    }
+    return [this.activity(key === 'thinking' ? 'reasoning_progress' : key === 'text' ? 'text_progress' : 'tool_input_progress', msg,
+      String(delta[key]).length)];
+  }
+
+  private activity(observationKind: import('../runtime-request-health.js').RuntimeObservationKind,
+    msg: Record<string, unknown>, count?: number): RuntimeStreamFrame {
+    const sequence = ++this.sequence;
+    return { kind: 'observation', observationKind, sequence, count,
+      eventId: typeof msg.uuid === 'string' ? msg.uuid : `claude:${sequence}` };
+  }
+
   private fromAssistant(msg: Record<string, unknown>): RuntimeStreamFrame[] {
+    if (msg.is_api_error_message === true || typeof msg.error === 'string') return [this.activity('provider_retry', msg)];
     const message = (msg.message ?? {}) as Record<string, unknown>;
     const contents = Array.isArray(message.content) ? (message.content as Array<Record<string, unknown>>) : [];
     const out: RuntimeStreamFrame[] = [];
     for (const item of contents) {
       const itemType = typeof item.type === 'string' ? item.type : '';
       if (itemType === 'text') {
-        out.push({ kind: 'assistant_text', text: typeof item.text === 'string' ? item.text : '' });
+        out.push({ kind: 'assistant_text', text: typeof item.text === 'string' ? item.text : '',
+          ...(message.id ? { eventId: `claude:${String(message.id)}:text:${contents.indexOf(item)}` } : {}),
+          ...(this.streamedMessages.has(String(message.id ?? '')) ? { progressReplay: true } : {}) });
+      } else if (itemType === 'thinking' && !this.streamedMessages.has(String(message.id ?? '')) &&
+        typeof item.thinking === 'string' && item.thinking.length) {
+        out.push(this.activity('reasoning_progress', msg, item.thinking.length));
       } else if (itemType === 'tool_use') {
         const id = typeof item.id === 'string' ? item.id : '';
         const name = typeof item.name === 'string' ? item.name : '';
-        if (id && name) this.toolNames.set(id, name);
+        if (id && name) {
+          if (this.toolNames.size >= 4096) this.toolNames.delete(this.toolNames.keys().next().value!);
+          this.toolNames.set(id, name);
+        }
         out.push({
           kind: 'tool_use',
           toolCallId: id,

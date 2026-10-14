@@ -188,7 +188,7 @@ test('Claude buffered command preserves process output and exit code on non-zero
   );
 });
 
-test('Claude buffered timeout uses and cannot exceed the independent absolute deadline', async () => {
+test('Claude buffered observation settings never install an execFile kill deadline', async () => {
   const workspace = mkdtempSync(join(tmpdir(), 'claude-buffered-timeout-'));
   const previousEnabled = process.env.CLAUDE_CODE_ENABLED;
   const previousStreaming = process.env.RUNTIME_STREAMING;
@@ -201,10 +201,10 @@ test('Claude buffered timeout uses and cannot exceed the independent absolute de
   process.env.CLAUDE_CODE_ABSOLUTE_TIMEOUT_MS = '1800000';
   try {
     for (const [configuredTimeout, expectedTimeout] of [
-      [undefined, 1_800_000],
-      ['0', 1_800_000],
-      ['250000', 250_000],
-      ['2500000', 1_800_000]
+      [undefined, 0],
+      ['0', 0],
+      ['250000', 0],
+      ['2500000', 0]
     ] as const) {
       if (configuredTimeout === undefined) delete process.env.CLAUDE_CODE_TIMEOUT_MS;
       else process.env.CLAUDE_CODE_TIMEOUT_MS = configuredTimeout;
@@ -335,6 +335,7 @@ test('Claude prompts include the strict output schema and example', () => {
   }).prompt(makeInvocationPlan({ executionTarget: { runtimeType: 'claude_code' } }), taskSidecarPath);
 
   for (const prompt of [promptFor(), promptFor('task-brief.json')]) {
+    assert.match(prompt, /所有面向用户的自然语言必须使用简体中文/);
     assert.match(prompt, /messageKind/);
     assert.match(prompt, /targetAgentIds/);
     assert.match(prompt, /Summarize the result here\./);

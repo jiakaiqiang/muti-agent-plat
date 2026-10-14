@@ -13,6 +13,7 @@
 | SessionStatus | Harness 阶段 | 含义 |
 | --- | --- | --- |
 | DRAFT_INPUT | requirement | 输入已存在，但还没形成 intent contract。 |
+| WAIT_SOURCE_PREPARATION | human_intervention | GitHub 代码来源正在授权、克隆或等待基础分支选择；准备完成前不启动 Agent。 |
 | AGENT_DISCUSSING | requirement / design | Agent 正在澄清目标与约束。 |
 | WAIT_USER_CONFIRM | human_intervention | brief 就绪，等待用户确认。 |
 | WAIT_WORKFLOW_SELECT | planning / human_intervention | brief 已确认，等待用户选择本次执行使用的工作流。 |

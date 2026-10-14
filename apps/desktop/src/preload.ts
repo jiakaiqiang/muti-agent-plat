@@ -9,6 +9,14 @@ const bridge: DesktopBridge = {
   checkUpdate: () => ipcRenderer.invoke('desktop:update:check'),
   downloadUpdate: () => ipcRenderer.invoke('desktop:update:download'),
   installUpdate: () => ipcRenderer.invoke('desktop:update:install'),
+  upgrade: () => ipcRenderer.invoke('desktop:update:upgrade'),
+  onUpdateStatus: callback => {
+    const listener = (_event: Electron.IpcRendererEvent, status: unknown) => {
+      if (status && typeof status === 'object' && 'state' in status) callback(status as Parameters<typeof callback>[0]);
+    };
+    ipcRenderer.on('desktop:update:status', listener);
+    return () => ipcRenderer.removeListener('desktop:update:status', listener);
+  },
   setNotificationsEnabled: enabled => ipcRenderer.invoke('desktop:notifications:enabled', enabled),
   testNotification: () => ipcRenderer.invoke('desktop:notifications:test'),
   openWebWorkflowManager: () => ipcRenderer.invoke('desktop:web:workflow-manager'),

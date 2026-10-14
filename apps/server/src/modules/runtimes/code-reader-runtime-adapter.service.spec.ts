@@ -128,7 +128,7 @@ test('summarizes successful file reads as task execution output', async () => {
 
   assert.equal(result.status, 'completed');
   assert.equal(result.output.kind, 'task_execution_result');
-  assert.match(result.output.summary, /Analyzed 1 file/);
+  assert.match(result.output.summary, /已分析 1 个文件/);
   assert.equal(result.events.some((event) => event.type === 'runtime_completed'), true);
 });
 
@@ -167,6 +167,6 @@ test('returns completed with zero files when no targets are present', async () =
 
   assert.equal(result.status, 'completed');
   assert.equal(result.output.kind, 'task_execution_result');
-  assert.match(result.output.summary, /Analyzed 0 files/);
+  assert.match(result.output.summary, /已分析 0 个文件/);
   assert.equal(calls.length, 0);
 });

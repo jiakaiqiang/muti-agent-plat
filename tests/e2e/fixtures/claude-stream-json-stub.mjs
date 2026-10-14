@@ -170,6 +170,8 @@ async function runScenario() {
   if (firstDelay > 0) await new Promise((r) => setTimeout(r, firstDelay));
 
   writeLine({ type: 'system', subtype: 'init', session_id: 'stub-claude-session-1', model: 'claude-stub' });
+  const progressGap = Number(process.env.STUB_PROGRESS_GAP_MS ?? 0);
+  if (progressGap > 0) await new Promise(resolve => setTimeout(resolve, progressGap));
   if (process.env.STUB_PROVIDER_524 === '1') {
     process.stderr.write('API Error: 524 {"status":524,"error_name":"origin_response_timeout","zone":"api.picpi.top","ray_id":"stub-ray","retryable":true,"retry_after":120}');
     process.exit(1);

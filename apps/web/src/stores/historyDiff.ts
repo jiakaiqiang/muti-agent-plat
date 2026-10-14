@@ -2,6 +2,7 @@ import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import type { HistoricalFile } from '@/utils/historyDiffModel'
 import { filesFromChanges } from '@/utils/historyDiffModel'
+import { formatDateTime } from '@/utils/dateTime'
 import { apiGet } from '@/api/client'
 import type { AgentTask, Artifact, WorkflowDeliveryFileDiff } from '@agent-cluster/shared'
 
@@ -28,7 +29,7 @@ export const useHistoryDiffStore = defineStore('historyDiff', () => {
       if (generation !== requestGeneration || artifact.sessionId !== id) return
       const changes = artifact.systemEvidence?.workspaceChangeSet
       const files = changes ? filesFromChanges(changes.changes) : [{ path: artifact.uri ?? artifact.title, operation: 'reference' as const, after: artifact.contentSummary, notice: '此产物未保存文件变更两端；仅展示已保存的摘要。' }]
-      open({ files, title: artifact.title, source: `${artifact.taskId ?? ''} · ${artifact.agentId ?? ''} · ${artifact.createdAt} · 本轮执行前 → 执行后 · ${changes?.id ?? '无版本化变更'}`, sessionId: id })
+      open({ files, title: artifact.title, source: `${artifact.taskId ?? ''} · ${artifact.agentId ?? ''} · ${formatDateTime(artifact.createdAt)} · 本轮执行前 → 执行后 · ${changes?.id ?? '无版本化变更'}`, sessionId: id })
     } catch (error) {
       if (generation === requestGeneration) open({ files: [], title: '产物读取失败', source: error instanceof Error ? error.message : '无法读取产物', sessionId: id })
     }

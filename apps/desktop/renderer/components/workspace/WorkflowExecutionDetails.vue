@@ -7,6 +7,7 @@ import { useHistoryDiffStore } from '@/stores/historyDiff'
 import { actorAgentId } from '@/composables/useActor'
 import { nodeTitle, executionLabel, tasksForNode } from './workflowPresentation'
 import { filesFromChanges } from '@/utils/historyDiffModel'
+import { formatDateTime } from '@/utils/dateTime'
 
 const props = defineProps<{ events: CollaborationEvent[]; inspector?: boolean }>()
 const emit = defineEmits<{ process: [confirmationId?: string]; close: []; locate: [nodeId: string] }>()
@@ -28,19 +29,19 @@ function openArtifact(artifactId: string, path?: string) {
   <section class="execution-details" :class="{ inspector }">
     <header><h2>{{ inspector ? (selectedTask ? 'Agent 执行详情' : '节点任务') : '工作流详情' }}</h2><el-button v-if="inspector && selectedTask" text @click="store.select({ taskId: '' })">返回列表</el-button><el-button v-if="inspector" text @click="emit('close')">关闭</el-button></header>
     <template v-if="selectedTask && inspector">
-      <h3>{{ selectedTask.title }}</h3><p>{{ agents.agentName(actorAgentId(selectedTask.assignee)) }} · {{ executionLabel(selectedTask.status) }} · 第 {{ selectedTask.workflowAttempt ?? '—' }} 轮</p><p>{{ selectedTask.description }}</p><small>{{ selectedTask.createdAt }} → {{ selectedTask.updatedAt }}</small>
+      <h3>{{ selectedTask.title }}</h3><p>{{ agents.agentName(actorAgentId(selectedTask.assignee)) }} · {{ executionLabel(selectedTask.status) }} · 第 {{ selectedTask.workflowAttempt ?? '—' }} 轮</p><p>{{ selectedTask.description }}</p><small>{{ formatDateTime(selectedTask.createdAt) }} → {{ formatDateTime(selectedTask.updatedAt) }}</small>
       <h4>验收标准</h4><ul><li v-for="criterion in selectedTask.acceptanceCriteria" :key="criterion">{{ criterion }}</li></ul>
       <h4>依赖</h4><p>{{ selectedTask.dependsOnTaskIds.map(id => store.tasks.find(t => t.id === id)?.title ?? id).join('；') || '无前置任务' }}</p>
       <h4>执行结果</h4><p>{{ selectedTask.resultSummary || '尚未形成结果' }}</p>
       <h4>验证与产物</h4><p v-if="!selectedArtifacts.length">暂无产物证据</p>
       <article v-for="artifact in selectedArtifacts" :key="artifact.id"><button type="button" class="file-link" @click="diff.openArtifact(artifact.id, store.sessionId)">{{ artifact.title }}</button><p>{{ artifact.contentSummary }}</p><button v-for="file in filesFromChanges(artifact.systemEvidence?.workspaceChangeSet?.changes ?? [])" :key="file.path" type="button" class="file-link" @click="openArtifact(artifact.id, file.path)">{{ file.path }}</button><p v-for="test in artifact.systemEvidence?.verifiedTestResults ?? []" :key="`${test.command}:${test.startedAt}`">{{ test.command }} · {{ test.status === 'passed' ? '通过' : '失败' }}<details><summary>测试输出</summary><pre>{{ test.stdout }}{{ test.stderr }}</pre></details></p></article>
-      <h4>实施记录</h4><article v-for="event in taskEvents" :key="event.id"><small>{{ event.createdAt }}</small><p>{{ event.content }}</p></article>
+      <h4>实施记录</h4><article v-for="event in taskEvents" :key="event.id"><small>{{ formatDateTime(event.createdAt) }}</small><p>{{ event.content }}</p></article>
     </template>
     <template v-else>
       <p v-if="!inspector && store.detail?.run.status === 'completed'"><el-button @click="diff.openDelivery(store.selection.runId, store.sessionId)">查看最终交付文件差异</el-button></p>
       <p v-if="!nodes.length">暂无可展示的节点记录</p>
       <article v-for="node in nodes" :key="node.id" class="execution-node"><h3>{{ nodeTitle(node) }}</h3><p v-if="node.type === 'agent'">{{ node.stageDescription }}</p>
-        <div v-for="attempt in store.detail?.nodeRuns.filter(item => item.nodeId === node.id) ?? []" :key="attempt.id" class="attempt"><strong>第 {{ attempt.attempt }} 轮 · {{ executionLabel(attempt.status) }}</strong><p>{{ attempt.outputSummary || attempt.error?.message }}</p><small>{{ attempt.startedAt }}<template v-if="attempt.completedAt"> → {{ attempt.completedAt }}</template></small><p v-if="attempt.status === 'waiting' && attempt.confirmationId"><el-button size="small" @click="emit('process', attempt.confirmationId)">去处理</el-button></p>
+        <div v-for="attempt in store.detail?.nodeRuns.filter(item => item.nodeId === node.id) ?? []" :key="attempt.id" class="attempt"><strong>第 {{ attempt.attempt }} 轮 · {{ executionLabel(attempt.status) }}</strong><p>{{ attempt.outputSummary || attempt.error?.message }}</p><small>{{ formatDateTime(attempt.startedAt) }}<template v-if="attempt.completedAt"> → {{ formatDateTime(attempt.completedAt) }}</template></small><p v-if="attempt.status === 'waiting' && attempt.confirmationId"><el-button size="small" @click="emit('process', attempt.confirmationId)">去处理</el-button></p>
           <p v-for="approval in store.detail?.approvals.filter(item => item.nodeRunId === attempt.id) ?? []" :key="approval.id">{{ approval.decision === 'approve' ? '验证通过' : approval.decision === 'revise' ? '要求返工' : approval.decision === 'reject' ? '不通过' : '取消' }}：{{ approval.reason }} {{ approval.revisionInstruction }}</p>
         </div>
         <p v-if="!store.detail?.nodeRuns.some(item => item.nodeId === node.id)">尚未执行</p>

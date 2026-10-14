@@ -91,3 +91,60 @@ test('ensureStructuredTermination classifies adapter watchdog timeouts', () => {
   assert.equal(normalized.termination?.kind, 'runtime_timeout');
   assert.deepEqual(normalized.termination?.timeout, { mode: 'idle', timeoutMs: 45_000 });
 });
+
+/**
+ * T05 / SRS-AC4, I4. A user-initiated Runtime switch is its own termination
+ * reason. It must not be audited as a pause or a cancellation, and above all it
+ * must not be retryable: the provider retry chain would otherwise restart the
+ * invocation the switch barrier just stopped.
+ */
+test('a Runtime switch is an audited user stop, never a retryable failure', () => {
+  const switched = termination('runtime_switch');
+  assert.equal(terminationDisposition(switched), 'stop');
+  assert.equal(terminationErrorCode(switched), 'RUNTIME_CANCELLED');
+
+  const result: AgentRunResult = {
+    invocationId: 'invocation-switch',
+    runtimeType: 'codex',
+    status: 'cancelled',
+    output: createAgentMessageOutput({ messageKind: 'risk', content: 'The operation was aborted' }),
+    events: [],
+    artifacts: [],
+    systemEvidence: createRuntimeArtifactSystemEvidence('invocation-switch'),
+    usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    error: { code: 'RUNTIME_CANCELLED', message: 'The operation was aborted', retryable: false }
+  };
+  const normalized = normalizeTerminatedResult(
+    result,
+    createExecutionTermination({
+      kind: 'runtime_switch',
+      source: 'user',
+      scope: 'invocation',
+      phase: 'task_execution'
+    })
+  );
+
+  assert.equal(normalized.status, 'cancelled');
+  assert.equal(normalized.error?.retryable, false, 'a switch must not re-enter the provider retry chain');
+  assert.equal(normalized.error?.details?.terminationKind, 'runtime_switch');
+  assert.equal(
+    normalized.error?.details?.terminationSource,
+    'user',
+    'the audit trail must show the user asked, not that the provider failed'
+  );
+  assert.doesNotMatch(normalized.error?.message ?? '', /operation was aborted/i);
+});
+
+/**
+ * A switch reason has to survive a round trip through an AbortSignal, because the
+ * stop barrier carries it that way; an unrecognised kind would be dropped and the
+ * stop would be re-derived as a plain user cancellation, losing the audit reason.
+ */
+test('a Runtime switch survives the abort signal round trip', () => {
+  const controller = new AbortController();
+  const switched = createExecutionTermination({ kind: 'runtime_switch', source: 'user', scope: 'session' });
+  assert.equal(abortWithTermination(controller, switched), true);
+  const recovered = terminationFromSignal(controller.signal);
+  assert.equal(recovered?.kind, 'runtime_switch', 'the guard must accept the new kind');
+  assert.equal(recovered?.terminationId, switched.terminationId);
+});

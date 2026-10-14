@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { Pool } from 'pg';
+import { runtimeSwitchLogicalKey } from '@agent-cluster/shared';
 import { ContentReferenceCodec } from '../content-reference-codec.js';
 import { LocalContentStore } from '../local-content-store.js';
 import { PersistenceService } from '../persistence.service.js';
@@ -17,9 +19,133 @@ import { SummaryCheckpointStore, type SummaryCheckpointDraft } from '../../memor
 import { DiscussionStore } from '../../orchestrator/discussion-store.js';
 import { RequirementDocumentStore } from '../../sessions/requirement-document-store.js';
 import { WorkflowStartStore } from '../../workflows/workflow-start-store.js';
+import { WorkflowsService } from '../../workflows/workflows.service.js';
 import { ChangeRequestStore } from '../../sessions/change-request-store.js';
+import { RuntimeSwitchStore } from '../../runtime-switch/runtime-switch-store.js';
+import { GitHubAuthorizationService } from '../../code-hosts/github-authorization.service.js';
+import { GitHubCodeHostAdapter } from '../../code-hosts/github-code-host.adapter.js';
 
 const databaseUrl = process.env.RELATIONAL_TEST_DATABASE_URL;
+
+test('PostgreSQL consumes a device-bound GitHub OAuth state once without persisting its token',
+  { skip: !databaseUrl }, async () => {
+    const first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+    const restored = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+    const sessionId = randomUUID();
+    const previous = {
+      id: process.env.GITHUB_APP_CLIENT_ID,
+      secret: process.env.GITHUB_APP_CLIENT_SECRET,
+      callback: process.env.GITHUB_APP_CALLBACK_URL
+    };
+    process.env.GITHUB_APP_CLIENT_ID = 'test-client-id';
+    process.env.GITHUB_APP_CLIENT_SECRET = 'test-client-secret';
+    process.env.GITHUB_APP_CALLBACK_URL = 'https://app.example.test/github/callback';
+    try {
+      await first.initialize();
+      const now = new Date().toISOString();
+      await first.setCollection('sessions', [...first.getCollection<unknown[]>('sessions', []), {
+        id: sessionId, dataEpoch: first.currentDataEpoch(), title: 'OAuth fixture',
+        status: 'WAIT_SOURCE_PREPARATION', ownerId: 'local-user',
+        decisionLedgerRevision: 0, createdAt: now, updatedAt: now
+      }]);
+      const started = new GitHubAuthorizationService(first, new GitHubCodeHostAdapter());
+      const url = new URL(await started.startLocalOAuth(sessionId,
+        'https://github.com/example/project', 'device-a'));
+      const oauthState = url.searchParams.get('state')!;
+      await first.flush();
+      const pool = new Pool({ connectionString: databaseUrl });
+      try {
+        const pending = await pool.query<{ source_snapshot: unknown }>(
+          'select source_snapshot from agent_cluster.github_oauth_states');
+        assert.equal(pending.rows.some((row) => JSON.stringify(row).includes('device-a')), true);
+        assert.equal(pending.rows.some((row) => JSON.stringify(row).includes(oauthState)), false);
+      } finally { await pool.end(); }
+      await restored.initialize();
+      const completed = new GitHubAuthorizationService(restored, new GitHubCodeHostAdapter());
+      (completed as any).request = async () => Response.json({ access_token: 'pg-local-oauth-secret',
+        expires_in: 3600 });
+      const exchanged = await completed.exchangeOAuthCode('one-time-code', oauthState);
+      assert.equal(exchanged.executionLocation, 'local');
+      assert.equal(exchanged.sessionId, sessionId);
+      assert.equal(exchanged.repositoryUrl, 'https://github.com/example/project');
+      await assert.rejects(completed.exchangeOAuthCode('one-time-code', oauthState),
+        /GITHUB_OAUTH_STATE_INVALID/);
+      await restored.flush();
+      const verification = new Pool({ connectionString: databaseUrl });
+      try {
+        const rows = await verification.query<{ source_snapshot: unknown }>(
+          'select source_snapshot from agent_cluster.github_oauth_states');
+        const authorizations = await verification.query('select external_id from agent_cluster.github_authorizations');
+        assert.equal(rows.rows.length, 0);
+        assert.equal(authorizations.rows.length, 0);
+      } finally { await verification.end(); }
+    } finally {
+      await first.onModuleDestroy();
+      await restored.onModuleDestroy();
+      for (const [key, value] of Object.entries({
+        GITHUB_APP_CLIENT_ID: previous.id,
+        GITHUB_APP_CLIENT_SECRET: previous.secret,
+        GITHUB_APP_CALLBACK_URL: previous.callback
+      })) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+test('PostgreSQL restores a published workflow and its immutable version after a fresh service instance', { skip: !databaseUrl }, async () => {
+  const firstPersistence = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const restoredPersistence = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
+  const workflowName = `PostgreSQL restart workflow ${process.pid}-${Date.now()}`;
+  const agents = {
+    getForSurface(id: string) {
+      return { id };
+    }
+  };
+  let firstClosed = false;
+  try {
+    await firstPersistence.initialize();
+    const first = new WorkflowsService(firstPersistence, agents as never);
+    const draft = first.create({
+      name: workflowName,
+      nodes: [
+        {
+          id: 'requirements',
+          type: 'agent',
+          agentId: 'requirements',
+          stageDescription: 'Clarify the requirement.',
+          outputContract: ['Accepted requirement.'],
+          order: 0
+        },
+        {
+          id: 'approval',
+          type: 'human_approval',
+          title: 'Confirm requirement',
+          assignee: 'session_owner',
+          allowedDecisions: ['approve', 'revise', 'cancel'],
+          order: 1
+        }
+      ]
+    });
+    const published = first.publish(draft.id, { expectedDraftRevision: draft.draftRevision });
+    await firstPersistence.flush();
+    await firstPersistence.onModuleDestroy();
+    firstClosed = true;
+
+    await restoredPersistence.initialize();
+    const restored = new WorkflowsService(restoredPersistence, undefined as never);
+
+    assert.deepEqual(restored.list().filter((workflow) => workflow.id === published.id)
+      .map((workflow) => [workflow.name, workflow.status]), [[workflowName, 'published']]);
+    assert.equal(restored.getVersion(published.id).definitionHash.length, 64);
+    assert.deepEqual(restored.getVersion(published.id).nodes.map((node) => node.type), ['agent', 'human_approval']);
+  } finally {
+    await Promise.all([
+      firstClosed ? Promise.resolve() : firstPersistence.onModuleDestroy(),
+      restoredPersistence.onModuleDestroy()
+    ]);
+  }
+});
 
 test('PostgreSQL runtime model projection preserves versioned relay pricing across reloads', { skip: !databaseUrl }, async () => {
   const first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
@@ -1259,6 +1385,120 @@ test('PostgreSQL keeps one change request per execution-time message across inst
       assert.equal(rows.rows[0].user_choice, 'pause_and_revise');
       // bigint comes back as a string from node-pg.
       assert.equal(Number(rows.rows[0].analysis_revision), 1);
+    } finally {
+      await pool.end();
+    }
+  } finally {
+    await first?.onModuleDestroy().catch(() => undefined);
+    await second?.onModuleDestroy().catch(() => undefined);
+    await third?.onModuleDestroy().catch(() => undefined);
+    await setupPool.query(`drop database if exists ${isolatedDatabase}`).catch(() => undefined);
+    await setupPool.end().catch(() => undefined);
+  }
+});
+
+test('PostgreSQL accepts one in-flight Runtime switch per Session and advances its version atomically', { skip: !databaseUrl }, async () => {
+  const isolatedDatabase = `agent_cluster_rs_${process.pid}_${Date.now()}`;
+  const isolatedUrl = new URL(databaseUrl!);
+  isolatedUrl.pathname = `/${isolatedDatabase}`;
+  const setupPool = new Pool({ connectionString: databaseUrl });
+  const isolated = isolatedUrl.toString();
+  const sessionId = `runtime-switch-${process.pid}-${Date.now()}`;
+  const now = new Date().toISOString();
+  let first: PersistenceService | undefined;
+  let second: PersistenceService | undefined;
+  let third: PersistenceService | undefined;
+  try {
+    await setupPool.query(`create database ${isolatedDatabase}`);
+    first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    second = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    third = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl: isolated });
+    await first.initialize();
+    await first.setCollection('sessions', [...first.getCollection<unknown[]>('sessions', []),
+      { id: sessionId, dataEpoch: first.currentDataEpoch(), title: 'Switch', status: 'EXECUTING', ownerId: 'test',
+        decisionLedgerRevision: 0, createdAt: now, updatedAt: now }
+    ]);
+    await second.initialize();
+
+    // The UI control and the chat command forward the same intent with the same
+    // Idempotency-Key. Whichever instance wins, this is one switch request.
+    const open = (service: PersistenceService) => new RuntimeSwitchStore(service, () => now).open({
+      sessionId,
+      source: 'ui_control',
+      fromRuntimeType: 'codex',
+      targetRuntimeType: 'claude_code',
+      resumeAfterSwitch: true,
+      fallbackMode: 'exclude_previous_once',
+      idempotencyKey: 'client-key-1'
+    });
+    const [a, b] = await Promise.all([open(first), open(second)]);
+    assert.equal(a.status === 'rejected' || b.status === 'rejected', false, 'neither entry point may be refused');
+    const ids = [a, b]
+      .map((outcome) => (outcome.status === 'opened' || outcome.status === 'duplicate' ? outcome.request.id : ''));
+    assert.equal(new Set(ids).size, 1, `both entry points must resolve to one request, got ${JSON.stringify(ids)}`);
+
+    await third.initialize();
+    const reopened = new RuntimeSwitchStore(third, () => now);
+    // Both instances may legitimately report `opened`: the id is derived from the
+    // logical key, so two racing writes are the same row and collapse on the
+    // primary key. The invariant that has to hold across instances is that the
+    // key produced one identity and one row, which is asserted above and in the
+    // SQL check below. Sequential replay returning `duplicate` is covered by
+    // runtime-switch-store.spec.ts.
+    const requestId = `runtime-switch:${runtimeSwitchLogicalKey({ sessionId, idempotencyKey: 'client-key-1' })}`;
+    assert.equal(reopened.get(sessionId, requestId)?.version, 1);
+
+    // A second, different switch while one is in flight is refused rather than
+    // racing the stop barrier of the first.
+    const competing = await new RuntimeSwitchStore(first, () => now).open({
+      sessionId,
+      source: 'chat_command',
+      targetRuntimeType: 'generic_llm',
+      resumeAfterSwitch: true,
+      fallbackMode: 'keep',
+      idempotencyKey: 'client-key-2'
+    });
+    assert.equal(competing.status, 'rejected');
+    assert.equal(competing.status === 'rejected' && competing.code, 'RUNTIME_SWITCH_ALREADY_IN_PROGRESS');
+
+    // Walk the barrier: preflight, stop, confirm, apply. Each accepted step is
+    // one version, so an event key can never collide or be skipped.
+    await reopened.transition(requestId, 'preflighted', {});
+    await reopened.transition(requestId, 'stopping', { stopRequestId: 'stop-1' });
+    const confirmed = await new RuntimeSwitchStore(second, () => now)
+      .transition(requestId, 'stop_confirmed', { stoppedInvocationIds: ['inv-old'] });
+    assert.equal(confirmed.status, 'applied');
+    assert.equal(confirmed.status === 'applied' && confirmed.request.version, 4);
+
+    // I1: applying is only reachable once the stop is confirmed, and a rewind to
+    // stopping would reopen admission, so it is refused across instances too.
+    const rewind = await new RuntimeSwitchStore(first, () => now).transition(requestId, 'stopping', {});
+    assert.equal(rewind.status, 'rejected');
+    assert.equal(rewind.status === 'rejected' && rewind.code, 'RUNTIME_SWITCH_ILLEGAL_TRANSITION');
+
+    await new RuntimeSwitchStore(first, () => now)
+      .transition(requestId, 'applying', { lifecycleGeneration: 3 });
+
+    const pool = new Pool({ connectionString: isolated });
+    try {
+      const rows = await pool.query<{
+        logical_key: string; status: string; version: number; target_runtime_type: string;
+        from_runtime_type: string | null; stop_request_external_id: string | null; lifecycle_generation: number | null;
+      }>(
+        `select logical_key,status,version,target_runtime_type,from_runtime_type,
+                stop_request_external_id,lifecycle_generation
+           from agent_cluster.runtime_switch_requests
+          where session_id=(select id from agent_cluster.sessions where external_id=$1)`,
+        [sessionId]
+      );
+      assert.equal(rows.rows.length, 1, 'one row per Idempotency-Key, not per entry point');
+      assert.equal(rows.rows[0].status, 'applying');
+      assert.equal(rows.rows[0].target_runtime_type, 'claude_code');
+      assert.equal(rows.rows[0].from_runtime_type, 'codex');
+      assert.equal(rows.rows[0].stop_request_external_id, 'stop-1');
+      // bigint and integer both come back as strings from node-pg for these columns.
+      assert.equal(Number(rows.rows[0].version), 5);
+      assert.equal(Number(rows.rows[0].lifecycle_generation), 3);
     } finally {
       await pool.end();
     }

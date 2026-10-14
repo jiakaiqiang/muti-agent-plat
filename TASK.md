@@ -1,180 +1,151 @@
-# TASK.md — 阶段 5：执行中补充、新需求与范围变更治理
+# TASK.md — Session Runtime 动态切换（SDD 实施）
 
-状态：实施完成，自动化验收通过，待用户确认（2026-09-19）。阶段 4 已于同日验收（用户确认），准入成立。
+状态：阶段 A（T01–T12）进行中，2026-09-26 开工。阶段 B/C 未开工。
 
-依据文档（四件套，2026-09-16 生成）：
-`docs/product/main-agent-collaboration-phase-5-spec-v1.md`（AC）、
-`docs/design/main-agent-collaboration-phase-5-plan-v1.md`（设计与落点）、
-`docs/implementation/main-agent-collaboration-phase-5-tasks-v1.md`（任务）、
-`docs/quality/main-agent-collaboration-phase-5-checklist-v1.md`（验收矩阵）。
+依据四件套（2026-09-26 生成）：
+`docs/product/session-runtime-switch-spec-v1.md`（SRS-AC1–AC12）、
+`docs/design/session-runtime-switch-plan-v1.md`（设计与落点）、
+`docs/implementation/session-runtime-switch-tasks-v1.md`（T01–T43）、
+`docs/quality/session-runtime-switch-checklist-v1.md`（验收矩阵）。
+
+本轮范围：**只做阶段 A（T01–T12）**，用户已确认。阶段 A 退出条件明确要求
+「不声明 Runtime 已可切换」——合同、状态机、持久化结构可独立测试即达标。
 
 ## 已核实的代码事实（开工前读出，不是设计愿望）
 
-- `SessionFollowUpMessage`（`packages/shared/src/contracts.ts:2280`）已有队列语义：
-  `status: 'queued' | 'planning' | 'executing' | 'completed' | 'failed' | 'cancelled'`、
-  `sourceEventId`、`workItemId`、`routingId`、`handlingPlan`。**没有** base 版本字段
-  （`baseWorkItemRevision` / `baseWorkflowRunId`）——这是 AC3/AC4 要补的洞。
-- 队列存在 session 投影上：`session.pendingFollowUpMessages`，写入方只有
-  `context-management.service.ts:703/727`（`applyRoutingDecision`）。
-- `UserMessageHandlingPlan.intent` 已有 `'question' | 'constraint' | 'scope_change' | 'stop' | 'other'`，
-  但 `route-application.service.ts` 的 `handlingPlanFromDecision` 把 `requiresBriefRevision`
-  简化为 `scopeRelation !== 'same_requirement'`，且 `affectedTaskIds` / `affectedAgentIds`
-  恒为空数组 —— 影响分析没有真实来源。
-- **仓库中没有任何 ChangeRequest 实体/状态机**（grep `ChangeRequest` 无业务命中），
-  plan §2.1 列的状态（received → analyzing → waiting_user → deferred/rejected/
-  stopping → revising → waiting_confirmation → ready）需要从零建。
-- 复用已具备的基础：阶段 3 `DiscussionStore`（有界只读委派、成员确认卡）、
-  阶段 4 `RequirementDocumentStore`（文档修订 + 确认绑定）、
-  `WorkflowStartStore`（逻辑键含 documentRevision，重确认后自然是新启动请求）。
+- `RuntimePreference`（`packages/shared/src/contracts.ts:1488`）只有三个字段：
+  `preferredRuntimeType` / `preferredModelId` / `allowedRuntimeTypes`。
+  **没有** `fallbackRuntimeTypes`、**没有** `revision` —— T03 要补的就是这两个。
+- `SystemAgentRuntimePolicy`（同文件 1524）是 `RuntimePreference & { role, updatedAt }`，
+  所以给 RuntimePreference 加字段会**同时**影响系统 Agent 策略类型，T03 必须确认这是期望的。
+- `ExecutionTerminationKind`（3250）九个值里**没有** `runtime_switch`；
+  `user_paused`、`user_cancelled` 已存在且语义独立 —— T05 要新增而不是复用。
+- `RuntimeAttemptTrace`（3110）有 `attemptGroupId` / `attempt` / `retryOfInvocationId` /
+  `fallbackFromRuntimeType` / `fallbackReason`，**没有** `trigger` / `switchRequestId` /
+  `switchFromRuntimeType` —— T05 要补这三个。
+- `apps/server/src/modules/runtime-switch/` **不存在**，T07/T08 是从零建模块。
+- `runtime_switch` 全仓零命中（业务代码），确认无既有实现可复用。
+- 复用而非另建：`SessionLifecycleStore`（已有 generation fence）、stop-state、
+  `ChangeRequestStore`（阶段 5 刚建，状态机 + 幂等 + generation 守卫的**范式参考**）、
+  `InvocationResolverService`（已有 allowlist/Workspace/Capability/Tool 校验）。
+- 工作区已有 13 个文件未提交改动（主 Agent 兜底派发 + 契约确认门禁 + 前端协作视图），
+  与本 SDD 文件层面重叠但逻辑不冲突。T01/T02 要动的 spec 文件在其中，需增量追加不覆盖。
 
-## T1 扩展执行期消息合同（AC1/AC3/AC5/AC6）
+## 阶段 A 任务清单（做完才勾）
 
-- [x] T1-1 shared 合同：ChangeRequest 聚合（sourceEventId、baseWorkItemRevision、
-      baseWorkflowRunId、affectedRefs、analysisRevision、choice、status、generation）
-      + 状态迁移表，browser-safe（不 import `node:*`），导出 index 并重建 dist
-      → `change-request-contracts.spec.ts` 8/8（版本钉死、逻辑键含需求修订、单向迁移、
-      已决状态不可重开、deferred 只能回到 analyzing、分析时效三分支）；shared 168/168；
-      5 workspace typecheck 干净
-- [x] T1-2 多意图消息拆段：一条消息含「停止 + 补充」时停止优先处理，其余持久化待办，
-      不丢段、不把整条当停止
-      → `splitExecutionMessageSegments`：停止段前置、无段丢弃、同优先级保持稳定顺序
-      （重放同计划）、空消息返回空数组而非占位段
-- [x] T1-3 持久化 store（file + PostgreSQL V16 **八处**接线 + cutover seed + schema 门禁）：
-      同一 sourceEventId 幂等、稳定排序、generation fencing
-      → `change-request-store.spec.ts` 10/10（一条消息一个请求、admission/generation 拒绝、
-      分析绑定版本、过期分析被拒且不推进、选择只记一次且冲突选择不覆盖、未提供的选项被拒、
-      deferred 需重新分析、重启保留分析与选择、不存模型正文）；
-      schema/cutover 18/18；隔离 PostgreSQL **15/15**（V16 跨实例一条消息一行、只记一个选择）；
-      四门禁全绿
+### 失败回归固化（T01–T02）
 
-  踩坑（对比阶段 4 的 V15 教训）：接线改为**逐处 grep 核对 + 每处改完即 typecheck**，
-  八处一次到位。V16 唯一的生产缺陷是 writer 插入列名写成 `choice` 而表列为 `user_choice`。
-  另外三次 PG 失败都在**测试自身**：①并发两调用都返回 `opened` 被我误判为「去重失效」——
-  实际 PG 始终只有 1 行（主键 + `logical_key` 唯一约束保证），断言对快照重叠情形过强；
-  ②校验查询 select 了不存在的 `choice` 列；③`analysis_revision` 是 bigint，node-pg 返回字符串。
-  教训：PG 不变量要查**列值**，不要拿内存态 JSON 的 id 当证据。
+- [x] T01 固化 PAUSED 下「切换到 Claude Code 继续」被 queued 的失败回归（AC2）
+      `sessions.service.spec.ts` 新增 1 条：断言的全是**坏行为**（deferred=true、
+      status 停在 PAUSED、queued、preferredRuntimeType 仍是 codex、processNextFollowUp
+      排不空队列）。注释写明 T29 修好时这条必须**重写为断言切换**，不许放宽或删除。
+- [x] T02 固化用户 Abort 不触发 Provider fallback + 现有 retry/fallback 基线（AC7）
+      `orchestrator.service.spec.ts` 新增 1 条，覆盖两种停止形状：
+      ① `status:'cancelled'` 且同时带 retryable providerFailure → 只调 1 次、不换 Runtime；
+      ② 执行中 abort signal → attempt 循环立即停，且全程无
+      `RUNTIME_PROVIDER_FALLBACK` / `RUNTIME_PROVIDER_RETRY_SCHEDULED` 事件。
+      读出的三道既有闸门（orchestrator.service.ts:7818/7819/7821）与 Spec §7.4 一致。
 
-## T2 实现主 Agent 影响分流（AC1/AC2/AC3）
+### 共享合同（T03–T06）
 
-- [x] T2-1 只读状态询问走确定性读投影直答，不触发讨论、不调多次模型
-      证据：shared `execution-progress-projection.spec.ts` 10/10（措辞取自固定词表，阶段名只来自
-      发布快照，未声明的 currentNodeId 不编造阶段；blocked/failed 任务、等待原因
-      approval_gate / revision_handoff / upstream_rerun、待处理变更都进答案）；
-      `execution-status-question.spec.ts` 6/6 + 既有守卫 6/6（含「顺便加一个导出按钮」不短路、
-      控制命令与 @ 专家不短路）；`sessions.service.spec.ts` 110/110（新增 2 条：状态询问
-      runtimeCalls=0 且不进语义路由、夹带需求的消息仍进路由）。
-- [x] T2-2 执行中 @ 专家 → 有界只读委派（复用阶段 3 `DiscussionStore`），不重跑全部专家/节点
-  证据：`execution-status-question.spec.ts` 16/16（新增 4 条咨询匹配用例：影响类提问命中；
-  「能不能顺便加一个导出按钮」等带需求的提问**不**命中，仍走变更路径；控制命令/纯陈述不命中；
-  超长消息回落语义路由）；`sessions.service.spec.ts` 100/100（执行中 @architect 提问只产生
-  1 次定向咨询、不再拆任务、不改契约、不取消节点、状态仍 EXECUTING）。
-  实现：orchestrator 新增 `consultDuringExecution`，复用阶段 3 `runMentionDelegations`
-  （有界只读委派、回复落在 delegation 上进入主 Agent 综合）；`sendMessage` 在 EXECUTING +
-  有 @ + 命中咨询匹配时短路。缺口：`prepareFollowUpExecution` 原先只在 @ 人数>1 或
-  discussionRequired 时才走委派，单个 @ 会落到跟进执行路径（重新拆任务）。
-- [x] T2-3 范围变更 → 影响分析（受影响任务/文件/确认版本 + 代价），用户未选前不改当前契约
-  证据：`deterministic-command-guard.service.spec` + `execution-status-question.spec` 13/13
-  （`matchExecutionScopeChange`：补充类措辞成立；只读问句/控制命令/超长消息不成立）；
-  `sessions.service.spec` 101/101 新增「执行期范围变更开一个已分析的 ChangeRequest 且不动契约」：
-  一条消息一个请求、状态停在 `waiting_user`、卡片 reason=`execution_scope_change` 带
-  受影响任务与可选项、`requiresBriefRevision=false`、不触发跟进重规划、会话仍 `EXECUTING`、
-  重复提交不二次排队。四门禁全绿。
+- [x] T03 RuntimePreference 增 `fallbackRuntimeTypes` / `revision` + 规范化校验（AC6、AC11）
+      新建 `packages/shared/src/runtime-switch-contracts.ts`（browser-safe，已导出 index + 重建 dist）。
+      `normalizeRuntimePreference` 6 条用例绿：去重保序、过滤非法值、**allowlist 外的
+      preferred 被丢弃而非扩大 allowed**、fallback ⊆ allowed 且不含 preferred、
+      revision 只收非负整数（0 是有效初版）、不改也不别名调用方输入。
+      顺带修掉一处漂移源：`RuntimeType` 的运行时值列表原先只在服务端
+      `runtime-config.ts` 有一份，已提为 shared `RUNTIME_TYPES` + `isRuntimeType`，
+      服务端改为 re-export，避免 shared/server 两份清单各自演化。
+      **一处断言方向纠正**：我最初断言「无 allowlist 时 fallback 顺序应被丢弃」，
+      这是错的——顺序不授权，授权由解析期交集决定，丢顺序只静默吞用户意图。
+      已改为保留顺序并注释说明 I5 的真实含义。
+- [x] T04 RuntimeSwitchRequest / status / fallbackMode 合同（AC8、AC9）
+      6 条用例绿。状态机把 I1 编码进迁移表：`applying` **只能**从 `stop_confirmed` 到达，
+      `requested`/`preflighted`/`stopping` 都到不了；`stopping` 不能自环也不能回退
+      （回退等于重开 admission）；终态 `completed`/`failed` 无出边。
+      `preflighted → stop_confirmed` 这条边是给「无活动 Invocation」场景留的直通路径。
+      `canRetryRuntimeSwitchFrom` 只拒 `resuming`（写任务无可信候选时等人，I8）。
+      幂等键含 sessionId（同一客户端键跨 Session 不得并成一个请求）；
+      事件键 `runtime-switch:<id>:<version>` 使重放成为 no-op。
+- [x] T05 `runtime_switch` termination + attempt trace 三字段（AC4、AC7）
+      shared 加 `runtime_switch` kind + `RuntimeAttemptTrigger`（initial/retry/fallback/
+      manual_switch）+ `switchRequestId` / `switchFromRuntimeType`（与既有
+      `fallbackFromRuntimeType` 分开，两者语义不同）。
+      服务端三处接线：安全文案、`isExecutionTermination` 白名单、disposition。
+      **disposition 归 `stop` 不是 `replace`**：`terminationRetryable` 由 disposition
+      推导，归 `replace` 会让 retryable=true，等于允许 provider 重试链重启刚被切换
+      屏障停掉的那次调用。2 条新用例锁死 retryable=false 且 source 记为 user。
+- [x] T06 API / Event / Runtime 合同文档精确增量（AC12）
+      三处按仓库既有「日期追加章节」约定写入，未改历史章节编号：
+      `api-contract-v0.1.md` §Session Runtime 动态切换 API（POST/GET、Idempotency-Key、
+      409 语义、灰度开关关闭时不退化为排队）；
+      `event-contract-v0.1.md` §Runtime 切换事件（payload 字段白名单、
+      `runtime-switch:<id>:<version>` 幂等键、旧客户端安全忽略）；
+      `runtime-contract-v0.1.md` §Runtime 主动切换接管（`runtime_switch` disposition=stop、
+      trigger 四值、禁跨 Runtime 传 cliSessionId、generation fence）。
+      `npm run test:harness:v2-only-docs` 10/10 绿。
 
-## T3 实现用户选择与暂停修订（AC3/AC4）
+### 状态机与持久化（T07–T10）
 
-- [x] T3-1 选择「停稳后修订」：先停稳 + 冻结未完成写回（复用现有停止屏障），再建文档新修订
-  证据：`resolveExecutionScopeChange`（sessions.service）+ controller 路由
-  `POST /sessions/:id/execution-scope-change`；三条新用例（停稳顺序、defer 不停运行、
-  重放幂等/改选被拒）随 `sessions.service.spec` 104/104 绿。顺序上先 `pause()` 再
-  `changeRequests.transition('revising')`，只冻结未完成写回（applied 不动）。
-- [x] T3-2 旧批准失效、重确认后按同一范围重新校验流程；复用已完成结果必须有版本匹配证据
-  证据（两部分）：
-  ① shared `result-reuse-contracts.ts` 8/8：`canReuseCompletedResult` 逐项校验
-     needRevision/docRevision/contentHash/inputFingerprint/fileHashes，缺证据即不可复用
-     （absence of proof is not proof）；只校验结果自己声明过的文件，无关文件不阻断复用。
-  ② 真实缺陷已修：`acceptanceFingerprint` 原先只含任务/Agent/工具/工作区，**不含需求与文档
-     版本**，导致需求改版后 `orchestrator.service.ts:2437` 仍命中旧验收 checkpoint，把旧范围
-     的验收算作新需求成果。已把 requirementVersion 并入指纹并在编排器接线
-     （`requirementVersionBinding`，无文档的会话返回 undefined 保持指纹稳定）。
-     `task-acceptance-preflight.spec` 4/4、`orchestrator.service.spec` 69/69。
-  「旧批准失效 + 重确认后按同一范围重新校验」沿用阶段 4 已验收机制：`assertConfirmationCurrent`
-  拒过期确认，`WorkflowStartStore` 逻辑键含 documentRevision + definitionHash，重确认自然是新
-  启动请求并重走成员/版本校验，不另造一套。
-  **未接线**：`isLateResultForSupersededRevision` 目前只有合同与单测，迟到回调的实际拦截点
-  与 T5-2 的「删除后回调只允许审计」同族，统一在 T5-2 接线。
+- [ ] T07 纯状态迁移表 + 非法迁移测试（AC8、AC9）
+      `requested → preflighted → stopping → stop_confirmed → applying → resuming → completed`
+      任意阶段可 `→ failed` 并记 failureStage；终态不可回退
+- [ ] T08 file collection：创建、查询、幂等键、CAS（AC8）
+- [ ] T09 relational 映射 + migration 单元测试（AC9、AC12）
+      迁移号按仓库最新实际编号追加，不预占
+- [x] T10 PostgreSQL 原子更新与并发幂等集成夹具（AC8、AC12）
+      `postgres-migration-runner.integration.spec.ts` 新增 1 条，按仓库约定建独立库
+      （`agent_cluster_rs_<pid>_<ts>`）跑完 drop，不碰主库；无
+      `RELATIONAL_TEST_DATABASE_URL` 时 skip。
+      覆盖：同 Idempotency-Key 跨实例并发折叠成一行、不同键的第二个切换被
+      `RUNTIME_SWITCH_ALREADY_IN_PROGRESS` 拒、走完屏障四步后
+      `version=5`/`status=applying`/`lifecycle_generation=3` 均在**真实列值**上核对、
+      `stop_confirmed → stopping` 回退跨实例也被拒（I1）。
+      **两处自身断言纠错**（都是阶段 5 同款坑）：
+      ① 并发下两个实例各自事务看不到对方，双方都返回 `opened` 是正常的，
+         PG 主键折叠成一行；原先断言内存 `list().length === 1` 对快照重叠情形过强，
+         已改为断言两边 id 相同 + SQL 只有一行。
+      ② 拒绝码写成 `ALREADY_IN_FLIGHT`，实际是 `ALREADY_IN_PROGRESS`。
+      实跑证据：Docker `agent-cluster-postgres` 容器上定向 1/1 绿；
+      干净独立库全套 **19/19 绿**（含既有 18 条），确认 V18 无回归。
+      注意：直接对主库 `agent_cluster` 跑会有 9 条失败，错误是
+      `CONTENT_UNAVAILABLE: content object does not exist` ——
+      该开发库已跑 4 天且本地内容存储被清理过，属**环境数据失效不是代码回归**，
+      已在干净库上交叉验证。后续跑这批集成测试一律用独立库。
 
-## T4 实现新需求排队/切换（AC5/AC6）
+### 命令解析（T11–T12）
 
-- [x] T4-1 相关/独立新需求各自 WorkItem；只有显式继承的有效决定/产物进入新需求
-  证据：缺口是产物继承**零校验**（决定早有 `assertInheritedDecisions`，产物 id 直接照抄，
-  跨会话 id 或拼写错误都能被记为「继承证据」）。新增 `assertInheritedArtifacts`：
-  只接受本会话 `artifactIdsBySession` 里的产物。`context-management.service.spec` 22/22 绿
-  （新增 2 条：未知产物 id 被拒 / 真实产物仍可显式继承）。
-  踩坑：既有用例 14 回归，根因是它的夹具依赖旧的零校验行为——产物只作为内存数组传给切片函数、
-  从未落库；已改为按真实系统方式先落库再继承，守卫按 AC5 保留。
-- [x] T4-2 排队幂等有序可查看；当前运行 完成/失败/取消 时提示下一需求，
-      队列存在**不等于**自动获得执行授权（仍走文档 + 流程选择）
-  证据：`setStatus` 的终态分支（COMPLETED/FAILED/CANCELLED，且前态非终态）新增
-  `offerNextRequirement`：按 `changeRequests.deferred()` 的排队顺序发 reason=`next_requirement_pending`
-  确认卡，卡片带 `changeRequestIds` + `summaries`，文案明确「排队不等于已获批执行」。
-  用 `events.createOnce` + 队列 id 集合的 hash 做键，重放终态不会发第二张卡；队列为空不发卡。
-  `sessions.service.spec` 107/107 绿（新增 3 条：提示但不自动启动执行、幂等且顺序稳定、空队列不造卡）。
-  踩坑：我最初用 `control(session, 'COMPLETED')` 驱动终态，被 `assertControlTransition` 拒
-  （EXECUTING→COMPLETED 不是合法控制边）；生产是由执行完成路径经 `setStatus` 到达终态，
-  已改为按生产路径驱动。
+- [x] T11 Runtime 别名规范化 + 明确切换句式解析（AC1、AC2）
+      新建 shared `runtime-alias.ts`：`runtimeDisplayName` / `resolveRuntimeAlias` /
+      `matchRuntimeSwitchCommand`，别名表（含中文「克劳德」、CC 缩写等）只此一份。
+      解析器接进既有 `DeterministicCommandGuardService.matchRuntimeSwitch`，
+      不新建 `sessions/runtime-switch-command.ts`——**这是对 SDD 落点的有意偏离**：
+      仓库已有确定性命令唯一归口（6 类匹配器），另建文件会造第二套别名表，
+      正好违反 Spec §7.1「别名来自统一注册表」。前端显示名散落 5 处（web
+      runtimeLabels.ts、web/desktop SessionWorkspace.vue、server runtime-config.ts）
+      是既有技术债，本任务不动，留待前端 T33/T34 收敛到 shared。
+- [x] T12 负/正样例：问句、比较、未知 Runtime、只使用、继续语义（AC1、AC2）
+      与 T11 同一份 `runtime-alias.spec.ts` 11/11 绿，负样例覆盖：
+      问句/比较（为什么、能不能、是否应该、should/can/why、区别）、
+      纯需求（「给 Claude Code 的调用加重试日志」等只提及不切换）、
+      否定（不要/别）、未知 Runtime（Cursor）、无 target、超长（>200 落语义路由）、
+      既有控制命令（继续/暂停/恢复执行不被吸收）；正样例覆盖九种切换动词双语、
+      复合「切换+继续」、「只用 X」→ target_only。
+      守卫 spec 34/34 无回归；shared 全量 227/227。
 
-## T5 接入状态投影和恢复（AC6/AC7）
-
-- [x] T5-1 双端共享队列/变更卡投影（shared 投影 + web/desktop 各自样式）
-  证据：shared `change-queue-projection.ts`（browser-safe，已导出 index 并重建 dist）9/9——
-  排队顺序按 raisedAt + id 稳定、waiting_user 与 deferred 分流、已结束状态不入队、
-  过期行带 `staleReason`、`grantsExecution:false` + `requiresReconfirmation:true`、
-  逐字段投影不带模型推理。双端各自样式：web `changeQueuePresentation.ts` 渲染单条内联列表
-  （6 条用例），desktop 同名模块渲染分组小节（8 条用例）。
-  `npm run test -w @project/web` 64 文件 / 312 用例全绿（该命令同时覆盖 desktop renderer spec）。
-- [x] T5-2 取消/删除 fencing：删除后回调只允许审计；重启保留用户选择与已完成分析，
-      不自动重播模型
-  证据：缺口是 `open()` 有 `admissionRefusal` 守卫，但 `recordAnalysis` / `recordChoice` /
-  `transition` 三个变更方法都**没有**——会话删除后迟到的分析回调、迟到的用户点击仍会写入。
-  三处统一接入 lifecycle 守卫（锁集合加 `SESSION_LIFECYCLES_COLLECTION`，按请求自身记录的
-  `generation` 比对）：删除后写入返回 `SESSION_ADMISSION_CLOSED`、恢复后旧代次返回
-  `CHANGE_REQUEST_STALE_GENERATION`，记录保持可读供审计。
-  `change-request-store.spec` 15/15 绿（新增 5 条：删除后分析被拒且不落库、删除后选择被拒、
-  恢复后旧代次分析被拒、重启保留选择与分析且 analysisRevision 不被重启抬升、
-  已删除会话队列只读可审计）。
-
-## T6 验证执行中交互矩阵（AC1–AC7）
-
-- [x] T6-1 多意图、重复提交、影响过期、旧结果、流程不支持恢复、同会话串行/跨会话并行
-      已由 shared 合同/投影、ChangeRequestStore、SessionsService、WorkflowRuntimeService
-      定向回归覆盖：停止优先、版本过期拒绝、迟到结果/旧 generation fencing、排队稳定顺序、
-      终态提示不自动授权、跨会话停止隔离、删除后只读审计。
-- [x] T6-2 独立 PostgreSQL（新集合）+ E2E + 四门禁
-      PostgreSQL `postgres-migration-runner.integration.spec.ts` 15/15；
-      `npm run test:e2e:phase-5-execution-change` exit 0；
-      `npm run typecheck`、`npm run test`、`npm run test:harness`、`npm run build` 均 exit 0。
-
-### T6 验证记录（2026-09-19）
-
-- E2E 使用隔离临时工作区和 mock Runtime，覆盖多意图停止优先、Web/Desktop 重复提交幂等、
-  暂停后修订、同会话 FIFO 排队、跨会话停止隔离和执行中 `@` Agent 定向咨询。
-- PostgreSQL 使用一次性独立数据库和独立连接，变更请求跨实例只保留一条记录并只接受一次选择。
-- 未调用真实付费模型，未执行部署或发布；真实浏览器快照、进程级崩溃注入和跨实例 CAS 仍按遗留项处理。
-
-## 纪律（每个任务都要做，做完才勾）
+## 纪律（沿用阶段 5 已验证的教训）
 
 1. 先写失败用例，再实现。
-2. 新 shared 模块：导出 `packages/shared/src/index.ts` + 重建 dist，否则 server 解析旧 dist。
-3. server spec 必须在 `apps/server` 下跑 tsx（装饰器）。
-4. 跑全量 `npm run test` 时注意失败可能在**别的 spec 文件**里（阶段 4 T3 教训：
-   单跑 `sessions.service.spec.ts` 全绿，真实回归在 `workflow-session-flow.spec.ts`）。
-5. 四门禁 + 隔离 PostgreSQL 全绿后提交并推送，用 `git status -sb` 的 ahead 标记核对推送。
+2. 新 shared 模块：导出 `packages/shared/src/index.ts` + **重建 dist**，
+   否则 server 解析旧 dist，只改 src 的修复会静默失效。
+3. shared 不能 `import node:*`（被 web/desktop 消费，只跑 shared 门禁是假绿）。
+4. server spec 必须在 `apps/server` 下跑 tsx（装饰器报错先查 cwd 不是查代码）。
+5. PostgreSQL 不变量要查**列值**，不要拿内存态 JSON 的 id 当证据。
+6. relational 接线是多处的：逐处 grep 核对 + 每处改完即 typecheck。
+7. 跑全量 `npm run test` 时注意失败可能在**别的 spec 文件**里。
+8. 阶段 A 不声明 Runtime 已可切换；不改 Checklist 的完成标记。
 
-## 遗留（跨阶段，未完成）
+## 阶段 B/C（本轮不做，留给后续会话）
 
-- [ ] 中断会话续接 G3：`npm run dev:restart-server` + 真实场景手测（上一专项人工项）。
-- [ ] 跨实例 CAS（讨论/预算 run 的并发写守卫），阶段 3 T1-3 起延后。
-- [x] Usage 评测（冷/热缓存、输入/输出、缓存读写、TTFT/总耗时）归阶段 6并已接线；中转未返回字段保持 unknown。
-- [ ] 美元计费、priceVersion、费用预算和账单核对归后续计费专项，不阻断当前正常流程（见总计划第 21 节）。
-- [ ] 阶段 4 带入：真实浏览器渲染快照、进程级崩溃注入、流程「已下架」时序竞争、
-      `blocked` 委派状态无写入方。
+- T13–T32 服务端切换闭环：API、预检、停止屏障、原子应用、Context 接管、fallback、恢复、事件。
+- T33–T43 前端与整体验收：切换 API/快照/SSE 收敛、三态展示、E2E、四门禁、Checklist 回填。

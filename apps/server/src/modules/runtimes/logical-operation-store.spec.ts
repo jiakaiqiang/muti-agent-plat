@@ -15,6 +15,22 @@ function withEnv(name: string, value: string | undefined, fn: () => void) {
   }
 }
 
+test('an active control call keeps one correction after deadline but cannot start another attempt', async () => {
+  const persistence = new PersistenceService({ enabled: false });
+  let now = 1_000;
+  const store = new LogicalOperationStore(persistence, () => now);
+  const operation = await store.begin({ id: 'late-correction', sessionId: 'session', phase: 'task_acceptance' });
+  await store.reserve('session', operation.id, 'active', { executionKind: 'internal' });
+  now = Date.parse(operation.deadlineAt) + 1;
+  assert.equal(await store.reserveCorrection('session', operation.id), true);
+  assert.equal(await store.reserveCorrection('session', operation.id), false);
+  await store.settle('session', operation.id, 'active', 'confirmed');
+  await assert.rejects(store.reserve('session', operation.id, 'retry'), /OPERATION_BUDGET_EXHAUSTED/);
+  const inactive = await store.begin({ id: 'inactive', sessionId: 'session', phase: 'task_acceptance' });
+  now = Date.parse(inactive.deadlineAt) + 1;
+  assert.equal(await store.reserveCorrection('session', inactive.id), false);
+});
+
 test('task acceptance uses a configurable phase budget instead of the old hard-coded 120 seconds', () => {
   withEnv('PHASE_TIMEOUT_TASK_ACCEPTANCE_MS', '240000', () => {
     assert.equal(operationPolicy('task_acceptance').timeoutMs, 240_000);

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DecisionRecord, SummaryMemory } from '@agent-cluster/shared';
 import { deriveSummaryMemory, reconcileOpenQuestions } from './summary-memory-derivation.js';
+import { unresolvedBriefQuestions } from './brief-question-answers.js';
 
 function decision(overrides: Partial<DecisionRecord>): DecisionRecord {
   return {
@@ -62,6 +63,23 @@ test('event prose is not accepted as a confirmed fact without a DecisionRecord',
   const derived = deriveSummaryMemory({ ...base, decisions: [] });
   assert.deepEqual(derived.decisions, []);
   assert.equal(derived.confirmedFacts.some((fact) => fact.startsWith('Event:')), false);
+});
+
+test('a confirmed answer stays resolved when the sixth Brief repeats the same question', () => {
+  const answered = decision({
+    id: 'answer-1', question: '是否支持 CSV？', answer: '不支持，只支持 Excel。',
+    content: '问题：是否支持 CSV？\n回答：不支持，只支持 Excel。'
+  });
+  let previous: SummaryMemory | undefined;
+  for (let version = 1; version <= 6; version += 1) {
+    const derived = deriveSummaryMemory({
+      ...base, previous, decisions: [answered], openQuestions: ['是否支持 CSV?']
+    });
+    assert.deepEqual(derived.openQuestions, []);
+    assert.deepEqual(unresolvedBriefQuestions(['是否支持 CSV?'], [answered]), []);
+    previous = derived;
+  }
+  assert.deepEqual(unresolvedBriefQuestions(['是否支持 PDF？'], [answered]), ['是否支持 PDF？']);
 });
 
 test('revised requirements drop stale facts and retain only current confirmed constraints and acceptance', () => {

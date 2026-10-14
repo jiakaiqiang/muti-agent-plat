@@ -430,3 +430,29 @@ async function waitForReadyIndex(workspace: LocalWorkspace, generation: number) 
   }
   throw new Error(`Workspace index did not advance beyond generation ${generation}.`);
 }
+
+
+test('nested Python and TypeScript workspaces exclude virtualenv evidence and reject binary text reads', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-runtime-polyglot-'));
+  let workspace: LocalWorkspace | undefined;
+  try {
+    await mkdir(join(root, 'python', '.venv', 'analysis'), { recursive: true });
+    await mkdir(join(root, 'typescript', 'src'), { recursive: true });
+    await writeFile(join(root, 'python', '.venv', 'analysis', 'lib.py'), 'dependency');
+    await writeFile(join(root, 'python', 'pyproject.toml'), '[project]');
+    await writeFile(join(root, 'typescript', 'package.json'), '{}');
+    await writeFile(join(root, 'typescript', 'src', 'main.ts'), 'export {}');
+    await writeFile(join(root, 'native.pyd'), Buffer.from([77, 90, 0, 255]));
+    await writeFile(join(root, 'unknown.txt'), Buffer.from([77, 90, 0, 255]));
+    workspace = new LocalWorkspace(await createWorkspaceState(root), { watch: false });
+    await waitForReadyIndex(workspace, 0);
+    const result = await workspace.queryWorkspaceIndex({ query: '分析当前项目架构', intent: 'analysis' });
+    assert.deepEqual(result.entrypoints, ['python/pyproject.toml', 'typescript/package.json']);
+    assert.ok(result.detectedStack.includes('python'));
+    assert.ok(result.detectedStack.includes('node'));
+    assert.ok(result.entries.some(e => e.path === 'typescript/src/main.ts'));
+    assert.ok(result.entries.every(e => !e.path.includes('.venv') && !e.path.endsWith('.pyd')));
+    await assert.rejects(workspace.readFile({ path: 'native.pyd' }), /WORKSPACE_EVIDENCE_UNSUPPORTED/);
+    await assert.rejects(workspace.readFile({ path: 'unknown.txt' }), /WORKSPACE_EVIDENCE_UNSUPPORTED/);
+  } finally { workspace?.close(); await rm(root, { recursive: true, force: true }); }
+});

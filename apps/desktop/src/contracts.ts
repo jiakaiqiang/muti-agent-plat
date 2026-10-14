@@ -26,6 +26,8 @@ export interface DesktopBridge {
   checkUpdate(): Promise<void>;
   downloadUpdate(): Promise<void>;
   installUpdate(): Promise<void>;
+  upgrade(): Promise<void>;
+  onUpdateStatus(callback: (status: UpdateStatus) => void): () => void;
   setNotificationsEnabled(enabled: boolean): Promise<void>;
   testNotification(): Promise<void>;
   openWebWorkflowManager(): Promise<void>;

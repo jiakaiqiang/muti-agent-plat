@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isBinaryWorkspacePath } from '@agent-cluster/shared';
 import { createReadStream } from 'node:fs';
 import { open, stat } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
@@ -24,6 +25,7 @@ export async function readServerLocalFile(args: ReadServerLocalFileArgs): Promis
     throw new Error(`workspace read denied for sensitive path: ${relative}`);
   }
 
+  if (isBinaryWorkspacePath(relative)) throw new Error(`workspace read rejected binary file: ${relative}`);
   await assertWorkspacePathWithinRoot(rootPath, relative);
 
   const metadataBefore = await stat(absolute);

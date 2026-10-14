@@ -16,6 +16,8 @@ import {
 } from '@element-plus/icons-vue'
 import { useAgentStore } from '@/stores/agent'
 import { useAppUiStore } from '@/stores/appUi'
+import { useLocalRuntimeStore } from '@/stores/localRuntime'
+import RuntimeUpgradeDialog from '@/components/RuntimeUpgradeDialog.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -25,6 +27,7 @@ const unsubscribeNotification = window.agentClusterDesktop?.onOpenSession?.(sess
 onUnmounted(() => unsubscribeNotification?.())
 const agentStore = useAgentStore()
 const appUiStore = useAppUiStore()
+const localRuntimeStore = useLocalRuntimeStore()
 const isDesktop = true
 const { routeRenderError } = storeToRefs(appUiStore)
 
@@ -47,6 +50,7 @@ const activePath = computed(() => {
 })
 
 const primaryAgent = computed(() => agentStore.agents[0])
+let unsubscribeUpdateStatus: (() => void) | undefined
 
 watch(
   () => route.fullPath,
@@ -67,7 +71,29 @@ onMounted(() => {
   if (!agentStore.agents.length) {
     void agentStore.loadAgents().catch(() => undefined)
   }
+  void Promise.all([
+    localRuntimeStore.loadDevices(),
+    localRuntimeStore.resolveLaunchServerUrl()
+  ]).catch(() => undefined)
+  unsubscribeUpdateStatus = window.agentClusterDesktop?.onUpdateStatus?.(status => {
+    const upgradeId = localRuntimeStore.upgradeProgress?.upgradeId ?? localRuntimeStore.upgradeInfo?.upgradeId
+    if (!upgradeId) return
+    const state = ({
+      checking: 'checking', available: 'available', downloading: 'downloading',
+      downloaded: 'stopping', error: 'failed'
+    } as Record<string, import('@agent-cluster/shared').LocalRuntimeUpgradeProgressState | undefined>)[status.state]
+    if (!state) return
+    localRuntimeStore.updateUpgradeProgress({
+      upgradeId,
+      state,
+      percent: status.percent,
+      message: status.error,
+      updatedAt: new Date().toISOString()
+    })
+  })
 })
+
+onUnmounted(() => unsubscribeUpdateStatus?.())
 </script>
 
 <template>
@@ -112,6 +138,7 @@ onMounted(() => {
         <component :is="Component" :key="viewRoute.meta.section === 'session' ? 'task-workspace' : viewRoute.path" />
       </RouterView>
     </main>
+    <RuntimeUpgradeDialog />
   </div>
 </template>
 

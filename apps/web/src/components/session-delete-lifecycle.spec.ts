@@ -5,6 +5,19 @@ import { describe, expect, it } from 'vitest'
 const source = readFileSync(resolve('src/components/SessionWorkspace.vue'), 'utf8')
 
 describe('Session deletion lifecycle', () => {
+  for (const [client, file] of [
+    ['Web', 'src/components/SessionWorkspace.vue'],
+    ['Desktop', '../desktop/renderer/components/SessionWorkspace.vue']
+  ] as const) {
+    it(`${client} retains archive restore without a stale deleted-session restore binding`, () => {
+      const workspace = readFileSync(resolve(file), 'utf8')
+      expect(workspace).toContain('@restore-archive="restoreArchivedSession"')
+      expect(workspace).toContain('@delete="requestDeleteSession"')
+      expect(workspace).not.toContain('@restore="restoreDeletedSession"')
+      expect(workspace).not.toContain('restoreDeletedSession')
+    })
+  }
+
   it('opens a visible confirmation before invoking the delete request', () => {
     expect(source).toContain('@delete="requestDeleteSession"')
     expect(source).toContain('aria-label="确认删除会话"')

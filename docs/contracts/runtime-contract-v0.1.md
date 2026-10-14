@@ -4,7 +4,13 @@
 
 ## 1. 目标
 
-群聊中断与纠正补充（2026-09-14）：本地 invocation.cancel 后以 CLI 子进程结束后发送的 invocation.result 或受支持的 stopped 回执确认停止；平台等待回执，超时或停止期间断线以 `details.stopUnconfirmed=true` 表达未知，不规范化成“已经停止”。未确认调用登记保留至匹配设备/工作区的结束回执，迟到结果不应用业务内容。契约生成/修订默认总时限 1200000ms，覆盖 Provider 重试；新操作的 0 或无效配置采用有限默认值并记录诊断，不关闭操作总预算。StructuredOutput 纠正按 toolCallId 去重，默认纠正时限 300000ms，并受同一 LogicalOperation 的截止、尝试上限及一次纠正额度限制；达到边界取消当前句柄。流式和最终返回事件共用统计；无法观察的 CLI 内部调用次数仍未知。输出合同错误及停止未确认不触发 Provider 自动重试。
+请求健康实施合同（2026-09-29，代码候选，非上线声明）：共享 `RuntimeObservation` 与 `RuntimeHealthSnapshot` 的权威定义为 `packages/shared/src/runtime-request-health.ts`。健康 stage/health 与 SessionStatus、LogicalOperation 及可信停止状态正交。接收端单调时间、generation、observerEpoch、sequence 和有限 native-event 去重共同保护投影；思考关闭/隐藏时不要求 reasoning 事件。公开观察只含活动计数与身份，诊断 JSON 中的思考正文/签名会被过滤，不能把诊断清洗器视为任意自由文本的完整隐私证明。
+
+Local Runtime 在现有协议 11 上增量协商 `requestHealthProtocol:1`，只有声明该能力的连接可以接收 invocation probe。Probe 精确匹配设备、工作区、invocation、generation、epoch，只读本地进程实例登记；`alive/pending/unknown` 不证明模型计算，未提供上游查询时 `providerRequestQuery=unsupported`。单调用一个、全局最多 32 个探测；探测超时只释放探测。旧 CLI 无 probe 时降级未知，禁止为检测状态另发 prompt。真实旧 CLI 对 partial 参数的兼容性和跨版本更新仍需专项验证。
+
+健康快照与转移事件/outbox 原子提交至 `runtimeHealthBySession`；辅助保存失败只进入 `pendingSync` 并有界重试，不取消或重跑模型。重启后未结束快照只作为 historical unknown，不能赋予等待/停止/恢复权限或复活进程。用户等待只更新选择确认，不更新模型进展和预算；可信停止和 session 生命周期仍先于健康投影。专项实施与剩余门禁见 `docs/quality/runtime-request-health-checklist-v1.md`。
+
+群聊中断与纠正补充（2026-09-14，等待语义于 2026-09-29 修订）：本地 invocation.cancel 后以 CLI 子进程结束后发送的 invocation.result 或受支持的 stopped 回执确认停止；平台等待回执，超时或停止期间断线以 `details.stopUnconfirmed=true` 表达未知，不规范化成“已经停止”。未确认调用登记保留至匹配设备/工作区的结束回执，迟到结果不应用业务内容。契约生成/修订默认操作预算 1200000ms，覆盖 Provider 重试；新操作的 0 或无效配置采用有限默认值并记录诊断，不关闭准入预算。StructuredOutput 纠正按 toolCallId 去重，默认 300000ms 是等待观察阈值，不仅因到时取消当前句柄；一次纠正额度、真实修复失败和停止屏障仍生效。原操作截止及尝试上限不续期，新平台调用和异常恢复仍做预算准入。流式和最终返回事件共用统计；无法观察的 CLI 内部调用次数仍未知。输出合同错误及停止未确认不触发 Provider 自动重试。
 
 本合同定义 Runtime 的唯一活动输入、路由元数据、执行句柄、输出和审计边界。Runtime 输出的唯一权威源是 `packages/shared/src/runtime-contracts/`；其余 Runtime 类型以 `packages/shared/src/contracts.ts` 为准。
 
@@ -357,21 +363,33 @@ Persisted writebacks in `queued/merging/applying` become retryable failures afte
 
 Parallel task writebacks form a Session-level barrier: any `conflicted/failed` record keeps the Session waiting; otherwise any `queued/merging/applying` record keeps it applying; execution resumes only after every record is terminal. Resolution actions are accepted only from blocking states; replayed or competing terminal actions fail closed. PostgreSQL deployments persist the complete writeback record in schema migration V4. Rollback compares the current path with the batch's last written value and never overwrites a later user edit. A Local Runtime one-time `workspace_delete` grant is scoped by Workspace, ChangeSet ID, and canonical full-ChangeSet digest, survives WebSocket reconnects in the running bridge, is consumed after successful apply, and expires after 30 minutes.
 
+Protocol 11 adds an exact `writeback` digest to the one-time permission grant request. A user-confirmed conflict result containing delete or move operations gets a new digest-bound grant before the Local Runtime applies it; the grant does not change the Workspace permission policy. Older protocol clients must reconnect after upgrading. The device rejects a different ChangeSet and consumes the grant only after successful apply.
+
 See `docs/design/managed-worktree-execution-v1.md` for lifecycle and limits.
+
+### 12.4 GitHub Session device operations (protocol v10)
+
+GitHub 来源的 Local Runtime 在设备侧保存授权令牌和 Git 工作区。交付请求仅包含有类型的 `integrate_validate`、`validate`、`publish`、`status`、`merge`、`diff`、`start_conflict` 与 `conflict_*` 操作，不暴露任意 Git shell 命令。`validate` 包含候选 `treeSha` 和用于重新计算变更文件清单的 `comparisonSha`；验证结果绑定候选 tree SHA。服务端在交付或合并前检查设备与工作区绑定的在线状态；重连只刷新远端状态，不自动执行合并。GitHub 新建入口在专项验收前保持关闭。
 
 ## 13. Structured Termination
 
 `AgentRunResult.termination` is the authoritative reason for an interrupted or timed-out invocation. The supported kinds are `user_cancelled`, `user_paused`, `frontend_disconnected`, `runtime_disconnected`, `phase_timeout`, `runtime_timeout`, `service_shutdown`, `superseded`, `maintenance`, and `output_contract_failure`. `user_paused` is resumable and must preserve the Session workflow checkpoint. `frontend_disconnected` is deprecated and retained only to decode historical persisted results; current browser SSE disconnects never produce this termination. A Local Runtime transport disconnect remains `runtime_disconnected` and interrupts its invocation.
 
-Server Codex and Claude Code invocations have lifecycle limits independent of SSE in both streaming and buffered modes: the default absolute deadline is 30 minutes and Worker concurrency defaults to 4. Each isolated platform Worker has a default V8 old-space ceiling of 512 MB; that ceiling does not constrain the RSS or heap of the CLI process spawned by the Worker. Production deployments that require a hard process-tree memory ceiling must add an OS job object, cgroup, or container limit. Deployments may tune the documented limits but must not make browser presence their resource-control mechanism.
+Server Codex and Claude Code invocations are supervised independently of SSE in streaming and buffered modes. First-frame, idle and the former 30-minute absolute timer are observation thresholds, not implicit process-kill policies; buffered model execution does not use an execFile wall-clock timeout. Worker concurrency still defaults to 4. Each isolated platform Worker has a default V8 old-space ceiling of 512 MB; that ceiling does not constrain the RSS or heap of the spawned CLI. Hard process-tree resource limits require an explicitly approved OS job object, cgroup, or container policy. Browser presence is never a resource-control mechanism.
 
-Adapters must not infer user intent from native exception text. Upstream cancellation is carried in `AbortSignal.reason`; Runtime-owned watchdogs produce `runtime_timeout`. During compatibility migration, `RuntimeError.termination` is dual-written and existing `RUNTIME_CANCELLED` / `RUNTIME_TIMEOUT` codes remain available.
+Adapters must not infer user intent from native exception text. Explicit cancellation is carried in `AbortSignal.reason`. Model-wait watchdogs emit metadata-only `observation_due`; they do not create `runtime_timeout`. A real provider timeout or an explicitly approved hard policy can still produce a structured termination. During compatibility migration, `RuntimeError.termination` is dual-written and existing `RUNTIME_CANCELLED` / `RUNTIME_TIMEOUT` codes remain available for real/historical failures.
 
 User-visible event content must use the safe termination message. Native process, provider, or AbortError details belong only in sanitized Debug/Audit data. See `docs/design/execution-termination-model-v1.md`.
 
 ## 14. 执行可靠性协议（2026-09-14）
 
 `InvocationPlan.operation` 携带持久化操作的 id、deadlineAt、policyVersion、maxAttempts。系统 RuntimeInvocation 和 Orchestrator 共用 RuntimeService 监督入口，启动前原子预留额度；路由重建、上下文补充、Provider 重试和提交修复不能重置截止。短控制操作 120 秒/2 次，长阶段使用有效配置/3 次，暂停后显式恢复仅使用剩余额度。停止请求后最多等待 15 秒确认；未知停止保留屏障，匹配回执只能清屏障，不能提交迟到业务成功。进程内 mock 的恢复豁免不适用于工程 CLI。
+
+执行中调用预算补充（2026-09-29，替代此前“无进展/工具停滞即可取消”）：所有阶段的已获准调用采用 `request-health-v1`。有有效进展继续执行；静默、长工具、无思考事件或无上游查询能力仅进入 `unknown_wait`，保留同一 invocation，超过原截止也不自动取消。绑定 socket 在线只证明控制通道，不要求设备心跳作为模型健康证明。明确断线或尚未恢复的真实 Provider/工具错误才可启用原有界预算兜底，记录 `operation_budget_fallback:<reason>`；静默观察/probe 超时不得重新包装为 Provider 失败。心跳、重复事件、调试噪声及 `running` 不刷新模型进展。RuntimeService 统一监督，Orchestrator 不叠加模型绝对阶段取消。deadline/attempt 不回填；新平台调用和异常恢复仍受原截止、次数及 allowlist 约束；Token、费用、循环、权限、可信停止和批准硬限制仍独立生效。预算耗尽的新调用返回 `OPERATION_BUDGET_EXHAUSTED`，不伪装成 `1ms` 阶段超时。
+
+明确异常监督补充（2026-09-29）：原生 `STREAM_SYSTEM/api_retry|api_error`、`RUNTIME_REQUEST_OBSERVATION/provider_retry|provider_error` 和工具错误由 shared `runtimeEventObservation` 统一分类。预算读取健康 reducer 的同一 live snapshot，不维护第二套错误标志，不读取历史投影。已知异常不能被静默 tick、请求 start/ack、心跳、存活探测、unsupported/timeout 探测改成未知或正常。Provider 故障以真实新模型动作恢复，旧工具完成/失败不证明其恢复；格式故障以成功 StructuredOutput 提交恢复，既有一次纠正额度独立生效。控制断线或确认进程退出保留至可信结束；退出 probe 本身不应用业务结果。
+
+健康快照增量可带 `failure`（仅固定类别及有界 HTTP 状态/重试数字）、`failureAt` 和 `budgetFallbackReason`，不得持久化 Provider 原文、凭据、完整 prompt 或思考正文。原预算耗尽且明确故障未恢复时先记录兜底原因，再走既有停止确认；迟到成功不得恢复业务或创建替代执行。schema/protocol 主版本不变，旧快照保持可读。Probe 支持能力来自当前连接协商，构建完成不等于现有 Runtime 已加载新代码；更新继续遵循在途调用及用户批准门禁。
 
 `task_execution_result@2.0` 的严格字段为 kind、schemaVersion、status、summary、artifactRefs、blockers、nextActions。仅支持此版本的 Local Runtime 写任务默认协商启用，`proposal_only` 保持原合同。操作冻结 `outputContractKey`。平台根据实际捕获 ChangeSet 的路径白名单生成领域 v1 结果，不接受伪造产物或测试通过；completed 且存在 blockers 为非法。
 
@@ -402,3 +420,15 @@ Session 停止先在事务中冻结目标，再向当时监督中的 invocation 
 存在活动方案文档时，`ContextAssembly.requiredDocument` 携带不可变的 `documentId/revision/relativePath/contentHash` 引用，Markdown 正文不复制到 Prompt。参与讨论的 Runtime 必须通过 WorkspaceProvider 路由的 `read_file` 读取精确相对路径；`server_local` 与 `local_bridge` 使用相同输入合同。
 
 RuntimeService 在流式和非流式结果的统一收口处校验读取回执。缺少回执、错误路径、分段或截断读取、活动版本已变化、文件缺失或 SHA-256 不一致时 fail closed，返回 `CONTEXT_INSUFFICIENT` / `DOCUMENT_READ_REQUIRED` 或对应文档读取错误，不能进入讨论成功分支。新文档只失效绑定旧版本的普通未完成任务；带 `workflowRunId` 的任务继续遵守已有 WorkflowRun 停止和返工合同。
+
+## Runtime 主动切换接管（2026-09-26）
+
+`runtime_switch` 是一个独立的 `ExecutionTermination.kind`，source 为 `user`，scope 为 `session` 或 `invocation`。它按用户显式停止处置（disposition `stop`、`retryable=false`），不得与 `user_paused`、`user_cancelled` 合并，也不得被记为 Provider 失败或自动 fallback。
+
+目标 Runtime 必须使用新的 `invocationId`、新的 `attemptGroupId` 和新的 CLI session。`RuntimeAttemptTrace.trigger` 区分 `initial`/`manual_switch`/`retry`/`fallback`；主动切换写 `manual_switch` 并附 `switchRequestId` 与 `switchFromRuntimeType`。该新组不继承旧失败调用的自动重试额度，但继续受 WorkItem Token 预算和操作截止约束。此后组内的 Provider 重试与 fallback 正常递增。
+
+跨 Runtime 不传递 `resume.cliSessionId`：Codex 与 Claude Code 的会话协议和状态不可互换。平台改为从 WorkItem、任务契约、决策账本、消息、附件、方案文档、Agent 身份、Skill/Tool 权限、Workspace 快照和上游产物重建 ContextEnvelopeV2。Agent 身份、任务目标、Skill、Tool 权限和知识绑定在切换前后必须一致。
+
+写任务只允许复用仍通过基线、版本、权限、manifest 和输出合同校验的 `executionCandidate`；任一项不成立时记录原因并从最后可信任务检查点重建当前阶段，不自动重放未确认的副作用。未完成的 writeback 在切换前冻结，只有新 generation 明确接管后才能继续处理。
+
+旧 Runtime 未取得可信停止证据时，目标 Runtime 不得启动。切换应用时递增会话生命周期 generation：旧 generation 的迟到回调只能用于资源清理、用量记账和审计，不得应用业务输出、终态或文件写回。

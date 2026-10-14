@@ -1170,6 +1170,112 @@ export const RELATIONAL_SCHEMA_V17_TABLES: RelationalTableDefinition[] = [
 ];
 export const RELATIONAL_SCHEMA_V17_SQL = renderTables(RELATIONAL_SCHEMA_V17_TABLES);
 
+export const RELATIONAL_SCHEMA_V18_TABLES: RelationalTableDefinition[] = [
+  table('runtime_switch_requests', '保存用户主动切换 Session Runtime 的请求：一个幂等键一个请求，状态单向前进，停止证据与生命周期代次一并留痕，重启后可解释可续接。', [
+    column('external_id', 'text primary key', '切换请求的稳定外部标识。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '切换请求所属会话。'),
+    column('logical_key', 'text not null unique', '会话加客户端 Idempotency-Key 组成的唯一逻辑键；重复提交返回同一请求，不重复停止或启动 Runtime。'),
+    column('idempotency_key', 'text not null', '客户端提交的 Idempotency-Key 原文。'),
+    column('source', 'text not null', '请求入口：chat_command/ui_control/plugin；仅用于审计，三者走同一服务端路径。'),
+    column('from_runtime_type', 'text', '发起切换时的首选 Runtime；为空表示当时没有确定的首选。'),
+    column('target_runtime_type', 'text not null', '用户要求切换到的目标 Runtime。'),
+    column('resume_after_switch', 'boolean not null', '切换完成后是否恢复原阶段执行。'),
+    column('fallback_mode', 'text not null', '备用策略：keep/exclude_previous_once/target_only。'),
+    column('status', 'text not null', '请求状态：requested/preflighted/stopping/stop_confirmed/applying/resuming/completed/failed。'),
+    column('version', 'bigint not null check (version > 0)', '请求内单调递增的版本号；每次状态推进恰好加一，事件幂等键取用该值。'),
+    column('expected_session_revision', 'bigint', '客户端做选择时看到的会话 Runtime 偏好版本；与当前值不一致时请求按 409 拒绝。'),
+    column('previous_session_status', 'text', '切换前的会话状态；完成后据此恢复原阶段。'),
+    column('stop_request_external_id', 'text', '本次切换复用的停止请求标识；未取得可信停止证据时目标 Runtime 不得启动。'),
+    column('lifecycle_generation', 'integer', '目标 Runtime 接管时的会话生命周期代次；旧代次的迟到回调只能审计。'),
+    column('failure_stage', 'text', '失败发生的阶段；只有该阶段允许显式重试。'),
+    column('source_snapshot', 'jsonb not null', '版本化切换请求合同完整快照，含安全错误摘要，不含凭据、提示全文或本机绝对路径。'),
+    column('created_at', 'timestamptz not null', '切换请求创建时间。'),
+    column('updated_at', 'timestamptz not null', '切换请求最后变化时间。')
+  ], [], [
+    'create index if not exists runtime_switch_requests_session_idx on agent_cluster.runtime_switch_requests(session_id, created_at desc)',
+    "create unique index if not exists runtime_switch_requests_active_idx on agent_cluster.runtime_switch_requests(session_id) where status not in ('completed','failed')"
+  ])
+];
+export const RELATIONAL_SCHEMA_V18_SQL = renderTables(RELATIONAL_SCHEMA_V18_TABLES);
+
+export const RELATIONAL_SCHEMA_V19_TABLES: RelationalTableDefinition[] = [
+  table('github_source_bindings', '保存每个 GitHub 会话的仓库来源、准备状态和工作区绑定，不保存授权秘密。', [
+    column('session_id', 'bigint primary key references agent_cluster.sessions(id) on delete cascade', '所属会话。'),
+    column('repository_id', 'text not null', '规范化的 GitHub 仓库身份。'),
+    column('repository_url', 'text not null', '不含凭据的规范化 HTTPS 仓库地址。'),
+    column('execution_location', 'text not null', '代码实际所在设备：local 或 server。'),
+    column('device_id', 'text', '本机执行设备标识；服务器执行时为空。'),
+    column('authorization_ref', 'text', '设备侧授权记录引用，不包含令牌。'),
+    column('workspace_id', 'text', '完成准备后绑定的独立会话工作区。'),
+    column('base_branch', 'text', '用户确认的目标基础分支。'),
+    column('base_sha', 'text', '确认基础分支时观察到的提交。'),
+    column('state', 'text not null', '授权、克隆、选分支、绑定及失败恢复状态。'),
+    column('version', 'bigint not null check (version > 0)', '来源状态单调递增版本。'),
+    column('source_snapshot', 'jsonb not null', '无凭据的来源绑定合同快照。'),
+    column('created_at', 'timestamptz not null', '首次创建时间。'),
+    column('updated_at', 'timestamptz not null', '最近状态变化时间。')
+  ], [], ['create index if not exists github_source_bindings_repo_idx on agent_cluster.github_source_bindings(repository_id, state)']),
+  table('github_deliveries', '保存各会话交付轮次的验证、PR 和合并状态。', [
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '所属会话。'),
+    column('round', 'integer not null check (round > 0)', '会话内交付轮次。'),
+    column('state', 'text not null', '验证、推送、PR、CI 与合并状态。'),
+    column('version', 'bigint not null check (version > 0)', '交付状态单调递增版本。'),
+    column('task_branch', 'text', '自动生成并推送的任务分支。'),
+    column('pull_request_number', 'integer', 'GitHub PR 编号。'),
+    column('reviewed_head_sha', 'text', '用户审查时确认的 PR head。'),
+    column('merged_commit_sha', 'text', '实际 Squash Merge 提交。'),
+    column('source_snapshot', 'jsonb not null', '无令牌的交付状态及验证摘要。'),
+    column('created_at', 'timestamptz not null', '交付轮次创建时间。'),
+    column('updated_at', 'timestamptz not null', '交付轮次最近变化时间。')
+  ], ['primary key (session_id, round)']),
+  table('github_conflicts', '保存 Git 冲突的版本化索引与用户草稿引用。', [
+    column('external_id', 'text primary key', '冲突记录的稳定标识。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '所属会话。'),
+    column('delivery_round', 'integer not null', '产生冲突的交付轮次。'),
+    column('target_operation', 'text not null', '整合任务分支或合并 PR 等目标操作。'),
+    column('version', 'bigint not null check (version > 0)', '草稿与确认的并发版本。'),
+    column('source_snapshot', 'jsonb not null', '冲突文件索引和内容对象引用，不含大文件正文。'),
+    column('created_at', 'timestamptz not null', '冲突创建时间。'),
+    column('updated_at', 'timestamptz not null', '最近草稿变化时间。')
+  ], [], ['create index if not exists github_conflicts_session_idx on agent_cluster.github_conflicts(session_id, delivery_round)']),
+  table('github_authorizations', '保存 GitHub 授权身份和仅服务器使用的加密令牌；本机令牌只存于本机。', [
+    column('external_id', 'text primary key', '授权记录的稳定标识。'),
+    column('account_id', 'text not null', 'GitHub 用户稳定身份。'),
+    column('execution_location', 'text not null', '授权秘密所属设备类型。'),
+    column('device_id', 'text', '本机设备标识，服务器授权时为空。'),
+    column('secret_envelope', 'text', '服务器执行时使用的 AES-GCM 加密令牌；本机执行时为空。'),
+    column('state', 'text not null', '有效、失效或已断开。'),
+    column('version', 'bigint not null check (version > 0)', '授权状态单调递增版本。'),
+    column('source_snapshot', 'jsonb not null', '无令牌的账号、权限和设备引用。'),
+    column('created_at', 'timestamptz not null', '授权建立时间。'),
+    column('updated_at', 'timestamptz not null', '授权最近变化时间。')
+  ], [], ['create index if not exists github_authorizations_account_idx on agent_cluster.github_authorizations(account_id, state)'])
+];
+export const RELATIONAL_SCHEMA_V19_SQL = renderTables(RELATIONAL_SCHEMA_V19_TABLES);
+
+export const RELATIONAL_SCHEMA_V20_TABLES: RelationalTableDefinition[] = [
+  table('github_oauth_states', '保存 GitHub 授权回调的一次性会话绑定，只保存 state 哈希。', [
+    column('state_hash', 'text primary key', '一次性随机 state 的 SHA-256 摘要。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '发起授权的会话。'),
+    column('repository_url', 'text not null', '授权启动时的规范化仓库地址。'),
+    column('execution_location', 'text not null', '授权秘密所属执行位置。'),
+    column('expires_at', 'timestamptz not null', '回调 state 失效时间。'),
+    column('source_snapshot', 'jsonb not null', '不含明文 state 或令牌的设备与会话绑定。')
+  ], [], ['create index if not exists github_oauth_states_expiry_idx on agent_cluster.github_oauth_states(expires_at)'])
+];
+export const RELATIONAL_SCHEMA_V20_SQL = renderTables(RELATIONAL_SCHEMA_V20_TABLES);
+
+export const RELATIONAL_SCHEMA_V21_TABLES: RelationalTableDefinition[] = [
+  table('runtime_health_snapshots', '保存请求级健康投影；不包含提示词、思考正文或进程结束权威事实。', [
+    column('invocation_external_id', 'text primary key', '不可变调用身份。'),
+    column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '所属会话。'),
+    column('version', 'bigint not null check (version > 0)', '投影单调版本。'),
+    column('source_snapshot', 'jsonb not null', '脱敏、版本化健康快照。'),
+    column('updated_at', 'timestamptz not null', '最近观察时间。')
+  ], [], ['create index if not exists runtime_health_session_idx on agent_cluster.runtime_health_snapshots(session_id)'])
+];
+export const RELATIONAL_SCHEMA_V21_SQL = renderTables(RELATIONAL_SCHEMA_V21_TABLES);
+
 export function expectedRelationalComments() {
   return [
     SCHEMA_MIGRATIONS_TABLE,
@@ -1187,7 +1293,11 @@ export function expectedRelationalComments() {
     ...RELATIONAL_SCHEMA_V14_TABLES,
     ...RELATIONAL_SCHEMA_V15_TABLES,
     ...RELATIONAL_SCHEMA_V16_TABLES,
-    ...RELATIONAL_SCHEMA_V17_TABLES
+    ...RELATIONAL_SCHEMA_V17_TABLES,
+    ...RELATIONAL_SCHEMA_V18_TABLES,
+    ...RELATIONAL_SCHEMA_V19_TABLES,
+    ...RELATIONAL_SCHEMA_V20_TABLES,
+    ...RELATIONAL_SCHEMA_V21_TABLES
   ].flatMap((definition) => [
     { table: definition.name, column: null, comment: definition.comment },
     ...definition.columns.map((item) => ({ table: definition.name, column: item.name, comment: item.comment }))

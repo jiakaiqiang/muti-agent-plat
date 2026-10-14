@@ -34,7 +34,8 @@ const safeMessages: Record<ExecutionTerminationKind, string> = {
   runtime_timeout: '运行时执行超时，已停止本次调用。',
   service_shutdown: '服务正在关闭，本次执行已中断且不会自动续跑。',
   superseded: '本次执行已被更新的需求或计划替代。',
-  maintenance: '系统进入维护，本次执行已中断且不会自动续跑。'
+  maintenance: '系统进入维护，本次执行已中断且不会自动续跑。',
+  runtime_switch: '执行已按你的要求停止，正在切换到目标 Runtime 继续。'
 };
 
 export function createExecutionTermination(input: CreateExecutionTerminationInput): ExecutionTermination {
@@ -61,7 +62,7 @@ export function isExecutionTermination(value: unknown): value is ExecutionTermin
     candidate.schemaVersion === '1.0' &&
     typeof candidate.terminationId === 'string' &&
     typeof candidate.occurredAt === 'string' &&
-    ['output_contract_failure', 'user_cancelled', 'user_paused', 'frontend_disconnected', 'runtime_disconnected', 'phase_timeout', 'runtime_timeout', 'service_shutdown', 'superseded', 'maintenance'].includes(
+    ['output_contract_failure', 'user_cancelled', 'user_paused', 'frontend_disconnected', 'runtime_disconnected', 'phase_timeout', 'runtime_timeout', 'service_shutdown', 'superseded', 'maintenance', 'runtime_switch'].includes(
       candidate.kind ?? ''
     ) &&
     ['user', 'orchestrator', 'runtime', 'system', 'operator'].includes(candidate.source ?? '') &&
@@ -101,7 +102,12 @@ export function terminationDisposition(termination: ExecutionTermination): Execu
     termination.kind === 'frontend_disconnected' ||
     termination.kind === 'runtime_disconnected' ||
     termination.kind === 'service_shutdown' ||
-    termination.kind === 'maintenance' || termination.kind === 'output_contract_failure'
+    termination.kind === 'maintenance' || termination.kind === 'output_contract_failure' ||
+    // A switch is the user replacing the execution owner. Classifying it as
+    // retryable would let the provider retry chain restart the very invocation
+    // the switch just stopped, and classifying it as `replace` would let it
+    // inherit the failed attempt's budget (Spec I4).
+    termination.kind === 'runtime_switch'
   ) return 'stop';
   if (termination.kind === 'superseded') return 'replace';
   return 'retry';

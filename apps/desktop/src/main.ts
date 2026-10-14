@@ -205,6 +205,9 @@ else {
     if (release.updateUrl) validateUpdateUrl(release.updateUrl);
     // electron-builder owns app-update.yml and publisher verification; never override the feed at runtime.
     updates = new UpdateController(autoUpdater, updateEnabled, () => runtime.stop(), allowed => { quitting = allowed; });
+    updates.onStatus(update => {
+      if (window && !window.isDestroyed()) window.webContents.send('desktop:update:status', update);
+    });
     const status = (): DesktopStatus => ({ version: app.getVersion(), packaged: app.isPackaged, serverUrl, runtime: runtime.status, update: updates.status,
       notifications: { enabled: notificationsEnabled, supported: Notification.isSupported(), error: notificationError, lastShownAt: lastNotificationShownAt } });
     const handlers: Record<string, (...args: any[]) => unknown> = {
@@ -248,7 +251,8 @@ else {
       'desktop:runtime:stop': () => exclusive(() => runtime.stop()),
       'desktop:update:check': () => updates.check(),
       'desktop:update:download': () => updates.download(),
-      'desktop:update:install': () => exclusive(() => updates.install())
+      'desktop:update:install': () => exclusive(() => updates.install()),
+      'desktop:update:upgrade': () => exclusive(() => updates.upgrade())
     };
     for (const [channel, handler] of Object.entries(handlers)) {
       ipcMain.handle(channel, (event, ...args) => {

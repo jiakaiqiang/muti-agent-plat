@@ -24,6 +24,7 @@ import type {
 import type { MemoryItem } from '@agent-cluster/shared';
 import { PersistenceService, type PersistedState } from '../persistence/persistence.service.js';
 import { SUMMARY_CHECKPOINTS_COLLECTION } from '../memory/summary-checkpoint-store.js';
+import { briefQuestionKey } from '@agent-cluster/shared';
 import { buildWorkItemArchiveIndex, recallWorkItems } from './work-item-recall.js';
 
 type BySession<T> = Record<string, T[]>;
@@ -120,9 +121,21 @@ export class ContextManagementService {
   validDecisions(sessionId: string, workItemId: string) {
     const workItem = this.getWorkItem(sessionId, workItemId);
     const validIds = new Set([...workItem.inheritedDecisionIds]);
-    return this.listDecisions(sessionId).filter(
+    const valid = this.listDecisions(sessionId).filter(
       (decision) => decision.status === 'confirmed' &&
         (decision.workItemId === workItemId || validIds.has(decision.id))
+    );
+    const effectiveAnswers = new Map<string, DecisionRecord>();
+    for (const decision of valid) {
+      if (!decision.question || !decision.answer) continue;
+      const key = briefQuestionKey(decision.question);
+      const previous = effectiveAnswers.get(key);
+      if (!previous || decision.workItemId === workItemId || previous.workItemId !== workItemId) {
+        effectiveAnswers.set(key, decision);
+      }
+    }
+    return valid.filter((decision) =>
+      !decision.question || effectiveAnswers.get(briefQuestionKey(decision.question))?.id === decision.id
     );
   }
 
@@ -359,12 +372,17 @@ export class ContextManagementService {
     session: SessionDetail;
     workItemId: string;
     sourceEvent: CollaborationEvent;
-    decisions: Array<{ kind: DecisionRecordKind; content: string }>;
+    decisions: Array<{ kind: DecisionRecordKind; content: string; question?: string; answer?: string }>;
   }) {
     return this.serialized(input.session.id, async () => {
       const now = new Date().toISOString();
       const normalized = input.decisions
-        .map((item) => ({ kind: item.kind, content: item.content.trim() }))
+        .map((item) => ({
+          kind: item.kind,
+          content: item.content.trim(),
+          question: item.question?.trim(),
+          answer: item.answer?.trim()
+        }))
         .filter((item) => item.content);
       if (!normalized.length) return [];
       const committed = await this.mutate((draft) => {
@@ -383,12 +401,28 @@ export class ContextManagementService {
           kind: item.kind,
           status: 'confirmed',
           content: item.content,
+          ...(item.question && item.answer ? { question: item.question, answer: item.answer } : {}),
           sourceEventId: input.sourceEvent.id,
+          ...(item.question ? {
+            supersedesDecisionId: sessionDecisions.find((candidate) =>
+              candidate.workItemId === input.workItemId && candidate.status === 'confirmed' &&
+              candidate.question && briefQuestionKey(candidate.question) === briefQuestionKey(item.question!)
+            )?.id
+          } : {}),
           revision: 1,
           confirmedBy: { type: 'user', id: input.session.ownerId },
           createdAt: now,
           updatedAt: now
         }));
+        for (const record of records) {
+          if (!record.supersedesDecisionId) continue;
+          const previous = sessionDecisions.find((item) => item.id === record.supersedesDecisionId);
+          if (previous) {
+            previous.status = 'superseded';
+            previous.revision += 1;
+            previous.updatedAt = now;
+          }
+        }
         sessionDecisions.push(...records);
         const events = collectionFromDraft<CollaborationEvent>(draft, 'eventsBySession');
         const sessionEvents = (events[input.session.id] ??= []);

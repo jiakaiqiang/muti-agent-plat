@@ -6,10 +6,15 @@ import { fileURLToPath } from 'node:url';
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repositoryRoot = resolve(packageRoot, '..', '..');
 const sourceRoot = join(packageRoot, 'src');
-const tests = readdirSync(sourceRoot)
-  .filter((name) => /\.(spec|test)\.ts$/.test(name))
-  .sort()
-  .map((name) => join(sourceRoot, name));
+function collectTests(directory) {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) return collectTests(path);
+    return /\.(spec|test)\.ts$/.test(entry.name) ? [path] : [];
+  });
+}
+
+const tests = collectTests(sourceRoot).sort();
 
 if (!tests.length) throw new Error('No shared contract tests found.');
 const tsx = join(repositoryRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');

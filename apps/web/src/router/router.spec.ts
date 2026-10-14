@@ -26,8 +26,8 @@ describe('application routes', () => {
     expectedPaths.forEach((path) => expect(paths.has(path), `missing route: ${path}`).toBe(true))
   })
 
-  it('isolates shared route components by full path and renders a failure fallback', () => {
-    expect(appShellSource).toContain(':key="viewRoute.fullPath"')
+  it('keeps workspace identity stable while isolating management routes and rendering failures', () => {
+    expect(appShellSource).toContain(":key=\"viewRoute.meta.section === 'session' ? 'task-workspace' : viewRoute.path\"")
     expect(appShellSource).toContain('onErrorCaptured')
     expect(appShellSource).toContain('页面加载失败')
     expect(appShellSource).toContain('重新加载页面')

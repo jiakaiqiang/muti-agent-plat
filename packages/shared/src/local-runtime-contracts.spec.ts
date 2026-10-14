@@ -33,7 +33,7 @@ test('Local Runtime capability probes distinguish executable readiness without i
 });
 
 test('local runtime protocol and default permissions are explicit', () => {
-  assert.equal(LOCAL_RUNTIME_PROTOCOL_VERSION, 7);
+  assert.equal(LOCAL_RUNTIME_PROTOCOL_VERSION, 11);
   assert.deepEqual(Object.keys(DEFAULT_LOCAL_RUNTIME_PERMISSION_POLICY).sort(), [...LOCAL_RUNTIME_PERMISSION_KEYS].sort());
   assert.equal(DEFAULT_LOCAL_RUNTIME_PERMISSION_POLICY.workspace_read, 'allow');
   assert.equal(DEFAULT_LOCAL_RUNTIME_PERMISSION_POLICY.workspace_write, 'allow');

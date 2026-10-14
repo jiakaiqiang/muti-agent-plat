@@ -47,8 +47,7 @@ function mountView(props: {
     props: {
       events: props.events ?? [],
       tasks: props.tasks ?? [],
-      agents: props.agents ?? [],
-      currentMode: 'workflow'
+      agents: props.agents ?? []
     }
   })
 }
@@ -102,29 +101,23 @@ describe('WorkflowRuntimeView render safety', () => {
     expect(wrapper.find('.workflow-chain-node.is-system').exists()).toBe(true)
   })
 
-  it.each([
-    ['workflow_agent_substitution', '等待改派或跳过'],
-    ['workflow_upstream_rerun', '等待选择返工节点'],
-    ['confirm_workflow_human_gate', '等待人工验收']
-  ])('shows the concrete waiting state for %s', (reason, label) => {
+  it('starts with the canvas and Agent rail without a duplicate session header', () => {
     const wrapper = mount(WorkflowRuntimeView, {
       props: {
         events: [],
         tasks: [],
         agents: [],
-        currentMode: 'workflow',
-        status: 'WAIT_USER_DECISION',
-        activeConfirmation: {
-          confirmationId: 'confirmation-1',
-          reason,
-          title: 'Decision',
-          description: 'Choose an action.',
-          status: 'pending',
-          options: []
-        }
+        status: 'WAIT_USER_DECISION'
       }
     });
-    expect(wrapper.find('.session-state').text()).toBe(label);
+    expect(wrapper.find('.workflow-topbar').exists()).toBe(false);
+    expect(wrapper.find('.workflow-mode-switcher').exists()).toBe(false);
+    expect(wrapper.find('.project-chip').exists()).toBe(false);
+    expect(wrapper.find('.progress-chip').exists()).toBe(false);
+    expect(wrapper.find('.session-state').exists()).toBe(false);
+    expect(wrapper.find('.graph-clock').exists()).toBe(false);
+    expect(wrapper.find('.workflow-agent-rail').exists()).toBe(true);
+    expect(wrapper.find('.workflow-canvas > header').text()).toContain('工作流可视化');
   });
 
   it('labels intake rejection and execution failure as different facts', async () => {

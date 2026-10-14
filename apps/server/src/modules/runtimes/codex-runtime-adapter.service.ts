@@ -1,3 +1,5 @@
+import { runtimeRecoveryContext } from '@agent-cluster/shared';
+import { runtimePhaseLabel } from "@agent-cluster/shared";
 import { Injectable } from '@nestjs/common';
 import { execFile } from 'node:child_process';
 import { readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -208,7 +210,7 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
   async checkAvailability() {
     return process.env.CODEX_RUNTIME_ENABLED === 'true'
       ? { available: true }
-      : { available: false, reason: 'Set CODEX_RUNTIME_ENABLED=true to register Codex.' };
+      : { available: false, reason: '请设置 CODEX_RUNTIME_ENABLED=true 以启用 Codex。' };
   }
 
   start(input: InvocationPlan, signal?: AbortSignal): AgentRuntimeRunHandle {
@@ -290,7 +292,7 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
             invocationId: input.invocationId,
             type: 'runtime_completed',
             visibility: 'user',
-            content: `${input.agent.name} completed ${input.phase} with Codex.`,
+            content: `${input.agent.name} 已通过 Codex 完成 ${runtimePhaseLabel(input.phase)}。`,
             metadata: { stderr: stderr.trim() || undefined },
             createdAt: nowIso()
           }
@@ -319,14 +321,14 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
         status: signal?.aborted ? 'cancelled' : 'failed',
         output: createAgentMessageOutput({
           messageKind: 'risk',
-          content: `${input.agent.name} Codex runtime failed: ${message}`
+          content: `${input.agent.name} 的 Codex 调用失败：${message}`
         }),
         events: [
           {
             invocationId: input.invocationId,
             type: 'runtime_failed',
             visibility: 'user',
-            content: `${input.agent.name} Codex runtime failed.`,
+            content: `${input.agent.name} 的 Codex 调用失败。`,
             metadata: { message, code: runtimeError.code },
             createdAt: nowIso()
           }
@@ -383,7 +385,7 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
     return new Promise((resolveCommand, rejectCommand) => {
       const child = execFile(command, args, {
         cwd,
-        timeout,
+        timeout: 0, // Preserve the original request while its status is unknown.
         shell: this.useShell(),
         signal,
         env: this.runtimeEnv(input, promptFilePath),
@@ -445,7 +447,8 @@ export class CodexRuntimeAdapterService implements AgentRuntimeAdapter {
         {
           phase: input.phase,
           agent: input.agent,
-          contextEnvelope: input.contextEnvelope,
+          recovery: runtimeRecoveryContext(input),
+      contextEnvelope: input.contextEnvelope,
           executionTarget: input.executionTarget,
           toolCatalog: input.toolCatalog,
           expectedOutput: input.expectedOutput,

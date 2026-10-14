@@ -139,14 +139,14 @@ export class CodeReaderRuntimeAdapterService implements AgentRuntimeAdapter {
           invocationId: input.invocationId,
           type: 'runtime_started',
           visibility: 'user',
-          content: `${input.agent.name} started code reading`,
+          content: `${input.agent.name} 已开始读取代码`,
           createdAt: startedAt
         },
         {
           invocationId: input.invocationId,
           type: 'runtime_completed',
           visibility: 'user',
-          content: `${input.agent.name} completed code reading`,
+          content: `${input.agent.name} 已完成代码读取`,
           createdAt: nowIso()
         }
       ],
@@ -178,7 +178,7 @@ export class CodeReaderRuntimeAdapterService implements AgentRuntimeAdapter {
           invocationId: input.invocationId,
           type: 'runtime_started',
           visibility: 'user',
-          content: `${input.agent.name} started code reading`,
+          content: `${input.agent.name} 已开始读取代码`,
           createdAt: startedAt
         },
         {
@@ -218,15 +218,14 @@ export class CodeReaderRuntimeAdapterService implements AgentRuntimeAdapter {
         truncated: output.truncated === true
       };
     });
-    const fileWord = fileSummaries.length === 1 ? 'file' : 'files';
 
     return {
       schemaVersion: '1.0',
       kind: 'task_execution_result',
       status: 'completed',
-      summary: `Analyzed ${fileSummaries.length} ${fileWord}.`,
+      summary: `已分析 ${fileSummaries.length} 个文件。`,
       completedItems: fileSummaries.map(
-        (file) => `${file.path}: ${file.lineCount} lines, ${file.byteLength} bytes${file.truncated ? ' (truncated)' : ''}`
+        (file) => `${file.path}：${file.lineCount} 行，${file.byteLength} 字节${file.truncated ? '（内容已截断）' : ''}`
       ),
       changedArtifacts: [],
       requestedContext: null,

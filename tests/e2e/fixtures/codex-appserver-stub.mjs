@@ -15,6 +15,7 @@ let interrupted = false;
 let activeThreadId;
 let activeTurnId;
 let activeOutputKind = process.env.STUB_KIND ?? 'agent_message';
+let activeOutputVersion = '1.0';
 
 function send(message) {
   stdout.write(`${JSON.stringify(message)}\n`);
@@ -37,6 +38,18 @@ function makePayload(kind) {
         agentMessages: []
       };
     case 'task_execution_result':
+      if (activeOutputVersion === '2.0') {
+        return {
+          schemaVersion: '2.0',
+          kind,
+          status: 'completed',
+          summary: 'Codex stub edited real files on disk.',
+          artifactRefs: (process.env.CODEX_RUNTIME_STUB_EDIT_FILES ?? process.env.STUB_EDIT_FILES) === 'codex'
+            ? ['src/feature.txt', 'src/generated-by-codex.txt'] : [],
+          blockers: [],
+          nextActions: []
+        };
+      }
       return {
         schemaVersion: '1.0',
         kind,
@@ -129,6 +142,9 @@ async function runScenario(threadId, turnId) {
     params: { server: 'fixture', status: process.env.STUB_MCP_FAIL === '1' ? 'failed' : 'ready' }
   });
   send({ method: 'item/agentMessage/delta', params: { threadId, turnId, itemId: 'msg-1', delta: '你' } });
+  const progressGap = Number(process.env.STUB_PROGRESS_GAP_MS ?? 0);
+  if (progressGap > 0) await new Promise(resolve => setTimeout(resolve, progressGap));
+  if (interrupted) return;
   if (process.env.STUB_CRASH === '1') {
     process.exit(1);
     return;
@@ -234,6 +250,7 @@ function handle(message) {
     activeTurnId = 'stub-turn-1';
     const schemaKind = message.params?.outputSchema?.properties?.kind?.const;
     activeOutputKind = typeof schemaKind === 'string' ? schemaKind : activeOutputKind;
+    activeOutputVersion = message.params?.outputSchema?.properties?.schemaVersion?.const ?? '1.0';
     send({ id: message.id, result: { turn: { id: activeTurnId, status: 'inProgress', items: [], error: null } } });
     void runScenario(activeThreadId, activeTurnId);
     return;

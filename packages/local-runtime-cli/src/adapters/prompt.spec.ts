@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { InvocationPlan, LocalRuntimePermissionPolicy } from '@agent-cluster/shared';
 import { buildLocalRuntimePrompt } from './prompt.js';
+import { CHINESE_RUNTIME_OUTPUT_INSTRUCTION } from '@agent-cluster/shared';
 
 function plan(kind: InvocationPlan['expectedOutput']['kind']): InvocationPlan {
   return {
@@ -23,6 +24,16 @@ function plan(kind: InvocationPlan['expectedOutput']['kind']): InvocationPlan {
 }
 
 const permissions = { readDirectory: 'allow' } as unknown as LocalRuntimePermissionPolicy;
+
+test('Codex and Claude local prompts require Chinese for both legacy and minimal submissions', () => {
+  for (const provider of ['Codex', 'Claude Code']) {
+    for (const schemaVersion of ['1.0', '2.0'] as const) {
+      const input = plan('task_execution_result');
+      input.expectedOutput.schemaVersion = schemaVersion;
+      assert.ok(buildLocalRuntimePrompt(provider, input, permissions).includes(CHINESE_RUNTIME_OUTPUT_INSTRUCTION));
+    }
+  }
+});
 
 // 2026-08-21 的真实失败发生在本地路径:prompt 只给 Schema 和 example,模型把单个 Artifact 当成了返回值本体。
 test('local prompt carries the shared root-object discipline', () => {

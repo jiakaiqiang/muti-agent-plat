@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { actorAgentId } from '@/composables/useActor'
+import { eventNoticeText } from '@/utils/userFacingCopy'
+import { formatDateTime } from '@/utils/dateTime'
 import type {
   AgentCardState,
   BriefEventPayload,
@@ -101,7 +103,7 @@ const interruptionEvents = computed(() =>
       const affectedAgentIds = [...(payload?.affectedAgentIds ?? []), ...(payload?.handlingPlan?.affectedAgentIds ?? event.toAgentIds ?? [])]
       return {
         id: event.id,
-        content: event.content,
+        content: eventNoticeText(event),
         reason: payload?.reason ?? ((event.metadata.payload as { phase?: string } | undefined)?.phase === 'user_message_routing' ? 'user_message_routing' : 'user_interrupt'),
         affectedTaskIds: [...new Set(affectedTaskIds)],
         affectedAgentIds: [...new Set(affectedAgentIds)],
@@ -275,13 +277,7 @@ function agentActivityLabel(status: string) {
 }
 
 function formatActivityTime(value: string) {
-  const timestamp = Date.parse(value)
-  if (Number.isNaN(timestamp)) return value
-  return new Date(timestamp).toLocaleTimeString('zh-CN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit'
-  })
+  return formatDateTime(value)
 }
 </script>
 
@@ -432,7 +428,7 @@ function formatActivityTime(value: string) {
         <div class="task-board-discussion-list">
           <article v-for="event in decisionEvents" :key="event.id">
             <strong>{{ eventAgentName(event) }} · {{ messageKind(event) }}</strong>
-            <p>{{ event.content }}</p>
+            <p>{{ eventNoticeText(event) }}</p>
           </article>
           <p v-if="!decisionEvents.length">Agent 的决策、风险、交接和总结会随着讨论推进显示在这里。</p>
         </div>

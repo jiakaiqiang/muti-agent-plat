@@ -10,6 +10,10 @@ test('heartbeats and repeated errors never count as useful activity; replayed ou
   assert.equal(useful({ ...event, content: 'model delta', visibility: 'debug', metadata: { code: 'STREAM_TEXT' } }), true);
   assert.equal(useful({ ...event, type: 'tool_completed', metadata: { isError: true, toolCallId: 'error' } }), false);
   assert.equal(useful(event), true);
-  assert.equal(useful({ ...event, createdAt: 'later' }), false);
+  assert.equal(useful({ ...event }), false);
+  assert.equal(useful({ ...event, createdAt: 'later' }), true, 'same text on a different observation is legitimate');
+  assert.equal(useful({ ...event, metadata: { eventId: 'native-1' } }), true);
+  assert.equal(useful({ ...event, createdAt: 'later', metadata: { eventId: 'native-1' } }), false);
+  assert.equal(useful({ ...event, metadata: { eventId: 'native-1', sequence: 99 } }), false);
   assert.equal(useful({ ...event, type: 'tool_completed', metadata: { isError: false, toolCallId: 'tool' } }), true);
 });

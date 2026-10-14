@@ -53,7 +53,7 @@ describe('runtime stop-state convergence', () => {
       reason: 'state_query_failed',
       message: '停止状态查询失败，暂不能确认是否可继续。'
     }])
-    expect(store.stopStateErrorsBySession['session-1']).toContain('stop-state unavailable')
+    expect(store.stopStateErrorsBySession['session-1']).toContain('服务暂不可用')
   })
 
   it('retries a failed query and clears the error after a valid response', async () => {

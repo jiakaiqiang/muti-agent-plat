@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -18,6 +18,7 @@ import type {
   RuntimeContextRequest,
   RuntimeError,
   SessionDetail,
+  SuggestedAgentTask,
   SupplementalContextResolution,
   TaskBrief,
   TaskContext,
@@ -43,8 +44,204 @@ import {
   usableAgentMessageOutput
 } from './orchestrator.service.js';
 import { makeInvocationPlan } from '../runtimes/invocation-plan.fixture.js';
+import { TasksService } from '../tasks/tasks.service.js';
 import { agent, makeService, session, type ServiceRecorder } from './orchestrator.test-fixtures.js';
 import { InvocationResolutionError } from '../runtime-routing/invocation-resolver.service.js';
+
+test('confirmed CLI exit moves directly to ordered backup; provider faults retry once; unknown stop blocks', async () => {
+  const service = makeService() as any;
+  const active = session();
+  active.runtimePreference = { preferredRuntimeType: 'codex', allowedRuntimeTypes: ['codex', 'claude_code', 'generic_llm'],
+    fallbackRuntimeTypes: ['generic_llm', 'claude_code'] };
+  const calls: any[] = [];
+  service.recordRuntimeProviderRetry = () => {};
+  service.recordRuntimeProviderFallback = () => {};
+  service.rememberSuccessfulRuntimeFallback = async () => {};
+  service.backoffRuntimeProviderRetry = async () => {};
+  let error: RuntimeError = { code: 'MODEL_ERROR', message: 'closed', retryable: true,
+    details: { runtimeFailure: 'process_exit', processExitConfirmed: true } };
+  service.runRuntimeAttempt = async (_session: unknown, input: any) => {
+    calls.push(input);
+    return { invocationId: input.invocationId, runtimeType: input.runtimeCandidateOverride ?? 'codex',
+      status: input.runtimeCandidateOverride ? 'completed' : 'failed', error: input.runtimeCandidateOverride ? undefined : error };
+  };
+  const input = { invocationId: 'initial', contextAssembly: { workItemId: active.activeWorkItemId } };
+  await service.runRuntimeProviderAttemptsWithinDeadline(active, input);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].runtimeCandidateOverride, 'generic_llm');
+  assert.equal(calls[1].attempt.attemptGroupId, 'initial');
+  assert.equal(calls[1].attempt.trigger, 'fallback');
+  calls.length = 0;
+  error = { ...error, details: { providerFailure: true } };
+  await service.runRuntimeProviderAttemptsWithinDeadline(active, input);
+  assert.equal(calls.length, 3);
+  assert.equal(calls[1].runtimeCandidateOverride, undefined);
+  assert.equal(calls[2].runtimeCandidateOverride, 'generic_llm');
+  calls.length = 0;
+  error = { ...error, details: { providerFailure: true, stopUnconfirmed: true } };
+  await service.runRuntimeProviderAttemptsWithinDeadline(active, input);
+  assert.equal(calls.length, 1);
+});
+
+test('Task Brief confirmation rejects unresolved questions defensively', () => {
+  const service = makeService() as any;
+  const activeSession = session();
+  const brief: TaskBrief = {
+    id: 'brief-with-open-questions',
+    sessionId: activeSession.id,
+    version: 1,
+    goal: 'Wait for explicit user confirmation.',
+    scope: [],
+    outOfScope: [],
+    constraints: [],
+    acceptanceCriteria: [],
+    risks: [],
+    openQuestions: ['Which ranking rule should be used?'],
+    confirmedByUser: false,
+    createdAt: '2026-07-03T00:00:00.000Z'
+  };
+  service.briefsBySession.set(activeSession.id, [brief]);
+
+  assert.throws(
+    () => service.confirmBrief(activeSession, brief.id),
+    (error: unknown) => {
+      const response = (error as { getResponse?: () => unknown }).getResponse?.() as {
+        code?: string;
+        openQuestions?: string[];
+      } | undefined;
+      return response?.code === 'brief_has_open_questions' && response.openQuestions?.length === 1;
+    }
+  );
+  assert.equal(brief.confirmedByUser, false);
+});
+
+test('Brief generation keeps only genuinely open questions from the active WorkItem', () => {
+  const service = makeService() as any;
+  const activeSession = { ...session(), activeWorkItemId: 'work-1' };
+  service.contextManagement = {
+    validDecisions: (_sessionId: string, workItemId: string) => workItemId === 'work-1' ? [{
+      id: 'answer-1', status: 'confirmed', question: '是否支持 CSV？', answer: '不支持',
+      content: '问题：是否支持 CSV？\n回答：不支持'
+    }] : []
+  };
+  assert.deepEqual(service.unresolvedBriefQuestions(activeSession,
+    ['是否支持 CSV?', '是否支持 PDF？']), ['是否支持 PDF？']);
+});
+
+test('GitHub task source changes cannot use server-local artifact writeback', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-cluster-github-artifact-'));
+  try {
+    await writeFile(join(directory, 'tracked.txt'), 'original\n', 'utf8');
+    const service = makeService() as any;
+    const githubSession = {
+      ...session(),
+      codeSource: { kind: 'remote_repository', provider: 'github',
+        repositoryUrl: 'https://github.com/example/repository' },
+      workingDirectory: { kind: 'server_local', id: directory, name: 'repository', path: directory,
+        selectedAt: new Date().toISOString() }
+    };
+    await service.applyServerLocalArtifactChanges(githubSession, [{
+      path: 'tracked.txt', operation: 'update', content: 'unapproved\n',
+      previousContent: 'original\n', encoding: 'utf-8', source: 'actual_filesystem_snapshot'
+    }], { allowSourceFileChanges: true });
+    assert.equal(await readFile(join(directory, 'tracked.txt'), 'utf8'), 'original\n');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('ordinary and directed Brief revisions publish converged questions despite repeated model output', async () => {
+  const recorder: ServiceRecorder = { events: [], runtimeCalls: 0, taskUpdates: [] };
+  const service = makeService([], recorder) as any;
+  const activeSession = { ...session(), activeWorkItemId: 'work-1' };
+  const decisions = [{
+    id: 'answer-1', status: 'confirmed', question: '是否支持 CSV？', answer: '不支持',
+    content: '问题：是否支持 CSV？\n回答：不支持'
+  }];
+  service.contextManagement = { validDecisions: () => decisions };
+  service.emitWorkspaceAnalyzedEvent = async () => undefined;
+  service.runDiscussion = async () => undefined;
+  service.createContextAssembly = () => ({ budget: {} });
+  service.runRuntime = async () => ({ status: 'completed' });
+  service.completedOutput = () => ({
+    goal: '只支持 Excel', scope: [], outOfScope: [], constraints: [],
+    acceptanceCriteria: [], risks: [], openQuestions: ['是否支持 CSV?', '是否支持 PDF？'],
+    suggestedTasks: []
+  });
+  service.shouldWriteGeneratedFiles = () => false;
+  service.persistBriefs = () => undefined;
+  service.applyServerLocalArtifactChanges = async () => undefined;
+  service.publishRequirementDocument = async () => undefined;
+  service.createSummaryMemoryCheckpoint = async () => undefined;
+
+  const first = await service.discussAndCreateBrief(activeSession);
+  const initialConfirmation = recorder.events.find((event) =>
+    event.type === 'user_confirmation_requested' &&
+    (event.metadata.payload as { relatedBriefId?: string } | undefined)?.relatedBriefId === first.id
+  );
+  assert.deepEqual(
+    (initialConfirmation?.metadata.payload as { options?: Array<{ key: string }> } | undefined)?.options?.map((option) => option.key),
+    ['revise'],
+    'a Brief with open questions must not expose a normal approve action'
+  );
+  for (let index = 0; index < 3; index += 1) {
+    recorder.events.push({
+      id: `brief-rejected-${index}`,
+      sessionId: activeSession.id,
+      type: 'brief_rejected',
+      content: '用户提交了任务契约修订。',
+      toAgentIds: [],
+      metadata: createMetadata('system_notice', { briefId: first.id }),
+      createdAt: `2026-07-03T00:00:0${index + 1}.000Z`
+    });
+  }
+  const directed = await service.runDirectedBriefRevision(activeSession, first,
+    '保留已确认回答', [], 'revision-event');
+  const limitedConfirmation = recorder.events.find((event) =>
+    event.type === 'user_confirmation_requested' &&
+    (event.metadata.payload as { relatedBriefId?: string } | undefined)?.relatedBriefId === directed.id
+  );
+  assert.deepEqual(
+    (limitedConfirmation?.metadata.payload as { options?: Array<{ key: string }> } | undefined)?.options?.map((option) => option.key),
+    ['proceed_with_open_questions'],
+    'the risk path appears only after the durable revision budget is exhausted'
+  );
+  assert.deepEqual(first.openQuestions, ['是否支持 PDF？']);
+  assert.deepEqual(directed.openQuestions, ['是否支持 PDF？']);
+  const cards = recorder.events.filter((event) => event.type === 'brief_created');
+  assert.equal(cards.length, 2);
+  assert.deepEqual((cards[1]?.metadata.payload as { openQuestions?: string[] }).openQuestions, ['是否支持 PDF？']);
+  decisions.push({
+    id: 'answer-2', status: 'confirmed', question: '是否支持 PDF？', answer: '不支持',
+    content: '问题：是否支持 PDF？\n回答：不支持'
+  });
+  const converged = await service.runDirectedBriefRevision(activeSession, directed,
+    'PDF 也不支持', [], 'revision-event-2');
+  assert.deepEqual(converged.openQuestions, []);
+  assert.equal(service.confirmBrief(activeSession, converged.id).confirmedByUser, true);
+});
+
+test('Orchestrator fallback routes through the system main Agent', () => {
+  const service = makeService() as any;
+  const activeSession = {
+    ...session(),
+    participatingAgentIds: ['requirements', 'backend']
+  };
+
+  const selected = service.pickSessionAgent(activeSession, ['review', 'test'], 1);
+
+  assert.equal(selected.key, 'coordinator');
+});
+
+test('Orchestrator fallback fails closed without the system main Agent', () => {
+  const service = makeService([], undefined, undefined, undefined, ['requirements', 'backend']) as any;
+  const activeSession = {
+    ...session(),
+    participatingAgentIds: ['requirements', 'backend']
+  };
+
+  assert.throws(() => service.pickSessionAgent(activeSession, ['review', 'test'], 1), /available|Agent/i);
+});
 
 test('task retries reuse acceptance but recheck permissions and changed scope before execution', async () => {
   const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
@@ -617,14 +814,16 @@ test('receiver Runtime recognizes every follow-up intent without requesting inte
   assert.equal(routedContext?.constraints.some((item) => item.startsWith('Current user message:')), false);
 });
 
-test('multiple mentioned agents discuss first and receiver decomposition stays within that agent set', async () => {
-  const service = makeService() as unknown as {
+test('multiple mentioned agents discuss first and a confirmation-required receiver plan stays within that set', async () => {
+  const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+  const service = makeService([], recorder) as unknown as {
     prepareFollowUpExecution(
       session: SessionDetail,
       content: string,
       sourceEventId: string,
-      mentionedAgentIds: string[]
-    ): Promise<{ brief: TaskBrief; tasks: AgentTask[] }>;
+      mentionedAgentIds: string[],
+      options?: { requiresUserConfirmation?: boolean }
+    ): Promise<{ brief: TaskBrief; tasks: AgentTask[]; awaitingUserConfirmation?: boolean }>;
     getBrief(sessionId: string, briefId: string): TaskBrief | undefined;
     memories: { create(input: unknown): unknown };
     createContextAssembly(): ContextAssembly;
@@ -640,6 +839,7 @@ test('multiple mentioned agents discuss first and receiver decomposition stays w
       tasks: TaskBriefOutput['suggestedTasks']
     ): TaskBriefOutput['suggestedTasks'];
     prepareExecution(session: SessionDetail, briefId: string): { brief: TaskBrief; tasks: AgentTask[] };
+    createSummaryMemoryCheckpoint(): Promise<void>;
     suggestedTasksByBriefId: Map<string, TaskBriefOutput['suggestedTasks']>;
   };
   let discussedKeys: string[] = [];
@@ -680,13 +880,21 @@ test('multiple mentioned agents discuss first and receiver decomposition stays w
     usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, model: 'mock' }
   });
   service.selectSuggestedTasks = (_session, tasks) => tasks;
-  service.prepareExecution = (inputSession, briefId) => ({
-    brief: service.getBrief(inputSession.id, briefId)!,
-    tasks: []
-  });
+  service.createSummaryMemoryCheckpoint = async () => undefined;
+  let prepareExecutionCalls = 0;
+  service.prepareExecution = (inputSession, briefId) => {
+    prepareExecutionCalls += 1;
+    return { brief: service.getBrief(inputSession.id, briefId)!, tasks: [] };
+  };
 
   const inputSession = session();
-  await service.prepareFollowUpExecution(inputSession, '实现并验证新需求', 'event-follow-up', ['backend', 'test']);
+  const prepared = await service.prepareFollowUpExecution(
+    inputSession,
+    '实现并验证新需求',
+    'event-follow-up',
+    ['backend', 'test'],
+    { requiresUserConfirmation: true }
+  );
   const latestBrief = service.getBrief(inputSession.id, inputSession.currentTaskBriefId ?? '') ??
     (service as unknown as { briefsBySession: Map<string, TaskBrief[]> }).briefsBySession.get(inputSession.id)?.at(-1);
   assert.deepEqual(discussedKeys, ['backend', 'test']);
@@ -695,6 +903,107 @@ test('multiple mentioned agents discuss first and receiver decomposition stays w
     service.suggestedTasksByBriefId.get(latestBrief!.id)?.map((task) => task.suggestedAgentKey),
     ['backend', 'test', 'backend']
   );
+  assert.equal(prepared.awaitingUserConfirmation, true);
+  assert.deepEqual(prepared.tasks, []);
+  assert.equal(prepareExecutionCalls, 0);
+  assert.ok(recorder.events.some((event) =>
+    event.type === 'user_confirmation_requested' &&
+    (event.metadata.payload as { reason?: string; relatedBriefId?: string }).reason === 'confirm_task_brief' &&
+    (event.metadata.payload as { reason?: string; relatedBriefId?: string }).relatedBriefId === latestBrief?.id
+  ));
+});
+
+test('task-context role fallbacks name the system main Agent instead of absent specialists', () => {
+  const service = makeService() as any;
+  const activeSession = { ...session(), participatingAgentIds: ['architect'] };
+
+  const responsibilities = service.createAgentResponsibilities(activeSession, 'coding');
+
+  assert.deepEqual(responsibilities, [
+    { role: 'execution', agentKey: 'coordinator' },
+    { role: 'validation', agentKey: 'coordinator', independentFrom: [] },
+    { role: 'review', agentKey: 'coordinator', independentFrom: [] }
+  ]);
+});
+
+test('task planning keeps missing specialist work and assigns it explicitly to the system main Agent', () => {
+  const service = makeService() as any;
+  const activeSession = {
+    ...session(),
+    participatingAgentIds: ['requirements'],
+    taskDomain: 'coding' as const
+  };
+
+  const suggestions = service.selectSuggestedTasks(activeSession, [
+    suggestedTask({
+      title: 'Implement unavailable backend work',
+      description: 'Implement the requested server behavior.',
+      suggestedAgentKey: 'backend',
+      acceptanceCriteria: ['Behavior is implemented.']
+    }),
+    suggestedTask({
+      title: 'Validate unavailable test work',
+      description: 'Validate the implementation.',
+      suggestedAgentKey: 'test',
+      acceptanceCriteria: ['Verification evidence is recorded.']
+    }),
+    suggestedTask({
+      title: 'Dispatch an unassigned task',
+      description: 'The receiver did not select a specialist.',
+      suggestedAgentKey: null,
+      acceptanceCriteria: ['The task has an explicit owner.']
+    })
+  ]);
+
+  assert.deepEqual(suggestions.map((task: SuggestedAgentTask) => task.suggestedAgentKey), [
+    'coordinator',
+    'coordinator',
+    'coordinator'
+  ]);
+  assert.equal(suggestions.length, 3, 'fallback must not silently drop implementation or validation work');
+});
+
+test('execution planning creates a task explicitly assigned to the system main Agent', () => {
+  const service = makeService() as any;
+  const activeSession = {
+    ...session(),
+    participatingAgentIds: ['requirements'],
+    currentTaskBriefId: 'brief-main-agent-assignee'
+  };
+  const brief: TaskBrief = {
+    id: 'brief-main-agent-assignee',
+    sessionId: activeSession.id,
+    version: 1,
+    goal: 'Assign missing specialist work to the main Agent.',
+    scope: [],
+    outOfScope: [],
+    constraints: [],
+    acceptanceCriteria: [],
+    risks: [],
+    openQuestions: [],
+    confirmedByUser: true,
+    createdAt: '2026-07-03T00:00:00.000Z'
+  };
+  service.tasks = new TasksService({
+    getCollection<T>(_key: string, fallback: T) {
+      return fallback;
+    },
+    setCollection() {}
+  } as never);
+  service.briefsBySession.set(activeSession.id, [brief]);
+  service.suggestedTasksByBriefId.set(brief.id, [
+    suggestedTask({
+      title: 'Main Agent fallback task',
+      description: 'Dispatch through the system main Agent.',
+      suggestedAgentKey: 'coordinator',
+      acceptanceCriteria: []
+    })
+  ]);
+  const prepared = service.prepareExecution(activeSession, brief.id);
+
+  assert.equal(prepared.tasks.length, 1);
+  assert.deepEqual(prepared.tasks[0].assignee, { type: 'agent', id: 'coordinator' });
+  assert.deepEqual(prepared.tasks[0].assignedBy, { type: 'agent', id: 'coordinator' });
 });
 
 test('receiver rejection fallback cannot escape an explicit mentioned-agent boundary', () => {
@@ -943,6 +1252,113 @@ test('provider fallback never bypasses a strict single-Runtime allowlist', async
   assert.equal(result.status, 'failed');
   assert.equal(calls, 2);
   assert.equal(recorder.events.some((event) => event.metadata.payload?.code === 'RUNTIME_PROVIDER_FALLBACK'), false);
+});
+
+/**
+ * SRS-AC7 baseline. Automatic fallback is only for retryable provider failures.
+ * A user stop is an explicit decision, so neither a cancelled result nor an
+ * aborted signal may spend the same-Runtime retry or walk the allowlist — doing
+ * so would restart work the user just stopped, and would file the stop under a
+ * Provider failure reason. Runtime switching must keep this separation: an
+ * explicit switch gets its own attempt group, it does not ride this path.
+ */
+test('an explicit user stop never spends the provider retry or walks the fallback allowlist', async () => {
+  const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+  const service = makeService([], recorder) as unknown as {
+    runRuntime(session: SessionDetail, input: {
+      invocationId: string;
+      sessionId: string;
+      phase: 'discussion';
+      agent: Agent;
+      contextAssembly: ContextAssembly;
+      expectedOutput: { kind: 'agent_message'; schemaVersion: '1.0' };
+      budget: Record<string, number>;
+    }, signal?: AbortSignal): Promise<AgentRunResult>;
+    runRuntimeAttempt(session: SessionDetail, input: { invocationId: string }): Promise<AgentRunResult>;
+  };
+  const inputSession = session();
+  inputSession.runtimePreference = {
+    preferredRuntimeType: 'claude_code',
+    allowedRuntimeTypes: ['claude_code', 'codex', 'generic_llm']
+  };
+  const draft = {
+    sessionId: inputSession.id,
+    phase: 'discussion' as const,
+    agent: agent('backend'),
+    contextAssembly: {} as ContextAssembly,
+    expectedOutput: { kind: 'agent_message' as const, schemaVersion: '1.0' as const },
+    budget: {}
+  };
+
+  // A cancelled result carries the user's stop, even though the Runtime also
+  // reported a retryable provider error alongside it.
+  let cancelledCalls = 0;
+  service.runRuntimeAttempt = async (_inputSession, input) => {
+    cancelledCalls += 1;
+    return {
+      invocationId: input.invocationId,
+      runtimeType: 'claude_code',
+      status: 'cancelled',
+      output: createAgentMessageOutput({ messageKind: 'risk', content: 'stopped by user' }),
+      events: [],
+      artifacts: [],
+      systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: 'claude_code' },
+      error: {
+        code: 'RUNTIME_CANCELLED',
+        message: 'stopped by user',
+        retryable: true,
+        details: { providerFailure: true, retryAfterMs: 0 }
+      }
+    };
+  };
+  const cancelled = await service.runRuntime(inputSession, { ...draft, invocationId: 'user-cancelled' });
+
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.runtimeType, 'claude_code', 'the stop is not reassigned to another Runtime');
+  assert.equal(cancelledCalls, 1, 'a cancelled result returns immediately, it does not retry');
+
+  // An aborted signal is the other shape of the same decision: the retryable
+  // provider failure must not be read as an invitation to try Codex instead.
+  const controller = new AbortController();
+  let abortedCalls = 0;
+  service.runRuntimeAttempt = async (_inputSession, input) => {
+    abortedCalls += 1;
+    controller.abort();
+    return {
+      invocationId: input.invocationId,
+      runtimeType: 'claude_code',
+      status: 'failed',
+      output: createAgentMessageOutput({ messageKind: 'risk', content: 'gateway timeout' }),
+      events: [],
+      artifacts: [],
+      systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: 'claude_code' },
+      error: {
+        code: 'RUNTIME_TIMEOUT',
+        message: 'gateway timeout',
+        retryable: true,
+        details: { providerFailure: true, httpStatus: 524, retryAfterMs: 0 }
+      }
+    };
+  };
+  const aborted = await service.runRuntime(
+    inputSession,
+    { ...draft, invocationId: 'user-aborted' },
+    controller.signal
+  );
+
+  assert.equal(abortedCalls, 1, 'an aborted signal stops the attempt loop');
+  assert.equal(aborted.runtimeType, 'claude_code');
+  assert.equal(
+    recorder.events.some((event) => event.metadata.payload?.code === 'RUNTIME_PROVIDER_FALLBACK'),
+    false,
+    'no stop is ever audited as a Provider fallback'
+  );
+  assert.equal(
+    recorder.events.some((event) => event.metadata.payload?.code === 'RUNTIME_PROVIDER_RETRY_SCHEDULED'),
+    false
+  );
 });
 
 test('fatal Claude invocation failure stops the remaining discussion agents', async () => {
@@ -2331,14 +2747,14 @@ test('file revision blocked or rejected acceptance stores only stable public sta
     const outcome = await service.runOneTask(activeSession, brief, task);
 
     assert.equal(outcome.ok, false);
-    assert.equal(outcome.message, 'File revision task acceptance was blocked.');
+    assert.equal(outcome.message, '文件修订任务接收已被阻止。');
     assert.doesNotMatch(JSON.stringify({ events: recorder.events, updates: recorder.taskUpdates }), new RegExp(secret));
     const blockedEvent = recorder.events.find((event) =>
       event.type === (status === 'rejected' ? 'task_rejected' : 'task_blocked')
     );
     assert.equal(
       (blockedEvent?.metadata.payload as { resultSummary?: string } | undefined)?.resultSummary,
-      'File revision task acceptance was blocked.'
+      '文件修订任务接收已被阻止。'
     );
   }
 });
@@ -3378,18 +3794,36 @@ test('normalizes a discussion-owned abort as a timeout without leaking the nativ
   assert.deepEqual(result.error?.details?.timeout, { mode: 'deadline', timeoutMs: 60_000 });
 });
 
-test('brief deadline is shared by provider attempts and is cleaned up after completion', async () => {
+test('task provider supervision does not cancel an active call at the operation deadline', async () => {
+  const service = makeService() as any;
+  const parent = new AbortController();
+  service.runRuntimeProviderAttemptsWithinDeadline = async (_s: unknown, _i: unknown, signal: AbortSignal) => {
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(signal.aborted, false);
+    parent.abort('user-stop');
+    assert.equal(signal.aborted, true, 'user cancellation still reaches the active task');
+    return { status: 'cancelled' };
+  };
+  const result = await service.runRuntimeProviderAttempts({}, {
+    phase: 'task_execution', operation: { deadlineAt: new Date(Date.now() + 5).toISOString() }
+  }, parent.signal);
+  assert.equal(result.status, 'cancelled');
+});
+
+test('brief provider supervision delegates budget health to RuntimeService without an outer deadline', async () => {
   const service = makeService() as any;
   const old = process.env.PHASE_TIMEOUT_BRIEF_GENERATION_MS;
   process.env.PHASE_TIMEOUT_BRIEF_GENERATION_MS = '25';
-  let reason: any;
+  const parent = new AbortController();
   service.runRuntimeProviderAttemptsWithinDeadline = async (_s: unknown, _i: unknown, signal: AbortSignal) => {
-    await new Promise<void>(resolve => signal.addEventListener('abort', () => { reason = signal.reason; resolve(); }, { once: true }));
-    return { status: 'failed' };
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(signal.aborted, false);
+    parent.abort('explicit stop');
+    assert.equal(signal.reason, 'explicit stop');
+    return { status: 'cancelled' };
   };
   try {
-    await service.runRuntimeProviderAttempts({}, { phase: 'brief_generation' });
-    assert.equal(reason.kind, 'phase_timeout');
+    await service.runRuntimeProviderAttempts({}, { phase: 'brief_generation' }, parent.signal);
     let completedSignal: AbortSignal | undefined;
     service.runRuntimeProviderAttemptsWithinDeadline = async (_s: unknown, _i: unknown, signal: AbortSignal) => { completedSignal = signal; return { status: 'completed' }; };
     await service.runRuntimeProviderAttempts({}, { phase: 'brief_generation' });
@@ -3492,3 +3926,47 @@ test('non-local runtime still requires a complete required document read receipt
   assert.equal(result.error?.code, 'CONTEXT_INSUFFICIENT');
   assert.match(result.error?.message ?? '', /DOCUMENT_READ_REQUIRED/);
 });
+
+
+test('supplemental hydration retains fresh evidence when the workspace revision advances during the batch', async () => {
+  let current = { id: 'before-read', observedAt: '2026-10-11T00:00:00Z' };
+  const service = makeService([], undefined, undefined, { resolve: () => ({
+    capabilities: () => ({ read: true, write: false, command: false, test: false }),
+    getRevision: async () => current,
+    readFile: async ({ path }: { path: string }) => {
+      current = { ...current, id: 'after-read' };
+      return { path, content: 'fresh source', encoding: 'utf-8', byteLength: 12, truncated: false,
+        revision: current, hash: { algorithm: 'sha256', value: 'fresh-hash' } };
+    }
+  }) }) as unknown as { hydrateSupplementalContext(session: SessionDetail, request: RuntimeContextRequest): Promise<SupplementalContextResolution> };
+  const activeSession = architectureSession();
+  const result = await service.hydrateSupplementalContext(activeSession, { reason: 'architecture', requestedRefs: [], requestedPaths: ['src/main.ts'] });
+  assert.deepEqual(result.hydratedPaths, ['src/main.ts']);
+  assert.equal(activeSession.workspaceSnapshot?.files[0]?.content, 'fresh source');
+  assert.equal(result.evidenceRevisions?.['src/main.ts']?.id, 'after-read');
+});
+
+
+for (const unchanged of [true, false]) {
+  test(`supplemental batch revalidates earlier reads by hash (unchanged=${unchanged})`, async () => {
+    let current = { id: 'r1', observedAt: '2026-10-11T00:00:00Z' };
+    const service = makeService([], undefined, undefined, { resolve: () => ({
+      capabilities: () => ({ read: true, write: false, command: false, test: false }),
+      getRevision: async () => current,
+      readFile: async ({ path }: { path: string }) => {
+        if (path === 'src/b.ts') current = { ...current, id: 'r2' };
+        return { path, content: 'source', encoding: 'utf-8', byteLength: 6, truncated: false,
+          revision: current, hash: { algorithm: 'sha256', value: path } };
+      },
+      statFile: async ({ path }: { path: string }) => ({ path, kind: 'file', size: 6, revision: current,
+        hash: { algorithm: 'sha256', value: unchanged ? path : 'changed' } })
+    }) }) as unknown as { hydrateSupplementalContext(session: SessionDetail, request: RuntimeContextRequest): Promise<SupplementalContextResolution> };
+    const activeSession = architectureSession();
+    const result = await service.hydrateSupplementalContext(activeSession, { reason: 'architecture', requestedRefs: [], requestedPaths: ['src/a.ts', 'src/b.ts'] });
+    assert.equal(result.hydratedPaths.includes('src/a.ts'), unchanged);
+    assert.equal(Boolean(activeSession.workspaceSnapshot?.files.find(file => file.path === 'src/a.ts')?.content), unchanged);
+    assert.ok(result.hydratedPaths.includes('src/b.ts'));
+    if (unchanged) assert.equal(result.evidenceRevisions?.['src/a.ts']?.id, 'r2');
+    else assert.ok(result.failedPaths.some(file => file.path === 'src/a.ts' && file.retryable));
+  });
+}

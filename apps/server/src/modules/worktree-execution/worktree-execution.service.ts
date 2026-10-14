@@ -17,10 +17,13 @@ import { isWorkspaceSensitivePath } from '../workspaces/workspace-sensitive-guar
 import { runGit, runGitText } from './git-command.js';
 import { buildWorktreeChangeSet } from './worktree-change-set.js';
 import { buildDirectoryChangeSet } from './directory-change-set.js';
+import { GitRepositoryWorkspaceManager } from '@agent-cluster/shared/node/repository-workspace-manager';
+import { captureGitTaskCandidate } from '@agent-cluster/shared/node/git-task-candidate';
+import { applyServerLocalChangeSet } from '../workspaces/workspace-apply-change-set.js';
 
 type WorktreeManifest = {
   version: '0.1';
-  mode?: 'git_worktree' | 'staging_copy';
+  mode?: 'git_worktree' | 'staging_copy' | 'github_task';
   sessionId: string;
   taskId: string;
   repositoryId: string;
@@ -40,6 +43,7 @@ type WorktreeManifest = {
 
 export type WorktreeExecutionLease = {
   manifest: WorktreeManifest;
+  plan?: InvocationPlan;
   captured?: boolean;
   release(): void;
 };
@@ -59,29 +63,31 @@ export class WorktreeExecutionService {
       input.phase === 'task_execution' &&
       Boolean(input.taskId) &&
       input.executionTarget.workspaceProviderKind === 'server_local' &&
-      input.executionTarget.writeMode !== 'none' &&
       ['codex', 'claude_code'].includes(input.executionTarget.runtimeType)
     );
   }
 
-  async prepare(input: InvocationPlan): Promise<WorktreeExecutionLease> {
+  async prepare(input: InvocationPlan, options: { github?: boolean } = {}): Promise<WorktreeExecutionLease> {
     if (!input.taskId) throw new Error('Worktree execution requires taskId.');
     const sourceWorkDir = this.workspaceBindings.resolveSessionRoot(input);
     if (!sourceWorkDir) throw new Error('Worktree execution requires a server-local workspace binding.');
     const key = `${input.sessionId}:${input.taskId}`;
     let manifest = this.contexts.get(key);
-    const gitManaged = await runGitText(sourceWorkDir, ['rev-parse', '--show-toplevel']).then(() => true).catch(() => false);
+    if (manifest && (manifest.mode === 'github_task') !== Boolean(options.github)) {
+      throw new Error('GITHUB_TASK_EXECUTION_MODE_MISMATCH');
+    }
+    const gitManaged = options.github || await runGitText(sourceWorkDir, ['rev-parse', '--show-toplevel']).then(() => true).catch(() => false);
     const directoryRelease = gitManaged ? undefined : await this.acquireDirectoryWrite(sourceWorkDir);
     if (!manifest) {
       let pending = this.preparing.get(key);
       if (!pending) {
-        pending = this.createOrRestore(
+        pending = options.github ? this.prepareGitHubTask(input, sourceWorkDir) : this.createOrRestore(
           input.sessionId,
           input.taskId,
           sourceWorkDir,
           input.contextEnvelope.L0.workspace.revision,
           gitManaged,
-          input.executionTarget.writeMode !== 'proposal_only'
+          input.executionTarget.writeMode !== 'proposal_only' && input.executionTarget.writeMode !== 'none'
         );
         this.preparing.set(key, pending);
       }
@@ -95,9 +101,41 @@ export class WorktreeExecutionService {
         this.preparing.delete(key);
       }
     }
+    const expectedAutoWriteback = !options.github &&
+      input.executionTarget.writeMode !== 'proposal_only' && input.executionTarget.writeMode !== 'none';
+    if ((manifest.autoWriteback !== false) !== expectedAutoWriteback) {
+      directoryRelease?.();
+      throw new Error('WORKTREE_WRITE_MODE_MISMATCH');
+    }
+    if (input.recoveryCandidate) {
+      try {
+        const candidate = input.recoveryCandidate;
+        if (candidate.sessionId !== input.sessionId || candidate.workItemId !== input.workItemId ||
+          (candidate.taskId !== input.taskId && candidate.taskId !== input.recoveryOriginTaskId) ||
+          candidate.workspaceId !== input.contextEnvelope.L0.workspace.workspaceId ||
+          candidate.baseRevision.id !== input.contextEnvelope.L0.workspace.revision.id ||
+          candidate.changeSet.baseRevision.id !== manifest.baseRevision.id ||
+          candidate.outputVersion !== input.expectedOutput.schemaVersion || !(Date.parse(candidate.expiresAt) > Date.now()) ||
+          candidate.permissionHash !== input.toolCatalog.catalogHash ||
+          candidate.manifestHash !== createHash('sha256').update(JSON.stringify(candidate.changeSet)).digest('hex')) {
+          throw new Error('CANDIDATE_RESTORE_VALIDATION_FAILED');
+        }
+        const current = manifest.mode === 'staging_copy'
+          ? await buildDirectoryChangeSet({ baselineRoot: manifest.baselineRoot!, executionRoot: manifest.executionWorkDir, baseRevision: manifest.baseRevision })
+          : await buildWorktreeChangeSet({ worktreeRoot: manifest.worktreeRoot, baseCommit: manifest.baseCommit,
+            baseRevision: manifest.baseRevision, baselineHashes: manifest.baselineHashes, scopePath: relative(manifest.repositoryRoot, manifest.sourceWorkDir) });
+        if (JSON.stringify(current.changes) !== JSON.stringify(candidate.changeSet.changes)) {
+          if (current.changes.length) throw new Error('CANDIDATE_RESTORE_CONFLICT');
+          const restored = await applyServerLocalChangeSet({ rootPath: manifest.executionWorkDir,
+            currentRevision: manifest.baseRevision, changeSet: candidate.changeSet });
+          if (!restored.ok) throw new Error('CANDIDATE_RESTORE_CONFLICT');
+        }
+      } catch (error) { directoryRelease?.(); throw error; }
+    }
     this.workspaceBindings.bindInvocation(input.invocationId, manifest.executionWorkDir);
     const lease: WorktreeExecutionLease = {
       manifest,
+      plan: input,
       release: () => {
         this.workspaceBindings.unbindInvocation(input.invocationId);
         if (directoryRelease && !lease.captured) directoryRelease();
@@ -109,6 +147,22 @@ export class WorktreeExecutionService {
 
   async capture(lease: WorktreeExecutionLease, result: AgentRunResult): Promise<AgentRunResult> {
     const { manifest } = lease;
+    if (manifest.mode === 'github_task') {
+      if (result.status !== 'completed') return result;
+      const githubCandidate = await captureGitTaskCandidate({
+        worktreePath: manifest.executionWorkDir,
+        sessionId: manifest.sessionId,
+        taskId: manifest.taskId,
+        baseCommit: manifest.baseCommit
+      });
+      return {
+        ...result,
+        ...(githubCandidate ? { githubCandidate } : {}),
+        output: markOutputChangesProposed(result.output),
+        artifacts: markArtifactChangesProposed(result.artifacts),
+        runtimeSession: { ...result.runtimeSession, workDir: manifest.executionWorkDir }
+      };
+    }
     const changeSet = manifest.mode === 'staging_copy'
       ? await buildDirectoryChangeSet({
           baselineRoot: manifest.baselineRoot!,
@@ -122,6 +176,18 @@ export class WorktreeExecutionService {
           baselineHashes: manifest.baselineHashes,
           scopePath: relative(manifest.repositoryRoot, manifest.sourceWorkDir)
         });
+    const plan = lease.plan;
+    if (plan && Buffer.byteLength(JSON.stringify(changeSet), 'utf8') <= 1_000_000) {
+      result = { ...result, executionCandidate: {
+        id: `candidate:${plan.invocationId}`, invocationId: plan.invocationId, sessionId: plan.sessionId,
+        taskId: plan.taskId, workItemId: plan.workItemId, workspaceId: plan.contextEnvelope.L0.workspace.workspaceId,
+        baseRevision: plan.contextEnvelope.L0.workspace.revision, changeSet,
+        manifestHash: createHash('sha256').update(JSON.stringify(changeSet)).digest('hex'),
+        permissionHash: plan.toolCatalog.catalogHash, outputVersion: plan.expectedOutput.schemaVersion,
+        createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 7 * 86400_000).toISOString(),
+        stage: result.status === 'completed' ? 'submission_validated' : 'candidate_captured'
+      } };
+    }
     if (manifest.mode === 'staging_copy' && result.status !== 'completed') {
       const release = this.pendingDirectoryWriteReleases.get(`${manifest.sessionId}:${manifest.taskId}`);
       this.pendingDirectoryWriteReleases.delete(`${manifest.sessionId}:${manifest.taskId}`);
@@ -179,6 +245,7 @@ export class WorktreeExecutionService {
     const taskSegment = safeSegment(taskId);
     const manifestPath = join(stagingRoot, 'manifests', sessionSegment, `${taskSegment}.json`);
     const manifest = this.contexts.get(key) ?? await this.readManifest(manifestPath);
+    if (manifest?.mode === 'github_task') throw new Error('GITHUB_TASK_RESET_REQUIRES_DELIVERY_RECOVERY');
     if (manifest?.mode !== 'staging_copy' && manifest && await exists(manifest.worktreeRoot)) {
       try {
         await runGit(manifest.repositoryRoot, ['worktree', 'remove', '--force', manifest.worktreeRoot]);
@@ -247,6 +314,25 @@ export class WorktreeExecutionService {
       manifests.push(manifest);
     }
     return manifests;
+  }
+
+  private async prepareGitHubTask(input: InvocationPlan, sourceWorkDir: string): Promise<WorktreeManifest> {
+    if (!input.taskId) throw new Error('GITHUB_TASK_ID_REQUIRED');
+    const manager = new GitRepositoryWorkspaceManager();
+    if (canonicalPath(sourceWorkDir) !== canonicalPath(manager.sessionWorkspacePath(input.sessionId))) {
+      throw new Error('GITHUB_SESSION_WORKSPACE_MISMATCH');
+    }
+    const task = await manager.prepareTask(input.sessionId, input.taskId);
+    const createdAt = new Date().toISOString();
+    return {
+      version: '0.1', mode: 'github_task', sessionId: input.sessionId, taskId: input.taskId,
+      repositoryId: createHash('sha256').update(canonicalPath(sourceWorkDir)).digest('hex'),
+      repositoryRoot: sourceWorkDir, sourceWorkDir,
+      worktreeRoot: task.workspacePath, executionWorkDir: task.workspacePath,
+      sourceHead: task.baseCommit, baseCommit: task.baseCommit,
+      baseRevision: { id: `git:${task.baseCommit}`, observedAt: createdAt },
+      dirtyBaseline: false, autoWriteback: false, baselineHashes: {}, createdAt
+    };
   }
 
   private async createOrRestore(

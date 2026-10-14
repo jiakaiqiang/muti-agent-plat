@@ -20,7 +20,7 @@ export const GROUP_CHAT_IMAGE_RECOGNITION_PROVIDER = Symbol('GROUP_CHAT_IMAGE_RE
 export class ImageRecognitionUnsupportedError extends Error {
   readonly code = 'image_recognition_unsupported';
 
-  constructor(message = 'No multimodal image understanding provider is configured.') {
+  constructor(message = '尚未配置支持图片理解的多模态模型。') {
     super(message);
     this.name = 'ImageRecognitionUnsupportedError';
   }
@@ -39,7 +39,7 @@ export class UnsupportedImageContentUnderstandingProvider extends ImageContentUn
 /** Small deterministic provider used by unit tests and local integration checks. */
 export class FakeImageContentUnderstandingProvider extends ImageContentUnderstandingProvider {
   constructor(
-    private readonly result: ImageContentUnderstandingResult | Error = { summary: 'Fake provider image description.' }
+    private readonly result: ImageContentUnderstandingResult | Error = { summary: '测试模型提供的图片说明。' }
   ) {
     super();
   }

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -8,6 +9,7 @@ import test from 'node:test';
 import {
   DEFAULT_LOCAL_RUNTIME_PERMISSION_POLICY,
   LOCAL_RUNTIME_PROTOCOL_VERSION,
+  canonicalWorkspaceChangeSetJson,
   type LocalRuntimeServerMessage
 } from '@agent-cluster/shared';
 import { firstValueFrom } from 'rxjs';
@@ -20,6 +22,103 @@ import { HeartbeatTracker } from '../workspaces/runtime-broker/heartbeat-tracker
 import { PendingRequestRegistry } from '../workspaces/runtime-broker/pending-request-registry.js';
 import { LocalRuntimeAuthService } from './local-runtime-auth.service.js';
 import { LocalRuntimeConnectionService } from './local-runtime-connection.service.js';
+
+test('bound open control socket remains connected without claiming fresh model progress', () => {
+  const persistence = new PersistenceService({ enabled: false });
+  let now = 0;
+  const heartbeats = new HeartbeatTracker(30_000, () => now);
+  const connections = new LocalRuntimeConnectionService(
+    new LocalRuntimeAuthService(persistence), new BrokerGateway(() => 'epoch-test'),
+    new PendingRequestRegistry(), heartbeats, persistence
+  );
+  const plan = makeInvocationPlan();
+  const workspaceId = plan.contextEnvelope.L0.workspace.workspaceId;
+  const internals = connections as any;
+  const socket = { readyState: WebSocket.OPEN as number };
+  internals.workspaces.set(workspaceId, { deviceId: 'bound-device' });
+  internals.clientsByDeviceId.set('bound-device', { hello: {}, socket });
+  assert.equal(connections.isInvocationConnected(plan), true);
+  heartbeats.record(workspaceId);
+  assert.equal(connections.isInvocationConnected(plan), true);
+  now = 30_001;
+  assert.equal(connections.isInvocationConnected(plan), true, 'heartbeat age is not proof of a lost request');
+  heartbeats.record(workspaceId);
+  assert.equal(connections.isInvocationConnected(plan), true);
+  socket.readyState = WebSocket.CLOSED;
+  assert.equal(connections.isInvocationConnected(plan), false);
+  socket.readyState = WebSocket.OPEN;
+  internals.workspaces.delete(workspaceId);
+  assert.equal(connections.isInvocationConnected(plan), false);
+});
+
+test('local GitHub PAT is handed to the selected connected device without server persistence', async () => {
+  const persistence = new PersistenceService({ enabled: false });
+  const connections = new LocalRuntimeConnectionService(
+    new LocalRuntimeAuthService(persistence), new BrokerGateway(() => 'epoch-test'),
+    new PendingRequestRegistry(), new HeartbeatTracker(30_000), persistence
+  );
+  const internals = connections as any;
+  const sent: LocalRuntimeServerMessage[] = [];
+  const client = { deviceId: 'device-a', hello: {}, socket: { readyState: WebSocket.OPEN } };
+  internals.clientsByDeviceId.set(client.deviceId, client);
+  internals.send = (_client: unknown, message: LocalRuntimeServerMessage) => sent.push(message);
+  const pending = connections.requestGitHubAuthorization('device-a', {
+    action: 'save_pat', repositoryUrl: 'https://github.com/example/project', token: 'fixture-secret'
+  });
+  const request = sent[0];
+  assert.equal(request.kind, 'local_runtime.github.authorization.request');
+  if (request.kind !== 'local_runtime.github.authorization.request') return;
+  assert.equal(request.payload.token, 'fixture-secret');
+  const result = { requestId: request.payload.requestId, status: 'ok' as const,
+    authorization: {
+      id: 'auth-a', deviceId: 'device-a', accountId: '42', accountLogin: 'octocat',
+      repositoryId: '73', repositoryUrl: 'https://github.com/example/project',
+      state: 'active' as const, version: 1,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+    }
+  };
+  assert.throws(() => internals.handleMessage({ ...client, deviceId: 'device-b' }, {
+    kind: 'local_runtime.github.authorization.result', payload: result
+  }), /device/);
+  internals.handleMessage(client, { kind: 'local_runtime.github.authorization.result', payload: result });
+  assert.deepEqual(await pending, result.authorization);
+  assert.equal(JSON.stringify(persistence.snapshotState()).includes('fixture-secret'), false);
+});
+
+test('local GitHub source response binds a session worktree to the selected device', async () => {
+  const persistence = new PersistenceService({ enabled: false });
+  const connections = new LocalRuntimeConnectionService(
+    new LocalRuntimeAuthService(persistence), new BrokerGateway(() => 'epoch-test'),
+    new PendingRequestRegistry(), new HeartbeatTracker(30_000), persistence
+  );
+  const internals = connections as any;
+  const sent: LocalRuntimeServerMessage[] = [];
+  const registered: string[] = [];
+  const client = { deviceId: 'device-a', hello: {}, socket: { readyState: WebSocket.OPEN } };
+  internals.clientsByDeviceId.set(client.deviceId, client);
+  internals.send = (_client: unknown, message: LocalRuntimeServerMessage) => sent.push(message);
+  internals.registerWorkspace = (_client: unknown, workspace: { workspaceId: string }) =>
+    registered.push(workspace.workspaceId);
+  const sessionId = '11111111-1111-4111-8111-111111111111';
+  const pending = connections.requestGitHubSource('device-a', {
+    action: 'prepare', sessionId, repositoryUrl: 'https://github.com/example/project',
+    authorizationId: 'auth-a'
+  });
+  const request = sent[0];
+  assert.equal(request.kind, 'local_runtime.github.source.request');
+  if (request.kind !== 'local_runtime.github.source.request') return;
+  const payload = { requestId: request.payload.requestId, status: 'ok' as const,
+    repositoryId: '73', defaultBranch: 'develop', cacheKey: 'cache-a',
+    workspaceId: `github-session:${sessionId}`,
+    workspace: { workspaceId: `github-session:${sessionId}` }
+  };
+  assert.throws(() => internals.handleMessage({ ...client, deviceId: 'device-b' }, {
+    kind: 'local_runtime.github.source.result', payload
+  }), /device/);
+  internals.handleMessage(client, { kind: 'local_runtime.github.source.result', payload });
+  assert.equal((await pending).defaultBranch, 'develop');
+  assert.deepEqual(registered, [`github-session:${sessionId}`]);
+});
 
 test('normal completion receipts stay silent; concurrent stop receipts notify only once', async () => {
   const persistence = new PersistenceService({ enabled: false });
@@ -327,6 +426,32 @@ test('authenticated Local Runtime carries an invocation and disconnects without 
     assert.equal((await permissionGrant).permissions.workspace_delete, 'allow');
     assert.equal((await inbox.next('local_runtime.workspace.registered')).payload.workspaceId, 'workspace-local-runtime');
 
+    const resolvedChangeSet = {
+      id: 'resolved-writeback', baseRevision: { id: 'revision-local-1', observedAt: '2026-07-24T00:00:00.000Z' },
+      changes: [{ operation: 'delete' as const, path: 'old.txt',
+        expectedHash: { algorithm: 'sha256' as const, value: 'a'.repeat(64) } }],
+      createdAt: '2026-07-24T00:00:00.000Z'
+    };
+    const exactGrant = connections.grantWorkspacePermissionOnce(
+      'workspace-local-runtime', 'workspace_delete', resolvedChangeSet);
+    const exactRequest = await inbox.next('local_runtime.workspace.permission.grant.request');
+    assert.deepEqual(exactRequest.payload.writeback, {
+      changeSetId: resolvedChangeSet.id,
+      digest: createHash('sha256').update(canonicalWorkspaceChangeSetJson(resolvedChangeSet)).digest('hex')
+    });
+    socket.send(JSON.stringify({ kind: 'local_runtime.workspace.permission.grant.result', payload: {
+      requestId: exactRequest.payload.requestId, workspaceId: 'workspace-local-runtime',
+      permission: 'workspace_delete', status: 'granted', workspace: {
+        workspaceId: 'workspace-local-runtime', displayName: 'local-project',
+        capabilities: { read: true, write: true, command: true, test: true },
+        revision: { id: 'revision-local-1', observedAt: '2026-07-24T00:00:00.000Z' },
+        permissions: { ...DEFAULT_LOCAL_RUNTIME_PERMISSION_POLICY, workspace_delete: 'allow' },
+        registeredAt: '2026-07-24T00:00:00.000Z'
+      }
+    } }));
+    await exactGrant;
+    await inbox.next('local_runtime.workspace.registered');
+
     const operationResult = pending.waitFor('workspace-operation-1', 'workspace-local-runtime');
     gateway.dispatch({
       requestId: 'workspace-operation-1',
@@ -563,7 +688,7 @@ test('authenticated Local Runtime carries an invocation and disconnects without 
   }
 });
 
-test('a silent Local Runtime invocation is terminated by the idle deadline', async () => {
+test('a silent Local Runtime invocation is retained until explicit cancellation, with trusted stop receipts', async () => {
   const persistence = new PersistenceService({ enabled: false });
   const auth = new LocalRuntimeAuthService(persistence);
   const gateway = new BrokerGateway(() => 'epoch-test');
@@ -651,6 +776,9 @@ test('a silent Local Runtime invocation is terminated by the idle deadline', asy
     const handle = connections.startInvocation(plan);
     await inbox.next('local_runtime.invocation.start');
 
+    await new Promise(resolve => setTimeout(resolve, 110));
+    assert.equal(inbox.count('local_runtime.invocation.cancel'), 0, 'silence does not cancel the original request');
+    const cancelling = handle.cancel();
     const stop = await inbox.next('local_runtime.invocation.cancel');
     assert.equal(stop.payload.invocationId, plan.invocationId);
     let settled = false;
@@ -663,13 +791,9 @@ test('a silent Local Runtime invocation is terminated by the idle deadline', asy
         output: {}, events: [], artifacts: [], usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } }
     } }));
     const result = await handle.result;
-    assert.equal(result.status, 'failed');
-    assert.equal(result.error?.code, 'RUNTIME_TIMEOUT');
-    assert.equal(result.error?.retryable, true);
-    assert.equal(result.termination?.kind, 'runtime_timeout');
-    assert.equal(result.termination?.timeout?.mode, 'idle');
-    assert.equal(result.termination?.timeout?.timeoutMs, 60);
-    assert.equal((await handle.events[Symbol.asyncIterator]().next()).done, true);
+    await cancelling;
+    assert.equal(result.status, 'cancelled');
+    assert.equal(result.termination?.kind, 'user_cancelled');
     process.env.LOCAL_RUNTIME_STOP_ACK_TIMEOUT_MS = '25';
     const unconfirmedPlan = { ...plan, invocationId: 'invocation-unconfirmed' };
     const unconfirmedHandle = connections.startInvocation(unconfirmedPlan);
@@ -800,6 +924,43 @@ test('same Local Runtime device can immediately re-register workspaces after rec
   } finally {
     if (first.readyState === WebSocket.OPEN || first.readyState === WebSocket.CONNECTING) first.terminate();
     if (second?.readyState === WebSocket.OPEN || second?.readyState === WebSocket.CONNECTING) second.terminate();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('an incompatible hello is reported and is never considered connected', async () => {
+  const persistence = new PersistenceService({ enabled: false });
+  const auth = new LocalRuntimeAuthService(persistence);
+  const connections = new LocalRuntimeConnectionService(
+    auth, new BrokerGateway(() => 'epoch-test'), new PendingRequestRegistry(), new HeartbeatTracker(30_000), persistence
+  );
+  const token = auth.authorizeTrustedDevice({
+    deviceId: 'device-downgraded', displayName: 'old-runtime', cliVersion: '0.1.0',
+    protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION, runtimes: {}
+  });
+  const server = createServer();
+  connections.attach(server);
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const socket = new WebSocket(`ws://127.0.0.1:${address.port}/local-runtime`, {
+    headers: { Authorization: `Bearer ${token.accessToken}` }
+  });
+  const inbox = new LocalRuntimeMessageInbox(socket);
+  try {
+    await once(socket, 'open');
+    socket.send(JSON.stringify({ kind: 'local_runtime.hello', payload: {
+      deviceId: 'device-downgraded', cliVersion: '0.1.0',
+      protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION - 1, runtimes: {}
+    } }));
+    const error = await inbox.next('local_runtime.protocol.error');
+    assert.equal(error.payload.code, 'LOCAL_RUNTIME_PROTOCOL_INCOMPATIBLE');
+    assert.equal(error.payload.compatibility?.compatible, false);
+    await once(socket, 'close');
+    assert.equal(connections.isDeviceConnected('device-downgraded'), false);
+  } finally {
+    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.terminate();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });

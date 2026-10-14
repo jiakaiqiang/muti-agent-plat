@@ -125,7 +125,9 @@ try {
     method: 'POST',
     body: JSON.stringify({
       name: 'Codex runtime stub workflow',
-      nodes: [{ id: 'codex-runtime-stub-node', type: 'agent', agentId: backend.id, order: 0 }]
+      nodes: [{ id: 'codex-runtime-stub-node', type: 'agent', agentId: backend.id,
+        stageDescription: 'Update the selected server workspace through the Codex worker.',
+        outputContract: ['Capture the Codex worker changes for review.'], order: 0 }]
     })
   })).data;
   const workflow = (await api(server.apiBase, `/workflows/${draft.id}/publish`, {
@@ -150,7 +152,7 @@ try {
     await page.waitForTimeout(100);
   }
   await dialog.getByLabel('Runtime 偏好').selectOption('codex');
-  await dialog.getByLabel('任务').fill('Use the server Runtime worker to update the selected server directory.');
+  await dialog.getByLabel('任务', { exact: true }).fill('Use the server Runtime worker to update the selected server directory.');
   await dialog.locator('.dialog-agent-picker button').filter({ hasText: backend.name }).click();
   await dialog.getByRole('button', { name: '保存', exact: true }).click();
   const confirmation = page.getByRole('region', { name: '确认保存会话' });
@@ -232,8 +234,12 @@ try {
 
   const updated = await readFile(join(workspaceRoot, 'src', 'feature.txt'), 'utf8').catch(() => '');
   const created = await readFile(join(workspaceRoot, 'src', 'generated-by-codex.txt'), 'utf8').catch(() => '');
-  if (updated !== 'before\n' || created) {
-    throw new Error('Managed Codex worktree must not directly mutate the selected source workspace.');
+  if (updated !== 'after from codex stub\n' || created !== 'created by codex stub\n') {
+    throw new Error('Platform writeback did not apply the isolated Codex changes.');
+  }
+  const completedSession = (await api(server.apiBase, `/sessions/${sessionId}`)).data;
+  if (!completedSession.workspaceWritebacks?.some((writeback) => writeback.status === 'applied')) {
+    throw new Error('Expected an applied workspace writeback record after Codex execution.');
   }
 
   const acceptanceDecision = events.find(

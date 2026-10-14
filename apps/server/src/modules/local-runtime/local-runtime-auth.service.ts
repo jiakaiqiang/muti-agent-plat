@@ -5,6 +5,7 @@ import type {
   LocalRuntimeCompatibility,
   LocalRuntimeDevice,
   LocalRuntimeDeviceCode,
+  LocalRuntimeUpgradeInfo,
   LocalRuntimeTokenPendingResponse,
   LocalRuntimeTokenResponse
 } from '@agent-cluster/shared';
@@ -206,31 +207,106 @@ export class LocalRuntimeAuthService {
   compatibility(cliVersion: string, protocolVersion: number): LocalRuntimeCompatibility {
     const minimumCliVersion = process.env.LOCAL_RUNTIME_MIN_CLI_VERSION?.trim() || '0.1.0';
     if (protocolVersion !== LOCAL_RUNTIME_PROTOCOL_VERSION) {
+      const upgradeInfo = this.upgradeInfo(cliVersion, protocolVersion);
       return {
         compatible: false,
         cliVersion,
         protocolVersion,
         requiredProtocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
-        reason: `Protocol ${protocolVersion} is unsupported; required protocol is ${LOCAL_RUNTIME_PROTOCOL_VERSION}.`,
-        upgradeRequired: protocolVersion < LOCAL_RUNTIME_PROTOCOL_VERSION
+        requiredCliVersion: minimumCliVersion,
+        reason: `不支持协议版本 ${protocolVersion}，需要协议版本 ${LOCAL_RUNTIME_PROTOCOL_VERSION}。`,
+        upgradeRequired: true,
+        upgradeAvailable: this.isUpgradeAvailable(upgradeInfo),
+        upgradeInfo
       };
     }
     if (compareVersions(cliVersion, minimumCliVersion) < 0) {
+      const upgradeInfo = this.upgradeInfo(cliVersion, protocolVersion);
       return {
         compatible: false,
         cliVersion,
         protocolVersion,
         requiredProtocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
-        reason: `CLI ${cliVersion} is older than the required ${minimumCliVersion}.`,
-        upgradeRequired: true
+        requiredCliVersion: minimumCliVersion,
+        reason: `本机 CLI 版本 ${cliVersion} 过低，需要升级至 ${minimumCliVersion}。`,
+        upgradeRequired: true,
+        upgradeAvailable: this.isUpgradeAvailable(upgradeInfo),
+        upgradeInfo
       };
     }
     return {
       compatible: true,
       cliVersion,
       protocolVersion,
-      requiredProtocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION
+      requiredProtocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+      requiredCliVersion: minimumCliVersion
     };
+  }
+
+  serverCompatibility(): LocalRuntimeCompatibility {
+    const minimumCliVersion = process.env.LOCAL_RUNTIME_MIN_CLI_VERSION?.trim() || '0.1.0';
+    const targetVersion = process.env.LOCAL_RUNTIME_RELEASE_VERSION?.trim() || `protocol-${LOCAL_RUNTIME_PROTOCOL_VERSION}`;
+    const releaseUrl = this.releaseUrl();
+    return {
+      compatible: true,
+      cliVersion: targetVersion,
+      protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+      requiredProtocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+      requiredCliVersion: minimumCliVersion,
+      upgradeAvailable: releaseUrl ? this.isUpgradeAvailable(this.upgradeInfo(targetVersion, LOCAL_RUNTIME_PROTOCOL_VERSION)) : false,
+      ...(releaseUrl ? { upgradeInfo: this.upgradeInfo(targetVersion, LOCAL_RUNTIME_PROTOCOL_VERSION) } : {})
+    };
+  }
+
+  private upgradeInfo(cliVersion: string, protocolVersion: number): LocalRuntimeUpgradeInfo {
+    const targetVersion = process.env.LOCAL_RUNTIME_RELEASE_VERSION?.trim() || `protocol-${LOCAL_RUNTIME_PROTOCOL_VERSION}`;
+    const releaseUrl = this.releaseUrl();
+    const releaseNotes = (process.env.LOCAL_RUNTIME_RELEASE_NOTES?.trim() || [
+      `支持 Local Runtime 协议 ${LOCAL_RUNTIME_PROTOCOL_VERSION}`,
+      '修复协议不一致时设备被错误显示为在线',
+      '升级后自动恢复本地工作区注册'
+    ].join('||')).split('||').map((item) => item.trim()).filter(Boolean);
+    const buildId = process.env.LOCAL_RUNTIME_BUILD_ID?.trim() || `local-runtime-${targetVersion}`;
+    const packageSize = Number(process.env.LOCAL_RUNTIME_PACKAGE_SIZE);
+    const upgradeId = createHash('sha256')
+      .update(`local-runtime:${targetVersion}:${LOCAL_RUNTIME_PROTOCOL_VERSION}:${buildId}`)
+      .digest('hex').slice(0, 32);
+    return {
+      upgradeId,
+      subject: 'local-runtime',
+      fromVersion: cliVersion,
+      toVersion: targetVersion,
+      fromProtocolVersion: protocolVersion,
+      toProtocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+      toBuildId: buildId,
+      releaseNotes,
+      installerType: 'windows-nsis',
+      mandatory: true,
+      ...(releaseUrl ? { releaseUrl } : {}),
+      ...(Number.isFinite(packageSize) && packageSize > 0 ? { packageSize } : {}),
+      ...(process.env.LOCAL_RUNTIME_PACKAGE_SHA256?.trim() ? { sha256: process.env.LOCAL_RUNTIME_PACKAGE_SHA256.trim() } : {}),
+      ...(process.env.LOCAL_RUNTIME_PACKAGE_SIGNATURE?.trim() ? { signature: process.env.LOCAL_RUNTIME_PACKAGE_SIGNATURE.trim() } : {})
+    };
+  }
+
+  private isUpgradeAvailable(info: LocalRuntimeUpgradeInfo) {
+    return Boolean(
+      info.releaseUrl
+      && info.sha256 && /^[a-f0-9]{64}$/i.test(info.sha256)
+      && info.signature && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(info.signature.trim())
+    );
+  }
+
+  private releaseUrl() {
+    const configured = process.env.LOCAL_RUNTIME_RELEASE_URL?.trim();
+    if (!configured) return undefined;
+    try {
+      const url = new URL(configured);
+      if (url.protocol !== 'https:' || url.username || url.password) return undefined;
+      return url.toString();
+    } catch {
+      return undefined;
+    }
   }
 
   private issueTokens(device: PersistedDevice): LocalRuntimeTokenResponse {

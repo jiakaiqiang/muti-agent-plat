@@ -57,6 +57,27 @@ function makeAgent(input: Pick<AgentDefinition, 'id' | 'key' | 'name'> & Partial
 }
 
 describe('UserInputBox composer context tags', () => {
+  it('restores text, Skill and Agent tags independently across sessions without remounting', async () => {
+    sessionStorage.clear()
+    wrapper = mount(UserInputBox, { props: { sessionId: 'A' } })
+    const composer = wrapper.vm as unknown as {
+      selectSkill: (skill: { id: string; key: string; name: string }) => void
+      selectAgent: (agent: { id: string; name: string }) => void
+    }
+    composer.selectSkill({ id: 'skill-A', key: 'test', name: '测试能力' })
+    composer.selectAgent({ id: 'agent-A', name: '甲' })
+    await wrapper.get('textarea').setValue('A 的草稿')
+    await wrapper.setProps({ sessionId: 'B' })
+    expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('')
+    expect(wrapper.text()).not.toContain('/测试能力')
+    await wrapper.get('textarea').setValue('B 的草稿')
+    await wrapper.setProps({ sessionId: 'A' })
+    expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('A 的草稿')
+    expect(wrapper.text()).toContain('/测试能力')
+    expect(wrapper.text()).toContain('@甲')
+    await wrapper.setProps({ sessionId: 'B' })
+    expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('B 的草稿')
+  })
   beforeEach(() => setActivePinia(createPinia()))
 
   let wrapper: ReturnType<typeof mount>

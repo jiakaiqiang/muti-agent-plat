@@ -171,11 +171,17 @@ export function makeService(
       getCollection<T>(_key: string, fallback: T) {
         return fallback;
       },
-      setCollection() {}
+      setCollection() {},
+      async mutateCollections<T>(_keys: string[], mutate: (draft: Record<string, unknown>) => T) {
+        return mutate({});
+      }
     }) as never,
     {} as never,
     {
       workspaceFocus() {
+        return undefined;
+      },
+      githubProjectScopeQuestion() {
         return undefined;
       }
     } as never,

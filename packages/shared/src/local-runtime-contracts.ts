@@ -13,8 +13,115 @@ import type {
   WorkspaceProviderKind,
   WorkspaceRevision
 } from './contracts.js';
+import type { ConflictView, DeliveryDiff, DeliveryValidation, GitTaskCandidate, RepositoryValidationCommand } from './contracts.js';
 
-export const LOCAL_RUNTIME_PROTOCOL_VERSION = 7 as const;
+export const LOCAL_RUNTIME_PROTOCOL_VERSION = 11 as const;
+
+export type LocalGitHubAuthorizationSummary = {
+  id: UUID;
+  kind?: 'pat' | 'github_app';
+  deviceId: UUID;
+  accountId: string;
+  accountLogin: string;
+  accountEmail?: string;
+  repositoryId: string;
+  repositoryUrl: string;
+  state: 'active' | 'invalid' | 'disconnected';
+  expiresAt?: ISODateTime;
+  version: number;
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+};
+
+export type LocalGitHubAuthorizationAction =
+  | { action: 'save_pat'; token: string; authorizationId?: never }
+  | { action: 'save_oauth'; token: string; expiresAt?: ISODateTime; authorizationId?: never }
+  | { action: 'find_reusable'; token?: never; authorizationId?: never }
+  | { action: 'disconnect'; authorizationId: UUID; token?: never };
+
+export type LocalGitHubAuthorizationRequest = {
+  requestId: UUID;
+  repositoryUrl: string;
+} & LocalGitHubAuthorizationAction;
+
+export type LocalGitHubAuthorizationResult = {
+  requestId: UUID;
+  status: 'ok' | 'error';
+  authorization?: LocalGitHubAuthorizationSummary;
+  error?: { code: string };
+};
+
+export type LocalGitHubSourceAction =
+  | { action: 'prepare'; sessionId: UUID; repositoryUrl: string; authorizationId: UUID }
+  | { action: 'branches'; sessionId: UUID }
+  | { action: 'select_branch'; sessionId: UUID; baseBranch: string }
+  | { action: 'cleanup'; sessionId: UUID };
+
+export type LocalGitHubSourceRequest = LocalGitHubSourceAction & { requestId: UUID };
+
+export type LocalGitHubSourceResult = {
+  requestId: UUID;
+  status: 'ok' | 'error';
+  repositoryId?: string;
+  defaultBranch?: string;
+  cacheKey?: string;
+  workspaceId?: UUID;
+  baseSha?: string;
+  branches?: Array<{ name: string; sha: string }>;
+  workspace?: LocalRuntimeWorkspaceRegistration;
+  error?: { code: string };
+};
+
+export type LocalGitHubDeliveryAction =
+  | { action: 'integrate_validate'; sessionId: UUID; baseSha: string; round: number;
+      candidates: GitTaskCandidate[]; command?: RepositoryValidationCommand }
+  | { action: 'validate'; sessionId: UUID; treeSha: string; comparisonSha: string;
+      command?: RepositoryValidationCommand }
+  | { action: 'publish'; sessionId: UUID; authorizationId: UUID; repositoryUrl: string;
+      round: number; baseBranch: string; baseSha: string; treeSha: string;
+      previousCommitSha?: string; integratedRemoteSha?: string }
+  | { action: 'status'; sessionId: UUID; authorizationId: UUID; repositoryUrl: string;
+      pullRequestNumber: number }
+  | { action: 'merge'; sessionId: UUID; authorizationId: UUID; repositoryUrl: string;
+      pullRequestNumber: number; expectedHeadSha: string }
+  | { action: 'diff'; sessionId: UUID; authorizationId: UUID; repositoryUrl: string;
+      kind: 'pull_request' | 'merged_commit'; pullRequestNumber?: number;
+      sha: string; page: number }
+  | { action: 'start_conflict'; sessionId: UUID; authorizationId: UUID;
+      repositoryUrl: string; round: number; headSha: string; baseBranch: string }
+  | { action: 'conflict_view'; sessionId: UUID; conflictId: UUID }
+  | { action: 'conflict_save'; sessionId: UUID; conflictId: UUID; fileId: UUID;
+      expectedVersion: number; resultContent?: string; binaryChoice?: 'ours' | 'theirs';
+      confirm: boolean }
+  | { action: 'conflict_complete'; sessionId: UUID; conflictId: UUID;
+      expectedVersion: number };
+
+export type LocalGitHubDeliveryRequest = LocalGitHubDeliveryAction & { requestId: UUID };
+
+export type LocalGitHubDeliveryResult = {
+  requestId: UUID;
+  sessionId: UUID;
+  status: 'ok' | 'error';
+  outcome?: 'needs_input' | 'conflict' | 'validated' | 'no_changes' | 'published' | 'remote_changed' | 'status' | 'merged' | 'diff' | 'conflict_view' | 'conflict_complete';
+  treeSha?: string;
+  changedPaths?: string[];
+  conflicts?: string[];
+  validation?: DeliveryValidation;
+  command?: RepositoryValidationCommand;
+  taskBranch?: string;
+  remoteHeadSha?: string;
+  commitSha?: string;
+  pullRequestNumber?: number;
+  pullRequestUrl?: string;
+  pullRequestHeadSha?: string;
+  ciStatus?: 'not_configured' | 'pending' | 'failed' | 'passed';
+  pullRequestState?: 'open' | 'closed';
+  mergeable?: boolean | null;
+  mergedCommitSha?: string;
+  diff?: DeliveryDiff;
+  conflictView?: ConflictView;
+  error?: { code: string };
+};
 
 export const LOCAL_RUNTIME_PERMISSION_KEYS = [
   'workspace_read',
@@ -89,6 +196,8 @@ export type LocalRuntimeWorkspacePermissionGrantRequest = {
   workspaceId: UUID;
   permission: LocalRuntimePermission;
   scope: 'once';
+  /** Exact user-confirmed conflict result; grants deletion only for this digest. */
+  writeback?: { changeSetId: UUID; digest: string };
 };
 
 export type LocalRuntimeWorkspacePermissionGrantResult = {
@@ -154,8 +263,61 @@ export type LocalRuntimeCompatibility = {
   cliVersion: string;
   protocolVersion: number;
   requiredProtocolVersion: typeof LOCAL_RUNTIME_PROTOCOL_VERSION;
+  requiredCliVersion?: string;
   reason?: string;
   upgradeRequired?: boolean;
+  upgradeAvailable?: boolean;
+  upgradeInfo?: LocalRuntimeUpgradeInfo;
+};
+
+export type LocalRuntimeUpgradeSubject = 'desktop' | 'local-runtime' | 'server';
+
+export type LocalRuntimeUpgradeInfo = {
+  upgradeId: UUID;
+  subject: LocalRuntimeUpgradeSubject;
+  fromVersion: string;
+  toVersion: string;
+  fromProtocolVersion?: number;
+  toProtocolVersion?: number;
+  fromBuildId?: string;
+  toBuildId: string;
+  releaseNotes: readonly string[];
+  packageSize?: number;
+  sha256?: string;
+  signature?: string;
+  installerType: 'windows-nsis' | 'manual-package';
+  mandatory: boolean;
+  releaseUrl?: string;
+};
+
+export type LocalRuntimeUpgradeProgressState =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'downloading'
+  | 'verifying'
+  | 'stopping'
+  | 'installing'
+  | 'restarting'
+  | 'reconnecting'
+  | 'completed'
+  | 'cancelled'
+  | 'failed';
+
+export type LocalRuntimeUpgradeProgress = {
+  upgradeId: UUID;
+  state: LocalRuntimeUpgradeProgressState;
+  percent?: number;
+  message?: string;
+  errorCode?: string;
+  updatedAt?: ISODateTime;
+};
+
+export type LocalRuntimeProtocolError = {
+  code: string;
+  message: string;
+  compatibility?: LocalRuntimeCompatibility;
+  upgradeInfo?: LocalRuntimeUpgradeInfo;
 };
 
 export type LocalRuntimeDeviceStatus = 'pending' | 'active' | 'revoked';
@@ -204,6 +366,7 @@ export type LocalRuntimeTokenPendingResponse = {
 };
 
 export type LocalRuntimeHello = {
+  requestHealthProtocol?: 1;
   outputContractVersions?: readonly string[];
   deviceId: UUID;
   cliVersion: string;
@@ -238,7 +401,16 @@ export type LocalRuntimeStopReceipt = {
   runtimeType: RuntimeType;
 };
 
+export type LocalRuntimeInvocationProbe = import('./runtime-request-health.js').RuntimeHealthIdentity & {
+  requestId: UUID; deviceId: UUID; workspaceId: UUID;
+};
+export type LocalRuntimeInvocationProbeResult = LocalRuntimeInvocationProbe & {
+  status: 'ok' | 'unsupported'; processStatus: 'alive' | 'exited' | 'unknown';
+  processInstanceId?: string; requestStatus: 'pending' | 'receiving' | 'ended' | 'unknown';
+};
+
 export type LocalRuntimeClientMessage =
+  | { kind: 'local_runtime.invocation.probe.result'; payload: LocalRuntimeInvocationProbeResult }
   | { kind: 'local_runtime.hello'; payload: LocalRuntimeHello }
   | { kind: 'local_runtime.heartbeat'; payload: { deviceId: UUID; sentAt: ISODateTime } }
   | { kind: 'local_runtime.workspace.register'; payload: LocalRuntimeWorkspaceRegistration }
@@ -251,12 +423,16 @@ export type LocalRuntimeClientMessage =
   | { kind: 'local_runtime.workspace.permission.grant.result'; payload: LocalRuntimeWorkspacePermissionGrantResult }
   | { kind: 'local_runtime.capabilities.result'; payload: LocalRuntimeCapabilityRefreshResult }
   | { kind: 'local_runtime.provider_connection.result'; payload: LocalRuntimeProviderConnectionResult }
+  | { kind: 'local_runtime.github.authorization.result'; payload: LocalGitHubAuthorizationResult }
+  | { kind: 'local_runtime.github.source.result'; payload: LocalGitHubSourceResult }
+  | { kind: 'local_runtime.github.delivery.result'; payload: LocalGitHubDeliveryResult }
   | { kind: 'local_runtime.workspace.operation.result'; payload: import('./contracts.js').WorkspaceOperationResult }
   | { kind: 'local_runtime.invocation.event'; payload: AgentRuntimeEvent }
   | { kind: 'local_runtime.invocation.result'; payload: LocalRuntimeInvocationResult }
   | { kind: 'local_runtime.invocation.stopped'; payload: LocalRuntimeStopReceipt };
 
 export type LocalRuntimeServerMessage =
+  | { kind: 'local_runtime.invocation.probe'; payload: LocalRuntimeInvocationProbe }
   | {
       kind: 'local_runtime.connected';
       payload: { deviceId: UUID; compatibility: LocalRuntimeCompatibility; connectedAt: ISODateTime; stopReceiptProtocol?: 1 };
@@ -270,10 +446,13 @@ export type LocalRuntimeServerMessage =
   | { kind: 'local_runtime.capabilities.request'; payload: { requestId: UUID } }
   | { kind: 'local_runtime.provider_connection.upsert'; payload: LocalRuntimeProviderConnectionUpsertRequest }
   | { kind: 'local_runtime.provider_connection.delete'; payload: LocalRuntimeProviderConnectionDeleteRequest }
+  | { kind: 'local_runtime.github.authorization.request'; payload: LocalGitHubAuthorizationRequest }
+  | { kind: 'local_runtime.github.source.request'; payload: LocalGitHubSourceRequest }
+  | { kind: 'local_runtime.github.delivery.request'; payload: LocalGitHubDeliveryRequest }
   | { kind: 'local_runtime.workspace.operation.request'; payload: LocalRuntimeWorkspaceOperationRequest }
   | { kind: 'local_runtime.invocation.start'; payload: LocalRuntimeInvocationRequest }
   | {
       kind: 'local_runtime.invocation.cancel';
       payload: { invocationId: UUID; termination?: ExecutionTermination };
     }
-  | { kind: 'local_runtime.protocol.error'; payload: { code: string; message: string } };
+  | { kind: 'local_runtime.protocol.error'; payload: LocalRuntimeProtocolError };

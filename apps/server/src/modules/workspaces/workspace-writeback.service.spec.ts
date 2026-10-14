@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { SessionDetail, WorkspaceChangeSet, WorkspaceRevision } from '@agent-cluster/shared';
 import { WorkspaceWritebackService } from './workspace-writeback.service.js';
+import { ServerLocalWorkspaceProvider } from './server-local-workspace-provider.js';
 
 const revision: WorkspaceRevision = { id: 'revision-writeback', observedAt: '2026-07-30T00:00:00.000Z' };
 const changeSet: WorkspaceChangeSet = {
@@ -33,7 +37,11 @@ function fixture(
     } as never,
     {
       resolve: () => ({
-        statFile: async () => { throw new Error('not found'); },
+        statFile: async ({ path }: { path: string }) => ({ path, kind: 'file', size: 7,
+          hash: { algorithm: 'sha256', value: createHash('sha256').update('current').digest('hex') } }),
+        readFile: async ({ path }: { path: string }) => ({ path, content: 'current',
+          encoding: 'utf-8', byteLength: 7, truncated: false, revision,
+          hash: { algorithm: 'sha256', value: createHash('sha256').update('current').digest('hex') } }),
         applyChangeSet: apply
       })
     } as never
@@ -77,6 +85,7 @@ test('duplicate concurrent enqueue waits for the active writeback instead of app
   const first = service.enqueue(input);
   await new Promise((resolve) => setImmediate(resolve));
   const duplicate = service.enqueue(input);
+  await assert.rejects(service.clearSessionDrafts(session.id), /WORKSPACE_WRITEBACK_ACTIVE/);
   releaseApply();
   const [firstRecord, duplicateRecord] = await Promise.all([first, duplicate]);
 
@@ -230,6 +239,78 @@ test('workspace writeback recovers in-flight persisted records as retryable fail
   assert.match(record?.error ?? '', /backend restart/i);
 });
 
+test('an interrupted confirmed conflict keeps its editor draft and can be applied after restart', async () => {
+  const currentHash = createHash('sha256').update('current').digest('hex');
+  const persisted = [{
+    id: 'writeback-interrupted-conflict', sessionId: session.id,
+    invocationId: 'invocation-interrupted-conflict', workspaceId: session.workspaceId,
+    providerKind: 'server_local', changeSet, status: 'applying',
+    resolution: 'apply_conflict', conflicts: [],
+    conflictObservedHashes: { 'result.txt': currentHash },
+    conflictView: {
+      id: 'writeback-interrupted-conflict', sessionId: session.id, deliveryRound: 0,
+      source: 'workspace_writeback', targetOperation: 'writeback', version: 2,
+      files: [{ fileId: 'file-result', path: 'result.txt', kind: 'text',
+        status: 'confirmed', version: 2, oursContent: 'done',
+        theirsContent: 'current', resultContent: 'resolved' }],
+      createdAt: revision.observedAt, updatedAt: revision.observedAt
+    },
+    createdAt: revision.observedAt, updatedAt: revision.observedAt
+  }];
+  const applied: WorkspaceChangeSet[] = [];
+  const { service } = fixture(async (input) => {
+    applied.push(input);
+    return { ok: true, changeSetId: input.id, revision, appliedCount: input.changes.length };
+  }, persisted);
+  const record = service.list(session.id)[0]!;
+  assert.equal(record.status, 'failed');
+  assert.equal(record.hasConflictDraft, true);
+  assert.equal('conflictView' in record, false);
+  assert.equal(service.hasConflict(session.id, record.id), true);
+  assert.equal(service.conflictView(session.id, record.id).files[0]?.resultContent, 'resolved');
+  const result = await service.resolve(session, record.id, {
+    action: 'apply_conflict', expectedConflictVersion: 2
+  });
+  assert.equal(result.status, 'applied');
+  assert.equal(result.hasConflictDraft, false);
+  assert.equal(applied[0]?.changes[0]?.operation, 'update');
+  assert.equal(applied[0]?.changes[0]?.operation === 'update'
+    ? applied[0].changes[0].content : undefined, 'resolved');
+});
+
+test('legacy conflicted writeback without an editor snapshot becomes retryable on restart', () => {
+  const persisted = [{
+    id: 'writeback-legacy-conflict', sessionId: session.id, invocationId: 'invocation-legacy',
+    workspaceId: session.workspaceId, providerKind: 'server_local', changeSet,
+    status: 'conflicted', conflicts: [], createdAt: revision.observedAt, updatedAt: revision.observedAt
+  }];
+  const { service } = fixture(async () => { throw new Error('not called'); }, persisted);
+  assert.equal(service.list(session.id)[0]?.status, 'failed');
+  assert.match(service.list(session.id)[0]?.error ?? '', /Retry merge/);
+});
+
+test('soft deletion removes only the selected Session conflict draft', async () => {
+  const view = { id: 'writeback-draft', sessionId: session.id, deliveryRound: 0,
+    source: 'workspace_writeback', targetOperation: 'writeback', version: 2,
+    files: [{ fileId: 'file-draft', path: 'result.txt', kind: 'text', status: 'draft',
+      version: 2, resultContent: 'private draft' }],
+    createdAt: revision.observedAt, updatedAt: revision.observedAt };
+  const records = [session.id, 'other-session'].map((sessionId, index) => ({
+    id: index === 0 ? 'writeback-draft' : 'other-draft', sessionId,
+    invocationId: `invocation-${index}`, workspaceId: session.workspaceId,
+    providerKind: 'server_local', changeSet, status: 'conflicted', conflicts: [],
+    conflictView: { ...view, id: index === 0 ? 'writeback-draft' : 'other-draft', sessionId },
+    conflictObservedHashes: { 'result.txt': 'abc' },
+    createdAt: revision.observedAt, updatedAt: revision.observedAt
+  }));
+  const { service, collections } = fixture(async () => { throw new Error('not called'); }, records);
+  await service.clearSessionDrafts(session.id);
+  assert.equal(service.list(session.id)[0]?.status, 'abandoned');
+  const stored = collections.get('workspaceWritebacks') as Array<{ sessionId: string; conflictView?: unknown }>;
+  assert.equal(stored.find((record) => record.sessionId === session.id)?.conflictView, undefined);
+  assert.ok(stored.find((record) => record.sessionId === 'other-session')?.conflictView);
+});
+
 test('queued writeback from a closed generation never reaches the workspace provider', async () => {
   let releaseFirst!: () => void;
   let firstEntered!: () => void;
@@ -294,4 +375,175 @@ test('a restored Session cannot resolve a conflicted writeback from an older gen
     }),
     /SESSION_ADMISSION_CLOSED/
   );
+});
+
+test('workspace conflict drafts survive restart and apply only the confirmed result', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'workspace-conflict-'));
+  try {
+    await writeFile(join(root, 'result.txt'), 'workspace\n');
+    const provider = new ServerLocalWorkspaceProvider(root);
+    const collections = new Map<string, unknown>();
+    const persistence = {
+      getCollection: (key: string, fallback: unknown) => collections.get(key) ?? fallback,
+      setCollection: async (key: string, value: unknown) => {
+        collections.set(key, structuredClone(value)); return true;
+      }
+    } as never;
+    const providers = { resolve: () => provider } as never;
+    const makeService = () => new WorkspaceWritebackService(persistence, providers);
+    const changeSetWithConflict: WorkspaceChangeSet = {
+      ...changeSet,
+      id: 'changes-three-way-conflict',
+      changes: [{ operation: 'update', path: 'result.txt', content: 'session\n',
+        encoding: 'utf-8', expectedHash: {
+          algorithm: 'sha256', value: createHash('sha256').update('base\n').digest('hex')
+        }, baseContent: 'base\n' }]
+    };
+    const first = makeService();
+    const record = await first.enqueue({ session, invocationId: 'invocation-three-way-conflict',
+      execution: { mode: 'staging_copy', baseRevision: revision,
+        changeSet: changeSetWithConflict, dirtyBaseline: false, requiresUserConfirmation: false } });
+    assert.equal(record.status, 'conflicted');
+    assert.equal('conflictView' in record, false);
+    const initial = first.conflictView(session.id, record.id);
+    assert.equal(initial.source, 'workspace_writeback');
+    assert.equal(initial.files[0]?.oursContent, 'session\n');
+    assert.equal(initial.files[0]?.theirsContent, 'workspace\n');
+    await assert.rejects(first.resolve(session, record.id, {
+      action: 'use_session', confirmationId: record.id
+    }), /Use the conflict editor/);
+    const saved = await first.saveConflictFile(session.id, record.id, initial.files[0]!.fileId, {
+      expectedVersion: initial.version, resultContent: 'resolved\n', confirm: true
+    });
+    await assert.rejects(first.saveConflictFile(session.id, record.id, initial.files[0]!.fileId, {
+      expectedVersion: initial.version, resultContent: 'stale\n', confirm: true
+    }), /WORKSPACE_CONFLICT_VERSION_CONFLICT/);
+    const restored = makeService();
+    assert.equal(restored.conflictView(session.id, record.id).files[0]?.resultContent, 'resolved\n');
+    const applied = await restored.resolve(session, record.id, {
+      action: 'apply_conflict', expectedConflictVersion: saved.version
+    });
+    assert.equal(applied.status, 'applied');
+    assert.equal(await readFile(join(root, 'result.txt'), 'utf8'), 'resolved\n');
+    assert.equal('conflictView' in restored.list(session.id)[0]!, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('workspace conflict rejects applying a draft after the current file changes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'workspace-conflict-drift-'));
+  try {
+    await writeFile(join(root, 'result.txt'), 'workspace\n');
+    const provider = new ServerLocalWorkspaceProvider(root);
+    const collections = new Map<string, unknown>();
+    const service = new WorkspaceWritebackService({
+      getCollection: (key: string, fallback: unknown) => collections.get(key) ?? fallback,
+      setCollection: async (key: string, value: unknown) => {
+        collections.set(key, structuredClone(value)); return true;
+      }
+    } as never, { resolve: () => provider } as never);
+    const conflicting: WorkspaceChangeSet = { ...changeSet, id: 'changes-drift', changes: [{
+      operation: 'update', path: 'result.txt', content: 'session\n', encoding: 'utf-8',
+      expectedHash: { algorithm: 'sha256', value: createHash('sha256').update('base\n').digest('hex') },
+      baseContent: 'base\n'
+    }] };
+    const record = await service.enqueue({ session, invocationId: 'invocation-drift',
+      execution: { mode: 'staging_copy', baseRevision: revision,
+        changeSet: conflicting, dirtyBaseline: false, requiresUserConfirmation: false } });
+    assert.equal(record.status, 'conflicted');
+    const view = service.conflictView(session.id, record.id);
+    const saved = await service.saveConflictFile(session.id, record.id, view.files[0]!.fileId, {
+      expectedVersion: view.version, resultContent: 'resolved\n', confirm: true
+    });
+    await writeFile(join(root, 'result.txt'), 'new external change\n');
+    await assert.rejects(service.resolve(session, record.id, {
+      action: 'apply_conflict', expectedConflictVersion: saved.version
+    }), /WORKSPACE_CONFLICT_SOURCE_CHANGED/);
+    assert.equal(await readFile(join(root, 'result.txt'), 'utf8'), 'new external change\n');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('typed delete conflict can keep the current workspace file', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'workspace-delete-conflict-'));
+  try {
+    await writeFile(join(root, 'result.txt'), 'workspace\n');
+    const provider = new ServerLocalWorkspaceProvider(root);
+    const collections = new Map<string, unknown>();
+    const service = new WorkspaceWritebackService({
+      getCollection: (key: string, fallback: unknown) => collections.get(key) ?? fallback,
+      setCollection: async (key: string, value: unknown) => {
+        collections.set(key, structuredClone(value)); return true;
+      }
+    } as never, { resolve: () => provider } as never);
+    const deletion: WorkspaceChangeSet = { ...changeSet, id: 'changes-delete-conflict', changes: [{
+      operation: 'delete', path: 'result.txt',
+      expectedHash: { algorithm: 'sha256', value: createHash('sha256').update('base\n').digest('hex') },
+      baseContent: 'base\n'
+    }] };
+    const record = await service.enqueue({ session, invocationId: 'invocation-delete-conflict',
+      execution: { mode: 'staging_copy', baseRevision: revision,
+        changeSet: deletion, dirtyBaseline: false, requiresUserConfirmation: false } });
+    assert.equal(record.status, 'conflicted');
+    const view = service.conflictView(session.id, record.id);
+    assert.equal(view.files[0]?.kind, 'deleted');
+    const saved = await service.saveConflictFile(session.id, record.id, view.files[0]!.fileId, {
+      expectedVersion: view.version, binaryChoice: 'theirs', confirm: true
+    });
+    const applied = await service.resolve(session, record.id, {
+      action: 'apply_conflict', expectedConflictVersion: saved.version
+    });
+    assert.equal(applied.status, 'applied');
+    assert.equal(await readFile(join(root, 'result.txt'), 'utf8'), 'workspace\n');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('typed local rename conflict requires authorization for the resolved ChangeSet', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'workspace-rename-conflict-'));
+  try {
+    await writeFile(join(root, 'old.txt'), 'workspace source\n');
+    await writeFile(join(root, 'new.txt'), 'workspace target\n');
+    const provider = new ServerLocalWorkspaceProvider(root);
+    const collections = new Map<string, unknown>();
+    const service = new WorkspaceWritebackService({
+      getCollection: (key: string, fallback: unknown) => collections.get(key) ?? fallback,
+      setCollection: async (key: string, value: unknown) => {
+        collections.set(key, structuredClone(value)); return true;
+      }
+    } as never, { resolve: () => provider } as never);
+    const localSession = { ...session, workspaceContext: {
+      binding: { providerKind: 'local_bridge' }
+    } } as SessionDetail;
+    const moved: WorkspaceChangeSet = { ...changeSet, id: 'changes-rename-conflict', changes: [{
+      operation: 'move', fromPath: 'old.txt', toPath: 'new.txt',
+      expectedHash: { algorithm: 'sha256', value: createHash('sha256').update('base source\n').digest('hex') }
+    }] };
+    const record = await service.enqueue({ session: localSession, invocationId: 'invocation-rename-conflict',
+      execution: { mode: 'staging_copy', baseRevision: revision,
+        changeSet: moved, dirtyBaseline: false, requiresUserConfirmation: false } });
+    assert.equal(record.status, 'conflicted');
+    const view = service.conflictView(session.id, record.id);
+    assert.equal(view.files[0]?.kind, 'renamed');
+    assert.equal(view.files[0]?.previousPath, 'old.txt');
+    const saved = await service.saveConflictFile(session.id, record.id, view.files[0]!.fileId, {
+      expectedVersion: view.version, binaryChoice: 'ours', confirm: true
+    });
+    await assert.rejects(service.resolve(localSession, record.id, {
+      action: 'apply_conflict', expectedConflictVersion: saved.version
+    }), /LOCAL_WRITEBACK_AUTHORIZATION_UNAVAILABLE/);
+    let authorized: WorkspaceChangeSet | undefined;
+    const applied = await service.resolve(localSession, record.id, {
+      action: 'apply_conflict', expectedConflictVersion: saved.version
+    }, async (resolved) => { authorized = resolved; });
+    assert.equal(applied.status, 'applied');
+    assert.deepEqual(authorized?.changes.map((item) => item.operation), ['update', 'delete']);
+    assert.equal(await readFile(join(root, 'new.txt'), 'utf8'), 'workspace source\n');
+    await assert.rejects(readFile(join(root, 'old.txt'), 'utf8'), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

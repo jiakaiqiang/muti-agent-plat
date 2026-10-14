@@ -543,11 +543,11 @@ export class PersistenceService implements OnModuleDestroy {
       }
     }
 
-    const writebacks = this.state.workspaceWritebacks as Record<string, { sessionId?: unknown }> | undefined;
-    if (writebacks) {
-      for (const [key, record] of Object.entries(writebacks)) {
-        if (record?.sessionId === sessionId) delete writebacks[key];
-      }
+    const writebacks = this.state.workspaceWritebacks;
+    if (Array.isArray(writebacks)) {
+      this.state.workspaceWritebacks = writebacks.filter(
+        (record) => (record as { sessionId?: unknown } | null)?.sessionId !== sessionId
+      );
     }
   }
 

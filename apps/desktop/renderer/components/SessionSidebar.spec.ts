@@ -1,11 +1,15 @@
-import { describe, expect, it } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { afterEach, describe, expect, it } from 'vitest'
+import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia } from 'pinia'
 import type { SessionListItem, SessionStatus } from '@/types/contracts'
 import SessionSidebar from './SessionSidebar.vue'
 
+const mounted: VueWrapper[] = []
+afterEach(() => { while (mounted.length) mounted.pop()!.unmount() })
+
 const statuses: Array<{ status: SessionStatus; label: string; tone: string }> = [
   { status: 'DRAFT_INPUT', label: '待理解', tone: 'draft' },
+  { status: 'WAIT_SOURCE_PREPARATION', label: '准备仓库', tone: 'waiting' },
   { status: 'AGENT_DISCUSSING', label: '讨论中', tone: 'running' },
   { status: 'WAIT_USER_CONFIRM', label: '待确认', tone: 'waiting' },
   { status: 'WAIT_WORKFLOW_SELECT', label: '选流程', tone: 'waiting' },
@@ -38,7 +42,7 @@ function session(status: SessionStatus, index: number): SessionListItem {
 }
 
 function mountSidebar(sessions: SessionListItem[]) {
-  return mount(SessionSidebar, {
+  const wrapper = mount(SessionSidebar, {
     props: {
       sessions,
       favoriteSessionIds: [],
@@ -52,6 +56,8 @@ function mountSidebar(sessions: SessionListItem[]) {
       }
     }
   })
+  mounted.push(wrapper)
+  return wrapper
 }
 
 describe('SessionSidebar status badges', () => {
@@ -86,7 +92,7 @@ describe('SessionSidebar status badges', () => {
     expect(document.body.textContent).toContain('删除会话')
   })
 
-  it('shows deleted Sessions only in the deleted tab and emits restore', async () => {
+  it('shows deleted Sessions as read-only and never exposes deleted-session restore', async () => {
     const deleted = { ...session('PAUSED', 2), lifecycleState: 'deleted' as const, lifecycleGeneration: 2 }
     const wrapper = mountSidebar([session('EXECUTING', 1), deleted])
 
@@ -99,22 +105,39 @@ describe('SessionSidebar status badges', () => {
     expect(wrapper.get('.session-status-badge').text()).toBe('已删除')
     await wrapper.get('.session-more-button').trigger('click')
     const restoreButton = Array.from(document.body.querySelectorAll('.session-context-menu button')).find((button) => button.textContent?.includes('恢复会话')) as HTMLElement | undefined
-    restoreButton?.click()
-    expect(wrapper.emitted('restore')).toEqual([['session-2']])
+    expect(restoreButton).toBeUndefined()
+    expect(document.body.textContent).not.toContain('恢复归档')
+    const item = wrapper.get('.session-list-item')
+    expect(item.attributes('role')).toBeUndefined()
+    expect(item.attributes('tabindex')).toBeUndefined()
+    await item.trigger('click')
+    await item.trigger('keydown', { key: 'Enter' })
+    expect(wrapper.emitted('restore')).toBeUndefined()
     expect(wrapper.emitted('select')).toBeUndefined()
   })
 
-  it('shows archive groups and emits archive restore', async () => {
+  it('shows archived session cards and retains archive restore and delete actions', async () => {
     const wrapper = mount(SessionSidebar, {
       props: {
         sessions: [], favoriteSessionIds: [], deletingSessionIds: [],
-        archiveGroups: [{ projectKey: 'p1', projectLabel: '项目一', items: [{ id: 'archived-1', title: '历史会话', projectId: 'p1', archivedAt: '2026-09-21T00:00:00.000Z', createdAt: '2026-09-20T00:00:00.000Z', updatedAt: '2026-09-21T00:00:00.000Z' }] }]
+        archiveGroups: [{ projectKey: 'p1', projectLabel: '项目一', items: [{ id: 'archived-1', title: '历史会话', status: 'COMPLETED', projectId: 'p1', archivedAt: '2026-09-21T00:00:00.000Z', createdAt: '2026-09-20T00:00:00.000Z', updatedAt: '2026-09-21T00:00:00.000Z' }] }]
       },
       global: { plugins: [createPinia()], stubs: { UiIcon: true } }
     })
+    mounted.push(wrapper)
     await wrapper.findAll('.session-tabs button')[4]!.trigger('click')
     expect(wrapper.text()).toContain('历史会话')
-    await wrapper.get('.session-archive-restore').trigger('click')
+    expect(wrapper.get('.session-archive-manager .session-list-item').text()).toContain('历史会话')
+    await wrapper.get('.session-more-button').trigger('click')
+    const restoreButton = Array.from(document.body.querySelectorAll('.session-context-menu button')).find((button) => button.textContent?.includes('恢复归档')) as HTMLElement | undefined
+    expect(restoreButton).toBeDefined()
+    restoreButton!.click()
     expect(wrapper.emitted('restoreArchive')).toEqual([['archived-1']])
+    await wrapper.get('.session-more-button').trigger('click')
+    const deleteButton = Array.from(document.body.querySelectorAll('.session-context-menu button')).find((button) => button.textContent?.includes('删除会话')) as HTMLElement | undefined
+    expect(deleteButton).toBeDefined()
+    deleteButton!.click()
+    expect(wrapper.emitted('delete')).toEqual([['archived-1']])
+    expect(wrapper.emitted('restore')).toBeUndefined()
   })
 })

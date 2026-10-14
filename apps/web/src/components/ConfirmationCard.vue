@@ -59,7 +59,7 @@ const availableWorkflows = computed<WorkflowSelectionOption[]>(() => {
 })
 
 onMounted(async () => {
-  if (props.confirmation.reason !== 'select_workflow') return
+  if (props.confirmation.reason !== 'select_workflow' || props.confirmation.status !== 'pending') return
   try {
     await workflowStore.loadWorkflows()
   } catch {

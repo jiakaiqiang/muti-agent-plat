@@ -1,20 +1,12 @@
-import type { AgentRunPhase, RuntimeType } from '@agent-cluster/shared';
+import { isRuntimeType, type AgentRunPhase, type RuntimeType } from '@agent-cluster/shared';
 
 export type LlmProvider = 'openai-compatible' | 'ollama';
 export type LlmStructuredOutputMode = 'auto' | 'json_schema' | 'json_object';
 
+export { isRuntimeType };
+
 const truthyValues = new Set(['1', 'true', 'yes', 'on']);
 const mockFallbackValues = new Set(['1', 'true', 'yes', 'on', 'mock']);
-const runtimeTypes = new Set<RuntimeType>([
-  'mock',
-  'generic_llm',
-  'code_reader',
-  'test_runner',
-  'codex',
-  'claude_code',
-  'mcp_tool',
-  'human'
-]);
 const ollamaProviderValues = new Set(['ollama', 'local-ollama']);
 const openAiDefaultBaseUrl = 'https://api.openai.com/v1';
 const openAiDefaultModel = 'gpt-4.1-mini';
@@ -24,10 +16,6 @@ const ollamaDefaultModel = 'llama3.2';
 export function envFlag(name: string, fallback = false) {
   const value = process.env[name];
   return value === undefined ? fallback : truthyValues.has(value.trim().toLowerCase());
-}
-
-export function isRuntimeType(value: unknown): value is RuntimeType {
-  return typeof value === 'string' && runtimeTypes.has(value as RuntimeType);
 }
 
 function configuredRuntimeType(...names: string[]) {
@@ -229,6 +217,18 @@ export function reworkMaxRounds() {
     return 1;
   }
   return Math.max(0, Math.min(3, Math.floor(parsed)));
+}
+
+/**
+ * Maximum number of user-submitted Task Brief revisions before the user gets a
+ * deliberate risk-acceptance path. The default keeps ordinary discussion
+ * flexible while guaranteeing that an unresolved brief cannot block a session
+ * forever. This is a policy limit, not an automatic approval.
+ */
+export function briefRevisionMaxAttempts() {
+  const parsed = Number(process.env.BRIEF_REVISION_MAX_ATTEMPTS ?? 3);
+  if (!Number.isFinite(parsed)) return 3;
+  return Math.max(1, Math.min(10, Math.floor(parsed)));
 }
 
 export function mockRuntimeEnabled() {

@@ -91,7 +91,7 @@ async function canConnectToPostgres() {
 }
 
 async function ensurePostgres() {
-  if (await canConnectToPostgres()) {
+  if (process.env.AGENT_CLUSTER_POSTGRES_SMOKE_EPHEMERAL !== '1' && await canConnectToPostgres()) {
     return;
   }
 
@@ -136,7 +136,7 @@ async function waitForServer(apiBase) {
   throw lastError ?? new Error('Server did not become ready');
 }
 
-async function startServer() {
+async function startServer({ githubCreate = false } = {}) {
   const port = await findFreePort();
   const apiBase = `http://127.0.0.1:${port}/api`;
   const server = spawn(process.execPath, ['apps/server/dist/apps/server/src/main.js'], {
@@ -149,6 +149,7 @@ async function startServer() {
       AGENT_CLUSTER_PERSISTENCE_BACKEND: 'postgres',
       AGENT_CLUSTER_POSTGRES_COLLECTION_TABLE: tableName,
       AGENT_CLUSTER_SEED_DEFAULT_AGENTS: 'true',
+      AGENT_CLUSTER_GITHUB_SESSION_CREATE_ENABLED: githubCreate ? 'true' : 'false',
       DATABASE_URL: databaseUrl,
       LLM_DRY_RUN: 'true',
       LLM_MOCK_FALLBACK: 'true',
@@ -254,21 +255,25 @@ async function dropSmokeTable() {
   }
 }
 
-await ensurePostgres();
-await runNpm(['run', 'build', '-w', '@agent-cluster/shared']);
-await runNpm(['run', 'build', '-w', '@agent-cluster/server']);
-
 let first;
 let second;
+let third;
 
 try {
+  await ensurePostgres();
+  await runNpm(['run', 'build', '-w', '@agent-cluster/shared']);
+  await runNpm(['run', 'build', '-w', '@agent-cluster/server']);
   await dropSmokeTable();
   first = await startServer();
+  const agents = await api(first.apiBase, '/agents?surface=chat');
+  const chatAgent = agents.data.find((agent) => agent.key === 'requirements' && agent.status === 'active')
+    ?? agents.data.find((agent) => agent.status === 'active');
+  if (!chatAgent) throw new Error('PostgreSQL smoke requires an active chat Agent.');
   const created = await api(first.apiBase, '/sessions', {
     method: 'POST',
     body: JSON.stringify({
       input: 'PostgreSQL persistence smoke session',
-      agentIds: ['coordinator', 'requirements']
+      agentIds: [chatAgent.id]
     })
   });
   const sessionId = created.data.session.id;
@@ -277,9 +282,29 @@ try {
   await stopServer(first.server);
   first = undefined;
 
-  second = await startServer();
-  const detail = await api(second.apiBase, `/sessions/${sessionId}`);
-  const events = await api(second.apiBase, `/sessions/${sessionId}/events`);
+  second = await startServer({ githubCreate: true });
+  const createdGithub = await api(second.apiBase, '/sessions', {
+    method: 'POST',
+    body: JSON.stringify({
+      input: 'Inspect this GitHub repository after authorization',
+      agentIds: [chatAgent.id], executionLocation: 'server',
+      codeSource: { kind: 'remote_repository', provider: 'github',
+        repositoryUrl: 'https://github.com/example/postgres-smoke' }
+    })
+  });
+  const githubSessionId = createdGithub.data.session.id;
+  if (createdGithub.data.session.status !== 'WAIT_SOURCE_PREPARATION' ||
+      createdGithub.data.session.sourceBinding?.state !== 'awaiting_auth') {
+    throw new Error('GitHub Session started before authorization or did not persist its source binding.');
+  }
+  await stopServer(second.server);
+  second = undefined;
+
+  third = await startServer({ githubCreate: true });
+  const detail = await api(third.apiBase, `/sessions/${sessionId}`);
+  const events = await api(third.apiBase, `/sessions/${sessionId}/events`);
+  const githubDetail = await api(third.apiBase, `/sessions/${githubSessionId}`);
+  const githubEvents = await api(third.apiBase, `/sessions/${githubSessionId}/events`);
 
   if (detail.data.id !== sessionId) {
     throw new Error(`Persisted PostgreSQL session was not restored: ${JSON.stringify(detail)}`);
@@ -287,14 +312,23 @@ try {
   if (events.data.items.length < 2) {
     throw new Error(`Persisted PostgreSQL events were not restored: ${JSON.stringify(events)}`);
   }
+  if (githubDetail.data.status !== 'WAIT_SOURCE_PREPARATION' ||
+      githubDetail.data.sourceBinding?.state !== 'awaiting_auth' ||
+      githubDetail.data.workingDirectory ||
+      githubEvents.data.items.some((event) => event.type === 'brief_created')) {
+    throw new Error('GitHub source preparation was not restored behind the Agent startup gate.');
+  }
 
-  console.log(`postgres persistence smoke ok: ${sessionId}, events=${events.data.items.length}`);
+  console.log(`postgres persistence smoke ok: ${sessionId}, events=${events.data.items.length}, github=${githubSessionId}`);
 } finally {
   if (first) {
     await stopServer(first.server);
   }
   if (second) {
     await stopServer(second.server);
+  }
+  if (third) {
+    await stopServer(third.server);
   }
   await dropSmokeTable().catch(() => undefined);
   if (postgresContainerName) {

@@ -12,6 +12,7 @@ import {
   WarningFilled
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import { formatDateTime } from '@/utils/dateTime'
 import {
   LOCAL_RUNTIME_MANUAL_START_COMMAND,
   LOCAL_RUNTIME_WAKE_FAILED_MESSAGE,
@@ -26,7 +27,8 @@ const waking = ref(false)
 const pageError = ref('')
 let disposed = false
 
-const connectedDevices = computed(() => localRuntimeStore.devices.filter((device) => device.connected))
+const connectedDevices = computed(() => localRuntimeStore.connectedDevices)
+const incompatibleDevices = computed(() => localRuntimeStore.incompatibleDevices)
 const isConnected = computed(() => connectedDevices.value.length > 0)
 // Must match the origin the CLI registered via `install --server`; deriving it from
 // the page origin makes localhost and 127.0.0.1 diverge and the CLI then exits
@@ -44,14 +46,7 @@ function runtimeLabels(runtimes: Readonly<Record<string, string | undefined>>) {
 }
 
 function formatTime(value?: string) {
-  if (!value) return '尚未连接'
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit'
-  }).format(new Date(value))
+  return formatDateTime(value, '尚未连接')
 }
 
 async function refreshStatus(silent = false) {
@@ -203,10 +198,13 @@ onBeforeUnmount(() => {
               <span>{{ runtimeLabels(device.runtimes) }}</span>
             </div>
             <div class="runtime-device-item__meta">
-              <el-tag :type="device.connected ? 'success' : 'info'" effect="plain">
-                {{ device.connected ? '在线' : '离线' }}
+              <el-tag :type="device.compatibility?.compatible === false ? 'warning' : device.connected ? 'success' : 'info'" effect="plain">
+                {{ device.compatibility?.compatible === false ? '需要升级' : device.connected ? '在线' : '离线' }}
               </el-tag>
               <span>CLI {{ device.cliVersion }}</span>
+              <span v-if="device.compatibility?.compatible === false">
+                需要 CLI {{ device.compatibility.requiredCliVersion }} / 协议 {{ device.compatibility.requiredProtocolVersion }}
+              </span>
               <span>{{ formatTime(device.lastSeenAt) }}</span>
             </div>
           </article>
@@ -250,6 +248,10 @@ onBeforeUnmount(() => {
       </section>
     </div>
 
+    <section v-if="incompatibleDevices.length" class="runtime-install-band runtime-install-band--warning" role="status">
+      <p>检测到本地 Runtime 协议版本不兼容，请先完成升级。</p>
+      <el-button type="warning" @click="localRuntimeStore.upgradeDialogOpen = true">查看升级</el-button>
+    </section>
     <section v-if="!isConnected && isDesktop" class="runtime-install-band">
       <p>本地助手已内置，请在连接设置中启动并完成设备授权。</p>
       <el-button type="primary" @click="router.push('/desktop')">打开连接设置</el-button>

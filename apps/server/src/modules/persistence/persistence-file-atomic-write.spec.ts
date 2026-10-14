@@ -25,6 +25,25 @@ test('file persistence ignores a stale PID temp file and leaves no new temp arti
   }
 });
 
+test('file session purge removes writeback array entries without leaving sparse records', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-cluster-writeback-purge-'));
+  const filePath = join(directory, 'state.v3.json');
+  const persistence = new PersistenceService({ backend: 'file', filePath });
+  try {
+    await persistence.initialize();
+    await persistence.setCollection('workspaceWritebacks', [
+      { id: 'first', sessionId: 'deleted-session' },
+      { id: 'second', sessionId: 'other-session' }
+    ]);
+    await persistence.deleteSessionData('deleted-session');
+    const stored = JSON.parse(readFileSync(filePath, 'utf8')) as { workspaceWritebacks: unknown[] };
+    assert.deepEqual(stored.workspaceWritebacks, [{ id: 'second', sessionId: 'other-session' }]);
+  } finally {
+    await persistence.onModuleDestroy();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('file persistence retries transient Windows replacement failures without dropping the new state', () => {
   let attempts = 0;
   replaceFileWithRetry('temporary-state', 'state.v3.json', () => {

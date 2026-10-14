@@ -17,6 +17,14 @@ import {
 } from './codex-runtime-adapter.service.js';
 import { makeInvocationPlan } from './invocation-plan.fixture.js';
 
+test('Codex normal and sidecar prompts require Chinese human language', () => {
+  const adapter = new CodexRuntimeAdapterService({ resolveServerRoot: () => process.cwd() } as never);
+  const promptFor = (adapter as unknown as { prompt(input: ReturnType<typeof makeInvocationPlan>, sidecar?: string): string }).prompt.bind(adapter);
+  for (const sidecar of [undefined, 'task-brief.json']) {
+    assert.match(promptFor(makeInvocationPlan(), sidecar), /所有面向用户的自然语言必须使用简体中文/);
+  }
+});
+
 function withStreaming(value: string | undefined, fn: () => void) {
   const previous = process.env.RUNTIME_STREAMING;
   if (value === undefined) delete process.env.RUNTIME_STREAMING;

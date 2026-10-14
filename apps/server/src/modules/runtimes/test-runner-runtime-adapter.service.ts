@@ -93,7 +93,7 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
       await this.recordToolInvocation(input, argumentsValue, result, result.success, toolStartedAt, result.error);
 
       if (!result.success) {
-        throw new Error(result.error ?? 'Test execution failed');
+        throw new Error(result.error ?? '测试执行失败');
       }
 
       const report = this.generateReport(result.output);
@@ -162,29 +162,29 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
           invocationId: input.invocationId,
           type: 'runtime_started',
           visibility: 'user',
-          content: `${input.agent.name} started test running`,
+          content: `${input.agent.name} 已开始运行测试`,
           createdAt: startedAt
         },
         {
           invocationId: input.invocationId,
           type: 'artifact_created',
           visibility: 'user',
-          content: 'Test report artifact created',
+          content: '已创建测试报告产物',
           createdAt: nowIso()
         },
         {
           invocationId: input.invocationId,
           type: 'runtime_completed',
           visibility: 'user',
-          content: `${input.agent.name} completed test running`,
+          content: `${input.agent.name} 已完成测试运行`,
           createdAt: nowIso()
         }
       ],
       artifacts: [
         createRuntimeArtifactOutput({
           type: 'test_report',
-          title: 'Test Report',
-          summary: `${report.passed}/${report.total} tests passed`,
+          title: '测试报告',
+          summary: `测试通过 ${report.passed}/${report.total} 项`,
           content: this.reportContent(report)
         })
       ],
@@ -225,7 +225,7 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
           invocationId: input.invocationId,
           type: 'runtime_started',
           visibility: 'user',
-          content: `${input.agent.name} started test running`,
+          content: `${input.agent.name} 已开始运行测试`,
           createdAt: startedAt
         },
         {
@@ -254,33 +254,33 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
       schemaVersion: '1.0',
       kind: 'task_execution_result',
       status: report.success ? 'completed' : 'failed',
-      summary: `${report.passed}/${report.total} tests passed in ${report.duration}ms.`,
-      completedItems: [`Script: ${report.script}`, `Passed: ${report.passed}`, `Skipped: ${report.skipped}`],
+      summary: `测试通过 ${report.passed}/${report.total} 项，耗时 ${report.duration} 毫秒。`,
+      completedItems: [`脚本：${report.script}`, `通过：${report.passed}`, `跳过：${report.skipped}`],
       changedArtifacts: [
         createRuntimeArtifactOutput({
           type: 'test_report',
-          title: 'Test Report',
-          summary: `${report.passed}/${report.total} tests passed`,
+          title: '测试报告',
+          summary: `测试通过 ${report.passed}/${report.total} 项`,
           content: this.reportContent(report)
         })
       ],
       requestedContext: null,
       agentMessages: [],
-      nextSuggestedActions: report.failed > 0 ? ['Inspect failing tests before continuing.'] : [],
+      nextSuggestedActions: report.failed > 0 ? ['请检查失败的测试后再继续。'] : [],
       risks: report.failed > 0 ? report.failures : []
     };
   }
 
   private reportContent(report: TestReport) {
     return [
-      `# Test Report`,
+      `# 测试报告`,
       '',
-      `- Script: ${report.script}`,
-      `- Duration: ${report.duration}ms`,
-      `- Total: ${report.total}`,
-      `- Passed: ${report.passed}`,
-      `- Failed: ${report.failed}`,
-      `- Skipped: ${report.skipped}`
+      `- 脚本：${report.script}`,
+      `- 耗时：${report.duration} 毫秒`,
+      `- 总数：${report.total}`,
+      `- 通过：${report.passed}`,
+      `- 失败：${report.failed}`,
+      `- 跳过：${report.skipped}`
     ].join('\n');
   }
 }

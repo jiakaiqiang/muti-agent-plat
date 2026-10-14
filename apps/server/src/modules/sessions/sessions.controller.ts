@@ -1,5 +1,6 @@
 import { BadRequestException, Body, Controller, Delete, Get, Header, Headers, HttpCode, Optional, Param, Post, Put, Query, Res, ServiceUnavailableException } from '@nestjs/common';
 import crypto from 'node:crypto';
+import type { RuntimeSwitchInput } from '@agent-cluster/shared';
 import type { ServerResponse } from 'node:http';
 import { ok } from '../../common/api-response.js';
 import type {
@@ -13,18 +14,28 @@ import type {
   SaveFileRevisionDraftInput,
   PostReviewAction,
   RuntimePreference,
+  SessionCodeSource,
+  SessionExecutionLocation,
   SessionWorkingDirectory,
   CreateDiscussionDocumentInput
 } from '@agent-cluster/shared';
 import { SessionsService } from './sessions.service.js';
 import type { GroupChatMessageDirectives } from '@agent-cluster/shared';
 import { DiscussionDocumentsService } from '../discussion-documents/discussion-documents.service.js';
+import { SourcePreparationCoordinator } from './source-preparation-coordinator.js';
+import { GitHubAuthorizationService } from '../code-hosts/github-authorization.service.js';
+import { DeliveryCoordinator } from '../delivery/delivery-coordinator.js';
+import type { RepositoryValidationCommand } from '@agent-cluster/shared';
+import { isRuntimeHealthWaitInput, type RuntimeHealthWaitInput } from '@agent-cluster/shared';
 
 @Controller()
 export class SessionsController {
   constructor(
     private readonly sessions: SessionsService,
-    @Optional() private readonly discussionDocuments?: DiscussionDocumentsService
+    @Optional() private readonly discussionDocuments?: DiscussionDocumentsService,
+    @Optional() private readonly sourcePreparation?: SourcePreparationCoordinator,
+    @Optional() private readonly githubAuthorizations?: GitHubAuthorizationService,
+    @Optional() private readonly deliveryCoordinator?: DeliveryCoordinator
   ) {}
 
   @Get('sessions')
@@ -43,6 +54,37 @@ export class SessionsController {
     return ok({ groups: this.sessions.listArchivedGroups() });
   }
 
+  @Get('sessions/:sessionId/runtime-health')
+  @Header('Cache-Control', 'no-store')
+  runtimeHealth(@Param('sessionId') sessionId: string) {
+    return ok(this.sessions.runtimeHealthState(sessionId));
+  }
+
+  @Get('sessions/:sessionId/runtime-switch')
+  @Header('Cache-Control', 'no-store')
+  runtimeSwitch(@Param('sessionId') sessionId: string) {
+    return ok(this.sessions.runtimeSwitchState(sessionId));
+  }
+
+  @Post('sessions/:sessionId/runtime-switch')
+  async switchRuntime(@Param('sessionId') sessionId: string, @Body() body: RuntimeSwitchInput,
+    @Headers('idempotency-key') key?: string) {
+    return ok(await this.sessions.switchRuntime(sessionId, { ...body, idempotencyKey: key ?? body?.idempotencyKey }));
+  }
+
+  @Post('sessions/:sessionId/runtime-health/:invocationId/wait')
+  @Header('Cache-Control', 'no-store')
+  async waitForRuntime(@Param('sessionId') sessionId: string, @Param('invocationId') invocationId: string,
+    @Body() body: RuntimeHealthWaitInput) {
+    if (!isRuntimeHealthWaitInput(body)) throw new BadRequestException('Invalid runtime health wait request.');
+    return ok(await this.sessions.waitForRuntime(sessionId, invocationId, body));
+  }
+
+  @Get('sessions/code-source-capabilities')
+  codeSourceCapabilities() {
+    return ok({ githubCreateEnabled: process.env.AGENT_CLUSTER_GITHUB_SESSION_CREATE_ENABLED === 'true' });
+  }
+
   @Post('sessions')
   create(
     @Body()
@@ -53,11 +95,201 @@ export class SessionsController {
       tokenBudget?: number;
       knowledgeBaseIds?: string[];
       workingDirectory?: SessionWorkingDirectory;
+      codeSource?: SessionCodeSource;
+      executionLocation?: SessionExecutionLocation;
       runtimePreference?: RuntimePreference;
     }
   ) {
     assertSessionCreateContract(body);
-    return this.sessions.create(body).then(ok);
+    if (process.env.AGENT_CLUSTER_GITHUB_SESSION_CREATE_ENABLED === 'true' &&
+        (body.executionLocation === 'server' || body.workingDirectory?.kind === 'server_local') &&
+        body.codeSource?.kind !== 'remote_repository') {
+      throw new BadRequestException('SERVER_SESSION_REQUIRES_GITHUB_SOURCE');
+    }
+    if (body.codeSource?.kind === 'remote_repository' &&
+        process.env.AGENT_CLUSTER_GITHUB_SESSION_CREATE_ENABLED !== 'true') {
+      throw new ServiceUnavailableException('GITHUB_SESSION_CREATE_NOT_ENABLED');
+    }
+    return this.sessions.create(body).then((result) => {
+      if (result.session.sourceBinding) {
+        void this.requireSourcePreparation().prepare(result.session.id).catch(() => undefined);
+      }
+      return ok(result);
+    });
+  }
+
+  @Post('code-hosts/github/oauth/start')
+  @Header('Cache-Control', 'no-store')
+  async startGitHubOAuth(@Body() body: { sessionId?: string }) {
+    if (!body?.sessionId) throw new BadRequestException('sessionId is required.');
+    return ok(await this.requireSourcePreparation().startOAuth(body.sessionId));
+  }
+
+  @Get('code-hosts/github/oauth/callback')
+  @Header('Cache-Control', 'no-store')
+  @Header('Content-Type', 'text/html; charset=utf-8')
+  async finishGitHubOAuth(@Query('code') code?: string, @Query('state') state?: string) {
+    if (!code || !state) throw new BadRequestException('GitHub OAuth code and state are required.');
+    await this.requireSourcePreparation().completeOAuth(code, state);
+    return '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>GitHub 授权完成</title><body><p>GitHub 授权已完成。请返回原会话继续操作。</p></body></html>';
+  }
+
+  @Post('code-hosts/github/tokens')
+  @Header('Cache-Control', 'no-store')
+  async saveGitHubPat(@Body() body: { sessionId?: string; token?: string }) {
+    if (!body?.sessionId || !body.token) throw new BadRequestException('sessionId and token are required.');
+    return ok(await this.requireSourcePreparation().savePat(body.sessionId, body.token));
+  }
+
+  @Delete('code-hosts/github/authorizations/:id')
+  async disconnectGitHubAuthorization(@Param('id') authorizationId: string,
+    @Query('deviceId') deviceId?: string, @Query('repositoryUrl') repositoryUrl?: string) {
+    if (deviceId || repositoryUrl) {
+      if (!deviceId || !repositoryUrl) {
+        throw new BadRequestException('deviceId and repositoryUrl are required together.');
+      }
+      return ok(await this.requireSourcePreparation().disconnectLocalAuthorization(
+        authorizationId, deviceId, repositoryUrl));
+    }
+    if (!this.githubAuthorizations) throw new ServiceUnavailableException('GitHub authorization service is unavailable.');
+    return ok(await this.githubAuthorizations.disconnect(authorizationId));
+  }
+
+  @Get('sessions/:sessionId/source/branches')
+  async sourceBranches(@Param('sessionId') sessionId: string) {
+    return ok(await this.requireSourcePreparation().branches(sessionId));
+  }
+
+  @Post('sessions/:sessionId/source/base-branch')
+  async selectSourceBaseBranch(@Param('sessionId') sessionId: string,
+    @Body() body: { branch?: string; expectedSourceVersion?: number }) {
+    if (!body?.branch || !Number.isSafeInteger(body.expectedSourceVersion)) {
+      throw new BadRequestException('branch and expectedSourceVersion are required.');
+    }
+    return ok(await this.requireSourcePreparation().selectBranch(sessionId,
+      body.branch, body.expectedSourceVersion!));
+  }
+
+  @Post('sessions/:sessionId/source/retry')
+  async retrySourcePreparation(@Param('sessionId') sessionId: string) {
+    return ok(await this.requireSourcePreparation().prepare(sessionId));
+  }
+
+  @Get('sessions/:sessionId/delivery')
+  delivery(@Param('sessionId') sessionId: string) {
+    return ok(this.sessions.get(sessionId).delivery ?? null);
+  }
+
+  @Get('sessions/:sessionId/delivery/diff')
+  async deliveryDiff(@Param('sessionId') sessionId: string,
+    @Query('kind') kind?: string, @Query('page') rawPage?: string) {
+    const page = rawPage ? Number(rawPage) : 1;
+    if (!['pull_request', 'merged_commit'].includes(kind ?? '') ||
+        !Number.isSafeInteger(page) || page < 1 || page > 30) {
+      throw new BadRequestException('kind and page are invalid.');
+    }
+    if (!this.deliveryCoordinator) throw new ServiceUnavailableException('GITHUB_DELIVERY_UNAVAILABLE');
+    return ok(await this.deliveryCoordinator.diff(sessionId,
+      kind as 'pull_request' | 'merged_commit', page));
+  }
+
+  @Post('sessions/:sessionId/delivery/validate')
+  async validateDelivery(@Param('sessionId') sessionId: string,
+    @Body() body: { expectedDeliveryVersion?: number; command?: RepositoryValidationCommand }) {
+    if (!Number.isSafeInteger(body?.expectedDeliveryVersion)) {
+      throw new BadRequestException('expectedDeliveryVersion is required.');
+    }
+    if (!this.deliveryCoordinator) throw new ServiceUnavailableException('GITHUB_DELIVERY_UNAVAILABLE');
+    return ok(await this.deliveryCoordinator.validate(sessionId,
+      body.expectedDeliveryVersion!, body.command));
+  }
+
+  @Post('sessions/:sessionId/delivery/publish')
+  async publishDelivery(@Param('sessionId') sessionId: string,
+    @Body() body: { expectedDeliveryVersion?: number }) {
+    if (!Number.isSafeInteger(body?.expectedDeliveryVersion)) {
+      throw new BadRequestException('expectedDeliveryVersion is required.');
+    }
+    if (!this.deliveryCoordinator) throw new ServiceUnavailableException('GITHUB_DELIVERY_UNAVAILABLE');
+    return ok(await this.deliveryCoordinator.publish(sessionId, body.expectedDeliveryVersion!));
+  }
+
+  @Post('sessions/:sessionId/delivery/refresh')
+  async refreshDelivery(@Param('sessionId') sessionId: string,
+    @Body() body: { expectedDeliveryVersion?: number }) {
+    if (!Number.isSafeInteger(body?.expectedDeliveryVersion)) {
+      throw new BadRequestException('expectedDeliveryVersion is required.');
+    }
+    if (!this.deliveryCoordinator) throw new ServiceUnavailableException('GITHUB_DELIVERY_UNAVAILABLE');
+    return ok(await this.deliveryCoordinator.refresh(sessionId, body.expectedDeliveryVersion!));
+  }
+
+  @Post('sessions/:sessionId/delivery/merge')
+  async mergeDelivery(@Param('sessionId') sessionId: string,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Body() body: { expectedDeliveryVersion?: number; expectedHeadSha?: string }) {
+    if (!Number.isSafeInteger(body?.expectedDeliveryVersion) ||
+        !/^[a-f0-9]{40}$/i.test(body?.expectedHeadSha ?? '') ||
+        !/^[A-Za-z0-9:_-]{8,120}$/.test(idempotencyKey ?? '')) {
+      throw new BadRequestException('expectedDeliveryVersion, expectedHeadSha and Idempotency-Key are required.');
+    }
+    if (!this.deliveryCoordinator) throw new ServiceUnavailableException('GITHUB_DELIVERY_UNAVAILABLE');
+    return ok(await this.deliveryCoordinator.merge(sessionId, body.expectedDeliveryVersion!,
+      body.expectedHeadSha!, idempotencyKey!));
+  }
+
+  @Get('sessions/:sessionId/conflicts/:conflictId')
+  async githubConflict(@Param('sessionId') sessionId: string,
+    @Param('conflictId') conflictId: string) {
+    if (this.sessions.hasWorkspaceWritebackConflict(sessionId, conflictId)) {
+      return ok(this.sessions.workspaceWritebackConflictView(sessionId, conflictId));
+    }
+    if (!this.deliveryCoordinator) throw new ServiceUnavailableException('GITHUB_DELIVERY_UNAVAILABLE');
+    return ok(await this.deliveryCoordinator.conflictView(sessionId, conflictId));
+  }
+
+  @Put('sessions/:sessionId/conflicts/:conflictId/files/:fileId')
+  async saveGitHubConflictFile(@Param('sessionId') sessionId: string,
+    @Param('conflictId') conflictId: string, @Param('fileId') fileId: string,
+    @Body() body: { expectedConflictVersion?: number; resultContent?: string;
+      binaryChoice?: 'ours' | 'theirs'; confirm?: boolean }) {
+    if (!Number.isSafeInteger(body?.expectedConflictVersion) ||
+        typeof body.confirm !== 'boolean') {
+      throw new BadRequestException('expectedConflictVersion and confirm are required.');
+    }
+    if (this.sessions.hasWorkspaceWritebackConflict(sessionId, conflictId)) {
+      return ok(await this.sessions.saveWorkspaceWritebackConflictFile(sessionId, conflictId, fileId, {
+        expectedVersion: body.expectedConflictVersion!, resultContent: body.resultContent,
+        binaryChoice: body.binaryChoice, confirm: body.confirm
+      }));
+    }
+    if (!this.deliveryCoordinator) throw new ServiceUnavailableException('GITHUB_DELIVERY_UNAVAILABLE');
+    return ok(await this.deliveryCoordinator.saveConflictFile(sessionId, conflictId, fileId, {
+      expectedVersion: body.expectedConflictVersion!, resultContent: body.resultContent,
+      binaryChoice: body.binaryChoice, confirm: body.confirm
+    }));
+  }
+
+  @Post('sessions/:sessionId/conflicts/:conflictId/complete')
+  async completeGitHubConflict(@Param('sessionId') sessionId: string,
+    @Param('conflictId') conflictId: string,
+    @Body() body: { expectedConflictVersion?: number }) {
+    if (!Number.isSafeInteger(body?.expectedConflictVersion)) {
+      throw new BadRequestException('expectedConflictVersion is required.');
+    }
+    if (this.sessions.hasWorkspaceWritebackConflict(sessionId, conflictId)) {
+      return ok(await this.sessions.resolveWorkspaceWriteback(sessionId, conflictId, {
+        action: 'apply_conflict', expectedConflictVersion: body.expectedConflictVersion
+      }));
+    }
+    if (!this.deliveryCoordinator) throw new ServiceUnavailableException('GITHUB_DELIVERY_UNAVAILABLE');
+    return ok(await this.deliveryCoordinator.completeConflict(sessionId, conflictId,
+      body.expectedConflictVersion!));
+  }
+
+  private requireSourcePreparation(): SourcePreparationCoordinator {
+    if (!this.sourcePreparation) throw new ServiceUnavailableException('Source preparation service is unavailable.');
+    return this.sourcePreparation;
   }
 
   @Get('sessions/:sessionId')
@@ -422,9 +654,11 @@ export class SessionsController {
   confirmBrief(
     @Param('sessionId') sessionId: string,
     @Param('briefId') briefId: string,
-    @Body() body: { confirmationId?: string }
+    @Body() body: { confirmationId?: string; allowOpenQuestions?: boolean }
   ) {
-    return this.sessions.confirmBrief(sessionId, briefId, body?.confirmationId).then(ok);
+    return this.sessions.confirmBrief(sessionId, briefId, body?.confirmationId, {
+      allowOpenQuestions: body?.allowOpenQuestions === true
+    }).then(ok);
   }
 
   @Post('sessions/:sessionId/workflow/select')
@@ -501,6 +735,7 @@ export class SessionsController {
       'resolve_with_agent',
       'keep_workspace',
       'use_session',
+      'apply_conflict',
       'abandon_writeback'
     ].includes(body.action)) {
       throw new BadRequestException('A valid workspace writeback action is required.');
@@ -566,8 +801,9 @@ export class SessionsController {
     @Body() body: {
       reason?: string;
       userMessage?: string;
-      confirmationId?: string;
-      assignedAgentKeys?: string[];
+        confirmationId?: string;
+        assignedAgentKeys?: string[];
+        questionAnswers?: Array<{ question: string; answer: string }>;
     }
   ) {
     return this.sessions.reviseBrief(sessionId, briefId, body).then(ok);
@@ -610,6 +846,8 @@ const SESSION_CREATE_FIELDS = new Set([
   'tokenBudget',
   'knowledgeBaseIds',
   'workingDirectory',
+  'codeSource',
+  'executionLocation',
   'runtimePreference'
 ]);
 

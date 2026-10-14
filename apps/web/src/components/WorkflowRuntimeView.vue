@@ -12,7 +12,7 @@ import {
   type WorkflowChainEdgeInput,
   type WorkflowChainState
 } from './workflowChainModel'
-import type { ActorRef, AgentCardState, ArtifactEventPayload, CollaborationEvent, ConfirmationCardState, SessionStatus, TaskViewState } from '@/types/contracts'
+import type { ActorRef, AgentCardState, ArtifactEventPayload, CollaborationEvent, SessionStatus, TaskViewState } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
 import UiIcon from './UiIcon.vue'
 import WorkflowAgentInspector from './WorkflowAgentInspector.vue'
@@ -21,14 +21,7 @@ const props = defineProps<{
   events: CollaborationEvent[]
   tasks: TaskViewState[]
   agents: AgentCardState[]
-  activeConfirmation?: ConfirmationCardState
   status?: SessionStatus
-  sessionTitle?: string
-  currentMode?: 'chat' | 'collaboration_graph' | 'workflow' | 'debug'
-}>()
-
-const emit = defineEmits<{
-  switchView: [mode: 'chat' | 'collaboration_graph' | 'workflow' | 'debug']
 }>()
 
 type WorkflowStage = {
@@ -129,11 +122,6 @@ const stages: WorkflowStage[] = [
   }
 ]
 
-const completedTaskCount = computed(() => props.tasks.filter((task) => task.status === 'completed').length)
-const progressPercent = computed(() => {
-  if (!props.tasks.length) return props.status === 'COMPLETED' ? 100 : 0
-  return Math.round((completedTaskCount.value / props.tasks.length) * 100)
-})
 const selectedStage = computed(() => stages.find((stage) => stage.key === selectedStageKey.value) ?? stages[0])
 
 const systemAgentIds = computed(() =>
@@ -370,31 +358,6 @@ const finalOutputCompleted = computed(() =>
 
 const selectedStageEvents = computed(() => [...stageEvents(selectedStage.value)].reverse())
 
-const sessionStateLabel = computed(() => {
-  if (props.activeConfirmation?.reason === 'workflow_agent_substitution') return '等待改派或跳过'
-  if (props.activeConfirmation?.reason === 'workflow_upstream_rerun') return '等待选择返工节点'
-  if (props.activeConfirmation?.reason === 'confirm_workflow_human_gate') return '等待人工验收'
-  if (props.status === 'COMPLETED') return '已完成'
-  if (props.status === 'PAUSED') return '已暂停'
-  if (props.status === 'FAILED') return '已失败'
-  if (props.status === 'CANCELLED') return '已取消'
-  if (props.status === 'WAIT_USER_DECISION') return '等待用户决策'
-  if (props.status === 'WAIT_WORKFLOW_STEP_CONFIRM') return '等待人工验收'
-  return props.events.length ? '运行中' : '等待开始'
-})
-
-/** Real elapsed span between the first and last event, replacing the old fixed clock. */
-const runtimeDuration = computed(() => {
-  if (props.events.length < 2) return ''
-  const timestamps = props.events.map((event) => new Date(event.createdAt).getTime()).filter((value) => !Number.isNaN(value))
-  if (timestamps.length < 2) return ''
-  const totalSeconds = Math.max(0, Math.round((Math.max(...timestamps) - Math.min(...timestamps)) / 1000))
-  const hours = String(Math.floor(totalSeconds / 3600)).padStart(2, '0')
-  const minutes = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, '0')
-  const seconds = String(totalSeconds % 60).padStart(2, '0')
-  return `${hours}:${minutes}:${seconds}`
-})
-
 function workflowEventTitle(event: CollaborationEvent) {
   if (event.type === 'task_failed') return '任务执行失败'
   if (event.type === 'task_rejected') return 'Agent 拒绝接单'
@@ -420,40 +383,10 @@ function agentTone(index: number) {
   return ((index % 5) + 1) as 1 | 2 | 3 | 4 | 5
 }
 
-const modeTabs: Array<{ mode: 'chat' | 'collaboration_graph' | 'workflow' | 'debug'; label: string; icon: string }> = [
-  { mode: 'chat', label: '群聊', icon: 'message' },
-  { mode: 'collaboration_graph', label: '协作图', icon: 'graph' },
-  { mode: 'workflow', label: '流程图', icon: 'workflow' },
-  { mode: 'debug', label: '调试', icon: 'debug' }
-]
 </script>
 
 <template>
   <section class="flow-view workflow-cockpit">
-    <header class="workflow-topbar">
-      <h2>多 Agent 协同工作流</h2>
-      <div class="workflow-mode-switcher" role="toolbar" aria-label="视图切换">
-        <button
-          v-for="mode in modeTabs"
-          :key="mode.mode"
-          type="button"
-          :class="['mode-button', { active: currentMode === mode.mode }]"
-          @click="emit('switchView', mode.mode)"
-        >
-          <UiIcon :name="mode.icon" :size="16" />
-          {{ mode.label }}
-        </button>
-      </div>
-      <span class="project-chip">会话：{{ sessionTitle ?? '暂无进行中的会话' }}</span>
-      <span class="progress-chip">
-        整体进度
-        <strong>{{ progressPercent }}%</strong>
-        <span><i :style="{ width: `${progressPercent}%` }"></i></span>
-      </span>
-      <span class="session-state" :class="{ online: sessionStateLabel === '运行中' }">{{ sessionStateLabel }}</span>
-      <span v-if="runtimeDuration" class="graph-clock">运行时长 {{ runtimeDuration }}</span>
-    </header>
-
     <div class="workflow-layout">
       <aside class="workflow-agent-rail" aria-label="Agents">
         <h3>Agents</h3>

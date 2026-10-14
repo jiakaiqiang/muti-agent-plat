@@ -95,14 +95,43 @@ const pendingAgentJoin = ref<GroupChatAgentRef>()
 const pendingAgentJoinTriggerIndex = ref<number | null>(null)
 let agentPickerLoadToken = 0
 
+function saveLocalDraft(id = props.sessionId) {
+  if (id) workspaceUiStore.saveComposerDraft(id, {
+    attachments: [...localAttachments.value], skill: localSkill.value, agents: [...localAgents.value]
+  })
+}
+watch(() => props.sessionId, (id, previous) => {
+  if (previous) saveLocalDraft(previous)
+  if (!id) return
+  workspaceUiStore.activateTask(id)
+  const saved = workspaceUiStore.getComposerDraft(id)
+  localAttachments.value = [...(saved?.attachments ?? props.attachments)]
+  localSkill.value = saved?.skill ?? props.skill
+  localAgents.value = [...(saved?.agents ?? props.agents)]
+  skillPickerLoadToken++
+  agentPickerLoadToken++
+  skillPickerOpen.value = false
+  agentPickerOpen.value = false
+  pendingAgentJoin.value = undefined
+  composerError.value = ''
+}, { flush: 'pre' })
+
 watch(() => props.attachments, value => { localAttachments.value = [...value] }, { deep: true })
 watch(() => props.skill, value => { localSkill.value = value }, { deep: true })
 watch(() => props.agents, value => { localAgents.value = [...value] }, { deep: true })
 
-onMounted(() => { activityTimer = setInterval(() => { now.value = Date.now() }, 5000) })
+onMounted(() => {
+  if (props.sessionId) {
+    workspaceUiStore.activateTask(props.sessionId)
+    const saved = workspaceUiStore.getComposerDraft(props.sessionId)
+    if (saved) { localAttachments.value = [...saved.attachments]; localSkill.value = saved.skill; localAgents.value = [...saved.agents] }
+  }
+  activityTimer = setInterval(() => { now.value = Date.now() }, 5000)
+})
 onBeforeUnmount(() => {
   clearInterval(activityTimer)
-  for (const attachment of localAttachments.value) revokePreviewUrl(attachment.previewUrl)
+  if (props.sessionId) saveLocalDraft()
+  else for (const attachment of localAttachments.value) revokePreviewUrl(attachment.previewUrl)
 })
 
 const activity = computed(() => taskActivity({
@@ -245,17 +274,28 @@ function recognitionLabel(attachment: ComposerAttachment) {
 
 async function retryRecognition(attachment: ComposerAttachment) {
   if (attachment.kind !== 'image' || attachment.recognitionStatus !== 'failed' || !props.sessionId) return
+  const sessionId = props.sessionId
   localAttachments.value = localAttachments.value.map(item => item.id === attachment.id
     ? { ...item, recognitionStatus: 'processing' }
     : item)
   composerError.value = ''
   try {
-    const updated = await apiPost<GroupChatAttachmentRef>(`/sessions/${encodeURIComponent(props.sessionId)}/attachments/${encodeURIComponent(attachment.id)}/recognition/retry`)
+    const updated = await apiPost<GroupChatAttachmentRef>(`/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachment.id)}/recognition/retry`)
+    if (props.sessionId !== sessionId) {
+      const saved = workspaceUiStore.getComposerDraft(sessionId)
+      if (saved) workspaceUiStore.saveComposerDraft(sessionId, { ...saved, attachments: saved.attachments.map(item => item.id === updated.id ? { ...item, ...updated } : item) })
+      return
+    }
     localAttachments.value = localAttachments.value.map(item => item.id === updated.id
       ? { ...item, ...updated }
       : item)
     emitContextChange()
   } catch (error) {
+    if (props.sessionId !== sessionId) {
+      const saved = workspaceUiStore.getComposerDraft(sessionId)
+      if (saved) workspaceUiStore.saveComposerDraft(sessionId, { ...saved, attachments: saved.attachments.map(item => item.id === attachment.id ? { ...item, recognitionStatus: 'failed' } : item) })
+      return
+    }
     localAttachments.value = localAttachments.value.map(item => item.id === attachment.id
       ? { ...item, recognitionStatus: 'failed' }
       : item)

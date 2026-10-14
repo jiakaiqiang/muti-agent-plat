@@ -3,6 +3,7 @@ import { computed, onMounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { frontendVersion } from '@/config/runtime'
 import { useSessionStore } from '@/stores/session'
+import { formatDateTime } from '@/utils/dateTime'
 
 const sessionStore = useSessionStore()
 const { runtimeHealth: health } = storeToRefs(sessionStore)
@@ -26,7 +27,7 @@ onMounted(async () => {
   </div>
   <div>
     <dt>构建时间</dt>
-    <dd>{{ health?.buildTime ?? '-' }}</dd>
+    <dd>{{ formatDateTime(health?.buildTime, '-') }}</dd>
   </div>
   <div>
     <dt>构建标识 / 状态</dt>
@@ -46,7 +47,7 @@ onMounted(async () => {
   </div>
   <div>
     <dt>进程 / 启动时间</dt>
-    <dd>{{ health ? `${health.processId} / ${health.startedAt}` : '-' }}</dd>
+    <dd>{{ health ? `${health.processId} / ${formatDateTime(health.startedAt, '-')}` : '-' }}</dd>
   </div>
   <div>
     <dt>持久化位置</dt>

@@ -1,3 +1,4 @@
+import { isUsableWorkspaceEvidencePath } from '@agent-cluster/shared';
 import type {
   ContextL1NavigationEntry,
   ContextL1NavigationManifest,
@@ -21,7 +22,7 @@ export function buildNavigationManifest(
   args: BuildNavigationManifestArgs
 ): ContextL1NavigationManifest {
   const { entries, entrypoints, maxEntries = DEFAULT_MAX_ENTRIES, budgetTokens } = args;
-  const eligible = entries.filter((entry) => !entry.generated && !entry.sensitive);
+  const eligible = entries.filter((entry) => !entry.generated && !entry.sensitive && isUsableWorkspaceEvidencePath(entry.path));
   const entrypointSet = new Set(entrypoints);
 
   const scored = eligible

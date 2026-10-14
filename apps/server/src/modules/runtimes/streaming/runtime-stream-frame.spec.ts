@@ -104,5 +104,5 @@ test('diagnostic frames do not count as invocation activity', () => {
   );
   assert.equal(isRuntimeActivityFrame({ kind: 'stderr_tail', text: 'retrying' }), false);
   assert.equal(isRuntimeActivityFrame({ kind: 'assistant_text', text: 'working' }), true);
-  assert.equal(isRuntimeActivityFrame({ kind: 'usage', usage: { inputTokens: 1 } }), true);
+  assert.equal(isRuntimeActivityFrame({ kind: 'usage', usage: { inputTokens: 1 } }), false);
 });

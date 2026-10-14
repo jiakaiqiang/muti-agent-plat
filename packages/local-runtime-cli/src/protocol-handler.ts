@@ -9,6 +9,10 @@ export type LocalRuntimeCliInvocation = {
   args: readonly string[];
 };
 
+export type LocalRuntimeLaunchRequest =
+  | { kind: 'connect'; serverUrl: string }
+  | { kind: 'upgrade'; serverUrl: string; upgradeId: string; nonce: string };
+
 type RegistryCommandRunner = (args: readonly string[]) => Promise<void>;
 
 export function normalizeLocalRuntimeServerUrl(value: string) {
@@ -40,7 +44,7 @@ export function updateTrustedLocalRuntimeServer(
 
 export function parseLocalRuntimeLaunchUrl(value: string, trustedServerUrl: string) {
   const url = new URL(value);
-  if (url.protocol !== `${PROTOCOL_NAME}:` || url.hostname !== 'connect' || url.pathname !== '') {
+  if (url.protocol !== `${PROTOCOL_NAME}:` || !['connect', 'upgrade'].includes(url.hostname) || url.pathname !== '') {
     throw new Error('Unsupported Local Runtime launch URL.');
   }
   const requestedServer = normalizeLocalRuntimeServerUrl(url.searchParams.get('server') ?? '');
@@ -48,7 +52,12 @@ export function parseLocalRuntimeLaunchUrl(value: string, trustedServerUrl: stri
   if (requestedServer !== trustedServer) {
     throw new Error('Local Runtime launch URL does not match the installed server.');
   }
-  return { serverUrl: requestedServer };
+  if (url.hostname === 'connect') return { serverUrl: requestedServer } as const;
+  const upgradeId = url.searchParams.get('upgradeId')?.trim();
+  if (!upgradeId || !/^[a-f0-9]{16,128}$/i.test(upgradeId)) throw new Error('Local Runtime upgrade ID is invalid.');
+  const nonce = url.searchParams.get('nonce')?.trim();
+  if (!nonce || !/^[a-z0-9-]{16,128}$/i.test(nonce)) throw new Error('Local Runtime launch nonce is invalid.');
+  return { kind: 'upgrade', serverUrl: requestedServer, upgradeId, nonce } as const;
 }
 
 export function buildWindowsProtocolCommand(invocation: LocalRuntimeCliInvocation) {

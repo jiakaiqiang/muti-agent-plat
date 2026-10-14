@@ -198,6 +198,10 @@ type ConfirmationRequestedPayload = {
   title: string
   description: string
   options: ConfirmationOption[]
+  /** Task Brief revision budget metadata, present for confirm_task_brief cards. */
+  revisionAttempts?: number
+  maxRevisionAttempts?: number
+  allowProceedWithOpenQuestions?: boolean
 }
 
 type ConfirmationOption = {
@@ -467,6 +471,8 @@ data: {"time":"2026-05-27T00:00:00.000Z"}
 - `rag_retrieved` 默认折叠展示，Agent 卡片展示摘要。
 - `tool_*` 渲染为工具调用卡片。
 - `final_delivery_created` 渲染为最终交付卡片。
+
+GitHub 交付阶段沿用 `runtime_progress` + `system_notice`：验证结果、PR 创建或更新、冲突和合并通知只传会话 ID、交付轮次、状态版本、PR 编号/URL、冲突文件数量或合并提交 SHA 等引用。通知不得包含令牌或设备绝对路径；同一交付提交和合并结果使用稳定事件键去重。GitHub 新建入口仍默认关闭，以上通知尚未构成完整端到端验收。
 - `phase=user_message_routing` 的 `runtime_*` 仅用于 Receiver Runtime 的 Debug/Audit，不进入协作事件 REST/SSE，也不渲染到聊天时间线。
 
 ## 10. 校验规则
@@ -594,6 +600,12 @@ type FileRevisionEventType =
 
 ## 13. Runtime 停止状态事件
 
+### Runtime 请求健康投影事件（2026-09-29）
+
+`runtime_progress` 的 `metadata.payload.code='RUNTIME_REQUEST_HEALTH_CHANGED'` 携带白名单化 `healthSnapshot`；事件身份为 `runtime-health:<invocationId>:<version>`，outbox 使用同一事件身份。快照、转移事件和 outbox 原子提交，频繁 pulse 在内存合并，语义不变不重复通知；不是逐 token 写入。健康辅助写入失败只保留待同步投影并有限重试，不触发模型重放或取消。
+
+客户端按 invocation/generation/version/observerEpoch 合并，终态不能被迟到非终态复活。该事件只驱动执行观测区域，不进入 ChatTimeline、不携带 prompt、思考正文/签名或供应商原始 payload，不改变业务 SessionStatus。等待确认与真正模型进展是不同事实。
+
 停止聚合每次持久化推进生成一个 `type='runtime_progress'` 的 `CollaborationEvent`，其 `metadata.payload.code` 固定为 `RUNTIME_STOP_STATE_CHANGED`，`metadata.payload.stopSummary` 为该版本的完整 `RuntimeStopSummary`。事件、停止状态和 outbox 必须在同一事务内提交。
 
 事件 ID 和聚合幂等键固定为 `runtime-stop:<stopRequestId>:<version>`；outbox 记录使用同一事件身份。相同回执、发布补偿或 ACK 前崩溃不得产生第二个相同版本事件。客户端按 `stopRequestId/version` 收敛，同轮旧版本不得覆盖新版本，新轮则以 `updatedAt` 判定先后。
@@ -605,3 +617,15 @@ type FileRevisionEventType =
 `discussion_document_published` 表示版本化方案文件已经写入工作区、完整回读并成为活动版本。`metadata.payload` 只允许包含 `documentId/artifactId/documentRole/revision/parentDocumentId/title/relativePath/contentUrl/uiUrl/contentHash/sizeBytes/readStatus`；禁止携带 Markdown 正文、`contentRef`、内部 Prompt 或工作区绝对路径。
 
 `discussion_document_read` 表示 Agent 对指定方案版本的读取回执。payload 只允许包含 `documentId/agentId/invocationId/contentHash/complete/truncated/status/errorCode`。只有精确路径、完整非截断读取、活动版本与哈希都匹配时，状态才可为 `completed`。发布和读取事件按既有 Session SSE 游标恢复，重连不得重放创建文档或 Agent 读取 mutation。
+
+## Runtime 切换事件（2026-09-26）
+
+用户主动切换 Runtime 的每一次状态推进生成一个 `runtime_switch_changed` 事件。事件、切换请求状态和 outbox 必须在同一事务内提交。
+
+`metadata.payload` 只允许包含 `switchRequestId/version/status/fromRuntimeType/targetRuntimeType/fallbackMode/resumeAfterSwitch/stopRequestId/activeRuntimeType/preferredRuntimeType/failureStage/error`。`error` 只能是稳定错误码加安全摘要；禁止携带凭据、Provider 原始响应、完整命令行、提示全文和本机绝对路径。
+
+事件身份与聚合幂等键固定为 `runtime-switch:<switchRequestId>:<version>`。发布补偿、ACK 前崩溃和客户端重传都不得产生第二个相同版本事件。客户端按 `switchRequestId/version` 收敛：同一请求只接受更高 version，新请求以 `updatedAt` 判定先后，乱序旧事件不得把已完成状态回退为处理中。
+
+`status` 取值与 `RuntimeSwitchRequest.status` 一致：`requested/preflighted/stopping/stop_confirmed/applying/resuming/completed/failed`。`failed` 必须带 `failureStage`，客户端据此展示可重试的阶段。
+
+该事件驱动 Runtime 切换状态区，不进入聊天时间线。旧客户端不认识该事件时应安全忽略，并仍能从 `session_status` 与 `runtime_started` 得到基本状态。用户主动切换、Provider 重试、自动 fallback 和用户暂停使用各自独立的审计原因，不得互相复用。

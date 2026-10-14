@@ -39,7 +39,7 @@ export class CapabilityAuditService {
         type: 'tool_failed',
         fromAgentId: input.agentId,
         priority: result.capability.riskLevel === 'high' ? 'high' : 'normal',
-        content: `${result.capability.name} blocked by capability policy.`,
+        content: `${result.capability.name} 已被能力权限策略阻止。`,
         metadata: {
           schemaVersion: '0.1',
           renderAs: 'tool_card',
@@ -54,7 +54,7 @@ export class CapabilityAuditService {
       type: 'tool_called',
       fromAgentId: input.agentId,
       priority: result.capability.riskLevel === 'high' ? 'high' : 'normal',
-      content: `${result.capability.name} invocation allowed by capability policy.`,
+      content: `能力权限策略已允许调用 ${result.capability.name}。`,
       metadata: {
         schemaVersion: '0.1',
         renderAs: 'tool_card',
@@ -73,7 +73,7 @@ export class CapabilityAuditService {
       type: 'tool_completed',
       fromAgentId: input.agentId,
       priority: result.capability.riskLevel === 'high' ? 'high' : 'normal',
-      content: `${result.capability.name} approved for this scope.`,
+      content: `已授权在当前范围内使用 ${result.capability.name}。`,
       metadata: {
         schemaVersion: '0.1',
         renderAs: 'tool_card',

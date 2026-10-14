@@ -7,6 +7,82 @@ import type { AgentTask, SessionDetail, UserMessageHandlingPlan, WorkspaceWriteb
 import { requirementConfirmationFingerprint } from '@agent-cluster/shared';
 import { SessionsService } from './sessions.service.js';
 
+test('runtime switch command bypasses paused message queue, preserves task scope and is idempotent', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Continue the same task' });
+  const service = fixture.service as any;
+  service.briefGenerationRuns.delete(session.id);
+  session.status = 'PAUSED';
+  session.pauseState = { previousStatus: 'EXECUTING', pausedAt: new Date().toISOString(), reason: 'test' };
+  session.currentTaskBriefId = 'brief-existing';
+  session.activeWorkItemId = 'work-existing';
+  session.runtimePreference = { preferredRuntimeType: 'codex', allowedRuntimeTypes: ['codex', 'claude_code'] };
+  service.persist();
+  let executions = 0;
+  let preflights = 0;
+  service.orchestrator.preflightRuntimeSwitch = async () => { preflights++; };
+  service.runtime = { hasUnconfirmedStops: () => false, activeInvocationCount: () => 0,
+    listInvocations: () => [], cancelSessionAndWait: async () => ({ requested: 0, completed: 0, timedOut: false }) };
+  service.resumeExecution = () => { executions++; };
+  const first = await fixture.service.sendMessage(session.id, '换成 Claude，继续把剩下的做完', [], 'switch-message');
+  assert.equal(first.deferred, false);
+  assert.equal(session.status, 'EXECUTING');
+  assert.equal(session.activeWorkItemId, 'work-existing');
+  assert.equal(session.currentTaskBriefId, 'brief-existing');
+  assert.equal(session.runtimePreference.preferredRuntimeType, 'codex', 'global/session default is preserved');
+  assert.equal(fixture.service.get(session.id).runtimeSwitchOverride?.preference.preferredRuntimeType, 'claude_code');
+  assert.equal(fixture.service.runtimeSwitchState(session.id).request?.status, 'completed');
+  await fixture.service.sendMessage(session.id, '换成 Claude，继续把剩下的做完', [], 'switch-message');
+  assert.equal(executions, 1);
+  assert.equal(preflights, 2, 'one preflight before stopping and one before applying');
+});
+
+test('unavailable target keeps healthy execution and an unconfirmed stop never starts a replacement', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Keep working' });
+  const service = fixture.service as any;
+  service.briefGenerationRuns.delete(session.id);
+  session.status = 'EXECUTING';
+  session.currentTaskBriefId = 'brief';
+  session.runtimePreference = { preferredRuntimeType: 'codex', allowedRuntimeTypes: ['codex', 'claude_code'] };
+  service.persist();
+  service.orchestrator.preflightRuntimeSwitch = async () => { throw new Error('RUNTIME_SWITCH_TARGET_OFFLINE'); };
+  const offline = await fixture.service.switchRuntime(session.id, { targetRuntimeType: 'claude_code', idempotencyKey: 'offline', resumeAfterSwitch: true });
+  assert.equal(offline.status, 'failed');
+  assert.equal(session.status, 'EXECUTING');
+  service.orchestrator.preflightRuntimeSwitch = async () => {};
+  let unknown = true;
+  service.runtime = { hasUnconfirmedStops: () => unknown, activeInvocationCount: () => 0, listInvocations: () => [],
+    cancelSessionAndWait: async () => ({ requested: 1, completed: unknown ? 0 : 1, timedOut: unknown }) };
+  service.resumeExecution = () => { throw new Error('must remain paused'); };
+  const stopping = await fixture.service.switchRuntime(session.id, { targetRuntimeType: 'claude_code', idempotencyKey: 'stopping', resumeAfterSwitch: false });
+  assert.equal(stopping.status, 'stopping');
+  assert.equal(session.runtimeSwitchOverride, undefined);
+  unknown = false;
+  const finished = await fixture.service.switchRuntime(session.id, { targetRuntimeType: 'claude_code', idempotencyKey: 'stopping', resumeAfterSwitch: false });
+  assert.equal(finished.status, 'completed');
+  assert.equal(session.status, 'PAUSED');
+  assert.equal(fixture.service.get(session.id).runtimeSwitchOverride?.preference.preferredRuntimeType, 'claude_code');
+});
+
+test('user pause cancels a pending step-boundary Runtime switch', async () => {
+  const fixture = makeService({ executionRunning: true });
+  const { session } = await fixture.service.create({ input: 'Continue work' });
+  const service = fixture.service as any;
+  service.briefGenerationRuns.delete(session.id);
+  session.status = 'EXECUTING';
+  session.runtimePreference = { preferredRuntimeType: 'codex', allowedRuntimeTypes: ['codex', 'claude_code'] };
+  service.persist();
+  service.orchestrator.preflightRuntimeSwitch = async () => {};
+  const request = await fixture.service.switchRuntime(session.id, { targetRuntimeType: 'claude_code',
+    timing: 'after_step', resumeAfterSwitch: true, idempotencyKey: 'later' });
+  assert.equal(request.status, 'preflighted');
+  await fixture.service.pause(session.id);
+  assert.equal(fixture.service.runtimeSwitchState(session.id).request?.error?.code, 'RUNTIME_SWITCH_USER_PAUSED');
+  assert.equal(session.runtimeSwitchOverride, undefined);
+  assert.equal(session.status, 'PAUSED');
+});
+
 test('failed brief resumes at generation, consumes its confirmation once and rejects a stale confirmation', async () => {
   const fixture = makeService();
   const { session } = await fixture.service.create({ input: 'Recover failed brief' });
@@ -165,6 +241,7 @@ function makeService(options: {
   localWorkspace?: {
     workspaceId: string;
     displayName: string;
+    deviceId?: string;
     files?: Record<string, string>;
     runtimeTypes?: Array<'codex' | 'claude_code'>;
     /** Runtimes the CLI still reports for routing; defaults to runtimeTypes. Empty = CLI offline. */
@@ -181,11 +258,13 @@ function makeService(options: {
   };
   capabilityChecks?: Record<string, boolean>;
   workflowResumeCalls?: string[];
+  briefOpenQuestions?: string[];
   workflowSubstitutionCalls?: Array<{ runId: string; taskId: string; agentId: string; confirmationId?: string }>;
   workflowSkipCalls?: Array<{ runId: string; taskId: string; reason: string; confirmationId?: string }>;
   followUpHandlingPlan?: {
     requirementRelation: 'continuation' | 'new_requirement';
     failedExecutionAction: 'none' | 'resume' | 'replan';
+    requiresUserConfirmation?: boolean;
   };
   routingRecovery?: {
     routings: Array<Record<string, any>>;
@@ -195,6 +274,9 @@ function makeService(options: {
   };
   attachments?: {
     removeForMessage(sessionId: string, messageId: string): Promise<string[]>;
+  };
+  githubWorkspaces?: {
+    cleanupSession(sessionId: string): Promise<void>;
   };
 } = {}) {
   const persistedSessions: SessionDetail[] = structuredClone(options.initialSessions ?? []);
@@ -258,6 +340,13 @@ function makeService(options: {
         };
         events.push(event);
         return event;
+      },
+      createDraft(input: Record<string, unknown>) {
+        return {
+          id: `draft-event-${events.length + 1}`,
+          createdAt: '2026-07-11T00:00:00.000Z',
+          ...input
+        };
       },
       createOnce(key: string, input: Record<string, unknown>) {
         if (eventOnceKeys.has(key)) return undefined;
@@ -335,7 +424,7 @@ function makeService(options: {
           affectedTaskIds: [],
           affectedAgentIds: [],
           requiresBriefRevision: false,
-          requiresUserConfirmation: false,
+          requiresUserConfirmation: options.followUpHandlingPlan?.requiresUserConfirmation ?? false,
           coordinatorInstruction: 'receiver recognized intent'
         };
       },
@@ -344,12 +433,36 @@ function makeService(options: {
         content: string,
         _sourceEventId: string,
         mentionedAgentIds: string[],
-        _options?: unknown
+        followUpOptions?: { requiresUserConfirmation?: boolean }
       ) {
         followUpPreparations.push({ content, mentionedAgentIds });
+        const awaitingUserConfirmation = followUpOptions?.requiresUserConfirmation ?? false;
+        const briefId = `follow-up-brief-${followUpPreparations.length}`;
+        if (awaitingUserConfirmation) {
+          events.push({
+            id: `event-${events.length + 1}`,
+            sessionId: session.id,
+            type: 'user_confirmation_requested',
+            content: '请确认主 Agent 给出的后续任务方案。',
+            toAgentIds: [],
+            metadata: {
+              schemaVersion: '0.1',
+              payload: {
+                confirmationId: `follow-up-confirmation-${followUpPreparations.length}`,
+                reason: 'confirm_task_brief',
+                relatedBriefId: briefId,
+                options: [
+                  { key: 'approve', label: '确认' },
+                  { key: 'revise', label: '修改' }
+                ]
+              }
+            },
+            createdAt: '2026-07-11T00:00:00.000Z'
+          });
+        }
         return {
           brief: {
-            id: `follow-up-brief-${followUpPreparations.length}`,
+            id: briefId,
             sessionId: session.id,
             version: followUpPreparations.length,
             goal: content,
@@ -359,10 +472,11 @@ function makeService(options: {
             acceptanceCriteria: [],
             risks: [],
             openQuestions: [],
-            confirmedByUser: true,
+            confirmedByUser: !awaitingUserConfirmation,
             createdAt: '2026-07-11T00:00:00.000Z'
           },
-          tasks: [{ id: `follow-up-task-${followUpPreparations.length}` }]
+          tasks: awaitingUserConfirmation ? [] : [{ id: `follow-up-task-${followUpPreparations.length}` }],
+          awaitingUserConfirmation
         };
       },
       discussAndCreateBrief(_session: SessionDetail, signal?: AbortSignal) {
@@ -386,7 +500,7 @@ function makeService(options: {
           constraints: [],
           acceptanceCriteria: [],
           risks: [],
-          openQuestions: [],
+          openQuestions: options.briefOpenQuestions ?? [],
           confirmedByUser: true,
           createdAt: '2026-07-11T00:00:00.000Z'
         };
@@ -412,7 +526,7 @@ function makeService(options: {
           constraints: [],
           acceptanceCriteria: [],
           risks: [],
-          openQuestions: [],
+          openQuestions: options.briefOpenQuestions ?? [],
           confirmedByUser: true,
           createdAt: '2026-07-11T00:00:00.000Z'
         };
@@ -575,10 +689,12 @@ function makeService(options: {
       }
     } as never : undefined,
     options.localWorkspace ? {
+      isDeviceConnected(deviceId: string) { return deviceId === (options.localWorkspace?.deviceId ?? 'device-a'); },
       getWorkspace(workspaceId: string) {
         if (workspaceId !== options.localWorkspace?.workspaceId) return undefined;
         return {
           workspaceId,
+          deviceId: options.localWorkspace.deviceId ?? 'device-a',
           displayName: options.localWorkspace.displayName,
           capabilities: { read: true, write: true, command: true, test: true },
           revision: { id: 'local-revision', observedAt: '2026-07-24T00:00:00.000Z' }
@@ -668,7 +784,8 @@ function makeService(options: {
       }
     } as never,
     undefined,
-    options.attachments as never
+    options.attachments as never,
+    options.githubWorkspaces as never
   );
   return {
     service,
@@ -734,6 +851,283 @@ test('confirming a Task Brief closes the exact confirmation request', async () =
   const resolved = fixture.events.find((event) => event.type === 'user_confirmation_resolved');
   assert.equal((resolved?.metadata as { payload?: { confirmationId?: string } })?.payload?.confirmationId, 'brief-confirmation-1');
   assert.equal(fixture.service.get(session.id).status, 'WAIT_WORKFLOW_SELECT');
+});
+
+test('Task Brief confirmation fails closed while initial or revised requirements have open questions', async () => {
+  for (const phase of ['initial', 'revised'] as const) {
+    const session: SessionDetail = {
+      id: `session-open-questions-${phase}`,
+      dataEpoch: 'epoch-test',
+      title: `${phase} brief with open questions`,
+      originalInput: 'Do not execute until every requirement is explicit.',
+      status: 'WAIT_USER_CONFIRM',
+      ownerId: 'local-user',
+      workspaceId: `workspace-open-questions-${phase}`,
+      tokenUsed: 0,
+      currentTaskBriefId: `brief-open-questions-${phase}`,
+      participatingAgentIds: ['requirements', 'frontend'],
+      createdAt: '2026-08-12T00:00:00.000Z',
+      updatedAt: '2026-08-12T00:00:00.000Z'
+    };
+    const fixture = makeService({
+      initialSessions: [session],
+      briefOpenQuestions: ['请确认排行榜排序规则。']
+    });
+    fixture.events.push({
+      id: `brief-open-questions-request-${phase}`,
+      sessionId: session.id,
+      type: 'user_confirmation_requested',
+      content: 'Confirm the brief.',
+      toAgentIds: [],
+      metadata: {
+        schemaVersion: '0.1',
+        payload: {
+          confirmationId: `brief-open-questions-confirmation-${phase}`,
+          reason: 'confirm_task_brief',
+          relatedBriefId: session.currentTaskBriefId,
+          options: [{ key: 'approve', label: 'Approve' }]
+        }
+      },
+      createdAt: '2026-08-12T00:00:00.000Z'
+    });
+
+    await assert.rejects(
+      fixture.service.confirmBrief(
+        session.id,
+        session.currentTaskBriefId!,
+        `brief-open-questions-confirmation-${phase}`
+      ),
+      (error: unknown) => {
+        const response = (error as { getResponse?: () => unknown }).getResponse?.() as {
+          code?: string;
+          openQuestions?: string[];
+        } | undefined;
+        return response?.code === 'brief_has_open_questions' && response.openQuestions?.length === 1;
+      }
+    );
+
+    assert.equal(fixture.service.get(session.id).status, 'WAIT_USER_CONFIRM');
+    assert.equal(fixture.executionStarts.length, 0);
+    assert.equal(fixture.events.some((event) =>
+      event.type === 'user_confirmation_resolved' ||
+      (event.metadata as { payload?: { reason?: string } } | undefined)?.payload?.reason === 'select_workflow'
+    ), false);
+  }
+});
+
+test('Task Brief revision limit exposes an explicit risk-acceptance path and then enters workflow selection', async () => {
+  const session: SessionDetail = {
+    id: 'session-brief-revision-limit',
+    dataEpoch: 'epoch-test',
+    title: 'Brief revision limit',
+    originalInput: '实现导出',
+    status: 'WAIT_USER_CONFIRM',
+    ownerId: 'local-user',
+    workspaceId: 'workspace-brief-revision-limit',
+    tokenUsed: 0,
+    currentTaskBriefId: 'brief-revision-limit',
+    participatingAgentIds: ['coordinator'],
+    createdAt: '2026-08-12T00:00:00.000Z',
+    updatedAt: '2026-08-12T00:00:00.000Z'
+  };
+  const fixture = makeService({ initialSessions: [session], briefOpenQuestions: ['是否支持 CSV？'] });
+  fixture.events.push({
+    id: 'brief-revision-limit-card',
+    sessionId: session.id,
+    type: 'user_confirmation_requested',
+    content: '确认任务契约',
+    toAgentIds: [],
+    metadata: {
+      schemaVersion: '0.1',
+      payload: {
+        confirmationId: 'brief-revision-limit-confirmation',
+        reason: 'confirm_task_brief',
+        relatedBriefId: session.currentTaskBriefId,
+        options: [
+          { key: 'revise', label: '继续修订' },
+          { key: 'proceed_with_open_questions', label: '保留未决问题并继续', style: 'danger' }
+        ]
+      }
+    },
+    createdAt: '2026-08-12T00:00:00.000Z'
+  });
+
+  await assert.rejects(
+    fixture.service.confirmBrief(
+      session.id,
+      session.currentTaskBriefId!,
+      'brief-revision-limit-confirmation',
+      { allowOpenQuestions: true }
+    ),
+    (error: unknown) => {
+      const response = (error as { getResponse?: () => unknown }).getResponse?.() as { code?: string } | undefined;
+      return response?.code === 'brief_revision_limit_not_reached';
+    }
+  );
+
+  for (let index = 0; index < 3; index += 1) {
+    fixture.events.push({
+      id: `brief-revision-limit-rejected-${index}`,
+      sessionId: session.id,
+      type: 'brief_rejected',
+      content: '用户提交了任务契约修订。',
+      toAgentIds: [],
+      metadata: {
+        schemaVersion: '0.1',
+        payload: { briefId: session.currentTaskBriefId }
+      },
+      createdAt: `2026-08-12T00:00:0${index + 1}.000Z`
+    });
+  }
+
+  await assert.rejects(
+    fixture.service.reviseBrief(session.id, session.currentTaskBriefId!, {
+      confirmationId: 'brief-revision-limit-confirmation',
+      userMessage: '继续修改',
+      questionAnswers: [{ question: '是否支持 CSV？', answer: '仍未决定' }]
+    }),
+    (error: unknown) => {
+      const response = (error as { getResponse?: () => unknown }).getResponse?.() as { code?: string } | undefined;
+      return response?.code === 'brief_revision_limit_reached';
+    }
+  );
+
+  const result = await fixture.service.confirmBrief(
+    session.id,
+    session.currentTaskBriefId!,
+    'brief-revision-limit-confirmation',
+    { allowOpenQuestions: true }
+  ) as { accepted: boolean };
+  assert.equal(result.accepted, true);
+  assert.equal(fixture.service.get(session.id).status, 'WAIT_WORKFLOW_SELECT');
+  const resolved = fixture.events.find((event) =>
+    event.type === 'user_confirmation_resolved' &&
+    ((event.metadata as { payload?: { confirmationId?: string } } | undefined)?.payload?.confirmationId === 'brief-revision-limit-confirmation')
+  );
+  assert.equal(
+    ((resolved?.metadata as { payload?: { selectedOptionKey?: string } } | undefined)?.payload?.selectedOptionKey),
+    'proceed_with_open_questions'
+  );
+  assert.equal(
+    ((resolved?.metadata as { payload?: { riskAccepted?: boolean } } | undefined)?.payload?.riskAccepted),
+    true
+  );
+});
+
+test('legacy Task Brief confirmation after the revision limit accepts the old approve action as risk acceptance', async () => {
+  const session: SessionDetail = {
+    id: 'session-legacy-brief-revision-limit',
+    dataEpoch: 'epoch-test',
+    title: 'Legacy Brief revision limit',
+    originalInput: '实现导出',
+    status: 'WAIT_USER_CONFIRM',
+    ownerId: 'local-user',
+    workspaceId: 'workspace-legacy-brief-revision-limit',
+    tokenUsed: 0,
+    currentTaskBriefId: 'brief-legacy-revision-limit',
+    participatingAgentIds: ['coordinator'],
+    createdAt: '2026-08-12T00:00:00.000Z',
+    updatedAt: '2026-08-12T00:00:00.000Z'
+  };
+  const fixture = makeService({ initialSessions: [session], briefOpenQuestions: ['是否支持 CSV？'] });
+  fixture.events.push({
+    id: 'legacy-brief-revision-limit-card',
+    sessionId: session.id,
+    type: 'user_confirmation_requested',
+    content: '确认任务契约',
+    toAgentIds: [],
+    metadata: {
+      schemaVersion: '0.1',
+      payload: {
+        confirmationId: 'legacy-brief-revision-limit-confirmation',
+        reason: 'confirm_task_brief',
+        relatedBriefId: session.currentTaskBriefId,
+        options: [
+          { key: 'approve', label: '确认执行' },
+          { key: 'revise', label: '继续修订' }
+        ]
+      }
+    },
+    createdAt: '2026-08-12T00:00:00.000Z'
+  });
+  for (let index = 0; index < 3; index += 1) {
+    fixture.events.push({
+      id: `legacy-brief-revision-limit-rejected-${index}`,
+      sessionId: session.id,
+      type: 'brief_rejected',
+      content: '用户提交了任务契约修订。',
+      toAgentIds: [],
+      metadata: {
+        schemaVersion: '0.1',
+        payload: { briefId: session.currentTaskBriefId }
+      },
+      createdAt: `2026-08-12T00:00:0${index + 1}.000Z`
+    });
+  }
+
+  const result = await fixture.service.confirmBrief(
+    session.id,
+    session.currentTaskBriefId!,
+    'legacy-brief-revision-limit-confirmation'
+  ) as { accepted: boolean };
+
+  assert.equal(result.accepted, true);
+  assert.equal(fixture.service.get(session.id).status, 'WAIT_WORKFLOW_SELECT');
+  const resolved = fixture.events.find((event) =>
+    event.type === 'user_confirmation_resolved' &&
+    ((event.metadata as { payload?: { confirmationId?: string } } | undefined)?.payload?.confirmationId === 'legacy-brief-revision-limit-confirmation')
+  );
+  assert.equal(
+    ((resolved?.metadata as { payload?: { selectedOptionKey?: string } } | undefined)?.payload?.selectedOptionKey),
+    'proceed_with_open_questions'
+  );
+  assert.equal(
+    ((resolved?.metadata as { payload?: { riskAccepted?: boolean } } | undefined)?.payload?.riskAccepted),
+    true
+  );
+});
+
+test('autopilot brief generation waits for explicit user confirmation', async () => {
+  const session: SessionDetail = {
+    id: 'session-autopilot-explicit-confirmation',
+    dataEpoch: 'epoch-test',
+    title: 'Autopilot explicit confirmation',
+    originalInput: 'Wait for my confirmation.',
+    status: 'AGENT_DISCUSSING',
+    ownerId: 'local-user',
+    workspaceId: 'workspace-autopilot-explicit-confirmation',
+    origin: 'autopilot',
+    autopilotRunId: 'autopilot-run-explicit-confirmation',
+    tokenUsed: 0,
+    participatingAgentIds: ['coordinator'],
+    createdAt: '2026-08-12T00:00:00.000Z',
+    updatedAt: '2026-08-12T00:00:00.000Z'
+  };
+  const fixture = makeService({ initialSessions: [session] });
+  const service = fixture.service as any;
+  let confirmationCalls = 0;
+  service.orchestrator.discussAndCreateBrief = async () => ({
+    id: 'brief-autopilot-explicit-confirmation',
+    sessionId: session.id,
+    version: 1,
+    goal: 'Wait for explicit user confirmation.',
+    scope: [],
+    outOfScope: [],
+    constraints: [],
+    acceptanceCriteria: [],
+    risks: [],
+    openQuestions: [],
+    confirmedByUser: false,
+    createdAt: '2026-08-12T00:00:00.000Z'
+  });
+  service.confirmBrief = async () => { confirmationCalls += 1; };
+
+  service.generateBriefInBackground(session);
+  await waitFor(() => session.status === 'WAIT_USER_CONFIRM');
+
+  assert.equal(session.currentTaskBriefId, 'brief-autopilot-explicit-confirmation');
+  assert.equal(confirmationCalls, 0);
+  assert.equal(fixture.executionStarts.length, 0);
 });
 
 test('boot recovery expires stale confirmations and exact continue consumes one durable checkpoint', async () => {
@@ -1597,6 +1991,39 @@ test('deleting a Session keeps directories, artifacts and persisted history reco
   assert.equal(service.getIncludingDeleted(session.id).id, session.id);
 });
 
+test('deleting a server GitHub Session cleans only its isolated workspace and remains retryable', async () => {
+  const cleanupCalls: string[] = [];
+  let failCleanup = true;
+  const fixture = makeService({
+    githubWorkspaces: {
+      async cleanupSession(sessionId: string) {
+        cleanupCalls.push(sessionId);
+        if (failCleanup) throw new Error('workspace busy');
+      }
+    }
+  });
+  const { session } = await fixture.service.create({
+    input: 'Delete a server GitHub Session',
+    executionLocation: 'server',
+    codeSource: {
+      kind: 'remote_repository', provider: 'github',
+      repositoryUrl: 'https://github.com/example/project'
+    }
+  });
+
+  const first = await fixture.service.delete(session.id);
+  assert.equal(first.deleted, false);
+  assert.equal(first.lifecycle.state, 'deleting');
+  assert.ok(first.blockers.some((blocker) => blocker.message.includes('GitHub 会话工作区清理')));
+  assert.deepEqual(cleanupCalls, [session.id]);
+
+  failCleanup = false;
+  const second = await fixture.service.delete(session.id);
+  assert.equal(second.deleted, true);
+  assert.equal(second.lifecycle.state, 'deleted');
+  assert.deepEqual(cleanupCalls, [session.id, session.id]);
+});
+
 test('rejects Session deletion after backend shutdown starts without removing persisted state', async () => {
   const cleanupCalls: string[] = [];
   const { service, persistedSessions } = makeService({ cleanupCalls });
@@ -1636,6 +2063,49 @@ test('persisted Agent membership does not broaden routing to the active catalog 
 
   const selected = (fixture.service as any).pickSessionAgent(session, ['test']);
   assert.equal(selected.key, 'coordinator', 'a disappeared member may only fall back to the trusted main Agent');
+});
+
+test('missing preferred roles fall back to the system main Agent instead of the first participant', () => {
+  const fixture = makeService();
+  const session: SessionDetail = {
+    id: 'session-system-main-agent-fallback',
+    dataEpoch: 'epoch-test',
+    title: 'System main Agent fallback',
+    originalInput: 'Route fallback handling through the main Agent.',
+    status: 'EXECUTING',
+    ownerId: 'local-user',
+    workspaceId: 'workspace-system-main-agent-fallback',
+    tokenUsed: 0,
+    participatingAgentIds: ['requirements', 'frontend'],
+    createdAt: '2026-08-12T00:00:00.000Z',
+    updatedAt: '2026-08-12T00:00:00.000Z'
+  };
+
+  const selected = (fixture.service as any).pickSessionAgent(session, ['review', 'test']);
+
+  assert.equal(selected.key, 'coordinator');
+});
+
+test('fallback fails closed when the system main Agent is unavailable', () => {
+  const fixture = makeService({ receiverAvailable: false });
+  const session: SessionDetail = {
+    id: 'session-system-main-agent-unavailable',
+    dataEpoch: 'epoch-test',
+    title: 'System main Agent unavailable',
+    originalInput: 'Do not route fallback work to an arbitrary participant.',
+    status: 'EXECUTING',
+    ownerId: 'local-user',
+    workspaceId: 'workspace-system-main-agent-unavailable',
+    tokenUsed: 0,
+    participatingAgentIds: ['requirements', 'frontend'],
+    createdAt: '2026-08-12T00:00:00.000Z',
+    updatedAt: '2026-08-12T00:00:00.000Z'
+  };
+
+  assert.throws(
+    () => (fixture.service as any).pickSessionAgent(session, ['review', 'test']),
+    /available|Agent/i
+  );
 });
 
 test('new message directives cannot execute a disabled or deleted Skill reference', async () => {
@@ -1807,6 +2277,38 @@ test('duplicate archive and restore requests are idempotent and keep one Session
   ]);
   assert.equal(restoreResults.some(result => result.restored), true);
   assert.equal(fixture.service.list('active').filter(item => item.id === session.id).length, 1);
+});
+
+test('an archived Session can be deleted straight from the archive list and leaves no archived projection', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Delete straight from the archive', projectId: 'project-archive-delete' });
+  assert.equal((await fixture.service.archive(session.id, 'archive-before-delete')).archived, true);
+
+  const deleted = await fixture.service.delete(session.id, 'delete-archived-session');
+
+  assert.equal(deleted.deleted, true);
+  assert.equal(deleted.lifecycle.state, 'deleted');
+  assert.equal(fixture.service.listArchivedGroups().some(group => group.items.some(item => item.id === session.id)), false);
+  assert.equal(fixture.service.list('deleted').some(item => item.id === session.id), true);
+  assert.equal(fixture.service.getIncludingDeleted(session.id).archivedAt, undefined);
+  assert.equal((fixture.persistedState.sessions as SessionDetail[]).find(item => item.id === session.id)?.archivedAt, undefined);
+});
+
+test('an archived Session whose deletion is still cleaning up cannot be restored from the archive', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Archived deletion still cleaning up', projectId: 'project-archive-pending-delete' });
+  await fixture.service.archive(session.id, 'archive-before-pending-delete');
+  (fixture.service as any).workspaceWritebacks = {
+    list: () => [],
+    clearSessionDrafts: async () => { throw new Error('draft storage unavailable'); }
+  };
+
+  const pending = await fixture.service.delete(session.id, 'delete-archived-pending');
+
+  assert.equal(pending.deleted, false);
+  assert.equal(fixture.service.list('archived').find(item => item.id === session.id)?.lifecycleState, 'deleting');
+  await assert.rejects(fixture.service.restoreArchived(session.id, 'restore-during-delete'), /正在删除/);
+  assert.ok(fixture.service.getIncludingDeleted(session.id).archivedAt);
 });
 
 test('deleting one Session blocks its late outcome without changing a sibling Session', async () => {
@@ -1995,7 +2497,8 @@ test('workflow failure events prefer the safe structured RuntimeError message', 
   );
   assert.equal(failureEvents.length, 2);
   for (const event of failureEvents) {
-    assert.match(String(event.content), /Claude Code could not be started/);
+    assert.match(String(event.content), /操作未完成.*RUNTIME_INVOCATION_ERROR/);
+    assert.match(JSON.stringify(event.metadata), /Claude Code could not be started/);
     assert.doesNotMatch(JSON.stringify(event), /json-schema|private|workspace/i);
   }
 });
@@ -2056,6 +2559,34 @@ test('an idle existing Session routes a new message through receiver decompositi
     event.type === 'session_status_changed' &&
     (event.metadata as { payload?: { status?: string } }).payload?.status === 'AGENT_DISCUSSING'
   ), false);
+});
+
+test('a main-Agent follow-up plan requiring confirmation never starts execution before approval', async () => {
+  const fixture = makeService({
+    followUpHandlingPlan: {
+      requirementRelation: 'continuation',
+      failedExecutionAction: 'none',
+      requiresUserConfirmation: true
+    }
+  });
+  const { session } = await fixture.service.create({ input: 'Analyze the workspace' });
+  (fixture.service as unknown as { briefGenerationRuns: Map<string, unknown> }).briefGenerationRuns.delete(session.id);
+  session.status = 'COMPLETED';
+
+  const result = await fixture.service.sendMessage(session.id, '按主 Agent 的方案增加审计日志', ['backend']);
+  await waitFor(() => session.status === 'WAIT_USER_CONFIRM');
+
+  assert.equal(result.handlingPlan.requiresUserConfirmation, true);
+  assert.equal(fixture.followUpPreparations.length, 1);
+  assert.equal(fixture.executionStarts.length, 0);
+  assert.equal(session.currentTaskBriefId, 'follow-up-brief-1');
+  assert.deepEqual(session.pendingFollowUpMessages ?? [], []);
+  assert.ok(fixture.events.some((event) =>
+    event.type === 'user_confirmation_requested' &&
+    (event.metadata as { payload?: { reason?: string; relatedBriefId?: string } }).payload?.reason === 'confirm_task_brief' &&
+    (event.metadata as { payload?: { reason?: string; relatedBriefId?: string } }).payload?.relatedBriefId ===
+      session.currentTaskBriefId
+  ));
 });
 
 test('collaboration retry is isolated and manual re-summary appends a new version', async () => {
@@ -2264,6 +2795,24 @@ test('a message received while paused remains queued without invoking the Receiv
   assert.equal(followUpPreparations.length, 1);
   assert.equal(executionStarts.length, 1);
   assert.equal(session.pendingFollowUpMessages?.[0]?.receiverRecognitionPending, undefined);
+});
+
+test('paused compound switch is a control request even when target preflight fails', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Analyze the workspace',
+    runtimePreference: { preferredRuntimeType: 'codex', allowedRuntimeTypes: ['codex', 'claude_code'] } });
+  const service = fixture.service as any;
+  service.briefGenerationRuns.delete(session.id);
+  session.status = 'PAUSED';
+  session.pauseState = { previousStatus: 'EXECUTING', pausedAt: '2026-09-26T00:00:00.000Z' };
+  service.orchestrator.preflightRuntimeSwitch = async () => { throw new Error('RUNTIME_SWITCH_TARGET_OFFLINE'); };
+  const result = await fixture.service.sendMessage(session.id, '切换到 Claude Code 继续', []);
+  assert.equal(result.deferred, false);
+  assert.equal(session.status, 'PAUSED');
+  assert.equal(session.pendingFollowUpMessages?.length ?? 0, 0);
+  assert.equal(fixture.service.runtimeSwitchState(session.id).request?.error?.code, 'RUNTIME_SWITCH_TARGET_OFFLINE');
+  assert.equal(fixture.followUpRecognitions.length, 0);
+  assert.equal(fixture.executionStarts.length, 0);
 });
 
 test('message ingress replays the durable event and follow-up for the same Idempotency-Key', async () => {
@@ -2905,6 +3454,238 @@ test('retired browser-local working directories are rejected', async () => {
   );
 });
 
+test('deletion stays retryable when workspace conflict draft cleanup fails', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Delete after conflict cleanup' });
+  (fixture.service as any).workspaceWritebacks = {
+    list: () => [],
+    clearSessionDrafts: async () => { throw new Error('draft storage unavailable'); }
+  };
+  const result = await fixture.service.delete(session.id);
+  assert.equal(result.deleted, false);
+  assert.equal(result.lifecycle.state, 'deleting');
+  assert.ok(result.blockers.some((blocker) => blocker.message.includes('冲突草稿清理')));
+});
+
+test('Brief revision records explicit answers before starting discussion and rejects stale answers', async () => {
+  const session: SessionDetail = {
+    id: 'session-revision-answers', dataEpoch: 'epoch-test', title: 'Revision answers',
+    originalInput: '实现导出', status: 'WAIT_USER_CONFIRM', ownerId: 'local-user',
+    workspaceId: 'workspace-revision-answers', tokenUsed: 0,
+    currentTaskBriefId: 'brief-revision-answers', participatingAgentIds: ['coordinator'],
+    createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:00:00.000Z'
+  };
+  const openQuestions = ['是否支持 CSV？'];
+  const fixture = makeService({ initialSessions: [session], briefOpenQuestions: openQuestions });
+  const service = fixture.service as any;
+  const decisions: Array<{ question: string; answer: string }> = [];
+  let discussions = 0;
+  service.contextManagement = {
+    validDecisions: () => decisions.map((item) => ({ ...item, status: 'confirmed' })),
+    ensureInitialWorkItem: async (active: SessionDetail) => {
+      active.activeWorkItemId = 'work-revision-answers';
+      return { id: active.activeWorkItemId };
+    },
+    recordConfirmedDecisions: async (input: { decisions: Array<{ question: string; answer: string }> }) => {
+      decisions.push(...input.decisions);
+    },
+    updateActiveWorkItemStatus: async () => undefined
+  };
+  service.generateBriefInBackground = () => { discussions += 1; };
+  fixture.events.push({
+    id: 'revision-card', sessionId: session.id, type: 'user_confirmation_requested',
+    content: '确认任务契约', toAgentIds: [],
+    metadata: { schemaVersion: '0.1', payload: {
+      confirmationId: 'revision-confirmation', reason: 'confirm_task_brief',
+      relatedBriefId: session.currentTaskBriefId, options: [{ key: 'revise', label: '修订' }]
+    } }, createdAt: '2026-08-12T00:00:00.000Z'
+  });
+  await assert.rejects(fixture.service.reviseBrief(session.id, session.currentTaskBriefId!, {
+    confirmationId: 'revision-confirmation', userMessage: '只支持 Excel'
+  }), (error: unknown) => {
+    const response = (error as { getResponse?: () => unknown }).getResponse?.() as { code?: string } | undefined;
+    return response?.code === 'brief_question_answers_required';
+  });
+  await assert.rejects(fixture.service.reviseBrief(session.id, session.currentTaskBriefId!, {
+    confirmationId: 'revision-confirmation', userMessage: '只支持 Excel',
+    questionAnswers: [{ question: '是否支持 PDF？', answer: '不支持' }]
+  }), /current or previously answered Brief question/);
+  assert.equal(fixture.events.some((event) => event.type === 'brief_rejected'), false);
+
+  const revision = {
+    confirmationId: 'revision-confirmation', userMessage: '只支持 Excel',
+    questionAnswers: [{ question: '是否支持 CSV？', answer: '不支持 CSV，只支持 Excel' }]
+  };
+  const [result, concurrent] = await Promise.all([
+    fixture.service.reviseBrief(session.id, session.currentTaskBriefId!, revision),
+    fixture.service.reviseBrief(session.id, session.currentTaskBriefId!, revision)
+  ]);
+  assert.equal(result.accepted, true);
+  assert.equal(concurrent.accepted, true);
+  assert.equal(decisions[0]?.answer, '不支持 CSV，只支持 Excel');
+  assert.equal(decisions.length, 1);
+  assert.equal(discussions, 1);
+  assert.equal(fixture.service.get(session.id).status, 'AGENT_DISCUSSING');
+  await fixture.service.reviseBrief(session.id, 'brief-revision-answers', {
+    confirmationId: 'revision-confirmation', userMessage: '只支持 Excel'
+  });
+  assert.equal(discussions, 1, 'a retried confirmation must not start another revision');
+
+  openQuestions.length = 0;
+  const current = fixture.service.get(session.id);
+  current.currentTaskBriefId = 'brief-revision-answers-v2';
+  current.status = 'WAIT_USER_CONFIRM';
+  fixture.events.push({
+    id: 'revision-card-v2', sessionId: session.id, type: 'user_confirmation_requested',
+    content: '确认新版任务契约', toAgentIds: [],
+    metadata: { schemaVersion: '0.1', payload: {
+      confirmationId: 'revision-confirmation-v2', reason: 'confirm_task_brief',
+      relatedBriefId: current.currentTaskBriefId, options: [{ key: 'revise', label: '修订' }]
+    } }, createdAt: '2026-08-12T00:00:01.000Z'
+  });
+  await fixture.service.reviseBrief(session.id, current.currentTaskBriefId, {
+    confirmationId: 'revision-confirmation-v2', userMessage: '现在需要同时支持 CSV',
+    questionAnswers: [{ question: '是否支持 CSV？', answer: '现在支持 CSV' }]
+  });
+  assert.equal(decisions[1]?.answer, '现在支持 CSV');
+  assert.equal(discussions, 2);
+});
+
+test('GitHub server Session persists preparation state without starting Agent', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({
+    input: 'Implement the requested change',
+    executionLocation: 'server',
+    codeSource: {
+      kind: 'remote_repository', provider: 'github',
+      repositoryUrl: 'https://GitHub.com/Example/Project.git'
+    }
+  });
+  assert.equal(session.status, 'WAIT_SOURCE_PREPARATION');
+  assert.equal(session.workingDirectory, undefined);
+  assert.equal(session.codeSource?.kind, 'remote_repository');
+  assert.equal(session.sourceBinding?.repositoryUrl, 'https://github.com/example/project');
+  assert.equal(session.sourceBinding?.state, 'awaiting_auth');
+  assert.equal(fixture.discussionStarts.length, 0);
+  assert.equal(fixture.persistedSessions[0]?.sourceBinding?.state, 'awaiting_auth');
+  await assert.rejects(fixture.service.sendMessage(session.id, 'continue'), /SOURCE_PREPARATION_REQUIRED/);
+  (fixture.service as any).generateBriefInBackground(session);
+  assert.equal(fixture.discussionStarts.length, 0);
+});
+
+test('GitHub server Session starts Agent only after the selected branch is bound', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({
+    input: 'Implement the requested change', executionLocation: 'server',
+    codeSource: { kind: 'remote_repository', provider: 'github',
+      repositoryUrl: 'https://github.com/example/project' }
+  });
+  const cloning = fixture.service.updateServerSourcePreparation(session.id, 1,
+    { state: 'cloning', authorizationRef: 'auth-1' });
+  const awaitingBranch = fixture.service.updateServerSourcePreparation(session.id, cloning.version,
+    { state: 'awaiting_base_branch', repositoryId: '73', defaultBranch: 'develop',
+      workspaceId: `github-session:${session.id}`, cacheKey: 'cache-1' });
+  assert.equal(fixture.discussionStarts.length, 0);
+  await assert.rejects(fixture.service.completeServerSourcePreparation(session.id,
+    awaitingBranch.version - 1, { workspaceId: `github-session:${session.id}`,
+      workspacePath: 'C:\\managed\\session', cacheKey: 'cache-1',
+      baseBranch: 'develop', baseSha: 'a'.repeat(40) }), /SOURCE_PREPARATION_VERSION_CONFLICT/);
+  assert.equal(fixture.discussionStarts.length, 0);
+  await fixture.service.completeServerSourcePreparation(session.id,
+    awaitingBranch.version, { workspaceId: `github-session:${session.id}`,
+      workspacePath: 'C:\\managed\\session', cacheKey: 'cache-1',
+      baseBranch: 'develop', baseSha: 'a'.repeat(40) });
+  assert.equal(session.status, 'AGENT_DISCUSSING');
+  assert.equal(session.sourceBinding?.state, 'ready');
+  assert.equal(fixture.discussionStarts.length, 1);
+});
+
+test('GitHub creation rejects mixed source, missing device and invalid repository', async () => {
+  const { service } = makeService();
+  const codeSource = {
+    kind: 'remote_repository' as const, provider: 'github' as const,
+    repositoryUrl: 'https://github.com/example/project'
+  };
+  await assert.rejects(service.create({
+    input: 'Mixed', executionLocation: 'server', codeSource,
+    workingDirectory: { kind: 'server_local', id: 'path', name: 'project', path: 'C:\\project', selectedAt: '2026-09-27T00:00:00.000Z' }
+  }), /must not include workingDirectory/);
+  await assert.rejects(service.create({
+    input: 'Missing device', executionLocation: 'local', codeSource,
+    runtimePreference: { preferredRuntimeType: 'codex' }
+  }), /deviceId is required/);
+  await assert.rejects(service.create({
+    input: 'Wrong source', executionLocation: 'server',
+    codeSource: { ...codeSource, repositoryUrl: 'https://github.com.evil.test/example/project' }
+  }), /GITHUB_REPOSITORY_URL_INVALID/);
+  await assert.rejects(service.create({
+    input: 'Server directory', executionLocation: 'server',
+    codeSource: { kind: 'local_directory' },
+    workingDirectory: { kind: 'server_local', id: 'path', name: 'project', path: 'C:\\project', selectedAt: '2026-09-27T00:00:00.000Z' }
+  }), /LOCAL_DIRECTORY_REQUIRES_LOCAL_RUNTIME/);
+});
+
+test('GitHub source drops unrecognized nested fields before persistence', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({
+    input: 'Implement a change', executionLocation: 'server',
+    codeSource: {
+      kind: 'remote_repository', provider: 'github',
+      repositoryUrl: 'https://github.com/example/project', token: 'must-not-persist'
+    } as never
+  });
+  assert.equal(JSON.stringify(session).includes('must-not-persist'), false);
+  assert.equal(JSON.stringify(fixture.persistedSessions).includes('must-not-persist'), false);
+});
+
+test('local GitHub Session binds only the registered device workspace after base selection', async () => {
+  const localWorkspace = { workspaceId: '', displayName: 'example/project', deviceId: 'device-a' };
+  const fixture = makeService({ localWorkspace });
+  const { session } = await fixture.service.create({
+    input: 'Implement a change', executionLocation: 'local',
+    codeSource: { kind: 'remote_repository', provider: 'github',
+      repositoryUrl: 'https://github.com/example/project', deviceId: 'device-a' },
+    runtimePreference: { preferredRuntimeType: 'codex', allowedRuntimeTypes: ['codex'] }
+  });
+  const service = fixture.service as any;
+  localWorkspace.workspaceId = `github-session:${session.id}`;
+  let starts = 0;
+  service.generateBriefInBackground = () => { starts += 1; };
+  assert.equal(session.status, 'WAIT_SOURCE_PREPARATION');
+  assert.equal(starts, 0);
+  const cloning = fixture.service.updateLocalSourcePreparation(session.id, 1, {
+    state: 'cloning', authorizationRef: 'auth-a'
+  });
+  const selection = fixture.service.updateLocalSourcePreparation(session.id, cloning.version, {
+    state: 'awaiting_base_branch', repositoryId: '73', defaultBranch: 'develop',
+    cacheKey: 'cache-a', workspaceId: localWorkspace.workspaceId
+  });
+  assert.equal(starts, 0);
+  await assert.rejects(fixture.service.completeLocalSourcePreparation(session.id, selection.version - 1,
+    { workspaceId: localWorkspace.workspaceId, cacheKey: 'cache-a',
+      baseBranch: 'develop', baseSha: 'a'.repeat(40) }), /SOURCE_PREPARATION_VERSION_CONFLICT/);
+  const ready = await fixture.service.completeLocalSourcePreparation(session.id, selection.version,
+    { workspaceId: localWorkspace.workspaceId, cacheKey: 'cache-a',
+      baseBranch: 'develop', baseSha: 'a'.repeat(40) });
+  assert.equal(ready.state, 'ready');
+  assert.equal(starts, 1);
+  assert.equal(session.workingDirectory?.kind, 'local_bridge');
+  assert.equal(session.workingDirectory?.path, undefined);
+  assert.equal(session.workspaceContext?.binding.workspaceId, localWorkspace.workspaceId);
+  assert.equal(JSON.stringify(fixture.persistedSessions).includes('fixture-token'), false);
+});
+
+test('source preparation cannot be bypassed by resuming a GitHub Session', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({
+    input: 'Implement a change', executionLocation: 'server',
+    codeSource: { kind: 'remote_repository', provider: 'github',
+      repositoryUrl: 'https://github.com/example/project' }
+  });
+  await assert.rejects(fixture.service.resume(session.id), /SOURCE_PREPARATION_REQUIRED/);
+  assert.equal(session.status, 'WAIT_SOURCE_PREPARATION');
+});
+
 test('local_bridge Session stores only a connected opaque workspace identity', async () => {
   const { service, persistedSessions } = makeService({
     localWorkspace: { workspaceId: 'local-workspace-id', displayName: 'local-project' }
@@ -3238,9 +4019,17 @@ async function postReviewActionFixture(action: {
   reason?: string;
   missingPaths?: string[];
   limitations?: string[];
-}, options: { failHydration?: boolean } = {}) {
-  const fixture = makeService(options);
+}, options: {
+  failHydration?: boolean;
+  workflowResumeCalls?: string[];
+  participatingAgentIds?: string[];
+} = {}) {
+  const fixture = makeService({
+    failHydration: options.failHydration,
+    workflowResumeCalls: options.workflowResumeCalls
+  });
   const { session } = await fixture.service.create({ input: 'Resolve a Post Review action' });
+  if (options.participatingAgentIds) session.participatingAgentIds = options.participatingAgentIds;
   session.currentTaskBriefId = 'brief-post-review-action';
   fixture.service.applyOutcome(session.id, {
     kind: 'ask_user',
@@ -3298,6 +4087,42 @@ test('Post Review actions select distinct Session recovery flows', async () => {
   });
   assert.equal(cancelled.session.status, 'CANCELLED');
   assert.deepEqual(cancelled.executionCancels, [cancelled.session.id]);
+});
+
+test('completed Workflow Post Review re-enters the closing pipeline through the system main Agent', async () => {
+  for (const action of [
+    {
+      action: 'request_workspace_context' as const,
+      reason: 'Read missing source.',
+      missingPaths: ['src/feature.ts']
+    },
+    {
+      action: 'deliver_with_limitations' as const,
+      limitations: ['src/feature.ts was not reviewed.']
+    }
+  ]) {
+    const workflowResumeCalls: string[] = [];
+    const fixture = await postReviewActionFixture(action, {
+      workflowResumeCalls,
+      participatingAgentIds: ['requirements', 'frontend']
+    });
+    fixture.session.workflowRunId = `completed-workflow-${action.action}`;
+
+    await fixture.service.resolvePostReviewAction(fixture.session.id, {
+      confirmationId: fixture.confirmationId,
+      action: action.action
+    });
+
+    assert.equal(fixture.session.status, 'EXECUTING');
+    assert.deepEqual(workflowResumeCalls, [], 'a terminal Workflow run must not be resumed');
+    assert.deepEqual(fixture.executionStarts, [{ sessionId: fixture.session.id, taskCount: 0 }]);
+    if (action.action === 'request_workspace_context') {
+      const contextEvent = fixture.events.find((event) =>
+        (event.metadata as { payload?: { phase?: string } } | undefined)?.payload?.phase === 'context_supplement'
+      );
+      assert.equal(contextEvent?.fromAgentId, 'coordinator');
+    }
+  }
 });
 
 test('Post Review does not resume execution when requested workspace context cannot be hydrated', async () => {

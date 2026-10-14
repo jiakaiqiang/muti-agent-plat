@@ -10,7 +10,8 @@ import { useRuntimeModelStore } from '@/stores/runtimeModel'
 import { useWorkspaceUiStore } from '@/stores/workspaceUi'
 import type { WorkspaceKind } from '@/stores/workspaceUi'
 import { apiBaseUrl, runtimeModeLabel } from '@/config/runtime'
-import { ApiRequestError, isAbortError } from '@/api/client'
+import { briefQuestionKey, normalizeGitHubRepositoryUrl, PROCEED_WITH_OPEN_QUESTIONS_OPTION } from '@agent-cluster/shared'
+import { ApiRequestError, apiGet, isAbortError, isSessionNotFoundError } from '@/api/client'
 import {
   sessionStatusLabel,
   type BriefEventPayload,
@@ -19,6 +20,7 @@ import {
   type RuntimeType,
   type SessionStatus,
   type SessionWorkingDirectory,
+  type SessionCodeSource,
   type SessionViewMode,
   type WorkspaceWritebackRecord,
   type WorkspaceWritebackResolutionAction
@@ -29,12 +31,18 @@ import ChatTimeline from './ChatTimeline.vue'
 import CollaborationGraphView from '@/components/CollaborationGraphView.vue'
 import DebugRuntimeView from '@/components/DebugRuntimeView.vue'
 import FileRevisionCandidateEditor from '@/components/FileRevisionCandidateEditor.vue'
+import GitHubSourcePreparation from '@/components/GitHubSourcePreparation.vue'
+import GitHubDeliveryPanel from '@/components/GitHubDeliveryPanel.vue'
+import GitHubConflictEditor from '@/components/GitHubConflictEditor.vue'
 import SessionSidebar from './SessionSidebar.vue'
 import UiIcon from '@/components/UiIcon.vue'
 import UserInputBox from '@/components/UserInputBox.vue'
 import RuntimeStopStatePanel from '@/components/RuntimeStopStatePanel.vue'
+import RuntimeRequestHealthPanel from '@/components/RuntimeRequestHealthPanel.vue'
 import { useWorkspaceSync } from '@/composables/useWorkspaceSync'
+import { useSessionSwitch } from '@/composables/useSessionSwitch'
 import { latestSessionStatusEvent, resolveSessionStatus } from '@/utils/sessionStatus'
+import { formatDateTime } from '@/utils/dateTime'
 import { useTaskWorkspaceStore } from '@/stores/taskWorkspace'
 import { useHistoryDiffStore } from '@/stores/historyDiff'
 import SelectedWorkflowGraph from './workspace/SelectedWorkflowGraph.vue'
@@ -43,9 +51,11 @@ import WorkflowCatalog from './workspace/WorkflowCatalog.vue'
 import HistoricalDiffDialog from './workspace/HistoricalDiffDialog.vue'
 import './workspace/task-workspace.css'
 import { findLatestBriefPayload } from '@/components/briefEventPayload'
+import { effectiveBriefQuestionAnswers } from '@/components/briefQuestionAnswers'
 import { resolveSessionWorkspacePostReviewAction } from '@/components/session-workspace-post-review-action'
 
 const sessionStore = useSessionStore()
+sessionStore.trackPendingWrites()
 const eventStore = useEventStore()
 const agentStore = useAgentStore()
 const localRuntimeStore = useLocalRuntimeStore()
@@ -69,8 +79,12 @@ const sessionControlErrors = ref<Record<string, string>>({})
 const isSessionControlBusy = computed(() => Boolean(sessionControls.value[currentSessionId.value]))
 const sessionControlError = computed(() => sessionControlErrors.value[currentSessionId.value] ?? '')
 const backendReachability = ref<'unknown' | 'reachable' | 'unreachable'>('unknown')
+const githubCreateEnabled = ref(false)
+const sourceMode = ref<'local_directory' | 'remote_repository'>('local_directory')
+const githubRepositoryUrl = ref('')
+const githubDeviceId = ref('')
+const isGithubSource = computed(() => githubCreateEnabled.value && sourceMode.value === 'remote_repository')
 const {
-  isSendingMessage,
   showAgentPopover,
   showCreateSessionDialog,
   showCreateConfirmDialog,
@@ -89,21 +103,19 @@ const {
   showBriefRevisionDialog,
   briefRevisionInput,
   briefRevisionError,
-  isSubmittingBriefRevision,
   showWorkflowStepRevisionDialog,
   workflowStepRevisionInput,
   workflowStepRevisionError,
-  isSubmittingWorkflowStepRevision,
   showFileRevisionDialog,
   fileRevisionPath,
   selectedFileRevisionBaselineId,
   selectedFileRevisionAgentIds,
   fileRevisionInstruction,
-  fileRevisionError,
-  isSubmittingFileRevision
+  fileRevisionError
 } = storeToRefs(workspaceUiStore)
 const pendingDeleteSession = computed(() =>
-  sessionStore.sessions.find((session) => session.id === pendingDeleteSessionId.value)
+  sessionStore.sessions.find((session) => session.id === pendingDeleteSessionId.value) ??
+  archivedSessionGroups.value.flatMap((group) => group.items).find((item) => item.id === pendingDeleteSessionId.value)
 )
 const isPendingSessionDeleting = computed(() =>
   Boolean(pendingDeleteSessionId.value && deletingSessionIds.value.includes(pendingDeleteSessionId.value))
@@ -111,15 +123,20 @@ const isPendingSessionDeleting = computed(() =>
 const selectedLocalRuntimeWorkspace = computed(() =>
   localRuntimeStore.workspaceById(sessionLocalRuntimeWorkspaceId.value)
 )
+const selectedGithubDevice = computed(() =>
+  localRuntimeStore.connectedDevices.find((device) => device.deviceId === githubDeviceId.value)
+)
 const selectedWorkspaceProviderKind = computed(() =>
   sessionWorkspaceKind.value === 'server_local' ? 'server_local' : 'local_bridge'
 )
 const hasSelectedWorkingDirectory = computed(() =>
+  isGithubSource.value ? Boolean(githubRepositoryUrl.value.trim()) :
   sessionWorkspaceKind.value === 'server_local'
     ? Boolean(sessionServerWorkspacePath.value.trim())
     : Boolean(selectedLocalRuntimeWorkspace.value)
 )
 const selectedWorkingDirectoryLabel = computed(() =>
+  isGithubSource.value ? githubRepositoryUrl.value.trim() :
   sessionWorkspaceKind.value === 'server_local'
     ? sessionServerWorkspacePath.value.trim()
     : selectedLocalRuntimeWorkspace.value?.displayName ?? ''
@@ -150,6 +167,7 @@ const localRuntimeConnectionLabel = computed(() => {
 
 function isRuntimeAvailableForWorkspace(runtimeType: RuntimeType) {
   if (sessionWorkspaceKind.value === 'local_bridge') {
+    if (isGithubSource.value) return Boolean(selectedGithubDevice.value?.runtimes[runtimeType])
     return selectedLocalRuntimeWorkspace.value?.runtimeTypes?.includes(runtimeType) === true
   }
   return runtimeModelStore.isRuntimeAvailable(runtimeType)
@@ -177,6 +195,7 @@ function isViewMode(value: string | null): value is SessionViewMode {
 function viewModeLabel(mode: SessionViewMode) {
   return (
     {
+      collaboration_plan: '协作计划',
       chat: '群聊消息',
       collaboration_graph: '协同看板',
       workflow: '流程图',
@@ -189,6 +208,7 @@ function viewModeLabel(mode: SessionViewMode) {
 function viewModeIcon(mode: SessionViewMode) {
   return (
     {
+      collaboration_plan: 'workflow',
       chat: 'message',
       collaboration_graph: 'graph',
       workflow: 'workflow',
@@ -223,6 +243,19 @@ async function switchWorkspaceView(mode: SessionViewMode) {
   })
 }
 
+let initialized = false
+const navigation = useSessionSwitch({
+  release: () => eventStore.disconnectSse(),
+  load: async context => {
+    await sessionStore.loadSession(context.sessionId, context)
+    if (!context.isCurrent()) return
+    if (!sessionStore.currentSession) throw new Error('会话不可用或已归档。')
+    await sessionStore.loadFileRevisions(context.sessionId, { signal: context.signal })
+    if (!context.isCurrent()) return
+    backendReachability.value = 'reachable'
+    await syncSessionEventConnection(context.sessionId, sessionStore.currentSession?.status)
+  }
+})
 onMounted(async () => {
   window.addEventListener('beforeunload', cancelLocalRuntimeAuthorizationOnPageExit)
   window.addEventListener('pagehide', cancelLocalRuntimeAuthorizationOnPageExit)
@@ -247,22 +280,16 @@ onMounted(async () => {
       sessionStore.loadArchivedSessions(),
       runtimeModelStore.loadAvailability()
     ])
-    await sessionStore.loadSession(routeSessionId())
+    initialized = true
+    const id = routeSessionId() ?? sessionStore.sessions.find(item => !item.archivedAt && item.lifecycleState !== 'deleted')?.id
+    if (id && !routeSessionId()) {
+      await router.replace({ name: 'workspace-session', params: { sessionId: id }, query: route.query })
+    } else if (id) {
+      await navigation.select(id)
+    }
   } catch (error) {
     showErrorMessage(error, '后端健康检查失败，已禁止加载会话。')
     return
-  }
-  if (sessionStore.currentSession) {
-    backendReachability.value = 'reachable'
-    await sessionStore.loadFileRevisions(sessionStore.currentSession.id)
-    await syncSessionEventConnection(sessionStore.currentSession.id, sessionStore.currentSession.status)
-    if (!routeSessionId()) {
-      await router.replace({
-        name: 'workspace-session',
-        params: { sessionId: sessionStore.currentSession.id },
-        query: route.query
-      })
-    }
   }
 })
 
@@ -270,7 +297,7 @@ watch(
   () => route.params.sessionId,
   async (value) => {
     const sessionId = typeof value === 'string' ? value : undefined
-    if (!sessionId || sessionStore.currentSession?.id === sessionId) return
+    if (!initialized || !sessionId) return
     await selectSession(sessionId, false)
   }
 )
@@ -287,7 +314,6 @@ onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', cancelLocalRuntimeAuthorizationOnPageExit)
   window.removeEventListener('pagehide', cancelLocalRuntimeAuthorizationOnPageExit)
   eventStore.disconnectSse()
-  void localRuntimeStore.cancelWorkspaceAuthorization().catch(() => undefined)
 })
 
 function cancelLocalRuntimeAuthorizationOnPageExit() {
@@ -323,6 +349,17 @@ async function ensureWorkflowRuntimeReady() {
 }
 
 const currentSessionId = computed(() => sessionStore.currentSession?.id ?? '')
+const isSubmittingBriefRevision = computed(() => Boolean(sessionStore.pendingOperations[currentSessionId.value]?.reviseBrief))
+const isSubmittingWorkflowStepRevision = computed(() => Boolean(sessionStore.pendingOperations[currentSessionId.value]?.resolveWorkflowStep || sessionStore.pendingOperations[currentSessionId.value]?.resolveWorkflowHumanDecision))
+const isSubmittingFileRevision = computed(() => Boolean(sessionStore.pendingOperations[currentSessionId.value]?.captureFileRevisionBaseline || sessionStore.pendingOperations[currentSessionId.value]?.startFileRevision))
+const sendingBySession = ref<Record<string, boolean>>({})
+const isSendingMessage = computed(() => Boolean(sendingBySession.value[currentSessionId.value]))
+watch(() => route.params.sessionId, () => {
+  workspaceUiStore.closeBriefRevision()
+  workspaceUiStore.closeWorkflowStepRevision()
+  workspaceUiStore.closeFileRevision()
+  workspaceUiStore.clearMessage()
+})
 // 与 apps/web 同步：后端探测不可达与会话被中断是两件事，前者禁用输入，后者放开。
 const backendUnreachable = computed(() =>
   Boolean(currentSessionId.value) && backendReachability.value === 'unreachable'
@@ -520,7 +557,7 @@ const latestBriefPayload = computed(() => findLatestBriefPayload(eventStore.even
 const terminalSessionStatuses = new Set<SessionStatus>(['COMPLETED', 'FAILED', 'CANCELLED'])
 
 const derivedStatus = computed(() => resolveSessionStatus(sessionStore.currentSession, events.value))
-useWorkspaceSync({ syncEvents: syncSessionEventConnection, refreshDetails: id => taskWorkspace.load(id) })
+useWorkspaceSync({ syncEvents: syncSessionEventConnection, refreshDetails: id => taskWorkspace.load(id), isSwitching: () => navigation.state.phase === 'loading' })
 const stoppableSessionStatuses = new Set<SessionStatus>([
   'AGENT_DISCUSSING',
   'REVISING_BRIEF',
@@ -568,7 +605,7 @@ watch(derivedStatus, (status, previousStatus) => {
   const event = latestSessionStatusEvent(sessionId, events.value)
   const updatedAt = [event?.createdAt, sessionStore.currentSession?.updatedAt].filter(Boolean).sort().at(-1)
   sessionStore.setCurrentStatus(sessionId, status, updatedAt)
-  if (!terminalSessionStatuses.has(status)) return
+  if (!terminalSessionStatuses.has(status) || navigation.state.phase === 'loading') return
   void eventStore.finalizeSessionEvents(sessionId).catch(() => undefined)
 })
 
@@ -580,28 +617,12 @@ const progressPercent = computed(() => {
 })
 
 async function selectSession(sessionId: string, navigate = true) {
-  try {
-    await sessionStore.loadSession(sessionId)
-    if (sessionStore.currentSession?.id !== sessionId) return
-    await sessionStore.loadFileRevisions(sessionId)
-    if (sessionStore.currentSession?.id !== sessionId) return
-    backendReachability.value = 'reachable'
-    await syncSessionEventConnection(sessionId, sessionStore.currentSession?.status)
-    if (navigate) {
-      await router.push({
-        name: 'workspace-session',
-        params: { sessionId },
-        query: { ...route.query, view: savedViews.get(sessionId) ?? 'chat' }
-      })
-    }
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('Session not found')) {
-      sessionStore.removeSessionFromState(sessionId)
-      showMessage('会话已不存在，已从列表移除', 'warning')
-      return
-    }
-    showErrorMessage(error, '加载会话失败')
+  if (navigate && routeSessionId() !== sessionId) {
+    await router.push({ name: 'workspace-session', params: { sessionId },
+      query: { ...route.query, view: savedViews.get(sessionId) ?? 'chat' } })
+    return
   }
+  await navigation.select(sessionId)
 }
 
 async function syncActiveFileRevisionContent() {
@@ -646,6 +667,7 @@ watch(
 )
 
 async function syncSessionEventConnection(sessionId: string, status?: SessionStatus) {
+  if (sessionStore.currentSession?.id !== sessionId || routeSessionId() !== sessionId) return
   if (status && terminalSessionStatuses.has(status)) {
     await eventStore.finalizeSessionEvents(sessionId)
     if (sessionStore.stopStateErrorsBySession[sessionId]) await sessionStore.loadStopState(sessionId)
@@ -656,6 +678,7 @@ async function syncSessionEventConnection(sessionId: string, status?: SessionSta
 }
 
 async function reconcileSessionEvents(sessionId: string) {
+  if (sessionStore.currentSession?.id !== sessionId || routeSessionId() !== sessionId) return
   const status = sessionStore.currentSession?.id === sessionId ? sessionStore.currentSession.status : undefined
   await syncSessionEventConnection(sessionId, status)
 }
@@ -742,17 +765,6 @@ async function confirmDeleteSession() {
   }
 }
 
-async function restoreDeletedSession(sessionId: string) {
-  try {
-    await sessionStore.restoreSession(sessionId)
-    workspaceUiStore.sessionListTab = 'all'
-    await selectSession(sessionId)
-    showMessage('会话已恢复为暂停状态', 'success')
-  } catch (error) {
-    showErrorMessage(error, '恢复会话失败')
-  }
-}
-
 async function archiveSessionFromSidebar(sessionId: string) {
   const archivingCurrent = sessionStore.currentSession?.id === sessionId
   try {
@@ -790,7 +802,8 @@ async function createSession(
   preferredRuntimeType?: RuntimeType,
   preferredModelId?: string,
   workingDirectoryOverride?: SessionWorkingDirectory,
-  fallbackRuntimeTypes: RuntimeType[] = []
+  fallbackRuntimeTypes: RuntimeType[] = [],
+  codeSource?: SessionCodeSource
 ) {
   const workingDirectory = workingDirectoryOverride
   const effectivePreferredRuntime = preferredRuntimeType || (preferredModelId ? 'generic_llm' : undefined)
@@ -804,17 +817,19 @@ async function createSession(
         ...(preferredModelId ? { preferredModelId } : {})
       }
     : undefined
+  const originEpoch = sessionStore.sessionLoadGeneration
   const session = await sessionStore.createSession({
     input,
     agentIds,
     workingDirectory,
+    ...(codeSource ? { codeSource, executionLocation: sessionWorkspaceKind.value === 'local_bridge' ? 'local' : 'server' } : {}),
     ...(runtimePreference ? { runtimePreference } : {})
   })
   if (workingDirectory) {
     sessionBindingStatus.value = 'bound'
   }
   backendReachability.value = 'reachable'
-  await syncSessionEventConnection(session.id, session.status)
+  if (originEpoch !== sessionStore.sessionLoadGeneration) return session
   await router.replace({
     name: 'workspace-session',
     params: { sessionId: session.id },
@@ -824,6 +839,13 @@ async function createSession(
 
 function openCreateSessionDialog() {
   workspaceUiStore.openCreateSession()
+  void apiGet<{ githubCreateEnabled: boolean }>('/sessions/code-source-capabilities')
+    .then((capabilities) => {
+      githubCreateEnabled.value = capabilities.githubCreateEnabled
+      if (capabilities.githubCreateEnabled && sessionWorkspaceKind.value === 'server_local') {
+        sourceMode.value = 'remote_repository'
+      }
+    }).catch(() => { githubCreateEnabled.value = false })
   if (!runtimeModelStore.config) {
     void runtimeModelStore.loadConfig().catch(() => undefined)
   }
@@ -837,6 +859,8 @@ function closeCreateSessionDialog() {
   sessionLocalRuntimeWorkspaceId.value = ''
   sessionBindingStatus.value = 'idle'
   sessionCreateError.value = ''
+  githubRepositoryUrl.value = ''
+  sourceMode.value = 'local_directory'
   workspaceUiStore.closeCreateSession()
 }
 
@@ -862,7 +886,9 @@ function handleRuntimePreferenceChange() {
 
 function reconcileLocalRuntimePreference() {
   if (sessionWorkspaceKind.value !== 'local_bridge') return
-  const availableRuntimeTypes = selectedLocalRuntimeWorkspace.value?.runtimeTypes
+  const availableRuntimeTypes = (isGithubSource.value
+    ? (['codex', 'claude_code'] as const).filter((runtimeType) => selectedGithubDevice.value?.runtimes[runtimeType])
+    : selectedLocalRuntimeWorkspace.value?.runtimeTypes ?? [])
     .filter((runtimeType): runtimeType is Extract<RuntimeType, 'codex' | 'claude_code'> => (
       runtimeType === 'codex' || runtimeType === 'claude_code'
     )) ?? []
@@ -883,6 +909,7 @@ function selectSessionWorkspaceKind(kind: WorkspaceKind) {
     sessionBindingStatus.value = 'idle'
   }
   workspaceUiStore.setSessionWorkspaceKind(kind)
+  if (githubCreateEnabled.value) sourceMode.value = kind === 'server_local' ? 'remote_repository' : 'local_directory'
   sessionCreateError.value = ''
   sessionFallbackRuntimeTypes.value = []
   if (kind === 'local_bridge') void ensureLocalRuntimeReady()
@@ -892,6 +919,9 @@ async function ensureLocalRuntimeReady() {
   sessionCreateError.value = ''
   try {
     const workspaces = await localRuntimeStore.ensureConnected()
+    if (!localRuntimeStore.connectedDevices.some((device) => device.deviceId === githubDeviceId.value)) {
+      githubDeviceId.value = localRuntimeStore.connectedDevices[0]?.deviceId ?? ''
+    }
     if (!workspaces.some((workspace) => workspace.workspaceId === sessionLocalRuntimeWorkspaceId.value)) {
       sessionLocalRuntimeWorkspaceId.value = workspaces[0]?.workspaceId ?? ''
     }
@@ -962,6 +992,7 @@ function localRuntimeWorkingDirectory(): SessionWorkingDirectory | undefined {
 }
 
 function selectedWorkingDirectory() {
+  if (isGithubSource.value) return undefined
   if (sessionWorkspaceKind.value === 'server_local') return serverWorkingDirectory()
   return localRuntimeWorkingDirectory()
 }
@@ -987,7 +1018,13 @@ async function createSessionFromDialog() {
     showMessage(sessionCreateError.value, 'warning')
     return
   }
-  if (sessionWorkspaceKind.value === 'local_bridge') {
+  if (sessionWorkspaceKind.value === 'local_bridge' && isGithubSource.value) {
+    await ensureLocalRuntimeReady()
+    if (!selectedGithubDevice.value) {
+      sessionCreateError.value = '请选择已连接的本地 Runtime 设备'
+      return
+    }
+  } else if (sessionWorkspaceKind.value === 'local_bridge') {
     if (!(await ensureSelectedLocalRuntimeReady())) return
   }
   if (sessionWorkspaceKind.value === 'local_bridge' && !sessionRuntimeType.value) {
@@ -1015,7 +1052,10 @@ async function createSessionFromDialog() {
     showMessage(sessionCreateError.value, 'warning')
     return
   }
-  if (!selectedWorkingDirectory()) {
+  if (isGithubSource.value) {
+    try { normalizeGitHubRepositoryUrl(githubRepositoryUrl.value.trim()) }
+    catch { sessionCreateError.value = '请输入有效的 github.com 仓库地址'; return }
+  } else if (!selectedWorkingDirectory()) {
     sessionCreateError.value = workspaceDirectoryRequiredMessage.value
     showMessage(sessionCreateError.value, 'warning')
     return
@@ -1035,9 +1075,13 @@ async function confirmCreateSessionFromDialog() {
   isCreatingSession.value = true
   sessionCreateError.value = ''
   try {
-    if (sessionWorkspaceKind.value === 'local_bridge' && !(await ensureSelectedLocalRuntimeReady())) {
+    if (sessionWorkspaceKind.value === 'local_bridge' && !isGithubSource.value && !(await ensureSelectedLocalRuntimeReady())) {
       showCreateConfirmDialog.value = false
       return
+    }
+    if (sessionWorkspaceKind.value === 'local_bridge' && isGithubSource.value) {
+      await localRuntimeStore.loadDevices()
+      if (!selectedGithubDevice.value) throw new Error('本地 Runtime 设备已断开，请重新选择')
     }
     await createSession(
       input,
@@ -1045,7 +1089,11 @@ async function confirmCreateSessionFromDialog() {
       sessionRuntimeType.value || undefined,
       sessionModelId.value || undefined,
       selectedWorkingDirectory(),
-      sessionFallbackRuntimeTypes.value
+      sessionFallbackRuntimeTypes.value,
+      isGithubSource.value
+        ? { kind: 'remote_repository', provider: 'github', repositoryUrl: githubRepositoryUrl.value.trim(),
+            ...(sessionWorkspaceKind.value === 'local_bridge' ? { deviceId: githubDeviceId.value } : {}) }
+        : sessionWorkspaceKind.value === 'local_bridge' ? { kind: 'local_directory' } : undefined
     )
     workspaceUiStore.closeCreateSession()
     showMessage('会话已保存并创建', 'success')
@@ -1069,7 +1117,9 @@ function resolveMentionedAgentIds(content: string): string[] {
 }
 
 async function sendUserMessage(content: string) {
-  isSendingMessage.value = true
+  const originSessionId = currentSessionId.value
+  if (sendingBySession.value[originSessionId]) return
+  sendingBySession.value[originSessionId] = true
   try {
     if (!sessionStore.currentSession) {
       if (!activeAgentIds.value.length) {
@@ -1088,45 +1138,49 @@ async function sendUserMessage(content: string) {
     eventStore.appendEvent(result.event)
     await reconcileSessionEvents(sessionId)
   } catch (error) {
-    showErrorMessage(error, '发送失败')
+    if (currentSessionId.value === originSessionId) showErrorMessage(error, '发送失败')
   } finally {
-    isSendingMessage.value = false
+    delete sendingBySession.value[originSessionId]
   }
 }
 
 async function openFileRevisionDialog() {
+  const operationEpoch = sessionStore.sessionLoadGeneration
   const session = sessionStore.currentSession
   if (!session) return
   try {
     await sessionStore.loadFileRevisions(session.id)
+    if (operationEpoch !== sessionStore.sessionLoadGeneration) return
     selectedFileRevisionBaselineId.value = fileRevisionBaselines.value[0]?.id ?? ''
     selectedFileRevisionAgentIds.value = []
     workspaceUiStore.openFileRevision()
   } catch (error) {
+    if (operationEpoch !== sessionStore.sessionLoadGeneration) return
     showErrorMessage(error, '加载文件修订状态失败')
   }
 }
 
 async function captureFileRevisionBaseline() {
+  const operationEpoch = sessionStore.sessionLoadGeneration
   const session = sessionStore.currentSession
   if (!session || !fileRevisionPath.value.trim()) {
     fileRevisionError.value = '请输入工作区内的文件路径。'
     return
   }
-  isSubmittingFileRevision.value = true
   fileRevisionError.value = ''
   try {
     const baseline = await sessionStore.captureFileRevisionBaseline(session.id, fileRevisionPath.value.trim())
+    if (operationEpoch !== sessionStore.sessionLoadGeneration) return
     selectedFileRevisionBaselineId.value = baseline.id
     showMessage('已记录修改前版本', 'success')
   } catch (error) {
+    if (operationEpoch !== sessionStore.sessionLoadGeneration) return
     fileRevisionError.value = error instanceof Error ? error.message : '记录基线失败'
-  } finally {
-    isSubmittingFileRevision.value = false
   }
 }
 
 async function submitFileRevision() {
+  const operationEpoch = sessionStore.sessionLoadGeneration
   const session = sessionStore.currentSession
   if (!session || !selectedFileRevisionBaselineId.value) {
     fileRevisionError.value = '请先选择修改前版本。'
@@ -1136,7 +1190,6 @@ async function submitFileRevision() {
     fileRevisionError.value = '请至少选择一个处理 Agent。'
     return
   }
-  isSubmittingFileRevision.value = true
   fileRevisionError.value = ''
   try {
     await sessionStore.startFileRevision(
@@ -1145,13 +1198,13 @@ async function submitFileRevision() {
       selectedFileRevisionAgentIds.value,
       fileRevisionInstruction.value
     )
+    if (operationEpoch !== sessionStore.sessionLoadGeneration) return
     workspaceUiStore.closeFileRevision()
     await reconcileSessionEvents(session.id)
     showMessage('文件修订已交给 Agent 处理', 'success')
   } catch (error) {
+    if (operationEpoch !== sessionStore.sessionLoadGeneration) return
     fileRevisionError.value = error instanceof Error ? error.message : '启动文件修订失败'
-  } finally {
-    isSubmittingFileRevision.value = false
   }
 }
 
@@ -1296,7 +1349,8 @@ async function retryActiveInterruptedFileRevision() {
   }
 }
 
-const decisionBusy = ref(false)
+const decisionsBySession = ref<Record<string, boolean>>({})
+const decisionBusy = computed(() => Boolean(decisionsBySession.value[currentSessionId.value]))
 async function resolveConfirmation(optionKey: string, confirmationId?: string) {
   if (decisionBusy.value) return
   confirmationSessionId.value = currentSessionId.value
@@ -1305,71 +1359,76 @@ async function resolveConfirmation(optionKey: string, confirmationId?: string) {
     if (!message) { showMessage('该确认已处理或已失效，请刷新群聊。', 'warning'); return }
     confirmationBeingHandled.value = { ...message.payload, status: 'pending' } as ConfirmationCardState
   }
-  decisionBusy.value = true
+  const origin = currentSessionId.value
+  decisionsBySession.value[origin] = true
   try { await resolveConfirmationAction(optionKey) }
-  catch (error) { showErrorMessage(error, '处理确认失败，请重试') }
-  finally { decisionBusy.value = false; confirmationBeingHandled.value = undefined }
+  catch (error) { if (currentSessionId.value === origin) showErrorMessage(error, '处理确认失败，请重试') }
+  finally {
+    delete decisionsBySession.value[origin]
+    if (confirmationSessionId.value === origin) confirmationBeingHandled.value = undefined
+  }
 }
 async function resolveConfirmationAction(optionKey: string) {
-  if (!sessionStore.currentSession || !activeConfirmation.value) return
+  const confirmation = activeConfirmation.value
+  if (!sessionStore.currentSession || !confirmation) return
   const sessionId = sessionStore.currentSession.id
   if (
-    activeConfirmation.value.reason === 'intent_relation_clarification' &&
-    activeConfirmation.value.routingId &&
+    confirmation.reason === 'intent_relation_clarification' &&
+    confirmation.routingId &&
     (optionKey === 'continue_current' || optionKey === 'related_new' || optionKey === 'independent_new')
   ) {
-    await sessionStore.clarifyIntentRouting(sessionId, activeConfirmation.value.routingId, {
+    await sessionStore.clarifyIntentRouting(sessionId, confirmation.routingId, {
       choice: optionKey,
-      confirmationId: activeConfirmation.value.confirmationId
+      confirmationId: confirmation.confirmationId
     })
     await reconcileSessionEvents(sessionId)
     return
   }
   if (
-    activeConfirmation.value.reason === 'confirm_file_revision_apply' &&
-    activeConfirmation.value.revisionId &&
+    confirmation.reason === 'confirm_file_revision_apply' &&
+    confirmation.revisionId &&
     (optionKey === 'apply_candidate' || optionKey === 'abandon_revision')
   ) {
     await decideActiveFileRevision(optionKey)
     return
   }
-  if (activeConfirmation.value.reason === 'approve_local_runtime_permission') {
+  if (confirmation.reason === 'approve_local_runtime_permission') {
     if (optionKey === 'approve_once' || optionKey === 'cancel') {
       await sessionStore.resolveLocalRuntimePermission(sessionId, {
-        confirmationId: activeConfirmation.value.confirmationId,
+        confirmationId: confirmation.confirmationId,
         decision: optionKey
       })
       await reconcileSessionEvents(sessionId)
       return
     }
   }
-  if (activeConfirmation.value.reason === 'initialize_empty_workspace') {
+  if (confirmation.reason === 'initialize_empty_workspace') {
     if (optionKey === 'reselect_workspace') {
       await sessionStore.resolveEmptyWorkspaceDecision(sessionId, {
-        confirmationId: activeConfirmation.value.confirmationId,
+        confirmationId: confirmation.confirmationId,
         decision: 'reselect_workspace'
       })
       await reconcileSessionEvents(sessionId)
-      openCreateSessionDialog()
+      if (currentSessionId.value === sessionId) openCreateSessionDialog()
       return
     }
     if (optionKey === 'initialize_project' || optionKey === 'cancel') {
       await sessionStore.resolveEmptyWorkspaceDecision(sessionId, {
-        confirmationId: activeConfirmation.value.confirmationId,
+        confirmationId: confirmation.confirmationId,
         decision: optionKey
       })
       await reconcileSessionEvents(sessionId)
       return
     }
   }
-  if (activeConfirmation.value.reason === 'select_workflow') {
+  if (confirmation.reason === 'select_workflow') {
     if (optionKey === 'manage_workflows') {
       showCatalog.value = true
       return
     }
     if (optionKey.startsWith('workflow:')) {
       const [, workflowId, versionText] = optionKey.split(':')
-      const confirmationId = activeConfirmation.value.confirmationId
+      const confirmationId = confirmation.confirmationId
       if (!(await ensureWorkflowRuntimeReady())) return
       const optimisticEventId = appendOptimisticConfirmationResolution(sessionId, confirmationId, optionKey)
       try {
@@ -1388,8 +1447,8 @@ async function resolveConfirmationAction(optionKey: string) {
       return
     }
   }
-  if (activeConfirmation.value.reason === 'confirm_workflow_member_mapping' && (optionKey === 'approve' || optionKey === 'decline')) {
-    const snapshot = activeConfirmation.value
+  if (confirmation.reason === 'confirm_workflow_member_mapping' && (optionKey === 'approve' || optionKey === 'decline')) {
+    const snapshot = confirmation
     let result
     try {
       result = await sessionStore.resolveWorkflowMemberMapping(sessionId, {
@@ -1416,14 +1475,14 @@ async function resolveConfirmationAction(optionKey: string) {
   }
 
   if (
-    activeConfirmation.value.reason === 'workflow_agent_substitution' &&
-    activeConfirmation.value.relatedTaskId
+    confirmation.reason === 'workflow_agent_substitution' &&
+    confirmation.relatedTaskId
   ) {
     if (optionKey.startsWith('agent:')) {
       const agentId = optionKey.slice('agent:'.length)
       await sessionStore.resolveWorkflowAgentSubstitution(sessionId, {
-        confirmationId: activeConfirmation.value.confirmationId,
-        taskId: activeConfirmation.value.relatedTaskId,
+        confirmationId: confirmation.confirmationId,
+        taskId: confirmation.relatedTaskId,
         agentId
       })
       await reconcileSessionEvents(sessionId)
@@ -1431,21 +1490,21 @@ async function resolveConfirmationAction(optionKey: string) {
     }
     if (optionKey === 'skip_agent') {
       await sessionStore.resolveWorkflowAgentSkip(sessionId, {
-        confirmationId: activeConfirmation.value.confirmationId,
-        taskId: activeConfirmation.value.relatedTaskId
+        confirmationId: confirmation.confirmationId,
+        taskId: confirmation.relatedTaskId
       })
       await reconcileSessionEvents(sessionId)
       return
     }
     if (optionKey === 'cancel') {
-      await sessionStore.cancelSession(sessionId, activeConfirmation.value.confirmationId)
+      await sessionStore.cancelSession(sessionId, confirmation.confirmationId)
       await reconcileSessionEvents(sessionId)
       return
     }
   }
 
-  if (activeConfirmation.value.reason === 'workflow_upstream_rerun') {
-    const confirmationId = activeConfirmation.value.confirmationId
+  if (confirmation.reason === 'workflow_upstream_rerun') {
+    const confirmationId = confirmation.confirmationId
     if (optionKey.startsWith('node:')) {
       await sessionStore.resolveWorkflowUpstreamRerun(sessionId, {
         confirmationId,
@@ -1471,9 +1530,9 @@ async function resolveConfirmationAction(optionKey: string) {
   }
 
   if (
-    activeConfirmation.value.reason === 'confirm_workflow_human_gate' &&
-    activeConfirmation.value.workflowRunId &&
-    activeConfirmation.value.workflowNodeRunId
+    confirmation.reason === 'confirm_workflow_human_gate' &&
+    confirmation.workflowRunId &&
+    confirmation.workflowNodeRunId
   ) {
     if (optionKey === 'revise') {
       workspaceUiStore.openWorkflowStepRevision()
@@ -1482,11 +1541,11 @@ async function resolveConfirmationAction(optionKey: string) {
     if (optionKey === 'approve' || optionKey === 'cancel') {
       await sessionStore.resolveWorkflowHumanDecision(
         sessionId,
-        activeConfirmation.value.workflowRunId,
-        activeConfirmation.value.workflowNodeRunId,
+        confirmation.workflowRunId,
+        confirmation.workflowNodeRunId,
         {
-          confirmationId: activeConfirmation.value.confirmationId,
-          expectedRunRevision: activeConfirmation.value.expectedRunRevision,
+          confirmationId: confirmation.confirmationId,
+          expectedRunRevision: confirmation.expectedRunRevision,
           decision: optionKey
         }
       )
@@ -1495,10 +1554,10 @@ async function resolveConfirmationAction(optionKey: string) {
     }
   }
 
-  if (activeConfirmation.value.reason === 'confirm_workflow_step' && activeConfirmation.value.relatedTaskId) {
+  if (confirmation.reason === 'confirm_workflow_step' && confirmation.relatedTaskId) {
     if (optionKey === 'approve') {
-      await sessionStore.resolveWorkflowStep(sessionId, activeConfirmation.value.relatedTaskId, {
-        confirmationId: activeConfirmation.value.confirmationId,
+      await sessionStore.resolveWorkflowStep(sessionId, confirmation.relatedTaskId, {
+        confirmationId: confirmation.confirmationId,
         decision: 'approve'
       })
       await reconcileSessionEvents(sessionId)
@@ -1509,16 +1568,16 @@ async function resolveConfirmationAction(optionKey: string) {
       return
     }
   }
-  if (activeConfirmation.value.actions?.length) {
+  if (confirmation.actions?.length) {
     const resolveAction = async (action: PostReviewAction) => {
       await sessionStore.resolvePostReviewAction(sessionId, {
-        confirmationId: activeConfirmation.value!.confirmationId,
+        confirmationId: confirmation!.confirmationId,
         action: action.action
       })
     }
     const handled = await resolveSessionWorkspacePostReviewAction(
       optionKey,
-      activeConfirmation.value.actions,
+      confirmation.actions,
       {
         requestWorkspaceContext: resolveAction,
         deliverWithLimitations: resolveAction,
@@ -1531,62 +1590,73 @@ async function resolveConfirmationAction(optionKey: string) {
       return
     }
   }
-  if (optionKey === 'approve' && activeConfirmation.value.relatedBriefId) {
+  if (optionKey === PROCEED_WITH_OPEN_QUESTIONS_OPTION && confirmation.relatedBriefId) {
     await sessionStore.confirmBrief(
       sessionId,
-      activeConfirmation.value.relatedBriefId,
-      activeConfirmation.value.confirmationId
+      confirmation.relatedBriefId,
+      confirmation.confirmationId,
+      { allowOpenQuestions: true }
+    )
+    await reconcileSessionEvents(sessionId)
+    showMessage('已记录未决问题风险，任务将继续进入工作流', 'warning')
+    return
+  }
+  if (optionKey === 'approve' && confirmation.relatedBriefId) {
+    await sessionStore.confirmBrief(
+      sessionId,
+      confirmation.relatedBriefId,
+      confirmation.confirmationId
     )
     await reconcileSessionEvents(sessionId)
     return
   }
 
-  if (optionKey === 'revise' && activeConfirmation.value.relatedBriefId) {
+  if (optionKey === 'revise' && confirmation.relatedBriefId) {
     openBriefRevisionDialog()
     return
   }
 
-  if (activeConfirmation.value.reason === 'resolve_contract_conflict') {
+  if (confirmation.reason === 'resolve_contract_conflict') {
     if (optionKey === 'resume') {
-      await sessionStore.resumeSession(sessionId, activeConfirmation.value.confirmationId)
+      await sessionStore.resumeSession(sessionId, confirmation.confirmationId)
     } else if (optionKey === 'cancel') {
-      await sessionStore.cancelSession(sessionId, activeConfirmation.value.confirmationId)
+      await sessionStore.cancelSession(sessionId, confirmation.confirmationId)
     }
     await reconcileSessionEvents(sessionId)
     return
   }
 
-  if (activeConfirmation.value.reason === 'confirm_memory_write') {
-    if (optionKey === 'approve' && activeConfirmation.value.candidate?.content) {
+  if (confirmation.reason === 'confirm_memory_write') {
+    if (optionKey === 'approve' && confirmation.candidate?.content) {
       await sessionStore.confirmMemory(sessionId, {
-        content: activeConfirmation.value.candidate.content,
-        confirmationId: activeConfirmation.value.confirmationId,
-        sourceEventId: activeConfirmation.value.candidate.sourceEventId,
-        confidence: activeConfirmation.value.candidate.confidence
+        content: confirmation.candidate.content,
+        confirmationId: confirmation.confirmationId,
+        sourceEventId: confirmation.candidate.sourceEventId,
+        confidence: confirmation.candidate.confidence
       })
       await reconcileSessionEvents(sessionId)
       return
     }
   }
 
-  if (activeConfirmation.value.reason === 'work_item_budget_exhausted') {
+  if (confirmation.reason === 'work_item_budget_exhausted') {
     if (optionKey === 'submit_narrowed_requirement') {
       workspaceUiStore.messageDraft = ''
       showMessage('请在下方输入拆分或缩小范围后的需求；系统会创建新的任务上下文。', 'info')
       return
     }
     if (optionKey === 'cancel') {
-      await sessionStore.cancelSession(sessionId, activeConfirmation.value.confirmationId)
+      await sessionStore.cancelSession(sessionId, confirmation.confirmationId)
       await reconcileSessionEvents(sessionId)
       return
     }
   }
 
-  if (activeConfirmation.value.reason === 'confirm_feishu_notification') {
+  if (confirmation.reason === 'confirm_feishu_notification') {
     if (optionKey === 'send_notification' || optionKey === 'skip_notification') {
       await sessionStore.decideFeishuNotification(sessionId, {
-        confirmationId: activeConfirmation.value.confirmationId,
-        notificationDraftArtifactId: activeConfirmation.value.relatedArtifactId,
+        confirmationId: confirmation.confirmationId,
+        notificationDraftArtifactId: confirmation.relatedArtifactId,
         decision: optionKey
       })
       await reconcileSessionEvents(sessionId)
@@ -1594,14 +1664,14 @@ async function resolveConfirmationAction(optionKey: string) {
     }
   }
 
-  if (activeConfirmation.value.reason === 'confirm_local_report_save') {
+  if (confirmation.reason === 'confirm_local_report_save') {
     if (
       (optionKey === 'save_local' || optionKey === 'keep_in_session') &&
-      activeConfirmation.value.relatedArtifactId
+      confirmation.relatedArtifactId
     ) {
       await sessionStore.decideLocalReportSave(sessionId, {
-        confirmationId: activeConfirmation.value.confirmationId,
-        artifactId: activeConfirmation.value.relatedArtifactId,
+        confirmationId: confirmation.confirmationId,
+        artifactId: confirmation.relatedArtifactId,
         decision: optionKey
       })
       await reconcileSessionEvents(sessionId)
@@ -1612,7 +1682,7 @@ async function resolveConfirmationAction(optionKey: string) {
   // 继续/取消是通用决策项：没有专属处理器的确认卡也必须真正落到后端，
   // 否则用户点了「继续执行」只会看到一条本地事件，会话仍然停在等待状态。
   if (optionKey === 'resume' || optionKey === 'cancel') {
-    const confirmationId = activeConfirmation.value.confirmationId
+    const confirmationId = confirmation.confirmationId
     try {
       if (optionKey === 'resume') await sessionStore.resumeSession(sessionId, confirmationId)
       else await sessionStore.cancelSession(sessionId, confirmationId)
@@ -1634,7 +1704,7 @@ async function resolveConfirmationAction(optionKey: string) {
       schemaVersion: '0.1',
       renderAs: 'system_notice',
       payload: {
-        confirmationId: activeConfirmation.value.confirmationId,
+        confirmationId: confirmation.confirmationId,
         status: optionKey === 'approve' ? 'approved' : 'rejected',
         selectedOptionKey: optionKey
       }
@@ -1704,9 +1774,6 @@ function formatBriefForRevision(brief?: BriefEventPayload) {
     '## 风险',
     ...(brief.risks.length ? brief.risks.map((item) => `- ${item}`) : ['- （未指定）']),
     '',
-    '## 未决问题',
-    ...(brief.openQuestions.length ? brief.openQuestions.map((item) => `- ${item}`) : ['- （未指定）']),
-    '',
     '## 任务拆分',
     ...((brief.suggestedTasks ?? []).length
       ? (brief.suggestedTasks ?? []).map((task) => `- **${task.title}**：${task.description}`)
@@ -1714,21 +1781,46 @@ function formatBriefForRevision(brief?: BriefEventPayload) {
   ].join('\n')
 }
 
-function openBriefRevisionDialog() {
+async function openBriefRevisionDialog() {
   workspaceUiStore.openBriefRevision(formatBriefForRevision(activeBriefPayload.value))
   selectedRevisionAgentKeys.value = []
+  briefQuestionAnswers.value = (activeBriefPayload.value?.openQuestions ?? [])
+    .map((question) => ({ question, answer: '' }))
+  const session = sessionStore.currentSession
+  if (!session?.activeWorkItemId) return
+  try {
+    const decisions = await sessionStore.listDecisions(session.id)
+    if (!showBriefRevisionDialog.value || sessionStore.currentSession?.id !== session.id) return
+    const prior = effectiveBriefQuestionAnswers(
+      decisions, session.activeWorkItemId, sessionStore.activeWorkItem?.inheritedDecisionIds
+    )
+    const listed = new Set(briefQuestionAnswers.value.map((item) => briefQuestionKey(item.question)))
+    for (const decision of prior) {
+      const key = briefQuestionKey(decision.question!)
+      if (listed.has(key)) continue
+      briefQuestionAnswers.value.push({ question: decision.question!, answer: decision.answer!, originalAnswer: decision.answer! })
+      listed.add(key)
+    }
+  } catch (error) {
+    briefRevisionError.value = error instanceof Error ? error.message : '读取已确认问答失败'
+  }
 }
 
 const selectedRevisionAgentKeys = ref<string[]>([])
+const briefQuestionAnswers = ref<Array<{ question: string; answer: string; originalAnswer?: string }>>([])
 
 async function submitBriefRevision() {
+  const operationEpoch = sessionStore.sessionLoadGeneration
   if (!sessionStore.currentSession || !activeConfirmation.value?.relatedBriefId) return
   const userMessage = briefRevisionInput.value.trim()
   if (!userMessage) {
     briefRevisionError.value = '请填写修改后的需求'
     return
   }
-  isSubmittingBriefRevision.value = true
+  if (briefQuestionAnswers.value.some((item) => !item.answer.trim())) {
+    briefRevisionError.value = '请逐一回答未决问题；不适用时请明确说明原因'
+    return
+  }
   briefRevisionError.value = ''
   try {
     const sessionId = sessionStore.currentSession.id
@@ -1736,25 +1828,28 @@ async function submitBriefRevision() {
       userMessage,
       confirmationId: activeConfirmation.value.confirmationId,
       reason: '用户修改任务契约',
+      questionAnswers: briefQuestionAnswers.value
+        .filter((item) => item.originalAnswer === undefined || item.answer.trim() !== item.originalAnswer)
+        .map(({ question, answer }) => ({ question, answer: answer.trim() })),
       assignedAgentKeys: selectedRevisionAgentKeys.value.length > 0 ? selectedRevisionAgentKeys.value : undefined
     })
+    if (operationEpoch !== sessionStore.sessionLoadGeneration) return
     workspaceUiStore.closeBriefRevision()
     await reconcileSessionEvents(sessionId)
   } catch (error) {
+    if (operationEpoch !== sessionStore.sessionLoadGeneration) return
     briefRevisionError.value = error instanceof Error ? error.message : '提交修改失败'
-  } finally {
-    isSubmittingBriefRevision.value = false
   }
 }
 
 async function submitWorkflowStepRevision() {
+  const operationEpoch = sessionStore.sessionLoadGeneration
   if (!sessionStore.currentSession || !activeConfirmation.value) return
   const instruction = workflowStepRevisionInput.value.trim()
   if (!instruction) {
     workflowStepRevisionError.value = '请填写本环节的修改要求'
     return
   }
-  isSubmittingWorkflowStepRevision.value = true
   workflowStepRevisionError.value = ''
   try {
     const sessionId = sessionStore.currentSession.id
@@ -1781,12 +1876,12 @@ async function submitWorkflowStepRevision() {
         instruction
       })
     }
+    if (operationEpoch !== sessionStore.sessionLoadGeneration) return
     workspaceUiStore.closeWorkflowStepRevision()
     await reconcileSessionEvents(sessionId)
   } catch (error) {
+    if (operationEpoch !== sessionStore.sessionLoadGeneration) return
     workflowStepRevisionError.value = error instanceof Error ? error.message : '提交修改要求失败'
-  } finally {
-    isSubmittingWorkflowStepRevision.value = false
   }
 }
 
@@ -1814,7 +1909,6 @@ async function submitWorkflowStepRevision() {
       @create="openCreateSessionDialog"
       @delete="requestDeleteSession"
       @archive="archiveSessionFromSidebar"
-      @restore="restoreDeletedSession"
       @restore-archive="restoreArchivedSession"
       @toggle-favorite="sessionStore.toggleFavoriteSession"
     />
@@ -1835,6 +1929,7 @@ async function submitWorkflowStepRevision() {
         <button v-for="mode in viewModes" :key="mode" type="button" role="tab" :aria-selected="currentMode === mode" :class="{ active: currentMode === mode }" @click="switchWorkspaceView(mode)"><UiIcon :name="viewModeIcon(mode)" :size="16" />{{ viewModeLabel(mode) }}<span v-if="mode === 'chat' && pendingMessages.length" class="pending-count">{{ pendingMessages.length }}</span></button>
       </nav>
 
+      <RuntimeRequestHealthPanel :session-id="currentSessionId" :stop-busy="isSessionControlBusy" :can-stop="canStopSession" @stop="stopCurrentSession" />
       <div :class="['workspace-content', {
         'has-backend-alert': backendConnectionNotice,
         'has-intent-routing': pendingIntentRoutingCount > 0
@@ -1878,9 +1973,10 @@ async function submitWorkflowStepRevision() {
           @failure-decision="resolveActiveFileRevisionFailure"
           @retry-interrupted="retryActiveInterruptedFileRevision"
         />
-        <section
-          v-for="writeback in currentMode === 'chat' ? activeWorkspaceWritebacks : []"
-          :key="writeback.id"
+        <template v-for="writeback in currentMode === 'chat' ? activeWorkspaceWritebacks : []" :key="writeback.id">
+        <GitHubConflictEditor v-if="writeback.hasConflictDraft"
+          :session-id="currentSessionId" :conflict-id="writeback.id" />
+        <section v-else
           class="workspace-writeback-panel"
           role="alert"
           aria-live="polite"
@@ -1904,7 +2000,7 @@ async function submitWorkflowStepRevision() {
             </li>
           </ul>
           <p v-if="workspaceWritebackError" class="form-error">{{ workspaceWritebackError }}</p>
-          <footer>
+          <footer v-if="writeback.status === 'failed'">
             <button type="button" :disabled="workspaceWritebackBusy" @click="resolveWorkspaceWriteback(writeback, 'retry_merge')">
               重试合并
             </button>
@@ -1922,7 +2018,12 @@ async function submitWorkflowStepRevision() {
             </button>
           </footer>
         </section>
+        </template>
         <div v-show="currentMode === 'chat'" class="chat-pane">
+          <GitHubSourcePreparation v-if="sessionStore.currentSession?.sourceBinding" :session="sessionStore.currentSession" />
+          <GitHubDeliveryPanel v-if="sessionStore.currentSession?.delivery" :session="sessionStore.currentSession" />
+          <GitHubConflictEditor v-if="sessionStore.currentSession?.delivery?.state === 'resolving_conflict' && sessionStore.currentSession.delivery.conflictId"
+            :session-id="sessionStore.currentSession.id" :conflict-id="sessionStore.currentSession.delivery.conflictId" />
           <RuntimeStopStatePanel
             :summary="runtimeStopSummary"
             :query-error="runtimeStopStateError"
@@ -1941,7 +2042,13 @@ async function submitWorkflowStepRevision() {
             @resolve-confirmation="resolveConfirmation"
             @approve-capability="approveCapability"
           />
+          <div v-if="navigation.state.phase === 'loading'" role="status" aria-live="polite">正在切换会话…</div>
+          <div v-if="navigation.state.phase === 'error'" role="alert">
+            {{ navigation.state.error }}
+            <button type="button" @click="navigation.select(navigation.state.targetSessionId)">重新加载</button>
+          </div>
           <UserInputBox
+            :session-id="routeSessionId()"
             :can-stop="canStopSession"
             :can-resume="canResumeStoppedSession"
             :control-busy="isSessionControlBusy"
@@ -1949,7 +2056,7 @@ async function submitWorkflowStepRevision() {
             @stop="stopCurrentSession"
             @resume="resumeStoppedSession"
             :busy="isSendingMessage"
-            :disabled="backendUnreachable"
+            :disabled="backendUnreachable || navigation.state.phase === 'loading' || navigation.state.phase === 'error'"
             :placeholder="backendUnreachable ? '后端离线，恢复连接后可继续发送' : undefined"
             @send="sendUserMessage"
           />
@@ -1962,7 +2069,7 @@ async function submitWorkflowStepRevision() {
           @switch-view="switchWorkspaceView"
         />
         <section v-else-if="currentMode === 'workflow' || currentMode === 'workflow_details'" class="workflow-run-surface">
-          <header class="run-toolbar"><select :value="taskWorkspace.selection.runId" aria-label="历史工作流运行" @change="taskWorkspace.select({ runId: ($event.target as HTMLSelectElement).value, nodeId: '', taskId: '', nodeRunId: '' })"><option v-for="run in taskWorkspace.runs" :key="run.id" :value="run.id">{{ run.workflowName }} · v{{ run.workflowVersion }} · {{ run.createdAt }}</option></select><el-button v-if="pendingMessages.length" size="small" @click="goToConfirmation()">去处理（{{ pendingMessages.length }}）</el-button><el-button size="small" @click="taskWorkspace.load(currentSessionId)">刷新</el-button></header>
+          <header class="run-toolbar"><select :value="taskWorkspace.selection.runId" aria-label="历史工作流运行" @change="taskWorkspace.select({ runId: ($event.target as HTMLSelectElement).value, nodeId: '', taskId: '', nodeRunId: '' })"><option v-for="run in taskWorkspace.runs" :key="run.id" :value="run.id">{{ run.workflowName }} · v{{ run.workflowVersion }} · {{ formatDateTime(run.createdAt) }}</option></select><el-button v-if="pendingMessages.length" size="small" @click="goToConfirmation()">去处理（{{ pendingMessages.length }}）</el-button><el-button size="small" @click="taskWorkspace.load(currentSessionId)">刷新</el-button></header>
           <el-alert v-if="taskWorkspace.error" :title="taskWorkspace.error" type="error" :closable="false" />
           <p v-if="taskWorkspace.loading && !taskWorkspace.detail" role="status">正在读取执行记录…</p>
           <template v-else-if="taskWorkspace.detail"><SelectedWorkflowGraph v-if="currentMode === 'workflow'" :definition="taskWorkspace.detail.run.definitionSnapshot" :node-runs="taskWorkspace.detail.nodeRuns" :selected-node-id="taskWorkspace.selection.nodeId" @select="taskWorkspace.select({ nodeId: $event, taskId: '', nodeRunId: '' }); rightOpen = true" /><WorkflowExecutionDetails v-else :events="events" @process="goToConfirmation" @locate="sessionStore.switchViewMode('workflow'); rightOpen = true" /></template>
@@ -2034,12 +2141,27 @@ async function submitWorkflowStepRevision() {
             服务器
           </button>
         </div>
-        <label v-if="sessionWorkspaceKind === 'server_local'" class="dialog-field">
+        <div v-if="githubCreateEnabled && sessionWorkspaceKind === 'local_bridge'" class="workspace-mode-switch" aria-label="代码来源">
+          <button type="button" :class="{ selected: sourceMode === 'local_directory' }" @click="sourceMode = 'local_directory'; reconcileLocalRuntimePreference()">本机目录</button>
+          <button type="button" :class="{ selected: sourceMode === 'remote_repository' }" @click="sourceMode = 'remote_repository'; ensureLocalRuntimeReady()">GitHub 仓库</button>
+        </div>
+        <label v-if="isGithubSource" class="dialog-field">
+          <span>GitHub 仓库地址</span>
+          <input v-model.trim="githubRepositoryUrl" type="url" placeholder="https://github.com/owner/repository" autocomplete="off" />
+        </label>
+        <label v-if="isGithubSource && sessionWorkspaceKind === 'local_bridge'" class="dialog-field">
+          <span>本地 Runtime 设备</span>
+          <select v-model="githubDeviceId" @change="reconcileLocalRuntimePreference">
+            <option value="">请选择已连接设备</option>
+            <option v-for="device in localRuntimeStore.connectedDevices" :key="device.deviceId" :value="device.deviceId">{{ device.displayName }}</option>
+          </select>
+        </label>
+        <label v-if="!isGithubSource && sessionWorkspaceKind === 'server_local'" class="dialog-field">
           <span>服务器本地工作目录</span>
           <input v-model="sessionServerWorkspacePath" type="text" placeholder="D:\\demo\\ai-langchain" />
           <small>后端只校验并绑定该目录；元数据索引后台更新，文件内容按任务需要读取。</small>
         </label>
-        <div v-else class="dialog-field">
+        <div v-else-if="!isGithubSource" class="dialog-field">
           <span>本机工作目录</span>
           <div
             :class="['local-runtime-connection-state', `is-${localRuntimeStore.connectionState}`]"
@@ -2134,7 +2256,7 @@ async function submitWorkflowStepRevision() {
           <small>模型仅作为路由偏好，不绕过 Runtime 可用性、Tool Authority 或 Workspace 检查。</small>
         </label>
         <section
-          v-if="hasSelectedWorkingDirectory || sessionBindingStatus !== 'idle'"
+          v-if="!isGithubSource && (hasSelectedWorkingDirectory || sessionBindingStatus !== 'idle')"
           class="workspace-binding-summary"
         >
           <header>
@@ -2191,7 +2313,7 @@ async function submitWorkflowStepRevision() {
           </span>
           <div>
             <h2>确认保存会话</h2>
-            <p>将使用当前任务、Agent 和工作目录创建新会话。</p>
+            <p>将使用当前任务、Agent 和代码来源创建新会话。</p>
           </div>
         </header>
         <dl>
@@ -2204,7 +2326,7 @@ async function submitWorkflowStepRevision() {
             <dd>{{ selectedSessionAgentIds.length }} 个</dd>
           </div>
           <div>
-            <dt>工作目录</dt>
+            <dt>代码来源</dt>
             <dd>{{ selectedWorkingDirectoryLabel || '未选择' }}</dd>
           </div>
           <div v-if="sessionRuntimeType">
@@ -2302,7 +2424,7 @@ async function submitWorkflowStepRevision() {
           <span>修改前版本</span>
           <select v-model="selectedFileRevisionBaselineId">
             <option v-for="baseline in fileRevisionBaselines" :key="baseline.id" :value="baseline.id">
-              {{ baseline.filePath }} · {{ baseline.hash.value.slice(0, 10) }} · {{ new Date(baseline.capturedAt).toLocaleString() }}
+              {{ baseline.filePath }} · {{ baseline.hash.value.slice(0, 10) }} · {{ formatDateTime(baseline.capturedAt) }}
             </option>
           </select>
         </label>
@@ -2368,6 +2490,13 @@ async function submitWorkflowStepRevision() {
           <span>修改后的方案 Markdown</span>
           <textarea v-model="briefRevisionInput" rows="14" />
         </label>
+        <div v-if="briefQuestionAnswers.length" class="dialog-field">
+          <span>未决问题与已确认答案</span>
+          <label v-for="item in briefQuestionAnswers" :key="item.question" class="dialog-field">
+            <span>{{ item.question }}</span>
+            <textarea v-model="item.answer" class="brief-question-answer-input" rows="3" :aria-describedby="briefRevisionError ? 'brief-revision-error' : undefined" />
+          </label>
+        </div>
         <label class="dialog-field">
           <span>指定处理 Agent（可选，默认不选则直接由 Coordinator 定稿）</span>
           <div class="agent-selector">
@@ -2381,7 +2510,7 @@ async function submitWorkflowStepRevision() {
             </label>
           </div>
         </label>
-        <p v-if="briefRevisionError" class="form-error">{{ briefRevisionError }}</p>
+        <p v-if="briefRevisionError" id="brief-revision-error" class="form-error" role="alert">{{ briefRevisionError }}</p>
         <footer class="form-actions">
           <button type="button" @click="workspaceUiStore.closeBriefRevision">取消</button>
           <button type="submit" class="primary" :disabled="isSubmittingBriefRevision">

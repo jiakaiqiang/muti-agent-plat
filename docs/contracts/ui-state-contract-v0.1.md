@@ -6,7 +6,19 @@
 
 本契约定义前端 v1 最小状态模型、状态流转和事件到 UI 的派生规则。Frontend Team 可基于本契约使用 mock events 开发三栏群聊页面。
 
+### 双端时间显示（2026-09-29）
+
+Web 与客户端的事件时间、历史记录和相关日期时间标签共用 `apps/web/src/utils/dateTime.ts` 的 `formatDateTime`，固定展示为 `YYYY年MM月DD日 HH:mm:ss`（例如 `2026年09月29日 15:04:05`）。月份、日期及 24 小时时分秒均补齐两位，沿用浏览器/设备本地时区。聊天、协作日志/计划、Runtime 消息、审计、工作流/任务历史、文件基线和历史 Diff 来源不得自行使用 locale 默认格式或直接显示 ISO 时间。缺失/无效时间使用原场景空态文案或 `—`，不得显示 `Invalid Date`。
+
+此规范只影响展示；API、持久化事件、排序/状态判断、日志正文、原始诊断 JSON 的 ISO 时间不变。等待时长和工作流耗时仍使用相对时长，不转换为日期。消息头和日志头允许自然换行，以适应完整日期及窄屏。
+
 ## 2. 页面视图
+
+### 会话导航实现中的补充约束（2026-09-29）
+
+跨会话切换只改变前端展示，导航取消信号不得传给发送、确认、修订等写请求。路由选择由独立 epoch 管理，Store 的普通缓存刷新不得激活其他会话，迟到响应不得重新导航或关闭较新的 SSE 连接。Web 工作台保持实例，草稿/tag/附件引用按会话隔离；后台任务仍以服务端事件为事实源。
+
+双端聊天窗口正在接入有界挂载；未挂载消息仍保留在数据层，浏览器原生全文搜索仅覆盖已挂载 DOM，不承诺全历史搜索。正文可以分段展示并复制完整文本。事件缓存淘汰须连同同步 cursor 一起移除，迟到单条回执不能被视为完整历史。实现与验收状态见 [跨会话切换 Checklist](../quality/session-navigation-performance-checklist-v1.md)：目前阅读锚点回归失败，**不是已验收完成的发布行为**。
 
 执行可靠性反馈（2026-09-14）：Web 与桌面共用 `apps/web/src/utils/taskActivity.ts` 和会话事件事实，各自保留页面布局。状态映射必须区分正常执行、模型连接等待有限重试、已保存修改正在修复提交、异常和停止未确认，不能因服务心跳把后四者覆盖成“任务正常”。
 
@@ -205,6 +217,8 @@ type ConfirmationCardState = {
 
 - 同一会话可以有多个历史确认卡片，但同时只能有一个 active confirmation。
 - `WAIT_USER_CONFIRM` 时 active confirmation 通常关联 Task Brief。
+- Task Brief 仍有未决问题时不得展示普通“确认执行”；达到修订上限后展示独立的
+  `proceed_with_open_questions` 风险确认按钮，用户明确选择后才进入工作流选择。
 - `WAIT_USER_DECISION` 时 active confirmation 通常关联冲突、预算或高风险能力。
 - `confirm_local_report_save` 必须展示完整报告正文和目标路径；只有用户选择“保存到本地”后才能写入工作区。
 - `workflow_agent_substitution` 显示“等待改派或跳过”，提供候选 Agent、`skip_agent` 和取消操作；不得提供普通继续。
@@ -460,6 +474,22 @@ Review Agent 复盘
 
 ## 14. 执行停止摘要
 
+### 模型请求观测（2026-09-29）
+
+Web/Desktop 在原顶部导航下复用 `RuntimeRequestHealthPanel` 和按 Session/invocation 隔离的 `runtimeRequestHealth` store，不新增导航或恢复被精简的顶部字段。`unknown_wait` 展示“等待模型响应／状态未知”，说明原调用保留，提供最后进展、等待时长、能力与调用身份详情。`reasoning` 仅表示新近观测到可选思考活动，不展示内容或修改思考设置。
+
+“继续等待”只 POST wait；请求失败保留幂等键，busy 防重复。当前停止能力为会话级，按钮明确命名“停止会话全部调用”，复用原停止流程，不宣称单调用停止。未知不改 SessionStatus、不调用 pause/resume；页面离开只 abort 观测 fetch，不取消模型。
+
+快照和 SSE 经共享白名单校验，拒绝旧 generation/version 及终态回退。查询失败显示“观测不可用”，不覆盖可信终态；终态到达收起相应提示。健康状态事件不堆入时间线。共享组件的单元测试和独立 Web/Desktop 样式 fixture 不等价于打包 Electron 的完整 E2E。
+
+可读性与 Runtime 消息（2026-09-29）：创建群聊进入工作区后，即使尚无调用，也提供“Runtime 消息”按钮。默认区只展示智能体名称、中文阶段、Runtime 名称、状态和时长，不直接显示 UUID 或内部枚举。共享 Element Plus 弹窗解释运行程序、模型请求、进展/思考活动反馈、程序检测、请求过程及模型服务状态查询；`unknown` 为“无法确认／暂未确认”，`unsupported` 为“当前不支持”，不得解释为模型卡死、关闭思考或调用失败。
+
+当前调用计数、默认状态区和弹窗“当前调用状态”只包含 `historical !== true && stage !== terminal` 的快照。没有当前调用时显示“暂无进行中的模型调用”，不回退展示最近历史或终态调用。当前未知、重试和停止中调用仍保留，多个当前调用分别展示。API 已标记历史的同 generation/version 快照，不允许被旧 SSE 重放还原为当前；更高版本更新仍按原收敛规则接收。历史数据及弹窗消息记录保持不变，不取消、重发模型请求或修改预算策略。
+
+消息记录复用该 Session 已加载的公开 Runtime/Tool 事件与白名单健康快照，最新在前、每页 20 条；只按事件 ID 去重，不合并相邻消息。当前快照已有同调用/版本事件时不重复添加。历史消息不代表当前状态；终态调用记录仍可查看。仅展示安全文本与状态说明，不序列化原始 provider payload、工具参数、凭据或隐藏思考。排查编号和规则版本放在折叠区并解释用途。打开/关闭弹窗、分页和切换会话不发起模型或恢复操作；会话切换关闭弹窗，离开页面只停止观察。
+
+明确故障可读性补充（2026-09-29）：provider 重试/错误以脱敏类别区分限流、上游失败与模型流中断，并可显示实际收到的 HTTP 状态、重试序号及最近异常时间。心跳、程序存活、请求受理和未知 probe 不显示为异常已恢复。格式错误明确标为“输出格式不符合要求／等待纠正”，不解释成 Runtime 断线。原预算耗尽且异常未恢复时显示“异常未恢复／等待停止确认”，说明确认结束前不重跑；只有可信终态才声称调用结束。Web/Desktop 继续使用同一展示函数和当前调用过滤。
+
 Web 与 Electron desktop 共用 `useSessionStore` 中按 sessionId 隔离的权威 `RuntimeStopSummary`，并在会话工作区渲染同一个 `RuntimeStopStatePanel`。切换会话时先读取 `GET /sessions/:sessionId/stop-state`；读取失败显示 unknown/阻塞状态，不能沿用其他 Session 的摘要或显示可继续。
 
 SSE `RUNTIME_STOP_STATE_CHANGED` 与快照按停止轮次收敛：同 `stopRequestId` 只接受更大 `version`，不同轮次按 `updatedAt` 选择较新事实。`waiting/unknown` 展示确认计数和 blocker；只有 `canResume=true` 才显示停止已确认。详情可展开查看目标，但诊断不得包含凭据、完整业务正文或本地绝对路径。
@@ -473,3 +503,11 @@ SSE `RUNTIME_STOP_STATE_CHANGED` 与快照按停止轮次收敛：同 `stopReque
 正文加载状态按消息和 Session 隔离为 `loading/loaded/failed`。切换 Session 时递增 generation 并清理旧映射，迟到响应不得写入新会话；加载完成后在客户端复算 SHA-256，不匹配时显示错误且不渲染为可信正文。正文使用文本节点/`pre` 展示，不使用未经消毒的 `v-html`。刷新和 SSE 重连只能恢复事件与正文读请求，不能重新发布文档。
 
 方案消息展示标题、版本、工作区相对路径、内容 URL、哈希、完整 Markdown 和 Agent 读取状态。`discussion_document_read` 只更新同一 documentId 的读取投影；失败状态必须展示可访问错误提示。
+
+## 16. GitHub 来源准备（开发中）
+
+Web/Desktop 共用 `GitHubSourcePreparation`。新建表单从服务端读取来源能力；GitHub 模式只提交仓库 URL 和执行位置，本机另提交已连接设备 ID，不提交目录或令牌。会话详情中的 `sourceBinding` 是准备状态权威来源；授权、克隆、绑定期间定时刷新详情。`awaiting_base_branch` 读取真实远端分支，默认仓库默认分支，提交时携带 `expectedSourceVersion`；刷新后可重新打开分支选择。PAT 使用专用密码输入和授权接口，请求结束后清空。`GitHubDeliveryPanel` 展示验证、PR、CI、合并和差异；`GitHubConflictEditor` 展示三栏冲突和逐文件确认。当前入口开关默认关闭，上述界面及端到端交付仍在专项验收中。
+
+## 17. 会话侧栏归档与删除入口（2026-09-29）
+
+Web/Desktop 的归档管理复用会话卡片，并在更多操作中提供“恢复归档”和“删除会话”；恢复仍走 `restoreArchive`，删除仍走原确认流程。已删除会话卡片只读、不触发选择，不展示“恢复会话”或归档恢复入口，不保留 Workspace 的已删除恢复绑定。桌面只读条目不声明可点击 role/tabindex。此限制只针对 UI，不移除服务端墓碑或 `/restore` API，也不代表物理清除数据。

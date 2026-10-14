@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PersistenceService } from '../persistence/persistence.service.js';
 import { WorkflowsController } from './workflows.controller.js';
 import { WorkflowsService } from './workflows.service.js';
 
@@ -99,6 +103,59 @@ test('WorkflowsService restores persisted workflows before Agent dependency init
   assert.deepEqual(service.list()[0]?.nodes, [
     { id: 'node-1', type: 'agent', agentId: 'requirements', order: 0, inputContract: [], outputContract: [] }
   ]);
+});
+
+test('WorkflowsService restores a published workflow and its immutable version after a file-backed restart', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'workflow-definition-restart-'));
+  const filePath = join(directory, 'state.json');
+  const agents = {
+    getForSurface(id: string) {
+      return { id };
+    }
+  };
+  const firstPersistence = new PersistenceService({ enabled: true, backend: 'file', filePath });
+  let restoredPersistence: PersistenceService | undefined;
+  try {
+    await firstPersistence.initialize();
+    const first = new WorkflowsService(firstPersistence, agents as never);
+    const draft = first.create({
+      name: 'Restart-safe workflow',
+      nodes: [
+        {
+          id: 'requirements',
+          type: 'agent',
+          agentId: 'requirements',
+          stageDescription: 'Clarify the requirement.',
+          outputContract: ['Accepted requirement.'],
+          order: 0
+        },
+        {
+          id: 'approval',
+          type: 'human_approval',
+          title: 'Confirm requirement',
+          assignee: 'session_owner',
+          allowedDecisions: ['approve', 'revise', 'cancel'],
+          order: 1
+        }
+      ]
+    });
+    const published = first.publish(draft.id, { expectedDraftRevision: draft.draftRevision });
+    await firstPersistence.flush();
+    await firstPersistence.onModuleDestroy();
+
+    restoredPersistence = new PersistenceService({ enabled: true, backend: 'file', filePath });
+    await restoredPersistence.initialize();
+    const restored = new WorkflowsService(restoredPersistence, undefined as never);
+
+    assert.deepEqual(restored.list().map((workflow) => [workflow.id, workflow.name, workflow.status]), [
+      [published.id, 'Restart-safe workflow', 'published']
+    ]);
+    assert.equal(restored.getVersion(published.id).version, 1);
+    assert.deepEqual(restored.getVersion(published.id).nodes.map((node) => node.type), ['agent', 'human_approval']);
+  } finally {
+    await restoredPersistence?.onModuleDestroy();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('WorkflowsService migrates a legacy published Agent flow into an immutable version with explicit gates', () => {

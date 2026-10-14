@@ -4,6 +4,28 @@ import { nowIso } from '../../common/time.js';
 
 @Injectable()
 export class ProjectMapService {
+  githubProjectScopeQuestion(session: SessionDetail): string | undefined {
+    if (session.codeSource?.kind !== 'remote_repository' ||
+        !session.workspaceIndex?.complete || session.workspaceIndex.truncated) return undefined;
+    const manifests = new Set(['package.json', 'pom.xml', 'build.gradle', 'build.gradle.kts',
+      'Cargo.toml', 'go.mod', 'pyproject.toml']);
+    const projects = [...new Set(session.workspaceIndex.entries
+      .filter((entry) => entry.kind === 'file' && !entry.generated && !entry.sensitive)
+      .map((entry) => entry.path.replace(/\\/g, '/').split('/'))
+      .filter((parts) => parts.length >= 2 && manifests.has(parts.at(-1)!))
+      .map((parts) => parts.slice(0, -1).join('/'))) ].sort();
+    if (projects.length < 2) return undefined;
+    const requirement = session.originalInput.toLowerCase();
+    if (projects.some((project) => requirement.includes(project.toLowerCase()))) return undefined;
+    const tokens = requirement.split(/[^a-z0-9_-]+/i);
+    if (projects.some((project) => {
+      const name = project.split('/').at(-1)!.toLowerCase();
+      return name.length >= 3 && tokens.includes(name);
+    })) return undefined;
+    const visible = projects.slice(0, 6).join('、');
+    return `仓库包含多个项目（${visible}${projects.length > 6 ? ' 等' : ''}）。请确认本次需求涉及哪个项目；如需跨项目修改，请列出全部。`;
+  }
+
   buildProjectMap(session: SessionDetail, workspaceFocus?: ContextAssembly['workspaceFocus']): ProjectMap | undefined {
     const snapshot = this.navigationSnapshot(session);
     if (!snapshot) return undefined;

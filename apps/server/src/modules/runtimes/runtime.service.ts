@@ -16,14 +16,17 @@ import type {
   RuntimeType,
   SessionDetail
 } from '@agent-cluster/shared';
-import { createAgentMessageOutput, classifyProviderFailure, ProviderCircuit, usefulRuntimeActivity, runtimeActivityKind } from '@agent-cluster/shared';
+import { createAgentMessageOutput, classifyProviderFailure, ProviderCircuit, usefulRuntimeActivity, runtimeActivityKind,
+  unknownRuntimeHealthCapabilities } from '@agent-cluster/shared';
 import {
   cliContextRotationInputTokens,
+  positiveRuntimeTimeoutMs,
   runtimeStreamingEnabledFor,
   workItemBudgetEnforcementEnabled
 } from '../../common/runtime-config.js';
 import { buildBudget } from '../../common/token.js';
 import { nowIso } from '../../common/time.js';
+import { ExecutionBudgetHealth } from '../../common/execution-budget-policy.js';
 import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import {
   abortWithTermination,
@@ -46,7 +49,7 @@ import { emptyRuntimeSystemEvidence } from './runtime-system-evidence.js';
 import { LocalRuntimeConnectionService } from '../local-runtime/local-runtime-connection.service.js';
 import { ServerRuntimeWorkerService } from './server-runtime-worker.service.js';
 import { InvocationWorkspaceBindingsService } from './invocation-workspace-bindings.service.js';
-import { LogicalOperationStore } from './logical-operation-store.js';
+import { LogicalOperationStore, operationPolicy } from './logical-operation-store.js';
 import { RuntimeModelConfigService } from './runtime-model-config.service.js';
 import { SessionStopStateStore } from './session-stop-state-store.js';
 import {
@@ -58,10 +61,12 @@ import { WorkItemBudgetStore } from './work-item-budget-store.js';
 import { SessionLifecycleStore } from './session-lifecycle-store.js';
 import { EventsService } from '../events/events.service.js';
 import { DiscussionDocumentsService } from '../discussion-documents/discussion-documents.service.js';
+import { RuntimeHealthStore } from './runtime-health-store.js';
 
 export type RuntimeInvocationLog = {
   operationTelemetry?: AgentRunResult['operationTelemetry'];
   executionCandidate?: AgentRunResult['executionCandidate'];
+  githubCandidate?: AgentRunResult['githubCandidate'];
   operation?: InvocationPlan['operation'];
   id: string;
   dataEpoch: string;
@@ -130,6 +135,7 @@ export class RuntimeService implements OnModuleInit {
   >();
   private readonly registrationReady: Promise<void>;
   readonly operations: LogicalOperationStore;
+  readonly requestHealth: RuntimeHealthStore;
   readonly stopStates: SessionStopStateStore;
   readonly workItemBudgets: WorkItemBudgetStore;
   private readonly lifecycle: SessionLifecycleStore;
@@ -171,6 +177,7 @@ export class RuntimeService implements OnModuleInit {
     this.stopStates = new SessionStopStateStore(persistence);
     this.workItemBudgets = new WorkItemBudgetStore(persistence);
     this.lifecycle = new SessionLifecycleStore(persistence);
+    this.requestHealth = new RuntimeHealthStore(persistence, events);
     const persisted = this.persistence.getCollection<Record<string, RuntimeInvocationLog[]>>(
       'runtimeInvocationsBySession',
       {}
@@ -214,6 +221,8 @@ export class RuntimeService implements OnModuleInit {
   async onModuleInit() {
     await this.registrationReady;
   }
+
+  onModuleDestroy() { this.requestHealth.dispose(); }
 
   getAdapter(type: RuntimeType) {
     return this.registry.getAdapter(type);
@@ -309,6 +318,13 @@ export class RuntimeService implements OnModuleInit {
     let reserved = false;
     let stopUnconfirmed = false;
     let eventsSealed = false;
+    let invocationSettled = false;
+    let budgetHealth: ExecutionBudgetHealth | undefined;
+    let lastProbeAt = 0;
+    let probePending = false;
+    const observationMs = positiveRuntimeTimeoutMs('RUNTIME_SILENCE_OBSERVATION_MS',
+      positiveRuntimeTimeoutMs('LOCAL_RUNTIME_IDLE_TIMEOUT_MS', 600_000));
+    let checkBudget: (() => void) | undefined;
     let bookkeeping = Promise.resolve();
     let supervisionFailed = false;
     let stopStatePersistenceError: Error | undefined;
@@ -316,6 +332,8 @@ export class RuntimeService implements OnModuleInit {
     let resolveStopped!: (result: AgentRunResult) => void;
     const stopped = new Promise<AgentRunResult>(resolve => { resolveStopped = resolve; });
     const stop = () => {
+      this.requestHealth.signal(input.invocationId, 'stop_requested', observationMs);
+      void this.requestHealth.flush();
       if (!underlying) return;
       const termination = terminationFromSignal(controller.signal);
       void underlying.cancel(termination).catch(() => undefined);
@@ -361,10 +379,49 @@ export class RuntimeService implements OnModuleInit {
             details: { providerFailure: true, circuitOpen: true, retryAfterMs: circuitWait, operationId: operation.id } };
           return failure;
         }
-        timer = setTimeout(() => abortWithTermination(controller, createExecutionTermination({
-          kind: 'phase_timeout', source: 'orchestrator', scope: 'phase', phase: input.phase,
-          timeout: { mode: 'deadline', timeoutMs: remainingMs }
-        })), remainingMs);
+        budgetHealth = new ExecutionBudgetHealth(Date.parse(operation.deadlineAt));
+        const capabilities = unknownRuntimeHealthCapabilities();
+        if (input.executionTarget.executionLocation === 'local') capabilities.processProbe =
+          this.localRuntime?.supportsInvocationProbe?.(input) ? 'supported' : 'unsupported';
+        const health = this.requestHealth.begin(input, this.lifecycle.generation(input.sessionId) ?? 0, observationMs, capabilities);
+        input.requestHealth = { sessionId: health.sessionId, invocationId: health.invocationId, operationId: health.operationId,
+          sessionGeneration: health.sessionGeneration, observerEpoch: health.observerEpoch };
+        void this.requestHealth.flush();
+        checkBudget = () => {
+          clearTimeout(timer);
+          if (invocationSettled || eventsSealed || controller.signal.aborted) return;
+          this.requestHealth.tick(input.invocationId, observationMs);
+          if (input.executionTarget.executionLocation === 'local' && this.requestHealth.snapshot(input.invocationId)?.stage === 'unknown_wait' &&
+            !probePending && Date.now() - lastProbeAt >= positiveRuntimeTimeoutMs('RUNTIME_PROBE_INTERVAL_MS', 30_000)) {
+            lastProbeAt = Date.now(); probePending = true;
+            const supported = this.localRuntime?.supportsInvocationProbe?.(input);
+            void (this.localRuntime?.probeInvocation?.(input) ?? Promise.resolve(undefined)).then(probe => {
+              this.requestHealth.signal(input.invocationId, 'probe_result', observationMs, {
+                probeStatus: !supported || probe?.status === 'unsupported' ? 'unsupported' : probe ? 'ok' : 'timeout',
+                processStatus: probe?.processStatus ?? 'unknown', requestStatus: probe?.requestStatus ?? 'unknown'
+              });
+            }).catch(() => this.requestHealth.signal(input.invocationId, 'probe_result', observationMs, { probeStatus: 'timeout' }))
+              .finally(() => { probePending = false; });
+          }
+          void this.requestHealth.flush();
+          const connected = input.executionTarget.executionLocation !== 'local' ||
+            Boolean(this.localRuntime?.isInvocationConnected?.(input));
+          const snapshot = this.requestHealth.snapshot(input.invocationId);
+          const decision = budgetHealth!.check(Date.now(), connected, snapshot);
+          if (decision.reason) {
+            this.requestHealth.budgetFallback(input.invocationId, decision.reason);
+            this.logger.warn(JSON.stringify({ event: 'operation_budget_fallback', operationId: operation.id,
+              invocationId: input.invocationId, phase: input.phase, reason: decision.reason,
+              healthReason: snapshot?.reasonCode, failure: snapshot?.failure, failureAt: snapshot?.failureAt,
+              lastProgressAt: snapshot?.lastProgressAt, deadlineAt: operation.deadlineAt }));
+            abortWithTermination(controller, createExecutionTermination({
+              kind: 'phase_timeout', source: 'orchestrator', scope: 'phase', phase: input.phase,
+              timeout: { mode: 'deadline', timeoutMs: operationPolicy(input.phase).timeoutMs },
+              diagnosticRef: `operation_budget_fallback:${decision.reason}`
+            }));
+          } else timer = setTimeout(checkBudget!, Math.max(1, Math.min(5_000, decision.waitMs)));
+        };
+        timer = setTimeout(checkBudget, Math.min(5_000, remainingMs));
         // Reservation happens here on purpose: every cheap early return above
         // must not leave an allowance committed for a call that never starts.
         const budgetRefusal = await this.commitRequirementBudget(input);
@@ -430,6 +487,10 @@ export class RuntimeService implements OnModuleInit {
             }
           }
           publishedEvents.add(JSON.stringify(event));
+          if (publishedEvents.size > 4096) publishedEvents.delete(publishedEvents.values().next().value!);
+          if (!invocationSettled) {
+            this.requestHealth.observe(input.invocationId, event, observationMs);
+          }
           if (isUseful(event)) firstUsefulOutputAt ??= nowIso();
           queue.push({ ...event, metadata: { ...event.metadata, operationId: operation.id,
             policyVersion: operation.policyVersion, activityKind: runtimeActivityKind(event),
@@ -446,9 +507,13 @@ export class RuntimeService implements OnModuleInit {
           if (stopUnconfirmed && !resolved.error?.details?.stopUnconfirmed) {
             await this.operations.settle(input.sessionId, operation.id, input.invocationId, 'confirmed',
               terminationFromSignal(controller.signal)?.kind === 'user_paused');
+            this.requestHealth.signal(input.invocationId, 'terminal_received', observationMs);
+            await this.requestHealth.flush();
           }
         }).catch(() => undefined);
         let resolved = await Promise.race([underlying.result, stopped]);
+        invocationSettled = true;
+        clearTimeout(timer);
         // A transport result is the process-exit receipt. A broken event iterator
         // must not turn a completed process into a 20 minute wait.
         void eventPump;
@@ -467,6 +532,8 @@ export class RuntimeService implements OnModuleInit {
           resolved = ensureStructuredTermination(resolved, { phase: input.phase, signal: controller.signal });
         }
         stopUnconfirmed ||= Boolean(resolved.error?.details?.stopUnconfirmed);
+        this.requestHealth.signal(input.invocationId, stopUnconfirmed ? 'stop_unconfirmed' : 'terminal_received', observationMs);
+        await this.requestHealth.flush();
         if (resolved.error && (!resolved.termination || resolved.error.details?.providerFailure) && !stopUnconfirmed) {
           const failure = classifyProviderFailure(resolved.error);
           if (failure.failureClass !== 'unknown' || resolved.error.details?.providerFailure) {
@@ -488,6 +555,11 @@ export class RuntimeService implements OnModuleInit {
         return failure;
       } finally {
         eventsSealed = true;
+        const health = this.requestHealth.snapshot(input.invocationId);
+        if (health && health.stage !== 'terminal') {
+          this.requestHealth.signal(input.invocationId, stopUnconfirmed ? 'stop_unconfirmed' : 'terminal_received', observationMs);
+          void this.requestHealth.flush();
+        }
         clearTimeout(timer);
         clearTimeout(stopTimer);
         signal?.removeEventListener('abort', forwardAbort);
@@ -625,7 +697,7 @@ export class RuntimeService implements OnModuleInit {
           requestedRefs: [],
           requestedFiles: [{ path: requiredDocument.relativePath, maxBytes: 200_000 }],
           reason: 'DOCUMENT_READ_REQUIRED',
-          followUpInstruction: 'Read the active discussion document completely before continuing.'
+          followUpInstruction: '请完整读取当前讨论方案文档后再继续。'
         },
         details: {
           documentId: requiredDocument.documentId,
@@ -655,6 +727,9 @@ export class RuntimeService implements OnModuleInit {
     const startedAt = nowIso();
     const runtimeType = input.executionTarget.runtimeType;
     const isLocalExecution = input.executionTarget.executionLocation === 'local';
+    const githubServerTask = !isLocalExecution && input.phase === 'task_execution' &&
+      this.sessionForBudget(input.sessionId)?.codeSource?.kind === 'remote_repository';
+    const managedWorktree = !isLocalExecution && this.worktreeExecution?.shouldManage(input) === true;
     const adapter = isLocalExecution ? undefined : this.registry.getAdapter(runtimeType);
     const invocationController = new AbortController();
     const forwardParentAbort = () => {
@@ -678,7 +753,9 @@ export class RuntimeService implements OnModuleInit {
         : settledHandle(this.unsupportedResult(input, 'Local Runtime CLI transport is unavailable'));
     } else if (!adapter) {
       handle = settledHandle(this.unsupportedResult(input, `Unsupported runtime: ${runtimeType}`));
-    } else if (this.worktreeExecution?.shouldManage(input)) {
+    } else if (githubServerTask && !managedWorktree) {
+      handle = settledHandle(this.workspaceExecutionFailure(input, 'GITHUB_TASK_REQUIRES_ISOLATED_WORKTREE'));
+    } else if (managedWorktree) {
       handle = this.startInManagedWorktree(adapter, input, invocationSignal);
     } else {
       try {
@@ -1000,6 +1077,7 @@ export class RuntimeService implements OnModuleInit {
     const log: RuntimeInvocationLog = {
       operationTelemetry: result.operationTelemetry,
       executionCandidate: result.executionCandidate,
+      githubCandidate: result.githubCandidate,
       operation: input.operation,
       id: crypto.randomUUID(),
       dataEpoch: this.persistence.currentDataEpoch(),
@@ -1093,14 +1171,14 @@ export class RuntimeService implements OnModuleInit {
       status: 'failed',
       output: createAgentMessageOutput({
         messageKind: 'risk',
-        content: `${input.agent.name} runtime ${runtimeType} is unavailable.`
+        content: `${input.agent.name} 所需的 ${runtimeType} 运行时不可用。`
       }) satisfies AgentMessageOutput,
       events: [
         {
           invocationId: input.invocationId,
           type: 'runtime_failed',
           visibility: 'user',
-          content: `${input.agent.name} runtime is unavailable: ${runtimeType}`,
+          content: `${input.agent.name} 的运行时不可用：${runtimeType}`,
           metadata: { code: 'CAPABILITY_BLOCKED', message: normalizedMessage },
           createdAt: nowIso()
         }
@@ -1225,13 +1303,19 @@ export class RuntimeService implements OnModuleInit {
     const result = (async () => {
       let lease: Awaited<ReturnType<WorktreeExecutionService['prepare']>> | undefined;
       try {
-        lease = await this.worktreeExecution!.prepare(input);
+        const session = this.sessionForBudget(input.sessionId);
+        const github = session?.codeSource?.kind === 'remote_repository';
+        if (github && (session?.sourceBinding?.state !== 'ready' ||
+            session.sourceBinding.workspaceId !== input.contextEnvelope.workspaceId)) {
+          throw new Error('GITHUB_SOURCE_NOT_READY');
+        }
+        lease = await this.worktreeExecution!.prepare(input, { github });
         if (cancelled || signal?.aborted) return this.workspaceExecutionFailure(input, 'Worktree execution was cancelled.', true);
         queue.push({
           invocationId: input.invocationId,
           type: 'runtime_progress',
           visibility: 'debug',
-          content: 'Prepared an isolated Git worktree for this task.',
+          content: '已为当前任务准备独立的 Git 工作区。',
           metadata: {
             code: 'WORKTREE_PREPARED',
             repositoryId: lease.manifest.repositoryId,
@@ -1421,7 +1505,7 @@ function fallbackEvent(input: InvocationPlan, reason: string): AgentRuntimeEvent
     invocationId: input.invocationId,
     type: 'runtime_progress',
     visibility: 'user',
-    content: 'Runtime session resume failed; retrying once with a new session.',
+    content: '运行时会话恢复失败，将使用新会话重试一次。',
     metadata: {
       code: 'RESUME_FALLBACK',
       previousCliSessionId: input.resume?.cliSessionId,

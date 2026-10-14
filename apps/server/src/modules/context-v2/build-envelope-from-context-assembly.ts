@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isUsableWorkspaceEvidencePath, isWorkspaceTextContent } from '@agent-cluster/shared';
 import type {
   AgentRunPhase,
   CompiledAgentIdentity,
@@ -68,7 +69,10 @@ export function buildEnvelopeFromContextAssembly(args: {
       .map((entry) => entry.path)
   );
   const hydratedSupplementalPaths = new Set(
-    (session.supplementalContextRequests ?? []).flatMap((request) =>
+    (session.supplementalContextRequests ?? []).filter(request =>
+      request.workItemId === (contextAssembly.workItemId ?? session.activeWorkItemId) ||
+      (!request.workItemId && Boolean(contextAssembly.currentTask?.id && request.taskId === contextAssembly.currentTask.id))
+    ).flatMap((request) =>
       request.resolution.hydratedPaths.filter((path) =>
         !providerIndex || request.resolution.evidenceRevisions?.[path]?.id === revision.id
       )
@@ -274,15 +278,17 @@ function selectedEvidence(
   const files = new Map<string, ContextL3EvidenceFile>();
   const candidates: ScoredEvidenceCandidate[] = [];
   for (const [index, item] of (contextAssembly.selectedEvidenceContents ?? []).entries()) {
-    if (item.source !== 'workspace_file' || !item.content) continue;
+    if (item.source !== 'workspace_file' || !item.content || !isWorkspaceTextContent(item.content)) continue;
     const path = item.ref?.trim() || item.label.trim();
+    const key = JSON.stringify([path, item.startLine ?? null, item.endLine ?? null]);
     if (
       !path ||
-      files.has(path) ||
+      !isUsableWorkspaceEvidencePath(path) ||
+      files.has(key) ||
       !allowedPaths.has(path) ||
       (requiredRevision && item.revision?.id !== requiredRevision.id)
     ) continue;
-    files.set(path, {
+    files.set(key, {
       path,
       content: item.content,
       byteLength: Buffer.byteLength(item.content, 'utf8'),
@@ -292,7 +298,7 @@ function selectedEvidence(
       ...(item.endLine ? { endLine: item.endLine } : {})
     });
     candidates.push({
-      path,
+      path: key,
       score:
         10_000 - index +
         (item.selectionReason?.startsWith('Requested by runtime') ? 2_000 : 0) +

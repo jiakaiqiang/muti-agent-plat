@@ -1,6 +1,6 @@
 import type { JsonRpcMessage } from './codex-appserver-codec.js';
 import type { RawUsage, RuntimeStreamFrame } from './runtime-stream-frame.js';
-import { classifyRuntimeNotification } from '@agent-cluster/shared';
+import { classifyRuntimeNotification, sanitizeRuntimeDiagnostic } from '@agent-cluster/shared';
 
 /**
  * 把 Codex app-server 的 JSON-RPC notification 翻译成 `RuntimeStreamFrame`。
@@ -115,6 +115,16 @@ export function parseCodexNotification(msg: JsonRpcMessage): RuntimeStreamFrame 
   const params = asRecord(msg.params);
 
   switch (method) {
+    case 'turn/started': return { kind: 'observation', observationKind: 'request_started' };
+    case 'item/reasoning/summaryTextDelta':
+    case 'item/reasoning/textDelta': {
+      return { kind: 'observation', observationKind: 'reasoning_progress',
+        count: typeof params?.delta === 'string' ? params.delta.length : 0 };
+    }
+    case 'item/commandExecution/outputDelta': {
+      return { kind: 'observation', observationKind: 'tool_progress', toolCallId: asString(params?.itemId),
+        count: typeof params?.delta === 'string' ? params.delta.length : 0 };
+    }
     case 'item/agentMessage/delta': {
       const text = asString(params?.delta);
       if (text === undefined) break;
@@ -189,7 +199,7 @@ export function parseCodexNotification(msg: JsonRpcMessage): RuntimeStreamFrame 
   return {
     kind: 'system',
     subtype,
-    raw: msg,
+    raw: sanitizeRuntimeDiagnostic(msg),
     disposition: disposition === 'runtime_error' ? 'runtime_error' : 'debug_only'
   };
 }

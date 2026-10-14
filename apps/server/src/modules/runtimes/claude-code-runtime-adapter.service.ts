@@ -1,3 +1,5 @@
+import { runtimeRecoveryContext } from '@agent-cluster/shared';
+import { runtimePhaseLabel } from "@agent-cluster/shared";
 import { Injectable, Optional } from '@nestjs/common';
 import { execFile } from 'node:child_process';
 import { readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -198,7 +200,7 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
 
   async checkAvailability() {
     if (process.env.CLAUDE_CODE_ENABLED !== 'true') {
-      return { available: false, reason: 'Set CLAUDE_CODE_ENABLED=true to register Claude Code.' };
+      return { available: false, reason: '请设置 CLAUDE_CODE_ENABLED=true 以启用 Claude Code。' };
     }
     try {
       const command = resolveClaudeCommand();
@@ -283,7 +285,7 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
         prompt,
         {
           cwd: rootPath,
-          timeout,
+          timeout: 0, // Model waiting is observed by RuntimeService, never an execFile kill deadline.
           signal,
           env: this.runtimeEnv(input, promptFilePath),
           maxBuffer: Number(process.env.CLAUDE_CODE_MAX_BUFFER ?? 8 * 1024 * 1024),
@@ -303,7 +305,7 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
             invocationId: input.invocationId,
             type: 'runtime_completed',
             visibility: 'user',
-            content: `${input.agent.name} completed ${input.phase} with Claude Code.`,
+            content: `${input.agent.name} 已通过 Claude Code 完成 ${runtimePhaseLabel(input.phase)}。`,
             metadata: { stderr: stderr.trim() || undefined },
             createdAt: nowIso()
           }
@@ -354,7 +356,7 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
                 invocationId: input.invocationId,
                 type: 'runtime_completed',
                 visibility: 'user',
-                content: `${input.agent.name} completed ${input.phase} with Claude Code; the CLI returned a non-zero exit code after producing a valid result.`,
+                content: `${input.agent.name} 已通过 Claude Code 完成 ${runtimePhaseLabel(input.phase)}；命令行返回有效结果后以非零退出码结束。`,
                 metadata: {
                   warning: 'CLAUDE_NONZERO_EXIT_WITH_VALID_OUTPUT',
                   exitCode: processFailure.exitCode
@@ -414,14 +416,14 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
         status: signal?.aborted ? 'cancelled' : 'failed',
         output: createAgentMessageOutput({
           messageKind: 'risk',
-          content: `${input.agent.name} Claude Code runtime failed: ${message}`
+          content: `${input.agent.name} 的 Claude Code 调用失败：${message}`
         }),
         events: [
           {
             invocationId: input.invocationId,
             type: 'runtime_failed',
             visibility: 'user',
-            content: `${input.agent.name} Claude Code runtime failed.`,
+            content: `${input.agent.name} 的 Claude Code 调用失败。`,
             metadata: { message, code: runtimeError.code },
             createdAt: nowIso()
           }
@@ -537,7 +539,8 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
         {
           phase: input.phase,
           agent: input.agent,
-          contextEnvelope: input.contextEnvelope,
+          recovery: runtimeRecoveryContext(input),
+      contextEnvelope: input.contextEnvelope,
           executionTarget: input.executionTarget,
           toolCatalog: input.toolCatalog,
           expectedOutput: input.expectedOutput,
@@ -818,6 +821,7 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
           '--input-format',
           'stream-json',
           '--verbose',
+          '--include-partial-messages',
           '--strict-mcp-config'
         ];
     args.push('--permission-mode', authority.claudePermissionMode, '--allowedTools', authority.claudeAllowedTools);

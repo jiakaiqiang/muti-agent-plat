@@ -11,7 +11,13 @@ export const GENERATED_WORKSPACE_DIRECTORIES = [
   '.turbo',
   '.cache',
   '.agent-cluster',
-  'coverage'
+  'coverage',
+  '.venv',
+  'venv',
+  '__pycache__',
+  '.pytest_cache',
+  '.mypy_cache',
+  '.ruff_cache'
 ] as const;
 
 const generatedWorkspaceDirectorySet = new Set<string>(GENERATED_WORKSPACE_DIRECTORIES);

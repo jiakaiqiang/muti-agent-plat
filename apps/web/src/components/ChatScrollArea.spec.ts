@@ -9,7 +9,19 @@ describe('shared chat reading behavior', () => {
   let viewport: number
   const disconnect = vi.fn()
   const wrappers: ReturnType<typeof mount>[] = []
+  const frames = new Map<number, FrameRequestCallback>()
+  let frameId = 0
+  async function flushFrame() {
+    await nextTick()
+    const callbacks = [...frames.values()]
+    frames.clear()
+    callbacks.forEach(callback => callback(performance.now()))
+    await nextTick()
+  }
   beforeEach(() => {
+    frames.clear()
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++frameId, callback); return frameId })
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id))
     sessionStorage.clear()
     height = 1200
     viewport = 400
@@ -49,11 +61,13 @@ describe('shared chat reading behavior', () => {
     expect(wrapper.get('main').element.scrollTop).toBe(800)
     height = 1500
     resize()
+    await flushFrame()
     expect(wrapper.get('main').element.scrollTop).toBe(1100)
     await scrollUp(wrapper)
     height = 1900
     resize()
     await wrapper.setProps({ messageCount: 4 })
+    await flushFrame()
     expect(wrapper.get('main').element.scrollTop).toBe(240)
     expect(wrapper.find('.chat-scroll-dots').exists()).toBe(true)
     expect(wrapper.get('button').attributes('aria-label')).toContain('会话正在进行')
@@ -64,6 +78,7 @@ describe('shared chat reading behavior', () => {
     expect(wrapper.find('button').exists()).toBe(false)
     height = 2100
     resize()
+    await flushFrame()
     expect(wrapper.get('main').element.scrollTop).toBe(1700)
   })
   it.each(['PAUSED', 'FAILED', 'CANCELLED', 'WAIT_WORKFLOW_SELECT'] as const)('shows the arrow while %s', async status => {
@@ -83,10 +98,10 @@ describe('shared chat reading behavior', () => {
     const wrapper = setup()
     await scrollUp(wrapper)
     await wrapper.setProps({ readingKey: 'session-b' })
-    await nextTick()
+    await flushFrame()
     expect(wrapper.get('main').element.scrollTop).toBe(800)
     await wrapper.setProps({ readingKey: 'session-a' })
-    await nextTick()
+    await flushFrame()
     expect(wrapper.get('main').element.scrollTop).toBe(240)
   })
   it('waits for visibility and messages before restoring, and releases the observer', async () => {
@@ -95,12 +110,22 @@ describe('shared chat reading behavior', () => {
     expect(wrapper.get('main').element.scrollTop).toBe(0)
     viewport = 400
     resize()
+    await flushFrame()
     expect(wrapper.get('main').element.scrollTop).toBe(800)
     await wrapper.setProps({ readingKey: 'saved', messageCount: 0 })
     sessionStorage.setItem('saved', JSON.stringify({ top: 100, following: false }))
     await wrapper.setProps({ messageCount: 10 })
+    await flushFrame()
     expect(wrapper.get('main').element.scrollTop).toBe(100)
     wrapper.unmount()
     expect(disconnect).toHaveBeenCalled()
+  })
+  it('coalesces resize notifications and does not scan message geometry at the tail', async () => {
+    const wrapper = setup()
+    const query = vi.spyOn(wrapper.get('main').element, 'querySelectorAll')
+    for (let index = 0; index < 20; index++) resize()
+    expect(frames.size).toBe(1)
+    await flushFrame()
+    expect(query).not.toHaveBeenCalled()
   })
 })

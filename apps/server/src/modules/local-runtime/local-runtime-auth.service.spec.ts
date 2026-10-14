@@ -69,8 +69,38 @@ test('incompatible protocol is reported and cannot be approved', () => {
   assert.equal(code.compatibility.upgradeRequired, true);
   assert.throws(
     () => service.approveDeviceCode(code.userCode),
-    new RegExp(`Protocol ${LOCAL_RUNTIME_PROTOCOL_VERSION - 1} is unsupported`)
+    new RegExp(`不支持协议版本 ${LOCAL_RUNTIME_PROTOCOL_VERSION - 1}`)
   );
+});
+
+test('upgrade metadata is deterministic and only advertises a complete trusted package', () => {
+  const previous = {
+    url: process.env.LOCAL_RUNTIME_RELEASE_URL,
+    hash: process.env.LOCAL_RUNTIME_PACKAGE_SHA256,
+    signature: process.env.LOCAL_RUNTIME_PACKAGE_SIGNATURE
+  };
+  try {
+    process.env.LOCAL_RUNTIME_RELEASE_URL = 'https://downloads.example.com/agent-runtime.exe';
+    process.env.LOCAL_RUNTIME_PACKAGE_SHA256 = 'a'.repeat(64);
+    process.env.LOCAL_RUNTIME_PACKAGE_SIGNATURE = 'b'.repeat(40);
+    const service = setup();
+    const first = service.compatibility('0.0.1', LOCAL_RUNTIME_PROTOCOL_VERSION - 1);
+    const second = service.compatibility('0.0.1', LOCAL_RUNTIME_PROTOCOL_VERSION - 1);
+    assert.equal(first.upgradeAvailable, true);
+    assert.deepEqual(first.upgradeInfo, second.upgradeInfo);
+    assert.equal(first.upgradeInfo?.releaseUrl, 'https://downloads.example.com/agent-runtime.exe');
+    process.env.LOCAL_RUNTIME_PACKAGE_SHA256 = 'bad';
+    assert.equal(service.compatibility('0.0.1', LOCAL_RUNTIME_PROTOCOL_VERSION - 1).upgradeAvailable, false);
+  } finally {
+    for (const [key, value] of Object.entries({
+      LOCAL_RUNTIME_RELEASE_URL: previous.url,
+      LOCAL_RUNTIME_PACKAGE_SHA256: previous.hash,
+      LOCAL_RUNTIME_PACKAGE_SIGNATURE: previous.signature
+    })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
 
 test('trusted loopback authorization issues tokens without the device-code round trip', () => {

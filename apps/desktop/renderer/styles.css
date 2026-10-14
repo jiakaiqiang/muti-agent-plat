@@ -593,12 +593,7 @@ textarea:disabled {
 .session-list-item.active .session-more-button,
 .session-more-button:focus-visible { opacity: 1; }
 .session-more-button:hover { background: #eef5ff; color: #365487; }
-.session-archive-manager { display: grid; gap: 12px; min-width: 0; }
-.session-archive-group { display: grid; gap: 6px; }
-.session-archive-group h3 { margin: 4px 6px; color: var(--light-muted); font-size: 12px; font-weight: 800; }
-.session-archive-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 8px 10px 12px; border: 1px solid var(--light-border); border-radius: 8px; background: #fbfdff; }
-.session-archive-item__title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--light-text); font-size: 13px; font-weight: 700; }
-.session-archive-restore { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; border: 0; border-radius: 6px; padding: 5px 8px; color: #2563eb; background: #eff6ff; font-size: 12px; font-weight: 700; }
+.session-archive-manager { min-width: 0; }
 
 .session-empty-state {
   margin: 18px 6px 0;
@@ -662,6 +657,10 @@ textarea:disabled {
   min-height: 0;
   overflow: hidden;
 }
+
+.workspace-main:has(> .workspace-view-tabs) { grid-template-rows: auto auto minmax(0, 1fr); }
+.workspace-main:has(> .runtime-request-health) { grid-template-rows: auto auto minmax(0, 1fr); }
+.workspace-main:has(> .workspace-view-tabs):has(> .runtime-request-health) { grid-template-rows: auto auto auto minmax(0, 1fr); }
 
 .workspace-header {
   display: flex;
@@ -1935,6 +1934,7 @@ textarea:disabled {
 
 .message-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -4737,6 +4737,10 @@ textarea:disabled {
   line-height: 1.55;
 }
 
+.brief-revision-dialog .brief-question-answer-input {
+  min-height: 86px;
+}
+
 .modal-panel header {
   display: flex;
   justify-content: space-between;
@@ -5722,6 +5726,7 @@ textarea:disabled {
 
 .collaboration-log-body header {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;

@@ -5,6 +5,17 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./node/authorized-git": { "types": "./dist/node/authorized-git.d.ts", "default": "./dist/node/authorized-git.js" },
+    "./node/repository-workspace-manager": { "types": "./dist/node/repository-workspace-manager.d.ts", "default": "./dist/node/repository-workspace-manager.js" },
+    "./node/git-task-candidate": { "types": "./dist/node/git-task-candidate.d.ts", "default": "./dist/node/git-task-candidate.js" },
+    "./node/git-delivery-integration": { "types": "./dist/node/git-delivery-integration.d.ts", "default": "./dist/node/git-delivery-integration.js" },
+    "./node/repository-validation": { "types": "./dist/node/repository-validation.d.ts", "default": "./dist/node/repository-validation.js" },
+    "./node/git-delivery-publisher": { "types": "./dist/node/git-delivery-publisher.d.ts", "default": "./dist/node/git-delivery-publisher.js" },
+    "./node/github-pull-requests": { "types": "./dist/node/github-pull-requests.d.ts", "default": "./dist/node/github-pull-requests.js" },
+    "./node/git-conflict-editor": { "types": "./dist/node/git-conflict-editor.d.ts", "default": "./dist/node/git-conflict-editor.js" }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",

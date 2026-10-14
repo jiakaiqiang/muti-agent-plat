@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
-import { apiDelete, apiGet, apiPage, apiPost, apiPut } from '@/api/client'
+import type { SessionSwitchContext } from '@/composables/useSessionSwitch'
+import { readPoolFor } from '@/utils/readPool'
+import { apiDelete, apiGet, apiPage, apiPost, apiPut, isNetworkRequestError, isSessionNotFoundError } from '@/api/client'
 import { expectedBackendCommit } from '@/config/runtime'
 import type {
   OpsHealth,
@@ -20,6 +22,8 @@ import type {
   SessionStatus,
   SessionViewMode,
   SessionWorkingDirectory,
+  SessionCodeSource,
+  SessionExecutionLocation,
   CollaborationEvent,
   DeleteSessionLifecycleResult,
   WorkflowMemberMappingResolution,
@@ -27,6 +31,7 @@ import type {
 } from '@/types/contracts'
 import type { PostReviewAction } from '@/types/contracts'
 import type { GroupChatMessageDirectives } from '@agent-cluster/shared'
+import type { DecisionRecord } from '@agent-cluster/shared'
 
 type CreateSessionInput = {
   input: string
@@ -35,6 +40,8 @@ type CreateSessionInput = {
   tokenBudget?: number
   knowledgeBaseIds?: string[]
   workingDirectory?: SessionWorkingDirectory
+  codeSource?: SessionCodeSource
+  executionLocation?: SessionExecutionLocation
   runtimePreference?: RuntimePreference
 }
 
@@ -55,6 +62,19 @@ type LoadStopStateOptions = {
 }
 
 const stopStateRequests = new Map<string, Promise<RuntimeStopSummary>>()
+const trackedStores = new WeakSet<object>()
+const sessionWriteActions = new Set([
+  'sendMessage', 'clarifyIntentRouting', 'saveFileRevisionDraft', 'reprocessFileRevision',
+  'resolveFileRevisionFailure', 'retryInterruptedFileRevision', 'captureFileRevisionBaseline',
+  'startFileRevision', 'decideFileRevision', 'deleteSession', 'archiveSession', 'restoreSession',
+  'confirmBrief', 'reviseBrief', 'pauseSession', 'resumeSession', 'cancelSession', 'joinAgent',
+  'cancelCollaboration', 'retryCollaborationAgent', 'resummarizeCollaboration',
+  'resolveLocalRuntimePermission', 'resolvePostReviewAction', 'selectWorkflow', 'restoreArchivedSession',
+  'resolveWorkflowMemberMapping', 'resolveMemberAddition', 'resolveEmptyWorkspaceDecision',
+  'resolveWorkflowAgentSubstitution', 'resolveWorkflowAgentSkip', 'resolveWorkflowUpstreamRerun',
+  'resolveWorkspaceWriteback', 'resolveWorkflowHumanDecision', 'resolveWorkflowStep', 'confirmMemory',
+  'decideFeishuNotification', 'decideLocalReportSave', 'approveCapability', 'approveCapabilities'
+])
 
 function emptyFileRevisionState(): FileRevisionState {
   return { baselines: [], chains: [], runs: [], drafts: [] }
@@ -62,7 +82,7 @@ function emptyFileRevisionState(): FileRevisionState {
 
 function normalizeSessionDeleteError(error: unknown) {
   if (!(error instanceof Error)) return new Error('删除会话失败，请稍后重试。')
-  if (/Failed to fetch|fetch failed|NetworkError|Load failed|ERR_CONNECTION_REFUSED/i.test(error.message)) {
+  if (isNetworkRequestError(error)) {
     return new Error('后端连接已中断，删除结果尚未确认；请恢复后端服务后重试。')
   }
   return error
@@ -119,6 +139,12 @@ export const useSessionStore = defineStore('session', {
     currentSession: undefined as SessionDetail | undefined,
     currentViewMode: 'chat' as SessionViewMode,
     sessionLoadGeneration: 0,
+    switching: false,
+    pendingWritesBySession: {} as Record<string, number>,
+    pendingOperations: {} as Record<string, Record<string, number>>,
+    detailRecency: [] as string[],
+    sessionDetails: {} as Record<string, SessionDetail>,
+    detailRequestGeneration: {} as Record<string, number>,
     loading: false,
     favoriteSessionIds: loadFavoriteSessionIds() as string[],
     deletingSessionIds: [] as string[],
@@ -161,13 +187,46 @@ export const useSessionStore = defineStore('session', {
       }).length
   },
   actions: {
+    trackPendingWrites() {
+      if (trackedStores.has(this)) return
+      trackedStores.add(this)
+      this.$onAction(({ name, args, after, onError }) => {
+        if (!sessionWriteActions.has(name)) return
+        const id = args[0]
+        if (typeof id !== 'string') return
+        this.pendingWritesBySession[id] = (this.pendingWritesBySession[id] ?? 0) + 1
+        const operations = this.pendingOperations[id] ??= {}
+        operations[name] = (operations[name] ?? 0) + 1
+        let finished = false
+        const finish = () => {
+          if (finished) return
+          finished = true
+          if (--this.pendingWritesBySession[id] === 0) delete this.pendingWritesBySession[id]
+          if (--operations[name] === 0) delete operations[name]
+          if (!Object.keys(operations).length) delete this.pendingOperations[id]
+          this.trimDetailCache()
+        }
+        after(finish); onError(finish)
+      }, true)
+    },
+    trimDetailCache() {
+      const protectedIds = new Set([this.currentSession?.id, ...Object.keys(this.pendingWritesBySession)])
+      const candidates = this.detailRecency.filter(id => !protectedIds.has(id))
+      while (this.detailRecency.length > 3 && candidates.length) {
+        const id = candidates.shift()!
+        this.detailRecency = this.detailRecency.filter(value => value !== id)
+        delete this.sessionDetails[id]
+        // Editable drafts and in-flight file-revision state deliberately remain outside this cache.
+      }
+    },
     async loadRuntimeHealth(force = false) {
       if (this.runtimeHealthChecked && !force) return this.runtimeHealth
       try {
-        this.runtimeHealth = await apiGet<OpsHealth>('/health', {
+        this.runtimeHealth = await readPoolFor(this)('health', signal => apiGet<OpsHealth>('/health', {
+          signal,
           timeoutMs: BACKEND_HEALTH_REQUEST_TIMEOUT_MS,
           timeoutMessage: '后端健康检查超时，请确认后端服务已启动后重试。'
-        })
+        }))
         this.runtimeHealthError = this.backendCompatible
           ? undefined
           : `BACKEND_VERSION_MISMATCH: expected pipeline=v2 schema=3 stale=false${expectedBackendCommit ? ` commit=${expectedBackendCommit}` : ''}; received pipeline=${this.runtimeHealth.pipelineVersion} schema=${this.runtimeHealth.dataSchemaVersion} commit=${this.runtimeHealth.commit} build=${this.runtimeHealth.buildId ?? 'missing'} stale=${String(this.runtimeHealth.runtimeBuildStale)}.`
@@ -207,7 +266,7 @@ export const useSessionStore = defineStore('session', {
       await this.assertBackendCompatible()
       this.loading = true
       try {
-        const page = await apiPage<SessionListItem>('/sessions?visibility=all')
+        const page = await readPoolFor(this)('list', signal => apiPage<SessionListItem>('/sessions?visibility=all', { signal }))
         const visible = new Map(this.sessions.map(item => [item.id, item]))
         this.sessions = sortSessionsByRecency(page.items.map(item => {
           const current = visible.get(item.id)
@@ -224,7 +283,7 @@ export const useSessionStore = defineStore('session', {
       await this.assertBackendCompatible()
       const result = await apiPost<{ session: SessionDetail }>('/sessions', input)
       const session = result.session
-      this.currentSession = session
+      this.sessionDetails[session.id] = session
       this.sessions = sortSessionsByRecency([
         {
           id: session.id,
@@ -242,31 +301,67 @@ export const useSessionStore = defineStore('session', {
       await this.loadWorkItems(session.id)
       return session
     },
-    async loadSession(sessionId?: string) {
+    async refreshSourceSession(sessionId: string) {
+      return this.refreshSessionCache(sessionId)
+    },
+    async fetchSessionDetail(sessionId: string, options: { signal?: AbortSignal; fresh?: boolean } = {}) {
+      const generation = (this.detailRequestGeneration[sessionId] ?? 0) + 1
+      this.detailRequestGeneration[sessionId] = generation
+      const detail = await readPoolFor(this)(`detail:${sessionId}${options.fresh ? `:${generation}` : ''}`, signal => apiGet<SessionDetail>(`/sessions/${sessionId}`, { signal }), options.signal)
+      if (!options.signal?.aborted && generation === this.detailRequestGeneration[sessionId]) {
+        const previous = this.sessionDetails[sessionId]
+        if (!previous || !(Date.parse(previous.updatedAt) > Date.parse(detail.updatedAt))) {
+          this.sessionDetails[sessionId] = detail
+          this.detailRecency = [...this.detailRecency.filter(id => id !== sessionId), sessionId]
+          this.trimDetailCache()
+        }
+      }
+      return this.sessionDetails[sessionId] ?? detail
+    },
+    async refreshSessionCache(sessionId: string) {
+      const navigationGeneration = this.sessionLoadGeneration
+      const detail = await this.fetchSessionDetail(sessionId, { fresh: true })
+      if (navigationGeneration === this.sessionLoadGeneration && this.currentSession?.id === sessionId &&
+          !(Date.parse(this.currentSession.updatedAt) > Date.parse(detail.updatedAt))) {
+        this.currentSession = detail
+      }
+      return detail
+    },
+    activateSession(detail: SessionDetail, context: SessionSwitchContext) {
+      if (context.isCurrent() && !context.signal.aborted && detail.id === context.sessionId) {
+        this.currentSession = detail.archivedAt ? undefined : detail
+      }
+    },
+    async loadSession(sessionId?: string, context?: SessionSwitchContext) {
       const generation = ++this.sessionLoadGeneration
-      await this.assertBackendCompatible()
-      this.loading = true
+      this.switching = true
+      this.currentSession = undefined
       const firstSelectableSession = this.sessions.find((item) => item.lifecycleState !== 'deleted' && !item.archivedAt)
       const selectedSessionId = sessionId ?? firstSelectableSession?.id
       if (!selectedSessionId) {
         this.currentSession = undefined
-        this.loading = false
+        this.switching = false
         return
       }
       try {
-        const session = await apiGet<SessionDetail>(`/sessions/${selectedSessionId}`)
-        if (generation !== this.sessionLoadGeneration) return
+        await this.assertBackendCompatible()
+        if (context && !context.isCurrent()) return
+        const session = await this.fetchSessionDetail(selectedSessionId, { signal: context?.signal })
+        if (generation !== this.sessionLoadGeneration || (context && !context.isCurrent())) return
         if (session.archivedAt) {
           this.currentSession = undefined
           return
         }
-        this.currentSession = session
-        if (this.currentSession) await Promise.all([
-          this.loadWorkItems(this.currentSession.id),
-          this.loadStopState(this.currentSession.id)
+        this.activateSession(session, context ?? {
+          sessionId: selectedSessionId, epoch: generation, signal: new AbortController().signal,
+          isCurrent: () => generation === this.sessionLoadGeneration
+        })
+        await Promise.all([
+          this.loadWorkItems(selectedSessionId, { signal: context?.signal }),
+          this.loadStopState(selectedSessionId)
         ])
       } finally {
-        if (generation === this.sessionLoadGeneration) this.loading = false
+        if (generation === this.sessionLoadGeneration) this.switching = false
       }
     },
     async sendMessage(
@@ -301,9 +396,9 @@ export const useSessionStore = defineStore('session', {
       }
       return result
     },
-    async loadWorkItems(sessionId: string) {
-      const page = await apiPage<WorkItem>(`/sessions/${sessionId}/work-items`)
-      this.workItemsBySession[sessionId] = page.items
+    async loadWorkItems(sessionId: string, options: { signal?: AbortSignal } = {}) {
+      const page = await readPoolFor(this)(`work-items:${sessionId}`, signal => apiPage<WorkItem>(`/sessions/${sessionId}/work-items`, { signal }), options.signal)
+      if (!options.signal?.aborted) this.workItemsBySession[sessionId] = page.items
       return page.items
     },
     async loadArchivedSessions() {
@@ -409,16 +504,14 @@ export const useSessionStore = defineStore('session', {
       await this.refreshCurrentSession(sessionId)
       return result
     },
-    async loadFileRevisions(sessionId: string) {
+    async loadFileRevisions(sessionId: string, options: { signal?: AbortSignal } = {}) {
       await this.assertBackendCompatible()
       const generation = (this.fileRevisionRequestGeneration[sessionId] ?? 0) + 1
       this.fileRevisionRequestGeneration[sessionId] = generation
       this.fileRevisionLoadingBySession[sessionId] = true
       try {
-        const state = await apiGet<FileRevisionState>(
-          `/sessions/${sessionId}/file-revisions`
-        )
-        if (this.fileRevisionRequestGeneration[sessionId] === generation) {
+        const state = await apiGet<FileRevisionState>(`/sessions/${sessionId}/file-revisions`, { signal: options.signal })
+        if (!options.signal?.aborted && this.fileRevisionRequestGeneration[sessionId] === generation) {
           this.fileRevisionStatesBySession[sessionId] = state
         }
         return state
@@ -431,14 +524,7 @@ export const useSessionStore = defineStore('session', {
     async refreshCurrentSession(sessionId: string) {
       await this.assertBackendCompatible()
       if (this.currentSession?.id !== sessionId) return undefined
-      const generation = this.sessionLoadGeneration
-      const snapshot = this.currentSession
-      const refreshed = await apiGet<SessionDetail>(`/sessions/${sessionId}`)
-      if (this.currentSession?.id === sessionId && generation === this.sessionLoadGeneration &&
-          (this.currentSession === snapshot || Date.parse(refreshed.updatedAt) >= Date.parse(this.currentSession.updatedAt))) {
-        this.currentSession = refreshed
-      }
-      return refreshed
+      return this.refreshSessionCache(sessionId)
     },
     fileRevisionCandidateFor(sessionId: string, revisionId: string) {
       return this.fileRevisionCandidates[`${sessionId}:${revisionId}`]
@@ -634,7 +720,7 @@ export const useSessionStore = defineStore('session', {
           headers: { 'Idempotency-Key': globalThis.crypto?.randomUUID?.() ?? `delete-${sessionId}-${Date.now()}` }
         })
       } catch (error) {
-        if (error instanceof Error && error.message.includes('Session not found')) {
+        if (isSessionNotFoundError(error)) {
           this.removeSessionFromState(sessionId)
           return true
         } else {
@@ -643,7 +729,8 @@ export const useSessionStore = defineStore('session', {
       } finally {
         this.deletingSessionIds = this.deletingSessionIds.filter((id) => id !== sessionId)
       }
-      await this.loadSessions()
+      // 归档会话也能从归档列表删除，删完要同时刷新归档分组，否则被删项还留在归档管理里。
+      await Promise.all([this.loadSessions(), this.loadArchivedSessions()])
       return result?.deleted ?? false
     },
     async archiveSession(sessionId: string) {
@@ -674,29 +761,45 @@ export const useSessionStore = defineStore('session', {
         : [...this.favoriteSessionIds, sessionId]
       persistFavoriteSessionIds(this.favoriteSessionIds)
     },
-    async confirmBrief(sessionId: string, briefId: string, confirmationId: string) {
+    async confirmBrief(
+      sessionId: string,
+      briefId: string,
+      confirmationId: string,
+      options: { allowOpenQuestions?: boolean } = {}
+    ) {
       await this.assertBackendCompatible()
       // Execution now runs in the background; confirm returns "accepted" and the
       // UI follows execution over SSE rather than waiting for the full result.
       const result = await apiPost<{ accepted: boolean; status: SessionStatus }>(
         `/sessions/${sessionId}/briefs/${briefId}/confirm`,
-        { confirmationId }
+        { confirmationId, ...options }
       )
-      await this.loadSession(sessionId)
+      await this.refreshSessionCache(sessionId)
       return result
     },
     async reviseBrief(
       sessionId: string,
       briefId: string,
-      input: { userMessage: string; confirmationId?: string; reason?: string; assignedAgentKeys?: string[] }
+      input: {
+        userMessage: string
+        confirmationId?: string
+        reason?: string
+        assignedAgentKeys?: string[]
+        questionAnswers?: Array<{ question: string; answer: string }>
+      }
     ) {
       await this.assertBackendCompatible()
       const result = await apiPost<{ accepted: boolean; status: SessionStatus }>(
         `/sessions/${sessionId}/briefs/${briefId}/reject`,
         input
       )
-      await this.loadSession(sessionId)
+      await this.refreshSessionCache(sessionId)
       return result
+    },
+    async listDecisions(sessionId: string) {
+      await this.assertBackendCompatible()
+      const result = await apiGet<{ items: DecisionRecord[] }>(`/sessions/${sessionId}/decisions`)
+      return result.items
     },
     async pauseSession(sessionId: string, confirmationId?: string) {
       await this.assertBackendCompatible()
@@ -704,7 +807,7 @@ export const useSessionStore = defineStore('session', {
         `/sessions/${sessionId}/pause`,
         confirmationId ? { confirmationId } : undefined
       )
-      if (this.currentSession?.id === sessionId) await this.loadSession(sessionId)
+      await this.refreshSessionCache(sessionId)
       return result
     },
     async resumeSession(sessionId: string, confirmationId?: string) {
@@ -713,7 +816,7 @@ export const useSessionStore = defineStore('session', {
         `/sessions/${sessionId}/resume`,
         confirmationId ? { confirmationId } : undefined
       )
-      if (this.currentSession?.id === sessionId) await this.loadSession(sessionId)
+      await this.refreshSessionCache(sessionId)
       return result
     },
     async cancelSession(sessionId: string, confirmationId?: string) {
@@ -726,7 +829,7 @@ export const useSessionStore = defineStore('session', {
       const result = await apiPost<{ session: SessionDetail; added: boolean }>(
         `/sessions/${sessionId}/agents/${agentId}/join`
       )
-      if (this.currentSession?.id === sessionId) this.currentSession = result.session
+      await this.refreshSessionCache(sessionId)
       return result
     },
     async cancelCollaboration(sessionId: string, taskId?: string) {
@@ -747,7 +850,7 @@ export const useSessionStore = defineStore('session', {
         `/sessions/${sessionId}/local-runtime/permissions/decision`,
         input
       )
-      await this.loadSession(sessionId)
+      await this.refreshSessionCache(sessionId)
       return result
     },
     async resolvePostReviewAction(
@@ -759,7 +862,7 @@ export const useSessionStore = defineStore('session', {
         `/sessions/${sessionId}/post-review/actions`,
         input
       )
-      await this.loadSession(sessionId)
+      await this.refreshSessionCache(sessionId)
       return result
     },
     async selectWorkflow(
@@ -768,7 +871,7 @@ export const useSessionStore = defineStore('session', {
     ) {
       await this.assertBackendCompatible()
       const result = await apiPost<{ session: SessionDetail }>(`/sessions/${sessionId}/workflow/select`, input)
-      await this.loadSession(sessionId)
+      await this.refreshSessionCache(sessionId)
       return result
     },
     async restoreArchivedSession(sessionId: string) {
@@ -790,7 +893,7 @@ export const useSessionStore = defineStore('session', {
         `/sessions/${sessionId}/workflow/member-mapping`,
         input
       )
-      await this.loadSession(sessionId)
+      await this.refreshSessionCache(sessionId)
       return result
     },
     async resolveMemberAddition(
@@ -803,7 +906,7 @@ export const useSessionStore = defineStore('session', {
         `/sessions/${sessionId}/discussions/${discussionId}/member-addition`,
         input
       )
-      await this.loadSession(sessionId)
+      await this.refreshSessionCache(sessionId)
       return result
     },
     async resolveEmptyWorkspaceDecision(
@@ -818,7 +921,7 @@ export const useSessionStore = defineStore('session', {
         `/sessions/${sessionId}/workspace/empty-decision`,
         input
       )
-      await this.loadSession(sessionId)
+      await this.refreshSessionCache(sessionId)
       return result
     },
     async resolveWorkflowAgentSubstitution(
@@ -830,7 +933,7 @@ export const useSessionStore = defineStore('session', {
         `/sessions/${sessionId}/workflow/agent-substitution`,
         input
       )
-      await this.loadSession(sessionId)
+      await this.refreshSessionCache(sessionId)
       return result
     },
     async resolveWorkflowAgentSkip(
@@ -842,7 +945,7 @@ export const useSessionStore = defineStore('session', {
         `/sessions/${sessionId}/workflow/agent-skip`,
         input
       )
-      await this.loadSession(sessionId)
+      await this.refreshSessionCache(sessionId)
       return result
     },
     async resolveWorkflowUpstreamRerun(
@@ -859,7 +962,7 @@ export const useSessionStore = defineStore('session', {
         `/sessions/${sessionId}/workflow/upstream-rerun`,
         input
       )
-      await this.loadSession(sessionId)
+      await this.refreshSessionCache(sessionId)
       return result
     },
     async resolveWorkspaceWriteback(
@@ -872,7 +975,7 @@ export const useSessionStore = defineStore('session', {
         `/sessions/${sessionId}/workspace-writebacks/${writebackId}/resolve`,
         input
       )
-      await this.loadSession(sessionId)
+      await this.refreshSessionCache(sessionId)
       return result
     },
     async resolveWorkflowHumanDecision(
@@ -888,7 +991,7 @@ export const useSessionStore = defineStore('session', {
     ) {
       await this.assertBackendCompatible()
       const result = await apiPost(`/workflow-runs/${runId}/nodes/${nodeRunId}/decision`, input)
-      await this.loadSession(sessionId)
+      await this.refreshSessionCache(sessionId)
       return result
     },
     async resolveWorkflowStep(
@@ -901,7 +1004,7 @@ export const useSessionStore = defineStore('session', {
         `/sessions/${sessionId}/workflow/steps/${taskId}/decision`,
         input
       )
-      await this.loadSession(sessionId)
+      await this.refreshSessionCache(sessionId)
       return result
     },
     async confirmMemory(

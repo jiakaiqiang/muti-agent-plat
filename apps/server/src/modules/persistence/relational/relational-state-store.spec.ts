@@ -2,6 +2,20 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { RelationalStateStore } from './relational-state-store.js';
 
+test('runtime health projection binds the Session and guards monotonic versions without storing reasoning', async () => {
+  const calls: Array<{ sql: string; values?: unknown[] }> = [];
+  const client = { async query(sql: string, values?: unknown[]) {
+    calls.push({ sql, values });
+    return { rows: sql.includes('select id::text from agent_cluster.sessions') ? [{ id: '1' }] : [] };
+  } };
+  const store = new RelationalStateStore({} as never, {} as never) as any;
+  await store.writeRuntimeHealth(client, { session: [{ invocationId: 'call', version: 5, updatedAt: '2026-09-29T00:00:00Z' }] });
+  const write = calls.find(item => item.sql.includes('insert into agent_cluster.runtime_health_snapshots'))!;
+  assert.match(write.sql, /runtime_health_snapshots.session_id=excluded.session_id/);
+  assert.match(write.sql, /runtime_health_snapshots.version <= excluded.version/);
+  assert.deepEqual(write.values?.slice(0, 3), ['call', '1', 5]);
+});
+
 test('replaceState clears managed state tables while retaining migration audit tables', async () => {
   const queries: string[] = [];
   const client = {
@@ -30,6 +44,67 @@ test('replaceState clears managed state tables while retaining migration audit t
   assert.doesNotMatch(truncate, /migration_runs/);
   assert.doesNotMatch(truncate, /migration_errors/);
   assert.equal(queries.at(-1), 'commit');
+});
+
+test('GitHub authorization projection stores only an encrypted secret outside its snapshot', async () => {
+  const calls: Array<{ sql: string; values?: unknown[] }> = [];
+  const client = {
+    async query(sql: string, values?: unknown[]) {
+      calls.push({ sql, values });
+      return { rows: [] };
+    }
+  };
+  const store = new RelationalStateStore({} as never, {} as never) as any;
+  const record = {
+    id: 'auth-1', accountId: '123', executionLocation: 'server', state: 'active',
+    version: 1, secretEnvelope: 'enc-v2:encrypted-only',
+    createdAt: '2026-09-27T00:00:00.000Z', updatedAt: '2026-09-27T00:00:00.000Z'
+  };
+  await store.writeCodeHostAuthorizations(client, [record]);
+  const values = calls[0]?.values ?? [];
+  assert.equal(values[4], record.secretEnvelope);
+  assert.equal(String(values[7]).includes(record.secretEnvelope), false);
+  await assert.rejects(store.writeCodeHostAuthorizations(client, [
+    { ...record, secretEnvelope: 'github_pat_plaintext' }
+  ]), /GITHUB_AUTHORIZATION_SECRET_NOT_ENCRYPTED/);
+});
+
+test('OAuth state projection stores only a hash and removes consumed states', async () => {
+  const calls: Array<{ sql: string; values?: unknown[] }> = [];
+  const client = { async query(sql: string, values?: unknown[]) {
+    calls.push({ sql, values });
+    return { rows: sql.includes('select id::text from agent_cluster.sessions') ? [{ id: '1' }] : [] };
+  } };
+  const store = new RelationalStateStore({} as never, {} as never) as any;
+  const state = { stateHash: 'a'.repeat(64), sessionId: 'session-1',
+    repositoryUrl: 'https://github.com/example/project', executionLocation: 'server',
+    expiresAt: '2026-09-27T01:00:00.000Z' };
+  await store.writeCodeHostOAuthStates(client, [state]);
+  assert.ok(calls.some((call) => call.sql.includes('delete from agent_cluster.github_oauth_states')));
+  const insert = calls.find((call) => call.sql.includes('insert into agent_cluster.github_oauth_states'));
+  assert.equal(insert?.values?.[0], state.stateHash);
+  assert.equal(JSON.stringify(insert?.values).includes('access_token'), false);
+});
+
+test('GitHub conflict projection omits editable file content', async () => {
+  const calls: Array<{ sql: string; values?: unknown[] }> = [];
+  const client = {
+    async query(sql: string, values?: unknown[]) {
+      calls.push({ sql, values });
+      return { rows: sql.includes('select id::text') ? [{ id: '1' }] : [] };
+    }
+  };
+  const store = new RelationalStateStore({} as never, {} as never) as any;
+  await store.writeGitHubConflicts(client, { 'session-1': [{
+    id: 'conflict-1', sessionId: 'session-1', deliveryRound: 1,
+    targetOperation: 'merge_pull_request', version: 1,
+    files: [{ fileId: 'file-1', path: 'src/a.ts', kind: 'text', status: 'draft',
+      version: 2, oursContent: 'private-ours', resultContent: 'private-result' }],
+    createdAt: '2026-09-27T00:00:00.000Z', updatedAt: '2026-09-27T00:00:00.000Z'
+  }] });
+  const snapshot = String(calls.find((call) => call.sql.includes('insert into agent_cluster.github_conflicts'))?.values?.[5]);
+  assert.equal(snapshot.includes('private-ours'), false);
+  assert.equal(snapshot.includes('private-result'), false);
 });
 
 test('replaceState rolls back when clearing managed state tables fails', async () => {

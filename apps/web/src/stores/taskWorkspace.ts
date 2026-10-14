@@ -20,6 +20,7 @@ export const useTaskWorkspaceStore = defineStore('taskWorkspace', () => {
   const selections = reactive<Record<string, WorkspaceSelection>>({})
   let generation = 0
   let catalogGeneration = 0
+  let detailGeneration = 0
   const selection = computed(() => selections[sessionId.value] ?? { runId: '', nodeId: '', taskId: '', nodeRunId: '' })
   const detail = computed(() => details.value[selection.value.runId])
 
@@ -27,6 +28,22 @@ export const useTaskWorkspaceStore = defineStore('taskWorkspace', () => {
     if (!sessionId.value) return
     selections[sessionId.value] = { ...selection.value, ...patch }
     try { sessionStorage.setItem(`task-workspace:${sessionId.value}`, JSON.stringify(selections[sessionId.value])) } catch { /* Storage may be disabled. */ }
+    if (patch.runId && !details.value[patch.runId]) void loadSelectedDetail()
+  }
+
+  async function loadSelectedDetail() {
+    const id = sessionId.value
+    const runId = selection.value.runId
+    const request = ++detailGeneration
+    if (!id || !runId) return
+    try {
+      const result = await apiGet<RunDetail>(`/workflow-runs/${encodeURIComponent(runId)}`)
+      if (request === detailGeneration && sessionId.value === id && selection.value.runId === runId) {
+        details.value = { [runId]: result }
+      }
+    } catch (cause) {
+      if (request === detailGeneration && sessionId.value === id) error.value = cause instanceof Error ? cause.message : '读取执行详情失败'
+    }
   }
 
   async function load(id: string) {
@@ -50,13 +67,14 @@ export const useTaskWorkspaceStore = defineStore('taskWorkspace', () => {
         apiGet<AgentTask[]>(`/sessions/${encodeURIComponent(id)}/tasks`),
         apiPage<Artifact>(`/sessions/${encodeURIComponent(id)}/artifacts`)
       ])
-      const runDetails = await Promise.all(history.items.map((run) => apiGet<RunDetail>(`/workflow-runs/${encodeURIComponent(run.id)}`)))
       if (request !== generation) return
       runs.value = history.items
       tasks.value = taskPage
       artifacts.value = artifactPage.items
-      details.value = Object.fromEntries(runDetails.map((item) => [item.run.id, item]))
-      if (!details.value[selection.value.runId]) select({ runId: history.items[0]?.id ?? '', nodeId: '', taskId: '', nodeRunId: '' })
+      if (!history.items.some(run => run.id === selection.value.runId)) {
+        selections[id] = { runId: history.items[0]?.id ?? '', nodeId: '', taskId: '', nodeRunId: '' }
+      }
+      await loadSelectedDetail()
     } catch (cause) {
       if (request === generation) error.value = cause instanceof Error ? cause.message : '读取执行记录失败'
     } finally {

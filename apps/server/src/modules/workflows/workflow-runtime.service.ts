@@ -1878,7 +1878,7 @@ export class WorkflowRuntimeService {
     this.events.createOnce(`workflow-task-dependencies:${nodeRun.id}`, {
       sessionId: run.sessionId,
       type: 'task_dependency_reconciled',
-      content: `Reconciled workflow task dependencies from ${originalTaskIds.length} to ${expectedTaskIds.length}.`,
+      content: `已核对工作流任务依赖：从 ${originalTaskIds.length} 项调整为 ${expectedTaskIds.length} 项。`,
       metadata: createMetadata('system_notice', {
         workflowRunId: run.id,
         workflowNodeId: nodeRun.nodeId,

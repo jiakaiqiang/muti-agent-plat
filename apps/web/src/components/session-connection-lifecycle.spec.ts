@@ -29,7 +29,7 @@ describe('Session event connection lifecycle', () => {
     expect(source).toContain('const backendUnreachable = computed')
     expect(source).toContain('const sessionInterrupted = computed')
     expect(source).not.toContain('const backendDisconnected')
-    expect(source).toContain(':disabled="backendUnreachable"')
+    expect(source).toContain(':disabled="backendUnreachable || navigation.state.phase')
     expect(source).toContain("backendUnreachable ? '后端离线，恢复连接后可继续发送'")
     expect(source).toContain('可以直接输入新需求或补充说明')
     expect(source).not.toContain('系统不会自动重新连接或续跑')

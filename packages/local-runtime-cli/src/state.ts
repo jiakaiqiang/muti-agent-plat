@@ -1,9 +1,10 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { hostname, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import type {
   LocalRuntimeProviderConnectionSummary,
+  LocalGitHubAuthorizationSummary,
   LocalRuntimePermission,
   LocalRuntimePermissionPolicy,
   LocalRuntimeTokenResponse,
@@ -11,6 +12,8 @@ import type {
   WorkspaceIndexSnapshot
 } from '@agent-cluster/shared';
 import { renameWithRetry } from './atomic-file.js';
+
+export type LocalGitHubAuthorization = LocalGitHubAuthorizationSummary;
 
 export type LocalWorkspaceState = {
   workspaceId: string;
@@ -31,6 +34,7 @@ export type LocalRuntimeState = {
   tokens?: LocalRuntimeTokenResponse;
   workspaces: LocalWorkspaceState[];
   providerConnections: LocalRuntimeProviderConnectionSummary[];
+  githubAuthorizations?: LocalGitHubAuthorization[];
   /** End receipts contain no output; replaying them can only release a stop barrier. */
   pendingStopReceipts?: import('@agent-cluster/shared').LocalRuntimeStopReceipt[];
 };
@@ -163,10 +167,14 @@ async function writeStateFile(path: string, state: LocalRuntimeState): Promise<v
 }
 
 function workspaceIndexFilePath(workspaceId: string) {
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(workspaceId)) {
-    throw new Error(`Invalid Local Runtime workspace ID: ${workspaceId}`);
-  }
-  return join(dirname(stateFilePath()), `${workspaceId}-index.json`);
+  if (!workspaceId) throw new Error('Invalid Local Runtime workspace ID: empty');
+  // Filename-safe IDs keep their existing file name. Other IDs (for example
+  // `github-session:<uuid>`) map to a hash so they can never escape the state
+  // directory or carry characters Windows rejects in file names.
+  const fileStem = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(workspaceId)
+    ? workspaceId
+    : `ws-${createHash('sha256').update(workspaceId).digest('hex').slice(0, 32)}`;
+  return join(dirname(stateFilePath()), `${fileStem}-index.json`);
 }
 
 function withoutEntries(snapshot: WorkspaceIndexSnapshot): Omit<WorkspaceIndexSnapshot, 'entries'> {

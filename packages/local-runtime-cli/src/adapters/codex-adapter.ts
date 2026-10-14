@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RuntimeOutput, MinimalTaskSubmission } from '@agent-cluster/shared';
-import { getVersionedRuntimeOutputContract, validateRuntimeOutput } from '@agent-cluster/shared';
+import { codexExecObserver, getVersionedRuntimeOutputContract, validateRuntimeOutput } from '@agent-cluster/shared';
 import { detectRuntimeVersion, parseConfiguredArgs, runRuntimeCommand } from '../runtime-process.js';
 import type { LocalRuntimeAdapter } from './adapter.js';
 import { buildLocalRuntimePrompt } from './prompt.js';
@@ -20,7 +20,7 @@ export class CodexLocalRuntimeAdapter implements LocalRuntimeAdapter {
     });
   }
 
-  async execute({ plan, cwd, signal, permissions, providerConnection }: Parameters<LocalRuntimeAdapter['execute']>[0]) {
+  async execute({ plan, cwd, signal, permissions, providerConnection, emit }: Parameters<LocalRuntimeAdapter['execute']>[0]) {
     const command = process.env.AGENT_RUNTIME_CODEX_COMMAND?.trim() || 'codex';
     const configuredArgs = process.env.AGENT_RUNTIME_CODEX_ARGS_JSON?.trim();
     const baseArgs = configuredArgs
@@ -39,19 +39,22 @@ export class CodexLocalRuntimeAdapter implements LocalRuntimeAdapter {
 
     try {
       const { stdout, stderr, exitCode } = await runRuntimeCommand({
+        invocationId: plan.invocationId,
         command,
         args: withCodexOutputSchema(baseArgs, schemaPath),
         stdin: buildLocalRuntimePrompt('Codex', plan, permissions),
         cwd,
         signal,
         shell: process.platform === 'win32',
+        ...(emit ? { onStdoutLine: codexExecObserver(plan.invocationId, emit) } : {}),
         envOverrides: providerConnection ? {
           OPENAI_BASE_URL: providerConnection.baseUrl,
           OPENAI_API_KEY: providerConnection.apiKey,
           CODEX_MODEL: providerConnection.model
         } : undefined
       });
-      if (exitCode !== 0) throw new Error(formatCodexProcessFailure(stdout, stderr, exitCode));
+      if (exitCode !== 0) throw localRuntimeError(confirmedRuntimeExit({ code: 'MODEL_ERROR',
+        message: formatCodexProcessFailure(stdout, stderr, exitCode), retryable: false }, exitCode));
       const output = parseCodexOutput(stdout, plan.expectedOutput.kind, plan.expectedOutput.schemaVersion);
       return {
         output,
@@ -170,3 +173,5 @@ export function parseCodexOutput(stdout: string, expectedKind: Parameters<typeof
   }
   return validation.value;
 }
+import { confirmedRuntimeExit } from '@agent-cluster/shared';
+import { localRuntimeError } from '../runtime-error.js';

@@ -10,7 +10,7 @@ import type {
   TaskBrief,
   TaskContext
 } from '@agent-cluster/shared';
-import { shouldPublishRuntimeEventToCollaboration } from '@agent-cluster/shared';
+import { shouldPublishRuntimeEventToCollaboration, isUsableWorkspaceEvidencePath, workspaceEvidencePriority } from '@agent-cluster/shared';
 
 export type ContextRouteInput = {
   session: SessionDetail;
@@ -56,7 +56,8 @@ export class ContextRouterService {
       ],
       16
     );
-    const supplementalEvidenceRefs = this.supplementalEvidenceRefs(session, task?.id);
+    const supplementalEvidenceRefs = this.supplementalEvidenceRefs(session, task?.id,
+      task?.workItemId ?? brief?.workItemId ?? session.activeWorkItemId);
     const architectureEvidenceRefs = isArchitectureAnalysis
       ? this.architectureEvidenceRefs(session, workspaceFocus, projectMap)
       : [];
@@ -382,7 +383,7 @@ export class ContextRouterService {
       ...focusPaths,
       ...(session.workspaceIndex?.entrypoints ?? session.workspaceSnapshot?.entrypoints ?? [])
     ]);
-    return paths
+    return paths.filter(isUsableWorkspaceEvidencePath)
       .map((path) => ({
         path,
         score: this.architectureEvidencePathScore(path) + (hintedPaths.has(path) ? 42 : 0)
@@ -401,7 +402,7 @@ export class ContextRouterService {
   private architectureEvidencePathScore(path: string) {
     const lower = path.toLowerCase();
     const fileName = lower.split('/').at(-1) ?? lower;
-    let score = 0;
+    let score = Math.max(0, workspaceEvidencePriority(path));
     if (/^(package\.json|readme\.md|agents\.md|claude\.md|tsconfig\.json|nest-cli\.json)$/.test(lower)) {
       score += 118;
     } else if (fileName === 'package.json') {
@@ -703,8 +704,10 @@ export class ContextRouterService {
     return score;
   }
 
-  private supplementalEvidenceRefs(session: SessionDetail, taskId?: string): TaskContext['evidenceRefs'] {
-    const requests = (session.supplementalContextRequests ?? []).filter((request) => !taskId || request.taskId === taskId);
+  private supplementalEvidenceRefs(session: SessionDetail, taskId?: string, workItemId?: string): TaskContext['evidenceRefs'] {
+    const requests = (session.supplementalContextRequests ?? []).filter((request) =>
+      (!taskId || request.taskId === taskId) &&
+      (request.workItemId === workItemId || (!request.workItemId && Boolean(taskId && request.taskId === taskId))));
     return requests.flatMap((request) => {
       const reason = `Requested by runtime after CONTEXT_INSUFFICIENT: ${request.requestedContext.reason}`;
       const hydratedPaths = request.resolution ? new Set(request.resolution.hydratedPaths) : undefined;
@@ -819,7 +822,7 @@ export class ContextRouterService {
 
     return {
       kind: 'domain_map',
-      summary: 'Domain Map built from user goal, brief scope, artifacts, event decisions, and knowledge evidence.',
+      summary: '已基于用户目标、任务范围、产物、会话决策和知识证据构建领域地图。',
       items: [
         {
           type: 'boundary' as const,
@@ -931,21 +934,29 @@ export class ContextRouterService {
     domain: TaskContext['domain'],
     isArchitectureAnalysis = false
   ): TaskContext['agentResponsibilities'] {
-    const choose = (preferredKeys: string[], fallback: string) =>
-      preferredKeys.find((key) => participatingAgentKeys.includes(key)) ?? fallback;
+    const choose = (preferredKeys: string[]) =>
+      preferredKeys.find((key) => participatingAgentKeys.includes(key)) ?? 'coordinator';
     if (isArchitectureAnalysis) {
-      return [{ role: 'execution', agentKey: choose(['architect'], 'architect') }];
+      return [{ role: 'execution', agentKey: choose(['architect']) }];
     }
     const executionKey =
       domain === 'non_coding'
-        ? choose(['requirements', 'product-manager'], 'requirements')
-        : choose(['backend', 'frontend', 'requirements'], 'backend');
-    const validationKey = choose(['test', 'review'], 'test');
-    const reviewKey = choose(['review', 'test'], 'review');
+        ? choose(['requirements', 'product-manager'])
+        : choose(['backend', 'frontend', 'requirements']);
+    const validationKey = choose(['test', 'review']);
+    const reviewKey = choose(['review', 'test']);
     return [
       { role: 'execution', agentKey: executionKey },
-      { role: 'validation', agentKey: validationKey, independentFrom: [executionKey] },
-      { role: 'review', agentKey: reviewKey, independentFrom: Array.from(new Set([executionKey, validationKey])) }
+      {
+        role: 'validation',
+        agentKey: validationKey,
+        independentFrom: validationKey === executionKey ? [] : [executionKey]
+      },
+      {
+        role: 'review',
+        agentKey: reviewKey,
+        independentFrom: Array.from(new Set([executionKey, validationKey])).filter((key) => key !== reviewKey)
+      }
     ];
   }
 

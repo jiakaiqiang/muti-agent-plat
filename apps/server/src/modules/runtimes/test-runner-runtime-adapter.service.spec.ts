@@ -125,7 +125,7 @@ test('summarizes successful test output as task execution result', async () => {
 
   assert.equal(result.status, 'completed');
   assert.equal(result.output.kind, 'task_execution_result');
-  assert.match(result.output.summary, /3\/3 tests passed/);
+  assert.match(result.output.summary, /测试通过 3\/3 项/);
   assert.equal(result.events.some((event) => event.type === 'runtime_completed'), true);
 });
 
@@ -137,8 +137,8 @@ test('creates a test_report artifact with structured metadata', async () => {
 
   assert.equal(result.artifacts.length, 1);
   assert.equal(result.artifacts[0]?.type, 'test_report');
-  assert.equal(result.artifacts[0]?.title, 'Test Report');
-  assert.match(result.artifacts[0]?.content ?? '', /Passed: 3/);
+  assert.equal(result.artifacts[0]?.title, '测试报告');
+  assert.match(result.artifacts[0]?.content ?? '', /通过：3/);
 });
 
 test('returns failed when run_test tool is missing', async () => {

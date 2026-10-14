@@ -1,3 +1,4 @@
+import { runtimePhaseLabel } from "@agent-cluster/shared";
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type {
   InvocationPlan,
@@ -8,17 +9,16 @@ import type {
   RuntimeOutput,
   RuntimeUsage
 } from '@agent-cluster/shared';
-import { createAgentMessageOutput, createRuntimeArtifactSystemEvidence } from '@agent-cluster/shared';
+import { createAgentMessageOutput, createRuntimeArtifactSystemEvidence, RuntimeDiagnosticCapture } from '@agent-cluster/shared';
 import { nowIso } from '../../../common/time.js';
 import { ControlRequestHandler, encodeControlResponse } from './claude-control-request.js';
 import { ClaudeStreamJsonParser } from './claude-stream-json-parser.js';
 import { framesToOutput, MapperError } from './frame-to-output.mapper.js';
-import { LivenessWatchdog, type WatchdogTimeoutObservation } from './liveness-watchdog.js';
+import { LivenessWatchdog } from './liveness-watchdog.js';
 import { RunChannel } from './run-channel.js';
 import { RuntimeStreamMetricsCollector } from './runtime-stream-metrics.js';
 import { isRuntimeActivityFrame, type RuntimeStreamFrame } from './runtime-stream-frame.js';
 import { runtimeUsageFromFrames } from './usage-from-frames.js';
-import { buildWatchdogTimeoutDetails } from './watchdog-timeout-details.js';
 import { validateRuntimeOutput } from '../runtime-output-schema.js';
 import { buildRuntimeDiagnostics } from './runtime-diagnostics.js';
 import { classifyClaudeProviderFailure } from '../claude-provider-error.js';
@@ -80,7 +80,10 @@ export function startClaudeStreaming(
   const collected: RuntimeStreamFrame[] = [];
   const stderrTail: Buffer[] = [];
   let stderrTailBytes = 0;
-  let watchdogTimeout: WatchdogTimeoutObservation | undefined;
+  const stderrCapture = new RuntimeDiagnosticCapture(line => {
+    const safe = Buffer.from(line); stderrTail.push(safe); stderrTailBytes += safe.length;
+    while (stderrTailBytes > STDERR_TAIL_BYTES && stderrTail.length > 1) stderrTailBytes -= stderrTail.shift()!.length;
+  });
   let cancelledByUser = false;
   let settled = false;
   let stdinBuf = '';
@@ -90,8 +93,8 @@ export function startClaudeStreaming(
     idleTimeoutMs: opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
     absoluteTimeoutMs: opts.absoluteTimeoutMs,
     onTimeout: (_reason, observation) => {
-      watchdogTimeout = observation;
-      terminateChild();
+      pushFrame({ kind: 'observation', observationKind: 'observation_due', count: observation.thresholdMs,
+        eventId: `watchdog:${observation.reason}` });
     }
   });
 
@@ -101,7 +104,13 @@ export function startClaudeStreaming(
   function pushFrame(frame: RuntimeStreamFrame) {
     streamMetrics.notifyFrame();
     watchdog.notifyFrame(isRuntimeActivityFrame(frame));
-    collected.push(frame);
+    if (frame.kind !== 'observation') {
+      if (collected.length >= 4096) {
+        const disposable = collected.findIndex(f => f.kind !== 'provider_output' && f.kind !== 'result' && !(f.kind === 'tool_result' && f.tool === 'StructuredOutput'));
+        collected.splice(Math.max(0, disposable), 1);
+      }
+      collected.push(frame);
+    }
     opts.onFrame?.(frame);
     channel.push(frame);
   }
@@ -144,12 +153,7 @@ export function startClaudeStreaming(
   }
 
   stderr?.on('data', (chunk: Buffer) => {
-    stderrTail.push(chunk);
-    stderrTailBytes += chunk.length;
-    while (stderrTailBytes > STDERR_TAIL_BYTES && stderrTail.length > 1) {
-      stderrTailBytes -= stderrTail[0].length;
-      stderrTail.shift();
-    }
+    stderrCapture.feed(chunk.toString('utf8'));
   });
 
   function terminateChild() {
@@ -193,6 +197,7 @@ export function startClaudeStreaming(
 
   const result = new Promise<AgentRunResult>((resolve) => {
     child.on('error', (err) => {
+      stderrCapture.flush();
       if (settled) return;
       settled = true;
       watchdog.stop();
@@ -211,6 +216,7 @@ export function startClaudeStreaming(
     // are closed. Waiting for `close` prevents workspace cleanup from racing
     // with a Runtime process tree that still holds the invocation directory.
     child.on('close', (code, sig) => {
+      stderrCapture.flush();
       if (settled) return;
       settled = true;
       watchdog.stop();
@@ -218,10 +224,6 @@ export function startClaudeStreaming(
 
       if (cancelledByUser) {
         resolve(makeCancelledResult(input, startedAt));
-        return;
-      }
-      if (watchdogTimeout) {
-        resolve(makeTimeoutResult(input, startedAt, watchdogTimeout, stderrTailToString(stderrTail)));
         return;
       }
       const hasResultFrame = collected.some((frame) => frame.kind === 'result');
@@ -232,8 +234,7 @@ export function startClaudeStreaming(
           { stderr, code, signal: sig },
           input.invocationId
         );
-        resolve(
-          makeFailedResult(
+        const failure = makeFailedResult(
             input,
             startedAt,
             providerError?.message ?? (invalidArguments
@@ -243,8 +244,9 @@ export function startClaudeStreaming(
             stderr,
             invalidArguments ? 'argument_validation' : undefined,
             providerError
-          )
-        );
+          );
+        if (!invalidArguments && !providerError && failure.error) failure.error = confirmedRuntimeExit(failure.error, code);
+        resolve(failure);
         return;
       }
       const resultFrame = collected.find((frame) => frame.kind === 'result');
@@ -329,14 +331,14 @@ function makeCompletedResult(
       invocationId: input.invocationId,
       type: 'runtime_started',
       visibility: 'user',
-      content: `${input.agent.name} Claude streaming started ${input.phase}.`,
+      content: `${input.agent.name} 已开始 Claude Code 流式调用：${runtimePhaseLabel(input.phase)}。`,
       createdAt: startedAt
     },
     {
       invocationId: input.invocationId,
       type: 'runtime_completed',
       visibility: 'user',
-      content: `${input.agent.name} Claude streaming completed ${input.phase}.`,
+      content: `${input.agent.name} 已完成 Claude Code 流式调用：${runtimePhaseLabel(input.phase)}。`,
       metadata: { exit: exitDetail ?? undefined },
       createdAt: nowIso()
     }
@@ -361,21 +363,21 @@ function makeCancelledResult(input: InvocationPlan, startedAt: string): AgentRun
     status: 'cancelled',
     output: createAgentMessageOutput({
       messageKind: 'progress',
-      content: `${input.agent.name} Claude streaming cancelled.`
+      content: `${input.agent.name} 的 Claude Code 流式调用已取消。`
     }),
     events: [
       {
         invocationId: input.invocationId,
         type: 'runtime_started',
         visibility: 'user',
-        content: `${input.agent.name} Claude streaming started ${input.phase}.`,
+        content: `${input.agent.name} 已开始 Claude Code 流式调用：${runtimePhaseLabel(input.phase)}。`,
         createdAt: startedAt
       },
       {
         invocationId: input.invocationId,
         type: 'runtime_failed',
         visibility: 'user',
-        content: `${input.agent.name} Claude streaming cancelled.`,
+        content: `${input.agent.name} 的 Claude Code 流式调用已取消。`,
         createdAt: nowIso()
       }
     ],
@@ -386,55 +388,6 @@ function makeCancelledResult(input: InvocationPlan, startedAt: string): AgentRun
   };
 }
 
-function makeTimeoutResult(
-  input: InvocationPlan,
-  startedAt: string,
-  observation: WatchdogTimeoutObservation,
-  stderrTail: string | undefined
-): AgentRunResult {
-  const details = buildWatchdogTimeoutDetails({
-    runtimeType: 'claude_code',
-    input,
-    observation,
-    stderrTail
-  });
-  const error: RuntimeError = {
-    code: 'RUNTIME_TIMEOUT',
-    message: `Claude streaming watchdog timeout: ${observation.reason}`,
-    retryable: true,
-    details
-  };
-  return {
-    invocationId: input.invocationId,
-    runtimeType: 'claude_code',
-    status: 'failed',
-    output: createAgentMessageOutput({
-      messageKind: 'risk',
-      content: `${input.agent.name} Claude streaming timed out (${observation.reason}).`
-    }),
-    events: [
-      {
-        invocationId: input.invocationId,
-        type: 'runtime_started',
-        visibility: 'user',
-        content: `${input.agent.name} Claude streaming started ${input.phase}.`,
-        createdAt: startedAt
-      },
-      {
-        invocationId: input.invocationId,
-        type: 'runtime_failed',
-        visibility: 'user',
-        content: `${input.agent.name} Claude streaming timed out (${observation.reason}).`,
-        metadata: details,
-        createdAt: nowIso()
-      }
-    ],
-    artifacts: [],
-    systemEvidence: createRuntimeArtifactSystemEvidence(input.invocationId),
-    usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, model: 'claude_code' },
-    error
-  };
-}
 
 function makeFailedResult(
   input: InvocationPlan,
@@ -459,21 +412,21 @@ function makeFailedResult(
     status: 'failed',
     output: createAgentMessageOutput({
       messageKind: 'risk',
-      content: `${input.agent.name} Claude streaming failed: ${message}`
+      content: `${input.agent.name} 的 Claude Code 流式调用失败：${message}`
     }),
     events: [
       {
         invocationId: input.invocationId,
         type: 'runtime_started',
         visibility: 'user',
-        content: `${input.agent.name} Claude streaming started ${input.phase}.`,
+        content: `${input.agent.name} 已开始 Claude Code 流式调用：${runtimePhaseLabel(input.phase)}。`,
         createdAt: startedAt
       },
       {
         invocationId: input.invocationId,
         type: 'runtime_failed',
         visibility: 'user',
-        content: `${input.agent.name} Claude streaming failed.`,
+        content: `${input.agent.name} 的 Claude Code 流式调用失败。`,
         metadata: { message },
         createdAt: nowIso()
       }
@@ -484,3 +437,4 @@ function makeFailedResult(
     error
   };
 }
+import { confirmedRuntimeExit } from '@agent-cluster/shared';

@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 import { createRequire } from 'node:module';
-import { dirname, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
+import { unlink, writeFile } from 'node:fs/promises';
 import { DEFAULT_LOCAL_RUNTIME_PERMISSION_POLICY, LOCAL_RUNTIME_PERMISSION_KEYS } from '@agent-cluster/shared';
 import type { LocalRuntimePermission } from '@agent-cluster/shared';
 import {
@@ -66,8 +69,18 @@ async function main(args: string[]) {
   if (command === 'launch-uri') {
     const launchUrl = args[1];
     if (!launchUrl) throw new Error('Usage: agent-runtime launch-uri <agent-runtime://connect?...>');
-    parseLocalRuntimeLaunchUrl(launchUrl, state.serverUrl);
+    const launch = parseLocalRuntimeLaunchUrl(launchUrl, state.serverUrl);
+    if ('kind' in launch && launch.kind === 'upgrade') {
+      await upgradeRuntime(state, launch.upgradeId);
+      return;
+    }
     await startRuntime(state);
+    return;
+  }
+  if (command === 'upgrade') {
+    const upgradeId = args[1];
+    if (!upgradeId) throw new Error('Usage: agent-runtime upgrade <upgrade-id>');
+    await upgradeRuntime(state, upgradeId);
     return;
   }
   if (command === 'status') {
@@ -185,6 +198,89 @@ async function startRuntime(state: Awaited<ReturnType<typeof loadState>>) {
   await runBridge(state, CLI_VERSION, controller.signal);
 }
 
+async function upgradeRuntime(state: Awaited<ReturnType<typeof loadState>>, upgradeId: string) {
+  if (process.platform !== 'win32') throw new Error('Local Runtime 自动升级当前仅支持 Windows。');
+  await refreshUpgradeAccessToken(state);
+  if (!state.tokens?.accessToken) throw new Error('Local Runtime 未授权，无法获取升级包。');
+  process.stdout.write(`Checking Local Runtime upgrade ${upgradeId}.\n`);
+  const response = await fetch(new URL(`/api/local-runtime/upgrades/${encodeURIComponent(upgradeId)}`, state.serverUrl), {
+    headers: { authorization: `Bearer ${state.tokens.accessToken}` },
+    redirect: 'error',
+    signal: AbortSignal.timeout(30_000)
+  });
+  if (!response.ok) throw new Error(`Local Runtime upgrade manifest failed: HTTP ${response.status}`);
+  const envelope = await response.json() as {
+    data?: { releaseUrl?: string; sha256?: string; signature?: string; toVersion?: string }
+  };
+  const manifest = envelope.data;
+  if (!manifest?.releaseUrl || !manifest.sha256 || !/^[a-f0-9]{64}$/i.test(manifest.sha256)
+    || !manifest.signature || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(manifest.signature.trim())) {
+    throw new Error('当前服务端尚未配置完整的签名升级包。');
+  }
+  process.stdout.write(`Upgrade package ${manifest.toVersion ?? 'target'} is available.\n`);
+  const packageResponse = await fetch(manifest.releaseUrl, { redirect: 'error', signal: AbortSignal.timeout(120_000) });
+  if (!packageResponse.ok) throw new Error(`Local Runtime upgrade package failed: HTTP ${packageResponse.status}`);
+  const content = Buffer.from(await packageResponse.arrayBuffer());
+  process.stdout.write('Verifying Local Runtime upgrade package.\n');
+  if (manifest.sha256) {
+    const digest = createHash('sha256').update(content).digest('hex');
+    if (digest.toLowerCase() !== manifest.sha256.toLowerCase()) throw new Error('Local Runtime upgrade package checksum failed.');
+  }
+  const temporaryPackage = join(dirname(stateFilePath()), `.agent-runtime-upgrade-${upgradeId}.exe`);
+  await writeFile(temporaryPackage, content, { mode: 0o700 });
+  try {
+    await verifyAuthenticodeSignature(temporaryPackage, manifest.signature);
+    process.stdout.write('Starting Local Runtime installer.\n');
+    const installer = spawn(temporaryPackage, ['/S'], { detached: true, windowsHide: true, stdio: 'ignore' });
+    installer.unref();
+    process.stdout.write(`Started Local Runtime ${manifest.toVersion ?? 'upgrade'} installer.\n`);
+  } catch (error) {
+    await unlink(temporaryPackage).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function refreshUpgradeAccessToken(state: Awaited<ReturnType<typeof loadState>>) {
+  if (!state.tokens?.refreshToken || Date.parse(state.tokens.accessTokenExpiresAt) > Date.now() + 60_000) return;
+  const response = await fetch(new URL('/api/local-runtime/device-tokens/refresh', state.serverUrl), {
+    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10_000),
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ refreshToken: state.tokens.refreshToken })
+  });
+  if (!response.ok) throw new Error(`Local Runtime token refresh failed: HTTP ${response.status}`);
+  const envelope = await response.json() as { data?: Awaited<ReturnType<typeof loadState>>['tokens'] };
+  const tokens = envelope.data;
+  if (!tokens?.accessToken || !tokens.refreshToken) throw new Error('Local Runtime token refresh returned invalid credentials.');
+  state.tokens = tokens;
+  await saveState(state);
+}
+
+async function verifyAuthenticodeSignature(path: string, expectedThumbprint: string) {
+  await new Promise<void>((resolve, reject) => {
+    const script = [
+      '$signature = Get-AuthenticodeSignature -LiteralPath $env:AGENT_RUNTIME_UPGRADE_PATH',
+      'if ($signature.Status -ne "Valid") { exit 2 }',
+      'if ($env:AGENT_RUNTIME_UPGRADE_SIGNATURE -and $signature.SignerCertificate.Thumbprint -ne $env:AGENT_RUNTIME_UPGRADE_SIGNATURE) { exit 3 }'
+    ].join(';');
+    const child = spawn('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script
+    ], {
+      windowsHide: true,
+      stdio: 'ignore',
+      env: {
+        ...process.env,
+        AGENT_RUNTIME_UPGRADE_PATH: path,
+        AGENT_RUNTIME_UPGRADE_SIGNATURE: expectedThumbprint.replace(/\s+/g, '').toUpperCase()
+      }
+    });
+    child.once('error', () => reject(new Error('无法验证 Local Runtime 安装包的 Windows 签名。')));
+    child.once('exit', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error('Local Runtime 安装包签名校验失败。'));
+    });
+  });
+}
+
 function currentCliInvocation() {
   const cliEntry = fileURLToPath(import.meta.url);
   if (!cliEntry.endsWith('.ts')) {
@@ -209,6 +305,7 @@ function printHelp() {
     '  workspaces',
     '  revoke [device|workspace-id]',
     '  install [--server <url>]',
+    '  upgrade <upgrade-id>',
     '  logs',
     ''
   ].join('\n'));

@@ -61,16 +61,13 @@ function outputFor(kind) {
       };
     case 'task_execution_result':
       return {
-        schemaVersion: '1.0',
+        schemaVersion: '2.0',
         kind,
         status: 'completed',
         summary: 'The Local Runtime fixture wrote the requested file.',
-        completedItems: ['Created src/local-runtime-e2e.txt in the isolated invocation directory.'],
-        changedArtifacts: [],
-        requestedContext: null,
-        agentMessages: [],
-        nextSuggestedActions: [],
-        risks: []
+        artifactRefs: ['src/local-runtime-e2e.txt'],
+        blockers: [],
+        nextActions: []
       };
     case 'post_review_report':
       return {

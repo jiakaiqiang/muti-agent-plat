@@ -10,6 +10,7 @@ type SessionStatusTone = 'draft' | 'running' | 'waiting' | 'completed' | 'failed
 
 const sessionStatusPresentation: Record<SessionStatus, { label: string; tone: SessionStatusTone }> = {
   DRAFT_INPUT: { label: '待理解', tone: 'draft' },
+  WAIT_SOURCE_PREPARATION: { label: '准备仓库', tone: 'waiting' },
   AGENT_DISCUSSING: { label: '讨论中', tone: 'running' },
   WAIT_USER_CONFIRM: { label: '待确认', tone: 'waiting' },
   WAIT_WORKFLOW_SELECT: { label: '选流程', tone: 'waiting' },
@@ -41,14 +42,14 @@ const emit = defineEmits<{
   create: []
   delete: [sessionId: string]
   archive: [sessionId: string]
-  restore: [sessionId: string]
   restoreArchive: [sessionId: string]
   toggleFavorite: [sessionId: string]
 }>()
 
 const workspaceUiStore = useWorkspaceUiStore()
 const { sessionListTab: activeTab, sessionSearchQuery: search } = storeToRefs(workspaceUiStore)
-const contextMenu = ref<{ sessionId: string; x: number; y: number } | undefined>()
+type SessionMenuKind = 'active' | 'deleted' | 'archived'
+const contextMenu = ref<{ sessionId: string; x: number; y: number; kind: SessionMenuKind } | undefined>()
 
 const favoriteIds = computed(() => new Set(props.favoriteSessionIds))
 const deletingIds = computed(() => new Set(props.deletingSessionIds))
@@ -66,12 +67,13 @@ const filteredSessions = computed(() => {
   })
 })
 
-function openContextMenu(event: MouseEvent, sessionId: string) {
+function openContextMenu(event: MouseEvent, sessionId: string, kind: SessionMenuKind) {
   event.preventDefault()
   contextMenu.value = {
     sessionId,
     x: event.clientX,
-    y: Math.max(12, event.clientY - 12)
+    y: Math.max(12, event.clientY - 12),
+    kind
   }
 }
 
@@ -96,13 +98,9 @@ function archiveSession(sessionId: string) {
   closeContextMenu()
 }
 
-function restoreSession(sessionId: string) {
-  emit('restore', sessionId)
-  closeContextMenu()
-}
-
 function restoreArchive(sessionId: string) {
   emit('restoreArchive', sessionId)
+  closeContextMenu()
 }
 
 function isFavorite(sessionId: string) {
@@ -117,7 +115,7 @@ function sessionStatus(status: SessionStatus) {
   return sessionStatusPresentation[status]
 }
 
-function lifecycleLabel(session: SessionListItem) {
+function lifecycleLabel(session: Pick<SessionListItem, 'status' | 'lifecycleState'>) {
   if (session.lifecycleState === 'deleting') return '删除中'
   if (session.lifecycleState === 'deleted') return '已删除'
   return sessionStatus(session.status).label
@@ -169,11 +167,33 @@ onBeforeUnmount(() => {
     <section v-if="activeTab === 'archives'" class="session-archive-manager" aria-label="归档管理">
       <section v-for="group in props.archiveGroups" :key="group.projectKey" class="session-archive-group">
         <h3>{{ group.projectLabel }}</h3>
-        <article v-for="item in group.items" :key="item.id" class="session-archive-item">
-          <span class="session-archive-item__title" :title="item.title">{{ item.title }}</span>
-          <button type="button" class="session-archive-restore" title="恢复归档" @click="restoreArchive(item.id)">
-            <UiIcon name="refresh-cw" :size="15" />
-            恢复
+        <article
+          v-for="(item, index) in group.items"
+          :key="item.id"
+          class="session-list-item"
+          @contextmenu="openContextMenu($event, item.id, 'archived')"
+        >
+          <span class="session-avatar">
+            <AgentPortrait :tone="(index % 5) + 1" :label="item.title" size="md" />
+            <span
+              :class="['session-status-badge', `status-${sessionStatus(item.status).tone}`]"
+              :aria-label="`会话状态：${lifecycleLabel(item)}`"
+              :title="lifecycleLabel(item)"
+            >
+              {{ lifecycleLabel(item) }}
+            </span>
+          </span>
+          <span class="session-item-main">
+            <span class="session-title">{{ item.title }}</span>
+          </span>
+          <button
+            class="session-more-button"
+            type="button"
+            title="更多操作"
+            :disabled="isDeletingSession(item.id)"
+            @click.stop="openContextMenu($event, item.id, 'archived')"
+          >
+            <UiIcon name="more" :size="16" />
           </button>
         </article>
       </section>
@@ -187,7 +207,7 @@ onBeforeUnmount(() => {
         class="session-list-item"
         :class="{ active: session.id === currentSessionId, favorite: isFavorite(session.id) }"
         @click="session.lifecycleState !== 'deleted' && emit('select', session.id)"
-        @contextmenu="openContextMenu($event, session.id)"
+        @contextmenu="openContextMenu($event, session.id, session.lifecycleState === 'deleted' ? 'deleted' : 'active')"
       >
       <span class="session-avatar">
         <AgentPortrait :tone="(index % 5) + 1" :label="session.title" size="md" />
@@ -207,7 +227,7 @@ onBeforeUnmount(() => {
         type="button"
         title="更多操作"
         :disabled="isDeletingSession(session.id)"
-        @click.stop="openContextMenu($event, session.id)"
+        @click.stop="openContextMenu($event, session.id, session.lifecycleState === 'deleted' ? 'deleted' : 'active')"
       >
         <UiIcon name="more" :size="16" />
       </button>
@@ -226,7 +246,14 @@ onBeforeUnmount(() => {
           <UiIcon name="sparkles" :size="15" />
           {{ isFavorite(contextMenu.sessionId) ? '取消收藏' : '收藏会话' }}
         </button>
-        <button v-if="props.sessions.find(item => item.id === contextMenu?.sessionId)?.lifecycleState !== 'deleted'"
+        <button v-if="contextMenu.kind === 'archived'"
+          type="button"
+          @click="restoreArchive(contextMenu.sessionId)"
+        >
+          <UiIcon name="refresh-cw" :size="15" />
+          恢复归档
+        </button>
+        <button v-if="contextMenu.kind === 'active'"
           type="button"
           class="warning"
           :disabled="isDeletingSession(contextMenu.sessionId)"
@@ -235,7 +262,7 @@ onBeforeUnmount(() => {
           <UiIcon name="archive" :size="15" />
           归档会话
         </button>
-        <button v-if="props.sessions.find(item => item.id === contextMenu?.sessionId)?.lifecycleState !== 'deleted'"
+        <button v-if="contextMenu.kind !== 'deleted'"
           type="button"
           class="danger"
           :disabled="isDeletingSession(contextMenu.sessionId)"
@@ -243,10 +270,6 @@ onBeforeUnmount(() => {
         >
           <UiIcon name="trash" :size="15" />
           删除会话
-        </button>
-        <button v-else type="button" @click="restoreSession(contextMenu.sessionId)">
-          <UiIcon name="refresh-cw" :size="15" />
-          恢复会话
         </button>
       </div>
     </teleport>

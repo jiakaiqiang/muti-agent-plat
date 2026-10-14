@@ -10,7 +10,7 @@ import type { RuntimeStreamFrame } from './runtime-stream-frame.js';
  * 详见 docs/design/multica-refactor-development-design-v1.md §3.2、§3.6。
  */
 
-const isPriorityFrame = (f: RuntimeStreamFrame): boolean => f.kind !== 'assistant_text';
+const isPriorityFrame = (f: RuntimeStreamFrame): boolean => !['assistant_text', 'observation', 'usage', 'system', 'stderr_tail'].includes(f.kind);
 
 export interface RunChannelOptions {
   capacity: number;

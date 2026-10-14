@@ -248,6 +248,32 @@ test('related WorkItems inherit only explicit confirmed decisions', async () => 
   }
 });
 
+test('a child WorkItem answer overrides an inherited answer without changing the parent', async () => {
+  const context = await fixture();
+  try {
+    const parent = await context.service.ensureInitialWorkItem(context.session, 'initial');
+    const sourceEvent = (id: string): CollaborationEvent => ({
+      id, sessionId: context.session.id, type: 'user_message', toAgentIds: [], content: '回答问题',
+      metadata: createMetadata('chat_message', {}), actor: { type: 'user', id: context.session.ownerId },
+      createdAt: new Date().toISOString()
+    });
+    const [oldAnswer] = await context.service.recordConfirmedDecisions({
+      session: context.session, workItemId: parent.id, sourceEvent: sourceEvent('parent-answer'),
+      decisions: [{ kind: 'requirement', question: '是否支持 CSV？', answer: '不支持', content: '不支持 CSV' }]
+    });
+    const child = await context.service.createWorkItem({
+      session: context.session, sourceEventId: 'child-created', title: '导出变更', goal: '修改导出范围',
+      parentWorkItemId: parent.id, inheritedDecisionIds: [oldAnswer.id]
+    });
+    const [newAnswer] = await context.service.recordConfirmedDecisions({
+      session: context.session, workItemId: child.id, sourceEvent: sourceEvent('child-answer'),
+      decisions: [{ kind: 'requirement', question: '是否支持 CSV?', answer: '支持', content: '支持 CSV' }]
+    });
+    assert.deepEqual(context.service.validDecisions(context.session.id, child.id).map((item) => item.id), [newAnswer.id]);
+    assert.deepEqual(context.service.validDecisions(context.session.id, parent.id).map((item) => item.id), [oldAnswer.id]);
+  } finally { await context.cleanup(); }
+});
+
 test('Brief confirmation checkpoints authoritative decisions and its audit event idempotently', async () => {
   const context = await fixture();
   try {
@@ -285,6 +311,37 @@ test('Brief confirmation checkpoints authoritative decisions and its audit event
   } finally {
     await context.cleanup();
   }
+});
+
+test('revision answers survive restart, replay and later answer replacement', async () => {
+  const context = await fixture();
+  try {
+    const workItem = await context.service.ensureInitialWorkItem(context.session, 'initial');
+    const event = (id: string): CollaborationEvent => ({
+      id, sessionId: context.session.id, type: 'user_message', toAgentIds: [],
+      content: '修订任务契约', metadata: createMetadata('chat_message', {}),
+      actor: { type: 'user', id: context.session.ownerId }, createdAt: new Date().toISOString()
+    });
+    const firstInput = {
+      session: context.session, workItemId: workItem.id, sourceEvent: event('revision-1'),
+      decisions: [{ kind: 'requirement' as const, question: '是否支持 CSV？', answer: '不支持',
+        content: '问题：是否支持 CSV？\n回答：不支持' }]
+    };
+    const first = await context.service.recordConfirmedDecisions(firstInput);
+    const replay = await context.service.recordConfirmedDecisions(firstInput);
+    assert.equal(replay[0]?.id, first[0]?.id);
+
+    const restored = new ContextManagementService(context.persistence);
+    assert.equal(restored.validDecisions(context.session.id, workItem.id)[0]?.answer, '不支持');
+    const replacement = await restored.recordConfirmedDecisions({
+      ...firstInput, sourceEvent: event('revision-6'),
+      decisions: [{ kind: 'requirement', question: '是否支持 CSV?', answer: '支持 CSV',
+        content: '问题：是否支持 CSV?\n回答：支持 CSV' }]
+    });
+    assert.equal(replacement[0]?.supersedesDecisionId, first[0]?.id);
+    assert.equal(restored.validDecisions(context.session.id, workItem.id)[0]?.answer, '支持 CSV');
+    assert.equal(restored.listDecisions(context.session.id).find((item) => item.id === first[0]?.id)?.status, 'superseded');
+  } finally { await context.cleanup(); }
 });
 
 test('intent snapshots are minimal, revisioned and routing ingress is idempotent', async () => {

@@ -13,6 +13,10 @@ import {
 } from '@nestjs/common';
 import type { Subscription } from 'rxjs';
 import crypto from 'node:crypto';
+import { effectiveRuntimePreference, normalizeRuntimePreference, parseRuntimeControlIntent, runtimeDisplayName,
+  type RuntimeSwitchInput, type RuntimeSwitchRequest, type RuntimeHandoffCheckpoint } from '@agent-cluster/shared';
+import { RuntimeSwitchStore } from '../runtime-switch/runtime-switch-store.js';
+import { RuntimeSwitchCoordinator } from '../runtime-switch/runtime-switch-coordinator.js';
 import { existsSync } from 'node:fs';
 import type {
   AgentDefinition as Agent,
@@ -38,12 +42,17 @@ import type {
   SessionFollowUpMessage,
   IntentRoutingRolloutMode,
   SessionStatus,
+  SessionCodeSource,
+  DeliveryRecord,
+  SessionExecutionLocation,
+  SourceBinding,
   RuntimePreference,
   SessionWorkingDirectory,
   SessionWorkspaceContext,
   TaskBrief,
   UserMessageHandlingPlan,
   WorkspaceWritebackRecord,
+  WorkspaceChangeSet,
   WorkItem,
   GroupChatAttachmentRef,
   GroupChatAgentRef,
@@ -54,13 +63,19 @@ import type {
   ChangeRequestChoice
 } from '@agent-cluster/shared';
 import { matchesRequirementConfirmation, requirementConfirmationFingerprint } from '@agent-cluster/shared';
+import { canStartSessionAgent } from '@agent-cluster/shared';
 import { createMetadata } from '@agent-cluster/shared';
-import { executionProgressView } from '@agent-cluster/shared';
+import { executionProgressView, localizeSystemError } from '@agent-cluster/shared';
 import { messages } from '../../common/messages.js';
 import { abortWithTermination, createExecutionTermination } from '../../common/execution-termination.js';
 import { extractRuntimeError } from '../../common/runtime-error.js';
+import {
+  countBriefRevisionAttempts,
+  PROCEED_WITH_OPEN_QUESTIONS_OPTION
+} from '../../common/brief-revision-policy.js';
 import { buildBudget } from '../../common/token.js';
 import {
+  briefRevisionMaxAttempts,
   isRuntimeType,
   reworkMaxRounds
 } from '../../common/runtime-config.js';
@@ -84,6 +99,7 @@ import {
 import { SemanticIntentRouterService } from '../intent-recognition/semantic-intent-router.service.js';
 import { ContextManagementService } from '../context-management/context-management.service.js';
 import { MemoryService } from '../memory/memory.service.js';
+import { briefQuestionKey } from '@agent-cluster/shared';
 import { ExecutionOutcome, OrchestratorService, usableAgentMessageOutput } from '../orchestrator/orchestrator.service.js';
 import { ExecutionService } from '../execution/execution.service.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
@@ -114,6 +130,8 @@ import { resolveExactCommand } from '../message-routing/command-state-resolver.s
 import { applyExactCommandResolution } from '../message-routing/command-application.service.js';
 import { resolveTagRouting } from '../message-routing/tag-routing.js';
 import { buildHistoricalMessageContext, type HistoricalSkillCandidate } from './historical-context.js';
+import { normalizeGitHubRepositoryUrl } from '../code-hosts/github-repository-url.js';
+import { GitRepositoryWorkspaceManager } from '../repository-workspaces/repository-workspace-manager.js';
 
 type CreateSessionInput = {
   input: string;
@@ -122,6 +140,8 @@ type CreateSessionInput = {
   tokenBudget?: number;
   knowledgeBaseIds?: string[];
   workingDirectory?: SessionWorkingDirectory;
+  codeSource?: SessionCodeSource;
+  executionLocation?: SessionExecutionLocation;
   runtimePreference?: RuntimePreference;
   origin?: 'user' | 'autopilot';
   autopilotRunId?: string;
@@ -205,6 +225,13 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   private readonly logger = new Logger(SessionsService.name);
   private readonly sessions = new Map<string, SessionDetail>();
   private readonly briefGenerationSeqBySession = new Map<string, number>();
+  private readonly briefRevisionSubmissions = new Map<string, Promise<{
+    accepted: boolean;
+    sessionId: string;
+    status: SessionStatus;
+    event?: CollaborationEvent;
+    discussionDocument?: DiscussionDocumentView;
+  }>>();
   private readonly briefGenerationRuns = new Map<
     string,
     { controller: AbortController; done: Promise<void> }
@@ -240,6 +267,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
    * impact analysis cannot be shown against a requirement that already moved on.
    */
   private readonly changeRequests: ChangeRequestStore;
+  private deliveryReadyListener?: (sessionId: string, version: number) => void;
+  private readonly runtimeSwitches: RuntimeSwitchCoordinator;
+  private runtimeSwitchTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly agents: AgentsService,
@@ -266,12 +296,43 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     @Optional() private readonly messageIngress?: MessageIngressService,
     @Optional() private readonly artifacts?: ArtifactsService,
     @Optional() private readonly discussionDocuments?: DiscussionDocumentsService,
-    @Optional() @Inject(forwardRef(() => AttachmentsService)) private readonly attachments?: AttachmentsService
+    @Optional() @Inject(forwardRef(() => AttachmentsService)) private readonly attachments?: AttachmentsService,
+    @Optional() private readonly githubWorkspaces?: GitRepositoryWorkspaceManager
   ) {
     this.lifecycle = new SessionLifecycleStore(persistence);
     this.requirementDocuments = new RequirementDocumentStore(persistence);
     this.workflowStarts = new WorkflowStartStore(persistence);
     this.changeRequests = new ChangeRequestStore(persistence);
+    this.runtimeSwitches = new RuntimeSwitchCoordinator(new RuntimeSwitchStore(persistence), {
+      session: id => this.get(id), generation: id => this.lifecycle.generation(id),
+      preflight: (session, target) => this.orchestrator.preflightRuntimeSwitch(session, target),
+      stop: async id => { await this.pause(id, '正在安全停止当前执行，以切换 Runtime。', undefined, 'runtime_switch'); },
+      stopped: id => Boolean(this.runtime && !this.runtime.hasUnconfirmedStops(id)),
+      busy: id => this.execution.isRunning(id) || Boolean(this.briefGenerationRuns.get(id)) || Boolean(this.runtime?.activeInvocationCount(id)),
+      checkpoint: session => this.runtimeHandoffCheckpoint(session),
+      apply: async (request, handoff) => {
+        const session = this.get(request.sessionId);
+        const event = this.events.createDraft({ sessionId: session.id, type: 'runtime_progress',
+          content: `已保留任务检查点，准备由 ${runtimeDisplayName(request.targetRuntimeType)} 接续。`,
+          metadata: createMetadata('system_notice', { code: 'RUNTIME_SWITCH_APPLIED', switchRequestId: request.id,
+            targetRuntimeType: request.targetRuntimeType, handoff }) });
+        const result = await this.runtimeSwitches.store.apply(request.id, session.revision ?? 0, handoff, event);
+        Object.assign(session, result.session);
+        if (!result.session.runtimeSwitchOverride) delete session.runtimeSwitchOverride;
+        delete session.runtimeFailover;
+        this.events.acceptCommitted(result.event);
+      },
+      resume: async id => {
+        const session = this.get(id);
+        if (session.status === 'PAUSED' && ['FAILED', 'INTERRUPTED'].includes(session.pauseState?.previousStatus ?? '')) {
+          const previous = session.pauseState!.previousStatus;
+          session.pauseState = undefined;
+          this.setStatus(session, previous);
+        }
+        await this.resume(id, '已应用新的 Runtime，正在从任务检查点接续。');
+      },
+      announce: request => this.announceRuntimeSwitch(request)
+    });
     const persisted = this.persistence.getCollection<SessionDetail[]>('sessions', []);
     let recoveredWorkspaceWriteback = false;
     for (const session of persisted) {
@@ -288,6 +349,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
     this.orchestrator.registerSavePendingInvocationCallback((sessionId, invocation) => {
       this.savePendingInvocation(sessionId, invocation);
+    });
+    this.orchestrator.registerDeliveryReadyCallback?.((sessionId, version) => {
+      this.deliveryReadyListener?.(sessionId, version);
     });
     this.capabilities.registerApprovalListener(({ sessionId, capabilityId }) =>
       this.retryPendingApprovalTasks(sessionId, capabilityId)
@@ -325,11 +389,71 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   }
 
   onModuleDestroy() {
+    if (this.runtimeSwitchTimer) clearInterval(this.runtimeSwitchTimer);
     this.runtimeInterruptSubscription?.unsubscribe();
     this.workspaceOfflineSubscription?.unsubscribe();
     this.runtimeStopSubscription?.unsubscribe();
     for (const timer of this.intentRoutingRetryTimers.values()) clearTimeout(timer);
     this.intentRoutingRetryTimers.clear();
+  }
+
+  async onModuleInit() {
+    for (const session of this.sessions.values()) {
+      if (!session.archivedAt) await this.runtimeSwitches.recover(session.id).catch(error => this.logger.warn(String(error)));
+    }
+    this.runtimeSwitchTimer = setInterval(() => {
+      if (this.shuttingDown) return;
+      for (const session of this.sessions.values()) {
+        const request = this.runtimeSwitches.store.unresolved(session.id)[0];
+        if (request && (request.status === 'stopping' ||
+          (request.timing === 'after_step' && !this.execution.isRunning(session.id) && !this.briefGenerationRuns.has(session.id)))) {
+          void this.runtimeSwitches.advance(request).catch(error => this.logger.warn(String(error)));
+        }
+      }
+    }, 2_000);
+    this.runtimeSwitchTimer.unref();
+  }
+
+  runtimeSwitchState(sessionId: string) {
+    const session = this.get(sessionId);
+    return { request: this.runtimeSwitches.store.current(sessionId), preference: effectiveRuntimePreference(session) };
+  }
+
+  async switchRuntime(sessionId: string, input: RuntimeSwitchInput, source: RuntimeSwitchRequest['source'] = 'ui_control') {
+    if (!input?.idempotencyKey?.trim() || input.idempotencyKey.length > 200 ||
+      (input.targetRuntimeType !== 'fallback' && !['codex', 'claude_code', 'generic_llm'].includes(input.targetRuntimeType)) ||
+      (input.resumeAfterSwitch !== undefined && typeof input.resumeAfterSwitch !== 'boolean') ||
+      (input.scope !== undefined && !['work_item', 'session'].includes(input.scope)) ||
+      (input.timing !== undefined && !['immediate', 'after_step'].includes(input.timing)) ||
+      (input.fallbackMode !== undefined && !['keep', 'exclude_previous_once', 'target_only'].includes(input.fallbackMode)) ||
+      (input.expectedSessionRevision !== undefined && (!Number.isSafeInteger(input.expectedSessionRevision) || input.expectedSessionRevision < 0))) {
+      throw new BadRequestException('RUNTIME_SWITCH_INVALID_INPUT');
+    }
+    return this.runtimeSwitches.request(sessionId, input, source);
+  }
+
+  private runtimeHandoffCheckpoint(session: SessionDetail): RuntimeHandoffCheckpoint {
+    return { version: '1.0', workItemId: session.activeWorkItemId, briefId: session.currentTaskBriefId,
+      sessionRevision: session.revision ?? 0, createdAt: nowIso(),
+      tasks: this.tasks.list(session.id).filter(task => !session.activeWorkItemId || task.workItemId === session.activeWorkItemId)
+        .map(task => ({ id: task.id, status: task.status, candidateId: task.executionCheckpoint?.candidateId,
+          stage: task.executionCheckpoint?.stage })),
+      invocationIds: (this.runtime?.listInvocations(session.id) ?? []).slice(-16).map(item => item.invocationId) };
+  }
+
+  private announceRuntimeSwitch(request: RuntimeSwitchRequest) {
+    const labels: Record<RuntimeSwitchRequest['status'], string> = {
+      requested: '已收到 Runtime 切换请求。', preflighted: request.timing === 'after_step'
+        ? '目标 Runtime 已通过预检，等待当前任务步骤结束。' : '目标 Runtime 已通过预检。',
+      stopping: '正在停止原执行；停止确认前不会启动备用 Runtime。', stop_confirmed: '原执行已确认停止。',
+      applying: '正在应用 Runtime 选择并准备接续上下文。', resuming: '已发起接续，正在准备新 Runtime 调用。',
+      completed: request.resumeAfterSwitch ? 'Runtime 选择已切换，任务已交回原阶段恢复流程。' : 'Runtime 已切换，当前保持暂停。',
+      failed: request.error?.message ?? 'Runtime 切换未完成。'
+    };
+    this.events.createOnce(`runtime-switch:${request.id}:${request.version}`, { sessionId: request.sessionId,
+      type: 'runtime_progress', content: labels[request.status], metadata: createMetadata('system_notice', {
+        code: 'RUNTIME_SWITCH_STATUS', switchRequestId: request.id, status: request.status, version: request.version,
+        targetRuntimeType: request.targetRuntimeType, error: request.error }) });
   }
 
   beforeApplicationShutdown(signal?: string) {
@@ -577,6 +701,19 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     return this.lifecycle.matchesActiveGeneration(sessionId, expectedGeneration);
   }
 
+  runtimeHealthState(sessionId: string) {
+    this.get(sessionId);
+    if (!this.runtime) throw new ServiceUnavailableException('Runtime health service unavailable.');
+    return { items: this.runtime.requestHealth.list(sessionId) };
+  }
+
+  waitForRuntime(sessionId: string, invocationId: string, input: import('@agent-cluster/shared').RuntimeHealthWaitInput) {
+    this.get(sessionId);
+    if (!this.runtime) throw new ServiceUnavailableException('Runtime health service unavailable.');
+    if (!this.lifecycle.isActive(sessionId, input.sessionGeneration)) throw new ConflictException('Session generation is no longer active.');
+    return this.runtime.requestHealth.wait(sessionId, invocationId, input);
+  }
+
   listWorkItems(sessionId: string) {
     this.get(sessionId);
     return this.contextManagement?.listWorkItems(sessionId) ?? [];
@@ -777,7 +914,13 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   ) {
     const session = this.get(sessionId);
     if (!this.workspaceWritebacks) throw new ServiceUnavailableException('Workspace writeback service is unavailable.');
-    const writeback = await this.workspaceWritebacks.resolve(session, writebackId, input);
+    const authorizeResolvedDelete = session.workingDirectory?.kind === 'local_bridge'
+      ? async (changeSet: WorkspaceChangeSet) => {
+          if (!this.localRuntime) throw new ServiceUnavailableException('LOCAL_RUNTIME_UNAVAILABLE');
+          await this.localRuntime.grantWorkspacePermissionOnce(session.workspaceId, 'workspace_delete', changeSet);
+        }
+      : undefined;
+    const writeback = await this.workspaceWritebacks.resolve(session, writebackId, input, authorizeResolvedDelete);
     session.workspaceWritebacks = this.workspaceWritebacks.list(sessionId);
     this.events.create({
       sessionId,
@@ -846,6 +989,24 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       if (!acceptedWorkflowOutcome) this.resumeExecution(session);
     }
     return writeback;
+  }
+
+  hasWorkspaceWritebackConflict(sessionId: string, conflictId: string) {
+    return this.workspaceWritebacks?.hasConflict(sessionId, conflictId) ?? false;
+  }
+
+  workspaceWritebackConflictView(sessionId: string, conflictId: string) {
+    this.get(sessionId);
+    if (!this.workspaceWritebacks) throw new ServiceUnavailableException('Workspace writeback service is unavailable.');
+    return this.workspaceWritebacks.conflictView(sessionId, conflictId);
+  }
+
+  saveWorkspaceWritebackConflictFile(sessionId: string, conflictId: string, fileId: string, input: {
+    expectedVersion: number; resultContent?: string; binaryChoice?: 'ours' | 'theirs'; confirm: boolean;
+  }) {
+    this.get(sessionId);
+    if (!this.workspaceWritebacks) throw new ServiceUnavailableException('Workspace writeback service is unavailable.');
+    return this.workspaceWritebacks.saveConflictFile(sessionId, conflictId, fileId, input);
   }
 
   listRaw() {
@@ -1520,9 +1681,6 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       throw new ServiceUnavailableException('后端正在关闭，请在服务重启后重试删除。');
     }
     const session = this.getIncludingDeleted(sessionId);
-    if (session.archivedAt) {
-      throw new ConflictException('归档会话请先恢复后再删除。');
-    }
     const existingLifecycle = this.lifecycle.get(sessionId);
     if (existingLifecycle?.state === 'deleted') {
       const view = this.lifecycleState(sessionId);
@@ -1557,6 +1715,14 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       });
       return { sessionId, deleted: false, ...view, blockers };
     }
+    if (session.delivery?.state === 'validating' || session.delivery?.state === 'pushing' ||
+        session.delivery?.state === 'merging') {
+      const view = this.lifecycleState(sessionId);
+      return { sessionId, deleted: false, ...view, blockers: [...view.blockers, {
+        reason: 'process_running' as const,
+        message: 'GitHub 交付操作仍在运行，结束后可重试删除。'
+      }] };
+    }
     let removedAttachmentIds: string[] = [];
     if (this.attachments) {
       try {
@@ -1575,14 +1741,46 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         };
       }
     }
+    if (session.codeSource?.kind === 'remote_repository' && session.sourceBinding) {
+      try {
+        if (session.sourceBinding.executionLocation === 'local') {
+          if (!session.sourceBinding.deviceId) throw new Error('LOCAL_RUNTIME_UNAVAILABLE');
+          await this.localRuntime?.requestGitHubSource(session.sourceBinding.deviceId,
+            { action: 'cleanup', sessionId });
+          if (!this.localRuntime) throw new Error('LOCAL_RUNTIME_UNAVAILABLE');
+        } else {
+          if (!this.githubWorkspaces) throw new Error('GITHUB_WORKSPACE_MANAGER_UNAVAILABLE');
+          await this.githubWorkspaces.cleanupSession(sessionId);
+        }
+      } catch {
+        const view = this.lifecycleState(sessionId);
+        return { sessionId, deleted: false, ...view,
+          blockers: [...view.blockers, { reason: 'state_query_failed' as const,
+            message: 'GitHub 会话工作区清理尚未完成，删除保持可重试状态。' }] };
+      }
+    }
+    try {
+      await this.workspaceWritebacks?.clearSessionDrafts?.(sessionId);
+    } catch (error) {
+      this.logger.error(`Failed to clean Session writeback drafts for ${sessionId}: ${String(error)}`);
+      const view = this.lifecycleState(sessionId);
+      return { sessionId, deleted: false, ...view,
+        blockers: [...view.blockers, { reason: 'state_query_failed' as const,
+          message: '工作区冲突草稿清理尚未完成，删除保持可重试状态。' }] };
+    }
     const completed = await this.lifecycle.completeDelete(sessionId);
     if (completed.event) this.events.acceptCommitted(completed.event);
     if (completed.lifecycle.state === 'deleted') {
       this.deletingSessionIds.delete(sessionId);
+      // 删除完成即清除归档态，避免出现既 deleted 又 archived 的脏投影。
+      const wasArchived = Boolean(session.archivedAt);
+      if (wasArchived) delete session.archivedAt;
       const coordinatorId = this.agents.findSystemByKey('coordinator')?.id ?? 'coordinator';
       const endedAgentIds = session.participatingAgentIds.filter((agentId) => agentId !== coordinatorId);
       if (endedAgentIds.length) {
         session.participatingAgentIds = session.participatingAgentIds.filter((agentId) => agentId === coordinatorId);
+        this.touchSession(session);
+      } else if (wasArchived) {
         this.touchSession(session);
       }
       await this.persistence.releaseWorkspaceSessionLease(session.workspaceId, session.id).catch((error) => {
@@ -1707,6 +1905,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     const lifecycle = this.lifecycle.get(sessionId);
     if (!lifecycle) throw new NotFoundException(`Session lifecycle not found: ${sessionId}`);
     if (lifecycle.state === 'deleted') throw new ConflictException('已删除会话不能从归档恢复，请使用删除列表恢复。');
+    // 归档会话可直接删除；删除卡在 deleting（清理未完成）时仍留在归档列表，此时恢复会把半删除的会话放回活动列表。
+    if (lifecycle.state === 'deleting') throw new ConflictException('会话正在删除，不能从归档恢复。');
     if (session.workingDirectory?.kind === 'server_local' && (!session.workingDirectory.path || !existsSync(session.workingDirectory.path))) {
       throw new ConflictException('会话工作目录已被移动或删除，无法安全恢复。');
     }
@@ -1778,10 +1978,46 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       const dataEpoch = this.persistence.currentDataEpoch();
       const now = nowIso();
       const participatingAgentIds = this.agents.resolveIds(input.agentIds);
-      const workspaceBinding = await this.resolveWorkspaceBinding(input);
-      const workspaceId = workspaceBinding.workingDirectory?.id ?? 'default-workspace';
-
       const sessionId = crypto.randomUUID();
+      const remoteSource = input.codeSource?.kind === 'remote_repository'
+        ? normalizeGitHubRepositoryUrl(input.codeSource.repositoryUrl)
+        : undefined;
+      if (input.codeSource?.kind === 'remote_repository') {
+        if (input.codeSource.provider !== 'github') {
+          throw new BadRequestException('CODE_SOURCE_PROVIDER_UNSUPPORTED');
+        }
+        if (input.workingDirectory) {
+          throw new BadRequestException('Remote repository Session must not include workingDirectory.');
+        }
+        if (input.executionLocation !== 'server' && input.executionLocation !== 'local') {
+          throw new BadRequestException('executionLocation is required for remote repository Sessions.');
+        }
+        if (input.executionLocation === 'local') {
+          if (!input.codeSource.deviceId) throw new BadRequestException('deviceId is required for local GitHub Sessions.');
+          if (!['codex', 'claude_code'].includes(input.runtimePreference?.preferredRuntimeType ?? '')) {
+            throw new BadRequestException('LOCAL_RUNTIME_REQUIRED: Select Codex or Claude Code.');
+          }
+          if (!this.localRuntime?.isDeviceConnected(input.codeSource.deviceId)) {
+            throw new BadRequestException('LOCAL_RUNTIME_UNAVAILABLE: Device is not connected.');
+          }
+        } else if (input.codeSource.deviceId) {
+          throw new BadRequestException('Server GitHub Session must not include deviceId.');
+        }
+      } else if (input.codeSource?.kind === 'local_directory') {
+        if (input.executionLocation === 'server' || input.workingDirectory?.kind === 'server_local') {
+          throw new BadRequestException('LOCAL_DIRECTORY_REQUIRES_LOCAL_RUNTIME');
+        }
+        if (input.workingDirectory?.kind !== 'local_bridge') {
+          throw new BadRequestException('LOCAL_DIRECTORY_REQUIRES_WORKSPACE');
+        }
+      } else if (input.codeSource !== undefined) {
+        throw new BadRequestException('CODE_SOURCE_INVALID');
+      }
+      const workspaceBinding = remoteSource
+        ? { workingDirectory: undefined, workspaceContext: undefined }
+        : await this.resolveWorkspaceBinding(input);
+      const workspaceId = remoteSource ? `github-session:${sessionId}`
+        : workspaceBinding.workingDirectory?.id ?? 'default-workspace';
       const leaseAcquired = await this.persistence.acquireWorkspaceSessionLease(workspaceId, sessionId);
       if (!leaseAcquired) {
         throw new ConflictException(`Workspace ${workspaceId} is already bound to an active session. Only one session per workspace is allowed.`);
@@ -1795,7 +2031,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       intentRoutingGeneration: 'v2',
       title: this.titleFromInput(input.input),
       originalInput: input.input,
-      status: 'AGENT_DISCUSSING',
+      status: remoteSource ? 'WAIT_SOURCE_PREPARATION' : 'AGENT_DISCUSSING',
       ownerId: 'local-user',
       workspaceId,
       projectId: input.projectId,
@@ -1803,6 +2039,25 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       autopilotRunId: input.autopilotRunId,
       knowledgeBaseIds: input.knowledgeBaseIds ?? [],
       workingDirectory: workspaceBinding.workingDirectory,
+      codeSource: remoteSource
+        ? { kind: 'remote_repository', provider: 'github', repositoryUrl: remoteSource.repositoryUrl,
+            ...(input.codeSource?.kind === 'remote_repository' && input.codeSource.deviceId
+              ? { deviceId: input.codeSource.deviceId } : {}) }
+        : input.codeSource?.kind === 'local_directory' ? { kind: 'local_directory' } : undefined,
+      executionLocation: input.executionLocation ?? (input.workingDirectory?.kind === 'local_bridge' ? 'local' : 'server'),
+      sourceBinding: remoteSource ? {
+        sessionId,
+        provider: 'github',
+        repositoryUrl: remoteSource.repositoryUrl,
+        repositoryId: remoteSource.repositoryId,
+        executionLocation: input.executionLocation!,
+        ...(input.codeSource?.kind === 'remote_repository' && input.codeSource.deviceId
+          ? { deviceId: input.codeSource.deviceId } : {}),
+        state: 'awaiting_auth',
+        version: 1,
+        createdAt: now,
+        updatedAt: now
+      } : undefined,
       workspaceContext: workspaceBinding.workspaceContext,
       runtimePreference: this.normalizeRuntimePreference(input.runtimePreference),
       tokenBudget: input.tokenBudget,
@@ -1844,12 +2099,157 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
       await this.contextManagement?.ensureInitialWorkItem(session, firstEvent.id, input.input);
 
-      this.generateBriefInBackground(session);
+      if (canStartSessionAgent(session)) this.generateBriefInBackground(session);
 
       return { session, firstEvent };
     } finally {
       workspaceMetrics.observe('session_create_duration_ms', Date.now() - startedAt);
     }
+  }
+
+  updateDeliveryRecord(sessionId: string, expectedVersion: number,
+    next: DeliveryRecord): DeliveryRecord {
+    const session = this.get(sessionId);
+    if (!session.delivery || session.delivery.version !== expectedVersion ||
+        next.sessionId !== sessionId || next.version <= expectedVersion) {
+      throw new ConflictException('GITHUB_DELIVERY_VERSION_CONFLICT');
+    }
+    session.delivery = structuredClone(next);
+    this.touchSession(session);
+    return session.delivery;
+  }
+
+  registerDeliveryReadyListener(listener: (sessionId: string, version: number) => void): void {
+    this.deliveryReadyListener = listener;
+  }
+
+  updateServerSourcePreparation(
+    sessionId: string,
+    expectedVersion: number,
+    update: Partial<Pick<SourceBinding,
+      'state' | 'authorizationRef' | 'repositoryId' | 'cacheKey' | 'workspaceId' |
+      'defaultBranch' | 'errorCode'>>
+  ): SourceBinding {
+    const session = this.get(sessionId);
+    const current = session.sourceBinding;
+    if (session.codeSource?.kind !== 'remote_repository' || current?.executionLocation !== 'server') {
+      throw new ConflictException('GITHUB_SERVER_SOURCE_REQUIRED');
+    }
+    if (current.version !== expectedVersion || current.state === 'ready') {
+      throw new ConflictException('SOURCE_PREPARATION_VERSION_CONFLICT');
+    }
+    const next: SourceBinding = { ...current, ...update, version: current.version + 1,
+      updatedAt: nowIso() };
+    session.sourceBinding = next;
+    session.updatedAt = next.updatedAt;
+    this.persist();
+    return next;
+  }
+
+  updateLocalSourcePreparation(
+    sessionId: string,
+    expectedVersion: number,
+    update: Partial<Pick<SourceBinding,
+      'state' | 'authorizationRef' | 'repositoryId' | 'cacheKey' | 'workspaceId' |
+      'defaultBranch' | 'errorCode'>>
+  ): SourceBinding {
+    const session = this.get(sessionId);
+    const current = session.sourceBinding;
+    if (session.codeSource?.kind !== 'remote_repository' || current?.executionLocation !== 'local') {
+      throw new ConflictException('GITHUB_LOCAL_SOURCE_REQUIRED');
+    }
+    if (current.version !== expectedVersion || current.state === 'ready') {
+      throw new ConflictException('SOURCE_PREPARATION_VERSION_CONFLICT');
+    }
+    const next: SourceBinding = { ...current, ...update, version: current.version + 1,
+      updatedAt: nowIso() };
+    session.sourceBinding = next;
+    session.updatedAt = next.updatedAt;
+    this.persist();
+    return next;
+  }
+
+  async completeLocalSourcePreparation(
+    sessionId: string, expectedVersion: number,
+    prepared: { workspaceId: string; cacheKey: string; baseBranch: string; baseSha: string }
+  ): Promise<SourceBinding> {
+    const session = this.get(sessionId);
+    const current = session.sourceBinding;
+    if (session.codeSource?.kind !== 'remote_repository' || current?.executionLocation !== 'local' ||
+        current.state !== 'awaiting_base_branch' || current.version !== expectedVersion ||
+        !current.deviceId || !current.authorizationRef ||
+        current.workspaceId !== prepared.workspaceId || current.cacheKey !== prepared.cacheKey) {
+      throw new ConflictException('SOURCE_PREPARATION_VERSION_CONFLICT');
+    }
+    const registration = this.localRuntime?.getWorkspace(prepared.workspaceId);
+    const runtimeType = session.runtimePreference?.preferredRuntimeType;
+    if (!registration || registration.deviceId !== current.deviceId || !runtimeType ||
+        !this.localRuntime?.isRuntimeAvailable(prepared.workspaceId, runtimeType)) {
+      throw new ServiceUnavailableException('GITHUB_LOCAL_WORKSPACE_UNAVAILABLE');
+    }
+    const workingDirectory: SessionWorkingDirectory = {
+      kind: 'local_bridge', id: prepared.workspaceId,
+      name: registration.displayName, selectedAt: nowIso()
+    };
+    if (session.sourceBinding?.version !== expectedVersion) {
+      throw new ConflictException('SOURCE_PREPARATION_VERSION_CONFLICT');
+    }
+    session.sourceBinding = { ...current, state: 'ready',
+      baseBranch: prepared.baseBranch, baseSha: prepared.baseSha,
+      version: current.version + 1, updatedAt: nowIso() };
+    session.workingDirectory = workingDirectory;
+    session.workspaceContext = { binding: {
+      workspaceId: registration.workspaceId, providerKind: 'local_bridge',
+      displayName: registration.displayName, capabilities: registration.capabilities,
+      boundRevision: registration.revision, boundAt: nowIso()
+    }, indexComplete: registration.index?.complete ?? false,
+    ...(registration.index ? { indexGeneration: registration.index.generation,
+      indexRevision: registration.index.revision } : {}) };
+    session.status = 'AGENT_DISCUSSING';
+    session.updatedAt = nowIso();
+    this.persist();
+    this.generateBriefInBackground(session);
+    return session.sourceBinding;
+  }
+
+  async completeServerSourcePreparation(
+    sessionId: string, expectedVersion: number,
+    prepared: { workspaceId: string; workspacePath: string; cacheKey: string;
+      baseBranch: string; baseSha: string }
+  ): Promise<SourceBinding> {
+    const session = this.get(sessionId);
+    const current = session.sourceBinding;
+    if (session.codeSource?.kind !== 'remote_repository' || current?.executionLocation !== 'server' ||
+        current.state !== 'awaiting_base_branch' || current.version !== expectedVersion ||
+        !current.authorizationRef || current.workspaceId !== prepared.workspaceId ||
+        current.cacheKey !== prepared.cacheKey) {
+      throw new ConflictException('SOURCE_PREPARATION_VERSION_CONFLICT');
+    }
+    const workingDirectory: SessionWorkingDirectory = {
+      kind: 'server_local', id: prepared.workspaceId,
+      name: session.codeSource.repositoryUrl.replace('https://github.com/', ''),
+      path: prepared.workspacePath, selectedAt: nowIso()
+    };
+    const provider = this.workspaceProviders?.resolveWorkingDirectory(workingDirectory);
+    if (!provider) throw new ServiceUnavailableException('GITHUB_WORKSPACE_PROVIDER_UNAVAILABLE');
+    const revision = await provider.getRevision();
+    if (session.sourceBinding?.version !== expectedVersion) {
+      throw new ConflictException('SOURCE_PREPARATION_VERSION_CONFLICT');
+    }
+    session.sourceBinding = { ...current, state: 'ready',
+      baseBranch: prepared.baseBranch, baseSha: prepared.baseSha,
+      version: current.version + 1, updatedAt: nowIso() };
+    session.workingDirectory = workingDirectory;
+    session.workspaceContext = { binding: {
+      workspaceId: prepared.workspaceId, providerKind: 'server_local',
+      displayName: workingDirectory.name, capabilities: provider.capabilities(),
+      boundRevision: revision, boundAt: nowIso()
+    }, indexComplete: false };
+    session.status = 'AGENT_DISCUSSING';
+    session.updatedAt = nowIso();
+    this.persist();
+    this.generateBriefInBackground(session);
+    return session.sourceBinding;
   }
 
   private async resolveWorkspaceBinding(input: CreateSessionInput) {
@@ -1944,6 +2344,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   }
 
   private generateBriefInBackground(session: SessionDetail) {
+    if (!canStartSessionAgent(session)) return;
     const lifecycleGeneration = this.lifecycle.generation(session.id);
     if (!this.lifecycle.isActive(session.id, lifecycleGeneration)) return;
     const generationSeq = (this.briefGenerationSeqBySession.get(session.id) ?? 0) + 1;
@@ -1969,11 +2370,6 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         }
         session.currentTaskBriefId = brief.id;
         this.setStatus(session, 'WAIT_USER_CONFIRM');
-        if (session.origin === 'autopilot') {
-          void this.confirmBrief(session.id, brief.id).catch((error) =>
-            this.failSessionWithFullError(session, error, 'autopilot_auto_confirm')
-          );
-        }
       })
       .catch((error) => {
         if (controller.signal.aborted || this.deletingSessionIds.has(session.id) ||
@@ -1999,8 +2395,32 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     directives?: GroupChatMessageDirectives
   ) {
     const session = this.get(sessionId);
+    if (!canStartSessionAgent(session)) throw new ConflictException('SOURCE_PREPARATION_REQUIRED');
     const replay = this.findMessageReplay(session, clientMessageId);
-    if (replay) return replay;
+    if (replay) {
+      const control = parseRuntimeControlIntent(replay.event.content);
+      if (control?.kind === 'switch' && clientMessageId) {
+        await this.switchRuntime(sessionId, { ...control.input, idempotencyKey: clientMessageId.trim() }, control.source);
+      }
+      return replay;
+    }
+    const runtimeControl = parseRuntimeControlIntent(content);
+    if (runtimeControl) {
+      const handlingPlan: UserMessageHandlingPlan = { intent: 'command', requirementRelation: 'continuation',
+        failedExecutionAction: 'none', priority: 'high', shouldPause: false, affectedTaskIds: [], affectedAgentIds: [],
+        requiresBriefRevision: false, requiresUserConfirmation: runtimeControl.kind === 'clarify',
+        coordinatorInstruction: '处理 Runtime 执行控制，不修改业务需求。' };
+      const event = this.events.create({ sessionId, type: 'user_message', sessionUserId: session.ownerId,
+        userMessageIntent: 'command', priority: 'high', content, metadata: {
+          ...createMetadata('chat_message', { text: content, handlingPlan, runtimeControl }),
+          ...(clientMessageId ? { idempotencyKey: this.messageIdempotencyKey(sessionId, clientMessageId) } : {}) } });
+      if (runtimeControl.kind === 'switch') {
+        await this.switchRuntime(sessionId, { ...runtimeControl.input, idempotencyKey: clientMessageId?.trim() ?? event.id }, runtimeControl.source);
+      } else this.events.create({ sessionId, type: 'runtime_progress', content: runtimeControl.message,
+        metadata: createMetadata('system_notice', { code: 'RUNTIME_SWITCH_CLARIFICATION_REQUIRED' }) });
+      return { event, handlingPlan, deferred: false as const, followUpMessageId: undefined,
+        routingId: undefined, routingStatus: undefined, idempotentReplay: false as const };
+    }
     const attachmentRefs = this.resolveMessageAttachmentRefs(session.id, attachmentIds);
     const normalizedDirectives = this.normalizeMessageDirectives(session, directives, attachmentRefs);
     if (normalizedDirectives?.agents.length) {
@@ -2446,7 +2866,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       this.events.create({
         sessionId: session.id,
         type: 'follow_up_queued',
-        content: 'Message saved; intent recognition will retry after the context snapshot is available.',
+        content: '消息已保存，上下文快照就绪后将重试意图识别。',
         metadata: createMetadata('system_notice', {
           routingId: routing.id,
           followUpMessageId: followUp.id,
@@ -3808,12 +4228,73 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
   }
 
-  async confirmBrief(sessionId: string, briefId: string, confirmationId?: string) {
+  async confirmBrief(
+    sessionId: string,
+    briefId: string,
+    confirmationId?: string,
+    input: { allowOpenQuestions?: boolean } = {}
+  ) {
     const session = this.get(sessionId);
     if (session.currentTaskBriefId !== briefId) {
       throw new BadRequestException(`Brief is not current: ${briefId}`);
     }
-    const resolvedConfirmationId = confirmationId ?? this.findPendingConfirmationId(
+    const currentBrief = this.orchestrator.getBrief(sessionId, briefId);
+    if (!currentBrief) {
+      throw new BadRequestException(`Brief not found: ${briefId}`);
+    }
+    const allowOpenQuestions = input.allowOpenQuestions === true;
+    const revisionAttempts = countBriefRevisionAttempts(
+      this.events.list(sessionId),
+      typeof this.orchestrator.listBriefs === 'function'
+        ? this.orchestrator.listBriefs(sessionId)
+        : [currentBrief],
+      currentBrief
+    );
+    const maxRevisionAttempts = briefRevisionMaxAttempts();
+    const canProceedWithOpenQuestions = currentBrief.openQuestions.length > 0 && revisionAttempts >= maxRevisionAttempts;
+    let resolvedConfirmationId = confirmationId;
+    if (confirmationId && this.isConfirmationApproved(sessionId, confirmationId)) {
+      const current = this.orchestrator.getBrief(sessionId, briefId);
+      if (current) return current;
+    }
+    let request = confirmationId
+      ? this.assertPendingConfirmation(sessionId, confirmationId, 'confirm_task_brief')
+      : undefined;
+    const requestOptions = ((request?.metadata.payload as {
+      options?: Array<{ key?: string }>;
+    } | undefined)?.options ?? []);
+    const hasExplicitOpenQuestionOverride = requestOptions.some(
+      (option) => option.key === PROCEED_WITH_OPEN_QUESTIONS_OPTION
+    );
+    // Older persisted confirmation cards predate the explicit risk-acceptance
+    // option and only expose "approve". Once the durable revision budget is
+    // exhausted, treating that legacy approval as the risk acceptance keeps an
+    // existing session recoverable without weakening the pre-limit guard.
+    const legacyOpenQuestionApproval = currentBrief.openQuestions.length > 0 &&
+      canProceedWithOpenQuestions && !allowOpenQuestions && !hasExplicitOpenQuestionOverride;
+    const effectiveAllowOpenQuestions = allowOpenQuestions || legacyOpenQuestionApproval;
+    if (allowOpenQuestions && currentBrief.openQuestions.length === 0) {
+      throw new BadRequestException('allowOpenQuestions is only valid when the current Brief has open questions.');
+    }
+    if (currentBrief.openQuestions.length && !effectiveAllowOpenQuestions) {
+      throw new ConflictException({
+        code: 'brief_has_open_questions',
+        message: '任务契约仍有待确认问题，请先修订并解决全部问题。',
+        briefId,
+        openQuestions: [...currentBrief.openQuestions]
+      });
+    }
+    if (currentBrief.openQuestions.length && !canProceedWithOpenQuestions) {
+      throw new ConflictException({
+        code: 'brief_revision_limit_not_reached',
+        message: '只有达到任务契约修订上限后，才能在明确接受风险的前提下继续。',
+        briefId,
+        revisionAttempts,
+        maxRevisionAttempts,
+        openQuestions: [...currentBrief.openQuestions]
+      });
+    }
+    resolvedConfirmationId ??= this.findPendingConfirmationId(
       sessionId,
       'confirm_task_brief',
       (payload) => payload.relatedBriefId === briefId
@@ -3827,10 +4308,21 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       const current = this.orchestrator.getBrief(sessionId, briefId);
       if (current) return current;
     }
-    const request = this.assertPendingConfirmation(sessionId, resolvedConfirmationId, 'confirm_task_brief');
+    request ??= this.assertPendingConfirmation(sessionId, resolvedConfirmationId, 'confirm_task_brief');
+    if (allowOpenQuestions) {
+      const options = ((request.metadata.payload as { options?: Array<{ key?: string }> } | undefined)?.options ?? []);
+      if (!options.some((option) => option.key === PROCEED_WITH_OPEN_QUESTIONS_OPTION)) {
+        throw new ConflictException({
+          code: 'brief_open_questions_override_unavailable',
+          message: '当前确认卡没有提供“保留未决问题并继续”选项，请使用最新确认卡。',
+          briefId,
+          openQuestions: [...currentBrief.openQuestions]
+        });
+      }
+    }
     const binding = this.documentBindingFromCard(session, resolvedConfirmationId, request.metadata.payload);
     if (binding) this.assertConfirmationCurrent(session, binding);
-    const brief = this.orchestrator.confirmBrief(session, briefId);
+    const brief = this.orchestrator.confirmBrief(session, briefId, { allowOpenQuestions: effectiveAllowOpenQuestions });
     if (binding) {
       const confirmed = await this.requirementDocuments.confirm(binding.documentId, { confirmationId: resolvedConfirmationId });
       if (confirmed.status === 'rejected') {
@@ -3848,13 +4340,18 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         sessionId,
         type: 'user_confirmation_resolved',
         sessionUserId: session.ownerId,
-        content: '任务契约已确认并写入决策账本。',
+         content: effectiveAllowOpenQuestions
+           ? '用户确认保留未决问题风险并继续执行，决定已写入决策账本。'
+          : '任务契约已确认并写入决策账本。',
         metadata: createMetadata('system_notice', {
           confirmationId: resolvedConfirmationId,
           relatedBriefId: brief.id,
           workItemId: activeWorkItem.id,
           status: 'approved',
-          reason: 'confirm_task_brief'
+          reason: 'confirm_task_brief',
+           selectedOptionKey: effectiveAllowOpenQuestions ? PROCEED_WITH_OPEN_QUESTIONS_OPTION : 'approve',
+           riskAccepted: effectiveAllowOpenQuestions,
+           ...(effectiveAllowOpenQuestions ? { openQuestions: [...brief.openQuestions] } : {})
         })
       });
       await this.contextManagement.recordConfirmedDecisions({
@@ -3863,10 +4360,10 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         sourceEvent: confirmationEvent,
         decisions: [
           { kind: 'requirement', content: brief.goal },
-          ...(brief.scope.length ? [{ kind: 'constraint' as const, content: `In scope: ${brief.scope.join('; ')}` }] : []),
-          ...(brief.outOfScope.length ? [{ kind: 'constraint' as const, content: `Out of scope: ${brief.outOfScope.join('; ')}` }] : []),
+          ...(brief.scope.length ? [{ kind: 'constraint' as const, content: `任务范围：${brief.scope.join('; ')}` }] : []),
+          ...(brief.outOfScope.length ? [{ kind: 'constraint' as const, content: `不在任务范围内：${brief.outOfScope.join('; ')}` }] : []),
           ...brief.constraints.map((content) => ({ kind: 'constraint' as const, content })),
-          { kind: 'approval', content: `Task Brief ${brief.id} version ${brief.version} confirmed by user.` }
+          { kind: 'approval', content: `用户已确认任务契约 ${brief.id}，版本 ${brief.version}。` }
         ]
       });
       this.events.acceptCommitted(confirmationEvent);
@@ -3875,12 +4372,17 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         sessionId,
         type: 'user_confirmation_resolved',
         sessionUserId: session.ownerId,
-        content: '任务契约已确认。',
+         content: effectiveAllowOpenQuestions
+           ? '用户确认保留未决问题风险并继续执行。'
+          : '任务契约已确认。',
         metadata: createMetadata('system_notice', {
           confirmationId: resolvedConfirmationId,
           relatedBriefId: brief.id,
           status: 'approved',
-          reason: 'confirm_task_brief'
+          reason: 'confirm_task_brief',
+           selectedOptionKey: effectiveAllowOpenQuestions ? PROCEED_WITH_OPEN_QUESTIONS_OPTION : 'approve',
+           riskAccepted: effectiveAllowOpenQuestions,
+           ...(effectiveAllowOpenQuestions ? { openQuestions: [...brief.openQuestions] } : {})
         })
       });
     }
@@ -4337,9 +4839,42 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       userMessage?: string;
       confirmationId?: string;
       assignedAgentKeys?: string[];
+      questionAnswers?: Array<{ question: string; answer: string }>;
     } = {}
   ) {
+    const key = `${sessionId}:${briefId}:${input.confirmationId ?? 'pending'}`;
+    const pending = this.briefRevisionSubmissions.get(key);
+    if (pending) return pending;
+    const submission = this.reviseBriefOnce(sessionId, briefId, input);
+    this.briefRevisionSubmissions.set(key, submission);
+    try {
+      return await submission;
+    } finally {
+      if (this.briefRevisionSubmissions.get(key) === submission) this.briefRevisionSubmissions.delete(key);
+    }
+  }
+
+  private async reviseBriefOnce(
+    sessionId: string,
+    briefId: string,
+    input: {
+      reason?: string;
+      userMessage?: string;
+      confirmationId?: string;
+      assignedAgentKeys?: string[];
+      questionAnswers?: Array<{ question: string; answer: string }>;
+    }
+  ) {
     const session = this.get(sessionId);
+    if (input.confirmationId && this.events.list(sessionId).some((event) =>
+      event.type === 'user_confirmation_resolved' &&
+      (event.metadata.payload as { confirmationId?: string; selectedOptionKey?: string } | undefined)?.confirmationId === input.confirmationId &&
+      ['revise', 'revise_directed'].includes(
+        (event.metadata.payload as { selectedOptionKey?: string } | undefined)?.selectedOptionKey ?? ''
+      )
+    )) {
+      return { accepted: true, sessionId, status: session.status };
+    }
     if (session.currentTaskBriefId !== briefId) {
       throw new BadRequestException(`Brief is not current: ${briefId}`);
     }
@@ -4348,17 +4883,88 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       throw new BadRequestException(`Brief not found: ${briefId}`);
     }
 
+    const revisionAttempts = countBriefRevisionAttempts(
+      this.events.list(sessionId),
+      typeof this.orchestrator.listBriefs === 'function'
+        ? this.orchestrator.listBriefs(sessionId)
+        : [brief],
+      brief
+    );
+    const maxRevisionAttempts = briefRevisionMaxAttempts();
+    if (revisionAttempts >= maxRevisionAttempts) {
+      throw new ConflictException({
+        code: 'brief_revision_limit_reached',
+        message: '任务契约修订次数已达上限，请确认当前方案或明确接受未决问题风险后继续。',
+        briefId,
+        revisionAttempts,
+        maxRevisionAttempts,
+        openQuestions: [...brief.openQuestions]
+      });
+    }
+
+    const confirmationId = input.confirmationId ?? this.findPendingConfirmationId(
+      sessionId, 'confirm_task_brief', (payload) => payload.relatedBriefId === briefId
+    );
+    if (!confirmationId) throw new BadRequestException(`Task Brief confirmation is missing: ${briefId}`);
+    const request = this.assertPendingConfirmation(sessionId, confirmationId, 'confirm_task_brief');
+    if ((request.metadata.payload as { relatedBriefId?: string } | undefined)?.relatedBriefId !== briefId) {
+      throw new BadRequestException('Confirmation card does not match this Brief.');
+    }
+    const binding = this.documentBindingFromCard(session, confirmationId, request.metadata.payload);
+    if (binding) this.assertConfirmationCurrent(session, binding);
+
+    const priorAnswers = session.activeWorkItemId && this.contextManagement
+      ? this.contextManagement.validDecisions(session.id, session.activeWorkItemId)
+        .filter((decision) => decision.question && decision.answer)
+        .map((decision) => ({ question: decision.question!, answer: decision.answer! }))
+      : [];
+    const availableQuestions = new Map([
+      ...brief.openQuestions.map((question) => [briefQuestionKey(question), question] as const),
+      ...priorAnswers.map(({ question }) => [briefQuestionKey(question), question] as const)
+    ]);
+    const questionAnswers = (input.questionAnswers ?? []).map(({ question, answer }) => ({
+      question: question?.trim() ?? '', answer: answer?.trim() ?? ''
+    }));
+    const answeredKeys = new Set<string>();
+    for (const item of questionAnswers) {
+      const key = briefQuestionKey(item.question);
+      if (!key || !item.answer || !availableQuestions.has(key) || answeredKeys.has(key)) {
+        throw new BadRequestException('Each answer must identify one current or previously answered Brief question exactly once.');
+      }
+      answeredKeys.add(key);
+      item.question = availableQuestions.get(key)!;
+    }
+    const priorKeys = new Set(priorAnswers.map((item) => briefQuestionKey(item.question)));
+    const unanswered = brief.openQuestions.filter((question) => {
+      const key = briefQuestionKey(question);
+      return !answeredKeys.has(key) && !priorKeys.has(key);
+    });
+    if (unanswered.length) {
+      throw new ConflictException({
+        code: 'brief_question_answers_required',
+        message: '请先逐一回答当前未决问题。',
+        openQuestions: unanswered
+      });
+    }
+    if (questionAnswers.length && !this.contextManagement) {
+      throw new ConflictException('Decision ledger is unavailable; revision answers were not accepted.');
+    }
+
     const submittedContent = (input.userMessage || input.reason || '用户要求修改当前任务契约。').trim();
+    const answersByQuestion = new Map(priorAnswers.map((item) => [briefQuestionKey(item.question), item]));
+    for (const item of questionAnswers) answersByQuestion.set(briefQuestionKey(item.question), item);
+    const revisionMarkdown = answersByQuestion.size
+      ? `${normalizeDiscussionMarkdown(submittedContent)}\n\n## 已确认问题与回答\n${[...answersByQuestion.values()]
+        .map((item) => `- 问题：${item.question}\n  回答：${item.answer}`).join('\n')}`
+      : normalizeDiscussionMarkdown(submittedContent);
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
     const canPublishDiscussionDocument = Boolean(session.workingDirectory && this.discussionDocuments);
     const activeDocument = canPublishDiscussionDocument ? this.discussionDocuments?.active(session.id) : undefined;
     const discussionDocument = canPublishDiscussionDocument && this.discussionDocuments
       ? await this.discussionDocuments.create(session, {
           title: `任务契约修订 v${brief.version + 1}`,
-          content: normalizeDiscussionMarkdown(submittedContent),
-          clientMessageId: input.confirmationId?.trim()
-            ? `brief-revision:${briefId}:${input.confirmationId.trim()}`
-            : `brief-revision:${briefId}:${crypto.createHash('sha256').update(normalizeDiscussionMarkdown(submittedContent)).digest('hex')}`,
+          content: revisionMarkdown,
+          clientMessageId: `brief-revision:${briefId}:${confirmationId}`,
           ...(activeDocument ? { parentDocumentId: activeDocument.id } : {}),
           ...(session.activeWorkItemId ? { workItemId: session.activeWorkItemId } : {}),
           createdBy: 'user'
@@ -4366,25 +4972,13 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       : undefined;
     const content = discussionDocument
       ? this.discussionDocumentReference(discussionDocument)
-      : submittedContent;
+      : revisionMarkdown;
 
-    // P1 分流:指定 Agent 定向修订 vs 全量重跑
-    if (input.assignedAgentKeys && input.assignedAgentKeys.length > 0) {
-      return this.reviseBriefDirected(
-        session,
-        brief,
-        content,
-        input.confirmationId,
-        input.assignedAgentKeys,
-        discussionDocument
-      );
-    }
-
-    const userEvent = this.events.create({
+    const revisionEventInput = {
       sessionId,
-      type: 'user_message',
-      userMessageIntent: 'correction',
-      priority: 'high',
+      type: 'user_message' as const,
+      userMessageIntent: 'correction' as const,
+      priority: 'high' as const,
       content,
       toAgentIds: [coordinator.id],
       metadata: createMetadata('chat_message', {
@@ -4398,14 +4992,46 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
           discussionDocumentHash: discussionDocument.contentHash
         } : {})
       })
-    });
+    };
+    const checkpointAnswers = questionAnswers.length > 0 && Boolean(this.contextManagement);
+    const userEvent = checkpointAnswers
+      ? this.events.createDraft(revisionEventInput)
+      : this.events.create(revisionEventInput);
+    if (questionAnswers.length && this.contextManagement) {
+      const workItem = await this.contextManagement.ensureInitialWorkItem(session, userEvent.id, brief.goal);
+      await this.contextManagement.recordConfirmedDecisions({
+        session,
+        workItemId: workItem.id,
+        sourceEvent: userEvent,
+        decisions: questionAnswers.map(({ question, answer }) => ({
+          kind: 'requirement' as const,
+          question,
+          answer,
+          content: `问题：${question}\n回答：${answer}`
+        }))
+      });
+      this.events.acceptCommitted(userEvent);
+    }
+
+    // P1 分流:指定 Agent 定向修订 vs 全量重跑
+    if (input.assignedAgentKeys && input.assignedAgentKeys.length > 0) {
+      return this.reviseBriefDirected(
+        session,
+        brief,
+        content,
+        confirmationId,
+        input.assignedAgentKeys,
+        discussionDocument,
+        userEvent
+      );
+    }
 
     this.events.create({
       sessionId,
       type: 'user_confirmation_resolved',
       content: '用户选择修改当前任务契约。',
       metadata: createMetadata('system_notice', {
-        confirmationId: input.confirmationId,
+        confirmationId,
         status: 'rejected',
         selectedOptionKey: 'revise',
         relatedBriefId: briefId
@@ -4419,6 +5045,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       content: '当前任务契约已进入修订，Coordinator 将基于用户修改重新组织讨论。',
       metadata: createMetadata('system_notice', {
         briefId,
+        ...(session.activeWorkItemId ? { workItemId: session.activeWorkItemId } : {}),
         reason: content,
         coordinatorAgentId: coordinator.id,
         ...(discussionDocument ? {
@@ -4451,7 +5078,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     userModification: string,
     confirmationId: string | undefined,
     assignedAgentKeys: string[],
-    discussionDocument?: DiscussionDocumentView
+    discussionDocument?: DiscussionDocumentView,
+    userEvent?: CollaborationEvent
   ) {
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
 
@@ -4461,7 +5089,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       ? this.discussionDocumentReference(discussionDocument)
       : userModification;
 
-    const userEvent = this.events.create({
+    userEvent ??= this.events.create({
       sessionId: session.id,
       type: 'user_message',
       userMessageIntent: 'correction',
@@ -4501,6 +5129,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       content: `当前任务契约已进入定向修订，指定的 ${assignedAgentKeys.length} 个 Agent 将审阅用户修改，最后由 Coordinator 定稿。`,
       metadata: createMetadata('system_notice', {
         briefId: brief.id,
+        ...(session.activeWorkItemId ? { workItemId: session.activeWorkItemId } : {}),
         reason: safeModification,
         coordinatorAgentId: coordinator.id,
         assignedAgentKeys,
@@ -4669,7 +5298,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       this.events.create({
         sessionId,
         type: 'work_item_activated',
-        content: `Activated task context: ${activated.title}`,
+        content: `已切换到任务上下文：${activated.title}`,
         metadata: createMetadata('system_notice', {
           workItemId: activated.id,
           previousWorkItemId,
@@ -4738,11 +5367,17 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       followUp.mentionedAgentIds,
       {
         discussionRequired,
-        requirementRelation: followUp.handlingPlan.requirementRelation
+        requirementRelation: followUp.handlingPlan.requirementRelation,
+        requiresUserConfirmation: followUp.handlingPlan.requiresUserConfirmation
       }
     );
     if (!this.lifecycle.isActive(sessionId, lifecycleGeneration)) return;
     session.currentTaskBriefId = brief.id;
+    if (brief.openQuestions.length || followUp.handlingPlan.requiresUserConfirmation) {
+      await this.completeFollowUpRouting(session, followUp.id);
+      this.setStatus(session, 'WAIT_USER_CONFIRM');
+      return;
+    }
     followUp.status = 'executing';
     await this.contextManagement?.saveFollowUp(sessionId, followUp);
     this.setStatus(session, 'EXECUTING');
@@ -4850,6 +5485,11 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   /** Applied when the background execution pipeline finishes. */
   applyOutcome(sessionId: string, outcome: ExecutionOutcome, expectedGeneration?: number) {
     const session = this.sessions.get(sessionId);
+    if (outcome.kind === 'cancelled' && outcome.termination?.kind === 'runtime_switch') {
+      const request = this.runtimeSwitches.store.unresolved(sessionId)[0];
+      if (request?.timing === 'after_step') void this.runtimeSwitches.advance(request).catch(error => this.logger.warn(String(error)));
+      return;
+    }
     if (
       !session ||
       !this.lifecycle.isActive(sessionId, expectedGeneration) ||
@@ -5165,7 +5805,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
           ref: path
         })),
         requestedFiles: action.missingPaths.map((path) => ({ path })),
-        followUpInstruction: 'Load the requested workspace files and retry Post Review with grounded evidence.'
+        followUpInstruction: '请读取请求的工作区文件，再基于实际证据重试复盘。'
       };
       const resolution = await this.orchestrator.hydrateSupplementalContext(session, requestedContext);
       session.supplementalContextRequests = [
@@ -5196,13 +5836,13 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       });
       if (resolution.hydratedPaths.length) {
         this.setStatus(session, 'EXECUTING');
-        this.resumeExecution(session);
+        this.resumePostReviewPipeline(session);
       } else {
         this.touchSession(session);
       }
     } else if (action.action === 'deliver_with_limitations') {
       this.setStatus(session, 'EXECUTING');
-      this.resumeExecution(session);
+      this.resumePostReviewPipeline(session);
     } else if (action.action === 'save_progress') {
       this.touchSession(session);
     } else {
@@ -5513,8 +6153,16 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     return { session };
   }
 
-  async pause(sessionId: string, reason = '用户已停止会话', confirmationId?: string) {
+  async pause(sessionId: string, reason = '用户已停止会话', confirmationId?: string,
+    terminationKind: 'user_paused' | 'runtime_switch' = 'user_paused') {
     const session = this.get(sessionId);
+    if (terminationKind === 'user_paused') {
+      for (const request of this.runtimeSwitches.store.unresolved(sessionId)) {
+        const stopped = await this.runtimeSwitches.store.transition(request.id, 'failed', { error: {
+          code: 'RUNTIME_SWITCH_USER_PAUSED', message: '用户已暂停，待处理的 Runtime 切换已停止。', retryable: false } });
+        if (stopped.status !== 'rejected') this.announceRuntimeSwitch(stopped.request);
+      }
+    }
     const admission = await this.lifecycle.closeForStop(sessionId, session.dataEpoch);
     if (admission.event) this.events.acceptCommitted(admission.event);
     const alreadyPaused = session.status === 'PAUSED';
@@ -5531,10 +6179,10 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
 
     const termination = createExecutionTermination({
-      kind: 'user_paused',
+      kind: terminationKind,
       source: 'user',
       scope: 'session',
-      diagnosticRef: 'session_paused'
+      diagnosticRef: terminationKind === 'runtime_switch' ? 'runtime_switch' : 'session_paused'
     });
     this.cancelIntentRoutingRetries(sessionId);
     this.intentRoutingControllers.get(sessionId)?.abort(termination);
@@ -5594,6 +6242,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
   async resume(sessionId: string, reason = '用户已继续会话', confirmationId?: string) {
     const session = this.get(sessionId);
+    if (!canStartSessionAgent(session)) throw new ConflictException('SOURCE_PREPARATION_REQUIRED');
     const history = this.events.list(sessionId);
     const pending = this.pendingConfirmationContext(sessionId);
     if (confirmationId) {
@@ -6225,12 +6874,13 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     if (this.applyWorkItemBudgetExhaustion(session, runtimeError)) return;
     if (this.pauseForLocalRuntimeConfirmation(session, runtimeError, phase)) return;
     const message = runtimeError?.message ?? (error instanceof Error ? error.message : String(error));
+    const publicMessage = localizeSystemError(message, runtimeError?.code);
     this.setStatus(session, 'FAILED');
     this.events.create({
       sessionId: session.id,
       type: 'session_status_changed',
       priority: 'high',
-      content: `会话在${messages.phaseLabel(phase)}阶段失败：${message}`,
+      content: `会话在${messages.phaseLabel(phase)}阶段失败：${publicMessage}`,
       metadata: createMetadata('system_notice', {
         status: 'FAILED',
         phase,
@@ -6242,7 +6892,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       sessionId: session.id,
       type: 'error_reported',
       priority: 'high',
-      content: message,
+      content: publicMessage,
       metadata: createMetadata('error_card', {
         phase,
         message,
@@ -6253,7 +6903,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     this.createRecoveryConfirmation(session, checkpoint, {
       content: '当前执行失败，可以从保留的检查点重试。',
       title: '执行失败',
-      description: `${message}\n继续时会重试当前阶段，不会重放已经完成的步骤。`
+      description: `${publicMessage}\n继续时会重试当前阶段，不会重放已经完成的步骤。`
     });
   }
 
@@ -6268,12 +6918,13 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     const effectivePhase = runtimePhase ?? phase;
     const phaseLabel = messages.phaseLabel(effectivePhase);
     const fullMessage = `会话在${phaseLabel}阶段失败：${message}`;
+    const publicMessage = `会话在${phaseLabel}阶段失败：${localizeSystemError(message, runtimeError?.code)}`;
     this.setStatus(session, 'FAILED');
     this.events.create({
       sessionId: session.id,
       type: 'session_status_changed',
       priority: 'high',
-      content: fullMessage,
+      content: publicMessage,
       metadata: createMetadata('system_notice', {
         status: 'FAILED',
         phase: effectivePhase,
@@ -6287,7 +6938,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       sessionId: session.id,
       type: 'error_reported',
       priority: 'high',
-      content: fullMessage,
+      content: publicMessage,
       metadata: createMetadata('error_card', {
         phase: effectivePhase,
         phaseLabel,
@@ -6300,7 +6951,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     this.createRecoveryConfirmation(session, checkpoint, {
       content: '当前执行失败，可以从保留的检查点重试。',
       title: '执行失败',
-      description: `${fullMessage}\n继续时会重试当前阶段，不会重放已经完成的步骤。`
+      description: `${publicMessage}\n继续时会重试当前阶段，不会重放已经完成的步骤。`
     });
   }
 
@@ -7213,6 +7864,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   }
 
   private resumeExecution(session: SessionDetail) {
+    if (!canStartSessionAgent(session)) return;
     const lifecycleGeneration = this.lifecycle.generation(session.id);
     if (!this.lifecycle.isActive(session.id, lifecycleGeneration)) return;
     if (!session.currentTaskBriefId) {
@@ -7253,6 +7905,27 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     const unfinishedTasks = this.tasks.unfinished(session.id, session.activeWorkItemId);
     this.execution.start(session, brief, unfinishedTasks,
       (outcome) => this.applyOutcome(session.id, outcome, lifecycleGeneration), lifecycleGeneration);
+  }
+
+  private resumePostReviewPipeline(session: SessionDetail) {
+    const lifecycleGeneration = this.lifecycle.generation(session.id);
+    if (!this.lifecycle.isActive(session.id, lifecycleGeneration)) return;
+    if (!session.currentTaskBriefId) {
+      this.applyOutcome(session.id, { kind: 'ask_user', reason: messages.resumeBriefMissing });
+      return;
+    }
+    const brief = this.orchestrator.getBrief(session.id, session.currentTaskBriefId);
+    if (!brief) {
+      this.applyOutcome(session.id, { kind: 'ask_user', reason: messages.resumeBriefMissing });
+      return;
+    }
+    this.execution.start(
+      session,
+      brief,
+      [],
+      (outcome) => this.applyOutcome(session.id, outcome, lifecycleGeneration),
+      lifecycleGeneration
+    );
   }
 
   private recoverWorkspaceWritebackState(session: SessionDetail) {
@@ -7325,16 +7998,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   }
 
   private normalizeRuntimePreference(input?: RuntimePreference): RuntimePreference | undefined {
-    if (!input) return undefined;
-    const preferredRuntimeType = isRuntimeType(input.preferredRuntimeType) ? input.preferredRuntimeType : undefined;
-    const allowedRuntimeTypes = Array.from(new Set((input.allowedRuntimeTypes ?? []).filter(isRuntimeType)));
-    const preferredModelId = input.preferredModelId?.trim() || undefined;
-    const preference = {
-      ...(preferredRuntimeType ? { preferredRuntimeType } : {}),
-      ...(preferredModelId ? { preferredModelId } : {}),
-      ...(allowedRuntimeTypes.length ? { allowedRuntimeTypes } : {})
-    };
-    return Object.keys(preference).length ? preference : undefined;
+    return normalizeRuntimePreference(input);
   }
 
   private assertCurrentSchema(session: SessionDetail) {
@@ -7470,11 +8134,11 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         return preferred;
       }
     }
-    const fallback = agents[0];
-    if (!fallback) {
-      throw new Error(messages.noAvailableAgent);
+    const coordinator = catalog.findSystemByKey?.('coordinator');
+    if (coordinator && (coordinator.status === undefined || coordinator.status === 'active')) {
+      return coordinator;
     }
-    return fallback;
+    throw new Error(messages.noAvailableAgent);
   }
 
   savePendingInvocation(sessionId: string, invocation: PendingInvocation) {

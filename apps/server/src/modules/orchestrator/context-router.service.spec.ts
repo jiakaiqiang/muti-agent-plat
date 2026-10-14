@@ -128,6 +128,18 @@ test('WorkItem-scoped routing uses the current goal instead of the legacy Sessio
   assert.doesNotMatch(taskContext.evidenceSelection.query, /支付模块/);
 });
 
+test('context-router role fallbacks use the system main Agent for missing specialists', () => {
+  const router = new ContextRouterService() as any;
+
+  const responsibilities = router.createAgentResponsibilities([], 'coding', false);
+
+  assert.deepEqual(responsibilities, [
+    { role: 'execution', agentKey: 'coordinator' },
+    { role: 'validation', agentKey: 'coordinator', independentFrom: [] },
+    { role: 'review', agentKey: 'coordinator', independentFrom: [] }
+  ]);
+});
+
 test('architecture routing selects file candidates from the Provider index without a Snapshot', () => {
   const indexedSession: SessionDetail = {
     ...session(),

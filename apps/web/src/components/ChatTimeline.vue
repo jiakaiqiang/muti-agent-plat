@@ -2,8 +2,14 @@
 import { computed, reactive, watch } from 'vue'
 import ChatScrollArea from './ChatScrollArea.vue'
 import { apiGetText } from '@/api/client'
+import { onBeforeUnmount } from 'vue'
+import { DocumentCache } from '@/utils/documentCache'
+import BoundedText from '@/components/BoundedText.vue'
 import { useAgentStore } from '@/stores/agent'
 import { actorAgentId } from '@/composables/useActor'
+import { formatDateTime } from '@/utils/dateTime'
+import { chatMessageText } from '@/utils/userFacingCopy'
+import { localizeBuiltInNotice, localizeSystemError } from '@agent-cluster/shared'
 import type {
   ArtifactEventPayload,
   ChatMessage,
@@ -40,7 +46,10 @@ const emit = defineEmits<{
 
 const agentStore = useAgentStore()
 const timeline = computed(() => collapseDuplicateFailureMessages(props.messages))
-type DiscussionDocumentState = { status: 'loading' | 'loaded' | 'failed'; content?: string; error?: string }
+const documentCache = new DocumentCache()
+let documentAbort = new AbortController()
+onBeforeUnmount(() => documentAbort.abort())
+type DiscussionDocumentState = { cacheKey?: string; status: 'loading' | 'loaded' | 'failed'; content?: string; error?: string }
 const discussionDocuments = reactive<Record<string, DiscussionDocumentState>>({})
 let discussionDocumentGeneration = 0
 let discussionDocumentSessionId: string | undefined
@@ -59,30 +68,47 @@ async function sha256Hex(content: string) {
 function loadDiscussionDocument(message: ChatMessage, generation: number) {
   const payload = discussionDocumentPayload(message)
   const contentUrl = payload?.contentUrl
-  if (!contentUrl || discussionDocuments[message.id]?.status === 'loaded' || discussionDocuments[message.id]?.status === 'loading') return
-  discussionDocuments[message.id] = { status: 'loading' }
-  apiGetText(contentUrl)
+  const cacheKey = message.sessionId + ':' + contentUrl + ':' + (payload?.contentHash ?? '')
+  const previous = discussionDocuments[message.id]
+  if (!contentUrl || (previous?.cacheKey === cacheKey && (previous.status === 'loaded' || previous.status === 'loading'))) return
+  const cached = documentCache.get(cacheKey)
+  if (cached !== undefined) { discussionDocuments[message.id] = { status: 'loaded', content: cached, cacheKey }; return }
+  discussionDocuments[message.id] = { status: 'loading', cacheKey }
+  const signal = documentAbort.signal
+  apiGetText(contentUrl, { signal })
     .then(async (content) => {
       if (payload?.contentHash && await sha256Hex(content) !== payload.contentHash) {
         throw new Error('方案文档内容校验失败，请刷新后重试。')
       }
-      if (generation === discussionDocumentGeneration) discussionDocuments[message.id] = { status: 'loaded', content }
+      if (!signal.aborted && generation === discussionDocumentGeneration && discussionDocuments[message.id]?.cacheKey === cacheKey) {
+        documentCache.set(cacheKey, message.sessionId, content)
+        discussionDocuments[message.id] = { status: 'loaded', content, cacheKey }
+      }
     })
     .catch((error) => {
-      if (generation === discussionDocumentGeneration) discussionDocuments[message.id] = { status: 'failed', error: error instanceof Error ? error.message : '文档加载失败' }
+      if (!signal.aborted && generation === discussionDocumentGeneration && discussionDocuments[message.id]?.cacheKey === cacheKey) discussionDocuments[message.id] = { status: 'failed', cacheKey, error: error instanceof Error ? error.message : '文档加载失败' }
     })
 }
 
 watch(timeline, (messages) => {
   const sessionId = props.sessionId ?? messages[0]?.sessionId
   if (sessionId !== discussionDocumentSessionId) {
+    documentAbort.abort()
+    documentAbort = new AbortController()
     discussionDocumentSessionId = sessionId
     discussionDocumentGeneration += 1
     for (const key of Object.keys(discussionDocuments)) delete discussionDocuments[key]
   }
-  const generation = discussionDocumentGeneration
-  messages.filter((message) => message.messageType === 'discussion_document').forEach((message) => loadDiscussionDocument(message, generation))
 }, { immediate: true })
+
+function loadVisibleDocuments(messages: ChatMessage[]) {
+  const visibleIds = new Set(messages.map(message => message.id))
+  for (const id of Object.keys(discussionDocuments)) {
+    if (!visibleIds.has(id) && discussionDocuments[id].status !== 'loading') delete discussionDocuments[id]
+  }
+  messages.filter(message => message.messageType === 'discussion_document')
+    .forEach(message => loadDiscussionDocument(message, discussionDocumentGeneration))
+}
 
 function collapseDuplicateFailureMessages(messages: ChatMessage[]) {
   const seenFailureKeys = new Set<string>()
@@ -770,11 +796,12 @@ function yesNo(value?: boolean) {
 </script>
 
 <template>
-  <ChatScrollArea :reading-key="`web-task-reading:${sessionId ?? messages[0]?.sessionId ?? ''}`" :message-count="messages.length" :status="status" :disconnected="disconnected">
+  <ChatScrollArea :reading-key="`web-task-reading:${sessionId ?? messages[0]?.sessionId ?? ''}`" :message-count="messages.length" :status="status" :disconnected="disconnected" :messages="timeline" v-slot="{ visibleMessages, messageStyle }" @visible="loadVisibleDocuments">
     <article
-      v-for="message in timeline"
+      v-for="message in visibleMessages"
       :key="message.id"
       :data-message-id="message.id"
+      :style="messageStyle?.(message.id)"
       class="timeline-item"
       :class="[message.senderType, message.messageType]"
     >
@@ -782,7 +809,7 @@ function yesNo(value?: boolean) {
       <div class="message-bubble">
         <header class="message-header">
           <strong>{{ senderLabel(message) }}</strong>
-          <span>{{ new Date(message.createdAt).toLocaleTimeString() }}</span>
+          <span>{{ formatDateTime(message.createdAt) }}</span>
         </header>
 
         <ConfirmationCard
@@ -822,6 +849,7 @@ function yesNo(value?: boolean) {
             <div><dt>主 Agent</dt><dd>{{ discussionDocumentPayload(message)?.readStatus === 'completed' ? '已读取' : discussionDocumentPayload(message)?.readStatus === 'failed' ? `读取失败：${discussionDocumentPayload(message)?.readErrorCode ?? '未知错误'}` : '正在读取' }}</dd></div>
           </dl>
           <p v-if="discussionDocuments[message.id]?.status === 'failed'" class="error-text">{{ discussionDocuments[message.id]?.error }}</p>
+          <BoundedText v-else-if="discussionDocuments[message.id]?.status === 'loaded' && (discussionDocuments[message.id]?.content?.length ?? 0) > 32000" :content="discussionDocuments[message.id]?.content ?? ''" />
           <pre v-else-if="discussionDocuments[message.id]?.status === 'loaded'" class="discussion-document-content">{{ discussionDocuments[message.id]?.content }}</pre>
           <p v-else class="muted-text">正在加载方案 Markdown...</p>
         </section>
@@ -830,9 +858,10 @@ function yesNo(value?: boolean) {
           <div v-if="discussionRound(message)" class="discussion-message-meta">
             第 {{ discussionRound(message) }} 轮 · {{ messageKindLabel(message) ?? 'Agent 讨论' }}
           </div>
-          <div class="message-content message-document">
+          <BoundedText v-if="chatMessageText(message).length > 32000" :content="chatMessageText(message)" />
+          <div v-else class="message-content message-document">
             <section
-              v-for="(block, blockIndex) in messageDocumentBlocks(message.content)"
+              v-for="(block, blockIndex) in messageDocumentBlocks(chatMessageText(message))"
               :key="`${message.id}:content-block:${blockIndex}`"
               class="message-document__section"
             >
@@ -855,7 +884,7 @@ function yesNo(value?: boolean) {
             <summary>查看 {{ message.payload?.collapsedStopReceiptCount }} 次停止回执时间</summary>
             <ul>
               <li v-for="time in (message.payload?.collapsedStopReceiptTimes as string[])" :key="time">
-                {{ new Date(time).toLocaleString() }}
+                {{ formatDateTime(time) }}
               </li>
             </ul>
           </details>
@@ -948,11 +977,11 @@ function yesNo(value?: boolean) {
             <dl>
               <div v-if="requestedContextPayload(message)?.reason">
                 <dt>原因</dt>
-                <dd>{{ requestedContextPayload(message)?.reason }}</dd>
+                <dd>{{ localizeBuiltInNotice(requestedContextPayload(message)?.reason ?? '') }}</dd>
               </div>
               <div v-if="requestedContextPayload(message)?.followUpInstruction">
                 <dt>下一步指令</dt>
-                <dd>{{ requestedContextPayload(message)?.followUpInstruction }}</dd>
+                <dd>{{ localizeBuiltInNotice(requestedContextPayload(message)?.followUpInstruction ?? '') }}</dd>
               </div>
             </dl>
             <div v-if="requestedContextRefs(message).length" class="context-request-list">
@@ -1009,7 +1038,7 @@ function yesNo(value?: boolean) {
               </div>
               <div>
                 <dt>错误</dt>
-                <dd>{{ errorText(message, 'message') || runtimeErrorPayload(message)?.message || message.content }}</dd>
+                <dd>{{ localizeSystemError(errorText(message, 'message') || runtimeErrorPayload(message)?.message || message.content, errorText(message, 'code') || runtimeErrorPayload(message)?.code) }}</dd>
               </div>
             </dl>
             <dl v-if="runtimeErrorPayload(message)" class="runtime-error-contract">
@@ -1122,7 +1151,7 @@ function yesNo(value?: boolean) {
                 {{ recommendationLabel(String(reviewPayload(message)?.recommendation ?? 'running')) }}
               </span>
             </div>
-            <p>{{ message.content }}</p>
+            <p>{{ chatMessageText(message) }}</p>
             <ul>
               <li v-for="item in listFromPayload(message, 'matchedItems')" :key="`matched-${String(item)}`">
                 {{ item }}

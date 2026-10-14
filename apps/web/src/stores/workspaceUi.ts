@@ -1,6 +1,13 @@
 import { ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import type { RuntimeType } from '@/types/contracts'
+import type { GroupChatAgentRef, GroupChatAttachmentRef, GroupChatSkillRef } from '@agent-cluster/shared'
+
+export type ComposerDraftState = {
+  attachments: (GroupChatAttachmentRef & { previewUrl?: string; sourceFile?: File })[]
+  skill?: GroupChatSkillRef
+  agents: GroupChatAgentRef[]
+}
 
 export type WorkspaceKind = 'local_bridge' | 'server_local'
 export type WorkspaceBindingStatus = 'idle' | 'binding' | 'bound' | 'failed'
@@ -29,6 +36,9 @@ export const useWorkspaceUiStore = defineStore('workspaceUi', () => {
   const sessionSearchQuery = ref('')
   const messageDraft = ref('')
   const draftsByTask = new Map<string, string>()
+  const composerDrafts = new Map<string, ComposerDraftState>()
+  function saveComposerDraft(id: string, draft: ComposerDraftState) { composerDrafts.set(id, draft) }
+  function getComposerDraft(id: string) { return composerDrafts.get(id) }
   let draftTaskId = ''
   function activateTask(taskId: string) {
     if (draftTaskId === taskId) return
@@ -186,6 +196,8 @@ export const useWorkspaceUiStore = defineStore('workspaceUi', () => {
     sessionSearchQuery,
     messageDraft,
     activateTask,
+    saveComposerDraft,
+    getComposerDraft,
     selectedWorkflowStage,
     showCreateSessionDialog,
     showCreateConfirmDialog,

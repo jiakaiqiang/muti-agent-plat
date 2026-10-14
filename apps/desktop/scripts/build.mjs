@@ -23,7 +23,13 @@ await build({
   outdir: resolve(desktop, 'dist'), outExtension: { '.js': '.cjs' },
   bundle: true, platform: 'node', format: 'cjs', target: 'node22',
   external: ['electron', 'electron-updater'],
-  alias: { '@agent-cluster/shared': resolve(root, 'packages/shared/src/index.ts') },
+  plugins: [{ name: 'shared-source', setup(context) {
+    context.onResolve({ filter: /^@agent-cluster\/shared(?:\/node\/[a-z-]+)?$/ }, ({ path }) => ({
+      path: path === '@agent-cluster/shared'
+        ? resolve(root, 'packages/shared/src/index.ts')
+        : resolve(root, 'packages/shared/src', `${path.slice('@agent-cluster/shared/'.length)}.ts`)
+    }));
+  } }],
   define: { '__LOCAL_RUNTIME_VERSION__': JSON.stringify(runtimeVersion) }
 });
 const updateUrl = process.env.AGENT_CLUSTER_UPDATE_URL?.trim() || '';

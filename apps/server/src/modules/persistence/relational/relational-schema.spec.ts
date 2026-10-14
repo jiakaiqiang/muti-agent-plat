@@ -30,10 +30,17 @@ import {
   RELATIONAL_SCHEMA_V15_SQL,
   RELATIONAL_SCHEMA_V16_SQL,
   RELATIONAL_SCHEMA_V17_SQL,
+  RELATIONAL_SCHEMA_V18_SQL,
+  RELATIONAL_SCHEMA_V19_SQL,
+  RELATIONAL_SCHEMA_V20_SQL,
+  RELATIONAL_SCHEMA_V21_SQL,
   RELATIONAL_SCHEMA_V14_TABLES,
   RELATIONAL_SCHEMA_V15_TABLES,
   RELATIONAL_SCHEMA_V16_TABLES,
   RELATIONAL_SCHEMA_V17_TABLES,
+  RELATIONAL_SCHEMA_V19_TABLES,
+  RELATIONAL_SCHEMA_V20_TABLES,
+  RELATIONAL_SCHEMA_V21_TABLES,
   RELATIONAL_TABLES,
   SCHEMA_MIGRATIONS_TABLE
 } from './relational-schema.js';
@@ -55,7 +62,10 @@ test('every relational table and column has a non-empty Chinese explanation', ()
     ...RELATIONAL_SCHEMA_V14_TABLES,
     ...RELATIONAL_SCHEMA_V15_TABLES,
     ...RELATIONAL_SCHEMA_V16_TABLES,
-    ...RELATIONAL_SCHEMA_V17_TABLES
+    ...RELATIONAL_SCHEMA_V17_TABLES,
+    ...RELATIONAL_SCHEMA_V19_TABLES,
+    ...RELATIONAL_SCHEMA_V20_TABLES,
+    ...RELATIONAL_SCHEMA_V21_TABLES
   ];
   assert.ok(definitions.length >= 35, 'expected the complete relational domain schema');
 
@@ -80,8 +90,14 @@ test('rendered migration emits COMMENT statements for every declared table and c
     const prefix = expected.column ? 'comment on column' : 'comment on table';
     assert.ok(`${sql}\n${RELATIONAL_SCHEMA_V8_SQL}\n${RELATIONAL_SCHEMA_V9_SQL}\n${RELATIONAL_SCHEMA_V10_SQL}\n${RELATIONAL_SCHEMA_V11_SQL}\n${RELATIONAL_SCHEMA_V12_SQL}
 ${RELATIONAL_SCHEMA_V13_SQL}\n${RELATIONAL_SCHEMA_V14_SQL}\n${RELATIONAL_SCHEMA_V15_SQL}
-${RELATIONAL_SCHEMA_V16_SQL}\n${RELATIONAL_SCHEMA_V17_SQL}`.includes(`${prefix} agent_cluster.${target} is `), `missing rendered SQL comment: ${target}`);
+${RELATIONAL_SCHEMA_V16_SQL}\n${RELATIONAL_SCHEMA_V17_SQL}\n${RELATIONAL_SCHEMA_V18_SQL}\n${RELATIONAL_SCHEMA_V19_SQL}\n${RELATIONAL_SCHEMA_V20_SQL}\n${RELATIONAL_SCHEMA_V21_SQL}`.includes(`${prefix} agent_cluster.${target} is `), `missing rendered SQL comment: ${target}`);
   }
+});
+
+test('OAuth callback state has a dedicated expiring PostgreSQL projection', () => {
+  assert.match(RELATIONAL_SCHEMA_V20_SQL, /create table if not exists agent_cluster\.github_oauth_states/);
+  assert.match(RELATIONAL_SCHEMA_V20_SQL, /state_hash text primary key/);
+  assert.match(RELATIONAL_SCHEMA_V20_SQL, /expires_at timestamptz not null/);
 });
 
 test('v6 migration adds WorkItem ownership to memories without rewriting v5', () => {
@@ -130,4 +146,36 @@ test('all external identity tables use text external IDs instead of forcing UUID
     const externalId = definition.columns.find((column) => column.name === 'external_id');
     assert.match(externalId?.sql ?? '', /^text\b/);
   }
+});
+
+test('v18 migration persists one in-flight Runtime switch request per Session', () => {
+  assert.match(RELATIONAL_SCHEMA_V18_SQL, /create table if not exists agent_cluster\.runtime_switch_requests/);
+  // The unique logical key is what makes a replayed POST one request rather than
+  // a second stop barrier; the partial index is what stops two concurrent
+  // switches from racing the same preference write (AC8).
+  assert.match(RELATIONAL_SCHEMA_V18_SQL, /logical_key text not null unique/);
+  assert.match(RELATIONAL_SCHEMA_V18_SQL, /runtime_switch_requests_active_idx/);
+  assert.match(RELATIONAL_SCHEMA_V18_SQL, /where status not in \('completed','failed'\)/);
+  // The version backs both the event idempotency key and client convergence, so
+  // it may never be absent or zero.
+  assert.match(RELATIONAL_SCHEMA_V18_SQL, /version bigint not null check \(version > 0\)/);
+  // A switch must outlive a restart with its stop evidence and generation fence.
+  assert.match(RELATIONAL_SCHEMA_V18_SQL, /stop_request_external_id text/);
+  assert.match(RELATIONAL_SCHEMA_V18_SQL, /lifecycle_generation integer/);
+  assert.match(RELATIONAL_SCHEMA_V18_SQL, /failure_stage text/);
+});
+
+test('v18 does not rewrite the change-request table it follows', () => {
+  assert.doesNotMatch(RELATIONAL_SCHEMA_V18_SQL, /agent_cluster\.change_requests/);
+  assert.doesNotMatch(RELATIONAL_SCHEMA_V18_SQL, /drop table/i);
+  assert.doesNotMatch(RELATIONAL_SCHEMA_V18_SQL, /alter table agent_cluster\.sessions/);
+});
+
+test('v19 stores GitHub source, delivery, conflict and encrypted authorization separately', () => {
+  for (const table of ['github_source_bindings', 'github_deliveries', 'github_conflicts', 'github_authorizations']) {
+    assert.match(RELATIONAL_SCHEMA_V19_SQL, new RegExp(`create table if not exists agent_cluster\\.${table}`));
+  }
+  assert.match(RELATIONAL_SCHEMA_V19_SQL, /secret_envelope text/);
+  assert.match(RELATIONAL_SCHEMA_V19_SQL, /version bigint not null check \(version > 0\)/);
+  assert.doesNotMatch(RELATIONAL_SCHEMA_V19_SQL, /alter table agent_cluster\.sessions/);
 });

@@ -35,7 +35,7 @@ export function canResumeRuntime(state, serverUrl, env = process.env) {
 // Owned by the independent runtime process, so restarting Web/server cannot spawn another one.
 export async function acquireRuntimeLock(path, alive = pid => {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code !== 'ESRCH'; }
-}) {
+}, metadata = {}) {
   for (let attempt = 0; attempt < 2; attempt++) {
     let handle;
     try { handle = await open(path, 'wx'); }
@@ -48,7 +48,7 @@ export async function acquireRuntimeLock(path, alive = pid => {
       await unlink(path).catch(error => { if (error.code !== 'ENOENT') throw error; });
       continue;
     }
-    await handle.writeFile(JSON.stringify({ pid: process.pid }));
+    await handle.writeFile(JSON.stringify({ pid: process.pid, ...metadata }));
     await handle.close();
     return async () => {
       const owner = JSON.parse(await readFile(path, 'utf8').catch(() => '{}'));
@@ -97,7 +97,15 @@ export async function launchDevLocalRuntime({ serverUrl, env = process.env, spaw
 
 async function runWorker(serverUrl) {
   const report = result => { if (process.connected) process.send(result); };
-  const release = await acquireRuntimeLock(runtimeStatePath() + '.dev.lock');
+  const lockPath = runtimeStatePath() + '.dev.lock';
+  const { LOCAL_RUNTIME_PROTOCOL_VERSION } = await import('../packages/shared/src/local-runtime-contracts.ts');
+  const expectedProtocolVersion = Number(LOCAL_RUNTIME_PROTOCOL_VERSION);
+  const existing = await readRuntimeLock(lockPath);
+  if (existing && existing.pid !== process.pid && isProcessAlive(existing.pid)
+    && existing.protocolVersion !== expectedProtocolVersion) {
+    await terminateManagedRuntime(existing.pid);
+  }
+  const release = await acquireRuntimeLock(lockPath, undefined, { protocolVersion: expectedProtocolVersion });
   if (!release) { report({ state: 'existing', reason: 'Existing launcher retained; it reconnects when the backend is ready.' }); return; }
   try {
     const { loadState, saveState } = await import('../packages/local-runtime-cli/src/state.ts');
@@ -121,6 +129,32 @@ async function runWorker(serverUrl) {
       }
     });
   } finally { await release(); }
+}
+
+async function readRuntimeLock(path) {
+  try {
+    const value = JSON.parse(await readFile(path, 'utf8'));
+    return Number.isInteger(value?.pid) && value.pid > 0 ? value : undefined;
+  } catch { return undefined; }
+}
+
+function isProcessAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+async function terminateManagedRuntime(pid) {
+  try { process.kill(pid, 'SIGTERM'); } catch { return; }
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && isProcessAlive(pid)) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  if (isProcessAlive(pid) && process.platform === 'win32') {
+    await new Promise(resolve => {
+      const child = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+      child.once('exit', resolve);
+      child.once('error', resolve);
+    });
+  }
 }
 
 export async function resumeSavedDevice(state, { saveState, env = process.env, request = fetch }) {

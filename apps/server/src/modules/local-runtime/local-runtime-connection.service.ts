@@ -7,7 +7,7 @@ import {
   RequestTimeoutException,
   ServiceUnavailableException
 } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import type {
@@ -18,9 +18,18 @@ import type {
   ExecutionTermination,
   InvocationPlan,
   LocalRuntimeCapabilityRefreshResult,
+  LocalGitHubAuthorizationAction,
+  LocalGitHubAuthorizationResult,
+  LocalGitHubAuthorizationSummary,
+  LocalGitHubSourceAction,
+  LocalGitHubSourceResult,
+  LocalGitHubDeliveryAction,
+  LocalGitHubDeliveryResult,
   LocalRuntimeCapabilityStatus,
   LocalRuntimeClientMessage,
   LocalRuntimeHello,
+  LocalRuntimeInvocationProbe,
+  LocalRuntimeInvocationProbeResult,
   LocalRuntimePermission,
   LocalRuntimePermissionPolicy,
   LocalRuntimeProviderConnectionInput,
@@ -33,9 +42,10 @@ import type {
   LocalRuntimeWorkspaceRegistration,
   LocalRuntimeWorkspaceSummary,
   RuntimeType,
-  WorkspaceCapabilityKey
+  WorkspaceCapabilityKey,
+  WorkspaceChangeSet
 } from '@agent-cluster/shared';
-import { createAgentMessageOutput, usefulRuntimeActivity, runtimeActivityKind } from '@agent-cluster/shared';
+import { canonicalWorkspaceChangeSetJson, createAgentMessageOutput, usefulRuntimeActivity, runtimeActivityKind, normalizeGitHubRepositoryUrl } from '@agent-cluster/shared';
 import { WebSocket, WebSocketServer } from 'ws';
 import { Subject } from 'rxjs';
 import {
@@ -122,6 +132,32 @@ type PendingWorkspacePermissionGrant = {
 type PendingProviderConnection = {
   deviceId: string;
   resolve: (connection: LocalRuntimeProviderConnectionSummary) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+type PendingGitHubAuthorization = {
+  deviceId: string;
+  repositoryUrl: string;
+  action: LocalGitHubAuthorizationAction['action'];
+  resolve: (authorization: LocalGitHubAuthorizationSummary | undefined) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+type PendingGitHubSource = {
+  deviceId: string;
+  sessionId: string;
+  action: LocalGitHubSourceAction['action'];
+  resolve: (result: LocalGitHubSourceResult) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+type PendingGitHubDelivery = {
+  deviceId: string;
+  sessionId: string;
+  resolve: (result: LocalGitHubDeliveryResult) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 };
@@ -218,6 +254,9 @@ export class LocalRuntimeConnectionService {
   private readonly pendingWorkspaceAuthorizations = new Map<string, PendingWorkspaceAuthorization>();
   private readonly pendingWorkspacePermissionGrants = new Map<string, PendingWorkspacePermissionGrant>();
   private readonly pendingProviderConnections = new Map<string, PendingProviderConnection>();
+  private readonly pendingGitHubAuthorizations = new Map<string, PendingGitHubAuthorization>();
+  private readonly pendingGitHubSources = new Map<string, PendingGitHubSource>();
+  private readonly pendingGitHubDeliveries = new Map<string, PendingGitHubDelivery>();
   private readonly pendingCapabilityRefreshes = new Map<string, PendingCapabilityRefresh>();
   private readonly operationAudits: LocalRuntimeOperationAudit[];
   private readonly interruptionSubject = new Subject<{
@@ -339,8 +378,12 @@ export class LocalRuntimeConnectionService {
 
   grantWorkspacePermissionOnce(
     workspaceId: string,
-    permission: LocalRuntimePermission
+    permission: LocalRuntimePermission,
+    writeback?: WorkspaceChangeSet
   ): Promise<LocalRuntimeWorkspaceSummary> {
+    if (writeback && permission !== 'workspace_delete') {
+      throw new BadRequestException('Only workspace_delete may bind a writeback result.');
+    }
     const workspace = this.workspaces.get(workspaceId);
     if (!workspace) throw new ServiceUnavailableException('Local Runtime 工作区未连接。');
     const client = this.clientsByDeviceId.get(workspace.deviceId);
@@ -363,7 +406,9 @@ export class LocalRuntimeConnectionService {
       });
       this.send(client, {
         kind: 'local_runtime.workspace.permission.grant.request',
-        payload: { requestId, workspaceId, permission, scope: 'once' }
+        payload: { requestId, workspaceId, permission, scope: 'once',
+          ...(writeback ? { writeback: { changeSetId: writeback.id,
+            digest: createHash('sha256').update(canonicalWorkspaceChangeSetJson(writeback)).digest('hex') } } : {}) }
       });
     });
   }
@@ -378,7 +423,77 @@ export class LocalRuntimeConnectionService {
   }
 
   isDeviceConnected(deviceId: string) {
-    return this.clientsByDeviceId.get(deviceId)?.socket.readyState === WebSocket.OPEN;
+    const client = this.clientsByDeviceId.get(deviceId);
+    return Boolean(client?.hello && client.socket.readyState === WebSocket.OPEN);
+  }
+
+  isGitHubDeviceReady(deviceId: string, workspaceId: string) {
+    return this.isDeviceConnected(deviceId) && this.heartbeats.status(workspaceId) === 'online';
+  }
+
+  requestGitHubAuthorization(
+    deviceId: string,
+    request: { repositoryUrl: string } & LocalGitHubAuthorizationAction
+  ): Promise<LocalGitHubAuthorizationSummary | undefined> {
+    const client = this.clientsByDeviceId.get(deviceId);
+    if (!client?.hello || client.socket.readyState !== WebSocket.OPEN) {
+      throw new ServiceUnavailableException('LOCAL_RUNTIME_UNAVAILABLE');
+    }
+    const repositoryUrl = normalizeGitHubRepositoryUrl(request.repositoryUrl).repositoryUrl;
+    const requestId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingGitHubAuthorizations.delete(requestId);
+        reject(new RequestTimeoutException('GITHUB_LOCAL_AUTHORIZATION_TIMEOUT'));
+      }, 60_000);
+      this.pendingGitHubAuthorizations.set(requestId, {
+        deviceId, repositoryUrl, action: request.action, resolve, reject, timer
+      });
+      this.send(client, { kind: 'local_runtime.github.authorization.request',
+        payload: { ...request, repositoryUrl, requestId } });
+    });
+  }
+
+  requestGitHubSource(deviceId: string, action: LocalGitHubSourceAction): Promise<LocalGitHubSourceResult> {
+    const client = this.clientsByDeviceId.get(deviceId);
+    if (!client?.hello || client.socket.readyState !== WebSocket.OPEN) {
+      throw new ServiceUnavailableException('LOCAL_RUNTIME_UNAVAILABLE');
+    }
+    const requestId = randomUUID();
+    const normalized = action.action === 'prepare'
+      ? { ...action, repositoryUrl: normalizeGitHubRepositoryUrl(action.repositoryUrl).repositoryUrl }
+      : action;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingGitHubSources.delete(requestId);
+        reject(new RequestTimeoutException('GITHUB_LOCAL_SOURCE_TIMEOUT'));
+      }, 180_000);
+      this.pendingGitHubSources.set(requestId, {
+        deviceId, sessionId: action.sessionId, action: action.action, resolve, reject, timer
+      });
+      this.send(client, { kind: 'local_runtime.github.source.request',
+        payload: { ...normalized, requestId } });
+    });
+  }
+
+  requestGitHubDelivery(deviceId: string,
+    action: LocalGitHubDeliveryAction): Promise<LocalGitHubDeliveryResult> {
+    const client = this.clientsByDeviceId.get(deviceId);
+    if (!client?.hello || client.socket.readyState !== WebSocket.OPEN) {
+      throw new ServiceUnavailableException('LOCAL_RUNTIME_UNAVAILABLE');
+    }
+    const requestId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingGitHubDeliveries.delete(requestId);
+        reject(new RequestTimeoutException('GITHUB_LOCAL_DELIVERY_TIMEOUT'));
+      }, 960_000);
+      this.pendingGitHubDeliveries.set(requestId, {
+        deviceId, sessionId: action.sessionId, resolve, reject, timer
+      });
+      this.send(client, { kind: 'local_runtime.github.delivery.request',
+        payload: { ...action, requestId } });
+    });
   }
 
   upsertProviderConnection(deviceId: string, connection: LocalRuntimeProviderConnectionInput): Promise<LocalRuntimeProviderConnectionSummary> {
@@ -467,6 +582,33 @@ export class LocalRuntimeConnectionService {
     const workspaceId = plan.contextEnvelope.L0.workspace.workspaceId;
     const workspace = this.workspaces.get(workspaceId);
     return workspace ? { deviceId: workspace.deviceId, workspaceId, runtimeType: plan.executionTarget.runtimeType } : undefined;
+  }
+
+  isInvocationConnected(plan: InvocationPlan) {
+    const binding = this.invocationBinding(plan);
+    return Boolean(binding && this.isDeviceConnected(binding.deviceId));
+  }
+
+  private readonly invocationProbes = new Map<string, { request: LocalRuntimeInvocationProbe; clientId: string;
+    timer: NodeJS.Timeout; resolve: (value: LocalRuntimeInvocationProbeResult | undefined) => void }>();
+
+  probeInvocation(plan: InvocationPlan): Promise<LocalRuntimeInvocationProbeResult | undefined> {
+    const binding = this.invocationBinding(plan);
+    const client = binding ? this.clientsByDeviceId.get(binding.deviceId) : undefined;
+    if (!binding || !client || client.hello?.requestHealthProtocol !== 1 || !plan.requestHealth) return Promise.resolve(undefined);
+    if (this.invocationProbes.size >= 32 || [...this.invocationProbes.values()].some(p => p.request.invocationId === plan.invocationId)) return Promise.resolve(undefined);
+    const request: LocalRuntimeInvocationProbe = { ...plan.requestHealth, ...binding, requestId: randomUUID() };
+    return new Promise(resolve => {
+      const timer = setTimeout(() => { this.invocationProbes.delete(request.requestId); resolve(undefined); },
+        positiveRuntimeTimeoutMs('RUNTIME_PROBE_RESPONSE_TIMEOUT_MS', 5_000));
+      this.invocationProbes.set(request.requestId, { request, clientId: client.clientId, resolve, timer });
+      this.send(client, { kind: 'local_runtime.invocation.probe', payload: request });
+    });
+  }
+
+  supportsInvocationProbe(plan: InvocationPlan) {
+    const binding = this.invocationBinding(plan);
+    return Boolean(binding && this.clientsByDeviceId.get(binding.deviceId)?.hello?.requestHealthProtocol === 1);
   }
 
   startInvocation(plan: InvocationPlan): AgentRuntimeRunHandle {
@@ -575,10 +717,12 @@ export class LocalRuntimeConnectionService {
       try {
         this.handleMessage(client, JSON.parse(data.toString()) as LocalRuntimeClientMessage);
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
         this.send(client, {
           kind: 'local_runtime.protocol.error',
-          payload: { code: 'LOCAL_RUNTIME_PROTOCOL_ERROR', message: error instanceof Error ? error.message : String(error) }
+          payload: { code: 'LOCAL_RUNTIME_PROTOCOL_ERROR', message }
         });
+        if (!client.hello) this.closeIncompatibleClient(client, 'LOCAL_RUNTIME_PROTOCOL_ERROR', message);
       }
     });
     socket.on('close', () => this.detachClient(client));
@@ -586,8 +730,49 @@ export class LocalRuntimeConnectionService {
   }
 
   private handleMessage(client: LocalRuntimeClient, message: LocalRuntimeClientMessage) {
+    if (message.kind === 'local_runtime.invocation.probe.result') {
+      const response = message.payload;
+      const pending = this.invocationProbes.get(response.requestId);
+      if (!pending || pending.clientId !== client.clientId || pending.request.deviceId !== client.deviceId ||
+        (['deviceId', 'workspaceId', 'sessionId', 'operationId', 'invocationId', 'sessionGeneration', 'observerEpoch'] as const)
+          .some(key => pending.request[key] !== response[key]) ||
+        !['ok', 'unsupported'].includes(response.status) || !['alive', 'exited', 'unknown'].includes(response.processStatus) ||
+        !['pending', 'receiving', 'ended', 'unknown'].includes(response.requestStatus)) return;
+      clearTimeout(pending.timer); this.invocationProbes.delete(response.requestId); pending.resolve(response);
+      return;
+    }
     if (message.kind === 'local_runtime.hello') {
       if (message.payload.deviceId !== client.deviceId) throw new Error('Authenticated device does not match hello deviceId.');
+      const compatibility = this.auth.compatibility(message.payload.cliVersion, message.payload.protocolVersion);
+      if (!compatibility.compatible) {
+        const errorMessage = compatibility.reason ?? 'Local Runtime CLI is incompatible.';
+        this.send(client, {
+          kind: 'local_runtime.protocol.error',
+          payload: {
+            code: 'LOCAL_RUNTIME_PROTOCOL_INCOMPATIBLE',
+            message: errorMessage,
+            compatibility,
+            ...(compatibility.upgradeInfo ? { upgradeInfo: compatibility.upgradeInfo } : {})
+          }
+        });
+        this.logger.warn(JSON.stringify({
+          event: 'local_runtime_handshake_rejected',
+          deviceId: client.deviceId,
+          cliVersion: message.payload.cliVersion,
+          protocolVersion: message.payload.protocolVersion,
+          requiredProtocolVersion: compatibility.requiredProtocolVersion,
+          upgradeAvailable: compatibility.upgradeAvailable === true,
+          ...(compatibility.upgradeInfo ? {
+            upgradeId: compatibility.upgradeInfo.upgradeId,
+            fromVersion: compatibility.upgradeInfo.fromVersion,
+            toVersion: compatibility.upgradeInfo.toVersion,
+            fromProtocolVersion: compatibility.upgradeInfo.fromProtocolVersion,
+            toProtocolVersion: compatibility.upgradeInfo.toProtocolVersion
+          } : {})
+        }));
+        this.closeIncompatibleClient(client, 'LOCAL_RUNTIME_PROTOCOL_INCOMPATIBLE', errorMessage);
+        return;
+      }
       const device = this.auth.touch(client.deviceId, message.payload);
       client.hello = structuredClone(message.payload);
       this.send(client, {
@@ -684,6 +869,18 @@ export class LocalRuntimeConnectionService {
       this.finishProviderConnection(client, message.payload);
       return;
     }
+    if (message.kind === 'local_runtime.github.authorization.result') {
+      this.finishGitHubAuthorization(client, message.payload);
+      return;
+    }
+    if (message.kind === 'local_runtime.github.source.result') {
+      this.finishGitHubSource(client, message.payload);
+      return;
+    }
+    if (message.kind === 'local_runtime.github.delivery.result') {
+      this.finishGitHubDelivery(client, message.payload);
+      return;
+    }
     if (message.kind === 'local_runtime.workspace.operation.result') {
       const workspace = this.workspaces.get(message.payload.workspaceId);
       if (!workspace || workspace.deviceId !== client.deviceId) throw new Error('Workspace result does not belong to this device.');
@@ -743,6 +940,13 @@ export class LocalRuntimeConnectionService {
       return;
     }
     throw new Error('Unsupported Local Runtime message.');
+  }
+
+  private closeIncompatibleClient(client: LocalRuntimeClient, code: string, reason: string) {
+    this.detachClient(client);
+    if (client.socket.readyState === WebSocket.OPEN || client.socket.readyState === WebSocket.CONNECTING) {
+      client.socket.close(code === 'LOCAL_RUNTIME_PROTOCOL_INCOMPATIBLE' ? 4406 : 4400, reason.slice(0, 120));
+    }
   }
 
   private registerWorkspace(client: LocalRuntimeClient, registration: LocalRuntimeWorkspaceRegistration) {
@@ -903,6 +1107,111 @@ export class LocalRuntimeConnectionService {
     pending.resolve(result.connection);
   }
 
+  private finishGitHubAuthorization(client: LocalRuntimeClient, result: LocalGitHubAuthorizationResult) {
+    const pending = this.pendingGitHubAuthorizations.get(result.requestId);
+    if (!pending) return;
+    if (pending.deviceId !== client.deviceId) {
+      throw new Error('GitHub authorization result does not belong to this device.');
+    }
+    clearTimeout(pending.timer);
+    this.pendingGitHubAuthorizations.delete(result.requestId);
+    if (result.status === 'error') {
+      pending.reject(new BadRequestException(/^GITHUB_[A-Z0-9_]+$/.test(result.error?.code ?? '')
+        ? result.error!.code : 'GITHUB_AUTHORIZATION_FAILED'));
+      return;
+    }
+    if (result.status !== 'ok' || (pending.action !== 'find_reusable' && !result.authorization) ||
+      result.authorization && (
+      result.authorization.deviceId !== client.deviceId ||
+      result.authorization.repositoryUrl !== pending.repositoryUrl ||
+      !/^[0-9]+$/.test(result.authorization.repositoryId) ||
+      !/^[0-9]+$/.test(result.authorization.accountId) ||
+      (pending.action === 'disconnect' && result.authorization.state !== 'disconnected') ||
+      (pending.action !== 'disconnect' && result.authorization.state !== 'active')
+    )) {
+      pending.reject(new BadRequestException('GITHUB_AUTHORIZATION_RESPONSE_INVALID'));
+      return;
+    }
+    pending.resolve(result.authorization ? structuredClone(result.authorization) : undefined);
+  }
+
+  private finishGitHubSource(client: LocalRuntimeClient, result: LocalGitHubSourceResult) {
+    const pending = this.pendingGitHubSources.get(result.requestId);
+    if (!pending) return;
+    if (pending.deviceId !== client.deviceId) {
+      throw new Error('GitHub source result does not belong to this device.');
+    }
+    clearTimeout(pending.timer);
+    this.pendingGitHubSources.delete(result.requestId);
+    if (result.status === 'error') {
+      pending.reject(new BadRequestException(/^GITHUB_[A-Z0-9_]+$/.test(result.error?.code ?? '')
+        ? result.error!.code : 'GITHUB_SOURCE_PREPARATION_FAILED'));
+      return;
+    }
+    const workspaceId = `github-session:${pending.sessionId}`;
+    if (result.status !== 'ok' || pending.action === 'prepare' && (
+      result.workspaceId !== workspaceId || result.workspace?.workspaceId !== workspaceId ||
+      !/^[0-9]+$/.test(result.repositoryId ?? '') || !result.cacheKey || !result.defaultBranch
+    ) || pending.action === 'select_branch' && (
+      !/^[a-f0-9]{40}$/i.test(result.baseSha ?? '') || result.workspace?.workspaceId !== workspaceId
+    ) || pending.action === 'branches' && !Array.isArray(result.branches)) {
+      pending.reject(new BadRequestException('GITHUB_SOURCE_RESPONSE_INVALID'));
+      return;
+    }
+    try {
+      if (result.workspace) this.registerWorkspace(client, result.workspace);
+      if (pending.action === 'cleanup') {
+        this.unregisterWorkspaceForClient(client, workspaceId, 'GitHub Session workspace deleted');
+      }
+      pending.resolve(structuredClone(result));
+    } catch {
+      pending.reject(new BadRequestException('GITHUB_WORKSPACE_REGISTRATION_FAILED'));
+    }
+  }
+
+  private finishGitHubDelivery(client: LocalRuntimeClient, result: LocalGitHubDeliveryResult) {
+    const pending = this.pendingGitHubDeliveries.get(result.requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingGitHubDeliveries.delete(result.requestId);
+    if (pending.deviceId !== client.deviceId || pending.sessionId !== result.sessionId) {
+      pending.reject(new BadRequestException('GITHUB_DELIVERY_RESPONSE_SCOPE_MISMATCH'));
+      return;
+    }
+    if (result.status === 'error') {
+      pending.reject(new BadRequestException(/^GITHUB_[A-Z0-9_]+$/.test(result.error?.code ?? '')
+        ? result.error!.code : 'GITHUB_DELIVERY_FAILED'));
+      return;
+    }
+    if (result.status !== 'ok' || result.outcome === 'validated' &&
+        (!/^[a-f0-9]{40}$/i.test(result.treeSha ?? '') ||
+         result.validation?.candidateSha !== result.treeSha) ||
+        result.outcome === 'conflict' && !result.conflicts?.length ||
+        result.outcome === 'needs_input' && !/^[a-f0-9]{40}$/i.test(result.treeSha ?? '') ||
+        result.outcome === 'published' &&
+          (!/^[a-f0-9]{40}$/i.test(result.commitSha ?? '') ||
+           !Number.isSafeInteger(result.pullRequestNumber) ||
+           !/^https:\/\/github\.com\//.test(result.pullRequestUrl ?? '') ||
+           result.pullRequestHeadSha !== result.commitSha) ||
+        result.outcome === 'remote_changed' &&
+          (!/^[a-f0-9]{40}$/i.test(result.remoteHeadSha ?? '') ||
+           (!result.conflictView && !/^[a-f0-9]{40}$/i.test(result.treeSha ?? ''))) ||
+        result.outcome === 'status' &&
+          (!Number.isSafeInteger(result.pullRequestNumber) ||
+           !/^[a-f0-9]{40}$/i.test(result.pullRequestHeadSha ?? '') ||
+           !['open', 'closed'].includes(result.pullRequestState ?? '')) ||
+        result.outcome === 'merged' && !/^[a-f0-9]{40}$/i.test(result.mergedCommitSha ?? '') ||
+        result.outcome === 'diff' && (!result.diff || !/^[a-f0-9]{40}$/i.test(result.diff.sha)) ||
+        result.outcome === 'conflict_view' &&
+          (!result.conflictView || result.conflictView.sessionId !== result.sessionId) ||
+        result.outcome === 'conflict_complete' && !/^[a-f0-9]{40}$/i.test(result.treeSha ?? '') ||
+        !['validated', 'conflict', 'needs_input', 'no_changes', 'published', 'remote_changed', 'status', 'merged', 'diff', 'conflict_view', 'conflict_complete'].includes(result.outcome ?? '')) {
+      pending.reject(new BadRequestException('GITHUB_DELIVERY_RESPONSE_INVALID'));
+      return;
+    }
+    pending.resolve(structuredClone(result));
+  }
+
   private finishCapabilityRefresh(client: LocalRuntimeClient, result: LocalRuntimeCapabilityRefreshResult) {
     const pending = this.pendingCapabilityRefreshes.get(result.requestId);
     if (!pending) {
@@ -989,6 +1298,24 @@ export class LocalRuntimeConnectionService {
       pending.reject(new ServiceUnavailableException('Local Runtime disconnected before storing the provider credential.'));
       this.pendingProviderConnections.delete(requestId);
     }
+    for (const [requestId, pending] of this.pendingGitHubAuthorizations) {
+      if (pending.deviceId !== client.deviceId) continue;
+      clearTimeout(pending.timer);
+      pending.reject(new ServiceUnavailableException('LOCAL_RUNTIME_DISCONNECTED'));
+      this.pendingGitHubAuthorizations.delete(requestId);
+    }
+    for (const [requestId, pending] of this.pendingGitHubSources) {
+      if (pending.deviceId !== client.deviceId) continue;
+      clearTimeout(pending.timer);
+      pending.reject(new ServiceUnavailableException('LOCAL_RUNTIME_DISCONNECTED'));
+      this.pendingGitHubSources.delete(requestId);
+    }
+    for (const [requestId, pending] of this.pendingGitHubDeliveries) {
+      if (pending.deviceId !== client.deviceId) continue;
+      clearTimeout(pending.timer);
+      pending.reject(new ServiceUnavailableException('LOCAL_RUNTIME_DISCONNECTED'));
+      this.pendingGitHubDeliveries.delete(requestId);
+    }
     for (const [requestId, pending] of this.pendingCapabilityRefreshes) {
       if (pending.deviceId !== client.deviceId) continue;
       clearTimeout(pending.timer);
@@ -1044,6 +1371,9 @@ export class LocalRuntimeConnectionService {
   private finishInvocation(invocationId: string, result: AgentRunResult) {
     const active = this.activeInvocations.get(invocationId);
     if (!active) return;
+    for (const [id, probe] of this.invocationProbes) if (probe.request.invocationId === invocationId) {
+      clearTimeout(probe.timer); this.invocationProbes.delete(id); probe.resolve(undefined);
+    }
     clearTimeout(active.idleTimer);
     for (const timer of active.toolTimers?.values() ?? []) clearTimeout(timer);
     clearTimeout(active.cancelTimer);
@@ -1059,10 +1389,10 @@ export class LocalRuntimeConnectionService {
       const timers = active.toolTimers ??= new Map();
       if (!timers.has(key)) {
         const timeoutMs = positiveRuntimeTimeoutMs('LOCAL_RUNTIME_TOOL_TIMEOUT_MS', 900_000);
-        timers.set(key, setTimeout(() => this.requestInvocationStop(active, createExecutionTermination({
-          kind: 'runtime_timeout', source: 'runtime', scope: 'invocation',
-          timeout: { mode: 'deadline', timeoutMs }, diagnosticRef: 'local_runtime_tool_timeout'
-        })), timeoutMs));
+        timers.set(key, setTimeout(() => active.queue.push({ invocationId: active.invocationId,
+          type: 'runtime_progress', visibility: 'debug', content: '', createdAt: nowIso(),
+          metadata: { code: 'RUNTIME_REQUEST_OBSERVATION', observationKind: 'observation_due', count: timeoutMs }
+        }), timeoutMs));
       }
     } else if (event.type === 'tool_completed') {
       if (!active.toolTimers?.has(key)) return;
@@ -1079,16 +1409,11 @@ export class LocalRuntimeConnectionService {
     const timeoutMs = positiveRuntimeTimeoutMs('LOCAL_RUNTIME_IDLE_TIMEOUT_MS', 600_000);
     active.idleTimer = setTimeout(() => {
       this.logger.warn(
-        `Local Runtime invocation ${active.invocationId} produced no events for ${timeoutMs}ms; terminating.`
+        `Local Runtime invocation ${active.invocationId} has no observable progress for ${timeoutMs}ms; retaining the invocation.`
       );
-      const termination = createExecutionTermination({
-        kind: 'runtime_timeout',
-        source: 'runtime',
-        scope: 'invocation',
-        timeout: { mode: 'idle', timeoutMs },
-        diagnosticRef: 'local_runtime_idle_timeout'
-      });
-      this.requestInvocationStop(active, termination);
+      active.queue.push({ invocationId: active.invocationId, type: 'runtime_progress', visibility: 'debug',
+        content: '', createdAt: nowIso(), metadata: { code: 'RUNTIME_REQUEST_OBSERVATION',
+          observationKind: 'observation_due', count: timeoutMs } });
     }, timeoutMs);
   }
 

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { actorAgentId } from '@/composables/useActor'
+import { eventNoticeText } from '@/utils/userFacingCopy'
 import type { ActorRef, AgentCardState, CollaborationEvent } from '@/types/contracts'
 import AgentPortrait from './AgentPortrait.vue'
 import UiIcon from './UiIcon.vue'
@@ -66,7 +67,7 @@ const eventDerivedEdges = computed<CommunicationEdge[]>(() =>
         toName: agentNameById.value.get(targetId) ?? targetId,
         kind: payload?.messageKind ?? 'message',
         phase: payload?.phase,
-        content: event.content,
+        content: eventNoticeText(event),
         createdAt: event.createdAt
       }))
     })
@@ -95,7 +96,7 @@ const taskDerivedEdges = computed<CommunicationEdge[]>(() => {
           toName: agentNameById.value.get(assigneeId) ?? assigneeId,
           kind: 'handoff',
           phase: event.type === 'task_created' || event.type === 'task_assigned' ? 'task_acceptance' : 'task_handoff',
-          content: payload?.title ?? event.content,
+          content: payload?.title ?? eventNoticeText(event),
           createdAt: event.createdAt
         })
       }
@@ -110,7 +111,7 @@ const taskDerivedEdges = computed<CommunicationEdge[]>(() => {
           toName: agentNameById.value.get(assigneeId) ?? assigneeId,
           kind: 'handoff',
           phase: 'task_handoff',
-          content: payload?.title ?? event.content,
+          content: payload?.title ?? eventNoticeText(event),
           createdAt: event.createdAt
         })
       }

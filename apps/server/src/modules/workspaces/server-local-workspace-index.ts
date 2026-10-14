@@ -11,7 +11,7 @@ import type {
   WorkspaceNavigationEntry,
   WorkspaceRevision
 } from '@agent-cluster/shared';
-import { isGeneratedWorkspaceDirectory, isSensitiveWorkspacePath } from '@agent-cluster/shared';
+import { isGeneratedWorkspaceDirectory, isSensitiveWorkspacePath, isUsableWorkspaceEvidencePath, deriveWorkspaceIndexEntrypoints, queryWorkspaceNavigation } from '@agent-cluster/shared';
 import { createWorkspaceRevision } from './workspace-revision.js';
 import { workspaceMetrics } from '../../common/workspace-metrics.js';
 
@@ -131,34 +131,7 @@ export function queryServerLocalIndex(
   state: ServerLocalWorkspaceState,
   input: WorkspaceIndexQueryInput = {}
 ): WorkspaceIndexQueryResult {
-  if (input.generation !== undefined && input.generation !== state.index.generation) {
-    return { ...state.index, entries: [], matched: 0 };
-  }
-  const terms = [
-    ...(input.pathHints ?? []),
-    ...(input.symbols ?? []),
-    ...(input.intent ? input.intent.split(/[^a-zA-Z0-9_./-]+/) : []),
-    ...(input.query ? input.query.split(/[^a-zA-Z0-9_./-]+/) : [])
-  ].map((term) => term.trim().toLowerCase()).filter((term) => term.length >= 2);
-  const limit = Math.min(200, Math.max(1, input.limit ?? 50));
-  const entrypoints = new Set(state.index.entrypoints.map((path) => path.toLowerCase()));
-  const ranked = state.index.entries
-    .map((entry, order) => {
-      const path = entry.path.toLowerCase();
-      const matches = terms.filter((term) => path.includes(term) || term.includes(path));
-      const score = matches.length * 10 + (entry.kind === 'file' ? 1 : 0) + (entrypoints.has(path) ? 5 : 0);
-      return { entry, order, score, matchedTerms: matches.length };
-    })
-    .filter((item) => terms.length === 0 || item.matchedTerms > 0)
-    .sort((left, right) => right.score - left.score || left.order - right.order);
-  const candidates = Array.from(new Map(
-    state.index.entries
-      .filter((entry) => entrypoints.has(entry.path.toLowerCase()))
-      .concat(ranked.map((item) => item.entry))
-      .concat(ranked.length ? [] : state.index.entries)
-      .map((entry) => [entry.path, entry])
-  ).values());
-  return { ...state.index, entries: candidates.slice(0, limit), matched: ranked.length };
+  return queryWorkspaceNavigation(state.index, input);
 }
 
 function scheduleBuild(rootPath: string, state: ServerLocalWorkspaceState, delayMs: number): void {
@@ -470,12 +443,11 @@ function languageForPath(path: string): string | undefined {
 }
 
 function entrypoints(entries: WorkspaceNavigationEntry[]): string[] {
-  const preferred = new Set(['package.json', 'README.md', 'readme.md', 'pom.xml', 'build.gradle', 'build.gradle.kts', 'Cargo.toml', 'go.mod', 'pyproject.toml', 'requirements.txt']);
-  return entries.filter((entry) => entry.kind === 'file' && preferred.has(entry.path)).map((entry) => entry.path).slice(0, 32);
+  return deriveWorkspaceIndexEntrypoints(entries);
 }
 
 function detectedStack(entries: WorkspaceNavigationEntry[]): string[] {
-  const paths = new Set(entries.filter((entry) => entry.kind === 'file').map((entry) => entry.path));
+  const paths = new Set(entries.filter((entry) => entry.kind === 'file' && isUsableWorkspaceEvidencePath(entry.path)).map((entry) => entry.path.split('/').at(-1)!));
   return [
     ...(paths.has('package.json') ? ['node'] : []),
     ...(paths.has('pom.xml') || paths.has('build.gradle') || paths.has('build.gradle.kts') ? ['jvm'] : []),

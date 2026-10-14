@@ -1,3 +1,4 @@
+import { runtimePhaseLabel } from "@agent-cluster/shared";
 import { Injectable } from '@nestjs/common';
 import type {
   AgentMessageOutput,
@@ -43,7 +44,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
   private readonly contextFailures = new Map<string, number>();
 
   async checkAvailability() {
-    return { available: process.env.MOCK_RUNTIME_ENABLED === 'true', reason: 'Explicit mock mode is disabled.' };
+    return { available: process.env.MOCK_RUNTIME_ENABLED === 'true', reason: '模拟运行模式未启用。' };
   }
 
   start(input: InvocationPlan, signal?: AbortSignal): AgentRuntimeRunHandle {
@@ -83,7 +84,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
         invocationId: input.invocationId,
         type: 'tool_completed' as const,
         visibility: 'debug' as const,
-        content: `read_file completed ${requiredDocument.relativePath}`,
+        content: `已读取文件：${requiredDocument.relativePath}`,
         metadata: { toolCallId: `required-document:${requiredDocument.documentId}`, name: 'read_file', input: { path: requiredDocument.relativePath }, truncated: false },
         createdAt: nowIso()
       }
@@ -98,7 +99,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
           invocationId: input.invocationId,
           type: 'runtime_started',
           visibility: 'user',
-          content: `${input.agent.name} started ${input.phase}`,
+          content: `${input.agent.name} 已开始 ${runtimePhaseLabel(input.phase)}`,
           createdAt: startedAt
         },
         ...documentToolEvents,
@@ -114,7 +115,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
           invocationId: input.invocationId,
           type: 'runtime_completed',
           visibility: 'user',
-          content: `${input.agent.name} completed ${input.phase}`,
+          content: `${input.agent.name} 已完成 ${runtimePhaseLabel(input.phase)}`,
           createdAt: nowIso()
         }
       ],
@@ -143,8 +144,8 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
         return {
           schemaVersion: '1.0',
           kind: 'final_delivery',
-          summary: `Completed: ${goal}`,
-          completedItems: ['Task contract confirmed', 'Execution completed', 'Post Review completed'],
+          summary: `已完成：${goal}`,
+          completedItems: ['任务契约已确认', '任务执行已完成', '复盘已完成'],
           incompleteItems: [],
           risks: [],
           artifactRefs: []
@@ -162,7 +163,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
           affectedAgentIds: [input.agent.agentId],
           requiresBriefRevision: false,
           requiresUserConfirmation: false,
-          coordinatorInstruction: 'Apply the new constraint to the current invocation.'
+          coordinatorInstruction: '将新增约束应用于当前调用。'
         } satisfies UserMessageHandlingPlanOutput;
       case 'discussion_plan':
         // A deterministic plan: consult the architect preset. Whether that is a
@@ -172,10 +173,10 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
           schemaVersion: '1.0',
           kind: 'discussion_plan',
           objective: goal,
-          gaps: ['Root cause not yet confirmed.'],
-          exitCondition: 'Every gap has an owner or a user decision.',
+          gaps: ['根因尚未确认。'],
+          exitCondition: '每项缺口均有负责者或用户决策。',
           consultations: [
-            { targetAgentKey: 'architect', objective: `Assess: ${goal}`, expectedResult: 'Conclusion, evidence, risks.' }
+            { targetAgentKey: 'architect', objective: `评估：${goal}`, expectedResult: '结论、证据与风险。' }
           ],
           questionsForUser: [],
           readyToSummarize: false
@@ -205,7 +206,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
       default:
         return createAgentMessageOutput({
           messageKind: 'discussion',
-          content: `${input.agent.name} completed ${input.phase}. Goal: ${goal}`
+          content: `${input.agent.name} 已完成 ${runtimePhaseLabel(input.phase)}。目标：${goal}`
         }) satisfies AgentMessageOutput;
     }
   }
@@ -215,15 +216,15 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
       schemaVersion: '1.0',
       kind: 'task_brief',
       goal,
-      scope: ['Implement the confirmed requirement'],
-      outOfScope: ['Unapproved external side effects'],
-      constraints: ['Use the resolved Tool Catalog', 'Keep evidence traceable'],
-      acceptanceCriteria: ['Return a structured result', 'Complete Post Review'],
+      scope: ['实现已确认的需求'],
+      outOfScope: ['未经授权的外部副作用'],
+      constraints: ['使用已解析的工具目录', '保持证据可追溯'],
+      acceptanceCriteria: ['返回结构化结果', '完成复盘'],
       risks: [],
       openQuestions: [],
       suggestedTasks: [
         {
-          title: 'Execute the confirmed task',
+          title: '执行已确认的任务',
           description: goal,
           suggestedAgentKey: 'backend',
           routingMode: 'coordinator_controlled',
@@ -253,7 +254,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
       sourceDraftHash: evidence.userDraft.hash,
       evidenceHash: evidence.evidenceHash,
       content: evidence.userDraft.content,
-      summary: 'Receiver preserved the complete authoritative user draft.',
+      summary: '接收者已保留完整的用户确认草稿。',
       incorporatedAgentResultIds: (evidence.agentResults ?? [])
         .filter((result) => result.status === 'completed')
         .map((result) => result.id),
@@ -270,7 +271,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
         schemaVersion: '1.0',
         kind: 'task_acceptance_decision',
         status: 'rejected',
-        reason: `${input.agent.name} cannot accept ${taskTitle}.`,
+        reason: `${input.agent.name} 无法接收任务「${taskTitle}」。`,
         missingContext: [],
         requestedContext: null,
         handoffSuggestion: null,
@@ -301,7 +302,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
       schemaVersion: '1.0',
       kind: 'task_execution_result',
       status: 'completed',
-      summary: `${input.agent.name} completed ${taskTitle}.`,
+      summary: `${input.agent.name} 已完成 ${taskTitle}。`,
       completedItems: ['Read the authoritative Context Envelope', 'Produced a deterministic mock artifact'],
       changedArtifacts: [artifact],
       requestedContext: null,
@@ -320,9 +321,9 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
       const content = revisionEvidence.userDraft.content;
       return createRuntimeArtifactOutput({
         type: 'markdown',
-        title: `${taskTitle} file revision proposal`,
+        title: `${taskTitle} 文件修订提案`,
         content,
-        summary: `Proposed an update to ${revisionEvidence.filePath}`,
+        summary: `已提出 ${revisionEvidence.filePath} 的修订候选`,
         metadata: {
           ...emptyRuntimeArtifactProposalMetadata(),
           fileChanges: [
@@ -354,9 +355,9 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
     ].join('\n');
     return createRuntimeArtifactOutput({
       type: 'markdown',
-      title: `${taskTitle} execution artifact`,
+      title: `${taskTitle} 执行产物`,
       content,
-      summary: `Generated ${path}`,
+      summary: `已生成 ${path}`,
       metadata: {
         ...emptyRuntimeArtifactProposalMetadata(),
         fileChanges: [
@@ -399,7 +400,7 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
       type: 'markdown',
       title: '项目架构分析报告',
       content,
-      summary: `Generated ${path} from ${evidencePaths.length} grounded files`,
+      summary: `已基于 ${evidencePaths.length} 个实际文件生成 ${path}`,
       metadata: {
         ...emptyRuntimeArtifactProposalMetadata(),
         fileChanges: [
@@ -462,10 +463,10 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
     const selectedPath = candidates[(failureNumber - 1) % Math.max(1, candidates.length)];
     const requestedPaths = selectedPath ? [selectedPath] : [];
     const requestedContext: RuntimeContextRequest = {
-      reason: 'Mock Runtime requested additional grounded evidence.',
+      reason: '模拟运行时请求补充实际证据。',
       requestedRefs: [],
       requestedPaths,
-      followUpInstruction: 'Read the requested files and resolve a new InvocationPlan.'
+      followUpInstruction: '请读取请求的文件并生成新的调用计划。'
     };
     return this.failed(
       input,

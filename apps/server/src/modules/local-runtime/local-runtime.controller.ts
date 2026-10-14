@@ -1,7 +1,7 @@
-import { Body, ConflictException, Controller, Delete, Get, Headers, Param, Post, Res, ServiceUnavailableException, UseGuards } from '@nestjs/common';
+import { Body, ConflictException, Controller, Delete, Get, Headers, Param, Post, Res, ServiceUnavailableException, UseGuards, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { ServerResponse } from 'node:http';
-import type { CreateLocalRuntimeDeviceCodeRequest, LocalRuntimeProviderConnectionInput } from '@agent-cluster/shared';
+import type { CreateLocalRuntimeDeviceCodeRequest, LocalRuntimeCompatibility, LocalRuntimeProviderConnectionInput } from '@agent-cluster/shared';
 import { LocalRuntimeAuthService } from './local-runtime-auth.service.js';
 import { LocalRuntimeConnectionService } from './local-runtime-connection.service.js';
 import { LocalRuntimeAdminGuard } from './local-runtime-admin.guard.js';
@@ -21,6 +21,20 @@ export class LocalRuntimeController {
     @Headers('host') host?: string
   ) {
     return ok({ serverUrl: localRuntimeConnectOrigin(forwardedProto, host) });
+  }
+
+  @Get('compatibility')
+  @UseGuards(LocalRuntimeAdminGuard)
+  compatibility() {
+    return ok(this.auth.serverCompatibility());
+  }
+
+  @Get('upgrades/:upgradeId')
+  upgrade(@Param('upgradeId') upgradeId: string, @Headers('authorization') authorization?: string) {
+    const device = this.auth.authenticate(bearerToken(authorization));
+    const info = this.compatibilityFor(device)?.upgradeInfo;
+    if (!info || info.upgradeId !== upgradeId) throw new NotFoundException('Local Runtime upgrade package not found.');
+    return ok(info);
   }
 
   @Post('device-codes')
@@ -67,7 +81,12 @@ export class LocalRuntimeController {
   @Get('device-tokens/current')
   currentDevice(@Headers('authorization') authorization?: string) {
     const device = this.auth.authenticate(bearerToken(authorization));
-    return { ...device, connected: this.connections.isDeviceConnected(device.deviceId) };
+    const compatibility = this.compatibilityFor(device);
+    return {
+      ...device,
+      connected: this.connections.isDeviceConnected(device.deviceId),
+      ...(compatibility ? { compatibility } : {})
+    };
   }
 
   @Delete('device-tokens/current')
@@ -80,10 +99,23 @@ export class LocalRuntimeController {
   @Get('devices')
   @UseGuards(LocalRuntimeAdminGuard)
   devices() {
-    return ok(this.auth.listDevices().map((device) => ({
-      ...device,
-      connected: this.connections.isDeviceConnected(device.deviceId)
-    })));
+    return ok(this.auth.listDevices().map((device) => {
+      const compatibility = this.compatibilityFor(device);
+      return {
+        ...device,
+        connected: this.connections.isDeviceConnected(device.deviceId),
+        ...(compatibility ? { compatibility } : {})
+      };
+    }));
+  }
+
+  private compatibilityFor(device: { cliVersion: string; protocolVersion: number }) {
+    const compatibility = (this.auth as unknown as {
+      compatibility?: (cliVersion: string, protocolVersion: number) => LocalRuntimeCompatibility
+    }).compatibility;
+    return typeof compatibility === 'function'
+      ? compatibility.call(this.auth, device.cliVersion, device.protocolVersion)
+      : undefined;
   }
 
   @Delete('devices/:deviceId')

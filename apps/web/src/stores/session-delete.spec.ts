@@ -123,6 +123,7 @@ describe('session deletion failure recovery', () => {
         }
       }, 202))
       .mockResolvedValueOnce(apiResponse(page([deleting])))
+      .mockResolvedValueOnce(apiResponse({ groups: [] }))
     const store = useSessionStore()
 
     await expect(store.deleteSession(deleting.id)).resolves.toBe(false)

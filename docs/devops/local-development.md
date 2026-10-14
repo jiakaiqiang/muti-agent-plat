@@ -30,6 +30,9 @@ cp .env.example .env
 - `LLM_MODEL=gpt-4.1-mini`
 - `LLM_API_KEY=<your api key>`
 - `AGENT_CLUSTER_SECRET_KEY=<high-entropy deployment secret>`：新增或更新持久化 Runtime 凭据时必填，用于 AES-256-GCM 加密；不得提交到仓库。
+- `GITHUB_APP_CLIENT_ID`、`GITHUB_APP_CLIENT_SECRET`、`GITHUB_APP_CALLBACK_URL`：服务端 GitHub App 用户授权所需配置；回调地址必须是 HTTPS。服务器 PAT 使用同一个 `AGENT_CLUSTER_SECRET_KEY` 加密，令牌不得写入环境文件或普通会话消息。
+- `AGENT_CLUSTER_GITHUB_WORKSPACES_ROOT`：服务器 GitHub 缓存和会话独立工作区根目录，默认位于用户目录下的 `.agent-cluster/github-workspaces`，不得位于平台代码目录内。
+- `AGENT_CLUSTER_GITHUB_SESSION_CREATE_ENABLED`：默认关闭 GitHub 会话新建入口。当前交付链路仍在实施，不能据此开关单独将功能发布给用户。
 - `LLM_BASE_URL=https://api.openai.com/v1`
 - `LLM_DRY_RUN=false`
 - `LLM_MOCK_FALLBACK=false`
@@ -238,7 +241,7 @@ npm run test:e2e:bullmq-ops
 npm run test:e2e:real-agents-no-seed
 ```
 
-其中 PostgreSQL 和 BullMQ smoke 会优先复用可连接的本机服务；不可连接时会临时启动 Docker 容器并在结束后清理。
+其中 PostgreSQL 和 BullMQ smoke 默认优先复用可连接的本机服务；不可连接时会临时启动 Docker 容器并在结束后清理。需要严格隔离 PostgreSQL 验收时，设置 `AGENT_CLUSTER_POSTGRES_SMOKE_EPHEMERAL=1` 再运行 `npm run test:e2e:postgres-persistence`；该模式始终使用独立临时容器，并在构建或测试失败时尝试清理。
 
 ## Migration 和 seed 建议
 
@@ -484,6 +487,19 @@ LOCAL_RUNTIME_MIN_CLI_VERSION=0.1.0
 LOCAL_RUNTIME_ADMIN_TOKEN=<random-value-with-at-least-32-characters>
 ```
 
+协议不兼容时，Web/桌面端会打开“版本升级”弹窗。要启用“立即升级”，服务端还必须配置同一份正式 Windows 安装包的完整发布元数据：
+
+```text
+LOCAL_RUNTIME_RELEASE_VERSION=0.2.0
+LOCAL_RUNTIME_RELEASE_URL=https://downloads.example.com/agent-runtime-0.2.0.exe
+LOCAL_RUNTIME_PACKAGE_SHA256=<64-hex-sha256>
+LOCAL_RUNTIME_PACKAGE_SIGNATURE=<40-or-64-hex-authenticode-thumbprint>
+LOCAL_RUNTIME_BUILD_ID=local-runtime-0.2.0-build.1
+LOCAL_RUNTIME_RELEASE_NOTES=协议升级||修复旧连接被误报在线||保留工作区重新注册
+```
+
+缺少 HTTPS 地址、SHA-256 或签名指纹时，弹窗仍会说明版本差异和升级内容，但“立即升级”保持禁用；不会下载未验证的安装包。Local Runtime CLI 在 Windows 上下载后会校验 SHA-256 和 Authenticode 签名，再启动静默安装器。真实安装包产出、证书签名、更新源上传和回滚演练属于发布操作，不能用开发环境变量替代。
+
 Local Runtime 的设备审批、设备管理和工作区列表使用单用户管理员令牌。生产环境必须配置 `LOCAL_RUNTIME_ADMIN_TOKEN`，否则后端拒绝启动。浏览器激活页面会在当前标签页会话中保存该令牌，并以 Bearer Token 调用管理接口。开发环境如需免输入令牌，只能显式设置 `LOCAL_RUNTIME_ALLOW_LOOPBACK_ADMIN_BYPASS=true`，且该豁免只接受回环地址，在生产环境会导致启动失败。
 
 服务器端 Codex/Claude invocation 始终使用独立 Worker 子进程；不存在关闭 Worker 后回退到 Nest 进程内执行的开关。Worker 仅继承 Runtime 启动所需的系统变量、Runtime 配置和明确的 Runtime 凭据，不继承数据库、平台管理员或平台加密密钥。
@@ -514,6 +530,16 @@ node $runtimeCli revoke device
 默认允许授权工作区内读取、创建/修改、测试和执行普通命令。删除或移动文件、安装依赖等危险动作会让会话暂停并在界面中请求用户确认；选择“仅本次允许”后，CLI 只为下一次对应操作发放一次性权限，然后自动恢复为需要确认。旧版工作区在 CLI 重启并加载状态时，会自动把遗留的 `command_execute: confirm` 迁移为默认允许。
 
 上面的 `workspace grant` 命令仍可用于本地诊断或手工预授权。危险命令、工作区外路径、符号链接逃逸和凭据路径始终拒绝，不能通过一次性确认放行。本地 Runtime 离线或不兼容时会明确失败，不会切换到服务器 Runtime。
+
+### 请求健康策略开发与更新门禁（2026-09-29）
+
+`request-health-v1` 已接入代码；不能把源代码或构建通过解释为原监听服务已加载策略。本轮不重启原后端、Worker 或 Local Runtime，不运行生产迁移或真实付费模型。
+
+观察配置：`RUNTIME_SILENCE_OBSERVATION_MS` 默认沿用有效的 `LOCAL_RUNTIME_IDLE_TIMEOUT_MS`（默认 600000）；`RUNTIME_PROBE_INTERVAL_MS=30000`、`RUNTIME_PROBE_RESPONSE_TIMEOUT_MS=5000`，非法配置采用有限默认值。原 first-frame/idle/absolute、模型 phase、Generic fetch 和 StructuredOutput 等等待阈值转为观察；不是 unknown 自动取消 TTL。启动预检/队列/Worker 启动及可信停止确认的界限保留。显式 Token、费用、循环和批准资源限制独立生效。
+
+Local Runtime probe 是协议 11 的可选 `requestHealthProtocol:1` 能力，不发模型请求；旧 CLI 无此能力时降级未知。默认 Claude partial 参数已加入，真实旧版 CLI/custom-args/供应商隐藏思考的组合仍须兼容验证，不自动安装或重跑试参数。
+
+关系持久化新增 migration v21 `runtime_health_snapshots`；代码映射与 file reload 已测试，未对现有 PostgreSQL 执行迁移。实际更新前：清点活动/停止未确认调用，取得用户对更新或显式停止的选择，备份隔离验证 v21、确认源代码/构建/进程版本及策略，不热切在途调用。回退先冻结新调用准入；保留健康/停止账本，旧进程可信结束后再切旧版本，不能恢复旧 kill timer 管理在途未知调用。详见请求健康 Checklist 的证据和待验项。
 
 ### 为什么界面仍可能出现旧会话
 

@@ -172,7 +172,8 @@ export class LogicalOperationStore {
       const lifecycle = ((draft[SESSION_LIFECYCLES_COLLECTION] ?? {}) as SessionLifecyclesBySession)[sessionId];
       if (lifecycle && (lifecycle.state !== 'active' || lifecycle.admission !== 'open' ||
         operation.sessionGeneration !== lifecycle.generation)) throw new Error('SESSION_ADMISSION_CLOSED');
-      if ((operation.correctionsUsed ?? 0) >= 1 || Date.parse(operation.deadlineAt) <= this.now()) return false;
+      const activeCall = operation.status === 'running' && operation.activeInvocationId;
+      if ((operation.correctionsUsed ?? 0) >= 1 || (!activeCall && Date.parse(operation.deadlineAt) <= this.now())) return false;
       operation.correctionsUsed = 1;
       return true;
     });

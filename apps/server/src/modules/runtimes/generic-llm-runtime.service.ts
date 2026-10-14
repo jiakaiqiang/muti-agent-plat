@@ -1,5 +1,9 @@
+import { runtimePhaseLabel } from "@agent-cluster/shared";
 import { Injectable, Optional } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { RuntimeObservationChannel } from './runtime-observation-channel.js';
+import { frameToRuntimeEvent, sanitizeRuntimeLine, type RuntimeObservationKind } from '@agent-cluster/shared';
 import type {
   AgentMessageOutput,
   InvocationPlan,
@@ -20,7 +24,7 @@ import type {
   UserMessageHandlingPlanOutput
 } from '@agent-cluster/shared';
 import { createAgentMessageOutput, createRuntimeArtifactSystemEvidence } from '@agent-cluster/shared';
-import { buildStructuredOutputInstructions, modelProviderSupportsRuntime } from '@agent-cluster/shared';
+import { buildStructuredOutputInstructions, modelProviderSupportsRuntime, CHINESE_RUNTIME_OUTPUT_INSTRUCTION } from '@agent-cluster/shared';
 import {
   genericLlmMockFallbackEnabled,
   llmDiagnosticPreviewChars,
@@ -235,12 +239,12 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     if (compatibilityError) return { available: false, reason: compatibilityError };
     const missing = this.missingConfig(connection);
     if (missing.length) {
-      return { available: false, reason: `Generic LLM configuration is missing: ${missing.join(', ')}` };
+      return { available: false, reason: `通用模型缺少配置： ${missing.join(', ')}` };
     }
     const baseUrl = connection.baseUrl;
     const apiKey = connection.apiKey;
     if (!baseUrl || !apiKey) {
-      return { available: false, reason: 'Generic LLM configuration is missing: baseUrl, apiKey' };
+      return { available: false, reason: '通用模型缺少配置： baseUrl, apiKey' };
     }
 
     const controller = new AbortController();
@@ -252,13 +256,13 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         headers: { authorization: `Bearer ${apiKey}` }
       });
       if (response.ok || response.status === 404 || response.status === 405) return { available: true };
-      return { available: false, reason: `Generic LLM preflight failed with HTTP ${response.status}` };
+      return { available: false, reason: `通用模型连接检查失败，HTTP ${response.status}` };
     } catch (error) {
       return {
         available: false,
         reason: error instanceof Error && error.name === 'AbortError'
-          ? 'Generic LLM preflight timed out.'
-          : `Generic LLM preflight failed: ${error instanceof Error ? error.message : String(error)}`
+          ? '通用模型连接检查超时。'
+          : `通用模型连接检查失败： ${error instanceof Error ? error.message : String(error)}`
       };
     } finally {
       clearTimeout(timer);
@@ -266,7 +270,29 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   }
 
   start(input: InvocationPlan, signal?: AbortSignal): AgentRuntimeRunHandle {
-    return withStructuredTermination(promiseHandle(this.execute(input, signal)), input, signal);
+    const channel = new RuntimeObservationChannel();
+    const controller = new AbortController();
+    const forwardAbort = () => controller.abort(signal?.reason);
+    if (signal?.aborted) forwardAbort(); else signal?.addEventListener('abort', forwardAbort, { once: true });
+    const result = this.observationContext.run({ invocationId: input.invocationId, channel, sequence: 0 },
+      () => this.execute(input, controller.signal)).finally(() => {
+        channel.close(); signal?.removeEventListener('abort', forwardAbort);
+      });
+    return withStructuredTermination({ events: channel, result, cancel: async termination => {
+      abortWithTermination(controller, termination ?? createExecutionTermination({ kind: 'user_cancelled', source: 'user',
+        scope: 'invocation', phase: input.phase }));
+      await result;
+    } }, input, controller.signal);
+  }
+
+  private readonly observationContext = new AsyncLocalStorage<{ invocationId: string; channel: RuntimeObservationChannel; sequence: number }>();
+  private observeRequest(kind: RuntimeObservationKind | 'observation_due', count?: number) {
+    const context = this.observationContext.getStore();
+    if (!context) return;
+    const sequence = ++context.sequence;
+    const event = frameToRuntimeEvent(context.invocationId, { kind: 'observation', observationKind: kind, count,
+      sequence, eventId: `generic:${sequence}` });
+    if (event) context.channel.push(event);
   }
 
   private async execute(input: InvocationPlan, signal?: AbortSignal): Promise<AgentRunResult> {
@@ -388,8 +414,13 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     let lastMessage = 'unknown error';
     let lastCode: RuntimeError['code'] = 'MODEL_ERROR';
     let lastDetails: Record<string, unknown> | undefined;
+    let repairAttempts = 0;
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      if (attempt > 0 && input.operation && Date.now() >= Date.parse(input.operation.deadlineAt)) {
+        lastDetails = { ...lastDetails, recoveryAdmission: 'operation_deadline_exhausted' };
+        break;
+      }
       const controller = new AbortController();
       let cancelledByUser = false;
       let timedOut = false;
@@ -418,19 +449,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         );
       }
       signal?.addEventListener('abort', onAbort, { once: true });
-      const timer = setTimeout(() => {
-        timedOut = true;
-        abortWithTermination(
-          controller,
-          createExecutionTermination({
-            kind: 'runtime_timeout',
-            source: 'runtime',
-            scope: 'invocation',
-            phase: input.phase,
-            timeout: { mode: 'absolute', timeoutMs }
-          })
-        );
-      }, timeoutMs);
+      const timer = setTimeout(() => this.observeRequest('observation_due', timeoutMs), timeoutMs);
       try {
         const messages = [
           {
@@ -461,9 +480,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         let streamMetrics = completion.streamMetrics;
         let usage = this.toUsage(completion.body.usage, selectedConnection);
         let evaluated = this.evaluateRuntimeOutput(completion.body, input.expectedOutput.kind);
-        let repairAttempts = 0;
-
-        while (!evaluated.output && repairAttempts < llmSchemaRepairAttempts()) {
+        while (!evaluated.output && repairAttempts < Math.min(1, llmSchemaRepairAttempts())) {
           repairAttempts += 1;
           completion = await this.requestCompletion(
             input,
@@ -511,14 +528,14 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
               invocationId: input.invocationId,
               type: 'runtime_started',
               visibility: 'user',
-              content: `${input.agent.name} GenericLlmRuntime started ${input.phase}`,
+              content: `${input.agent.name} 已通过通用大模型开始 ${runtimePhaseLabel(input.phase)}`,
               createdAt: startedAt
             },
             {
               invocationId: input.invocationId,
               type: 'runtime_completed',
               visibility: 'user',
-              content: `${input.agent.name} GenericLlmRuntime completed ${input.phase}`,
+              content: `${input.agent.name} 已通过通用大模型完成 ${runtimePhaseLabel(input.phase)}`,
               createdAt: nowIso()
             }
           ],
@@ -557,6 +574,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         if (!retryable || attempt === maxRetries) {
           break;
         }
+        this.observeRequest('provider_retry');
         await this.backoff(attempt, signal);
       } finally {
         clearTimeout(timer);
@@ -586,6 +604,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       const requestBody = this.completionRequestBody(input, connection, messages, activeMode);
       const requestStartedAt = nowIso();
       const requestStartedMs = Date.now();
+      this.observeRequest('request_started');
       const response = await fetch(this.chatCompletionsUrl(connection.baseUrl), {
         method: 'POST',
         signal,
@@ -596,6 +615,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         body: JSON.stringify(requestBody)
       });
 
+      this.observeRequest('request_acknowledged');
       if (!response.ok) {
         if (
           connection.kind === 'remote' &&
@@ -605,6 +625,9 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         ) {
           activeMode = 'json_object';
           this.structuredOutputCapabilities.set(this.structuredOutputCapabilityKey(connection), activeMode);
+          if (input.operation && Date.now() >= Date.parse(input.operation.deadlineAt)) {
+            throw Object.assign(new Error('Structured mode recovery refused: operation deadline exhausted.'), { retryable: false });
+          }
           continue;
         }
         const httpError = await this.httpRuntimeError(response, context);
@@ -742,6 +765,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
 
     const baseSystemPrompt = [
       input.agent.systemPrompt,
+      CHINESE_RUNTIME_OUTPUT_INSTRUCTION,
       'You can read files from the working directory using the tool protocol described below.',
       'Return structured JSON matching the expected RuntimeOutput kind after you have enough context.',
       `Expected kind: ${input.expectedOutput.kind}`,
@@ -938,6 +962,10 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       let rawResponse: string | undefined;
       const maxRetries = llmMaxRetries();
       for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+        if (attempt > 0 && input.operation && Date.now() >= Date.parse(input.operation.deadlineAt)) {
+          return this.failedResult(input, startedAt, selectedModel, 'Recovery refused: operation deadline exhausted.',
+            'MODEL_ERROR', { recoveryAdmission: 'operation_deadline_exhausted' });
+        }
         const controller = new AbortController();
         let cancelledByUser = false;
         let timedOut = false;
@@ -956,20 +984,10 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           );
         };
         signal?.addEventListener('abort', onAbort, { once: true });
-        const timer = setTimeout(() => {
-          timedOut = true;
-          abortWithTermination(
-            controller,
-            createExecutionTermination({
-              kind: 'runtime_timeout',
-              source: 'runtime',
-              scope: 'invocation',
-              phase: input.phase,
-              timeout: { mode: 'absolute', timeoutMs }
-            })
-          );
-        }, timeoutMs);
+        const timer = setTimeout(() => this.observeRequest('observation_due', timeoutMs), timeoutMs);
         try {
+          if (signal?.aborted) onAbort();
+          this.observeRequest('request_started');
           const response = await fetch(this.chatCompletionsUrl(selectedConnection.baseUrl), {
             method: 'POST',
             signal: controller.signal,
@@ -980,6 +998,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
             body: JSON.stringify(requestBody)
           });
 
+          this.observeRequest('request_acknowledged');
           if (!response.ok) {
             const httpError = await this.httpRuntimeError(response, 'Tool-loop LLM request');
             if (!httpError.retryable || attempt === maxRetries) {
@@ -992,6 +1011,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
                 httpError.details
               );
             }
+            this.observeRequest('provider_retry');
             await this.backoff(attempt, signal);
             continue;
           }
@@ -1037,6 +1057,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
               this.errorDetails(error)
             );
           }
+          this.observeRequest('provider_retry');
           await this.backoff(attempt, signal);
         } finally {
           clearTimeout(timer);
@@ -1107,14 +1128,14 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
               invocationId: input.invocationId,
               type: 'runtime_started',
               visibility: 'user',
-              content: `${input.agent.name} GenericLlmRuntime tool-loop started`,
+              content: `${input.agent.name} 已开始通用大模型工具调用`,
               createdAt: startedAt
             },
             {
               invocationId: input.invocationId,
               type: 'runtime_completed',
               visibility: 'user',
-              content: `${input.agent.name} GenericLlmRuntime tool-loop completed (${toolCallHistory.length} tool calls)`,
+              content: `${input.agent.name} 已完成通用大模型工具调用（共 ${toolCallHistory.length} 次）`,
               createdAt: nowIso()
             }
           ],
@@ -1150,6 +1171,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           break;
         }
         totalToolCalls += 1;
+        this.observeRequest('tool_started');
 
         if (call.name === 'read_file') {
           const toolStartedAt = nowIso();
@@ -1249,6 +1271,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           toolCallHistory.push({ name: call.name, input: call.input, output: '', error: 'UNKNOWN_TOOL' });
         }
 
+        this.observeRequest('tool_completed');
         if (totalToolOutputChars >= MAX_TOOL_OUTPUT_CHARS) {
           const content = `Tool output budget reached (${MAX_TOOL_OUTPUT_CHARS} chars).`;
           toolResults.push(
@@ -1556,8 +1579,6 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   private extractMessageContent(body: GenericLlmResponseBody): { content?: string; source?: string } {
     const candidates: Array<[string, unknown]> = [
       ['choices[0].message.content', body.choices?.[0]?.message?.content],
-      ['choices[0].message.reasoning', body.choices?.[0]?.message?.reasoning],
-      ['choices[0].message.reasoning_content', body.choices?.[0]?.message?.reasoning_content],
       ['choices[0].text', body.choices?.[0]?.text],
       ['output_text', body.output_text],
       ['output', body.output],
@@ -1788,6 +1809,9 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         firstFrameLatencyMs = Math.max(0, observedMs - startedMs);
       }
       content += frameContent;
+      if (frameContent) this.observeRequest('text_progress', frameContent.length);
+      const reasoning = (delta as unknown as Record<string, unknown> | undefined)?.reasoning_content;
+      if (typeof reasoning === 'string' && reasoning) this.observeRequest('reasoning_progress', reasoning.length);
       usage = chunk.usage ?? usage;
       model = chunk.model ?? model;
     };
@@ -1921,7 +1945,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   }
 
   private compactPreview(value: string) {
-    return value.replace(/\s+/g, ' ').trim().slice(0, 240);
+    return sanitizeRuntimeLine(value).replace(/\s+/g, ' ').trim().slice(0, 240);
   }
 
   private async httpRuntimeError(response: Response, context: string): Promise<HttpRuntimeError> {
@@ -2022,21 +2046,21 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       status: 'failed',
       output: createAgentMessageOutput({
         messageKind: 'risk',
-        content: `GenericLlmRuntime failed during ${input.phase}.`
+        content: `通用大模型在 ${runtimePhaseLabel(input.phase)} 阶段调用失败。`
       }) satisfies AgentMessageOutput,
       events: [
         {
           invocationId: input.invocationId,
           type: 'runtime_started',
           visibility: 'user',
-          content: `${input.agent.name} GenericLlmRuntime started ${input.phase}`,
+          content: `${input.agent.name} 已通过通用大模型开始 ${runtimePhaseLabel(input.phase)}`,
           createdAt: startedAt
         },
         {
           invocationId: input.invocationId,
           type: 'runtime_failed',
           visibility: 'user',
-          content: `${input.agent.name} GenericLlmRuntime failed ${input.phase}`,
+          content: `${input.agent.name} 的通用大模型在 ${runtimePhaseLabel(input.phase)} 阶段调用失败`,
           metadata: { message, code, details },
           createdAt: nowIso()
         }

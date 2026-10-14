@@ -14,6 +14,9 @@ import {
   RELATIONAL_SCHEMA_V9_TABLES,
   RELATIONAL_SCHEMA_V10_TABLES,
   RELATIONAL_SCHEMA_V17_TABLES,
+  RELATIONAL_SCHEMA_V19_TABLES,
+  RELATIONAL_SCHEMA_V20_TABLES,
+  RELATIONAL_SCHEMA_V21_TABLES,
   RELATIONAL_TABLES
 } from './relational-schema.js';
 
@@ -72,6 +75,7 @@ export type McpObservationRecord = {
  * a key missing here is a session remnant that cannot be forgotten locally.
  */
 export const SESSION_KEYED_COLLECTIONS = [
+  'runtimeHealthBySession',
   'sessionLifecyclesBySession',
   'logicalOperationsBySession',
   'sessionStopRequestsBySession',
@@ -91,10 +95,13 @@ export const SESSION_KEYED_COLLECTIONS = [
   'requirementDocumentsBySession',
   'discussionDocumentsBySession',
   'workflowStartRequestsBySession',
-  'changeRequestsBySession'
+  'changeRequestsBySession',
+  'runtimeSwitchRequestsBySession',
+  'githubConflictsBySession'
 ] as const;
 
 const KNOWN_COLLECTIONS = new Set([
+  'runtimeHealthBySession',
   'sessionLifecyclesBySession',
   'logicalOperationsBySession',
   'sessionStopRequestsBySession',
@@ -105,6 +112,10 @@ const KNOWN_COLLECTIONS = new Set([
   'discussionDocumentsBySession',
   'workflowStartRequestsBySession',
   'changeRequestsBySession',
+  'runtimeSwitchRequestsBySession',
+  'githubConflictsBySession',
+  'codeHostAuthorizations',
+  'codeHostOAuthStates',
   'systemDataMetadata',
   'agents',
   'skills',
@@ -148,6 +159,8 @@ const WORKFLOW_START_REQUESTS_SELECT_SQL =
   `select s.external_id group_id,r.source_snapshot->'sourceRecord' value from agent_cluster.workflow_start_requests r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by s.id,r.created_at`;
 const CHANGE_REQUESTS_SELECT_SQL =
   `select s.external_id group_id,c.source_snapshot->'sourceRecord' value from agent_cluster.change_requests c join agent_cluster.sessions s on s.id=c.session_id where s.deleted_at is null order by s.id,c.created_at,c.external_id`;
+const RUNTIME_SWITCH_REQUESTS_SELECT_SQL =
+  `select s.external_id group_id,r.source_snapshot->'sourceRecord' value from agent_cluster.runtime_switch_requests r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by s.id,r.created_at,r.external_id`;
 const REQUIREMENT_DOCUMENTS_SELECT_SQL =
   `select s.external_id group_id,r.source_snapshot->'sourceRecord' value from agent_cluster.requirement_documents r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by s.id,r.work_item_external_id,r.document_revision`;
 const DISCUSSION_DOCUMENTS_SELECT_SQL =
@@ -161,7 +174,10 @@ const REPLACEABLE_RELATIONAL_TABLES = [
   ...RELATIONAL_SCHEMA_V8_TABLES,
   ...RELATIONAL_SCHEMA_V9_TABLES,
   ...RELATIONAL_SCHEMA_V10_TABLES,
-  ...RELATIONAL_SCHEMA_V17_TABLES
+  ...RELATIONAL_SCHEMA_V17_TABLES,
+  ...RELATIONAL_SCHEMA_V19_TABLES,
+  ...RELATIONAL_SCHEMA_V20_TABLES,
+  ...RELATIONAL_SCHEMA_V21_TABLES
 ]
   .map((definition) => definition.name)
   .filter((name) => !RETAINED_OPERATIONAL_TABLES.has(name))
@@ -366,21 +382,24 @@ export class RelationalStateStore {
   }
 
   async compareAndSetCollection(key: string, expected: unknown, value: unknown): Promise<void> {
-    if (key !== 'fileRevisions') {
+    if (key !== 'fileRevisions' && key !== 'codeHostOAuthStates') {
       throw new Error(`RELATIONAL_COLLECTION_CAS_UNSUPPORTED: ${key}`);
     }
     const client = await this.pool.connect();
     try {
       await client.query('begin');
       await this.lockCollections(client, [key]);
-      await client.query('select pg_advisory_xact_lock(hashtext($1))', ['agent_cluster:file-revisions']);
-      const current = await this.loadFileRevisionsWithClient(client);
+      await client.query('select pg_advisory_xact_lock(hashtext($1))', [`agent_cluster:${key}`]);
+      const current = key === 'fileRevisions'
+        ? await this.loadFileRevisionsWithClient(client)
+        : await this.loadCodeHostOAuthStates(client);
       if (collectionRevision(current) !== collectionRevision(expected)) {
         throw new Error('REVISION_PERSISTENCE_CONFLICT: PostgreSQL file revision state changed in another process.');
       }
       const externalized = this.codec.externalize(value);
       await this.registerContents(client, externalized.contents);
-      await this.writeFileRevisions(client, record(externalized.value));
+      if (key === 'fileRevisions') await this.writeFileRevisions(client, record(externalized.value));
+      else await this.writeCodeHostOAuthStates(client, array(externalized.value));
       await client.query('commit');
     } catch (error) {
       await client.query('rollback').catch(() => undefined);
@@ -453,6 +472,16 @@ export class RelationalStateStore {
         case 'sessions':
           state.sessions = await sourceRecords(client, `select metadata->'sourceRecord' value from agent_cluster.sessions where deleted_at is null order by created_at`);
           break;
+        case 'codeHostAuthorizations':
+          state.codeHostAuthorizations = await this.loadCodeHostAuthorizations(client);
+          break;
+        case 'codeHostOAuthStates':
+          state.codeHostOAuthStates = await this.loadCodeHostOAuthStates(client);
+          break;
+        case 'githubConflictsBySession':
+          state.githubConflictsBySession = await groupedSources(client,
+            `select s.external_id group_id,c.source_snapshot->'sourceRecord' value from agent_cluster.github_conflicts c join agent_cluster.sessions s on s.id=c.session_id where s.deleted_at is null order by s.id,c.created_at`);
+          break;
         case 'sessionLifecyclesBySession':
           state.sessionLifecyclesBySession = await keyedSources(client, `select s.external_id,l.source_snapshot->'sourceRecord' value from agent_cluster.session_lifecycles l join agent_cluster.sessions s on s.id=l.session_id order by s.external_id`);
           break;
@@ -476,6 +505,9 @@ export class RelationalStateStore {
           break;
         case 'changeRequestsBySession':
           state.changeRequestsBySession = await groupedSources(client, CHANGE_REQUESTS_SELECT_SQL);
+          break;
+        case 'runtimeSwitchRequestsBySession':
+          state.runtimeSwitchRequestsBySession = await groupedSources(client, RUNTIME_SWITCH_REQUESTS_SELECT_SQL);
           break;
         case 'eventsBySession':
           state.eventsBySession = await groupedSources(client, `select s.external_id group_id,e.payload->'sourceRecord' value from agent_cluster.collaboration_events e join agent_cluster.sessions s on s.id=e.session_id where s.deleted_at is null order by s.id,e.session_seq`);
@@ -506,6 +538,9 @@ export class RelationalStateStore {
           break;
         case 'followUpMessagesBySession':
           state.followUpMessagesBySession = await groupedSources(client, `select s.external_id group_id,f.handling_payload->'sourceRecord' value from agent_cluster.session_follow_up_messages f join agent_cluster.sessions s on s.id=f.session_id where s.deleted_at is null order by s.id,f.queued_at`);
+          break;
+        case 'runtimeHealthBySession':
+          state.runtimeHealthBySession = await groupedSources(client, `select s.external_id group_id,h.source_snapshot->'sourceRecord' value from agent_cluster.runtime_health_snapshots h join agent_cluster.sessions s on s.id=h.session_id where s.deleted_at is null order by h.updated_at`);
           break;
         case 'runtimeInvocationsBySession':
           state.runtimeInvocationsBySession = await groupedSources(client, `select s.external_id group_id,r.profile_snapshot->'sourceRecord' value from agent_cluster.runtime_invocations r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by r.started_at`);
@@ -893,6 +928,7 @@ export class RelationalStateStore {
 
   private async writeCollectionWithClient(client: PoolClient, key: string, value: unknown): Promise<void> {
     switch (key) {
+      case 'runtimeHealthBySession': return this.writeRuntimeHealth(client, record(value));
       case 'logicalOperationsBySession': return this.writeLogicalOperations(client, record(value));
       case 'sessionLifecyclesBySession': return this.writeSessionLifecycles(client, record(value));
       case 'sessionStopRequestsBySession': return this.writeSessionStopRequests(client, record(value));
@@ -903,6 +939,9 @@ export class RelationalStateStore {
       case 'workflowCatalog': return this.writeWorkflowCatalog(client, record(value));
       case 'workflows': return this.writeWorkflowDrafts(client, array(value));
       case 'sessions': return this.writeSessions(client, array(value));
+      case 'codeHostAuthorizations': return this.writeCodeHostAuthorizations(client, array(value));
+      case 'codeHostOAuthStates': return this.writeCodeHostOAuthStates(client, array(value));
+      case 'githubConflictsBySession': return this.writeGitHubConflicts(client, record(value));
       case 'fileRevisions': return this.writeFileRevisions(client, record(value));
       case 'eventsBySession': return this.writeEvents(client, record(value));
       case 'briefsBySession': return this.writeBriefs(client, record(value));
@@ -928,6 +967,7 @@ export class RelationalStateStore {
       case 'discussionDocumentsBySession': return this.writeDiscussionDocuments(client, record(value));
       case 'workflowStartRequestsBySession': return this.writeWorkflowStartRequests(client, record(value));
       case 'changeRequestsBySession': return this.writeChangeRequests(client, record(value));
+      case 'runtimeSwitchRequestsBySession': return this.writeRuntimeSwitchRequests(client, record(value));
       case 'workItemsBySession': return this.writeWorkItems(client, record(value));
       case 'decisionRecordsBySession': return this.writeDecisionRecords(client, record(value));
       case 'contextSnapshotsBySession': return this.writeContextSnapshots(client, record(value));
@@ -970,6 +1010,21 @@ export class RelationalStateStore {
           text(lifecycle.admission), text(lifecycle.stopStatus), json({ sourceRecord: lifecycle }),
           date(lifecycle.restoredAt ?? lifecycle.deletedAt ?? new Date().toISOString())]
       );
+    }
+  }
+
+  private async writeRuntimeHealth(client: PoolClient, value: Record<string, unknown>) {
+    for (const [sessionExternalId, snapshots] of Object.entries(value)) {
+      const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
+      if (!sessionId) throw new Error('RUNTIME_HEALTH_SESSION_NOT_FOUND');
+      for (const snapshot of array(snapshots).map(record)) {
+        await client.query(`insert into agent_cluster.runtime_health_snapshots
+          (invocation_external_id,session_id,version,source_snapshot,updated_at) values ($1,$2,$3,$4,$5)
+          on conflict (invocation_external_id) do update set version=excluded.version,
+            source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at
+          where runtime_health_snapshots.session_id=excluded.session_id and runtime_health_snapshots.version <= excluded.version`,
+        [text(snapshot.invocationId), sessionId, integer(snapshot.version, 1), json({ sourceRecord: snapshot }), date(snapshot.updatedAt)]);
+      }
     }
   }
 
@@ -1198,6 +1253,44 @@ export class RelationalStateStore {
         working_directory: item.workingDirectory ? JSON.stringify(item.workingDirectory) : null,
         metadata: json({ sourceRecord: item }), created_at: date(item.createdAt), updated_at: date(item.updatedAt), deleted_at: null
       });
+      if (item.sourceBinding) {
+        const binding = record(item.sourceBinding);
+        if (text(binding.sessionId) !== externalId) throw new Error('GITHUB_SOURCE_SESSION_MISMATCH');
+        await client.query(
+          `insert into agent_cluster.github_source_bindings
+           (session_id,repository_id,repository_url,execution_location,device_id,authorization_ref,
+            workspace_id,base_branch,base_sha,state,version,source_snapshot,created_at,updated_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+           on conflict (session_id) do update set repository_id=excluded.repository_id,
+             repository_url=excluded.repository_url,execution_location=excluded.execution_location,
+             device_id=excluded.device_id,authorization_ref=excluded.authorization_ref,
+             workspace_id=excluded.workspace_id,base_branch=excluded.base_branch,
+             base_sha=excluded.base_sha,state=excluded.state,version=excluded.version,
+             source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at`,
+          [sessionId, text(binding.repositoryId), text(binding.repositoryUrl), text(binding.executionLocation),
+            nullableText(binding.deviceId), nullableText(binding.authorizationRef), nullableText(binding.workspaceId),
+            nullableText(binding.baseBranch), nullableText(binding.baseSha), text(binding.state),
+            integer(binding.version, 1), json({ sourceRecord: binding }), date(binding.createdAt), date(binding.updatedAt)]
+        );
+      }
+      if (item.delivery) {
+        const delivery = record(item.delivery);
+        if (text(delivery.sessionId) !== externalId) throw new Error('GITHUB_DELIVERY_SESSION_MISMATCH');
+        await client.query(
+          `insert into agent_cluster.github_deliveries
+           (session_id,round,state,version,task_branch,pull_request_number,reviewed_head_sha,
+            merged_commit_sha,source_snapshot,created_at,updated_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+           on conflict (session_id,round) do update set state=excluded.state,version=excluded.version,
+             task_branch=excluded.task_branch,pull_request_number=excluded.pull_request_number,
+             reviewed_head_sha=excluded.reviewed_head_sha,merged_commit_sha=excluded.merged_commit_sha,
+             source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at`,
+          [sessionId, integer(delivery.round, 1), text(delivery.state), integer(delivery.version, 1),
+            nullableText(delivery.taskBranch), delivery.pullRequestNumber == null ? null : integer(delivery.pullRequestNumber),
+            nullableText(delivery.reviewedHeadSha), nullableText(delivery.mergedCommitSha),
+            json({ sourceRecord: delivery }), date(delivery.createdAt), date(delivery.updatedAt)]
+        );
+      }
       for (const agentExternalId of array(item.participatingAgentIds).map((value) => text(value))) {
         await client.query(
           `insert into agent_cluster.session_participants
@@ -1865,6 +1958,92 @@ export class RelationalStateStore {
     }
   }
 
+  private async writeCodeHostAuthorizations(client: PoolClient, values: unknown[]) {
+    for (const rawValue of values) {
+      const item = record(rawValue);
+      const secretEnvelope = nullableText(item.secretEnvelope);
+      if (secretEnvelope && (!secretEnvelope.startsWith('enc-v2:') || item.executionLocation !== 'server')) {
+        throw new Error('GITHUB_AUTHORIZATION_SECRET_NOT_ENCRYPTED');
+      }
+      const { secretEnvelope: _secret, ...publicRecord } = item;
+      await client.query(
+        `insert into agent_cluster.github_authorizations
+         (external_id,account_id,execution_location,device_id,secret_envelope,state,version,
+          source_snapshot,created_at,updated_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+         on conflict (external_id) do update set account_id=excluded.account_id,
+           execution_location=excluded.execution_location,device_id=excluded.device_id,
+           secret_envelope=excluded.secret_envelope,state=excluded.state,version=excluded.version,
+           source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at`,
+        [text(item.id), text(item.accountId), text(item.executionLocation), nullableText(item.deviceId),
+          secretEnvelope, text(item.state), integer(item.version, 1), json({ sourceRecord: publicRecord }),
+          date(item.createdAt), date(item.updatedAt)]
+      );
+    }
+  }
+
+  private async loadCodeHostAuthorizations(client: PoolClient) {
+    const rows = await client.query<{ value: unknown; secret_envelope: string | null }>(
+      `select source_snapshot->'sourceRecord' value,secret_envelope from agent_cluster.github_authorizations order by created_at`
+    );
+    return rows.rows.map((row) => ({ ...record(row.value),
+      ...(row.secret_envelope ? { secretEnvelope: row.secret_envelope } : {}) }));
+  }
+
+  private async writeCodeHostOAuthStates(client: PoolClient, values: unknown[]) {
+    await client.query('delete from agent_cluster.github_oauth_states');
+    for (const rawValue of values) {
+      const item = record(rawValue);
+      const stateHash = text(item.stateHash);
+      if (!/^[a-f0-9]{64}$/.test(stateHash)) throw new Error('GITHUB_OAUTH_STATE_HASH_INVALID');
+      const sessionId = await idByExternal(client, 'sessions', text(item.sessionId));
+      if (!sessionId) throw new Error('GITHUB_OAUTH_SESSION_NOT_FOUND');
+      await client.query(
+        `insert into agent_cluster.github_oauth_states
+         (state_hash,session_id,repository_url,execution_location,expires_at,source_snapshot)
+         values ($1,$2,$3,$4,$5,$6)`,
+        [stateHash, sessionId, text(item.repositoryUrl), text(item.executionLocation),
+          date(item.expiresAt), json({ sourceRecord: item })]
+      );
+    }
+  }
+
+  private async loadCodeHostOAuthStates(client: PoolClient) {
+    return sourceRecords(client,
+      `select source_snapshot->'sourceRecord' value from agent_cluster.github_oauth_states
+        where expires_at > now() order by expires_at`);
+  }
+
+  private async writeGitHubConflicts(client: PoolClient, values: Record<string, unknown>) {
+    for (const [sessionExternalId, conflicts] of Object.entries(values)) {
+      const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
+      if (!sessionId) throw new Error('GITHUB_CONFLICT_SESSION_NOT_FOUND');
+      for (const rawValue of array(conflicts)) {
+        const item = record(rawValue);
+        if (text(item.sessionId) !== sessionExternalId) throw new Error('GITHUB_CONFLICT_SESSION_MISMATCH');
+        const files = array(item.files).map((rawFile) => {
+          const file = record(rawFile);
+          return {
+            fileId: file.fileId, path: file.path, kind: file.kind, status: file.status,
+            version: file.version, baseObjectId: file.baseObjectId, oursObjectId: file.oursObjectId,
+            theirsObjectId: file.theirsObjectId, draftObjectId: file.draftObjectId,
+            binaryChoice: file.binaryChoice
+          };
+        });
+        await client.query(
+          `insert into agent_cluster.github_conflicts
+           (external_id,session_id,delivery_round,target_operation,version,source_snapshot,created_at,updated_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8)
+           on conflict (external_id) do update set version=excluded.version,
+             source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at`,
+          [text(item.id), sessionId, integer(item.deliveryRound, 1), text(item.targetOperation),
+            integer(item.version, 1), json({ sourceRecord: { ...item, files } }),
+            date(item.createdAt), date(item.updatedAt)]
+        );
+      }
+    }
+  }
+
   private async writeSummaryCheckpoints(client: PoolClient, value: Record<string, unknown>) {
     for (const [sessionExternalId, values] of Object.entries(value)) {
       const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
@@ -1888,6 +2067,61 @@ export class RelationalStateStore {
             text(checkpoint.policyVersion), text(checkpoint.contentHash),
             checkpoint.generation === undefined || checkpoint.generation === null ? null : integer(checkpoint.generation, 1),
             json({ sourceRecord: checkpoint }), date(checkpoint.createdAt)]
+        );
+      }
+    }
+  }
+
+  private async writeRuntimeSwitchRequests(client: PoolClient, value: Record<string, unknown>) {
+    for (const [sessionExternalId, values] of Object.entries(value)) {
+      const sessionId = await idByExternal(client, 'sessions', sessionExternalId);
+      if (!sessionId) continue;
+      for (const rawRequest of array(values)) {
+        const request = record(rawRequest);
+        const externalId = text(request.id);
+        const logicalKey = text(request.logicalKey);
+        if (!externalId || !logicalKey) throw new Error('RUNTIME_SWITCH_KEY_MISSING');
+        // Target, mode and resume intent are immutable once accepted; only the
+        // status, version and stop/generation bindings advance. The unique
+        // logical key is what keeps one request per Idempotency-Key real across
+        // instances, so a replayed POST cannot open a second stop barrier.
+        await client.query(
+          `insert into agent_cluster.runtime_switch_requests
+             (external_id,session_id,logical_key,idempotency_key,source,from_runtime_type,target_runtime_type,
+              resume_after_switch,fallback_mode,status,version,expected_session_revision,previous_session_status,
+              stop_request_external_id,lifecycle_generation,failure_stage,source_snapshot,created_at,updated_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+           on conflict (external_id) do update set
+             status=excluded.status,version=excluded.version,
+             stop_request_external_id=excluded.stop_request_external_id,
+             lifecycle_generation=excluded.lifecycle_generation,
+             failure_stage=excluded.failure_stage,
+             source_snapshot=excluded.source_snapshot,updated_at=excluded.updated_at`,
+          [externalId, sessionId, logicalKey, text(request.idempotencyKey), text(request.source, 'ui_control'),
+            request.fromRuntimeType === undefined || request.fromRuntimeType === null
+              ? null
+              : text(request.fromRuntimeType),
+            text(request.targetRuntimeType),
+            request.resumeAfterSwitch === true,
+            text(request.fallbackMode, 'exclude_previous_once'),
+            text(request.status, 'requested'),
+            integer(request.version, 1),
+            request.expectedSessionRevision === undefined || request.expectedSessionRevision === null
+              ? null
+              : integer(request.expectedSessionRevision, 0),
+            request.previousSessionStatus === undefined || request.previousSessionStatus === null
+              ? null
+              : text(request.previousSessionStatus),
+            request.stopRequestId === undefined || request.stopRequestId === null
+              ? null
+              : text(request.stopRequestId),
+            request.lifecycleGeneration === undefined || request.lifecycleGeneration === null
+              ? null
+              : integer(request.lifecycleGeneration, 1),
+            request.failureStage === undefined || request.failureStage === null
+              ? null
+              : text(request.failureStage),
+            json({ sourceRecord: request }), date(request.createdAt), date(request.updatedAt)]
         );
       }
     }
@@ -2349,9 +2583,13 @@ export class RelationalStateStore {
 
   private async loadSessions(client: PoolClient, state: PersistedState) {
     state.sessions = await sourceRecords(client, `select metadata->'sourceRecord' value from agent_cluster.sessions where deleted_at is null order by created_at`);
+    state.codeHostAuthorizations = await this.loadCodeHostAuthorizations(client);
+    state.codeHostOAuthStates = await this.loadCodeHostOAuthStates(client);
   }
 
   private async loadSessionOwnedData(client: PoolClient, state: PersistedState) {
+    state.githubConflictsBySession = await groupedSources(client,
+      `select s.external_id group_id,c.source_snapshot->'sourceRecord' value from agent_cluster.github_conflicts c join agent_cluster.sessions s on s.id=c.session_id where s.deleted_at is null order by s.id,c.created_at`);
     state.eventsBySession = await groupedSources(client, `select s.external_id group_id,e.payload->'sourceRecord' value from agent_cluster.collaboration_events e join agent_cluster.sessions s on s.id=e.session_id where s.deleted_at is null order by s.id,e.session_seq`);
     state.briefsBySession = await groupedSources(client, `select s.external_id group_id,b.source_snapshot->'sourceRecord' value from agent_cluster.briefs b join agent_cluster.sessions s on s.id=b.session_id where s.deleted_at is null order by s.id,b.created_at`);
     state.suggestedTasksByBriefId = await groupedSources(client, `select b.external_id group_id,t.source_snapshot->'sourceRecord' value from agent_cluster.suggested_tasks t join agent_cluster.briefs b on b.id=t.brief_id join agent_cluster.sessions s on s.id=b.session_id where s.deleted_at is null order by b.external_id,t.id`);
@@ -2403,6 +2641,7 @@ export class RelationalStateStore {
   }
 
   private async loadRuntime(client: PoolClient, state: PersistedState) {
+    state.runtimeHealthBySession = await groupedSources(client, `select s.external_id group_id,h.source_snapshot->'sourceRecord' value from agent_cluster.runtime_health_snapshots h join agent_cluster.sessions s on s.id=h.session_id where s.deleted_at is null order by h.updated_at`);
     state.sessionLifecyclesBySession = await keyedSources(client, `select s.external_id,l.source_snapshot->'sourceRecord' value from agent_cluster.session_lifecycles l join agent_cluster.sessions s on s.id=l.session_id order by s.external_id`);
     state.workItemBudgetsBySession = await groupedSources(client, `select s.external_id group_id,b.source_snapshot->'sourceRecord' value from agent_cluster.work_item_budgets b join agent_cluster.sessions s on s.id=b.session_id where s.deleted_at is null order by s.id,b.updated_at`);
     state.summaryCheckpointsBySession = await groupedSources(client, SUMMARY_CHECKPOINTS_SELECT_SQL);
@@ -2411,6 +2650,7 @@ export class RelationalStateStore {
     state.discussionDocumentsBySession = await groupedSources(client, DISCUSSION_DOCUMENTS_SELECT_SQL);
     state.workflowStartRequestsBySession = await groupedSources(client, WORKFLOW_START_REQUESTS_SELECT_SQL);
     state.changeRequestsBySession = await groupedSources(client, CHANGE_REQUESTS_SELECT_SQL);
+    state.runtimeSwitchRequestsBySession = await groupedSources(client, RUNTIME_SWITCH_REQUESTS_SELECT_SQL);
     state.runtimeInvocationsBySession = await groupedSources(client, `select s.external_id group_id,r.profile_snapshot->'sourceRecord' value from agent_cluster.runtime_invocations r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by r.started_at`);
     state.logicalOperationsBySession = await groupedSources(client, `select s.external_id group_id,o.source_snapshot->'sourceRecord' value from agent_cluster.logical_operations o join agent_cluster.sessions s on s.id=o.session_id where s.deleted_at is null order by o.external_id`);
     state.sessionStopRequestsBySession = await groupedSources(client, `select s.external_id group_id,r.source_snapshot->'sourceRecord' value from agent_cluster.session_stop_requests r join agent_cluster.sessions s on s.id=r.session_id where s.deleted_at is null order by r.created_at,r.external_id`);
@@ -2448,8 +2688,8 @@ export class RelationalStateStore {
 }
 
 function collectionWriteOrder(state: PersistedState): string[] {
-  const order = ['systemDataMetadata','agents','systemAgentRuntimePolicies','skills','capabilities','workflowCatalog','workflows','sessions','sessionLifecyclesBySession','workItemBudgetsBySession','workItemsBySession','decisionRecordsBySession','contextSnapshotsBySession','intentRoutingRecordsBySession','followUpMessagesBySession','summaryCheckpointsBySession','discussionsBySession','requirementDocumentsBySession','discussionDocumentsBySession','workflowStartRequestsBySession','changeRequestsBySession','fileRevisions','workspaceWritebacks','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','localRuntimeDevices','localRuntimeOperationAudits','eventOutbox','cutoverAudits'];
-  order.push('logicalOperationsBySession', 'sessionStopRequestsBySession');
+  const order = ['systemDataMetadata','agents','systemAgentRuntimePolicies','skills','capabilities','workflowCatalog','workflows','sessions','codeHostAuthorizations','codeHostOAuthStates','githubConflictsBySession','sessionLifecyclesBySession','workItemBudgetsBySession','workItemsBySession','decisionRecordsBySession','contextSnapshotsBySession','intentRoutingRecordsBySession','followUpMessagesBySession','summaryCheckpointsBySession','discussionsBySession','requirementDocumentsBySession','discussionDocumentsBySession','workflowStartRequestsBySession','changeRequestsBySession','runtimeSwitchRequestsBySession','fileRevisions','workspaceWritebacks','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','localRuntimeDevices','localRuntimeOperationAudits','eventOutbox','cutoverAudits'];
+  order.push('logicalOperationsBySession', 'sessionStopRequestsBySession', 'runtimeHealthBySession');
   return order.filter((key) => Object.prototype.hasOwnProperty.call(state, key));
 }
 

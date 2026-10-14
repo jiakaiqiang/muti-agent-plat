@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { getEventListeners } from 'node:events';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -16,6 +17,7 @@ import {
 import { defaultState } from './state.js';
 import { LocalWorkspace } from './workspace.js';
 import { probeLocalRuntimeCapabilities } from './adapters/registry.js';
+import { canonicalWorkspaceChangeSetJson } from '@agent-cluster/shared';
 
 test('reconnect delay removes abort listeners after successful waits', async () => {
   const controller = new AbortController();
@@ -301,4 +303,14 @@ test('one-time delete authorization is bound to one ChangeSet and consumed only 
   authorizations.authorizeDelete(request.workspaceId, request.input);
   now += 101;
   assert.equal(authorizations.permissionsFor(request, base).workspace_delete, 'confirm');
+
+  const digest = createHash('sha256').update(canonicalWorkspaceChangeSetJson(request.input)).digest('hex');
+  authorizations.authorizeDigest(request.workspaceId, request.input.id, digest);
+  assert.equal(authorizations.permissionsFor(request, base).workspace_delete, 'allow');
+  assert.equal(authorizations.permissionsFor({ ...request,
+    input: { ...request.input, changes: [{ operation: 'create', path: 'other.txt',
+      content: 'unreviewed', encoding: 'utf-8' }] }
+  }, base).workspace_delete, 'confirm');
+  assert.throws(() => authorizations.authorizeDigest(request.workspaceId, request.input.id, 'invalid'),
+    /INVALID_WRITEBACK_AUTHORIZATION_DIGEST/);
 });

@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import type { AgentCardState, CollaborationEvent } from '@/types/contracts'
 import { buildCollaborationTaskPanels } from './collaborationTaskModel'
+import { formatDateTime } from '@/utils/dateTime'
 
 const props = defineProps<{ events: CollaborationEvent[]; agents: AgentCardState[] }>()
 const emit = defineEmits<{
@@ -64,7 +65,7 @@ function agentStatusLabel(status: string) {
             @click="emit('retryAgent', agent.agentId, panel.taskId)"
           >重试此 Agent</button>
           <ul v-if="agent.outputs.length" class="collaboration-task-panel__outputs">
-            <li v-for="output in agent.outputs" :key="output.id"><time>{{ new Date(output.createdAt).toLocaleTimeString() }}</time>{{ output.content }}</li>
+            <li v-for="output in agent.outputs" :key="output.id"><time>{{ formatDateTime(output.createdAt) }}</time>{{ output.content }}</li>
           </ul>
           <p v-else class="collaboration-task-panel__empty">暂无阶段输出</p>
         </details>

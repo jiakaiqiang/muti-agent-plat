@@ -100,7 +100,7 @@ POST /api/ops/maintenance/enter
 
 会话列表、详情、创建和 resume 仅对当前 `dataEpoch` 的 v2 数据开放。Web 在调用这些接口前必须通过下方 Health 版本闸门。
 
-`POST /api/sessions` 只接受 `input / agentIds / projectId / tokenBudget / knowledgeBaseIds / workingDirectory / runtimePreference`。创建请求只建立 Workspace Binding，不递归扫描目录、不批量读取正文，也不等待 Provider Index 完成。`workspaceSnapshot` 禁止客户端上传；`runtimeType / modelId / executionTarget / contextAssembly / pipelineVersion` 等旧字段或其他未知字段返回 400，不会被静默忽略。
+`POST /api/sessions` 只接受 `input / agentIds / projectId / tokenBudget / knowledgeBaseIds / workingDirectory / codeSource / executionLocation / runtimePreference`。普通目录创建请求只建立 Workspace Binding，不递归扫描目录、不批量读取正文，也不等待 Provider Index 完成。`workspaceSnapshot` 禁止客户端上传；`runtimeType / modelId / executionTarget / contextAssembly / pipelineVersion` 等旧字段或其他未知字段返回 400，不会被静默忽略。GitHub 来源新建入口在交付链路验收前默认关闭。
 
 ### 3.1 获取会话列表
 
@@ -147,6 +147,10 @@ type CreateSessionRequest = {
     path?: string
     selectedAt: string
   }
+  codeSource?:
+    | { kind: 'local_directory' }
+    | { kind: 'remote_repository'; provider: 'github'; repositoryUrl: string; deviceId?: string }
+  executionLocation?: 'local' | 'server'
   runtimePreference?: {
     preferredRuntimeType?: RuntimeType
     preferredModelId?: string
@@ -156,6 +160,10 @@ type CreateSessionRequest = {
 ```
 
 `local_bridge` 不得携带服务器可访问的绝对路径；`server_local` 必须携带通过平台边界校验的绝对路径。响应只保证 Binding 和首条用户事件已建立，不保证 `workspaceSnapshot` 或完整索引存在。后台索引状态不会阻塞 Session 进入讨论。
+
+GitHub 来源不得同时提交 `workingDirectory` 或令牌；服务器执行不带 `deviceId`，本机执行须带已连接设备 ID。新建 GitHub 会话需要部署侧显式启用 `AGENT_CLUSTER_GITHUB_SESSION_CREATE_ENABLED=true`，未启用时返回 `GITHUB_SESSION_CREATE_NOT_ENABLED`。该开关仅用于分阶段开发，完整交付和双端验收通过前不得作为生产功能发布。
+
+`GET /api/sessions/code-source-capabilities` 返回 `{ githubCreateEnabled: boolean }`，Web/Desktop 据此显示 GitHub 来源选项。启用该开关后，新建服务器执行会话仅接受 GitHub 来源；服务器目录请求返回 `SERVER_SESSION_REQUIRES_GITHUB_SOURCE`。历史服务器目录会话仍可读取和恢复。
 
 同一 `workspaceId` 允许创建多个活动 Session。创建阶段只建立独立 Session Binding，不获取目录级独占 Lease。写能力任务必须进入隔离执行目录；真实目录的变更在任务完成后按 Workspace FIFO 写回，并使用 path hash 与三方合并处理并发修改。
 
@@ -167,6 +175,38 @@ type CreateSessionResponse = {
   firstEvent: CollaborationEvent
 }
 ```
+
+### 3.2.1 GitHub 来源准备（开发中）
+
+```text
+POST   /api/code-hosts/github/oauth/start         { sessionId }
+GET    /api/code-hosts/github/oauth/callback?code=&state=
+POST   /api/code-hosts/github/tokens              { sessionId, token }
+DELETE /api/code-hosts/github/authorizations/:id
+GET    /api/sessions/:sessionId/source/branches
+POST   /api/sessions/:sessionId/source/base-branch { branch, expectedSourceVersion }
+POST   /api/sessions/:sessionId/source/retry
+```
+
+OAuth 回调成功时返回不含令牌、授权引用或会话详情的 HTML 结果页；原会话通过详情查询继续同步准备状态。失败仍由 API 错误处理器返回错误。PAT 输入仅存于客户端表单直到专用请求结束，客户端随后清空输入。
+
+当前服务端准备流程在授权后克隆并返回 `awaiting_base_branch`；分支列表包含仓库实际默认分支、远端分支和来源版本。选分支按版本校验，绑定独立工作区后才开始 Agent。OAuth `state` 由服务端生成，绑定会话与仓库，10 分钟过期且只能消费一次；PAT 只通过专用请求正文发送。以上接口不表示本机 GitHub 执行、PR 与合并链路已可用。
+
+### 3.2.2 GitHub 交付与冲突（专项验收中）
+
+```text
+GET  /api/sessions/:sessionId/delivery
+GET  /api/sessions/:sessionId/delivery/diff?kind=pull_request|merged_commit&page=1
+POST /api/sessions/:sessionId/delivery/validate { expectedDeliveryVersion, command? }
+POST /api/sessions/:sessionId/delivery/publish  { expectedDeliveryVersion }
+POST /api/sessions/:sessionId/delivery/refresh  { expectedDeliveryVersion }
+POST /api/sessions/:sessionId/delivery/merge    { expectedDeliveryVersion, expectedHeadSha }
+GET  /api/sessions/:sessionId/conflicts/:conflictId
+PUT  /api/sessions/:sessionId/conflicts/:conflictId/files/:fileId
+POST /api/sessions/:sessionId/conflicts/:conflictId/complete
+```
+
+合并请求须携带 `Idempotency-Key`，服务端重新查询 PR、CI 和 head，并以 `expectedHeadSha` 调用 Squash Merge。CI 状态同时检查最新 Check Runs 与 Commit Status 的综合 `state`；无检查返回 `not_configured`，检查分页未取全或状态待完成返回 `pending`，响应结构不完整时拒绝合并。PR Diff 与实际合并提交 Diff 分开读取，文件按页返回。冲突文件保存提交 `{ expectedConflictVersion, confirm, resultContent?, binaryChoice? }`；完成冲突提交 `{ expectedConflictVersion }`。`ConflictView.source` 区分 Git 与工作区写回：Git 完成后重新验证并更新 PR；写回完成后检查原文件哈希，将逐文件确认的结果应用到 Workspace Provider，文件变化则返回 409。写回草稿存于写回记录，不出现在 Session 或事件响应中。`DeliveryRecord` 与冲突快照均使用版本比较；本机 GitHub 操作依赖在线设备，离线时不能合并。当前新建入口仍默认关闭，完整故障矩阵和真实测试仓库验收未完成。
 
 ### 3.3 获取会话详情
 
@@ -230,18 +270,22 @@ type ResolveWorkspaceWritebackInput = {
     | 'resolve_with_agent'
     | 'keep_workspace'
     | 'use_session'
+    | 'apply_conflict'
     | 'abandon_writeback'
   confirmationId?: string
+  expectedConflictVersion?: number
 }
 ```
 
 - `retry_merge`：基于当前工作区重新执行 path hash 校验和三方合并。
 - `resolve_with_agent`：保留当前目录内容，把原任务重新置为待执行，让 Agent 生成兼容变更。
 - `keep_workspace`：保留当前目录，放弃该隔离结果，并继续后续任务。
-- `use_session`：强制使用 Session 版本；必须令 `confirmationId === writebackId`，用于表达覆盖风险的显式确认。
+- `use_session`：仅供失败状态的旧恢复路径使用；必须令 `confirmationId === writebackId`。已有统一冲突草稿时必须逐文件确认。
+- `apply_conflict`：统一冲突编辑器完成时使用，必须传当前 `expectedConflictVersion`；正常由 `/conflicts/:conflictId/complete` 调用。
 - `abandon_writeback`：明确放弃写回，并继续后续任务。
 
 响应为更新后的 `WorkspaceWritebackRecord`。`conflicted/failed` 状态保持 Session 在 `WAIT_WORKSPACE_CONFLICT_RESOLUTION`；`applied/abandoned` 会完成或重新安排对应任务并恢复执行。
+`WorkspaceWritebackRecord.hasConflictDraft` 只表示该记录有可恢复的编辑器快照，不包含草稿正文。服务重启将正在应用的记录转为 `failed` 后，若该字段为 `true`，仍可通过冲突接口读取原草稿并用原版本号继续 `apply_conflict`；应用前重新校验工作区文件哈希，文件已变化时返回 `409`，不覆盖新内容。
 
 ### 3.3.2 删除会话
 
@@ -397,7 +441,9 @@ POST /api/sessions/:sessionId/briefs/:briefId/confirm
 
 ```ts
 type ConfirmBriefRequest = {
-  note?: string
+  confirmationId?: string
+  /** Only accepted when the current confirmation card explicitly exposes the risk path. */
+  allowOpenQuestions?: boolean
 }
 ```
 
@@ -411,6 +457,13 @@ type ConfirmBriefResponse = {
 }
 ```
 
+普通确认仍要求 `openQuestions` 为空。每个 WorkItem 默认最多允许 3 次用户提交的
+Brief 修订（可通过 `BRIEF_REVISION_MAX_ATTEMPTS` 配置，范围 1-10）；次数由持久化的
+`brief_rejected` 事件统计，服务重启不会重置。达到上限且仍有未决问题时，确认卡才会
+提供 `proceed_with_open_questions` 选项。客户端必须提交 `allowOpenQuestions: true`
+和该卡的 `confirmationId`，服务端会记录 `riskAccepted` 及未决问题后进入
+`WAIT_WORKFLOW_SELECT`；这不是自动忽略问题，也不能绕过确认卡或提前使用该字段。
+
 ### 4.3 拒绝或继续沟通
 
 ```text
@@ -421,10 +474,15 @@ POST /api/sessions/:sessionId/briefs/:briefId/reject
 
 ```ts
 type RejectBriefRequest = {
-  reason: string
+  reason?: string
   userMessage?: string
+  confirmationId?: string
+  assignedAgentKeys?: string[]
+  questionAnswers?: Array<{ question: string; answer: string }>
 }
 ```
+
+`confirmationId` 必须对应当前 Brief 的待处理确认卡；重复提交同一修订卡只返回已接受状态，不重新发起讨论。当前未决问题必须逐一回答，否则返回 `brief_question_answers_required`；不适用时也须明确说明。`questionAnswers` 的每个 `question` 必须对应当前 Brief 的未决问题或当前 WorkItem 已确认的问题，`answer` 不得为空；后者用于显式修改旧答案。明确答案在重新讨论前以用户确认的 DecisionRecord 写入当前 WorkItem，旧答案被 supersede；新 Brief、需求文档及摘要不得再把这些问题列为未决。仅修改 Markdown 文本不会自动推断成已确认问答。
 
 响应：
 
@@ -1075,6 +1133,14 @@ VALIDATION_ERROR
 
 ## 执行停止状态查询（2026-09-15）
 
+### Runtime 请求健康查询与等待确认（2026-09-29）
+
+`GET /api/sessions/:sessionId/runtime-health` 返回标准成功封装中的 `{items:RuntimeHealthSnapshot[]}`。`POST /api/sessions/:sessionId/runtime-health/:invocationId/wait` 接收 `{expectedVersion,sessionGeneration,idempotencyKey}`，返回同一调用的最新快照；两者均设置 `Cache-Control:no-store`。
+
+版本为正安全整数、generation 为非负安全整数，幂等键为 1–128 字符；非法 body 在 mutation 前拒绝。服务端校验会话存在、活动生命周期、调用归属、generation、version 和 unknown_wait 可操作状态；不存在活动调用返回 404，冲突返回 409 与当前快照。同一调用重复最后一个等待键返回原确认。历史或终态快照不能获得操作权限。
+
+等待仅确认用户选择：不发送模型请求、不启动进程、不调用 resume、不改变 operation deadline、attempt 或 SessionStatus。查询/probe 失败不得取消模型。复用既有单用户部署安全边界，本专项未实现多租户用户权限系统；不能将客户端 Session ID 当作新增鉴权凭据。停止仍由既有会话停止 API 与可信回执完成。
+
 `GET /api/sessions/:sessionId/stop-state` 返回标准成功封装中的 `data: RuntimeStopSummary`，并设置 `Cache-Control: no-store`。该接口读取服务端权威停止轮次、监督句柄、待同步记录和 Local Runtime 未确认回执；查询不会重试、恢复或启动 Runtime。
 
 `RuntimeStopSummary.status` 为 `idle/requested/waiting/confirmed/unknown`，`canResume` 是客户端唯一可用于展示“已可继续”的聚合判断。`blockers` 必须保留稳定原因码；客户端不得根据 HTTP 成功、连接在线或本地计时器自行推断停止完成。查询或状态合并失败时必须 fail closed，返回/展示 unknown，而不是放行新的执行。
@@ -1094,3 +1160,22 @@ GET  /api/sessions/:sessionId/discussion-documents/:documentId/content
 创建请求使用 `{ title, content, clientMessageId?, parentDocumentId?, workItemId?, createdBy? }`；`clientMessageId` 可由 `Idempotency-Key` 请求头提供。响应包含 `documentId/revision/relativePath/contentUrl/uiUrl/contentHash/sizeBytes/status` 等元数据，正文不进入元数据事件。正文接口返回 `text/markdown; charset=utf-8`、`Cache-Control: no-store` 和 `"sha256-<contentHash>"` ETag，并且只能读取 URL 所属 Session 的文档。
 
 服务端按活动文档 parent 执行 CAS；相同幂等键与内容返回同一文档，不同内容产生不可覆盖的新版本。内容上限为 200,000 bytes，写入、Provider 回读或哈希校验失败时不发布 active 文档。
+
+## Session Runtime 动态切换 API（2026-09-26）
+
+会话级 Runtime 切换使用以下两个接口。UI Runtime 选择器、聊天切换命令和 `/runtime` 插件必须经过同一入口，不允许任一端直接写 `runtimePreference`。
+
+```text
+POST /api/sessions/:sessionId/runtime-switch
+GET  /api/sessions/:sessionId/runtime-switch
+```
+
+POST body 为 `{ targetRuntimeType, resumeAfterSwitch?, fallbackMode?, expectedSessionRevision? }`。`fallbackMode` 取 `keep`/`exclude_previous_once`/`target_only`，缺省为 `exclude_previous_once`；近似拼写不做纠正，一律拒绝。请求必须携带 `Idempotency-Key`，相同键在同一 Session 内返回同一个 `RuntimeSwitchRequest`，不重复停止旧 Runtime，也不重复启动目标 Runtime。
+
+`expectedSessionRevision` 表达客户端做选择时看到的 Session 版本。与服务端当前版本不一致时返回 409 且不改变任何状态，客户端必须刷新后重新选择，服务端不采用最后写入者覆盖。
+
+POST 返回已持久化的请求本身，不等待切换完成；切换进度通过 Session 详情与 SSE 事件推进。GET 返回当前或最近一条请求，供刷新和重连后恢复解释，`Cache-Control: no-store`。
+
+目标 Runtime 未授权、离线、Workspace/Capability/Tool 不匹配时，接口返回结构化错误，当前执行与首选 Runtime 均保持不变；预检失败不得先停止仍健康的当前 Runtime。停止未取得可信证据时请求保持 `stopping`，重复提交幂等，接口不得以 HTTP 成功暗示已完成切换。
+
+灰度开关 `SESSION_RUNTIME_SWITCH_ENABLED` 关闭时，两个接口返回明确的不支持错误，聊天切换命令也不得退化为普通需求排队。

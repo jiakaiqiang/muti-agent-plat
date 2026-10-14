@@ -30,7 +30,7 @@ test('API exception filter preserves structured conflict details', () => {
   assert.equal(status, 409);
   assert.deepEqual((body as { error: unknown }).error, {
     code: 'SESSION_DELETE_CONFLICT',
-    message: 'Session cleanup did not finish.',
+    message: '会话清理尚未完成，请稍后重试。（SESSION_DELETE_CONFLICT）',
     details: {
       sessionId: 'session-1',
       pendingInvocationIds: ['invocation-1']

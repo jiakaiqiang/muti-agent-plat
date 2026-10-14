@@ -1,14 +1,26 @@
 import { defineStore } from 'pinia'
 import { apiDelete, apiGet, apiPost, isAbortError } from '@/api/client'
-import { createLocalRuntimeLaunchUrl, requestLocalRuntimeLaunch } from '@/utils/localRuntimeLauncher'
+import {
+  createLocalRuntimeLaunchUrl,
+  createLocalRuntimeUpgradeUrl,
+  requestLocalRuntimeLaunch,
+  requestLocalRuntimeUpgrade
+} from '@/utils/localRuntimeLauncher'
 import type {
   LocalRuntimeCapabilityStatus,
+  LocalRuntimeCompatibility,
   LocalRuntimeDevice,
+  LocalRuntimeUpgradeInfo,
+  LocalRuntimeUpgradeProgress,
+  LocalRuntimeUpgradeProgressState,
   LocalRuntimeWorkspaceSummary,
   RuntimeType
 } from '@agent-cluster/shared'
 
-type LocalRuntimeDeviceView = LocalRuntimeDevice & { connected: boolean }
+type LocalRuntimeDeviceView = LocalRuntimeDevice & {
+  connected: boolean
+  compatibility?: LocalRuntimeCompatibility
+}
 type LocalRuntimeWorkspaceResponse = Omit<LocalRuntimeWorkspaceSummary, 'runtimeTypes' | 'runtimeCapabilities'> & {
   runtimeTypes?: readonly RuntimeType[]
   runtimeCapabilities?: readonly LocalRuntimeCapabilityStatus[]
@@ -42,6 +54,11 @@ const authorizationControllers = new Map<string, AbortController>()
 const authorizationPromises = new Map<string, Promise<LocalRuntimeWorkspaceSummary>>()
 let connectionPromise: Promise<LocalRuntimeWorkspaceSummary[]> | undefined
 let connectionAttempt = 0
+let upgradeAttempt = 0
+
+function upgradeStateRank(state: LocalRuntimeUpgradeProgressState) {
+  return ['idle', 'checking', 'available', 'downloading', 'verifying', 'stopping', 'installing', 'restarting', 'reconnecting', 'completed', 'cancelled', 'failed'].indexOf(state)
+}
 
 export function readLocalRuntimeAdminToken() {
   return typeof sessionStorage === 'undefined' ? '' : sessionStorage.getItem(adminTokenStorageKey) ?? ''
@@ -89,6 +106,9 @@ export function localRuntimeErrorMessage(error: unknown) {
   if (/Local Runtime 未连接|Local Runtime CLI is offline|Local Runtime CLI 未连接/i.test(message)) {
     return '未检测到本地助手，请重新检测或确认已安装本地桥接组件。'
   }
+  if (/LOCAL_RUNTIME_PROTOCOL_INCOMPATIBLE|Protocol .* unsupported|CLI .* older than the required/i.test(message)) {
+    return '本地 Runtime 版本过低，请升级后再继续。'
+  }
   if (/capabilit.*timed out|capability detection/i.test(message)) {
     return '本机 Runtime 探测超时，请重新检测。'
   }
@@ -106,12 +126,16 @@ export const useLocalRuntimeStore = defineStore('localRuntime', {
     connectionError: '',
     runtimeCapabilities: [] as LocalRuntimeCapabilityStatus[],
     launchServerUrl: '',
-    error: ''
+    error: '',
+    upgradeInfo: undefined as LocalRuntimeUpgradeInfo | undefined,
+    upgradeDialogOpen: false,
+    upgradeProgress: undefined as LocalRuntimeUpgradeProgress | undefined
   }),
   getters: {
     workspaceById: (state) => (workspaceId: string) =>
       state.workspaces.find((workspace) => workspace.workspaceId === workspaceId),
-    connectedDevices: (state) => state.devices.filter((device) => device.connected),
+    connectedDevices: (state) => state.devices.filter((device) => device.connected && device.compatibility?.compatible !== false),
+    incompatibleDevices: (state) => state.devices.filter((device) => device.compatibility?.compatible === false),
     isConnected(): boolean {
       return this.connectedDevices.length > 0
     },
@@ -139,7 +163,112 @@ export const useLocalRuntimeStore = defineStore('localRuntime', {
     },
     async loadDevices() {
       this.devices = await apiGet<LocalRuntimeDeviceView[]>('/local-runtime/devices', adminRequest())
+      const incompatible = this.devices.find((device) => device.compatibility?.compatible === false)
+      this.upgradeInfo = incompatible?.compatibility?.upgradeInfo
+      if (this.upgradeInfo) this.upgradeDialogOpen = true
       return this.devices
+    },
+    async startUpgrade() {
+      const info = this.upgradeInfo
+      if (!info) throw new Error('当前没有可用的 Runtime 升级信息。')
+      const attempt = ++upgradeAttempt
+      this.upgradeProgress = {
+        upgradeId: info.upgradeId,
+        state: 'checking',
+        updatedAt: new Date().toISOString()
+      }
+      try {
+        if (typeof window !== 'undefined' && window.agentClusterDesktop) {
+          await window.agentClusterDesktop.upgrade()
+          this.upgradeProgress = { ...this.upgradeProgress, state: 'reconnecting', updatedAt: new Date().toISOString() }
+          return
+        }
+        if (!info.releaseUrl || !/^[a-f0-9]{64}$/i.test(info.sha256 ?? '')
+          || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(info.signature ?? '')) {
+          throw new Error('当前环境尚未配置完整的签名升级包，请联系管理员发布 Runtime。')
+        }
+        this.upgradeProgress = { ...this.upgradeProgress, state: 'available', updatedAt: new Date().toISOString() }
+        // Do not await a config request here: that would consume the browser's
+        // transient user activation and cause the custom-protocol launch to be
+        // silently blocked. AppShell/manager prefetch this value on mount.
+        const serverUrl = this.launchServerUrl
+        if (!serverUrl) throw new Error('无法读取本地助手升级地址，请先刷新本地运行状态。')
+        requestLocalRuntimeUpgrade(createLocalRuntimeUpgradeUrl(serverUrl, info.upgradeId))
+        this.upgradeProgress = {
+          ...this.upgradeProgress,
+          state: 'reconnecting',
+          message: '已唤起本地升级助手，等待新版本重新连接。',
+          updatedAt: new Date().toISOString()
+        }
+        await this.waitForUpgrade(attempt)
+      } catch (error) {
+        const message = localRuntimeErrorMessage(error)
+        this.upgradeProgress = {
+          ...this.upgradeProgress,
+          state: 'failed',
+          message,
+          errorCode: 'LOCAL_RUNTIME_UPGRADE_FAILED',
+          updatedAt: new Date().toISOString()
+        }
+        throw new Error(message)
+      }
+    },
+    async waitForUpgrade(attempt = upgradeAttempt, timeoutMs = 120_000) {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        if (attempt !== upgradeAttempt) return false
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 1_000))
+        if (attempt !== upgradeAttempt) return false
+        try {
+          await this.loadDevices()
+        } catch {
+          continue
+        }
+        if (!this.incompatibleDevices.length && this.connectedDevices.length) {
+          this.updateUpgradeProgress({
+            upgradeId: this.upgradeProgress?.upgradeId ?? this.upgradeInfo?.upgradeId ?? '',
+            state: 'completed',
+            percent: 100,
+            message: '本地 Runtime 已升级并重新连接。',
+            updatedAt: new Date().toISOString()
+          })
+          await this.loadWorkspaces().catch(() => undefined)
+          return true
+        }
+      }
+      if (attempt === upgradeAttempt && this.upgradeProgress) {
+        this.upgradeProgress = {
+          ...this.upgradeProgress,
+          state: 'failed',
+          message: '升级后未检测到新版本重新连接，请检查本地 Runtime 日志后重试。',
+          errorCode: 'LOCAL_RUNTIME_UPGRADE_RECONNECT_TIMEOUT',
+          updatedAt: new Date().toISOString()
+        }
+      }
+      return false
+    },
+    cancelUpgrade() {
+      upgradeAttempt += 1
+      if (['installing', 'restarting'].includes(this.upgradeProgress?.state ?? '')) return false
+      if (this.upgradeProgress) {
+        this.upgradeProgress = { ...this.upgradeProgress, state: 'cancelled', updatedAt: new Date().toISOString() }
+      }
+      this.upgradeDialogOpen = false
+      return true
+    },
+    closeUpgradeDialog() {
+      if (this.upgradeInfo?.mandatory) return false
+      this.upgradeDialogOpen = false
+      return true
+    },
+    updateUpgradeProgress(progress: LocalRuntimeUpgradeProgress) {
+      const current = this.upgradeProgress
+      if (current && current.upgradeId === progress.upgradeId && upgradeStateRank(progress.state) < upgradeStateRank(current.state)) return
+      this.upgradeProgress = progress
+      if (progress.state === 'completed') {
+        this.upgradeDialogOpen = false
+        this.upgradeInfo = undefined
+      }
     },
     /**
      * The CLI rejects launch URLs whose origin differs from the one registered by
@@ -201,6 +330,12 @@ export const useLocalRuntimeStore = defineStore('localRuntime', {
             this.resolveLaunchServerUrl().catch(() => '')
           ])
           assertActive()
+          if (this.incompatibleDevices.length && this.upgradeInfo) {
+            this.connectionState = 'failed'
+            this.connectionError = '本地 Runtime 版本过低，请先完成升级。'
+            this.error = this.connectionError
+            throw new Error(this.connectionError)
+          }
           if (!this.isConnected) {
             if (!launchServerUrl) throw new Error('无法读取本地助手唤醒地址，请稍后重新检测。')
             this.connectionState = 'waking'

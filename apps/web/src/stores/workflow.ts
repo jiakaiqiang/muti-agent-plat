@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import { readPoolFor } from '@/utils/readPool'
 import { apiDelete, apiGet, apiPatch, apiPost } from '@/api/client'
 import type { WorkflowDefinition, WorkflowEdge, WorkflowNode, WorkflowStatus, WorkflowVersion } from '@/types/contracts'
 
@@ -42,7 +43,7 @@ export const useWorkflowStore = defineStore('workflow', {
     async loadWorkflows() {
       this.loading = true
       try {
-        this.workflows = await apiGet<WorkflowDefinition[]>('/workflows')
+        this.workflows = await readPoolFor(this)('catalog', signal => apiGet<WorkflowDefinition[]>('/workflows', { signal }))
         if (!this.workflows.some((workflow) => workflow.id === this.selectedWorkflowId)) {
           this.selectedWorkflowId = this.workflows[0]?.id ?? ''
         }
