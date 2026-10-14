@@ -93,24 +93,18 @@ describe('SessionSidebar status badges', () => {
     expect(document.body.textContent).toContain('删除会话')
   })
 
-  it('shows deleted Sessions as read-only and never exposes deleted-session restore', async () => {
+  it('has no deleted-Session tab and never shows deleted Sessions on any tab', async () => {
     const deleted = { ...session('PAUSED', 2), lifecycleState: 'deleted' as const, lifecycleGeneration: 2 }
     const wrapper = mountSidebar([session('EXECUTING', 1), deleted])
 
-    expect(wrapper.text()).toContain('会话 1')
-    expect(wrapper.text()).not.toContain('会话 2')
-    await wrapper.findAll('.session-tabs button')[3]!.trigger('click')
-
-    expect(wrapper.text()).not.toContain('会话 1')
-    expect(wrapper.text()).toContain('会话 2')
-    expect(wrapper.get('.session-status-badge').text()).toBe('已删除')
-    await wrapper.get('.session-more-button').trigger('click')
-    const restoreButton = Array.from(document.body.querySelectorAll('.session-context-menu button')).find((button) => button.textContent?.includes('恢复会话')) as HTMLElement | undefined
-    expect(restoreButton).toBeUndefined()
-    expect(document.body.textContent).not.toContain('恢复归档')
-    await wrapper.get('.session-list-item').trigger('click')
+    const tabs = wrapper.findAll('.session-tabs button').map(button => button.text())
+    expect(tabs).toEqual(['全部', '我创建的', '收藏', '归档管理'])
+    for (const tab of wrapper.findAll('.session-tabs button')) {
+      await tab.trigger('click')
+      expect(wrapper.text()).not.toContain('会话 2')
+      expect(wrapper.text()).not.toContain('已删除')
+    }
     expect(wrapper.emitted('restore')).toBeUndefined()
-    expect(wrapper.emitted('select')).toBeUndefined()
   })
 
   it('shows archived session cards and retains archive restore and delete actions', async () => {
@@ -122,7 +116,7 @@ describe('SessionSidebar status badges', () => {
       global: { plugins: [createPinia()], stubs: { AgentPortrait: true, UiIcon: true } }
     })
     mounted.push(wrapper)
-    await wrapper.findAll('.session-tabs button')[4]!.trigger('click')
+    await wrapper.findAll('.session-tabs button').find(button => button.text() === '归档管理')!.trigger('click')
     expect(wrapper.text()).toContain('历史会话')
     expect(wrapper.get('.session-archive-manager .session-list-item').text()).toContain('历史会话')
     await wrapper.get('.session-more-button').trigger('click')

@@ -49,6 +49,8 @@ import SelectedWorkflowGraph from './workspace/SelectedWorkflowGraph.vue'
 import WorkflowExecutionDetails from './workspace/WorkflowExecutionDetails.vue'
 import WorkflowCatalog from './workspace/WorkflowCatalog.vue'
 import HistoricalDiffDialog from './workspace/HistoricalDiffDialog.vue'
+import { visibleSessionOrder } from './workspace/sessionListModel'
+import { listableTab, sessionAfterRemoval } from '@/utils/sessionList'
 import './workspace/task-workspace.css'
 import { findLatestBriefPayload } from '@/components/briefEventPayload'
 import { effectiveBriefQuestionAnswers } from '@/components/briefQuestionAnswers'
@@ -738,10 +740,30 @@ function cancelDeleteSession() {
   deleteSessionError.value = ''
 }
 
+function sidebarSessionOrder() {
+  return visibleSessionOrder(sessionStore.sessions, listableTab(workspaceUiStore.sessionListTab), sessionStore.favoriteSessionIds)
+}
+
+/**
+ * After the current Session is deleted or archived, opens its neighbour in the
+ * order captured beforehand (the removed row has left the list by now), or shows
+ * the empty workspace when nothing is left.
+ */
+async function openNeighbourAfterRemoval(removedId: string, orderBefore: string[]) {
+  const nextSessionId = sessionAfterRemoval(orderBefore, removedId, sidebarSessionOrder())
+  if (nextSessionId) {
+    await selectSession(nextSessionId)
+    return
+  }
+  sessionStore.currentSession = undefined
+  await router.replace({ name: 'workspace' })
+}
+
 async function confirmDeleteSession() {
   const sessionId = pendingDeleteSessionId.value
   if (!sessionId || deletingSessionIds.value.includes(sessionId)) return
   const deletingCurrent = sessionStore.currentSession?.id === sessionId
+  const orderBefore = sidebarSessionOrder()
   deleteSessionError.value = ''
   try {
     const deleted = await sessionStore.deleteSession(sessionId)
@@ -749,14 +771,7 @@ async function confirmDeleteSession() {
     pendingDeleteSessionId.value = undefined
     if (deletingCurrent) {
       eventStore.disconnectSse()
-    }
-    if (deletingCurrent) {
-      const nextSessionId = sessionStore.sessions[0]?.id
-      if (nextSessionId) {
-        await selectSession(nextSessionId)
-      } else {
-        await router.replace({ name: 'workspace' })
-      }
+      await openNeighbourAfterRemoval(sessionId, orderBefore)
     }
     showMessage('会话已删除', 'success')
   } catch (error) {
@@ -767,6 +782,7 @@ async function confirmDeleteSession() {
 
 async function archiveSessionFromSidebar(sessionId: string) {
   const archivingCurrent = sessionStore.currentSession?.id === sessionId
+  const orderBefore = sidebarSessionOrder()
   try {
     const archived = await sessionStore.archiveSession(sessionId)
     if (!archived) {
@@ -775,9 +791,7 @@ async function archiveSessionFromSidebar(sessionId: string) {
     }
     if (archivingCurrent) {
       eventStore.disconnectSse()
-      const nextSessionId = sessionStore.sessions.find((item) => item.lifecycleState !== 'deleted' && !item.archivedAt)?.id
-      if (nextSessionId) await selectSession(nextSessionId)
-      else await router.replace({ name: 'workspace' })
+      await openNeighbourAfterRemoval(sessionId, orderBefore)
     }
     showMessage('会话已归档，可在归档管理中恢复', 'success')
   } catch (error) {
@@ -1919,8 +1933,8 @@ async function submitWorkflowStepRevision() {
       <header class="workspace-header">
         <button class="workspace-panel-toggle" type="button" @click="leftOpen = !leftOpen" aria-label="切换任务列表">任务列表</button>
         <div class="workspace-title">
-          <h1>{{ sessionStore.currentSession?.title ?? '多 Agent 协同工作平台' }}</h1>
-          <p>{{ sessionStore.currentSession?.originalInput ?? '创建会话或输入任务，启动多 Agent 协作。' }}</p>
+          <h1>{{ sessionStore.currentSession?.title ?? '' }}</h1>
+          <p>{{ sessionStore.currentSession?.originalInput ?? '' }}</p>
         </div>
         <button class="workspace-panel-toggle" type="button" @click="rightOpen = !rightOpen" aria-label="切换右侧信息">右侧信息</button>
       </header>

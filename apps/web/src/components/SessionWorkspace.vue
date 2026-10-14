@@ -45,6 +45,7 @@ import { useWorkspaceSync } from '@/composables/useWorkspaceSync'
 import { useSessionSwitch } from '@/composables/useSessionSwitch'
 import { latestSessionStatusEvent, resolveSessionStatus } from '@/utils/sessionStatus'
 import { formatDateTime } from '@/utils/dateTime'
+import { listableSessions, listableTab, sessionAfterRemoval } from '@/utils/sessionList'
 import WorkflowRuntimeView from './WorkflowRuntimeView.vue'
 import { findLatestBriefPayload } from './briefEventPayload'
 import { effectiveBriefQuestionAnswers } from './briefQuestionAnswers'
@@ -418,7 +419,7 @@ const workspaceWritebackBusy = ref(false)
 const workspaceWritebackError = ref('')
 const capabilityApprovalBusy = ref(false)
 const currentMode = computed(() => sessionStore.currentViewMode)
-const workspaceLabel = computed(() => sessionStore.currentSession?.title ?? '无活动会话')
+const workspaceLabel = computed(() => sessionStore.currentSession?.title ?? '')
 const truncatedSessionTitle = computed(() => truncateSessionTitle(workspaceLabel.value))
 const activeAgentIds = computed(() => agentStore.chatAgents.filter((agent) => agent.status === 'active').map((agent) => agent.id))
 const participatingAgents = computed(() => {
@@ -671,10 +672,34 @@ function cancelDeleteSession() {
   deleteSessionError.value = ''
 }
 
+function sidebarSessionOrder() {
+  return listableSessions(sessionStore.sessions, {
+    tab: listableTab(workspaceUiStore.sessionListTab),
+    favoriteSessionIds: sessionStore.favoriteSessionIds,
+    search: workspaceUiStore.sessionSearchQuery
+  }).map((session) => session.id)
+}
+
+/**
+ * After the current Session is deleted or archived, opens its neighbour in the
+ * order captured beforehand (the removed row has left the list by now), or shows
+ * the empty workspace when nothing is left.
+ */
+async function openNeighbourAfterRemoval(removedId: string, orderBefore: string[]) {
+  const nextSessionId = sessionAfterRemoval(orderBefore, removedId, sidebarSessionOrder())
+  if (nextSessionId) {
+    await selectSession(nextSessionId)
+    return
+  }
+  sessionStore.currentSession = undefined
+  await router.replace({ name: 'workspace' })
+}
+
 async function confirmDeleteSession() {
   const sessionId = pendingDeleteSessionId.value
   if (!sessionId || deletingSessionIds.value.includes(sessionId)) return
   const deletingCurrent = sessionStore.currentSession?.id === sessionId
+  const orderBefore = sidebarSessionOrder()
   deleteSessionError.value = ''
   try {
     const deleted = await sessionStore.deleteSession(sessionId)
@@ -682,14 +707,7 @@ async function confirmDeleteSession() {
     pendingDeleteSessionId.value = undefined
     if (deletingCurrent) {
       eventStore.disconnectSse()
-    }
-    if (deletingCurrent) {
-      const nextSessionId = sessionStore.sessions[0]?.id
-      if (nextSessionId) {
-        await selectSession(nextSessionId)
-      } else {
-        await router.replace({ name: 'workspace' })
-      }
+      await openNeighbourAfterRemoval(sessionId, orderBefore)
     }
     showMessage('会话已删除', 'success')
   } catch (error) {
@@ -700,6 +718,7 @@ async function confirmDeleteSession() {
 
 async function archiveSessionFromSidebar(sessionId: string) {
   const archivingCurrent = sessionStore.currentSession?.id === sessionId
+  const orderBefore = sidebarSessionOrder()
   try {
     const archived = await sessionStore.archiveSession(sessionId)
     if (!archived) {
@@ -708,9 +727,7 @@ async function archiveSessionFromSidebar(sessionId: string) {
     }
     if (archivingCurrent) {
       eventStore.disconnectSse()
-      const nextSessionId = sessionStore.sessions.find((item) => item.lifecycleState !== 'deleted' && !item.archivedAt)?.id
-      if (nextSessionId) await selectSession(nextSessionId)
-      else await router.replace({ name: 'workspace' })
+      await openNeighbourAfterRemoval(sessionId, orderBefore)
     }
     showMessage('会话已归档，可在归档管理中恢复', 'success')
   } catch (error) {
@@ -1880,7 +1897,7 @@ async function submitWorkflowStepRevision() {
     <section class="workspace-main">
       <header class="workspace-header">
         <div class="workspace-title">
-          <el-tooltip :content="workspaceLabel" placement="bottom-start">
+          <el-tooltip :content="workspaceLabel" :disabled="!workspaceLabel" placement="bottom-start">
             <h1 :aria-label="workspaceLabel">{{ truncatedSessionTitle }}</h1>
           </el-tooltip>
           <span

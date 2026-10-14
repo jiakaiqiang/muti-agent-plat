@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useWorkspaceUiStore } from '@/stores/workspaceUi'
 import type { SessionArchiveGroup, SessionListItem, SessionStatus } from '@/types/contracts'
+import { listableSessions, listableTab } from '@/utils/sessionList'
 import AgentPortrait from './AgentPortrait.vue'
 import UiIcon from './UiIcon.vue'
 
@@ -48,24 +49,15 @@ const emit = defineEmits<{
 
 const workspaceUiStore = useWorkspaceUiStore()
 const { sessionListTab: activeTab, sessionSearchQuery: search } = storeToRefs(workspaceUiStore)
-type SessionMenuKind = 'active' | 'deleted' | 'archived'
+type SessionMenuKind = 'active' | 'archived'
 const contextMenu = ref<{ sessionId: string; x: number; y: number; kind: SessionMenuKind } | undefined>()
 
 const favoriteIds = computed(() => new Set(props.favoriteSessionIds))
 const deletingIds = computed(() => new Set(props.deletingSessionIds))
 
-const filteredSessions = computed(() => {
-  const query = search.value.trim().toLowerCase()
-  return props.sessions.filter((session) => {
-    const deleted = session.lifecycleState === 'deleted'
-    if (activeTab.value === 'archives') return false
-    if (activeTab.value === 'deleted' ? !deleted : deleted) return false
-    if (activeTab.value !== 'deleted' && session.archivedAt) return false
-    if (activeTab.value === 'favorites' && !favoriteIds.value.has(session.id)) return false
-    if (query && !`${session.title} ${session.latestEventSummary ?? ''}`.toLowerCase().includes(query)) return false
-    return true
-  })
-})
+const filteredSessions = computed(() => activeTab.value === 'archives' ? [] : listableSessions(props.sessions, {
+  tab: listableTab(activeTab.value), favoriteSessionIds: props.favoriteSessionIds, search: search.value
+}))
 
 function openContextMenu(event: MouseEvent, sessionId: string, kind: SessionMenuKind) {
   event.preventDefault()
@@ -117,7 +109,6 @@ function sessionStatus(status: SessionStatus) {
 
 function lifecycleLabel(session: Pick<SessionListItem, 'status' | 'lifecycleState'>) {
   if (session.lifecycleState === 'deleting') return '删除中'
-  if (session.lifecycleState === 'deleted') return '已删除'
   return sessionStatus(session.status).label
 }
 
@@ -160,7 +151,6 @@ onBeforeUnmount(() => {
       <button type="button" :class="{ active: activeTab === 'all' }" @click="activeTab = 'all'">全部</button>
       <button type="button" :class="{ active: activeTab === 'mine' }" @click="activeTab = 'mine'">我创建的</button>
       <button type="button" :class="{ active: activeTab === 'favorites' }" @click="activeTab = 'favorites'">收藏</button>
-      <button type="button" :class="{ active: activeTab === 'deleted' }" @click="activeTab = 'deleted'">已删除</button>
       <button type="button" :class="{ active: activeTab === 'archives' }" @click="activeTab = 'archives'">归档管理</button>
     </div>
 
@@ -206,8 +196,8 @@ onBeforeUnmount(() => {
         :key="session.id"
         class="session-list-item"
         :class="{ active: session.id === currentSessionId, favorite: isFavorite(session.id) }"
-        @click="session.lifecycleState !== 'deleted' && emit('select', session.id)"
-        @contextmenu="openContextMenu($event, session.id, session.lifecycleState === 'deleted' ? 'deleted' : 'active')"
+        @click="emit('select', session.id)"
+        @contextmenu="openContextMenu($event, session.id, 'active')"
       >
       <span class="session-avatar">
         <AgentPortrait :tone="(index % 5) + 1" :label="session.title" size="md" />
@@ -227,7 +217,7 @@ onBeforeUnmount(() => {
         type="button"
         title="更多操作"
         :disabled="isDeletingSession(session.id)"
-        @click.stop="openContextMenu($event, session.id, session.lifecycleState === 'deleted' ? 'deleted' : 'active')"
+        @click.stop="openContextMenu($event, session.id, 'active')"
       >
         <UiIcon name="more" :size="16" />
       </button>
@@ -262,7 +252,7 @@ onBeforeUnmount(() => {
           <UiIcon name="archive" :size="15" />
           归档会话
         </button>
-        <button v-if="contextMenu.kind !== 'deleted'"
+        <button
           type="button"
           class="danger"
           :disabled="isDeletingSession(contextMenu.sessionId)"

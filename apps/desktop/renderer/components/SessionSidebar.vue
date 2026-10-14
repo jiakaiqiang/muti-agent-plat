@@ -4,6 +4,8 @@ import { storeToRefs } from 'pinia'
 import { useWorkspaceUiStore } from '@/stores/workspaceUi'
 import type { SessionArchiveGroup, SessionListItem, SessionStatus } from '@/types/contracts'
 import UiIcon from '@/components/UiIcon.vue'
+import { listableTab } from '@/utils/sessionList'
+import { groupVisibleSessions } from './workspace/sessionListModel'
 
 type SessionStatusTone = 'draft' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled'
 
@@ -47,32 +49,14 @@ const emit = defineEmits<{
 
 const workspaceUiStore = useWorkspaceUiStore()
 const { sessionListTab: activeTab } = storeToRefs(workspaceUiStore)
-type SessionMenuKind = 'active' | 'deleted' | 'archived'
+type SessionMenuKind = 'active' | 'archived'
 const contextMenu = ref<{ sessionId: string; x: number; y: number; kind: SessionMenuKind } | undefined>()
 
 const favoriteIds = computed(() => new Set(props.favoriteSessionIds))
 const deletingIds = computed(() => new Set(props.deletingSessionIds))
 
-const filteredSessions = computed(() => {
-  return props.sessions.filter((session) => {
-    const deleted = session.lifecycleState === 'deleted'
-    if (activeTab.value === 'archives') return false
-    if (activeTab.value === 'deleted' ? !deleted : deleted) return false
-    if (activeTab.value !== 'deleted' && session.archivedAt) return false
-    if (activeTab.value === 'favorites' && !favoriteIds.value.has(session.id)) return false
-    return true
-  })
-})
-
-const sessionGroups = computed(() => {
-  const groups = new Map<string, { key: string; label: string; sessions: SessionListItem[] }>()
-  for (const session of filteredSessions.value) {
-    const key = session.projectId ? `project:${session.projectId}` : `workspace:${session.workspaceId ?? ''}`
-    if (!groups.has(key)) groups.set(key, { key, label: session.projectId ? `项目 ${session.projectId}` : session.workspaceId ? `工作区 ${session.workspaceId}` : '未分组任务', sessions: [] })
-    groups.get(key)!.sessions.push(session)
-  }
-  return [...groups.values()]
-})
+const sessionGroups = computed(() =>
+  activeTab.value === 'archives' ? [] : groupVisibleSessions(props.sessions, listableTab(activeTab.value), props.favoriteSessionIds))
 
 function openContextMenu(event: MouseEvent, sessionId: string, kind: SessionMenuKind) {
   event.preventDefault()
@@ -124,7 +108,6 @@ function sessionStatus(status: SessionStatus) {
 
 function lifecycleLabel(session: Pick<SessionListItem, 'status' | 'lifecycleState'>) {
   if (session.lifecycleState === 'deleting') return '删除中'
-  if (session.lifecycleState === 'deleted') return '已删除'
   return sessionStatus(session.status).label
 }
 
@@ -159,7 +142,6 @@ onBeforeUnmount(() => {
       <button type="button" :class="{ active: activeTab === 'all' }" @click="activeTab = 'all'">全部</button>
       <button type="button" :class="{ active: activeTab === 'mine' }" @click="activeTab = 'mine'">我创建的</button>
       <button type="button" :class="{ active: activeTab === 'favorites' }" @click="activeTab = 'favorites'">收藏</button>
-      <button type="button" :class="{ active: activeTab === 'deleted' }" @click="activeTab = 'deleted'">已删除</button>
       <button type="button" :class="{ active: activeTab === 'archives' }" @click="activeTab = 'archives'">归档管理</button>
     </div>
 
@@ -204,12 +186,12 @@ onBeforeUnmount(() => {
         :key="session.id"
         class="session-list-item"
         :class="{ active: session.id === currentSessionId, favorite: isFavorite(session.id) }"
-        :role="session.lifecycleState === 'deleted' ? undefined : 'button'"
-        :tabindex="session.lifecycleState === 'deleted' ? undefined : 0"
-        @keydown.enter="session.lifecycleState !== 'deleted' && emit('select', session.id)"
-        @keydown.space.prevent="session.lifecycleState !== 'deleted' && emit('select', session.id)"
-        @click="session.lifecycleState !== 'deleted' && emit('select', session.id)"
-        @contextmenu="openContextMenu($event, session.id, session.lifecycleState === 'deleted' ? 'deleted' : 'active')"
+        role="button"
+        tabindex="0"
+        @keydown.enter="emit('select', session.id)"
+        @keydown.space.prevent="emit('select', session.id)"
+        @click="emit('select', session.id)"
+        @contextmenu="openContextMenu($event, session.id, 'active')"
       >
       <span class="session-item-main">
         <span class="session-title">{{ session.title }}</span>
@@ -226,7 +208,7 @@ onBeforeUnmount(() => {
         type="button"
         title="更多操作"
         :disabled="isDeletingSession(session.id)"
-        @click.stop="openContextMenu($event, session.id, session.lifecycleState === 'deleted' ? 'deleted' : 'active')"
+        @click.stop="openContextMenu($event, session.id, 'active')"
       >
         <UiIcon name="more" :size="16" />
       </button>
@@ -234,7 +216,7 @@ onBeforeUnmount(() => {
       </section>
     </template>
 
-    <p v-if="activeTab !== 'archives' && !filteredSessions.length" class="session-empty-state">当前筛选下没有会话。</p>
+    <p v-if="activeTab !== 'archives' && !sessionGroups.length" class="session-empty-state">当前筛选下没有会话。</p>
 
     <teleport to="body">
       <div
@@ -262,7 +244,7 @@ onBeforeUnmount(() => {
           <UiIcon name="archive" :size="15" />
           归档会话
         </button>
-        <button v-if="contextMenu.kind !== 'deleted'"
+        <button
           type="button"
           class="danger"
           :disabled="isDeletingSession(contextMenu.sessionId)"
