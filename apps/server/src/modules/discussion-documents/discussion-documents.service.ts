@@ -226,7 +226,7 @@ export class DiscussionDocumentsService {
       if (read.truncated || read.byteLength !== document.sizeBytes || read.hash?.value !== document.contentHash || sha256(read.content) !== document.contentHash) {
         throw new Error('DISCUSSION_DOCUMENT_WORKSPACE_HASH_MISMATCH');
       }
-      const artifact = this.artifacts.create({
+      const artifact = await this.artifacts.create({
         sessionId: session.id,
         workItemId: document.workItemId,
         type: 'markdown',

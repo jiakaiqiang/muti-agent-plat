@@ -34,6 +34,9 @@ tmp/
 temp/
 uploads/
 artifacts/
+# The server artifact module is source code, not generated output.
+!apps/server/src/modules/artifacts/
+!apps/server/src/modules/artifacts/**
 
 # Docker and database local state
 *.pid
@@ -63,3 +66,8 @@ junit.xml
 
 # Stray local scratch files
 .tmpdir.txt
+
+# Raw model provider/transport dumps from intent evaluations (large; reports and summaries stay tracked)
+docs/quality/**/provider-*.json
+docs/quality/**/provider-*.jsonl
+docs/quality/**/transport-*.json

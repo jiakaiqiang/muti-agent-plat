@@ -219,6 +219,7 @@ export type IntentRoutingStatus =
   | 'ROUTED'
   | 'CLARIFICATION_REQUIRED'
   | 'PENDING_RETRY'
+  | 'BLOCKED'
   | 'REJECTED';
 
 export type IntentRoutingAction =
@@ -554,6 +555,9 @@ export type WorkspaceWritebackResolutionAction =
 export type WorkspaceWritebackRecord = {
   id: UUID;
   sessionId: UUID;
+  dataEpoch?: string;
+  workItemId?: UUID;
+  executionBinding?: import('./intent-plan-contracts.js').IntentExecutionBinding;
   /** Session generation that admitted this writeback; stale generations cannot apply after restore. */
   sessionGeneration?: number;
   taskId?: UUID;
@@ -1458,6 +1462,15 @@ export type CollaborationEventType =
   | 'discussion_document_published'
   | 'discussion_document_read'
   | 'intent_clarification_required'
+  | 'intent_correction_requested'
+  | 'intent_plan_committed'
+  | 'intent_plan_blocked'
+  | 'intent_recognition_retry_requested'
+  | 'intent_workspace_authority_changed'
+  | 'intent_test_authority_changed'
+  | 'intent_plan_clarification_required'
+  | 'intent_correction_applied'
+  | 'intent_correction_reconciliation_required'
   | 'work_item_created'
   | 'work_item_activated'
   | 'decision_superseded'
@@ -1513,6 +1526,45 @@ export type CollaborationEvent<TPayload extends Record<string, unknown> = Record
   createdAt: ISODateTime;
 };
 
+export type ChangeIntentWorkspaceReadAuthorityInput = {
+  action: 'grant' | 'revoke';
+  dataEpoch: string;
+  expectedBindingHash: string;
+  expectedGrantRevision: number;
+  idempotencyKey: string;
+};
+export type IntentWorkspaceReadAuthorityView = {
+  sessionId: string;
+  dataEpoch: string;
+  sessionRevision: number;
+  bindingHash: string | null;
+  authority: { bindingHash: string; grant: import('./intent-plan-contracts.js').IntentEffectGrant } | null;
+  enabled: boolean;
+};
+
+export const INTENT_TEST_SCRIPTS = ['test', 'test:unit', 'test:integration'] as const;
+export type IntentTestScript = typeof INTENT_TEST_SCRIPTS[number];
+export type IntentTestRunnerBinding = {
+  runnerId: 'docker-npm-tests-v1';
+  resourceId: string;
+  bindingHash: string;
+  workspaceBindingHash: string;
+  workspaceId: string;
+  imageId: string;
+  script: IntentTestScript;
+};
+export type IntentTestAuthority = { binding: IntentTestRunnerBinding; grant: import('./intent-plan-contracts.js').IntentEffectGrant;
+  reportGrant?: import('./intent-plan-contracts.js').IntentEffectGrant };
+export type ChangeIntentTestAuthorityInput = ChangeIntentWorkspaceReadAuthorityInput & { script: IntentTestScript; writeReport?: boolean };
+export type IntentTestAuthorityView = {
+  sessionId: string;
+  dataEpoch: string;
+  sessionRevision: number;
+  availableBindings: IntentTestRunnerBinding[];
+  authority: IntentTestAuthority | null;
+  enabled: boolean;
+};
+
 export type SessionDetail = {
   id: UUID;
   dataEpoch: UUID;
@@ -1524,6 +1576,12 @@ export type SessionDetail = {
   decisionLedgerRevision?: number;
   /** Marks Sessions created after WorkItem-aware routing became available. */
   intentRoutingGeneration?: 'v2';
+  intentContractVersion?: 'intent-understanding-v1';
+  pendingBriefRevisionRoutingId?: string;
+  /** Server-issued read authority from an explicitly selected, validated workspace. */
+  intentWorkspaceReadAuthority?: { bindingHash: string; grant: import('./intent-plan-contracts.js').IntentEffectGrant };
+  /** Explicit user grant for one pinned isolated runner; never inferred from a model proposal. */
+  intentTestAuthority?: IntentTestAuthority;
   title: string;
   originalInput: string;
   /**
@@ -1638,6 +1696,7 @@ export function canStartSessionAgent(
 }
 
 export type SessionRecoveryCheckpoint = {
+  retryBinding?: import('./intent-correction-contracts.js').IntentRetryBinding;
   confirmationId: UUID;
   reason:
     | 'coordinator_routing_needs_user_decision'
@@ -1731,6 +1790,8 @@ export type SystemAgentRuntimePolicy = RuntimePreference & {
 export type WorkflowStatus = 'draft' | 'published' | 'archived';
 
 export type WorkflowNodeBase = {
+  /** Explicit required effects for versioned intent execution; omission is unknown. */
+  intentEffects?: import('./intent-workflow-effects.js').IntentWorkflowEffects;
   id: UUID;
   name?: string;
   order: number;
@@ -2191,6 +2252,10 @@ export type RuntimeInvocationProfileSnapshot = {
 };
 
 export type TaskBrief = {
+  supersedesBriefId?: string;
+  intentConfirmationReceipt?: import('./intent-brief-confirmation.js').IntentBriefConfirmationReceipt;
+  /** A draft projection of a committed intent step, not business execution authority. */
+  intentBinding?: { routingId: string; intentRevision: number; stepId: string; invocationId: string };
   id: UUID;
   sessionId: UUID;
   workItemId?: UUID;
@@ -2208,6 +2273,8 @@ export type TaskBrief = {
 };
 
 export type AgentTask = {
+  /** Exact failed call, recorded at failure time rather than inferred on retry. */
+  lastExecutionFailure?: { invocationId: string; phase: 'task_execution' };
   recoveryOriginTaskId?: UUID;
   previousExecutionOperationId?: UUID;
   executionCheckpoint?: {
@@ -2311,6 +2378,8 @@ export type RagMatchedChunk = {
 };
 
 export type ArtifactMetadata = {
+  intentTestReport?: { format: 'markdown'; content: string; stepId: string; invocationId: string;
+    bindingHash: string; snapshotHash: string; script: IntentTestScript; exitCode: number; supersedesArtifactIds?: string[] };
   phase:
     | 'task_brief'
     | 'discussion_document'
@@ -2382,6 +2451,9 @@ export type UserMessageHandlingPlan = {
 };
 
 export type WorkItem = {
+  requirementRevision?: number;
+  executionEpoch?: number;
+  dispatchHold?: import('./intent-correction-contracts.js').IntentDispatchHold;
   id: UUID;
   sessionId: UUID;
   parentWorkItemId?: UUID;
@@ -2411,6 +2483,8 @@ export type DecisionRecord = {
   answer?: string;
   sourceEventId: UUID;
   supersedesDecisionId?: UUID;
+  /** Local replacement of an inherited decision; never supersedes its owner globally. */
+  overridesDecisionId?: UUID;
   revision: number;
   confirmedBy?: ActorRef;
   createdAt: ISODateTime;
@@ -2477,6 +2551,12 @@ export type IntentSnapshotRecall = {
 };
 
 export type IntentContextSnapshot = {
+  effectAuthority?: { grants: import('./intent-plan-contracts.js').IntentEffectGrant[];
+    resources: import('./intent-plan-contracts.js').IntentResource[]; testRunnerBindings: IntentTestRunnerBinding[] };
+  /** Bounded server-owned references for corrections; omission never authorizes guessing. */
+  correctionCandidates?: Array<{ routingId: UUID; routingRevision: number; sourceEventId: UUID;
+    referenceEventId?: UUID; workItemIds: UUID[]; decisionIds: UUID[] }>;
+  omittedCorrectionCandidates?: number;
   /** Business inputs only; progress and heartbeat events never invalidate routing. */
   businessFingerprint?: string;
   id: UUID;
@@ -2505,6 +2585,10 @@ export type IntentContextSnapshot = {
   pendingConfirmationContext?: PendingConfirmationContext;
   validDecisionIds: UUID[];
   validDecisions: Array<Pick<DecisionRecord, 'id' | 'kind' | 'status' | 'content' | 'revision'>>;
+  /** Bounded artifact references observed at classification time; absent means no inheritance authority. */
+  validArtifactIds?: UUID[];
+  validArtifacts?: Array<Pick<Artifact, 'id' | 'workItemId' | 'title' | 'type' | 'contentSummary'>>;
+  omittedArtifacts?: number;
   candidateWorkItemIds: UUID[];
   candidateWorkItems: Array<Pick<WorkItem, 'id' | 'title' | 'goal' | 'status' | 'revision'>>;
   failureCheckpoint?: string;
@@ -2548,10 +2632,63 @@ export type IntentRoutingValidation = {
   snapshotCurrent: boolean;
   safeToApply: boolean;
   serverConfidence: number;
+  /** Validation diagnostics only; neither score is a semantic probability or authorization. */
+  validationScore?: number;
   errors: string[];
 };
 
 export type IntentRoutingRecord = {
+  inputBudgetDecision?: import('./input-budget.js').InputBudgetDecision;
+  recognitionOperationId?: string;
+  recognitionRetryReceipts?: Array<{ id: string; request: RetryIntentRecognitionInput; actorId: string;
+    operationId: string; previousOperationId: string; acceptedRoutingRevision: number; createdAt: ISODateTime;
+    previous: { status: IntentRoutingStatus; failureClass?: IntentRoutingRecord['failureClass']; blockedReason?: string;
+      reasonCodes: string[]; classificationAttempts: number; classificationDeadlineAt?: ISODateTime;
+      snapshotRebuildCount: number; snapshotId?: string; invocationId?: string;
+      attemptLog: NonNullable<IntentRoutingRecord['attemptLog']>; semanticProposal?: IntentRoutingRecord['semanticProposal'] } }>;
+  /** Explicit, successful revalidation of the saved proposal; never a model retry. */
+  authorizationRetryReceipts?: Array<{ request: RetryIntentAuthorizationInput; actorId: string;
+    intentRevision: number; resultRoutingRevision: number; createdAt: ISODateTime }>;
+  /** A user clarification is a new logical operation; retries share this durable budget. */
+  semanticClarification?: {
+    request: ClarifyIntentRoutingInput; canonicalChoiceHash: string; actorId: string;
+    dataEpoch: string; sessionGeneration: number; status: 'pending' | 'ready' | 'blocked' | 'completed';
+    ownerId?: string; leaseExpiresAt?: ISODateTime; deadlineAt: ISODateTime; attemptsUsed: number;
+    snapshotId?: string; invocationIds: string[]; retryAt?: ISODateTime;
+    understanding?: import('./runtime-contracts/intent-understanding.js').IntentUnderstandingOutput;
+    repairFeedback?: { previousOutput: string; validationErrors: string[] }; failureCode?: string;
+  };
+  /** Compilation diagnostics, including non-executable outcomes. Executable revisions are immutable ledger records. */
+  semanticPlan?: import('./intent-plan-contracts.js').ValidatedRoutePlan;
+  /** New-contract proposal; never authorization or a legacy executable decision. */
+  semanticContractVersion?: 'intent-understanding-v1';
+  semanticIngress?: { dataEpoch: string; sessionGeneration: number; entryPoint: 'first_message' | 'message' };
+  briefRevision?: import('./intent-brief-revision.js').IntentBriefRevisionBinding;
+  semanticProposal?: {
+    contractVersion: 'intent-understanding-v1';
+    dataEpoch: string;
+    sessionGeneration?: number;
+    snapshotId: UUID;
+    understanding?: import('./runtime-contracts/intent-understanding.js').IntentUnderstandingOutput;
+    repairFeedback?: { previousOutput: string; validationErrors: string[] };
+    retryAt?: ISODateTime;
+  };
+  /** Chat correction inputs point to the original route whose version/history they update. */
+  correctionTargetRoutingId?: UUID;
+  currentIntentRevision?: number;
+  effectiveIntentRevision?: number;
+  executionEpoch?: number;
+  correctionId?: string;
+  dispatchHold?: import('./intent-correction-contracts.js').IntentDispatchHold;
+  blockedReason?: string;
+  failureClass?: 'transient' | 'auth' | 'config' | 'schema' | 'unknown_effect' | 'budget';
+  classificationAttempts?: number;
+  classificationDeadlineAt?: ISODateTime;
+  attemptLog?: Array<{ invocationId: string; attempt: number; reason: string; startedAt: ISODateTime }>;
+  /** CAS version; missing on legacy records is revision 1. */
+  routingRevision?: number;
+  /** Additive B1 receipt; migrated to a separate entity in B3. */
+  resolution?: IntentClarificationResolution;
   /** Durable monotonic allowance, independent from diagnostic reasonCodes. */
   snapshotRebuildCount?: number;
   id: UUID;
@@ -2582,6 +2719,39 @@ export type IntentRoutingRecord = {
   idempotencyKey: string;
   createdAt: ISODateTime;
   updatedAt: ISODateTime;
+};
+
+export type IntentClarificationChoice = 'continue_current' | 'related_new' | 'independent_new';
+
+export type RetryIntentAuthorizationInput = {
+  contractVersion: 'intent-authorization-retry-v1'; dataEpoch: string;
+  expectedRoutingRevision: number; idempotencyKey: string;
+};
+
+export type RetryIntentRecognitionInput = {
+  inputBudget?: { decisionId: string; decision: 'continue' | 'end' };
+  contractVersion: 'intent-recognition-retry-v1'; dataEpoch: string;
+  expectedRoutingRevision: number; idempotencyKey: string;
+};
+
+export type ClarifyIntentRoutingInput = {
+  contractVersion?: 'intent-clarify-v1';
+  confirmationId?: string;
+  expectedRoutingRevision?: number;
+  choice: IntentClarificationChoice;
+  idempotencyKey?: string;
+};
+
+export type IntentClarificationResolution = {
+  confirmationId: string;
+  choice: IntentClarificationChoice;
+  canonicalChoiceHash: string;
+  idempotencyKey: string;
+  resolvedRevision: number;
+  resultWorkItemId?: string;
+  actorId: string;
+  resolvedAt: ISODateTime;
+  supersededAt?: ISODateTime;
 };
 
 export type SessionFollowUpMessage = {
@@ -3172,7 +3342,8 @@ export type AgentRunPhase =
   | 'revision_synthesis'
   | 'post_review'
   | 'final_delivery'
-  | 'user_message_routing';
+  | 'user_message_routing'
+  | 'user_message_response';
 
 export type SystemDataMetadata = {
   dataSchemaVersion: 3;
@@ -3199,7 +3370,37 @@ export type PendingInvocation = {
   createdAt: ISODateTime;
 };
 
+export type IsolatedTestAttempt = {
+  /** Exact server authority and source root used by this physical attempt; absent only for legacy runs. */
+  authorityBinding?: IntentTestRunnerBinding;
+  workingDirectory?: string;
+  invocationId: string;
+  containerName: string;
+  identityHash: string;
+  imageId: string;
+  script: string;
+  ownerId: string;
+  leaseExpiresAt: string;
+  deadlineAt: string;
+  phase: 'reserved' | 'prepared' | 'created' | 'running' | 'stopping' | 'finished' | 'reconciliation_required' | 'reconciled';
+  snapshotDirectory?: string;
+  snapshotHash?: string;
+  daemonId?: string;
+  stopConfirmed: boolean;
+  cleanupRequired: boolean;
+  result?: { stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; aborted: boolean; error?: string; outputTruncated: boolean };
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type LogicalOperation = {
+  inputBudgetDecisions?: import('./input-budget.js').InputBudgetDecision[];
+  isolatedTestAttempts?: IsolatedTestAttempt[];
+  workItemId?: string;
+  executionBinding?: import('./intent-plan-contracts.js').IntentExecutionBinding;
+  admissionClass?: 'business' | 'routing' | 'response';
+  intentStepId?: string;
+  dataEpoch?: UUID;
   scopeKey?: string;
   diagnostics?: string[];
   correctionsUsed?: number;
@@ -3216,6 +3417,8 @@ export type LogicalOperation = {
   policyVersion: 'execution-reliability-v1';
   status: 'ready' | 'running' | 'paused' | 'interrupted' | 'exhausted';
   deadlineAt: ISODateTime;
+  /** Absolute server-owned wall-clock limit; pause/resume cannot extend it. */
+  deadlineCeilingAt?: ISODateTime;
   remainingActiveMs: number;
   maxAttempts: number;
   attemptsUsed: number;
@@ -3292,6 +3495,17 @@ export type RuntimeExecutionCandidate = {
 };
 
 export type InvocationPlan = {
+  /** A bounded retry must also fence the ultimately selected Runtime. */
+  intentRetryBinding?: import('./intent-correction-contracts.js').IntentRetryBinding;
+  inputBudgetPolicy?: import('./input-budget.js').InputBudgetPolicy;
+  /** Server-bound isolated runner; never read from model output or tool arguments. */
+  intentTestBinding?: IntentTestRunnerBinding;
+  admissionClass?: 'business' | 'routing' | 'response';
+  intentStepId?: string;
+  dataEpoch?: UUID;
+  /** Committed server plan authority; absence denotes a legacy invocation, never a new grant. */
+  effectScope?: import('./intent-plan-contracts.js').IntentEffectScope;
+  executionBinding?: import('./intent-plan-contracts.js').IntentExecutionBinding;
   /** Supervisor observation identity only; not part of the model's output contract. */
   requestHealth?: import('./runtime-request-health.js').RuntimeHealthIdentity;
   recoveryOriginTaskId?: UUID;
@@ -3525,6 +3739,7 @@ export type RuntimeError = {
     | 'CONTEXT_INSUFFICIENT'
     | 'CONTEXT_RETRY_EXHAUSTED'
     | 'TOKEN_BUDGET_EXCEEDED'
+    | 'INPUT_BUDGET_EXCEEDED'
     | 'WORK_ITEM_BUDGET_EXHAUSTED'
     | 'UNKNOWN_ERROR';
   message: string;
@@ -3579,6 +3794,8 @@ export type RuntimeStreamMetrics = {
 };
 
 export type AgentRunResult<TOutput = RuntimeOutput> = {
+  /** Server-owned result admission; adapters cannot authorize a stale result. */
+  intentAdmission?: { status: 'current' | 'superseded'; reason?: string };
   operationTelemetry?: {
     operationId: string;
     policyVersion: string;

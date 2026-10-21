@@ -12,6 +12,7 @@ import type {
 } from '@agent-cluster/shared';
 import { AgentsService } from '../agents/agents.service.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
+import { isIntentWorkflowEffects } from '@agent-cluster/shared';
 
 const MAX_NAME_LENGTH = 100;
 const MAX_DESCRIPTION_LENGTH = 500;
@@ -311,8 +312,11 @@ export class WorkflowsService {
         if (!node?.id?.trim()) throw new BadRequestException('Workflow node id is required.');
         if (ids.has(node.id)) throw new BadRequestException(`Duplicate workflow node id: ${node.id}`);
         ids.add(node.id);
+        if (node.intentEffects !== undefined && !isIntentWorkflowEffects(node.intentEffects)) throw new BadRequestException('WORKFLOW_NODE_EFFECTS_INVALID');
+        if (node.type === 'human_approval' && node.intentEffects?.effects.length) throw new BadRequestException('HUMAN_APPROVAL_CANNOT_EXECUTE_EFFECTS');
         const normalizedName = node.name?.trim();
         const base = {
+          ...(node.intentEffects ? { intentEffects: structuredClone(node.intentEffects) } : {}),
           id: node.id.trim(),
           order,
           ...(normalizedName ? { name: normalizedName } : {}),
@@ -430,6 +434,7 @@ export class WorkflowsService {
   }
 
   private cloneNode(node: WorkflowNode): WorkflowNode {
+    node = structuredClone(node);
     if (node.type === 'agent') {
       return { ...node, inputContract: [...(node.inputContract ?? [])], outputContract: [...(node.outputContract ?? [])], ui: node.ui ? { ...node.ui } : undefined };
     }

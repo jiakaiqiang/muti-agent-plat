@@ -27,7 +27,7 @@ export const defaultAgentPresets: DefaultAgentPreset[] = [
       '把已确认需求拆分为清晰、可验收、可派发的 Agent 任务。',
       '协调执行、复核与交付，不承担消息意图分类。'
     ],
-    capabilityIds: ['cap-brief', 'cap-router'],
+    capabilityIds: ['cap-brief', 'cap-router', 'cap-file-read', 'cap-code-search'],
     responsibilities: [
       '接收系统意图路由器产出的结构化路由决定和有效上下文。',
       '根据 WorkItem 和多 Agent 讨论结论拆分任务，并派发给对应专业 Agent。'
@@ -157,7 +157,7 @@ export const defaultAgentPresets: DefaultAgentPreset[] = [
       '失败定位、回归风险识别和测试报告输出。',
       '验收证据整理和剩余风险说明。'
     ],
-    capabilityIds: ['cap-test-report', 'cap-command-run'],
+    capabilityIds: ['cap-test-report', 'cap-command-run', 'cap-isolated-test'],
     responsibilities: [
       '选择与风险匹配的最小有效验证集合。',
       '检查类型、单测、集成、e2e、构建和关键冒烟结果。',

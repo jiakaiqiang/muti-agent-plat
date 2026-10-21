@@ -1,6 +1,9 @@
 import { defaultAgentPresets, type RuntimeCapabilityDefinition } from '@agent-cluster/shared';
 
 export const defaultCapabilities: RuntimeCapabilityDefinition[] = [
+  { id: 'cap-isolated-test', key: 'tool.isolated_test', name: '隔离测试', riskLevel: 'medium', description: '仅执行当前持久化计划中独立授权的隔离测试脚本，不授予宿主命令或源码写入权限。' },
+  { id: 'cap-file-read', key: 'tool.file_read', name: '只读文件', riskLevel: 'low', description: '读取已授权工作区内的非敏感文本文件，不提供写入或命令能力。' },
+  { id: 'cap-code-search', key: 'tool.code_search', name: '只读代码搜索', riskLevel: 'low', description: '搜索已授权工作区内的非敏感文本文件，不跟随符号链接。' },
   {
     id: 'cap-brief',
     key: 'brief.generate',

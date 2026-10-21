@@ -64,6 +64,27 @@ test('Worker environment uses an allowlist and excludes backend credentials', ()
   assert.equal(env.AGENT_CLUSTER_SECRET_KEY, undefined);
 });
 
+test('isolated Claude classification uses a real worker without binding a project directory', async () => {
+  const service = new ServerRuntimeWorkerService();
+  const previous = process.env.CLAUDE_CODE_ENABLED;
+  process.env.CLAUDE_CODE_ENABLED = 'false';
+  try {
+    const plan = makeInvocationPlan({ admissionClass: 'routing', phase: 'user_message_routing', dataEpoch: 'epoch',
+      executionTarget: { runtimeType: 'claude_code' }, expectedOutput: { kind: 'intent_understanding', schemaVersion: '1.0' } });
+    const handle = service.start(plan);
+    assert.equal(service.activeWorkerCount(), 1);
+    assert.equal((await handle.result).status, 'blocked');
+    assert.equal(service.activeWorkerCount(), 0);
+    const invalid = await service.start({ ...plan, resume: { cliSessionId: 'old' } } as typeof plan).result;
+    assert.match(invalid.error?.message ?? '', /RESTRICTED_ROUTING_CAPABILITY_UNAVAILABLE/);
+    const business = await service.start(makeInvocationPlan({ executionTarget: { runtimeType: 'claude_code' } })).result;
+    assert.match(business.error?.message ?? '', /SERVER_RUNTIME_WORKDIR_REQUIRED/);
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CODE_ENABLED; else process.env.CLAUDE_CODE_ENABLED = previous;
+    await service.onModuleDestroy();
+  }
+});
+
 test('a Worker failure returns an invocation result without terminating the control process', async () => {
   const root = await mkdtemp(join(tmpdir(), 'server-runtime-worker-'));
   const service = new ServerRuntimeWorkerService();

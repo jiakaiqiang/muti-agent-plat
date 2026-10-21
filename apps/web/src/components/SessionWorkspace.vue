@@ -32,6 +32,8 @@ import CollaborationGraphView from './CollaborationGraphView.vue'
 import CollaborationLogPanel from './CollaborationLogPanel.vue'
 import DebugRuntimeView from './DebugRuntimeView.vue'
 import FileRevisionCandidateEditor from './FileRevisionCandidateEditor.vue'
+import IntentWorkspaceAuthorityPanel from './IntentWorkspaceAuthorityPanel.vue'
+import IntentTestAuthorityPanel from './IntentTestAuthorityPanel.vue'
 import GitHubSourcePreparation from './GitHubSourcePreparation.vue'
 import GitHubDeliveryPanel from './GitHubDeliveryPanel.vue'
 import GitHubConflictEditor from './GitHubConflictEditor.vue'
@@ -1320,17 +1322,21 @@ async function resolveConfirmation(optionKey: string, confirmationId?: string) {
   }
   const origin = currentSessionId.value
   decisionsBySession.value[origin] = true
-  try { await resolveConfirmationAction(optionKey) }
-  catch (error) { if (currentSessionId.value === origin) showErrorMessage(error, '处理确认失败，请重试') }
+  const confirmation = activeConfirmation.value ? { ...activeConfirmation.value } : undefined
+  try { await resolveConfirmationAction(optionKey, origin, confirmation) }
+  catch (error) {
+    if ([409, 410].includes((error as { status?: number })?.status ?? 0)) {
+      await reconcileSessionEvents(origin).catch(() => undefined)
+    }
+    if (currentSessionId.value === origin) showErrorMessage(error, '处理确认失败，请重试')
+  }
   finally {
     delete decisionsBySession.value[origin]
     if (confirmationSessionId.value === origin) confirmationBeingHandled.value = undefined
   }
 }
-async function resolveConfirmationAction(optionKey: string) {
-  const confirmation = activeConfirmation.value
-  if (!sessionStore.currentSession || !confirmation) return
-  const sessionId = sessionStore.currentSession.id
+async function resolveConfirmationAction(optionKey: string, sessionId: string, confirmation?: ConfirmationCardState) {
+  if (!confirmation) return
   if (
     confirmation.reason === 'intent_relation_clarification' &&
     confirmation.routingId &&
@@ -1338,7 +1344,8 @@ async function resolveConfirmationAction(optionKey: string) {
   ) {
     await sessionStore.clarifyIntentRouting(sessionId, confirmation.routingId, {
       choice: optionKey,
-      confirmationId: confirmation.confirmationId
+      confirmationId: confirmation.confirmationId,
+      expectedRoutingRevision: confirmation.routingRevision
     })
     await reconcileSessionEvents(sessionId)
     return
@@ -1608,6 +1615,16 @@ async function resolveConfirmationAction(optionKey: string) {
       await reconcileSessionEvents(sessionId)
       return
     }
+  }
+
+  if (confirmation.reason === 'input_budget_exceeded') {
+    const hold = confirmation.inputBudgetDecision
+    if (!hold || !['continue', 'end'].includes(optionKey)) return
+    await sessionStore.decideInputBudget(sessionId, { operationId: hold.operationId,
+      decisionId: hold.id, decision: optionKey as 'continue' | 'end' })
+    await reconcileSessionEvents(sessionId)
+    await sessionStore.fetchSessionDetail(sessionId)
+    return
   }
 
   if (confirmation.reason === 'work_item_budget_exhausted') {
@@ -2031,6 +2048,10 @@ async function submitWorkflowStepRevision() {
         />
         <div v-else-if="currentMode === 'chat'" class="chat-pane">
           <TokenUsageIndicator :session-id="currentSessionId" />
+          <IntentWorkspaceAuthorityPanel v-if="sessionStore.currentSession?.intentContractVersion === 'intent-understanding-v1'"
+            :session="sessionStore.currentSession" :disabled="backendUnreachable || navigation.state.phase !== 'ready'" />
+          <IntentTestAuthorityPanel v-if="sessionStore.currentSession?.intentContractVersion === 'intent-understanding-v1'"
+            :session="sessionStore.currentSession" :disabled="backendUnreachable || navigation.state.phase !== 'ready'" />
           <GitHubSourcePreparation v-if="sessionStore.currentSession?.sourceBinding" :session="sessionStore.currentSession" />
           <GitHubDeliveryPanel v-if="sessionStore.currentSession?.delivery" :session="sessionStore.currentSession" />
           <GitHubConflictEditor v-if="sessionStore.currentSession?.delivery?.state === 'resolving_conflict' && sessionStore.currentSession.delivery.conflictId"
@@ -2051,7 +2072,7 @@ async function submitWorkflowStepRevision() {
             @resolve-confirmation="resolveConfirmation"
             @approve-capability="approveCapability"
           />
-          <div v-if="navigation.state.phase === 'loading'" role="status" aria-live="polite">正在切换会话…</div>
+          <div v-if="navigation.state.phase === 'loading'" role="status" aria-live="polite">正在加载会话…</div>
           <div v-if="navigation.state.phase === 'error'" role="alert">
             {{ navigation.state.error }}
             <button type="button" @click="navigation.select(navigation.state.targetSessionId)">重新加载</button>
@@ -2066,6 +2087,8 @@ async function submitWorkflowStepRevision() {
             @resume="resumeStoppedSession"
             :busy="isSendingMessage"
             :disabled="backendUnreachable || navigation.state.phase === 'loading' || navigation.state.phase === 'error'"
+            :connection-unavailable="backendUnreachable"
+            :session-ready="navigation.state.phase === 'ready'"
             :placeholder="backendUnreachable ? '后端离线，恢复连接后可继续发送' : undefined"
             @send="sendUserMessage"
             @agent-join-confirmed="joinMentionedAgent"

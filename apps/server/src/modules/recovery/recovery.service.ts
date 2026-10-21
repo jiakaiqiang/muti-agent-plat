@@ -56,10 +56,11 @@ export class RecoveryService implements OnApplicationBootstrap {
     }
 
     const sessions = filterSessionsForDataEpoch(this.sessions.listRaw(), this.persistence.currentDataEpoch());
+    const legacySessions = sessions.filter(session => session.intentContractVersion !== 'intent-understanding-v1');
     if ((process.env.AGENT_CLUSTER_WORKITEM_BOOTSTRAP ?? 'true').trim().toLowerCase() !== 'false' && this.legacyMigration) {
       const migrationMode = workItemMigrationMode();
       if (migrationMode === 'apply' && this.contextManagement) {
-        for (const session of sessions) {
+        for (const session of legacySessions) {
           if (!this.contextManagement.activeWorkItem(session)) {
             await this.contextManagement.ensureInitialWorkItem(
               session,
@@ -69,10 +70,10 @@ export class RecoveryService implements OnApplicationBootstrap {
             );
           }
         }
-        const report = await this.legacyMigration.apply(sessions);
+        const report = await this.legacyMigration.apply(legacySessions);
         this.logger.log(`Applied legacy WorkItem ownership migration: sessions=${report.sessionCount}, migrated=${report.migratedRecordCount}, issues=${report.issues.length}.`);
       } else {
-        const report = this.legacyMigration.report(sessions, migrationMode);
+        const report = this.legacyMigration.report(legacySessions, migrationMode);
         this.logger.log(`Legacy WorkItem ownership ${migrationMode}: sessions=${report.sessionCount}, planned=${report.plannedRecordCount}, issues=${report.issues.length}, revision=${report.revision}.`);
       }
     }
@@ -81,6 +82,8 @@ export class RecoveryService implements OnApplicationBootstrap {
     // reconciliation until the user explicitly restores them.
     const recoverableSessions = sessions.filter((session) => !session.archivedAt);
     for (const session of recoverableSessions) {
+      // New-contract routing/answer steps recover from their own leases and budgets.
+      if (session.intentContractVersion === 'intent-understanding-v1') continue;
       this.interruptSessionFromPreviousProcess(session);
       await this.sessions.reconcileRecoveryStateOnBoot?.(session.id);
     }

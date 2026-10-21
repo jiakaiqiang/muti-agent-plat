@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentRuntimeEvent, InvocationPlan, LocalRuntimeInvocationRequest } from '@agent-cluster/shared';
 import { buildClaudeArgs, ClaudeCodeLocalRuntimeAdapter } from './adapters/claude-code-adapter.js';
-import { buildCodexArgs, parseCodexOutput, withCodexOutputSchema } from './adapters/codex-adapter.js';
+import { buildCodexArgs, buildCodexInvocationArgs, parseCodexOutput, withCodexOutputSchema } from './adapters/codex-adapter.js';
 import {
   buildRuntimeProcessEnv,
   revalidateReadOnlyEvidence,
@@ -87,6 +87,53 @@ test('Codex local adapter permits the managed staging directory without relying 
   assert.deepEqual(buildCodexArgs(), [
     'exec', '--json', '--sandbox', 'workspace-write', '--skip-git-repo-check', '-'
   ]);
+});
+
+test('Codex invocation sandbox follows effective write permission and rejects custom privilege overrides', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'intent-codex-authority-'));
+  const workspace = new LocalWorkspace(await createWorkspaceState(root, 'authority'), { watch: false, index: false });
+  try {
+    const { plan, permissions } = await invocationRequest(workspace);
+    plan.toolCatalog.tools = [{ name: 'write_file', description: '', inputSchema: {} }];
+    const sandbox = (args: string[]) => args[args.indexOf('--sandbox') + 1];
+    plan.executionTarget.writeMode = 'none';
+    assert.equal(sandbox(buildCodexInvocationArgs(plan, permissions)), 'read-only');
+    plan.executionTarget.writeMode = 'propose_changes';
+    assert.equal(sandbox(buildCodexInvocationArgs(plan, { ...permissions, workspace_write: 'deny' })), 'read-only');
+    assert.equal(sandbox(buildCodexInvocationArgs(plan, { ...permissions, workspace_write: 'allow' })), 'workspace-write');
+    for (const option of ['--dangerously-bypass-approvals-and-sandbox', '--yolo', '--full-auto', '--sandbox=danger-full-access', '-c', '--add-dir']) {
+      assert.throws(() => buildCodexInvocationArgs(plan, permissions, ['exec', option]), /UNSAFE_CUSTOM_ARGS/);
+    }
+    plan.submissionRepair = true;
+    assert.equal(sandbox(buildCodexInvocationArgs(plan, permissions)), 'read-only');
+    assert.throws(() => buildCodexInvocationArgs(plan, permissions, ['exec']), /UNSAFE_CUSTOM_ARGS/);
+  } finally { workspace.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('read-only invocation rejects actual staged writes without exposing a recovery candidate', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'intent-read-only-effect-'));
+  await writeFile(join(root, 'source.ts'), 'original');
+  const workspace = new LocalWorkspace(await createWorkspaceState(root, 'authority'), { watch: false, index: false });
+  const adapter = getLocalRuntimeAdapter('codex');
+  const previous = adapter.execute;
+  try {
+    const request = await invocationRequest(workspace);
+    request.plan.executionTarget.writeMode = 'none';
+    request.plan.executionTarget.requiredCapabilities = ['read'];
+    request.plan.toolCatalog.tools = [{ name: 'read_file', description: '', inputSchema: {} }];
+    adapter.execute = async ({ cwd }) => {
+      await writeFile(join(cwd, 'source.ts'), 'unauthorized');
+      return { output: { schemaVersion: '1.0', kind: 'agent_message', messageKind: 'progress', content: 'done',
+        targetAgentIds: [], targetAgentKeys: [], mentionedAgentIds: [], relatedTaskIds: [] },
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } };
+    };
+    const result = await executeLocalInvocation(request, workspace, new AbortController().signal, () => {});
+    assert.equal(result.status, 'failed');
+    assert.match(result.error?.message ?? '', /READ_ONLY_SIDE_EFFECT_DETECTED/);
+    assert.equal(result.executionCandidate, undefined);
+    assert.equal(result.workspaceExecution, undefined);
+    assert.equal(await readFile(join(root, 'source.ts'), 'utf8'), 'original');
+  } finally { adapter.execute = previous; workspace.close(); await rm(root, { recursive: true, force: true }); }
 });
 
 test('Codex local adapter appends the platform-controlled output schema', () => {

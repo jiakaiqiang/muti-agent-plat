@@ -13,6 +13,7 @@ import {
 } from './output-contracts.js';
 import { assertStrictJsonSchema } from './preflight.js';
 import { minimalTaskSubmissionContract } from './minimal-submission.js';
+import { intentUnderstandingStructureErrors, type IntentUnderstandingOutput } from './intent-understanding.js';
 
 export type RuntimeContractDefinition<T extends RuntimeOutput> = {
   contractId: `runtime.output.${T['kind']}`;
@@ -74,6 +75,10 @@ export function validateRuntimeOutput<K extends RuntimeOutputKind>(
     validators.set(kind, validator);
   }
   if (validator(value)) {
+    if (kind === 'intent_understanding') {
+      const errors = intentUnderstandingStructureErrors(value as IntentUnderstandingOutput);
+      if (errors.length) return { valid: false, errors };
+    }
     return { valid: true, value: structuredClone(value) as RuntimeOutputByKind[K], errors: [] };
   }
   return { valid: false, errors: (validator.errors ?? []).map(formatValidationError) };

@@ -2,6 +2,81 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { AgentTask, SessionDetail, TaskBrief, WorkflowVersion } from '@agent-cluster/shared';
 import { WorkflowRuntimeService } from './workflow-runtime.service.js';
+import { approvedResumeState } from '../message-routing/intent-resume.fixture.js';
+import { bindIntentResume } from '../message-routing/intent-resume-guard.js';
+import { approvedRetryState } from '../message-routing/intent-retry.fixture.js';
+import { captureIntentRetryBinding } from '../message-routing/intent-retry-guard.js';
+
+test('R8 workflow retries its fixed failed nodeRun/task without recreating upstream or sibling tasks', async () => {
+  for (const stale of [false, true]) {
+    const state: any = approvedRetryState(), session = state.sessions[0], brief = state.briefsBySession.session[0];
+    session.workflowRunId = 'run';
+    const run = { id: 'run', sessionId: 'session', workItemId: 'work', briefId: brief.id, status: 'failed', revision: 3,
+      sessionGeneration: 1, currentNodeId: 'node', definitionSnapshot: { nodes: [{ id: 'node', type: 'agent', agentId: 'frontend' }], edges: [] } };
+    const node = { id: 'failed-node', workflowRunId: 'run', nodeId: 'node', status: 'failed', relatedTaskId: 'original-task', attempt: 2 };
+    const upstream = { id: 'completed-node', workflowRunId: 'run', nodeId: 'upstream', status: 'completed', relatedTaskId: 'upstream-task', attempt: 1 };
+    state.workflowRuntime = { runs: [run], nodeRunsByRunId: { run: [upstream, node] } };
+    const task = state.tasksBySession.session[0];
+    Object.assign(task, { workflowRunId: 'run', workflowNodeId: 'node', workflowNodeRunId: node.id, workflowAgentOverride: true });
+    const binding = captureIntentRetryBinding(state, 'session', 'user', 'failed-checkpoint', task.id, 'failed-call');
+    assert.ok(binding); assert.equal(binding.workflow?.nodeRunId, 'failed-node');
+    session.activeRecoveryCheckpoint.retryBinding = binding;
+    state.intentPlanStepsBySession.session[0].retryReceipts = [{ status: 'running', binding, processId: 'dispatch' }];
+    session.status = 'EXECUTING'; task.status = 'pending';
+    const others = [{ id: 'upstream-task', sessionId: 'session', status: 'completed' }, { id: 'sibling-task', sessionId: 'session', status: 'failed' }];
+    state.tasksBySession.session.push(...others); const before = structuredClone({ upstream, others });
+    if (stale) state.workItemsBySession.session[0].requirementRevision++;
+    const calls: any[][] = [];
+    const runtime = new WorkflowRuntimeService({} as never, {} as never,
+      { find: (_session: string, id: string) => state.tasksBySession.session.find((row: any) => row.id === id),
+        list: () => state.tasksBySession.session, update: (item: AgentTask, patch: Partial<AgentTask>) => Object.assign(item, patch) } as never,
+      {} as never, { isRunning: () => false, start: (...args: any[]) => calls.push(args) } as never,
+      { getCollection: (key: string, fallback: unknown) => structuredClone(state[key] ?? fallback),
+        setCollection: (key: string, value: unknown) => { state[key] = structuredClone(value); } } as never);
+    const invoke = () => runtime.resumeCurrentExecution('run', { session, brief, coordinatorId: 'coordinator', sessionGeneration: 1, intentRetryBinding: binding });
+    if (stale) { await assert.rejects(invoke(), /INTENT_RESUME_VERSION_STALE/); assert.equal(calls.length, 0); }
+    else {
+      assert.equal(await invoke(), true); assert.equal(calls.length, 1);
+      assert.deepEqual(calls[0][2].map((row: AgentTask) => row.id), ['original-task']); assert.deepEqual(calls[0][6], binding);
+      const nodes = (state.workflowRuntime as any).nodeRunsByRunId.run;
+      assert.equal(nodes.length, 2); assert.equal(nodes[1].id, 'failed-node'); assert.equal(nodes[1].attempt, 2);
+    }
+    assert.deepEqual({ upstream, others }, before);
+  }
+});
+
+test('R7 workflow forwards its original resume authority to the actual execution dispatch', async () => {
+  const state: any = approvedResumeState(), session = state.sessions[0], brief = state.briefsBySession.session[0];
+  session.workflowRunId = 'run';
+  const run = { id: 'run', sessionId: 'session', workItemId: 'work', briefId: brief.id, status: 'running', sessionGeneration: 1,
+    currentNodeId: 'node', definitionSnapshot: { nodes: [{ id: 'node', type: 'agent', agentId: 'frontend' }], edges: [] } };
+  const node = { id: 'node-run', workflowRunId: 'run', nodeId: 'node', status: 'running', relatedTaskId: 'original-task' };
+  state.workflowRuntime = { runs: [run], nodeRunsByRunId: { run: [node] } };
+  const task = state.tasksBySession.session[0];
+  Object.assign(task, { workflowRunId: 'run', workflowNodeId: 'node', workflowNodeRunId: node.id, dependsOnTaskIds: [], workflowAgentOverride: true });
+  const binding = bindIntentResume(state, 'session', 'user');
+  state.sessionLifecyclesBySession.session.admission = 'open';
+  const calls: any[][] = [];
+  const runtime = new WorkflowRuntimeService({} as never, {} as never,
+    { find: () => task, update: (_task: AgentTask, patch: Partial<AgentTask>) => Object.assign(task, patch) } as never,
+    {} as never, { isRunning: () => false, start: (...args: any[]) => calls.push(args) } as never,
+    { getCollection: (key: string, fallback: unknown) => structuredClone(state[key] ?? fallback),
+      setCollection: (key: string, value: unknown) => { state[key] = structuredClone(value); } } as never);
+  assert.equal(await runtime.resumeCurrentExecution(run.id, { session, brief, coordinatorId: 'coordinator', sessionGeneration: 1, intentResumeBinding: binding }), true);
+  assert.equal(calls.length, 1); assert.deepEqual(calls[0][5], binding);
+});
+
+test('R7 new-chain workflow resume cannot reset a cancelled task to pending', async () => {
+  const setup = fixture([{ id: 'development', type: 'agent', agentId: 'frontend', order: 0 }]);
+  const run = await setup.runtime.start({ session: setup.session, brief: setup.brief, coordinatorId: 'coordinator', workflowId: 'workflow-1', confirmationId: 'r7-cancelled' });
+  setup.callbacks[0]({ kind: 'cancelled', reason: 'Paused' }); await settle();
+  setup.taskItems[0].status = 'cancelled';
+  setup.session.intentContractVersion = 'intent-understanding-v1'; setup.session.status = 'PAUSED';
+  setup.collections.set('sessions', [setup.session]);
+  const calls = setup.executionTaskBatches.length;
+  await assert.rejects(setup.runtime.resumeCurrentExecution(run.id, { session: setup.session, brief: setup.brief, coordinatorId: 'coordinator' }), /INTENT_RESUME_/);
+  assert.equal(setup.taskItems[0].status, 'cancelled'); assert.equal(setup.executionTaskBatches.length, calls);
+});
 
 const now = '2026-07-14T00:00:00.000Z';
 
@@ -1195,6 +1270,19 @@ test('WorkflowRuntimeService refuses to resume a run owned by a different active
   assert.equal(resumed, false);
   assert.equal(setup.runtime.get(run.id).status, 'failed');
   assert.equal(setup.callbacks.length, 1);
+});
+
+test('existing Agent node forwards input-budget waiting without failing the run', async () => {
+  const setup = fixture([{ id: 'requirements-node', type: 'agent', agentId: 'requirements', order: 0 }]);
+  const run = await setup.runtime.start({ session: setup.session, brief: setup.brief, coordinatorId: 'coordinator',
+    workflowId: 'workflow-1', confirmationId: 'budget-wait' });
+  setup.taskItems[0].status = 'waiting';
+  setup.callbacks[0]({ kind: 'input_budget_exceeded', taskId: setup.taskItems[0].id, reason: '等待输入预算选择',
+    error: { code: 'INPUT_BUDGET_EXCEEDED', message: '等待输入预算选择', retryable: false } });
+  await settle();
+  assert.equal(setup.runtime.get(run.id).status, 'running');
+  assert.equal(setup.taskItems[0].status, 'waiting');
+  assert.ok(setup.updates.some(row => row.kind === 'session_outcome' && row.outcome.kind === 'input_budget_exceeded'));
 });
 
 test('WorkflowRuntimeService keeps the current node resumable while workspace conflict is resolved', async () => {

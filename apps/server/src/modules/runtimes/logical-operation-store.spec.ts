@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +14,111 @@ function withEnv(name: string, value: string | undefined, fn: () => void) {
     if (previous === undefined) delete process.env[name]; else process.env[name] = previous;
   }
 }
+
+async function restrictedFixture(t: TestContext) {
+  const directory = mkdtempSync(join(tmpdir(), 'restricted-routing-'));
+  const persistence = new PersistenceService({ enabled: true, backend: 'file', filePath: join(directory, 'state.json') });
+  t.after(async () => { await persistence.onModuleDestroy(); rmSync(directory, { recursive: true, force: true }); });
+  await persistence.initialize();
+  const session = { id: 'session', status: 'PAUSED', dataEpoch: 'epoch' };
+  const lifecycle = { contractVersion: 'main-agent-collaboration/v1', sessionId: 'session', dataEpoch: 'epoch',
+    generation: 2, revision: 5, state: 'active', admission: 'closed', stopStatus: 'confirmed' };
+  await persistence.setCollection('sessions', [session]);
+  await persistence.setCollection('sessionLifecyclesBySession', { session: lifecycle });
+  const store = new LogicalOperationStore(persistence);
+  const input = { id: 'routing', sessionId: 'session', phase: 'user_message_routing' as const,
+    admissionClass: 'routing' as const, dataEpoch: 'epoch' };
+  return { persistence, session, lifecycle, store, input };
+}
+
+test('restricted routing survives a paused session without reopening business admission or its budget', async (t) => {
+  const { persistence, lifecycle, store, input } = await restrictedFixture(t);
+  const operation = await store.begin(input);
+  await store.reserve('session', operation.id, 'classify', { admissionClass: 'routing', executionKind: 'internal' });
+  assert.equal(await store.reserveCorrection('session', operation.id), true);
+  await store.settle('session', operation.id, 'classify');
+  const restored = new LogicalOperationStore(persistence);
+  const replay = await restored.begin(input);
+  assert.equal(replay.attemptsUsed, 1);
+  assert.equal(replay.deadlineAt, operation.deadlineAt);
+  assert.deepEqual(persistence.getCollection<Record<string, unknown>>('sessionLifecyclesBySession', {}).session, lifecycle);
+  await assert.rejects(restored.begin({ ...input, id: 'business', admissionClass: 'business' }), /SESSION_ADMISSION_CLOSED/);
+  await assert.rejects(restored.reserve('session', operation.id, 'forged-business'), /ADMISSION_MISMATCH/);
+  await restored.reserve('session', operation.id, 'repair', { admissionClass: 'routing', executionKind: 'internal' });
+  await restored.settle('session', operation.id, 'repair');
+  await assert.rejects(restored.reserve('session', operation.id, 'third', { admissionClass: 'routing' }), /BUDGET_EXHAUSTED/);
+});
+
+test('restricted routing rechecks archive, epoch, generation and unknown stop before reserve', async (t) => {
+  for (const change of ['archive', 'epoch', 'generation', 'deleted', 'unknown'] as const) {
+    const { persistence, session, lifecycle, store, input } = await restrictedFixture(t);
+    await store.begin(input);
+    if (change === 'archive') await persistence.setCollection('sessions', [{ ...session, archivedAt: new Date().toISOString() }]);
+    if (change === 'epoch') await persistence.setCollection('sessions', [{ ...session, dataEpoch: 'new-epoch' }]);
+    if (change === 'generation') await persistence.setCollection('sessionLifecyclesBySession', { session: { ...lifecycle, generation: 3 } });
+    if (change === 'deleted') await persistence.setCollection('sessionLifecyclesBySession', { session: { ...lifecycle, state: 'deleted' } });
+    if (change === 'unknown') await persistence.setCollection('sessionLifecyclesBySession', { session: { ...lifecycle, stopStatus: 'unknown' } });
+    await assert.rejects(store.reserve('session', 'routing', 'late', { admissionClass: 'routing' }), /ADMISSION_CLOSED|STOP_UNCONFIRMED/, change);
+    assert.equal(store.list('session')[0].attemptsUsed, 0);
+  }
+});
+
+test('targeted correction stop preserves unknown process evidence and blocks restricted classification until confirmation', async t => {
+  const { persistence, store, input } = await restrictedFixture(t);
+  const previous = await store.begin(input);
+  for (const stopState of ['unconfirmed', 'requested'] as const) {
+    await persistence.setCollection('logicalOperationsBySession', { session: [{ ...previous, id: 'old-business',
+      phase: 'task_execution', admissionClass: 'business', activeInvocationId: 'unknown-process',
+      invocationIds: ['unknown-process'], stopState, status: 'interrupted' }] });
+    await store.requestIntentStop('session', ['unknown-process']);
+    assert.equal(store.list('session')[0].stopState, stopState);
+    await assert.rejects(store.begin({ ...input, id: 'new-classification' }), /OPERATION_STOP_UNCONFIRMED/);
+  }
+});
+
+test('restricted routing rejects execution phases, task bindings and stale epoch at begin', async (t) => {
+  const { store, input } = await restrictedFixture(t);
+  await assert.rejects(store.begin({ ...input, phase: 'task_execution' }), /ROUTING_ADMISSION_INVALID/);
+  await assert.rejects(store.begin({ ...input, taskId: 'task' }), /ROUTING_ADMISSION_INVALID/);
+  await assert.rejects(store.begin({ ...input, dataEpoch: 'other' }), /SESSION_ADMISSION_CLOSED/);
+  assert.equal(store.list('session').length, 0);
+});
+
+test('absolute routing deadline can tighten but cannot expand across retry, pause or store restart', async () => {
+  const persistence = new PersistenceService({ enabled: false });
+  let now = 1000;
+  const store = new LogicalOperationStore(persistence, () => now);
+  const input = { id: 'bounded', sessionId: 'session', phase: 'user_message_routing' as const,
+    deadlineCeilingAt: new Date(3000).toISOString() };
+  const original = await store.begin(input);
+  assert.equal(Date.parse(original.deadlineAt), 3000);
+  await assert.rejects(store.begin({ ...input, id: 'invalid', deadlineCeilingAt: 'invalid-date' }), /OPERATION_DEADLINE_INVALID/);
+  await store.reserve('session', input.id, 'first', { executionKind: 'internal' });
+  now = 1500;
+  await store.settle('session', input.id, 'first', 'confirmed', true);
+  now = 2000;
+  const restored = new LogicalOperationStore(persistence, () => now);
+  const replay = await restored.begin({ ...input, deadlineCeilingAt: new Date(100_000).toISOString() });
+  assert.equal(Date.parse(replay.deadlineAt), 3000);
+  assert.equal(Date.parse(replay.deadlineCeilingAt!), 3000);
+  assert.equal(Date.parse((await restored.resume('session', input.id)).deadlineAt), 3000);
+  const tightened = await restored.begin({ ...input, deadlineCeilingAt: new Date(2500).toISOString() });
+  assert.equal(Date.parse(tightened.deadlineAt), 2500);
+  assert.equal(tightened.attemptsUsed, 1);
+  now = 2501;
+  await assert.rejects(restored.reserve('session', input.id, 'too-late'), /OPERATION_BUDGET_EXHAUSTED/);
+});
+
+test('absolute wall deadline expiry prevents resuming even with remaining active time', async () => {
+  const persistence = new PersistenceService({ enabled: false });
+  let now = 1000;
+  const store = new LogicalOperationStore(persistence, () => now);
+  await store.begin({ id: 'paused', sessionId: 'session', phase: 'user_message_routing', deadlineCeilingAt: new Date(2000).toISOString() });
+  await store.reserve('session', 'paused', 'first');
+  await store.settle('session', 'paused', 'first', 'confirmed', true);
+  now = 2500;
+  await assert.rejects(store.resume('session', 'paused'), /OPERATION_BUDGET_EXHAUSTED/);
+});
 
 test('an active control call keeps one correction after deadline but cannot start another attempt', async () => {
   const persistence = new PersistenceService({ enabled: false });

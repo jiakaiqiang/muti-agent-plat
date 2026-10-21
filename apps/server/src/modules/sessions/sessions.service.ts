@@ -1,3 +1,9 @@
+import { InputBudgetStore } from '../runtimes/input-budget-store.js';
+import { IntentResumeControlService } from '../message-routing/intent-resume-control.service.js';
+import { assertNoPendingInputBudget, bindIntentResume, readIntentResumeState } from '../message-routing/intent-resume-guard.js';
+import type { IntentResumeBinding, IntentRetryBinding } from '@agent-cluster/shared';
+import { bindIntentRetry, captureIntentRetryBinding, readIntentRetryState } from '../message-routing/intent-retry-guard.js';
+import type { DecideInputBudgetInput } from '@agent-cluster/shared';
 import {
   BadRequestException,
   ConflictException,
@@ -13,6 +19,7 @@ import {
 } from '@nestjs/common';
 import type { Subscription } from 'rxjs';
 import crypto from 'node:crypto';
+import { isReviseIntentBriefInput, briefRevisionMessage, type IntentRoutingRecord } from '@agent-cluster/shared';
 import { effectiveRuntimePreference, normalizeRuntimePreference, parseRuntimeControlIntent, runtimeDisplayName,
   type RuntimeSwitchInput, type RuntimeSwitchRequest, type RuntimeHandoffCheckpoint } from '@agent-cluster/shared';
 import { RuntimeSwitchStore } from '../runtime-switch/runtime-switch-store.js';
@@ -24,6 +31,7 @@ import type {
   AgentTask,
   CaptureFileRevisionBaselineInput,
   CollaborationEvent,
+  ClarifyIntentRoutingInput,
   DiscussionDocumentView,
   CreateFileRevisionRunInput,
   DecideFileRevisionInput,
@@ -98,9 +106,12 @@ import {
 } from '../intent-recognition/deterministic-command-guard.service.js';
 import { SemanticIntentRouterService } from '../intent-recognition/semantic-intent-router.service.js';
 import { ContextManagementService } from '../context-management/context-management.service.js';
+import { assertClarifyIntentRoutingInput, bindIntentClarification } from '../message-routing/intent-clarification.js';
+import { validateIntentRoutingDecision } from '../message-routing/intent-policy.service.js';
 import { MemoryService } from '../memory/memory.service.js';
 import { briefQuestionKey } from '@agent-cluster/shared';
 import { ExecutionOutcome, OrchestratorService, usableAgentMessageOutput } from '../orchestrator/orchestrator.service.js';
+import { IntentExecutionSupersededError } from '../message-routing/intent-execution-guard.js';
 import { ExecutionService } from '../execution/execution.service.js';
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { assertCurrentDataEpoch } from '../persistence/data-epoch-guard.js';
@@ -123,6 +134,10 @@ import { CapabilitiesService } from '../capabilities/capabilities.service.js';
 import { ArtifactsService } from '../artifacts/artifacts.service.js';
 import { FileRevisionsService } from '../file-revisions/file-revisions.service.js';
 import { RouteApplicationService } from '../message-routing/route-application.service.js';
+import { IntentCorrectionService } from '../message-routing/intent-correction.service.js';
+import { IntentMessagePipelineService } from '../message-routing/intent-message-pipeline.service.js';
+import { IntentBriefConfirmationService } from '../message-routing/intent-brief-confirmation.service.js';
+import { SemanticClarificationService } from '../message-routing/semantic-clarification.service.js';
 import { MessageIngressService } from '../message-routing/message-ingress.service.js';
 import { DiscussionDocumentsService } from '../discussion-documents/discussion-documents.service.js';
 import { AttachmentsService } from '../attachments/attachments.service.js';
@@ -270,6 +285,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   private deliveryReadyListener?: (sessionId: string, version: number) => void;
   private readonly runtimeSwitches: RuntimeSwitchCoordinator;
   private runtimeSwitchTimer?: NodeJS.Timeout;
+  private readonly resumeControl: IntentResumeControlService;
 
   constructor(
     private readonly agents: AgentsService,
@@ -297,9 +313,16 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     @Optional() private readonly artifacts?: ArtifactsService,
     @Optional() private readonly discussionDocuments?: DiscussionDocumentsService,
     @Optional() @Inject(forwardRef(() => AttachmentsService)) private readonly attachments?: AttachmentsService,
-    @Optional() private readonly githubWorkspaces?: GitRepositoryWorkspaceManager
+    @Optional() private readonly githubWorkspaces?: GitRepositoryWorkspaceManager,
+    @Optional() private readonly intentCorrections?: IntentCorrectionService,
+    @Optional() private readonly intentPipeline?: IntentMessagePipelineService,
+    @Optional() private readonly semanticClarifications?: SemanticClarificationService,
+    @Optional() private readonly intentBriefConfirmation?: IntentBriefConfirmationService,
+    @Optional() intentResumeControl?: IntentResumeControlService
   ) {
     this.lifecycle = new SessionLifecycleStore(persistence);
+    this.resumeControl = intentResumeControl ?? new IntentResumeControlService(persistence);
+    this.resumeControl.bind(input => this.resume(input.sessionId, '用户恢复原已批准计划', undefined, input.stepId));
     this.requirementDocuments = new RequirementDocumentStore(persistence);
     this.workflowStarts = new WorkflowStartStore(persistence);
     this.changeRequests = new ChangeRequestStore(persistence);
@@ -342,11 +365,6 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       if (this.lifecycle.get(session.id)?.state === 'deleting') this.deletingSessionIds.add(session.id);
     }
     if (recoveredWorkspaceWriteback) this.persist();
-    for (const session of this.sessions.values()) {
-      if (session.archivedAt) continue;
-      if (this.lifecycle.get(session.id)?.state !== 'active' && this.lifecycle.get(session.id)) continue;
-      this.orchestrator.ensureArchitectureReportSaveConfirmation(session);
-    }
     this.orchestrator.registerSavePendingInvocationCallback((sessionId, invocation) => {
       this.savePendingInvocation(sessionId, invocation);
     });
@@ -398,6 +416,11 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   }
 
   async onModuleInit() {
+    for (const session of this.sessions.values()) {
+      if (session.archivedAt) continue;
+      if (this.lifecycle.get(session.id)?.state !== 'active' && this.lifecycle.get(session.id)) continue;
+      await this.orchestrator.ensureArchitectureReportSaveConfirmation(session);
+    }
     for (const session of this.sessions.values()) {
       if (!session.archivedAt) await this.runtimeSwitches.recover(session.id).catch(error => this.logger.warn(String(error)));
     }
@@ -513,6 +536,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
 
   get(sessionId: string) {
     const session = this.getIncludingDeleted(sessionId);
+    this.refreshIntentLedgerRevision(session);
     const lifecycle = this.lifecycle.get(sessionId);
     if (session.archivedAt) {
       throw new ConflictException({
@@ -552,6 +576,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     if (!session) {
       throw new NotFoundException(`Session not found: ${sessionId}`);
     }
+    this.refreshIntentLedgerRevision(session);
     if (this.workspaceWritebacks) session.workspaceWritebacks = this.workspaceWritebacks.list(sessionId);
     return session;
   }
@@ -749,6 +774,15 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     return this.contextManagement?.listDecisions(sessionId) ?? [];
   }
 
+  listIntentRoutingsForMessage(sessionId: string, sourceEventId: string) {
+    this.get(sessionId);
+    if (typeof sourceEventId !== 'string' || !sourceEventId.trim()) {
+      throw new BadRequestException('SOURCE_EVENT_ID_REQUIRED');
+    }
+    return (this.contextManagement?.listRoutingRecords(sessionId) ?? [])
+      .filter(item => item.sourceEventId === sourceEventId);
+  }
+
   getIntentRouting(sessionId: string, routingId: string) {
     this.get(sessionId);
     const routing = this.contextManagement?.listRoutingRecords(sessionId).find((item) => item.id === routingId);
@@ -774,136 +808,64 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     };
   }
 
-  async clarifyIntentRouting(
-    sessionId: string,
-    routingId: string,
-    input: {
-      choice: 'continue_current' | 'related_new' | 'independent_new';
-      confirmationId?: string;
-    }
-  ) {
+  async clarifyIntentRouting(sessionId: string, routingId: string, input: ClarifyIntentRoutingInput) {
+    assertClarifyIntentRoutingInput(input);
     const session = this.get(sessionId);
     if (!this.contextManagement || !this.routeApplication) {
       throw new ServiceUnavailableException('Intent routing is unavailable.');
     }
     const routing = this.getIntentRouting(sessionId, routingId);
-    const followUp = (session.pendingFollowUpMessages ?? []).find((item) => item.routingId === routingId) ??
-      this.contextManagement.listFollowUps(sessionId).find((item) => item.routingId === routingId);
-    if (routing.status === 'ROUTED') {
-      return { routing, workItem: followUp?.workItemId
-        ? this.contextManagement.getWorkItem(sessionId, followUp.workItemId)
-        : this.contextManagement.activeWorkItem(session) };
+    if (routing.semanticContractVersion) {
+      if (!this.semanticClarifications) throw new ServiceUnavailableException('Semantic clarification is unavailable.');
+      return this.semanticClarifications.resolve({ sessionId, routingId }, session.ownerId, input);
     }
-    if (routing.status !== 'CLARIFICATION_REQUIRED') {
-      throw new ConflictException(`Intent routing is not waiting for clarification: ${routing.status}`);
+    if (routing.decision?.dialogueAct === 'correction' || routing.reasonCodes.includes('CORRECTION_TARGET_REQUIRED')) {
+      throw new ConflictException('CORRECTION_REQUIRES_VERSIONED_ENDPOINT');
     }
+    // Early feedback only. The durable application transaction repeats all checks.
+    const binding = bindIntentClarification(routing, this.events.list(sessionId), input);
+    const followUp = this.contextManagement.listFollowUps(sessionId).find(item => item.routingId === routingId);
     if (!followUp) throw new NotFoundException(`Follow-up message not found for routing: ${routingId}`);
-    if (!(session.pendingFollowUpMessages ?? []).some((item) => item.id === followUp.id)) {
-      session.pendingFollowUpMessages = [...(session.pendingFollowUpMessages ?? []), followUp];
-    }
     const active = this.contextManagement.activeWorkItem(session);
     if (!active) throw new ConflictException('No active WorkItem is available for clarification.');
     const snapshot = await this.contextManagement.buildIntentSnapshot({
-      session,
-      sourceEventId: routing.sourceEventId,
-      currentMessage: followUp.content,
-      latestEventSeq: this.events.list(sessionId).length,
-      mentionedAgentIds: followUp.mentionedAgentIds,
-      replyToEventId: followUp.replyToEventId,
-      pendingConfirmation: this.pendingConfirmationSummary(sessionId),
-      pendingConfirmationContext: this.pendingConfirmationContext(sessionId),
-      failureCheckpoint: this.latestFailurePhase(sessionId)
+      session, sourceEventId: routing.sourceEventId, currentMessage: followUp.content,
+      latestEventSeq: this.events.list(sessionId).length, mentionedAgentIds: followUp.mentionedAgentIds,
+      replyToEventId: followUp.replyToEventId, pendingConfirmation: this.pendingConfirmationSummary(sessionId),
+      pendingConfirmationContext: this.pendingConfirmationContext(sessionId), failureCheckpoint: this.latestFailurePhase(sessionId)
     });
-    await this.contextManagement.updateRoutingRecord(sessionId, routingId, {
-      status: 'SNAPSHOT_READY',
-      snapshotId: snapshot.id,
-      reasonCodes: [...routing.reasonCodes, `USER_CLARIFIED_${input.choice.toUpperCase()}`]
-    });
-    await this.contextManagement.updateRoutingRecord(sessionId, routingId, { status: 'CLASSIFYING' });
     const related = input.choice === 'related_new';
     const independent = input.choice === 'independent_new';
+    const payload = binding.card.metadata.payload as Record<string, unknown>;
+    const boundIds = (key: string) => Array.isArray(payload[key])
+      ? (payload[key] as unknown[]).filter((id): id is string => typeof id === 'string') : [];
     const decision = {
       dialogueAct: 'command' as const,
-      scopeRelation: independent
-        ? 'independent_new_requirement' as const
+      scopeRelation: independent ? 'independent_new_requirement' as const
         : related ? 'related_new_requirement' as const : 'same_requirement' as const,
-      contextPolicy: independent
-        ? 'clean_task_context' as const
+      contextPolicy: independent ? 'clean_task_context' as const
         : related ? 'inherit_selected' as const : 'inherit_confirmed' as const,
-      requestedAction: independent
-        ? 'create_independent_work_item' as const
+      requestedAction: independent ? 'create_independent_work_item' as const
         : related ? 'create_related_work_item' as const : 'continue_active_work_item' as const,
       selectedWorkItemId: active.id,
-      selectedDecisionIds: related || !independent
-        ? this.contextManagement.validDecisions(sessionId, active.id).map((item) => item.id)
-        : [],
-      selectedArtifactIds: related ? [...active.inheritedArtifactIds] : [],
-      goalSegments: independent || related ? [followUp.content] : [],
-      missingFields: [],
-      ambiguityReasons: [],
-      reasonCodes: [`USER_CLARIFIED_${input.choice.toUpperCase()}`],
-      riskLevel: 'low' as const
+      selectedDecisionIds: independent ? [] : related ? boundIds('inheritedDecisionIds') : snapshot.validDecisionIds,
+      selectedArtifactIds: related ? boundIds('inheritedArtifactIds') : [],
+      requestedAgentIds: snapshot.mentionedAgentIds ?? [],
+      goalSegments: independent || related ? [followUp.content] : [], missingFields: [], ambiguityReasons: [],
+      reasonCodes: [`USER_CLARIFIED_${input.choice.toUpperCase()}`], riskLevel: 'low' as const
     };
-    const validation = {
-      schemaValid: true,
-      referencesValid: true,
-      transitionValid: true,
-      snapshotCurrent: true,
-      safeToApply: true,
-      serverConfidence: 1,
-      errors: []
-    };
-    const validating = await this.contextManagement.updateRoutingRecord(sessionId, routingId, {
-      status: 'VALIDATING',
-      decision,
-      validation
-    });
-    const confirmationResolvedEvent = this.events.createDraft({
-      sessionId,
-      type: 'user_confirmation_resolved',
-      content: '任务关系已确认。',
-      metadata: createMetadata('system_notice', {
-        confirmationId: input.confirmationId,
-        routingId,
-        status: 'approved',
-        selectedOptionKey: input.choice
-      })
-    });
+    const validation = validateIntentRoutingDecision({ session, snapshot, decision, snapshotCurrent: true,
+      inheritedArtifactIds: active.inheritedArtifactIds });
     const applied = await this.routeApplication.apply({
-      session,
-      snapshot,
-      followUp,
-      outcome: { routing: validating, decision, validation, autoApplicable: true },
-      additionalEvents: [confirmationResolvedEvent]
+      session, snapshot, followUp, outcome: { routing, decision, validation, autoApplicable: validation.safeToApply },
+      clarification: input
     });
-    followUp.workItemId = applied.workItem.id;
-    followUp.handlingPlan = applied.handlingPlan;
-    if (!applied.committedEvents?.some((event) => event.type === 'user_confirmation_resolved')) this.events.create({
-      sessionId,
-      type: 'user_confirmation_resolved',
-      content: '任务关系已确认。',
-      metadata: createMetadata('system_notice', {
-        confirmationId: input.confirmationId,
-        routingId,
-        status: 'approved',
-        selectedOptionKey: input.choice
-      })
-    });
-    if (!applied.committedEvent) this.events.create({
-      sessionId,
-      type: applied.createdWorkItem ? 'work_item_created' : 'work_item_activated',
-      content: applied.createdWorkItem
-        ? `已创建任务上下文：${applied.workItem.title}`
-        : `继续任务上下文：${applied.workItem.title}`,
-      metadata: createMetadata('system_notice', {
-        routingId,
-        workItemId: applied.workItem.id,
-        previousWorkItemId: applied.previousWorkItemId,
-        inheritedDecisionIds: applied.workItem.inheritedDecisionIds,
-        inheritedArtifactIds: applied.workItem.inheritedArtifactIds
-      })
-    });
-    if (!this.hasActiveSessionWork(session)) this.scheduleFollowUpPlanning(sessionId);
+    if (!applied.idempotentReplay) {
+      const pending = session.pendingFollowUpMessages?.find(item => item.id === followUp.id);
+      if (pending) Object.assign(pending, applied.followUp);
+      else session.pendingFollowUpMessages = [...(session.pendingFollowUpMessages ?? []), applied.followUp];
+      if (!this.hasActiveSessionWork(session)) this.scheduleFollowUpPlanning(sessionId);
+    }
     return { routing: applied.routing, workItem: applied.workItem };
   }
 
@@ -1625,7 +1587,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
           }
           continue;
         }
-        if (routing.status === 'CLARIFICATION_REQUIRED' || routing.status === 'REJECTED') continue;
+        if (['CLARIFICATION_REQUIRED', 'REJECTED', 'BLOCKED'].includes(routing.status)) continue;
         if (routing.status === 'CLASSIFYING' || routing.status === 'VALIDATING' || routing.status === 'APPLYING') {
           const leaseExpiresAt = Date.parse(routing.leaseExpiresAt ?? '');
           if (Number.isFinite(leaseExpiresAt) && leaseExpiresAt > Date.now()) {
@@ -2069,6 +2031,23 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       createdAt: now,
       updatedAt: now
       };
+      const routingMode = this.intentRoutingMode();
+      if (process.env.INTENT_UNDERSTANDING_ENABLED === 'true' && this.shouldEnforceIntentRouting(session, routingMode)) {
+        if (!this.intentPipeline) {
+          await this.persistence.releaseWorkspaceSessionLease(workspaceId, sessionId);
+          throw new ServiceUnavailableException('Intent understanding pipeline is unavailable.');
+        }
+        session.intentContractVersion = 'intent-understanding-v1';
+        try {
+          const accepted = await this.intentPipeline.accept({ session, first: true, content: input.input,
+            idempotencyKey: `${session.id}:first-message`, rolloutMode: routingMode });
+          this.sessions.set(session.id, accepted.session);
+          return { session: accepted.session, firstEvent: accepted.event, routingId: accepted.routing.id, routingStatus: accepted.routing.status };
+        } catch (error) {
+          await this.persistence.releaseWorkspaceSessionLease(workspaceId, sessionId).catch(() => undefined);
+          throw error;
+        }
+      }
       this.sessions.set(session.id, session);
       this.persist();
       try {
@@ -2173,7 +2152,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     sessionId: string, expectedVersion: number,
     prepared: { workspaceId: string; cacheKey: string; baseBranch: string; baseSha: string }
   ): Promise<SourceBinding> {
-    const session = this.get(sessionId);
+    const live = this.get(sessionId);
+    const session = live.intentContractVersion === 'intent-understanding-v1' ? structuredClone(live) : live;
     const current = session.sourceBinding;
     if (session.codeSource?.kind !== 'remote_repository' || current?.executionLocation !== 'local' ||
         current.state !== 'awaiting_base_branch' || current.version !== expectedVersion ||
@@ -2205,6 +2185,12 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }, indexComplete: registration.index?.complete ?? false,
     ...(registration.index ? { indexGeneration: registration.index.generation,
       indexRevision: registration.index.revision } : {}) };
+    if (session.intentContractVersion === 'intent-understanding-v1') {
+      if (!this.intentPipeline) throw new ServiceUnavailableException('Intent understanding pipeline is unavailable.');
+      const committed = await this.intentPipeline.sourceReady(session, expectedVersion);
+      this.sessions.set(sessionId, committed);
+      return committed.sourceBinding!;
+    }
     session.status = 'AGENT_DISCUSSING';
     session.updatedAt = nowIso();
     this.persist();
@@ -2217,7 +2203,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     prepared: { workspaceId: string; workspacePath: string; cacheKey: string;
       baseBranch: string; baseSha: string }
   ): Promise<SourceBinding> {
-    const session = this.get(sessionId);
+    const live = this.get(sessionId);
+    const session = live.intentContractVersion === 'intent-understanding-v1' ? structuredClone(live) : live;
     const current = session.sourceBinding;
     if (session.codeSource?.kind !== 'remote_repository' || current?.executionLocation !== 'server' ||
         current.state !== 'awaiting_base_branch' || current.version !== expectedVersion ||
@@ -2245,6 +2232,12 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       displayName: workingDirectory.name, capabilities: provider.capabilities(),
       boundRevision: revision, boundAt: nowIso()
     }, indexComplete: false };
+    if (session.intentContractVersion === 'intent-understanding-v1') {
+      if (!this.intentPipeline) throw new ServiceUnavailableException('Intent understanding pipeline is unavailable.');
+      const committed = await this.intentPipeline.sourceReady(session, expectedVersion);
+      this.sessions.set(sessionId, committed);
+      return committed.sourceBinding!;
+    }
     session.status = 'AGENT_DISCUSSING';
     session.updatedAt = nowIso();
     this.persist();
@@ -2344,6 +2337,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   }
 
   private generateBriefInBackground(session: SessionDetail) {
+    // New-contract Brief dispatch must come from its validated plan executor.
+    if (session.intentContractVersion === 'intent-understanding-v1') return;
     if (!canStartSessionAgent(session)) return;
     const lifecycleGeneration = this.lifecycle.generation(session.id);
     if (!this.lifecycle.isActive(session.id, lifecycleGeneration)) return;
@@ -2395,6 +2390,23 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     directives?: GroupChatMessageDirectives
   ) {
     const session = this.get(sessionId);
+    if (session.intentContractVersion === 'intent-understanding-v1' && !matchExactUserCommand(content) && !parseRuntimeControlIntent(content)) {
+      if (!this.intentPipeline) throw new ServiceUnavailableException('Intent understanding pipeline is unavailable.');
+      const attachmentRefs = this.resolveMessageAttachmentRefs(session.id, attachmentIds);
+      const normalized = this.normalizeMessageDirectives(session, directives, attachmentRefs);
+      const targets = [...new Set([...mentionedAgentIds, ...(normalized?.agents.map(row => row.id) ?? [])])].map(id => {
+        const agent = this.agents.getForSurface(id, 'mention');
+        if (!session.participatingAgentIds.includes(agent.id)) throw new BadRequestException('AGENT_NOT_SESSION_PARTICIPANT');
+        return agent.id;
+      });
+      const committed = await this.intentPipeline.accept({ session, content, mentionedAgentIds: targets, attachmentRefs,
+        skillRef: normalized?.skill, agentRefs: normalized?.agents, replyToEventId,
+        idempotencyKey: clientMessageId ? this.messageIdempotencyKey(session.id, clientMessageId) : `${session.id}:message:${crypto.randomUUID()}`,
+        rolloutMode: 'enforce_all_current_epoch' });
+      this.refreshIntentLedgerRevision(session);
+      return { event: committed.event, handlingPlan: this.pendingIntentHandlingPlan(), deferred: true,
+        followUpMessageId: undefined, routingId: committed.routing.id, routingStatus: committed.routing.status, idempotentReplay: committed.idempotentReplay };
+    }
     if (!canStartSessionAgent(session)) throw new ConflictException('SOURCE_PREPARATION_REQUIRED');
     const replay = this.findMessageReplay(session, clientMessageId);
     if (replay) {
@@ -3444,6 +3456,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     clientMessageId: string | undefined,
     exactCommand: ExactCommandMatch
   ) {
+    if (exactCommand.command === 'resume' || exactCommand.command === 'retry') {
+      assertNoPendingInputBudget(readIntentResumeState(this.persistence), session);
+    }
     const resolution = resolveExactCommand({
       command: exactCommand,
       sessionStatus: session.status,
@@ -3955,7 +3970,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     followUpId: string,
     legacyRelation?: UserMessageHandlingPlan['requirementRelation']
   ) {
-    if (this.shuttingDown || this.sessions.get(sessionId)?.status === 'PAUSED') return;
+    if (this.shuttingDown) return;
     const key = `${sessionId}:${routingId}`;
     if (this.intentRoutingRetryTimers.has(key)) return;
     const retryCount = this.contextManagement?.listRoutingRecords(sessionId)
@@ -3989,8 +4004,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     const startedAt = Date.now();
     const session = this.sessions.get(sessionId);
     const lifecycleGeneration = this.lifecycle.generation(sessionId);
-    if (!session || this.deletingSessionIds.has(sessionId) || session.status === 'PAUSED' ||
-      !this.lifecycle.isActive(sessionId, lifecycleGeneration)) return;
+    if (!session || !this.canRecognizeIntent(session, lifecycleGeneration)) return;
     const routingController = new AbortController();
     this.intentRoutingControllers.set(sessionId, routingController);
     try {
@@ -4002,7 +4016,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         `${this.intentRoutingWorkerId}:${crypto.randomUUID()}`,
         150_000
       );
-      if (!this.lifecycle.isActive(sessionId, lifecycleGeneration)) return;
+      if (!this.canRecognizeIntent(session, lifecycleGeneration)) return;
       if (claim.state === 'terminal') return;
       if (claim.state === 'blocked') {
         const blocking = claim.blockingRouting;
@@ -4025,7 +4039,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       const snapshot = this.contextManagement?.listSnapshots(session.id).find((item) => item.id === snapshotId);
       if (!routing || !snapshot || !this.semanticIntentRouter) return;
       const outcome = await this.semanticIntentRouter.classify(session, routing, snapshot, routingController.signal);
-      if (routingController.signal.aborted || String(session.status) === 'PAUSED') return;
+      if (routingController.signal.aborted || !this.canRecognizeIntent(session, lifecycleGeneration)) return;
       if (
         outcome.validation.errors.includes('SNAPSHOT_STALE') &&
         await this.contextManagement.reserveRoutingRebuild(sessionId, routingId)
@@ -4073,6 +4087,29 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       }
       const followUp = session.pendingFollowUpMessages?.find((item) => item.id === followUpId);
       if (!followUp) return;
+      if (outcome.routing.status === 'BLOCKED') {
+        this.events.create({ sessionId: session.id, type: 'error_reported', priority: 'high',
+          content: '意图识别暂时无法完成，当前消息尚未执行。请先处理模型连接或运行错误。',
+          metadata: createMetadata('error_card', { code: 'INTENT_PROCESSING_BLOCKED', routingId,
+            routingRevision: outcome.routing.routingRevision, blockedReason: outcome.routing.blockedReason,
+            failureClass: outcome.routing.failureClass }) });
+        return;
+      }
+      if (outcome.decision.dialogueAct === 'correction') {
+        if (!this.intentCorrections) throw new ServiceUnavailableException('Intent correction service is unavailable.');
+        try {
+          if (!outcome.autoApplicable) throw new ConflictException('CORRECTION_TARGET_REQUIRED');
+          const accepted = await this.intentCorrections.acceptMessage(session.id, session.ownerId, routingId, outcome.routing.leaseOwner);
+          session.pendingFollowUpMessages = (session.pendingFollowUpMessages ?? []).filter(row => row.id !== followUpId);
+          this.intentCorrections.schedule(accepted.correction);
+        } catch (error) {
+          if (!(error instanceof ConflictException) || String(error).includes('ROUTING_LEASE_LOST')) throw error;
+          await this.intentCorrections.clarifyMessage(session.id, routingId, outcome.routing.routingRevision ?? 1,
+            error.message.startsWith('CORRECTION_') ? error.message : 'CORRECTION_TARGET_CHANGED');
+          session.pendingFollowUpMessages = (session.pendingFollowUpMessages ?? []).filter(row => row.id !== followUpId);
+        }
+        return;
+      }
       if (!outcome.autoApplicable) {
         const reason = intentClarificationMetricReason(outcome.validation.errors);
         workspaceMetrics.increment('intent_route_total', 1, {
@@ -4164,12 +4201,19 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
             status: 'PENDING_RETRY',
             reasonCodes: [...new Set([...current.reasonCodes, 'ROUTING_PROCESSING_FAILED'])]
           });
-          this.scheduleIntentRoutingRetry(sessionId, routingId, snapshotId, followUpId, legacyRelation);
+          if (!routingController.signal.aborted) this.scheduleIntentRoutingRetry(sessionId, routingId, snapshotId, followUpId, legacyRelation);
         }
       }
     } finally {
       if (this.intentRoutingControllers.get(sessionId) === routingController) this.intentRoutingControllers.delete(sessionId);
     }
+  }
+
+  private canRecognizeIntent(session: SessionDetail, expectedGeneration?: number) {
+    if (this.deletingSessionIds.has(session.id) || session.archivedAt || session.status === 'CANCELLED') return false;
+    const lifecycle = this.lifecycle.get(session.id);
+    return !lifecycle || (lifecycle.state === 'active' && lifecycle.dataEpoch === session.dataEpoch &&
+      (expectedGeneration === undefined || lifecycle.generation === expectedGeneration));
   }
 
   stopState(sessionId: string) {
@@ -4191,6 +4235,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     followUp: SessionFollowUpMessage,
     reasonCodes: string[]
   ) {
+    const routing = followUp.routingId ? this.contextManagement?.listRoutingRecords(session.id)
+      .find(item => item.id === followUp.routingId) : undefined;
     const confirmationId = crypto.randomUUID();
     this.events.create({
       sessionId: session.id,
@@ -4201,6 +4247,11 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         confirmationId,
         reason: 'intent_relation_clarification',
         routingId: followUp.routingId,
+        routingRevision: routing?.routingRevision ?? 1,
+        activeWorkItemId: session.activeWorkItemId,
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        inheritedDecisionIds: [],
+        inheritedArtifactIds: [],
         followUpMessageId: followUp.id,
         reasonCodes,
         title: '选择任务关系',
@@ -4224,8 +4275,28 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       return await this.orchestrator.recognizeFollowUpMessage(session, content, mentionedAgentIds, undefined, attachmentRefs);
     } catch (error) {
       this.logger.warn(`Receiver Runtime intent recognition failed for session ${session.id}: ${String(error)}`);
-      return this.intentRecognition.recognizeUserMessage(content, session.status);
+      throw new ServiceUnavailableException('INTENT_PROCESSING_BLOCKED: 接收者意图识别失败，消息未执行。');
     }
+  }
+
+  async confirmIntentBrief(sessionId: string, briefId: string, request: unknown) {
+    const session = this.get(sessionId);
+    if (!this.intentBriefConfirmation) throw new ConflictException('INTENT_BRIEF_CONFIRMATION_UNAVAILABLE');
+    return this.intentBriefConfirmation.confirm(sessionId, briefId, session.ownerId, request);
+  }
+
+  async reviseIntentBrief(sessionId: string, briefId: string, raw: unknown) {
+    if (!isReviseIntentBriefInput(raw)) throw new BadRequestException('INTENT_BRIEF_REVISION_INPUT_INVALID');
+    const session = this.get(sessionId);
+    if (!this.intentPipeline) throw new ConflictException('INTENT_PIPELINE_UNAVAILABLE');
+    const brief = this.persistence.getCollection<Record<string, TaskBrief[]>>('briefsBySession', {})[sessionId]?.find(row => row.id === briefId);
+    const original = this.persistence.getCollection<Record<string, IntentRoutingRecord[]>>('intentRoutingRecordsBySession', {})[sessionId]
+      ?.find(row => row.id === brief?.intentBinding?.routingId);
+    if (!original || session.intentContractVersion !== 'intent-understanding-v1') throw new ConflictException('INTENT_BRIEF_REVISION_STALE');
+    const result = await this.intentPipeline.accept({ session, content: briefRevisionMessage(raw), idempotencyKey: raw.idempotencyKey,
+      replyToEventId: original.sourceEventId, rolloutMode: original.rolloutMode, briefRevision: { briefId, request: raw } });
+    return { accepted: true, sessionId, briefId, dataEpoch: result.session.dataEpoch, routingId: result.routing.id,
+      status: result.session.status, request: result.routing.briefRevision!.request, idempotentReplay: result.idempotentReplay };
   }
 
   async confirmBrief(
@@ -4242,6 +4313,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     if (!currentBrief) {
       throw new BadRequestException(`Brief not found: ${briefId}`);
     }
+    if (currentBrief.intentBinding || session.intentContractVersion === 'intent-understanding-v1') throw new ConflictException({ code: 'INTENT_BRIEF_VERSIONED_CONFIRMATION_REQUIRED',
+      message: '草稿已保留，执行条件尚未满足；当前操作不会启动建议任务。' });
     const allowOpenQuestions = input.allowOpenQuestions === true;
     const revisionAttempts = countBriefRevisionAttempts(
       this.events.list(sessionId),
@@ -4435,6 +4508,8 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     input: { workflowId: string; workflowVersion?: number; confirmationId: string }
   ) {
     const session = this.get(sessionId);
+    if (session.intentContractVersion === 'intent-understanding-v1') throw new ConflictException({ code: 'INTENT_WORKFLOW_PLAN_REQUIRED',
+      message: '草稿确认已保留，工作流仍需独立的执行计划与权限校验。' });
     const previousRun = this.workflowRuntime?.findBySession(sessionId);
     if (previousRun?.startIdempotencyKey === `${sessionId}:${input.confirmationId}`) {
       if (previousRun.workflowId !== input.workflowId || (input.workflowVersion !== undefined && previousRun.workflowVersion !== input.workflowVersion)) {
@@ -4883,6 +4958,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       throw new BadRequestException(`Brief not found: ${briefId}`);
     }
 
+    if (brief.intentBinding || session.intentContractVersion === 'intent-understanding-v1') throw new ConflictException({ code: 'INTENT_BRIEF_VERSIONED_REVISION_REQUIRED',
+      message: '当前草稿的修订条件尚未满足，已保留草稿和原请求。' });
+
     const revisionAttempts = countBriefRevisionAttempts(
       this.events.list(sessionId),
       typeof this.orchestrator.listBriefs === 'function'
@@ -5292,6 +5370,15 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
     const followUp = session.pendingFollowUpMessages?.find((item) => item.status === 'queued');
     if (!followUp) return;
+    if (followUp.routingId && this.contextManagement) {
+      const durable = this.contextManagement.listFollowUps(sessionId).find(item => item.id === followUp.id);
+      if (durable && ['cancelled', 'completed', 'failed'].includes(durable.status)) {
+        session.pendingFollowUpMessages = (session.pendingFollowUpMessages ?? []).filter(item => item.id !== followUp.id);
+        return;
+      }
+      const routing = this.contextManagement.listRoutingRecords(sessionId).find(item => item.id === followUp.routingId);
+      if (!routing || routing.dispatchHold || (routing.rolloutMode !== 'shadow' && routing.status !== 'ROUTED')) return;
+    }
     if (followUp.workItemId && followUp.workItemId !== session.activeWorkItemId && this.contextManagement) {
       const previousWorkItemId = session.activeWorkItemId;
       const activated = await this.contextManagement.activateWorkItem(session, followUp.workItemId);
@@ -5461,6 +5548,10 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   ) {
     const session = this.sessions.get(sessionId);
     if (!session || !this.lifecycle.matchesActiveGeneration(sessionId, expectedGeneration)) return;
+    if (outcome.kind === 'input_budget_exceeded') {
+      this.applyOutcome(sessionId, outcome, expectedGeneration);
+      return;
+    }
     await this.completeFollowUpRouting(
       session,
       followUpMessageId,
@@ -5503,8 +5594,18 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     // 和恢复卡（用户还要靠它决定怎么办）。但 delivered 是产物真的落地了，继续挂在
     // INTERRUPTED 会让一个已完成的任务永远卡在恢复卡后面。
     if (session.status === 'INTERRUPTED' && outcome.kind !== 'delivered') return;
+    if (outcome.kind === 'retry_task_completed') {
+      this.setStatus(session, 'WAIT_USER_DECISION');
+      this.events.create({ sessionId, taskId: outcome.taskId, type: 'session_status_changed', content: '失败任务重试已完成，其他任务未重跑。',
+        metadata: createMetadata('system_notice', { status: 'WAIT_USER_DECISION', outcome: outcome.kind, resultSummary: outcome.resultSummary }) });
+      return;
+    }
     if (outcome.kind === 'workflow_step_completed') {
       this.pauseForWorkflowStepConfirmation(session, outcome.taskId, outcome.resultSummary);
+      return;
+    }
+    if (outcome.kind === 'input_budget_exceeded') {
+      this.setStatus(session, 'WAIT_USER_DECISION');
       return;
     }
     if (outcome.kind === 'approval_required') {
@@ -5644,6 +5745,12 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         actions: outcome.kind === 'ask_user' ? outcome.actions : undefined
       })
     });
+    if (outcome.kind === 'failed' && session.intentContractVersion === 'intent-understanding-v1') {
+      if (session.workflowRunId) this.workflowRuntime?.checkpointInterruptedExecution?.(session.workflowRunId,
+        { code: outcome.error?.code ?? 'MODEL_ERROR', message: reason });
+      const checkpoint = this.createRecoveryCheckpoint(session, 'retry_failed_execution', { phase: 'task_execution', failedTaskId: outcome.taskId });
+      this.createRecoveryConfirmation(session, checkpoint, { content: '当前任务执行失败，可校验保留的失败检查点后重试。', title: '执行失败', description: reason });
+    }
     if (outcome.kind === 'ask_user') {
       const substitution = outcome.workflowAgentSubstitution;
       if (!substitution && session.workflowRunId && this.workflowRuntime) {
@@ -6156,6 +6263,15 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   async pause(sessionId: string, reason = '用户已停止会话', confirmationId?: string,
     terminationKind: 'user_paused' | 'runtime_switch' = 'user_paused') {
     const session = this.get(sessionId);
+    const alreadyPaused = session.status === 'PAUSED';
+    if (!alreadyPaused) {
+      const pendingRouting = this.contextManagement?.listRoutingRecords(sessionId)
+        .some(item => ['RECEIVED', 'SNAPSHOT_READY', 'CLASSIFYING', 'VALIDATING', 'APPLYING', 'PENDING_RETRY'].includes(item.status));
+      const intentConfirmation = session.intentContractVersion === 'intent-understanding-v1' &&
+        ['WAIT_USER_CONFIRM', 'WAIT_WORKFLOW_SELECT'].includes(session.status);
+      // Reject invalid controls before closing admission or failing pending switches.
+      if (!pendingRouting && !intentConfirmation) this.assertControlTransition(session.status, 'PAUSED');
+    }
     if (terminationKind === 'user_paused') {
       for (const request of this.runtimeSwitches.store.unresolved(sessionId)) {
         const stopped = await this.runtimeSwitches.store.transition(request.id, 'failed', { error: {
@@ -6165,11 +6281,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     }
     const admission = await this.lifecycle.closeForStop(sessionId, session.dataEpoch);
     if (admission.event) this.events.acceptCommitted(admission.event);
-    const alreadyPaused = session.status === 'PAUSED';
     if (!alreadyPaused) {
-      const pendingRouting = this.contextManagement?.listRoutingRecords(sessionId)
-        .some(item => ['RECEIVED', 'SNAPSHOT_READY', 'CLASSIFYING', 'VALIDATING', 'APPLYING', 'PENDING_RETRY'].includes(item.status));
-      if (!pendingRouting) this.assertControlTransition(session.status, 'PAUSED');
       session.pauseState = {
         previousStatus: session.status,
         pausedAt: nowIso(),
@@ -6240,7 +6352,49 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     return { session, event, confirmationEvent };
   }
 
-  async resume(sessionId: string, reason = '用户已继续会话', confirmationId?: string) {
+  async resume(sessionId: string, reason = '用户已继续会话', confirmationId?: string, controlStepId?: string): Promise<Awaited<ReturnType<SessionsService['resumeWithBinding']>>> {
+    const session = this.get(sessionId);
+    if (session.intentContractVersion !== 'intent-understanding-v1') return this.resumeWithBinding(sessionId, reason, confirmationId);
+    const state = readIntentResumeState(this.persistence);
+    assertNoPendingInputBudget(state, session);
+    const retryControl = controlStepId && this.persistence.getCollection<Record<string, import('@agent-cluster/shared').IntentPlanStepRecord[]>>(
+      'intentPlanStepsBySession', {})[sessionId]?.find(row => row.id === controlStepId)?.retryBinding;
+    if (['FAILED', 'INTERRUPTED'].includes(session.status) || retryControl) {
+      const result = await this.resumeControl.retry(sessionId, session.ownerId,
+        binding => this.retryWithBinding(sessionId, reason, confirmationId, binding), controlStepId);
+      return result ?? { session: this.get(sessionId), event: this.events.list(sessionId).at(-1), confirmationEvent: undefined };
+    }
+    if (session.status === 'EXECUTING' && !controlStepId) return { session, event: this.events.list(sessionId).at(-1), confirmationEvent: undefined };
+    const result = await this.resumeControl.resume(sessionId, session.ownerId,
+      binding => this.resumeWithBinding(sessionId, reason, confirmationId, binding), controlStepId);
+    return result ?? { session: this.get(sessionId), event: this.events.list(sessionId).at(-1), confirmationEvent: undefined };
+  }
+
+  private async retryWithBinding(sessionId: string, reason: string, confirmationId: string | undefined, binding: IntentRetryBinding) {
+    const session = this.get(sessionId);
+    bindIntentRetry(readIntentRetryState(this.persistence), sessionId, session.ownerId, binding, true);
+    if (!canStartSessionAgent(session)) throw new ConflictException('SOURCE_PREPARATION_REQUIRED');
+    if (confirmationId && confirmationId !== binding.checkpointId) throw new ConflictException('INTENT_RETRY_CHECKPOINT_STALE');
+    if (this.execution.isRunning(sessionId)) throw new ConflictException('INTENT_RETRY_IN_PROGRESS');
+    const task = this.tasks.find(sessionId, binding.task.taskId);
+    if (!task || task.status !== 'failed') throw new ConflictException('INTENT_RETRY_TARGET_OBSOLETE');
+    if (this.lifecycle.get(sessionId)?.admission === 'closed') {
+      const opened = await this.lifecycle.reopen(sessionId);
+      if (opened.event) this.events.acceptCommitted(opened.event);
+    }
+    // R6 holds, original authority and the failure identity were all checked before these mutations.
+    bindIntentRetry(readIntentRetryState(this.persistence), sessionId, session.ownerId, binding, true);
+    this.tasks.update(task, { status: 'pending', resultSummary: undefined });
+    this.resolveRecoveryCheckpoint(session, binding.checkpointId);
+    this.setStatus(session, 'EXECUTING');
+    await this.resumeExecution(session, undefined, undefined, binding);
+    const event = this.events.create({ sessionId, type: 'session_status_changed', content: reason,
+      metadata: createMetadata('system_notice', { status: 'EXECUTING', reason: 'retry_failed_step', taskId: task.id,
+        checkpointId: binding.checkpointId }) });
+    return { session, event, confirmationEvent: undefined };
+  }
+
+  private async resumeWithBinding(sessionId: string, reason: string, confirmationId?: string, resumeBinding?: IntentResumeBinding) {
     const session = this.get(sessionId);
     if (!canStartSessionAgent(session)) throw new ConflictException('SOURCE_PREPARATION_REQUIRED');
     const history = this.events.list(sessionId);
@@ -6319,6 +6473,9 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       return this.control(sessionId, 'EXECUTING', reason, confirmationId);
     }
     this.assertControlTransition(session.status, 'EXECUTING');
+    if (session.intentContractVersion === 'intent-understanding-v1') {
+      bindIntentResume(readIntentResumeState(this.persistence), sessionId, session.ownerId, resumeBinding);
+    }
     const previousStatus = session.pauseState?.previousStatus ?? 'EXECUTING';
     session.pauseState = undefined;
     session.interruption = undefined;
@@ -6360,7 +6517,10 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       if (followUp) this.enqueueIntentRouting(sessionId, routing.id, routing.snapshotId!, followUp.id);
     }
     if (nextStatus === 'AGENT_DISCUSSING') this.generateBriefInBackground(session);
-    else if (nextStatus === 'EXECUTING') this.resumeExecution(session);
+    else if (nextStatus === 'EXECUTING') {
+      if (resumeBinding) await this.resumeExecution(session, undefined, resumeBinding);
+      else this.resumeExecution(session);
+    }
     return { session, event, confirmationEvent };
   }
 
@@ -6821,7 +6981,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     const checkpointReason = interruption.reason === 'local_runtime_disconnected'
       ? 'reconnect_local_runtime' as const
       : 'recover_interrupted_execution' as const;
-    const checkpoint = this.createRecoveryCheckpoint(session, checkpointReason, {
+    let checkpoint = session.intentContractVersion === 'intent-understanding-v1' ? undefined : this.createRecoveryCheckpoint(session, checkpointReason, {
       phase: 'execution_interrupted'
     });
     session.interruption = {
@@ -6842,6 +7002,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     const briefRun = this.briefGenerationRuns.get(session.id);
     if (briefRun) abortWithTermination(briefRun.controller, termination);
     this.tasks.interruptUnfinished(session.id, taskReason);
+    checkpoint ??= this.createRecoveryCheckpoint(session, checkpointReason, { phase: 'execution_interrupted', failedInvocationId: interruption.invocationId });
     this.events.create({
       sessionId: session.id,
       type: 'session_status_changed',
@@ -6870,6 +7031,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   }
 
   private failSession(session: SessionDetail, error: unknown, phase: string) {
+    if (error instanceof IntentExecutionSupersededError) return;
     const runtimeError = extractRuntimeError(error);
     if (this.applyWorkItemBudgetExhaustion(session, runtimeError)) return;
     if (this.pauseForLocalRuntimeConfirmation(session, runtimeError, phase)) return;
@@ -6908,6 +7070,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   }
 
   private failSessionWithFullError(session: SessionDetail, error: unknown, phase: string) {
+    if (error instanceof IntentExecutionSupersededError) return;
     const runtimeError = extractRuntimeError(error);
     if (this.applyWorkItemBudgetExhaustion(session, runtimeError)) return;
     if (this.pauseForLocalRuntimeConfirmation(session, runtimeError, phase)) return;
@@ -7863,7 +8026,40 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     return undefined;
   }
 
-  private resumeExecution(session: SessionDetail) {
+  async decideInputBudget(sessionId: string, input: DecideInputBudgetInput) {
+    if (!input || Object.keys(input).some(key => !['operationId', 'decisionId', 'decision'].includes(key)) ||
+      ![input.operationId, input.decisionId].every(value => typeof value === 'string' && value.length > 0) ||
+      !['continue', 'end'].includes(input.decision)) throw new BadRequestException('INPUT_BUDGET_DECISION_INVALID');
+    const session = this.get(sessionId);
+    const result = await new InputBudgetStore(this.persistence).decide(sessionId, session.ownerId, input, 'agent_task');
+    const { hold } = result;
+    if (hold.kind !== 'agent_task' || !hold.taskId) throw new ConflictException('INPUT_BUDGET_SCOPE_MISMATCH');
+    const task = this.tasks.find(sessionId, hold.taskId);
+    if (!task) throw new ConflictException('INPUT_BUDGET_TASK_UNAVAILABLE');
+    this.events.createOnce(`input-budget-resolved:${hold.id}`, { sessionId, taskId: task.id,
+      type: 'user_confirmation_resolved', content: input.decision === 'continue' ? '已单次放行本次任务调用。' : '已结束此任务，会话保留。',
+      metadata: createMetadata('system_notice', { confirmationId: hold.id, reason: 'input_budget_exceeded',
+        status: input.decision === 'continue' ? 'approved' : 'rejected', selectedOptionKey: input.decision }) });
+    if (result.isCurrentDecision && (!result.idempotentReplay || (hold.status === 'granted' && task.status === 'waiting'))) {
+      this.tasks.update(task, { status: input.decision === 'continue' ? 'assigned' : 'cancelled',
+        resultSummary: input.decision === 'continue' ? '用户已单次放行，准备重跑本次调用。' : '用户结束了本次调用对应的任务。' });
+      if (input.decision === 'end' && session.workflowRunId) {
+        // The current node depends on this cancelled task. Do not resurrect it via workflow resume.
+        this.setStatus(session, 'PAUSED');
+        session.pauseState = { previousStatus: 'EXECUTING', pausedAt: nowIso(), reason: 'input_budget_task_ended' };
+        this.persist();
+        return { session, ...result };
+      }
+      this.setStatus(session, 'EXECUTING');
+      this.resumeExecution(session, { followUpMessageId: session.activeFollowUpMessageId });
+    }
+    return { session, ...result };
+  }
+
+  private resumeExecution(session: SessionDetail, inputBudgetResume?: { followUpMessageId?: string }, resumeBinding?: IntentResumeBinding, retryBinding?: IntentRetryBinding) {
+    if (session.intentContractVersion === 'intent-understanding-v1' && !inputBudgetResume && !retryBinding) {
+      resumeBinding = bindIntentResume(readIntentResumeState(this.persistence), session.id, session.ownerId, resumeBinding, true);
+    }
     if (!canStartSessionAgent(session)) return;
     const lifecycleGeneration = this.lifecycle.generation(session.id);
     if (!this.lifecycle.isActive(session.id, lifecycleGeneration)) return;
@@ -7876,14 +8072,31 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       this.applyOutcome(session.id, { kind: 'ask_user', reason: messages.resumeBriefMissing });
       return;
     }
+    if (retryBinding) {
+      bindIntentRetry(readIntentRetryState(this.persistence), session.id, session.ownerId, retryBinding, true);
+      if (session.workflowRunId && this.workflowRuntime) return this.workflowRuntime.resumeCurrentExecution(session.workflowRunId, {
+        session, brief, coordinatorId: this.pickSessionAgent(session, ['coordinator']).id, sessionGeneration: lifecycleGeneration,
+        intentRetryBinding: retryBinding
+      }).then(resumed => { if (!resumed) throw new ConflictException('INTENT_RETRY_DISPATCH_UNAVAILABLE'); });
+      const task = this.tasks.find(session.id, retryBinding.task.taskId);
+      if (!task) throw new ConflictException('INTENT_RETRY_TARGET_OBSOLETE');
+      this.execution.start(session, brief, [task], outcome => this.applyOutcome(session.id, outcome, lifecycleGeneration),
+        lifecycleGeneration, undefined, retryBinding);
+      return;
+    }
     if (session.workflowRunId && this.workflowRuntime) {
       const coordinator = this.pickSessionAgent(session, ['coordinator']);
+      if (resumeBinding) return this.workflowRuntime.resumeCurrentExecution(session.workflowRunId, {
+        session, brief, coordinatorId: coordinator.id, sessionGeneration: lifecycleGeneration, intentResumeBinding: resumeBinding
+      }).then(resumed => { if (!resumed) throw new ConflictException('INTENT_RESUME_DISPATCH_UNAVAILABLE'); });
       void this.workflowRuntime
         .resumeCurrentExecution(session.workflowRunId, {
           session,
           brief,
           coordinatorId: coordinator.id,
-          sessionGeneration: lifecycleGeneration
+          sessionGeneration: lifecycleGeneration,
+          ...(resumeBinding ? { intentResumeBinding: resumeBinding } : {}),
+          ...(inputBudgetResume ? { inputBudgetResume: true } : {})
         })
         .then((resumed) => {
           if (!resumed) {
@@ -7901,10 +8114,22 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
         .catch((error) => this.failSession(session, error, 'workflow_resume'));
       return;
     }
-    this.tasks.resetStaleRunning(session.id, session.activeWorkItemId);
-    const unfinishedTasks = this.tasks.unfinished(session.id, session.activeWorkItemId);
+    let unfinishedTasks: AgentTask[];
+    if (resumeBinding) {
+      const boundWorkItemId = resumeBinding.workItemId;
+      const ids = new Set(resumeBinding.tasks.map(task => task.taskId));
+      unfinishedTasks = this.tasks.list(session.id).filter(task => ids.has(task.id));
+      if (unfinishedTasks.length !== ids.size || unfinishedTasks.some(task => task.workItemId !== boundWorkItemId ||
+        task.stale || ['cancelled', 'completed', 'failed'].includes(task.status))) throw new ConflictException('INTENT_RESUME_TARGET_OBSOLETE');
+      for (const task of unfinishedTasks) if (task.status === 'running') this.tasks.update(task, { status: 'pending' });
+    } else {
+      this.tasks.resetStaleRunning(session.id, session.activeWorkItemId);
+      unfinishedTasks = this.tasks.unfinished(session.id, session.activeWorkItemId);
+    }
     this.execution.start(session, brief, unfinishedTasks,
-      (outcome) => this.applyOutcome(session.id, outcome, lifecycleGeneration), lifecycleGeneration);
+      (outcome) => inputBudgetResume?.followUpMessageId
+        ? this.applyFollowUpOutcome(session.id, inputBudgetResume.followUpMessageId, outcome, lifecycleGeneration)
+        : this.applyOutcome(session.id, outcome, lifecycleGeneration), lifecycleGeneration, resumeBinding);
   }
 
   private resumePostReviewPipeline(session: SessionDetail) {
@@ -8302,13 +8527,57 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   }
 
   private persist() {
+    const durableSessions = new Map(this.persistence.getCollection<SessionDetail[]>('sessions', []).map(row => [row.id, row]));
+    for (const session of this.sessions.values()) this.refreshIntentLedgerRevision(session, durableSessions);
     this.persistence.setCollection('sessions', [...this.sessions.values()]);
+  }
+
+  /** Correction activation commits the ledger outside this service's live Session object. */
+  private refreshIntentLedgerRevision(session: SessionDetail, durableSessions?: ReadonlyMap<string, SessionDetail>) {
+    const durable = durableSessions ? durableSessions.get(session.id)
+      : this.persistence.getCollection<SessionDetail[]>('sessions', []).find(row => row.id === session.id);
+    if (durable?.dataEpoch === session.dataEpoch && durable.intentContractVersion === 'intent-understanding-v1') {
+      const revising = this.persistence.getCollection<Record<string, import('@agent-cluster/shared').IntentPlanStepRecord[]>>('intentPlanStepsBySession', {})[session.id]?.some(step =>
+        step.step.action === 'prepare_brief' && step.step.replacesBrief?.briefId === durable.currentTaskBriefId && ['queued', 'running'].includes(step.status));
+      if (revising || durable.pendingBriefRevisionRoutingId) {
+        if (durable.status === 'REVISING_BRIEF' && ['WAIT_USER_CONFIRM', 'WAIT_WORKFLOW_SELECT'].includes(session.status)) session.status = durable.status;
+        if (session.status === 'PAUSED' && durable.status === 'PAUSED' && session.pauseState && durable.pauseState &&
+          session.pauseState.pausedAt === durable.pauseState.pausedAt) session.pauseState.previousStatus = durable.pauseState.previousStatus;
+      }
+      const reviewed = this.persistence.getCollection<Record<string, TaskBrief[]>>('briefsBySession', {})[session.id]?.find(brief =>
+        brief.id === durable.currentTaskBriefId && brief.confirmedByUser && brief.intentConfirmationReceipt);
+      if (reviewed && session.currentTaskBriefId === durable.currentTaskBriefId) {
+        if (session.status === 'WAIT_USER_CONFIRM' && durable.status === 'WAIT_WORKFLOW_SELECT') session.status = durable.status;
+        if (session.status === 'PAUSED' && durable.status === 'PAUSED' && session.pauseState?.pausedAt === durable.pauseState?.pausedAt &&
+          session.pauseState && durable.pauseState) session.pauseState.previousStatus = durable.pauseState.previousStatus;
+      }
+      if (durable.currentTaskBriefId && durable.currentTaskBriefId !== session.currentTaskBriefId &&
+        this.persistence.getCollection<Record<string, TaskBrief[]>>('briefsBySession', {})[session.id]?.some(brief =>
+          brief.id === durable.currentTaskBriefId && brief.intentBinding)) {
+        session.currentTaskBriefId = durable.currentTaskBriefId; session.latestContractGoal = durable.latestContractGoal;
+        // A just-published draft must not undo a local pause/cancel awaiting persistence.
+        if (!['PAUSED', 'INTERRUPTED', 'CANCELLED', 'COMPLETED'].includes(session.status)) session.status = durable.status;
+        if (durable.updatedAt > session.updatedAt) session.updatedAt = durable.updatedAt;
+      }
+      session.intentContractVersion = durable.intentContractVersion;
+      session.pendingBriefRevisionRoutingId = durable.pendingBriefRevisionRoutingId;
+      session.activeWorkItemId = durable.activeWorkItemId;
+      session.intentWorkspaceReadAuthority = structuredClone(durable.intentWorkspaceReadAuthority);
+      session.intentTestAuthority = structuredClone(durable.intentTestAuthority);
+      session.decisionLedgerRevision = Math.max(session.decisionLedgerRevision ?? 0, durable.decisionLedgerRevision ?? 0);
+      session.revision = Math.max(session.revision ?? 1, durable.revision ?? 1);
+      return;
+    }
+    if (!durable || durable.dataEpoch !== session.dataEpoch ||
+      (durable.decisionLedgerRevision ?? 0) <= (session.decisionLedgerRevision ?? 0)) return;
+    session.decisionLedgerRevision = durable.decisionLedgerRevision;
+    session.revision = Math.max(session.revision ?? 1, durable.revision ?? 1);
   }
 
   private createRecoveryCheckpoint(
     session: SessionDetail,
     reason: SessionRecoveryCheckpoint['reason'],
-    input: Pick<SessionRecoveryCheckpoint, 'phase' | 'sourceEventId'> = {}
+    input: Pick<SessionRecoveryCheckpoint, 'phase' | 'sourceEventId'> & { failedTaskId?: string; failedInvocationId?: string } = {}
   ): SessionRecoveryCheckpoint {
     const checkpoint: SessionRecoveryCheckpoint = {
       confirmationId: crypto.randomUUID(),
@@ -8319,6 +8588,29 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
       ...(input.phase ? { phase: input.phase } : {}),
       ...(input.sourceEventId ? { sourceEventId: input.sourceEventId } : {})
     };
+    if (session.intentContractVersion === 'intent-understanding-v1' && ['FAILED', 'INTERRUPTED'].includes(session.status)) {
+      const state = readIntentRetryState(this.persistence);
+      // The in-flight Session snapshot is the failure being committed, not an older cached status.
+      const saved = (state.sessions as SessionDetail[]).find(row => row.id === session.id);
+      if (saved) Object.assign(saved, session);
+      let taskId = input.failedTaskId;
+      if (!taskId && input.failedInvocationId) {
+        const calls = (state.runtimeInvocationsBySession as Record<string, import('../runtimes/runtime.service.js').RuntimeInvocationLog[]>)?.[session.id]
+          ?.filter(row => row.invocationId === input.failedInvocationId) ?? [];
+        if (calls.length === 1) taskId = calls[0].taskId;
+      }
+      if (!taskId && session.workflowRunId) {
+        const runtime = state.workflowRuntime as { runs?: import('@agent-cluster/shared').WorkflowRun[];
+          nodeRunsByRunId?: Record<string, import('@agent-cluster/shared').WorkflowNodeRun[]> };
+        const run = runtime?.runs?.find(row => row.id === session.workflowRunId);
+        const nodes = runtime?.nodeRunsByRunId?.[session.workflowRunId]?.filter(row => row.nodeId === run?.currentNodeId && row.status === 'failed') ?? [];
+        if (nodes.length === 1) taskId = nodes[0].relatedTaskId;
+      }
+      const task = taskId ? this.tasks.find(session.id, taskId) : undefined;
+      const invocationId = input.failedInvocationId ?? task?.lastExecutionFailure?.invocationId;
+      if (taskId && invocationId) checkpoint.retryBinding = captureIntentRetryBinding(state, session.id, session.ownerId,
+        checkpoint.confirmationId, taskId, invocationId);
+    }
     session.activeRecoveryCheckpoint = checkpoint;
     this.persist();
     return checkpoint;

@@ -5,6 +5,22 @@ import { IntentRecognitionService } from './intent-recognition.service.js';
 
 const service = new IntentRecognitionService();
 
+test('legacy compatibility projection never grants source writes from explicit read-only requests', () => {
+  for (const input of ['解释这个报错，不要修改代码', '只做评审并给出修复建议', '评测系统并保存报告，不要改动源码',
+    'Review the implementation without changing code', 'Analyze this bug; do not modify code']) {
+    assert.equal(service.recognizeTask(input).requiresCodeChanges, false, input);
+  }
+  assert.equal(service.recognizeTask('修复登录缺陷，但不要修改数据库结构').requiresCodeChanges, true);
+});
+
+test('negated new-task and supplemental wording remains in the current requirement', () => {
+  for (const input of ['这不是新任务，只补充超时限制', '另外补充一点，日志不要输出手机号', 'This is not a new task; add a timeout constraint']) {
+    assert.equal(service.recognizeUserMessage(input, 'FAILED').requirementRelation, 'continuation', input);
+    assert.equal(service.recognizeUserMessage(input, 'FAILED').failedExecutionAction, 'none', input);
+  }
+  assert.equal(service.recognizeUserMessage('当前失败原因是什么？', 'FAILED').failedExecutionAction, 'none');
+});
+
 function workspaceSnapshot(): WorkspaceSnapshot {
   return {
     rootName: 'demo',

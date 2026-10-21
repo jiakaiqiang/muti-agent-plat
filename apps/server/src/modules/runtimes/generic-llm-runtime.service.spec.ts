@@ -569,6 +569,45 @@ test('repairs an invalid RuntimeOutput once with a compact schema repair request
   });
 });
 
+test('restricted intent contracts return bounded sanitized feedback without an adapter-owned repair request', async () => {
+  for (const kind of ['intent_understanding', 'intent_routing_decision'] as const) {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return new Response(JSON.stringify(chatContent(JSON.stringify({ apiKey: 'sk-sensitive-credential', extra: 'x'.repeat(9000) }))), { status: 200 });
+    };
+    const result = await runWithService(kind, makeServiceWithCurrentFetch, input => {
+      input.phase = 'user_message_routing'; input.admissionClass = 'routing';
+    });
+    assert.equal(calls, 1, kind);
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error?.code, 'RUNTIME_OUTPUT_CONTRACT_VIOLATION');
+    assert.equal(result.error?.details?.schemaRepairOwner, 'intent_classifier');
+    assert.equal(result.error?.details?.repairAttempts, 0);
+    assert.ok(String(result.error?.details?.previousOutput).length <= 8000);
+    assert.doesNotMatch(JSON.stringify(result.error?.details), /sk-sensitive-credential/);
+    assert.ok((result.error?.details?.validationErrors as string[]).length > 0);
+  }
+});
+
+test('bound Brief generation and reviewer calls leave schema repair to their durable executor', async () => {
+  for (const kind of ['task_brief', 'agent_message'] as const) {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return new Response(JSON.stringify(chatContent('{}')), { status: 200 });
+    };
+    const result = await runWithService(kind, makeServiceWithCurrentFetch, input => {
+      input.phase = kind === 'task_brief' ? 'brief_generation' : 'brief_revision';
+      input.admissionClass = 'business'; input.intentStepId = 'bound-step';
+      input.executionBinding = { routingId: 'route', intentRevision: 1 } as InvocationPlan['executionBinding'];
+    });
+    assert.equal(calls, 1); assert.equal(result.status, 'failed');
+    assert.equal(result.error?.details?.schemaRepairOwner, 'intent_brief');
+    assert.equal(result.error?.details?.repairAttempts, 0);
+  }
+});
+
 test('reports sanitized schema diagnostics after the repair attempt fails', async () => {
   let requestCount = 0;
   const invalidContent = JSON.stringify({

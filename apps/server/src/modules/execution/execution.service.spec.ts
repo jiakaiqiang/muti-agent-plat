@@ -3,6 +3,47 @@ import test from 'node:test';
 import type { ExecutionTermination } from '@agent-cluster/shared';
 import { createExecutionTermination } from '../../common/execution-termination.js';
 import { ExecutionService } from './execution.service.js';
+import { IntentExecutionSupersededError } from '../message-routing/intent-execution-guard.js';
+import { approvedResumeState } from '../message-routing/intent-resume.fixture.js';
+import { bindIntentResume } from '../message-routing/intent-resume-guard.js';
+import { approvedRetryState } from '../message-routing/intent-retry.fixture.js';
+
+test('R8 local retry dispatch carries its binding and rejects authority changes before the pipeline', async () => {
+  for (const invalidated of [false, true]) {
+    const state: any = approvedRetryState(), session = state.sessions[0], task = state.tasksBySession.session[0];
+    const binding = session.activeRecoveryCheckpoint.retryBinding;
+    state.intentPlanStepsBySession.session[0].retryReceipts = [{ status: 'running', processId: 'dispatch', binding }];
+    session.status = 'EXECUTING'; task.status = invalidated ? 'cancelled' : 'pending';
+    const calls: any[][] = [];
+    const service = new ExecutionService({ runPipeline: async (...args: any[]) => { calls.push(args); return { kind: 'retry_task_completed' }; } } as never,
+      {} as never, { getCollection: (key: string, fallback: unknown) => structuredClone(state[key] ?? fallback) } as never);
+    const invoke = () => service.start(session, state.briefsBySession.session[0], [task], () => {}, 1, undefined, binding);
+    if (invalidated) { assert.throws(invoke, /INTENT_RETRY_TARGET_OBSOLETE/); assert.equal(calls.length, 0); }
+    else { invoke(); await new Promise(resolve => setImmediate(resolve)); assert.equal(calls.length, 1); assert.deepEqual(calls[0][4], binding); }
+  }
+});
+
+test('R7 execution rechecks resume authority before invoking the pipeline or queue', () => {
+  const state: any = approvedResumeState(), binding = bindIntentResume(state, 'session', 'user');
+  state.tasksBySession.session[0].status = 'cancelled';
+  let calls = 0;
+  const service = new ExecutionService({ runPipeline() { calls++; } } as never, { enqueue() { calls++; } } as never,
+    { getCollection: (key: string, fallback: unknown) => structuredClone(state[key] ?? fallback) } as never);
+  assert.throws(() => service.start(state.sessions[0], state.briefsBySession.session[0], [], () => {}, 1, binding), /INTENT_RESUME_TARGET_OBSOLETE/);
+  assert.equal(calls, 0);
+});
+
+test('an audited superseded result releases the pipeline without invoking an outcome or scheduling a retry', async () => {
+  let calls = 0, outcomes = 0;
+  const service = new ExecutionService({ async runPipeline() {
+    calls += 1; throw new IntentExecutionSupersededError('INTENT_DISPATCH_HELD');
+  } } as never, {} as never);
+  service.start({ id: 'superseded' } as never, {} as never, [], () => { outcomes += 1; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 1);
+  assert.equal(outcomes, 0);
+  assert.equal(service.isRunning('superseded'), false);
+});
 
 test('graceful shutdown aborts active execution with service_shutdown and rejects new work', async () => {
   let observedTermination: ExecutionTermination | undefined;

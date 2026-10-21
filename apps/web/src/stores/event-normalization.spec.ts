@@ -25,6 +25,31 @@ describe('normalizeCollaborationEvent', () => {
 })
 
 describe('timeline runtime diagnostics boundary', () => {
+  it('shows plan persistence and blocked outcomes as system status messages', () => {
+    setActivePinia(createPinia())
+    const store = useEventStore()
+    const types = ['intent_plan_committed', 'intent_plan_blocked', 'intent_plan_clarification_required'] as const
+    store.eventsBySessionId['session-1'] = types.map((type, index) => ({ ...eventWithoutContent(), id: `plan-${index}`, type,
+      content: ['已保存消息处理计划。', '当前消息的处理计划未获执行许可。', '需要确认消息目标。'][index],
+      actor: { type: 'system', id: 'intent-plan' }, metadata: { schemaVersion: '0.1', renderAs: 'system_notice', payload: { planId: 'plan' } } }))
+    const messages = store.chatMessages('session-1')
+    expect(messages).toHaveLength(3)
+    expect(messages.every(message => message.messageType === 'text' && message.senderType === 'system')).toBe(true)
+    expect(messages[0].content).toBe('已保存消息处理计划。')
+  })
+  it('shows correction acceptance, activation and reconciliation as status messages rather than relationship choices', () => {
+    setActivePinia(createPinia())
+    const store = useEventStore()
+    const types = ['intent_correction_requested', 'intent_correction_applied', 'intent_correction_reconciliation_required'] as const
+    store.eventsBySessionId['session-1'] = types.map((type, index) => ({ ...eventWithoutContent(), id: `correction-${index}`, type,
+      content: ['已受理，尚未生效。', '纠错已生效。', '需要核对已发生的执行效果。'][index],
+      actor: { type: 'system', id: 'intent-correction' }, metadata: { schemaVersion: '0.1', renderAs: 'system_notice', payload: {
+        routingId: 'original-route', correctionId: 'correction-1', routingRevision: index + 1 } } }))
+    const messages = store.chatMessages('session-1')
+    expect(messages).toHaveLength(3)
+    expect(messages.every(message => message.messageType === 'text' && message.senderType === 'system')).toBe(true)
+    expect(messages.map(message => message.content)).toEqual(['已受理，尚未生效。', '纠错已生效。', '需要核对已发生的执行效果。'])
+  })
   it('does not render debug visibility or raw provider diagnostics', () => {
     const base = eventWithoutContent({ message: 'internal' })
     expect(shouldRenderInTimeline({

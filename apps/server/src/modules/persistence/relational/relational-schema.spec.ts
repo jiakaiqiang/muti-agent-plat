@@ -35,6 +35,8 @@ import {
   RELATIONAL_SCHEMA_V20_SQL,
   RELATIONAL_SCHEMA_V21_SQL,
   RELATIONAL_SCHEMA_V22_SQL,
+  RELATIONAL_SCHEMA_V23_SQL,
+  RELATIONAL_SCHEMA_V23_TABLES,
   RELATIONAL_SCHEMA_V14_TABLES,
   RELATIONAL_SCHEMA_V15_TABLES,
   RELATIONAL_SCHEMA_V16_TABLES,
@@ -66,7 +68,8 @@ test('every relational table and column has a non-empty Chinese explanation', ()
     ...RELATIONAL_SCHEMA_V17_TABLES,
     ...RELATIONAL_SCHEMA_V19_TABLES,
     ...RELATIONAL_SCHEMA_V20_TABLES,
-    ...RELATIONAL_SCHEMA_V21_TABLES
+    ...RELATIONAL_SCHEMA_V21_TABLES,
+    ...RELATIONAL_SCHEMA_V23_TABLES
   ];
   assert.ok(definitions.length >= 35, 'expected the complete relational domain schema');
 
@@ -91,7 +94,7 @@ test('rendered migration emits COMMENT statements for every declared table and c
     const prefix = expected.column ? 'comment on column' : 'comment on table';
     assert.ok(`${sql}\n${RELATIONAL_SCHEMA_V8_SQL}\n${RELATIONAL_SCHEMA_V9_SQL}\n${RELATIONAL_SCHEMA_V10_SQL}\n${RELATIONAL_SCHEMA_V11_SQL}\n${RELATIONAL_SCHEMA_V12_SQL}
 ${RELATIONAL_SCHEMA_V13_SQL}\n${RELATIONAL_SCHEMA_V14_SQL}\n${RELATIONAL_SCHEMA_V15_SQL}
-${RELATIONAL_SCHEMA_V16_SQL}\n${RELATIONAL_SCHEMA_V17_SQL}\n${RELATIONAL_SCHEMA_V18_SQL}\n${RELATIONAL_SCHEMA_V19_SQL}\n${RELATIONAL_SCHEMA_V20_SQL}\n${RELATIONAL_SCHEMA_V21_SQL}`.includes(`${prefix} agent_cluster.${target} is `), `missing rendered SQL comment: ${target}`);
+${RELATIONAL_SCHEMA_V16_SQL}\n${RELATIONAL_SCHEMA_V17_SQL}\n${RELATIONAL_SCHEMA_V18_SQL}\n${RELATIONAL_SCHEMA_V19_SQL}\n${RELATIONAL_SCHEMA_V20_SQL}\n${RELATIONAL_SCHEMA_V21_SQL}\n${RELATIONAL_SCHEMA_V23_SQL}`.includes(`${prefix} agent_cluster.${target} is `), `missing rendered SQL comment: ${target}`);
   }
 });
 

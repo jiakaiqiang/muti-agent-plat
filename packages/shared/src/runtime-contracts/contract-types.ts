@@ -10,6 +10,7 @@ export const RUNTIME_OUTPUT_KINDS = [
   'final_delivery',
   'user_message_handling_plan',
   'intent_routing_decision',
+  'intent_understanding',
   'discussion_plan'
 ] as const;
 

@@ -6,10 +6,11 @@ import { RuntimeInvocationModule } from '../runtime-invocation/runtime-invocatio
 import { SemanticIntentRouterService } from './semantic-intent-router.service.js';
 import { EventsModule } from '../events/events.module.js';
 import { DeterministicCommandGuardService } from './deterministic-command-guard.service.js';
+import { IntentUnderstandingRoutingService } from './intent-understanding-routing.service.js';
 
 @Module({
   imports: [AgentsModule, ContextManagementModule, RuntimeInvocationModule, EventsModule],
-  providers: [DeterministicCommandGuardService, IntentRecognitionService, SemanticIntentRouterService],
-  exports: [DeterministicCommandGuardService, IntentRecognitionService, SemanticIntentRouterService]
+  providers: [DeterministicCommandGuardService, IntentRecognitionService, SemanticIntentRouterService, IntentUnderstandingRoutingService],
+  exports: [DeterministicCommandGuardService, IntentRecognitionService, SemanticIntentRouterService, IntentUnderstandingRoutingService]
 })
 export class IntentRecognitionModule {}

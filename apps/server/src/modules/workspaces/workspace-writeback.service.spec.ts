@@ -21,6 +21,15 @@ const session = {
   workspaceContext: { binding: { providerKind: 'server_local' } }
 } as SessionDetail;
 
+function memoryTransaction(collections: Map<string, unknown>) {
+  return async (_keys: string[], mutate: (draft: Record<string, unknown>) => unknown) => {
+    const draft = structuredClone(Object.fromEntries(collections));
+    const result = mutate(draft);
+    for (const [key, value] of Object.entries(draft)) collections.set(key, structuredClone(value));
+    return result;
+  };
+}
+
 function fixture(
   apply: (input: WorkspaceChangeSet) => Promise<any>,
   persisted: unknown[] = [],
@@ -33,6 +42,7 @@ function fixture(
   const service = new WorkspaceWritebackService(
     {
       getCollection: (key: string, fallback: unknown) => collections.get(key) ?? fallback,
+      mutateCollections: memoryTransaction(collections),
       setCollection: async (key: string, value: unknown) => { collections.set(key, structuredClone(value)); return true; }
     } as never,
     {
@@ -185,6 +195,7 @@ test('forcing a move replaces an existing destination without relying on rename 
   const service = new WorkspaceWritebackService(
     {
       getCollection: (key: string, fallback: unknown) => collections.get(key) ?? fallback,
+      mutateCollections: memoryTransaction(collections),
       setCollection: async (key: string, value: unknown) => { collections.set(key, structuredClone(value)); return true; }
     } as never,
     {
@@ -385,6 +396,7 @@ test('workspace conflict drafts survive restart and apply only the confirmed res
     const collections = new Map<string, unknown>();
     const persistence = {
       getCollection: (key: string, fallback: unknown) => collections.get(key) ?? fallback,
+      mutateCollections: memoryTransaction(collections),
       setCollection: async (key: string, value: unknown) => {
         collections.set(key, structuredClone(value)); return true;
       }
@@ -439,6 +451,7 @@ test('workspace conflict rejects applying a draft after the current file changes
     const collections = new Map<string, unknown>();
     const service = new WorkspaceWritebackService({
       getCollection: (key: string, fallback: unknown) => collections.get(key) ?? fallback,
+      mutateCollections: memoryTransaction(collections),
       setCollection: async (key: string, value: unknown) => {
         collections.set(key, structuredClone(value)); return true;
       }
@@ -474,6 +487,7 @@ test('typed delete conflict can keep the current workspace file', async () => {
     const collections = new Map<string, unknown>();
     const service = new WorkspaceWritebackService({
       getCollection: (key: string, fallback: unknown) => collections.get(key) ?? fallback,
+      mutateCollections: memoryTransaction(collections),
       setCollection: async (key: string, value: unknown) => {
         collections.set(key, structuredClone(value)); return true;
       }
@@ -511,6 +525,7 @@ test('typed local rename conflict requires authorization for the resolved Change
     const collections = new Map<string, unknown>();
     const service = new WorkspaceWritebackService({
       getCollection: (key: string, fallback: unknown) => collections.get(key) ?? fallback,
+      mutateCollections: memoryTransaction(collections),
       setCollection: async (key: string, value: unknown) => {
         collections.set(key, structuredClone(value)); return true;
       }

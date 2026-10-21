@@ -140,3 +140,12 @@ test('rejects invalid params before scanning', async () => {
   assert.equal(result.success, false);
   assert.match(result.error ?? '', /pattern/);
 });
+
+test('literal answer search treats regex syntax as text and never evaluates nested quantifiers', async () => {
+  await withWorkspace(async workspace => {
+    await writeFile(join(workspace, 'src', 'literal.ts'), `// literal (a+)+$\n${'a'.repeat(20_000)}!\n`);
+    const result = await new CodeSearchTool().execute({ pattern: '(a+)+$', literal: true }, { workingDirectory: workspace, sessionId: 's1' });
+    assert.equal(result.success, true);
+    assert.deepEqual(output(result).results.map(row => ({ file: row.file, match: row.match })), [{ file: 'src/literal.ts', match: '(a+)+$' }]);
+  });
+});

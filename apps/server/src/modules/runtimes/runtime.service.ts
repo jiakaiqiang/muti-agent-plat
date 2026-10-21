@@ -1,4 +1,5 @@
 import { Injectable, Logger, Optional, type OnModuleInit } from '@nestjs/common';
+import { assertIntentInvocationScope } from '@agent-cluster/shared';
 import type {
   AgentMessageOutput,
   AgentRunResult,
@@ -27,6 +28,9 @@ import {
 import { buildBudget } from '../../common/token.js';
 import { nowIso } from '../../common/time.js';
 import { ExecutionBudgetHealth } from '../../common/execution-budget-policy.js';
+import { InputBudgetStore } from './input-budget-store.js';
+import { estimateTokens, reserveInputTokenSafetyMargin } from '../../common/token.js';
+import { llmInputSafetyMarginRatio } from '../../common/runtime-config.js';
 import { workspaceMetrics } from '../../common/workspace-metrics.js';
 import {
   abortWithTermination,
@@ -62,8 +66,15 @@ import { SessionLifecycleStore } from './session-lifecycle-store.js';
 import { EventsService } from '../events/events.service.js';
 import { DiscussionDocumentsService } from '../discussion-documents/discussion-documents.service.js';
 import { RuntimeHealthStore } from './runtime-health-store.js';
+import { assertIntentExecutionCurrent, INTENT_EXECUTION_COLLECTIONS, IntentExecutionSupersededError } from '../message-routing/intent-execution-guard.js';
+import type { SessionLifecyclesBySession } from './session-lifecycle-store.js';
+import { assertIntentRetryRuntimeSafe } from '../message-routing/intent-retry-guard.js';
 
 export type RuntimeInvocationLog = {
+  executionBinding?: InvocationPlan['executionBinding'];
+  intentAdmission?: AgentRunResult['intentAdmission'];
+  /** Original response retained only for rejected late results; never used for dispatch. */
+  supersededResult?: Pick<AgentRunResult, 'status' | 'output' | 'artifacts' | 'events' | 'error'>;
   operationTelemetry?: AgentRunResult['operationTelemetry'];
   executionCandidate?: AgentRunResult['executionCandidate'];
   githubCandidate?: AgentRunResult['githubCandidate'];
@@ -127,6 +138,12 @@ export type RuntimeExecutionHandle = AgentRuntimeRunHandle & {
 
 @Injectable()
 export class RuntimeService implements OnModuleInit {
+  estimatePreparedInputTokens(input: InvocationPlan) {
+    return input.executionTarget.runtimeType === 'generic_llm' && input.toolCatalog.tools.length === 0
+      ? this.genericLlmRuntime.estimatePreparedInputTokens(input)
+      : estimateTokens({ agent: input.agent.systemPrompt, contextEnvelope: input.contextEnvelope,
+        toolCatalog: input.toolCatalog, expectedOutput: input.expectedOutput });
+  }
   private readonly logger = new Logger(RuntimeService.name);
   private readonly invocationsBySession = new Map<string, RuntimeInvocationLog[]>();
   private readonly activeInvocationsBySession = new Map<
@@ -301,6 +318,12 @@ export class RuntimeService implements OnModuleInit {
   }
 
   start(input: InvocationPlan, signal?: AbortSignal): RuntimeExecutionHandle {
+    if (input.intentRetryBinding && this.persistence.getCollection<SessionDetail[]>('sessions', [])
+      .some(session => session.id === input.sessionId && session.intentContractVersion === 'intent-understanding-v1')) {
+      assertIntentRetryRuntimeSafe(input.executionTarget.runtimeType);
+    }
+    input.dataEpoch ??= this.persistence.getCollection<SessionDetail[]>('sessions', [])
+      .find(session => session.id === input.sessionId)?.dataEpoch;
     const startedAt = nowIso();
     let adapterStartedAt: string | undefined;
     let firstUsefulOutputAt: string | undefined;
@@ -351,19 +374,25 @@ export class RuntimeService implements OnModuleInit {
     controller.signal.addEventListener('abort', stop, { once: true });
     const result = (async (): Promise<AgentRunResult> => {
       try {
+        assertIntentInvocationScope(input);
         const operation = await this.operations.begin({ id: input.operation?.id ?? input.invocationId,
-          sessionId: input.sessionId, taskId: input.taskId, phase: input.phase });
-        input.operation = { id: operation.id, deadlineAt: operation.deadlineAt,
+          sessionId: input.sessionId, taskId: input.taskId, phase: input.phase,
+          admissionClass: input.admissionClass, dataEpoch: input.dataEpoch,
+          intentStepId: input.intentStepId,
+          workItemId: input.workItemId, executionBinding: input.executionBinding });
+        input.operation = { id: operation.id, deadlineAt: operation.deadlineAt, sessionGeneration: operation.sessionGeneration,
           maxAttempts: operation.maxAttempts, policyVersion: operation.policyVersion };
         this.assertStopBarrierAllowsStart(input.sessionId);
         if (controller.signal.aborted) return ensureStructuredTermination(this.unsupportedResult(input, 'Cancelled before invocation start.'),
           { phase: input.phase, signal: controller.signal });
         await this.operations.reserve(input.sessionId, operation.id, input.invocationId, {
           transport: input.executionTarget.executionLocation === 'local' ? this.localRuntime?.invocationBinding?.(input) : undefined,
+          admissionClass: input.admissionClass,
           executionKind: input.executionTarget.runtimeType === 'mock' ? 'internal' : 'process',
           outputContractKey: `${input.expectedOutput.kind}@${input.expectedOutput.schemaVersion}`
         });
         reserved = true;
+        assertIntentInvocationScope(input);
         this.assertStopBarrierAllowsStart(input.sessionId);
         if (controller.signal.aborted) return ensureStructuredTermination(this.unsupportedResult(input, 'Cancelled before invocation start.'),
           { phase: input.phase, signal: controller.signal });
@@ -424,8 +453,16 @@ export class RuntimeService implements OnModuleInit {
         timer = setTimeout(checkBudget, Math.min(5_000, remainingMs));
         // Reservation happens here on purpose: every cheap early return above
         // must not leave an allowance committed for a call that never starts.
+        if (input.inputBudgetPolicy && input.executionTarget.runtimeType !== 'generic_llm' && input.budget.maxInputTokens !== undefined) {
+          const margin = reserveInputTokenSafetyMargin(input.budget.maxInputTokens, llmInputSafetyMarginRatio());
+          await new InputBudgetStore(this.persistence).assert(input, { estimatedInputTokens: estimateTokens({
+            agent: input.agent.systemPrompt, contextEnvelope: input.contextEnvelope, toolCatalog: input.toolCatalog, expectedOutput: input.expectedOutput }),
+            outputReservationTokens: Math.ceil((input.budget.maxOutputTokens ?? 0) * 0.5), maxInputTokens: input.budget.maxInputTokens,
+            effectiveMaxInputTokens: margin.effectiveMaxInputTokens!, safetyMarginTokens: margin.safetyMarginTokens }, true);
+        }
         const budgetRefusal = await this.commitRequirementBudget(input);
         if (budgetRefusal) return budgetRefusal;
+        await this.operations.assertCurrentIntent(input);
         underlying = this.startUnsupervised(input, controller.signal);
         // Reconcile from the adapter's own result so a refusal or a partial
         // failure still releases the allowance instead of holding it forever.
@@ -534,7 +571,7 @@ export class RuntimeService implements OnModuleInit {
         stopUnconfirmed ||= Boolean(resolved.error?.details?.stopUnconfirmed);
         this.requestHealth.signal(input.invocationId, stopUnconfirmed ? 'stop_unconfirmed' : 'terminal_received', observationMs);
         await this.requestHealth.flush();
-        if (resolved.error && (!resolved.termination || resolved.error.details?.providerFailure) && !stopUnconfirmed) {
+        if (resolved.error && resolved.error.code !== 'INPUT_BUDGET_EXCEEDED' && !resolved.error.details?.inputBudgetAdmissionDenied && (!resolved.termination || resolved.error.details?.providerFailure) && !stopUnconfirmed) {
           const failure = classifyProviderFailure(resolved.error);
           if (failure.failureClass !== 'unknown' || resolved.error.details?.providerFailure) {
             resolved.error = { ...resolved.error, retryable: failure.retryable, details: {
@@ -547,10 +584,15 @@ export class RuntimeService implements OnModuleInit {
         return resolved;
       } catch (error) {
         const failure = this.invocationFailureResult(input, errorMessage(error));
-        failure.error = { code: errorMessage(error).includes('BUDGET_EXHAUSTED') ? 'RUNTIME_TIMEOUT' : 'RUNTIME_INVOCATION_ERROR',
-          message: errorMessage(error), retryable: false,
+        if ((error as { code?: string }).code === 'INPUT_BUDGET_EXCEEDED') return { ...failure, status: 'blocked',
+          error: { code: 'INPUT_BUDGET_EXCEEDED', message: errorMessage(error), retryable: false,
+            details: (error as { details?: Record<string, unknown> }).details } };
+        const intentReason = errorMessage(error).match(/^INTENT_[A-Z_]+/)?.[0];
+        failure.error = { code: intentReason ? 'CAPABILITY_BLOCKED' : errorMessage(error).includes('BUDGET_EXHAUSTED') ? 'RUNTIME_TIMEOUT' : 'RUNTIME_INVOCATION_ERROR',
+          message: intentReason ? '当前执行已被意图纠错暂停，请先完成纠错确认。' : errorMessage(error), retryable: false,
           details: { operationId: input.operation?.id,
-            operationFailure: errorMessage(error).match(/OPERATION_[A-Z_]+/)?.[0] ?? 'OPERATION_PERSISTENCE_FAILED',
+            ...(intentReason ? { reason: intentReason } : {}),
+            operationFailure: intentReason ?? errorMessage(error).match(/OPERATION_[A-Z_]+/)?.[0] ?? 'OPERATION_PERSISTENCE_FAILED',
             stopUnconfirmed: errorMessage(error).includes('STOP_UNCONFIRMED') } };
         return failure;
       } finally {
@@ -621,7 +663,13 @@ export class RuntimeService implements OnModuleInit {
         remainingMs: Math.max(0, Date.parse(input.operation?.deadlineAt ?? completedAt) - Date.now()),
         stopState: stopUnconfirmed ? 'unconfirmed' : 'confirmed', upstreamWaitMs: null,
         usageScope: 'reported_cumulative', billableTokens: null };
-      await this.recordInvocation(input, resolved, startedAt);
+      const admission = await this.recordInvocation(input, resolved, startedAt);
+      if (admission.status === 'superseded') {
+        resolved = { ...this.invocationFailureResult(input, '本次执行已被新的要求替代，结果已保留供核对。'),
+          usage: resolved.usage, operationTelemetry: resolved.operationTelemetry, intentAdmission: admission,
+          error: { code: 'CAPABILITY_BLOCKED', message: '本次执行已被新的要求替代，结果已保留供核对。', retryable: false,
+            details: { reason: admission.reason, operationFailure: 'INTENT_EXECUTION_SUPERSEDED', originalStatus: resolved.status } } };
+      } else resolved.intentAdmission = admission;
       for (const event of resolved.events) {
         if (!publishedEvents.has(JSON.stringify(event))) queue.push({ ...event, metadata: {
           ...event.metadata, operationId: input.operation?.id, policyVersion: input.operation?.policyVersion
@@ -891,6 +939,23 @@ export class RuntimeService implements OnModuleInit {
     };
   }
 
+  /** A correction targets exact invocations and never opens/closes Session admission. */
+  async cancelIntentExecutionsAndWait(sessionId: string, invocationIds: string[], timeoutMs = 10_000) {
+    await this.operations.requestIntentStop(sessionId, invocationIds);
+    const handles = invocationIds.map(id => this.supervised.get(sessionId)?.get(id)).filter((handle): handle is RuntimeExecutionHandle => Boolean(handle));
+    for (const handle of handles) void handle.cancel(createExecutionTermination({
+      kind: 'user_cancelled', source: 'user', scope: 'invocation', diagnosticRef: 'intent_correction'
+    })).catch(() => undefined);
+    let timer: NodeJS.Timeout | undefined;
+    if (handles.length) await Promise.race([Promise.allSettled(handles.map(handle => handle.result)),
+      new Promise<void>(resolve => { timer = setTimeout(resolve, Math.max(0, timeoutMs)); })]);
+    if (timer) clearTimeout(timer);
+    const operations = this.operations.list(sessionId);
+    const stopConfirmed = invocationIds.every(id => operations.some(operation => operation.invocationIds.includes(id) &&
+      operation.activeInvocationId !== id && operation.stopState === 'confirmed'));
+    return { stopConfirmed };
+  }
+
   activeInvocationCount(sessionId: string) {
     return this.supervised.get(sessionId)?.size ?? 0;
   }
@@ -999,13 +1064,26 @@ export class RuntimeService implements OnModuleInit {
     return this.invocationsBySession.get(sessionId) ?? [];
   }
 
+  /** Recheck after an awaited writeback before the Orchestrator projects task results. */
+  async assertInvocationCurrent(sessionId: string, invocationId: string) {
+    const log = this.persistence.getCollection<Record<string, RuntimeInvocationLog[]>>('runtimeInvocationsBySession', {})[sessionId]
+      ?.find(item => item.invocationId === invocationId);
+    if (!log || log.intentAdmission?.status === 'superseded') throw new IntentExecutionSupersededError('INTENT_EXECUTION_STALE');
+    try { await this.operations.assertCurrentIntent({ sessionId, taskId: log.taskId, workItemId: log.workItemId,
+      dataEpoch: log.dataEpoch, sessionGeneration: log.contextGeneration, executionBinding: log.executionBinding }); }
+    catch (error) {
+      if (error instanceof Error && /^INTENT_/.test(error.message)) throw new IntentExecutionSupersededError(error.message);
+      throw error;
+    }
+  }
+
   findExecutionCandidate(plan: InvocationPlan) {
     const previous = [...this.listInvocations(plan.sessionId)].reverse().find(item =>
       item.agentId === plan.agent.agentId && item.workItemId === plan.workItemId &&
       (item.taskId === plan.taskId || Boolean(plan.recoveryOriginTaskId && item.taskId === plan.recoveryOriginTaskId)) &&
       item.phase === 'task_execution');
     // Never resurrect an older candidate after a newer success or failed restore.
-    const candidate = previous?.status === 'completed' ? undefined : previous?.executionCandidate;
+    const candidate = previous?.status === 'completed' || previous?.intentAdmission?.status === 'superseded' ? undefined : previous?.executionCandidate;
     if (!candidate || candidate.workspaceId !== plan.contextEnvelope.L0.workspace.workspaceId ||
       candidate.outputVersion !== plan.expectedOutput.schemaVersion || Date.parse(candidate.expiresAt) <= Date.now() ||
       candidate.baseRevision.id !== plan.contextEnvelope.L0.workspace.revision.id) return undefined;
@@ -1075,12 +1153,13 @@ export class RuntimeService implements OnModuleInit {
 
   private async recordInvocation(input: InvocationPlan, result: AgentRunResult, startedAt: string) {
     const log: RuntimeInvocationLog = {
+      executionBinding: input.executionBinding,
       operationTelemetry: result.operationTelemetry,
       executionCandidate: result.executionCandidate,
       githubCandidate: result.githubCandidate,
       operation: input.operation,
       id: crypto.randomUUID(),
-      dataEpoch: this.persistence.currentDataEpoch(),
+      dataEpoch: input.dataEpoch ?? this.persistence.currentDataEpoch(),
       invocationId: input.invocationId,
       sessionId: input.sessionId,
       ...(input.workItemId ? { workItemId: input.workItemId } : {}),
@@ -1107,7 +1186,7 @@ export class RuntimeService implements OnModuleInit {
       cliSessionId: result.runtimeSession?.cliSessionId ?? this.extractCliSessionId(result),
       workDir: result.runtimeSession?.workDir,
       ...(this.lifecycle.generation(input.sessionId) !== undefined
-        ? { contextGeneration: this.lifecycle.generation(input.sessionId) }
+        ? { contextGeneration: input.operation?.sessionGeneration ?? this.lifecycle.generation(input.sessionId) }
         : {}),
       workspaceExecution: result.workspaceExecution,
       attempt: input.attempt,
@@ -1123,16 +1202,36 @@ export class RuntimeService implements OnModuleInit {
       completedAt: nowIso()
     };
     const write = this.invocationWrites.then(async () => {
-      const committed = await this.persistence.mutateCollections(['runtimeInvocationsBySession'], draft => {
-        const all = (draft.runtimeInvocationsBySession ??= Object.fromEntries(this.invocationsBySession)) as Record<string, RuntimeInvocationLog[]>;
+      const committed = await this.persistence.mutateCollections(['runtimeInvocationsBySession', 'sessions',
+        'sessionLifecyclesBySession', ...INTENT_EXECUTION_COLLECTIONS], draft => {
+        const session = (draft.sessions as SessionDetail[] | undefined)?.find(item => item.id === input.sessionId);
+        const lifecycle = (draft.sessionLifecyclesBySession as SessionLifecyclesBySession | undefined)?.[input.sessionId];
+        let reason: string | undefined;
+        if ((input.dataEpoch && (!session || session.dataEpoch !== input.dataEpoch)) ||
+          session?.archivedAt || (lifecycle && (lifecycle.state !== 'active' ||
+            (input.operation?.sessionGeneration !== undefined && lifecycle.generation !== input.operation.sessionGeneration)))) reason = 'INTENT_EXECUTION_STALE';
+        if (!reason) {
+          try { assertIntentExecutionCurrent(draft, input); }
+          catch (error) { reason = errorMessage(error).match(/INTENT_[A-Z_]+/)?.[0]; if (!reason) throw error; }
+        }
+        const admission: NonNullable<AgentRunResult['intentAdmission']> = reason ? { status: 'superseded', reason } : { status: 'current' };
+        // A deleted/restored Session must never be recreated by an old audit cache.
+        if ((input.dataEpoch && (!session || session.dataEpoch !== input.dataEpoch)) ||
+          (lifecycle && lifecycle.state !== 'active')) return { items: undefined, admission };
+        log.intentAdmission = admission;
+        if (reason) log.supersededResult = structuredClone({ status: result.status, output: result.output,
+          artifacts: result.artifacts, events: result.events, error: result.error });
+        const all = (draft.runtimeInvocationsBySession ??= {}) as Record<string, RuntimeInvocationLog[]>;
         const items = all[input.sessionId] ??= [];
         if (!items.some(item => item.invocationId === log.invocationId)) items.push(log);
-        return structuredClone(items);
-      });
-      this.invocationsBySession.set(input.sessionId, committed);
+        return { items: structuredClone(items), admission };
+      }, { sessionIds: [input.sessionId] });
+      if (committed.items) this.invocationsBySession.set(input.sessionId, committed.items);
+      else this.invocationsBySession.delete(input.sessionId);
+      return committed.admission;
     });
-    this.invocationWrites = write.catch(() => undefined);
-    await write;
+    this.invocationWrites = write.then(() => undefined, () => undefined);
+    return write;
   }
 
   private buildProfileSnapshot(input: InvocationPlan): RuntimeInvocationProfileSnapshot {
@@ -1326,6 +1425,7 @@ export class RuntimeService implements OnModuleInit {
         });
         // Each managed worktree invocation gets an isolated execution directory,
         // so a CLI session tied to an older directory must not be resumed.
+        await this.operations.assertCurrentIntent(input);
         activeHandle = this.startServerExecution(
           adapter,
           withoutResume(input),
@@ -1405,8 +1505,11 @@ export class RuntimeService implements OnModuleInit {
       if (!this.serverRuntimeWorker) {
         return settledHandle(this.unsupportedResult(input, 'Server Runtime Worker is unavailable; in-process execution is forbidden'));
       }
-      const executionWorkDir = workDir ?? this.workspaceBindings?.resolveServerRoot(input);
-      if (!executionWorkDir) {
+      const isolatedClassification = input.admissionClass === 'routing' && input.executionTarget.runtimeType === 'claude_code';
+      // The classifier creates its own empty directory inside the worker. It must
+      // never inherit a repository binding merely to satisfy the CLI worker API.
+      const executionWorkDir = isolatedClassification ? undefined : workDir ?? this.workspaceBindings?.resolveServerRoot(input);
+      if (!executionWorkDir && !isolatedClassification) {
         return settledHandle(this.unsupportedResult(input, 'Server Runtime Worker could not resolve an isolated execution directory'));
       }
       const startWorker = (plan: InvocationPlan, invocationSignal?: AbortSignal) => {
@@ -1455,6 +1558,7 @@ export class RuntimeService implements OnModuleInit {
           invocation.taskId === taskId &&
           invocation.runtimeType === runtimeType &&
           invocation.status === 'completed' &&
+          invocation.intentAdmission?.status !== 'superseded' &&
           Boolean(invocation.cliSessionId) &&
           (scope.workItemId === undefined || invocation.workItemId === scope.workItemId) &&
           (generation === undefined || invocation.contextGeneration === generation)

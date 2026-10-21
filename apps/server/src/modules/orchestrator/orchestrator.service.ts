@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
 import { effectiveRuntimePreference, resolveFallbackRuntimeChain, canAutomaticallyFailover } from '@agent-cluster/shared';
 import { RuntimeSwitchStore } from '../runtime-switch/runtime-switch-store.js';
-import { localizeBuiltInNotice, isUsableWorkspaceEvidencePath, isWorkspaceTextContent, workspaceEvidencePriority } from '@agent-cluster/shared';
-import { BadRequestException, ConflictException, Injectable, Optional } from '@nestjs/common';
+import { contextSupplementNotice, localizeBuiltInNotice, isUsableWorkspaceEvidencePath, isWorkspaceTextContent, workspaceEvidencePriority } from '@agent-cluster/shared';
+import { BadRequestException, ConflictException, Injectable, Logger, Optional } from '@nestjs/common';
 import type {
   ActorRef,
   AgentDefinition as Agent,
@@ -145,6 +145,7 @@ import {
 import { truncateContentForEvidence } from '../../common/evidence-truncation.js';
 import { WorkspaceProviderResolver } from '../workspaces/workspace-provider-resolver.js';
 import { WorkspaceWritebackService } from '../workspaces/workspace-writeback.service.js';
+import { IntentExecutionSupersededError } from '../message-routing/intent-execution-guard.js';
 import { WorktreeExecutionService } from '../worktree-execution/worktree-execution.service.js';
 import { recordDeliveryCandidate } from '../delivery/delivery-candidate.js';
 import { workspaceProviderKindForDirectory } from '../workspaces/workspace-provider.js';
@@ -156,8 +157,15 @@ import { InvocationWorkspaceBindingsService } from '../runtimes/invocation-works
 import { FileRevisionsService } from '../file-revisions/file-revisions.service.js';
 import { applyRuntimeWriteModeOverride } from './runtime-write-mode-policy.js';
 import { DiscussionDocumentsService } from '../discussion-documents/discussion-documents.service.js';
+import { InputBudgetStore } from '../runtimes/input-budget-store.js';
+import type { IntentRetryBinding } from '@agent-cluster/shared';
+import { claimIntentRetryExecution, settleIntentRetryExecution } from '../message-routing/intent-retry-guard.js';
+import { llmInputSafetyMarginRatio } from '../../common/runtime-config.js';
+import { reserveInputTokenSafetyMargin } from '../../common/token.js';
 
 export type ExecutionOutcome =
+  | { kind: 'retry_task_completed'; taskId: string; resultSummary: string }
+  | { kind: 'input_budget_exceeded'; reason: string; taskId: string; error: RuntimeError }
   | { kind: 'delivered' }
   | { kind: 'rework'; reason: string }
   | {
@@ -179,7 +187,7 @@ export type ExecutionOutcome =
       error: RuntimeError;
     }
   | { kind: 'cancelled'; reason: string; termination?: ExecutionTermination }
-  | { kind: 'failed'; reason: string; error?: RuntimeError };
+  | { kind: 'failed'; reason: string; error?: RuntimeError; taskId?: string };
 
 function cancelledExecutionOutcome(signal?: AbortSignal): ExecutionOutcome {
   const termination = terminationFromSignal(signal);
@@ -228,6 +236,7 @@ export type WorkflowAgentSubstitutionRequest = {
 };
 
 type RuntimeInvocationDraft = {
+  inputBudgetTask?: true;
   recoveryCandidate?: InvocationPlan['recoveryCandidate'];
   submissionRepair?: boolean;
   operation?: InvocationPlan['operation'];
@@ -406,19 +415,42 @@ export class OrchestratorService {
     // So just call createContextAssembly and let it build everything
     const contextAssembly = this.createContextAssembly(session, taskAgent, brief, task, inv.phase);
 
-    return this.runRuntime(session, {
+    const result = await this.runRuntime(session, {
       invocationId: crypto.randomUUID(),
       sessionId: inv.sessionId,
       taskId: inv.taskId,
+      ...(task && inv.phase === 'task_execution' ? { inputBudgetTask: true as const } : {}),
+      ...(task && inv.phase === 'task_execution' && this.runtime.operations
+        ? { operation: await this.taskExecutionOperation(session, task, crypto.randomUUID()) } : {}),
       phase: inv.phase,
       agent: taskAgent,
       contextAssembly,
       expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' },
       budget: contextAssembly.budget
     });
+    if (task && result.error?.code === 'INPUT_BUDGET_EXCEEDED') {
+      this.markInputBudgetWaiting(session, task, taskAgent.id, result);
+    }
+    return result;
+  }
+
+  private markInputBudgetWaiting(session: SessionDetail, task: AgentTask, agentId: string, result: AgentRunResult) {
+    const message = result.error?.message ?? '输入预算超限，等待用户决定。';
+    this.tasks.update(task, { status: 'waiting', resultSummary: message });
+    this.events.create({ sessionId: session.id, taskId: task.id, type: 'task_waiting', fromAgentId: agentId,
+      content: `任务输入预算超限，等待选择继续或结束：${task.title}`,
+      metadata: createMetadata('task_card', { taskId: task.id, status: 'waiting', reason: 'input_budget_exceeded' }) });
+    const hold = result.error?.details?.inputBudgetDecision as import('@agent-cluster/shared').InputBudgetDecision | undefined;
+    if (hold) this.events.createOnce(`input-budget-request:${hold.id}`, { sessionId: session.id, taskId: task.id,
+      type: 'user_confirmation_requested', priority: 'high', content: message,
+      metadata: createMetadata('confirmation_card', { confirmationId: hold.id, reason: 'input_budget_exceeded',
+        title: '本次调用输入预算超限', relatedTaskId: task.id, inputBudgetDecision: hold,
+        description: `输入估算 ${hold.estimatedInputTokens}，输出保留 ${hold.outputReservationTokens}，有效上限 ${hold.effectiveMaxInputTokens} tokens。继续仅放行本次重跑，不修改预算设置。`,
+        options: [{ key: 'continue', label: '继续执行（本次放行）', style: 'primary' }, { key: 'end', label: '结束此任务', style: 'default' }] }) });
   }
 
   async discussAndCreateBrief(session: SessionDetail, signal?: AbortSignal) {
+    if (session.intentContractVersion === 'intent-understanding-v1') throw new ConflictException('INTENT_BRIEF_VERSIONED_EXECUTOR_REQUIRED');
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
     await this.emitWorkspaceAnalyzedEvent(session, coordinator);
     throwIfAborted(signal);
@@ -489,7 +521,7 @@ export class OrchestratorService {
     // latestContractGoal 反映当前权威目标,供后续 Agent 上下文注入(见 createContextAssembly)。
     // 该赋值会在随后 sessions.service 的 setStatus/persist 中落库(同一 session 对象引用)。
     session.latestContractGoal = brief.goal;
-    this.persistBriefs();
+    await this.persistBriefs();
 
     this.events.create({
       sessionId: session.id,
@@ -516,7 +548,7 @@ export class OrchestratorService {
     });
 
     const briefFileChanges = allowGeneratedFileWrites ? this.briefFileChanges(brief, suggestedTasks) : [];
-    const briefArtifact = this.artifacts.create({
+    const briefArtifact = await this.artifacts.create({
       sessionId: session.id,
       workItemId: session.activeWorkItemId,
       agentId: coordinator.id,
@@ -650,6 +682,7 @@ export class OrchestratorService {
     } = {},
     signal?: AbortSignal
   ): Promise<{ brief: TaskBrief; tasks: AgentTask[]; awaitingUserConfirmation?: boolean }> {
+    if (session.intentContractVersion === 'intent-understanding-v1') throw new ConflictException('INTENT_BRIEF_VERSIONED_EXECUTOR_REQUIRED');
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
     const mentionedAgents = this.participatingAgents(session).filter(
       (agent) => agent.id !== coordinator.id && mentionedAgentIds.includes(agent.id)
@@ -735,7 +768,7 @@ export class OrchestratorService {
     this.briefsBySession.set(session.id, [...(this.briefsBySession.get(session.id) ?? []), brief]);
     this.suggestedTasksByBriefId.set(brief.id, suggestedTasks);
     session.latestContractGoal = brief.goal;
-    this.persistBriefs();
+    await this.persistBriefs();
     const awaitingUserConfirmation = Boolean(options.requiresUserConfirmation || brief.openQuestions.length);
 
     this.events.create({
@@ -801,6 +834,7 @@ export class OrchestratorService {
     sourceEventId: string,
     signal?: AbortSignal
   ): Promise<TaskBrief> {
+    if (session.intentContractVersion === 'intent-understanding-v1') throw new ConflictException('INTENT_BRIEF_VERSIONED_EXECUTOR_REQUIRED');
     const coordinator = this.pickSessionAgent(session, ['coordinator']);
     const allAgents = this.participatingAgents(session);
     const assignedAgents = allAgents.filter((agent) => assignedAgentKeys.includes(agent.key));
@@ -946,7 +980,7 @@ export class OrchestratorService {
     this.briefsBySession.set(session.id, [...(this.briefsBySession.get(session.id) ?? []), brief]);
     this.suggestedTasksByBriefId.set(brief.id, suggestedTasks);
     session.latestContractGoal = brief.goal;
-    this.persistBriefs();
+    await this.persistBriefs();
 
     this.events.create({
       sessionId: session.id,
@@ -973,7 +1007,7 @@ export class OrchestratorService {
     });
 
     const briefFileChanges = allowGeneratedFileWrites ? this.briefFileChanges(brief, suggestedTasks) : [];
-    const briefArtifact = this.artifacts.create({
+    const briefArtifact = await this.artifacts.create({
       sessionId: session.id,
       workItemId: session.activeWorkItemId,
       agentId: coordinator.id,
@@ -1159,7 +1193,7 @@ export class OrchestratorService {
     const focus = this.projectMap.workspaceFocus(session);
     const analysis = this.workspaceAnalysis(session, snapshot, focus);
     const fileChanges = this.shouldWriteGeneratedFiles(session) ? this.workspaceAnalysisFileChanges(analysis.markdown) : [];
-    const artifact = this.artifacts.create({
+    const artifact = await this.artifacts.create({
       sessionId: session.id,
       workItemId: session.activeWorkItemId,
       agentId: coordinator.id,
@@ -1202,6 +1236,10 @@ export class OrchestratorService {
   }
 
   listBriefs(sessionId: string) {
+    const session = this.persistence.getCollection<SessionDetail[]>('sessions', []).find(row => row.id === sessionId);
+    if (session?.intentContractVersion === 'intent-understanding-v1') {
+      return structuredClone(this.persistence.getCollection<Record<string, TaskBrief[]>>('briefsBySession', {})[sessionId] ?? []);
+    }
     return this.briefsBySession.get(sessionId) ?? [];
   }
 
@@ -1249,7 +1287,7 @@ export class OrchestratorService {
     this.briefsBySession.delete(sessionId);
     // Derived bundles must stop being visible now, not at the next TTL.
     this.contextBundles.invalidateSession(sessionId);
-    this.persistBriefs();
+    void this.persistBriefs().catch(() => Logger.error('Brief persistence transaction failed.', 'OrchestratorService'));
   }
 
   prepareExecution(
@@ -1333,6 +1371,7 @@ export class OrchestratorService {
   }
 
   confirmBrief(session: SessionDetail, briefId: string, options: { allowOpenQuestions?: boolean } = {}) {
+    if (session.intentContractVersion === 'intent-understanding-v1') throw new ConflictException('INTENT_BRIEF_VERSIONED_CONFIRMATION_REQUIRED');
     const brief = this.getBrief(session.id, briefId);
     if (!brief) {
       throw new Error(`Brief not found: ${briefId}`);
@@ -1361,7 +1400,7 @@ export class OrchestratorService {
     if (!brief.confirmedByUser) {
       brief.confirmedByUser = true;
       brief.confirmedAt = nowIso();
-      this.persistBriefs();
+      void this.persistBriefs().catch(() => Logger.error('Brief persistence transaction failed.', 'OrchestratorService'));
       this.events.create({
         sessionId: session.id,
         type: 'brief_confirmed',
@@ -1860,8 +1899,12 @@ export class OrchestratorService {
     session: SessionDetail,
     brief: TaskBrief,
     tasks: AgentTask[],
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    intentRetryBinding?: IntentRetryBinding
   ): Promise<ExecutionOutcome> {
+    if (session.intentContractVersion === 'intent-understanding-v1' && intentRetryBinding) {
+      return this.runBoundRetryTask(session, brief, tasks, intentRetryBinding, signal);
+    }
     while (true) {
       const pendingSwitch = new RuntimeSwitchStore(this.persistence).unresolved(session.id)
         .find(item => item.timing === 'after_step' && item.status === 'preflighted');
@@ -1880,6 +1923,10 @@ export class OrchestratorService {
 
       const readyTasks = remaining.filter((task) => this.isTaskReady(task, executableTasks));
       if (!readyTasks.length) {
+        const blocked = remaining.find(task => this.runtime.operations?.list(session.id).some(operation => operation.taskId === task.id &&
+          operation.inputBudgetDecisions?.some(hold => hold.status === 'pending')));
+        if (blocked) return { kind: 'input_budget_exceeded', taskId: blocked.id, reason: blocked.resultSummary ?? '等待输入预算决定。',
+          error: { code: 'INPUT_BUDGET_EXCEEDED', message: blocked.resultSummary ?? '等待输入预算决定。', retryable: false } };
         // A cancelled pipeline must not report ask_user; otherwise a user
         // interrupt that just called execution.cancel + execution.start would
         // race with this branch and trap the session at WAIT_USER_DECISION.
@@ -1901,8 +1948,10 @@ export class OrchestratorService {
       if (signal?.aborted) {
         return cancelledExecutionOutcome(signal);
       }
-      const failedTask = taskResults.find((item) => !item.result.ok);
+      const failedTask = taskResults.find(item => !item.result.ok && item.result.code === 'INPUT_BUDGET_EXCEEDED') ?? taskResults.find((item) => !item.result.ok);
       if (failedTask && !failedTask.result.ok) {
+        if (failedTask.result.code === 'INPUT_BUDGET_EXCEEDED') return { kind: 'input_budget_exceeded',
+          reason: failedTask.result.message, taskId: failedTask.task.id, error: failedTask.result.error! };
         if (failedTask.result.workItemBudgetExhausted || failedTask.result.code === 'WORK_ITEM_BUDGET_EXHAUSTED') {
           return {
             kind: 'work_item_budget_exhausted',
@@ -1939,6 +1988,7 @@ export class OrchestratorService {
         if (this.isInfrastructureTaskFailure(failedTask.result)) {
           return {
             kind: 'failed',
+            taskId: failedTask.task.id,
             reason: `${messages.taskFailed(failedTask.task.title)}: ${failedTask.result.message}`,
             ...(failedTask.result.error ? { error: failedTask.result.error } : {})
           };
@@ -2010,6 +2060,34 @@ export class OrchestratorService {
     return { kind: 'delivered' };
   }
 
+  private retryTaskBindings = new Map<string, IntentRetryBinding>();
+
+  private async runBoundRetryTask(session: SessionDetail, brief: TaskBrief, tasks: AgentTask[], binding: IntentRetryBinding,
+    signal?: AbortSignal): Promise<ExecutionOutcome> {
+    if (signal?.aborted) return cancelledExecutionOutcome(signal);
+    if (tasks.length !== 1 || tasks[0].id !== binding.task.taskId || brief.id !== binding.briefId) throw new Error('INTENT_RETRY_TARGET_OBSOLETE');
+    const claimId = await claimIntentRetryExecution(this.persistence, binding);
+    const task = this.tasks.find(session.id, binding.task.taskId);
+    const key = `${session.id}:${binding.task.taskId}`;
+    (this.retryTaskBindings ??= new Map()).set(key, binding);
+    try {
+      if (!task || !this.isTaskReady(task, this.tasks.list(session.id))) throw new Error('INTENT_RETRY_DEPENDENCIES_INCOMPLETE');
+      const result = await this.runOneTask(session, brief, task, signal);
+      await settleIntentRetryExecution(this.persistence, binding, claimId);
+      if (signal?.aborted) return cancelledExecutionOutcome(signal);
+      if (result.ok) return { kind: binding.workflow ? 'workflow_step_completed' : 'retry_task_completed',
+        taskId: task.id, resultSummary: task.resultSummary ?? messages.taskCompleted(task.title) };
+      if (result.code === 'INPUT_BUDGET_EXCEEDED') return { kind: 'input_budget_exceeded', taskId: task.id,
+        reason: result.message, error: result.error! };
+      if (result.approvalRequired) return { kind: 'approval_required', reason: result.message };
+      if (result.workspaceConflict) return { kind: 'workspace_conflict', reason: result.message };
+      return { kind: 'failed', taskId: task.id, reason: result.message, ...(result.error ? { error: result.error } : {}) };
+    } catch (error) {
+      await settleIntentRetryExecution(this.persistence, binding, claimId, true);
+      throw error;
+    } finally { this.retryTaskBindings.delete(key); }
+  }
+
   private async runOneTask(
     session: SessionDetail,
     brief: TaskBrief,
@@ -2019,6 +2097,7 @@ export class OrchestratorService {
     contextRetryCount = 0,
     runtimeRetryCount = 0
   ): Promise<TaskRunOutcome> {
+    const boundRetry = this.retryTaskBindings?.has(`${session.id}:${task.id}`) ?? false;
     const isFileRevisionTask = task.executionPurpose === 'file_revision' || task.executionPurpose === 'revision_synthesis';
     const backend = this.pickSessionAgent(session, ['backend'], 0);
     const coordinator = isFileRevisionTask
@@ -2174,6 +2253,7 @@ export class OrchestratorService {
       taskId: task.id,
       phase: 'task_execution',
       ...(this.runtime.operations ? { operation: await this.taskExecutionOperation(session, task, invocationId) } : {}),
+      inputBudgetTask: true,
       agent: taskAgent,
       contextAssembly,
       expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' },
@@ -2181,6 +2261,7 @@ export class OrchestratorService {
       ...(isFileRevisionTask ? { writeModeOverride: 'proposal_only' as const } : {})
     }, signal);
     const executionRuntimeType = result.runtimeType;
+    await this.runtime.assertInvocationCurrent?.(session.id, result.invocationId);
     if (result.executionCandidate) this.tasks.update(task, { executionCheckpoint: {
       operationId: task.executionOperationId, invocationId: result.invocationId,
       candidateId: result.executionCandidate.id, candidateHash: result.executionCandidate.manifestHash,
@@ -2196,6 +2277,10 @@ export class OrchestratorService {
       const message = result.error?.message ?? result.status;
       const requestedContext = result.error?.requestedContext;
       const code = result.error?.code;
+      if (code === 'INPUT_BUDGET_EXCEEDED') {
+        this.markInputBudgetWaiting(session, task, taskAgent.id, result);
+        return { ok: false, message, code, retryable: false, error: result.error };
+      }
       const publicMessage = isFileRevisionTask
         ? this.fileRevisionRuntimeFailureMessage(code)
         : message;
@@ -2243,7 +2328,7 @@ export class OrchestratorService {
           workItemBudgetExhausted: true
         };
       }
-      if (this.canRetryRuntimeTimeout(result.error, runtimeRetryCount)) {
+      if (!boundRetry && this.canRetryRuntimeTimeout(result.error, runtimeRetryCount)) {
         this.recordRuntimeTimeoutRetry(session, task, taskAgent.id, invocationId, publicMessage, runtimeRetryCount + 1);
         this.tasks.update(task, { status: 'pending', resultSummary: `运行时调用超时，准备重试：${publicMessage}` });
         await this.backoffRuntimeRetry(runtimeRetryCount, signal);
@@ -2267,9 +2352,10 @@ export class OrchestratorService {
         code,
         isFileRevisionTask ? undefined : requestedContext,
         isFileRevisionTask ? undefined : result.error?.details,
-        result.error?.retryable ?? false
+        result.error?.retryable ?? false,
+        result.invocationId
       );
-      if (!isFileRevisionTask && this.canRetryWithSupplementalContext(code, requestedContext, contextRetryCount)) {
+      if (!boundRetry && !isFileRevisionTask && this.canRetryWithSupplementalContext(code, requestedContext, contextRetryCount)) {
         const novelContext = this.resolveRetryRequest(session, code, requestedContext, contextRetryCount);
         if (novelContext) {
           const resolution = await this.hydrateSupplementalContext(session, novelContext, { workItemId: task.workItemId ?? session.activeWorkItemId });
@@ -2318,9 +2404,12 @@ export class OrchestratorService {
         publicMessage,
         executionRuntimeType,
         code,
-        isFileRevisionTask ? undefined : requestedContext
+        isFileRevisionTask ? undefined : requestedContext,
+        undefined,
+        false,
+        result.invocationId
       );
-      if (!isFileRevisionTask && this.canRetryWithSupplementalContext(code, requestedContext, contextRetryCount)) {
+      if (!boundRetry && !isFileRevisionTask && this.canRetryWithSupplementalContext(code, requestedContext, contextRetryCount)) {
         const novelContext = this.resolveRetryRequest(session, code, requestedContext, contextRetryCount);
         if (novelContext) {
           const resolution = await this.hydrateSupplementalContext(session, novelContext, { workItemId: task.workItemId ?? session.activeWorkItemId });
@@ -2381,6 +2470,7 @@ export class OrchestratorService {
       } finally {
         this.worktreeExecution?.releaseWriteLease(result.workspaceExecution.changeSet.id);
       }
+      await this.runtime.assertInvocationCurrent?.(session.id, result.invocationId);
       result.workspaceExecution.writeback = writeback;
       if (writeback.status === 'applied') this.tasks.update(task, { executionCheckpoint: {
         ...task.executionCheckpoint, operationId: task.executionOperationId, invocationId: result.invocationId,
@@ -2435,7 +2525,7 @@ export class OrchestratorService {
       : output.summary;
     this.tasks.update(task, { status: 'completed', resultSummary: publicResultSummary });
     const allowGeneratedFileWrites = isFileRevisionTask || this.shouldWriteGeneratedFiles(session, brief);
-    const executionArtifact = this.createExecutionArtifact(
+    const executionArtifact = await this.createExecutionArtifact(
       session.id,
       task,
       taskAgent.id,
@@ -3276,7 +3366,7 @@ export class OrchestratorService {
     const reviewOutput = this.completedOutput<PostReviewReportOutput>(reviewRun, 'post_review_report');
     const allowGeneratedFileWrites = this.shouldWriteGeneratedFiles(session, brief);
     const reviewFileChanges = allowGeneratedFileWrites ? this.reviewFileChanges(reviewOutput) : [];
-    const reviewArtifact = this.artifacts.create({
+    const reviewArtifact = await this.artifacts.create({
       sessionId: session.id,
       workItemId: session.activeWorkItemId,
       agentId: review.id,
@@ -3377,7 +3467,7 @@ export class OrchestratorService {
           requiresUserConfirmation: true as const
         }
       : undefined;
-    const deliveryArtifact = this.artifacts.create({
+    const deliveryArtifact = await this.artifacts.create({
       sessionId: session.id,
       workItemId: session.activeWorkItemId,
       agentId: coordinator.id,
@@ -3395,7 +3485,7 @@ export class OrchestratorService {
     const notificationFileChanges =
       notification && allowGeneratedFileWrites ? this.notificationDraftFileChanges(brief, finalOutput) : [];
     const notificationDraft = notification
-      ? this.artifacts.create({
+      ? await this.artifacts.create({
           sessionId: session.id,
           workItemId: session.activeWorkItemId,
           agentId: notification.id,
@@ -4449,6 +4539,8 @@ export class OrchestratorService {
   }
 
   private isTaskReady(task: AgentTask, tasks: AgentTask[]) {
+    if (this.runtime.operations?.list(task.sessionId).some(operation => operation.taskId === task.id &&
+      operation.inputBudgetDecisions?.some(hold => hold.status === 'pending'))) return false;
     if (!task.dependsOnTaskIds.length) {
       return true;
     }
@@ -4466,7 +4558,8 @@ export class OrchestratorService {
     code: RuntimeError['code'] = 'MODEL_ERROR',
     requestedContext?: RuntimeContextRequest,
     details?: Record<string, unknown>,
-    retryable = false
+    retryable = false,
+    failedInvocationId?: string
   ) {
     const needsMoreContext = code === 'CONTEXT_INSUFFICIENT';
     const taskStatus: AgentTask['status'] = needsMoreContext ? 'waiting' : 'failed';
@@ -4474,7 +4567,9 @@ export class OrchestratorService {
     const publicMessage = isFileRevisionTask ? 'File revision Runtime failed.' : message;
     const publicRequestedContext = isFileRevisionTask ? undefined : requestedContext;
     const publicDetails = isFileRevisionTask ? undefined : details;
-    this.tasks.update(task, { status: taskStatus, resultSummary: publicMessage });
+    this.tasks.update(task, { status: taskStatus, resultSummary: publicMessage,
+      ...(this.persistence.getCollection<SessionDetail[]>('sessions', []).find(row => row.id === sessionId)?.intentContractVersion === 'intent-understanding-v1' ?
+        { lastExecutionFailure: failedInvocationId ? { invocationId: failedInvocationId, phase: 'task_execution' as const } : undefined } : {}) });
     this.events.create({
       sessionId,
       workItemId: task.workItemId,
@@ -4573,7 +4668,10 @@ export class OrchestratorService {
       this.tasks.update(task, { previousExecutionOperationId: task.executionOperationId, executionOperationId: undefined });
     }
     let operation = await this.runtime.operations.begin({ id: task.executionOperationId ?? invocationId,
-      sessionId: session.id, taskId: task.id, phase: 'task_execution', previousId: task.previousExecutionOperationId });
+      sessionId: session.id, taskId: task.id, phase: 'task_execution', previousId: task.previousExecutionOperationId,
+      ...(this.retryTaskBindings?.get(`${session.id}:${task.id}`) ? { dataEpoch: session.dataEpoch, workItemId: task.workItemId,
+        intentStepId: this.retryTaskBindings.get(`${session.id}:${task.id}`)!.task.stepId,
+        executionBinding: this.retryTaskBindings.get(`${session.id}:${task.id}`)!.task.executionBinding } : {}) });
     if (operation.status === 'paused') operation = await this.runtime.operations.resume(session.id, operation.id);
     if (!task.executionOperationId) this.tasks.update(task, { executionOperationId: operation.id });
     return operation;
@@ -4759,13 +4857,7 @@ export class OrchestratorService {
       content,
       confidence: 0.92
     });
-    const eventContent = resolution.outcome === 'resolved'
-      ? `已补充上下文，准备重试：${requestedContext.reason}`
-      : resolution.outcome === 'partial'
-        ? `已补充部分上下文，准备重试：${requestedContext.reason}`
-        : resolution.outcome === 'cancelled'
-          ? `上下文补充已取消：${requestedContext.reason}`
-          : `未能补充上下文：${requestedContext.reason}`;
+    const eventContent = contextSupplementNotice(resolution, requestedContext.reason);
     this.events.create({
       sessionId: session.id,
       type: 'agent_message',
@@ -4814,7 +4906,7 @@ export class OrchestratorService {
     });
   }
 
-  private createExecutionArtifact(
+  private async createExecutionArtifact(
     sessionId: string,
     task: AgentTask,
     agentId: string,
@@ -4834,7 +4926,7 @@ export class OrchestratorService {
     const platformProjections = allowFileChanges
       ? this.runtimeStageFileChangeProjections(proposalsForPersistence)
       : [];
-    return this.artifacts.create({
+    return await this.artifacts.create({
       sessionId,
       workItemId: task.workItemId,
       taskId: task.id,
@@ -5348,7 +5440,7 @@ export class OrchestratorService {
     return { artifact, resolvedEvent, resultEvent, saved: approved, path: report.suggestedPath };
   }
 
-  ensureArchitectureReportSaveConfirmation(session: SessionDetail) {
+  async ensureArchitectureReportSaveConfirmation(session: SessionDetail) {
     if (
       session.status !== 'COMPLETED' ||
       session.workingDirectory?.kind !== 'server_local' ||
@@ -5385,7 +5477,7 @@ export class OrchestratorService {
         )
       : sourceReport.content;
     const coordinator = this.pickSessionAgent(session, ['coordinator'], 0);
-    const artifact = this.artifacts.create({
+    const artifact = await this.artifacts.create({
       sessionId: session.id,
       workItemId: session.activeWorkItemId,
       agentId: coordinator.id,
@@ -7544,7 +7636,7 @@ export class OrchestratorService {
           }
         : {})
     };
-    const artifact = this.artifacts.create({
+    const artifact = await this.artifacts.create({
       sessionId: session.id,
       workItemId,
       taskId: task?.id,
@@ -7905,6 +7997,12 @@ export class OrchestratorService {
       const supplementalStartedAt = Date.now();
       const task = draft.taskId ? this.tasks.find(inputSession.id, draft.taskId) : undefined;
       const workItemId = draft.contextAssembly.workItemId ?? task?.workItemId ?? inputSession.activeWorkItemId;
+      this.events.create({ sessionId: inputSession.id, workItemId, taskId: draft.taskId,
+        type: 'runtime_progress', fromAgentId: draft.agent.id,
+        content: '正在准备上下文证据，完成后将继续当前阶段。',
+        metadata: createMetadata('system_notice', { code: 'CONTEXT_PREPARATION_STARTED',
+          runtimeInvocationId: draft.invocationId, operationId: draft.operation?.id,
+          phase: draft.phase, contextPreparationState: 'preparing' }) });
       const resolution = await this.hydrateSupplementalContext(inputSession, novelContext, { workItemId, signal });
       throwIfAborted(signal);
       const supplementalDurationMs = Date.now() - supplementalStartedAt;
@@ -8149,6 +8247,14 @@ export class OrchestratorService {
         workItemId: input.contextAssembly.workItemId ?? inputSession.activeWorkItemId,
         attempt: input.attempt
       };
+      const retryBinding = input.taskId && this.retryTaskBindings?.get(`${inputSession.id}:${input.taskId}`);
+      if (retryBinding) {
+        resolvedPlan.intentRetryBinding = retryBinding;
+        resolvedPlan.intentStepId = retryBinding.task.stepId;
+        resolvedPlan.executionBinding = retryBinding.task.executionBinding;
+        resolvedPlan.effectScope = this.persistence.getCollection<Record<string, import('@agent-cluster/shared').IntentPlanStepRecord[]>>(
+          'intentPlanStepsBySession', {})[inputSession.id]?.find(row => row.id === retryBinding.task.stepId)?.step.effectScope;
+      }
       if (input.runtimeCandidateOverride && resolvedPlan.executionTarget.runtimeType !== input.runtimeCandidateOverride) {
         return this.runtimeRoutingBlockedResult(inputSession, input, '指定的接管 Runtime 当前不满足执行条件，未改用其他 Runtime。');
       }
@@ -8212,6 +8318,11 @@ export class OrchestratorService {
     const plan: InvocationPlan = priorRuntimeSession
       ? { ...resolvedPlan, resume: priorRuntimeSession }
       : resolvedPlan;
+    if (input.inputBudgetTask && input.taskId && this.tasks.find(inputSession.id, input.taskId)) {
+      plan.inputBudgetPolicy = { kind: 'agent_task', actorId: inputSession.ownerId, dataEpoch: inputSession.dataEpoch!,
+        sessionGeneration: plan.operation?.sessionGeneration ?? this.lifecycle.generation(inputSession.id)!,
+        taskId: input.taskId, slot: `task:${input.taskId}:${input.phase}:${plan.operation?.id}` };
+    }
 
     // === 检查是否有待审批的能力 ===
     if (plan.pendingApprovals && plan.pendingApprovals.length > 0) {
@@ -8233,9 +8344,10 @@ export class OrchestratorService {
         .filter(item => item.source === 'workspace_file');
       this.events.create({ sessionId: inputSession.id, type: 'runtime_progress', fromAgentId: input.agent.id,
         content: evidenceDecision.ok
-          ? `已为当前 Agent 装配 ${injected.size} 份源码证据。`
-          : '当前 Agent 的源码证据尚未就绪，正在检查补充路径。',
+          ? `源码证据已就绪，已通过检查（${injected.size} 份文件），准备调用模型。`
+          : '正在检查上下文证据，当前仍需补充源码内容。',
         metadata: createMetadata('system_notice', { code: 'CONTEXT_EVIDENCE_ASSEMBLED',
+          contextPreparationState: evidenceDecision.ok ? 'ready' : 'preparing',
           runtimeInvocationId: input.invocationId, phase: input.phase, workItemId: plan.workItemId,
           evidencePaths: [...injected], evidenceBytes: plan.contextEnvelope.L3.totalByteLength,
           truncated: plan.contextEnvelope.L3.truncated,
@@ -8250,13 +8362,28 @@ export class OrchestratorService {
       return this.groundedEvidenceMissingResult(plan, evidenceDecision.reason);
     }
 
-    const estimatedInputTokens = estimateTokens({
+    const estimatedInputTokens = plan.inputBudgetPolicy && this.runtime.estimatePreparedInputTokens ? this.runtime.estimatePreparedInputTokens(plan) : estimateTokens({
       agent: plan.agent.systemPrompt,
       contextEnvelope: plan.contextEnvelope,
       toolCatalog: plan.toolCatalog,
       expectedOutput: plan.expectedOutput
     });
-    if (plan.budget.maxInputTokens && estimatedInputTokens > plan.budget.maxInputTokens) {
+    if (plan.inputBudgetPolicy && plan.budget.maxInputTokens !== undefined) {
+      const margin = reserveInputTokenSafetyMargin(plan.budget.maxInputTokens, llmInputSafetyMarginRatio());
+      const estimate = { estimatedInputTokens, outputReservationTokens: Math.ceil((plan.budget.maxOutputTokens ?? 0) * 0.5),
+        maxInputTokens: plan.budget.maxInputTokens, effectiveMaxInputTokens: margin.effectiveMaxInputTokens!,
+        safetyMarginTokens: margin.safetyMarginTokens };
+      try { await new InputBudgetStore(this.persistence).assert(plan, estimate, false); }
+      catch (error) {
+        const exceeded = (error as { code?: string }).code === 'INPUT_BUDGET_EXCEEDED';
+        return { ...(exceeded ? this.tokenBudgetExceededResult(plan, estimatedInputTokens, plan.budget.maxInputTokens)
+          : this.runtimeRoutingBlockedResult(inputSession, input, (error as Error).message)),
+          status: 'blocked', error: { code: exceeded ? 'INPUT_BUDGET_EXCEEDED' : 'CAPABILITY_BLOCKED',
+            message: (error as Error).message, retryable: false,
+            details: exceeded ? (error as { details?: Record<string, unknown> }).details
+              : { inputBudgetAdmissionDenied: true, reason: (error as Error).message } } } as AgentRunResult;
+      }
+    } else if (plan.budget.maxInputTokens && estimatedInputTokens > plan.budget.maxInputTokens) {
       return this.tokenBudgetExceededResult(plan, estimatedInputTokens, plan.budget.maxInputTokens);
     }
     if (input.minimumOutputTokens !== undefined) {
@@ -8352,6 +8479,16 @@ export class OrchestratorService {
     try {
       let result = await execution.result;
       await streamConsumer;
+      if (result.intentAdmission?.status === 'superseded') {
+        throw new IntentExecutionSupersededError(result.intentAdmission.reason ?? 'INTENT_EXECUTION_STALE');
+      }
+      if (this.runtime.operations?.assertCurrentIntent) {
+        try { await this.runtime.operations.assertCurrentIntent(plan); }
+        catch (error) {
+          if (error instanceof Error && /^INTENT_/.test(error.message)) throw new IntentExecutionSupersededError(error.message);
+          throw error;
+        }
+      }
       const requiredDocument = plan.contextEnvelope.L1.requiredDocument;
       if (
         requiredDocument &&
@@ -8734,6 +8871,8 @@ export class OrchestratorService {
       ? [{ path: '.', depth: 1 }]
       : undefined;
     const message = localizeBuiltInNotice(`Context v2 blocked an ungrounded runtime call: ${reason}.`);
+    // Internal retry signal only. The outer loop publishes preparation progress;
+    // a runtime failure is exposed only if bounded preparation cannot recover.
     return {
       invocationId: input.invocationId,
       runtimeType: input.executionTarget.runtimeType,
@@ -8970,9 +9109,19 @@ export class OrchestratorService {
     throw new Error(messages.noAvailableAgent);
   }
 
-  private persistBriefs() {
-    this.persistence.setCollection('briefsBySession', Object.fromEntries(this.briefsBySession));
-    this.persistence.setCollection('suggestedTasksByBriefId', Object.fromEntries(this.suggestedTasksByBriefId));
+  private async persistBriefs() {
+    const cachedBriefs = structuredClone(Object.fromEntries(this.briefsBySession));
+    const cachedSuggestions = structuredClone(Object.fromEntries(this.suggestedTasksByBriefId));
+    await this.persistence.mutateCollections(['sessions', 'briefsBySession', 'suggestedTasksByBriefId'], draft => {
+      const protectedSessions = new Set((draft.sessions as SessionDetail[] | undefined)?.filter(row => row.intentContractVersion === 'intent-understanding-v1').map(row => row.id));
+      const saved = (draft.briefsBySession ?? {}) as Record<string, TaskBrief[]>;
+      const protectedBriefs = Object.fromEntries(Object.entries(saved).filter(([id]) => protectedSessions.has(id)));
+      const protectedIds = new Set(Object.values(protectedBriefs).flat().map(row => row.id));
+      const savedSuggestions = (draft.suggestedTasksByBriefId ?? {}) as Record<string, SuggestedAgentTask[]>;
+      draft.briefsBySession = { ...Object.fromEntries(Object.entries(cachedBriefs).filter(([id]) => !protectedSessions.has(id))), ...protectedBriefs };
+      draft.suggestedTasksByBriefId = { ...Object.fromEntries(Object.entries(cachedSuggestions).filter(([id]) => !protectedIds.has(id))),
+        ...Object.fromEntries(Object.entries(savedSuggestions).filter(([id]) => protectedIds.has(id))) };
+    });
   }
 
   private searchAgentKnowledge(session: SessionDetail, agent: Agent, query: string) {

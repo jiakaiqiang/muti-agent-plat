@@ -18,6 +18,8 @@ export type ExecutionJobData = {
   briefId: string;
   dataEpoch: string;
   sessionGeneration?: number;
+  intentResumeBinding?: import('@agent-cluster/shared').IntentResumeBinding;
+  intentRetryBinding?: import('@agent-cluster/shared').IntentRetryBinding;
 };
 
 @Injectable()

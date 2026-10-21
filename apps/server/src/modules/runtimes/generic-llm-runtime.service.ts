@@ -57,6 +57,11 @@ import { ToolInvocationAuditService } from '../tools/tool-invocation-audit.servi
 import { AttachmentReaderTool } from '../tools/builtin/attachment-reader.tool.js';
 import { InvocationWorkspaceBindingsService } from './invocation-workspace-bindings.service.js';
 import { DiscussionDocumentsService } from '../discussion-documents/discussion-documents.service.js';
+import { CodeSearchTool } from '../tools/builtin/code-search.tool.js';
+import { PersistenceService } from '../persistence/persistence.service.js';
+import { InputBudgetStore, INPUT_BUDGET_EXCEEDED } from './input-budget-store.js';
+import { assertIntentExecutionCurrent, INTENT_EXECUTION_COLLECTIONS } from '../message-routing/intent-execution-guard.js';
+import { assertIntentInvocationScope, type SessionDetail, type LogicalOperation } from '@agent-cluster/shared';
 import {
   abortWithTermination,
   createExecutionTermination,
@@ -204,6 +209,7 @@ const TOOL_LOOP_OUTPUT_RESERVATION_RATIO = 0.5;
 
 @Injectable()
 export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
+  static readonly TOOL_LOOP_READ_ONLY_TOOLS = Object.freeze(['read_file', 'search_code', 'read_attachment'] as const);
   readonly type = 'generic_llm' as const;
   readonly metadata = {
     name: 'generic-llm',
@@ -224,7 +230,9 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     private readonly workspaceBindings: InvocationWorkspaceBindingsService,
     @Optional() private readonly toolAudit?: ToolInvocationAuditService,
     @Optional() private readonly discussionDocuments?: DiscussionDocumentsService,
-    @Optional() private readonly attachmentReader?: AttachmentReaderTool
+    @Optional() private readonly attachmentReader?: AttachmentReaderTool,
+    @Optional() private readonly codeSearch?: CodeSearchTool,
+    @Optional() private readonly intentPersistence?: PersistenceService
   ) {}
 
   maxStructuredOutputTokens(input: { modelId?: string }) {
@@ -330,10 +338,13 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     }
 
     const hasTools = input.toolCatalog.tools.length > 0;
-    if (hasTools && this.workspaceBindings.resolveServerRoot(input)) {
+    const boundReadResponse = input.admissionClass === 'response' && input.executionBinding &&
+      input.effectScope?.effects.some(effect => effect.kind === 'read_workspace');
+    if (hasTools && (boundReadResponse || this.workspaceBindings.resolveServerRoot(input))) {
       try {
         return await this.runWithToolLoop(input, selectedConnection, signal);
       } catch (error) {
+        if ((error as { code?: string }).code === INPUT_BUDGET_EXCEEDED) return this.inputBudgetBlockedResult(input, startedAt, selectedConnection.model, error);
         const guard = (error as { budgetGuard?: { code: string; round: number; estimator: string;
           estimatedInputTokens: number; effectiveMaxInputTokens: number; maxInputTokens?: number;
           safetyMarginTokens: number; outputReservationTokens: number;
@@ -409,12 +420,13 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   ): Promise<AgentRunResult> {
     const startedAt = nowIso();
     const selectedModel = selectedConnection.model;
-    const maxRetries = llmMaxRetries();
+    const maxRetries = input.admissionClass === 'response' ? 0 : llmMaxRetries();
     const timeoutMs = llmTimeoutMs();
     let lastMessage = 'unknown error';
     let lastCode: RuntimeError['code'] = 'MODEL_ERROR';
     let lastDetails: Record<string, unknown> | undefined;
     let repairAttempts = 0;
+    let accruedUsage: RuntimeUsage | undefined;
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       if (attempt > 0 && input.operation && Date.now() >= Date.parse(input.operation.deadlineAt)) {
@@ -451,25 +463,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       signal?.addEventListener('abort', onAbort, { once: true });
       const timer = setTimeout(() => this.observeRequest('observation_due', timeoutMs), timeoutMs);
       try {
-        const messages = [
-          {
-            role: 'system',
-            content:
-              selectedConnection.kind === 'local'
-                ? this.buildLocalSystemPrompt(input)
-                : this.buildRemoteSystemPrompt(input)
-          },
-          {
-            role: 'user',
-            content: JSON.stringify({
-              phase: input.phase,
-              expectedOutput: input.expectedOutput,
-              contextEnvelope: input.contextEnvelope,
-              toolCatalog: input.toolCatalog,
-              budget: input.budget
-            })
-          }
-        ];
+        const messages = this.completionMessages(input, selectedConnection);
         let completion = await this.requestCompletion(
           input,
           selectedConnection,
@@ -479,8 +473,12 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         );
         let streamMetrics = completion.streamMetrics;
         let usage = this.toUsage(completion.body.usage, selectedConnection);
+        accruedUsage = usage;
         let evaluated = this.evaluateRuntimeOutput(completion.body, input.expectedOutput.kind);
-        while (!evaluated.output && repairAttempts < Math.min(1, llmSchemaRepairAttempts())) {
+        const callerOwnsRepair = (input.admissionClass === 'routing' && input.phase === 'user_message_routing' &&
+          ['intent_understanding', 'intent_routing_decision'].includes(input.expectedOutput.kind)) || input.admissionClass === 'response' ||
+          (['brief_generation', 'brief_revision'].includes(input.phase) && Boolean(input.intentStepId && input.executionBinding));
+        while (!evaluated.output && !callerOwnsRepair && repairAttempts < Math.min(1, llmSchemaRepairAttempts())) {
           repairAttempts += 1;
           completion = await this.requestCompletion(
             input,
@@ -491,6 +489,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           );
           streamMetrics = mergeRuntimeStreamMetrics(streamMetrics, completion.streamMetrics);
           usage = this.mergeUsage(usage, this.toUsage(completion.body.usage, selectedConnection));
+          accruedUsage = usage;
           evaluated = this.evaluateRuntimeOutput(completion.body, input.expectedOutput.kind);
         }
 
@@ -511,6 +510,9 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
               contentLength: diagnostics.contentLength,
               contentHash: diagnostics.contentHash,
               sanitizedPreview: diagnostics.sanitizedPreview,
+              ...(callerOwnsRepair ? { schemaRepairOwner: input.admissionClass === 'response' ? 'intent_response' : ['brief_generation', 'brief_revision'].includes(input.phase) ? 'intent_brief' : 'intent_classifier',
+                previousOutput: this.sanitizeDiagnosticPreview(diagnostics.content, 8000),
+                validationErrors: diagnostics.validationErrors.slice(0, 20).map(error => this.sanitizeDiagnosticPreview(error, 500)) } : {}),
               repairAttempts
             },
             usage
@@ -545,6 +547,10 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           streamMetrics
         };
       } catch (error) {
+        if ((error as { code?: string }).code === INPUT_BUDGET_EXCEEDED) return this.inputBudgetBlockedResult(input, startedAt, selectedModel, error, accruedUsage);
+        if ((error as { details?: { inputBudgetAdmissionDenied?: boolean } }).details?.inputBudgetAdmissionDenied) {
+          return this.failedResult(input, startedAt, selectedModel, (error as Error).message, 'CAPABILITY_BLOCKED', this.errorDetails(error));
+        }
         const isAbort = error instanceof Error && (error.name === 'AbortError' || Boolean(signal?.aborted));
         const upstreamTimeoutMessage = this.upstreamTimeoutMessage(signal);
         const wasUpstreamTimeout = isAbort && Boolean(upstreamTimeoutMessage);
@@ -585,6 +591,39 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     return this.failedResult(input, startedAt, selectedModel, lastMessage, lastCode, lastDetails);
   }
 
+  private completionMessages(input: InvocationPlan, connection: RuntimeModelConnection) {
+    return [{ role: 'system', content: connection.kind === 'local' ? this.buildLocalSystemPrompt(input) : this.buildRemoteSystemPrompt(input) },
+      { role: 'user', content: JSON.stringify({ phase: input.phase, expectedOutput: input.expectedOutput,
+        contextEnvelope: input.contextEnvelope, toolCatalog: input.toolCatalog, budget: input.budget }) }];
+  }
+
+  estimatePreparedInputTokens(input: InvocationPlan) {
+    return estimateTokens({ messages: this.completionMessages(input, this.modelConfig.connectionForModelId(input.executionTarget.modelId)) });
+  }
+
+  private async assertScopedInputBudget(input: InvocationPlan, messages: Array<{ role: string; content: string }>) {
+    if (!input.inputBudgetPolicy || input.budget.maxInputTokens === undefined) return;
+    const margin = reserveInputTokenSafetyMargin(input.budget.maxInputTokens, llmInputSafetyMarginRatio());
+    try { await new InputBudgetStore(this.intentPersistence).assert(input, {
+      estimatedInputTokens: estimateTokens({ messages }),
+      outputReservationTokens: Math.ceil((input.budget.maxOutputTokens ?? 0) * TOOL_LOOP_OUTPUT_RESERVATION_RATIO),
+      maxInputTokens: input.budget.maxInputTokens,
+      effectiveMaxInputTokens: margin.effectiveMaxInputTokens!, safetyMarginTokens: margin.safetyMarginTokens
+    }, true); } catch (error) {
+      if ((error as { code?: string }).code === INPUT_BUDGET_EXCEEDED) throw error;
+      throw Object.assign(new Error((error as Error).message), { code: 'CAPABILITY_BLOCKED', retryable: false,
+        details: { inputBudgetAdmissionDenied: true, reason: (error as Error).message } });
+    }
+  }
+
+  private inputBudgetBlockedResult(input: InvocationPlan, startedAt: string, model: string, error: unknown, usage?: RuntimeUsage): AgentRunResult {
+    const result = this.failedResult(input, startedAt, model, (error as Error).message,
+      'INPUT_BUDGET_EXCEEDED', this.errorDetails(error), usage);
+    return { ...result, status: 'blocked', output: createAgentMessageOutput({ messageKind: 'risk', content: (error as Error).message }),
+      events: result.events.map(event => event.type === 'runtime_failed' ? { ...event, type: 'runtime_progress',
+        content: '输入预算超限，已停止本次请求，等待用户选择继续或结束。', metadata: { ...event.metadata, status: 'blocked' } } : event) };
+  }
+
   private async requestCompletion(
     input: InvocationPlan,
     connection: RuntimeModelConnection,
@@ -604,6 +643,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       const requestBody = this.completionRequestBody(input, connection, messages, activeMode);
       const requestStartedAt = nowIso();
       const requestStartedMs = Date.now();
+      await this.assertScopedInputBudget(input, messages);
       this.observeRequest('request_started');
       const response = await fetch(this.chatCompletionsUrl(connection.baseUrl), {
         method: 'POST',
@@ -753,7 +793,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   ): Promise<AgentRunResult> {
     const startedAt = nowIso();
     const selectedModel = selectedConnection.model;
-    const rootPath = this.workspaceBindings.resolveServerRoot(input) ?? '';
+    let rootPath = this.workspaceBindings.resolveServerRoot(input) ?? '';
     const MAX_TOOL_ROUNDS = 5;
     const MAX_TOOL_CALLS_TOTAL = 12;
     const MAX_TOOL_OUTPUT_CHARS = 80_000;
@@ -771,6 +811,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       `Expected kind: ${input.expectedOutput.kind}`,
       '',
       '## Tool Protocol',
+      `Available authorized tools: ${JSON.stringify(input.toolCatalog.tools)}`,
       'To read a file, output:',
       '<<TOOL_CALL>>',
       '{"name":"read_file","input":{"path":"relative/path/to/file.ts"}}',
@@ -904,7 +945,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       countedToolHistoryTokens = activeToolHistory.length ? estimateTokens(activeToolHistory) : 0;
       countedRounds += 1;
       estimatedInputTokensTotal += estimatedInputTokens;
-      if (!effectiveInputCap) return;
+      if (input.inputBudgetPolicy || !effectiveInputCap) return;
       if (comparedInputTokens <= effectiveInputCap) return;
       throw Object.assign(new Error(
         `Estimated input tokens ${comparedInputTokens} exceed effective budget ${effectiveInputCap} (configured ${input.budget.maxInputTokens}).`
@@ -960,7 +1001,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       }
 
       let rawResponse: string | undefined;
-      const maxRetries = llmMaxRetries();
+      const maxRetries = input.admissionClass === 'response' ? 0 : llmMaxRetries();
       for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
         if (attempt > 0 && input.operation && Date.now() >= Date.parse(input.operation.deadlineAt)) {
           return this.failedResult(input, startedAt, selectedModel, 'Recovery refused: operation deadline exhausted.',
@@ -987,6 +1028,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         const timer = setTimeout(() => this.observeRequest('observation_due', timeoutMs), timeoutMs);
         try {
           if (signal?.aborted) onAbort();
+          await this.assertScopedInputBudget(input, messages);
           this.observeRequest('request_started');
           const response = await fetch(this.chatCompletionsUrl(selectedConnection.baseUrl), {
             method: 'POST',
@@ -1029,6 +1071,10 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           loopUsage = loopUsage ? this.mergeUsage(loopUsage, roundUsage) : roundUsage;
           break;
         } catch (error) {
+          if ((error as { code?: string }).code === INPUT_BUDGET_EXCEEDED) return this.inputBudgetBlockedResult(input, startedAt, selectedModel, error, loopUsage);
+          if ((error as { details?: { inputBudgetAdmissionDenied?: boolean } }).details?.inputBudgetAdmissionDenied) {
+            return this.failedResult(input, startedAt, selectedModel, (error as Error).message, 'CAPABILITY_BLOCKED', this.errorDetails(error));
+          }
           const isAbort = error instanceof Error && (error.name === 'AbortError' || Boolean(signal?.aborted));
           const timeoutMessage = this.upstreamTimeoutMessage(signal);
           const wasUpstreamTimeout = isAbort && Boolean(timeoutMessage);
@@ -1171,6 +1217,36 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           break;
         }
         totalToolCalls += 1;
+        if (!GenericLlmRuntimeService.TOOL_LOOP_READ_ONLY_TOOLS.includes(call.name as 'read_file') ||
+          !input.toolCatalog.tools.some(tool => tool.name === call.name)) {
+          return this.failedResult(input, startedAt, selectedModel, '模型请求的工具不在本次授权范围内。',
+            'CAPABILITY_BLOCKED', { reason: 'TOOL_NOT_AUTHORIZED', toolName: call.name }, loopUsage);
+        }
+        if (input.executionBinding) {
+          try {
+            assertIntentInvocationScope(input);
+            signal?.throwIfAborted();
+            if (!this.intentPersistence) throw new Error('INTENT_TOOL_GUARD_UNAVAILABLE');
+            const boundRoot = await this.intentPersistence.mutateCollections(['sessions', 'sessionLifecyclesBySession',
+              'logicalOperationsBySession', ...INTENT_EXECUTION_COLLECTIONS], draft => {
+              assertIntentExecutionCurrent(draft, input);
+              const operation = (draft.logicalOperationsBySession as Record<string, LogicalOperation[]> | undefined)?.[input.sessionId]
+                ?.find(row => row.id === input.operation?.id);
+              if (!operation || operation.activeInvocationId !== input.invocationId || ['requested', 'unconfirmed'].includes(operation.stopState)) {
+                throw new Error('INTENT_TOOL_OPERATION_STALE');
+              }
+              const session = (draft.sessions as SessionDetail[]).find(row => row.id === input.sessionId)!;
+              return input.admissionClass === 'response' ? session.workingDirectory?.path : undefined;
+            }, { sessionIds: [input.sessionId] });
+            if (input.admissionClass === 'response') {
+              if (!boundRoot) throw new Error('INTENT_WORKSPACE_ROOT_UNAVAILABLE');
+              rootPath = boundRoot;
+            }
+          } catch (error) {
+            return this.failedResult(input, startedAt, selectedModel, '本次工具调用的意图版本或只读授权已失效。',
+              'CAPABILITY_BLOCKED', { reason: error instanceof Error ? error.message : 'INTENT_TOOL_ADMISSION_FAILED', toolName: call.name }, loopUsage);
+          }
+        }
         this.observeRequest('tool_started');
 
         if (call.name === 'read_file') {
@@ -1218,6 +1294,24 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           }));
           totalToolOutputChars += output.length;
           toolCallHistory.push({ name: call.name, input: call.input, output, error: result.ok ? undefined : result.errorCode });
+        } else if (call.name === 'search_code') {
+          const toolStartedAt = nowIso();
+          const searchInput = input.admissionClass === 'response' && call.input && typeof call.input === 'object'
+            ? { ...call.input, literal: true } : call.input;
+          const result = this.codeSearch ? await this.codeSearch.execute(searchInput, { workingDirectory: rootPath,
+            sessionId: input.sessionId, agentId: input.agent.agentId, signal }) : { success: false, output: null, error: 'SEARCH_TOOL_UNAVAILABLE' };
+          const output = JSON.stringify(result.output ?? { error: result.error });
+          const truncated = Boolean((result.output as { limited?: boolean } | null)?.limited);
+          await this.toolAudit?.record({ externalId: `tool:${input.invocationId}:${totalToolCalls}`,
+            runtimeInvocationExternalId: input.invocationId, toolName: call.name, providerCallId: `${input.invocationId}:${totalToolCalls}`,
+            provider: 'generic_llm', arguments: call.input, result, success: result.success,
+            errorCode: result.success ? undefined : result.error, errorMessage: result.success ? undefined : result.error,
+            agentExternalId: input.agent.agentId, startedAt: toolStartedAt, completedAt: nowIso() });
+          toolResults.push(`<<TOOL_RESULT name="search_code" truncated="${truncated}">>\n${output}\n<<END_TOOL_RESULT>>`);
+          toolResultReferences.push(this.toolResultReference({ name: call.name, content: output, truncated,
+            ...(result.success ? {} : { error: result.error ?? 'SEARCH_FAILED' }) }));
+          totalToolOutputChars += output.length;
+          toolCallHistory.push({ name: call.name, input: call.input, output, error: result.success ? undefined : result.error });
         } else if (call.name === 'read_attachment') {
           const toolStartedAt = nowIso();
           const result = this.attachmentReader
@@ -1565,7 +1659,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     return undefined;
   }
 
-  private sanitizeDiagnosticPreview(content: string) {
+  private sanitizeDiagnosticPreview(content: string, maxChars = llmDiagnosticPreviewChars()) {
     const redacted = content
       .replace(
         /("(?:api[_-]?key|access[_-]?token|authorization|password|secret)"\s*:\s*")[^"]*(")/gi,
@@ -1573,7 +1667,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       )
       .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
       .replace(/\bsk-[A-Za-z0-9_-]{6,}\b/g, '[REDACTED]');
-    return redacted.replace(/\s+/g, ' ').trim().slice(0, llmDiagnosticPreviewChars());
+    return redacted.replace(/\s+/g, ' ').trim().slice(0, maxChars);
   }
 
   private extractMessageContent(body: GenericLlmResponseBody): { content?: string; source?: string } {
@@ -2082,7 +2176,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     if (typeof httpStatus === 'number') {
       return httpStatus === 408 || httpStatus === 429 || httpStatus === 504 || httpStatus === 524 || httpStatus >= 500;
     }
-    return !['RUNTIME_OUTPUT_CONTRACT_VIOLATION', 'RUNTIME_CANCELLED', 'CAPABILITY_BLOCKED'].includes(code);
+    return !['RUNTIME_OUTPUT_CONTRACT_VIOLATION', 'RUNTIME_CANCELLED', 'CAPABILITY_BLOCKED', 'INPUT_BUDGET_EXCEEDED'].includes(code);
   }
 
   private mergeUsage(left: RuntimeUsage, right: RuntimeUsage): RuntimeUsage {

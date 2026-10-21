@@ -1,7 +1,10 @@
 import { defineStore } from 'pinia'
+import { useIntentBriefConfirmationStore } from './intentBriefConfirmation'
+import { useIntentBriefRevisionStore } from './intentBriefRevision'
+import type { TaskBrief } from '@agent-cluster/shared'
 import type { SessionSwitchContext } from '@/composables/useSessionSwitch'
 import { readPoolFor } from '@/utils/readPool'
-import { apiDelete, apiGet, apiPage, apiPost, apiPut, isNetworkRequestError, isSessionNotFoundError } from '@/api/client'
+import { apiDelete, apiGet, apiPage, apiPost, apiPut, ApiRequestError, isNetworkRequestError, isSessionNotFoundError } from '@/api/client'
 import { expectedBackendCommit } from '@/config/runtime'
 import type {
   OpsHealth,
@@ -32,6 +35,7 @@ import type {
 import type { PostReviewAction } from '@/types/contracts'
 import type { GroupChatMessageDirectives } from '@agent-cluster/shared'
 import type { DecisionRecord } from '@agent-cluster/shared'
+import type { ClarifyIntentRoutingInput } from '@agent-cluster/shared'
 
 type CreateSessionInput = {
   input: string
@@ -116,6 +120,7 @@ function sessionRecencyTime(session: SessionListItem) {
 const terminalIntentRoutingStatuses = new Set<IntentRoutingStatus>([
   'ROUTED',
   'CLARIFICATION_REQUIRED',
+  'BLOCKED',
   'REJECTED'
 ])
 
@@ -468,6 +473,9 @@ export const useSessionStore = defineStore('session', {
       return true
     },
     recordIntentRouting(sessionId: string, routing: IntentRoutingRecord) {
+      if (routing.sessionId !== sessionId) return
+      const current = this.intentRoutingsById[routing.id]
+      if (current && (current.routingRevision ?? 1) > (routing.routingRevision ?? 1)) return
       this.intentRoutingsById[routing.id] = routing
       const ids = this.intentRoutingIdsBySession[sessionId] ?? []
       if (!ids.includes(routing.id)) this.intentRoutingIdsBySession[sessionId] = [...ids, routing.id]
@@ -490,19 +498,30 @@ export const useSessionStore = defineStore('session', {
     async clarifyIntentRouting(
       sessionId: string,
       routingId: string,
-      input: {
-        choice: 'continue_current' | 'related_new' | 'independent_new'
-        confirmationId?: string
-      }
+      input: ClarifyIntentRoutingInput
     ) {
-      const result = await apiPost<{ routing: IntentRoutingRecord; workItem: WorkItem }>(
-        `/sessions/${sessionId}/message-routings/${routingId}/clarify`,
-        input
-      )
-      this.recordIntentRouting(sessionId, result.routing)
-      await this.loadWorkItems(sessionId)
-      await this.refreshCurrentSession(sessionId)
-      return result
+      const payload = { ...input }
+      if (payload.confirmationId && payload.expectedRoutingRevision !== undefined) {
+        payload.contractVersion = 'intent-clarify-v1'
+        payload.idempotencyKey ??= `clarify:${payload.confirmationId}:${payload.expectedRoutingRevision}:${payload.choice}`
+      }
+      try {
+        const result = await apiPost<{ routing: IntentRoutingRecord; workItem: WorkItem }>(
+          `/sessions/${sessionId}/message-routings/${routingId}/clarify`, payload)
+        this.recordIntentRouting(sessionId, result.routing)
+        await this.loadWorkItems(sessionId)
+        await this.refreshCurrentSession(sessionId)
+        return result
+      } catch (error) {
+        if (error instanceof ApiRequestError && [409, 410].includes(error.status)) {
+          await Promise.allSettled([
+            apiGet<IntentRoutingRecord>(`/sessions/${sessionId}/message-routings/${routingId}`)
+              .then(routing => this.recordIntentRouting(sessionId, routing)),
+            this.loadWorkItems(sessionId), this.refreshCurrentSession(sessionId)
+          ])
+        }
+        throw error
+      }
     },
     async loadFileRevisions(sessionId: string, options: { signal?: AbortSignal } = {}) {
       await this.assertBackendCompatible()
@@ -768,8 +787,17 @@ export const useSessionStore = defineStore('session', {
       options: { allowOpenQuestions?: boolean } = {}
     ) {
       await this.assertBackendCompatible()
-      // Execution now runs in the background; confirm returns "accepted" and the
-      // UI follows execution over SSE rather than waiting for the full result.
+      const session = await apiGet<SessionDetail>(`/sessions/${encodeURIComponent(sessionId)}`)
+      if (session.intentContractVersion === 'intent-understanding-v1') {
+        const briefs = await apiGet<TaskBrief[]>(`/sessions/${encodeURIComponent(sessionId)}/briefs`)
+        const brief = briefs.find(row => row.id === briefId && row.sessionId === sessionId)
+        if (!brief?.intentBinding || !session.dataEpoch) throw new Error('原任务草稿已失效，请刷新确认卡。')
+        if (options.allowOpenQuestions) throw new Error('请先解决草稿中的未决问题。')
+        try {
+          return await useIntentBriefConfirmationStore().confirm(sessionId, briefId, { dataEpoch: session.dataEpoch,
+            confirmationId, expectedBriefVersion: brief.version, expectedIntentRevision: brief.intentBinding.intentRevision })
+        } finally { await this.refreshSessionCache(sessionId).catch(() => undefined) }
+      }
       const result = await apiPost<{ accepted: boolean; status: SessionStatus }>(
         `/sessions/${sessionId}/briefs/${briefId}/confirm`,
         { confirmationId, ...options }
@@ -789,6 +817,18 @@ export const useSessionStore = defineStore('session', {
       }
     ) {
       await this.assertBackendCompatible()
+      const session = await apiGet<SessionDetail>(`/sessions/${encodeURIComponent(sessionId)}`)
+      if (session.intentContractVersion === 'intent-understanding-v1') {
+        const briefs = await apiGet<TaskBrief[]>(`/sessions/${encodeURIComponent(sessionId)}/briefs`)
+        const brief = briefs.find(row => row.id === briefId && row.sessionId === sessionId)
+        if (!brief?.intentBinding || !session.dataEpoch || !input.confirmationId) throw new Error('原草稿或确认卡已失效，请刷新后重试。')
+        try {
+          return await useIntentBriefRevisionStore().submit(sessionId, briefId, { dataEpoch: session.dataEpoch, confirmationId: input.confirmationId,
+            expectedBriefVersion: brief.version, expectedIntentRevision: brief.intentBinding.intentRevision,
+            userMessage: input.userMessage, questionAnswers: input.questionAnswers ?? [],
+            ...(input.assignedAgentKeys?.length ? { assignedAgentKeys: input.assignedAgentKeys } : {}) })
+        } finally { await this.refreshSessionCache(sessionId).catch(() => undefined) }
+      }
       const result = await apiPost<{ accepted: boolean; status: SessionStatus }>(
         `/sessions/${sessionId}/briefs/${briefId}/reject`,
         input
@@ -1013,6 +1053,9 @@ export const useSessionStore = defineStore('session', {
     ) {
       await this.assertBackendCompatible()
       return apiPost(`/sessions/${sessionId}/memories/confirm`, input)
+    },
+    async decideInputBudget(sessionId: string, input: import('@agent-cluster/shared').DecideInputBudgetInput) {
+      return apiPost(`/sessions/${sessionId}/input-budget/decision`, input)
     },
     async decideFeishuNotification(
       sessionId: string,

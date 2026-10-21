@@ -5,6 +5,7 @@ import type { ServerResponse } from 'node:http';
 import { ok } from '../../common/api-response.js';
 import type {
   CaptureFileRevisionBaselineInput,
+  ClarifyIntentRoutingInput,
   CreateFileRevisionRunInput,
   DecideFileRevisionInput,
   ReprocessFileRevisionInput,
@@ -20,6 +21,12 @@ import type {
   CreateDiscussionDocumentInput
 } from '@agent-cluster/shared';
 import { SessionsService } from './sessions.service.js';
+import { IntentCorrectionService } from '../message-routing/intent-correction.service.js';
+import { IntentWorkspaceAuthorityService } from '../message-routing/intent-workspace-authority.service.js';
+import { IntentTestAuthorityService } from '../message-routing/intent-test-authority.service.js';
+import { IntentAuthorizationRetryService } from '../message-routing/intent-authorization-retry.service.js';
+import { IntentRecognitionRetryService } from '../message-routing/intent-recognition-retry.service.js';
+import { IntentBriefRetryService } from '../message-routing/intent-brief-retry.service.js';
 import type { GroupChatMessageDirectives } from '@agent-cluster/shared';
 import { DiscussionDocumentsService } from '../discussion-documents/discussion-documents.service.js';
 import { SourcePreparationCoordinator } from './source-preparation-coordinator.js';
@@ -35,8 +42,60 @@ export class SessionsController {
     @Optional() private readonly discussionDocuments?: DiscussionDocumentsService,
     @Optional() private readonly sourcePreparation?: SourcePreparationCoordinator,
     @Optional() private readonly githubAuthorizations?: GitHubAuthorizationService,
-    @Optional() private readonly deliveryCoordinator?: DeliveryCoordinator
+    @Optional() private readonly deliveryCoordinator?: DeliveryCoordinator,
+    @Optional() private readonly intentCorrections?: IntentCorrectionService,
+    @Optional() private readonly intentWorkspaceAuthority?: IntentWorkspaceAuthorityService,
+    @Optional() private readonly intentTestAuthority?: IntentTestAuthorityService,
+    @Optional() private readonly intentAuthorizationRetry?: IntentAuthorizationRetryService,
+    @Optional() private readonly intentRecognitionRetry?: IntentRecognitionRetryService,
+    @Optional() private readonly intentBriefRetry?: IntentBriefRetryService
   ) {}
+
+  @Post('sessions/:sessionId/input-budget/decision')
+  @HttpCode(202)
+  async decideInputBudget(@Param('sessionId') sessionId: string, @Body() body: import('@agent-cluster/shared').DecideInputBudgetInput) {
+    return ok(await this.sessions.decideInputBudget(sessionId, body));
+  }
+
+  @Post('sessions/:sessionId/intent-plan-steps/:stepId/retry-brief')
+  @HttpCode(202)
+  async retryIntentBrief(@Param('sessionId') sessionId: string, @Param('stepId') stepId: string, @Body() body: unknown) {
+    if (!this.intentBriefRetry) throw new ServiceUnavailableException('INTENT_BRIEF_RETRY_UNAVAILABLE');
+    return ok(await this.intentBriefRetry.retry(sessionId, stepId, this.sessions.get(sessionId).ownerId, body));
+  }
+
+  @Get('sessions/:sessionId/intent-plan-steps/:stepId/brief-recovery')
+  @Header('Cache-Control', 'no-store')
+  async intentBriefRecovery(@Param('sessionId') sessionId: string, @Param('stepId') stepId: string) {
+    if (!this.intentBriefRetry) throw new ServiceUnavailableException('INTENT_BRIEF_RETRY_UNAVAILABLE');
+    return ok(await this.intentBriefRetry.view(sessionId, stepId, this.sessions.get(sessionId).ownerId));
+  }
+
+  @Get('sessions/:sessionId/intent-test-authority')
+  testAuthority(@Param('sessionId') sessionId: string) {
+    if (!this.intentTestAuthority) throw new ServiceUnavailableException('INTENT_AUTHORITY_SERVICE_UNAVAILABLE');
+    return ok(this.intentTestAuthority.view(this.sessions.get(sessionId)));
+  }
+
+  @Post('sessions/:sessionId/intent-test-authority')
+  async changeTestAuthority(@Param('sessionId') sessionId: string, @Body() body: unknown) {
+    if (!this.intentTestAuthority) throw new ServiceUnavailableException('INTENT_AUTHORITY_SERVICE_UNAVAILABLE');
+    const session = this.sessions.get(sessionId);
+    return ok(await this.intentTestAuthority.change(sessionId, session.ownerId, body));
+  }
+
+  @Get('sessions/:sessionId/intent-workspace-read-authority')
+  workspaceReadAuthority(@Param('sessionId') sessionId: string) {
+    if (!this.intentWorkspaceAuthority) throw new ServiceUnavailableException('INTENT_AUTHORITY_SERVICE_UNAVAILABLE');
+    return ok(this.intentWorkspaceAuthority.view(this.sessions.get(sessionId)));
+  }
+
+  @Post('sessions/:sessionId/intent-workspace-read-authority')
+  async changeWorkspaceReadAuthority(@Param('sessionId') sessionId: string, @Body() body: unknown) {
+    if (!this.intentWorkspaceAuthority) throw new ServiceUnavailableException('INTENT_AUTHORITY_SERVICE_UNAVAILABLE');
+    const session = this.sessions.get(sessionId);
+    return ok(await this.intentWorkspaceAuthority.change(sessionId, session.ownerId, body));
+  }
 
   @Get('sessions')
   list(@Query('visibility') visibility?: 'active' | 'deleted' | 'archived' | 'all') {
@@ -398,7 +457,14 @@ export class SessionsController {
     return ok({ items: this.sessions.listDecisions(sessionId), hasMore: false });
   }
 
+  @Get('sessions/:sessionId/message-routings')
+  @Header('Cache-Control', 'no-store')
+  messageRoutings(@Param('sessionId') sessionId: string, @Query('sourceEventId') sourceEventId: string) {
+    return ok({ items: this.sessions.listIntentRoutingsForMessage(sessionId, sourceEventId), hasMore: false });
+  }
+
   @Get('sessions/:sessionId/message-routings/:routingId')
+  @Header('Cache-Control', 'no-store')
   messageRouting(
     @Param('sessionId') sessionId: string,
     @Param('routingId') routingId: string
@@ -407,18 +473,48 @@ export class SessionsController {
   }
 
   @Post('sessions/:sessionId/message-routings/:routingId/clarify')
+  @HttpCode(200)
   async clarifyMessageRouting(
     @Param('sessionId') sessionId: string,
     @Param('routingId') routingId: string,
-    @Body() body: {
-      choice: 'continue_current' | 'related_new' | 'independent_new';
-      confirmationId?: string;
-    }
+    @Body() body: ClarifyIntentRoutingInput
   ) {
-    if (!['continue_current', 'related_new', 'independent_new'].includes(body.choice)) {
-      throw new BadRequestException('Invalid intent clarification choice.');
-    }
     return ok(await this.sessions.clarifyIntentRouting(sessionId, routingId, body));
+  }
+
+  @Post('sessions/:sessionId/message-routings/:routingId/retry-authorization')
+  @HttpCode(200)
+  async retryIntentAuthorization(@Param('sessionId') sessionId: string, @Param('routingId') routingId: string, @Body() body: unknown) {
+    if (!this.intentAuthorizationRetry) throw new ServiceUnavailableException('INTENT_AUTHORIZATION_RETRY_UNAVAILABLE');
+    return ok(await this.intentAuthorizationRetry.retry(sessionId, routingId, this.sessions.get(sessionId).ownerId, body));
+  }
+
+  @Post('sessions/:sessionId/message-routings/:routingId/retry-recognition')
+  @HttpCode(202)
+  async retryIntentRecognition(@Param('sessionId') sessionId: string, @Param('routingId') routingId: string, @Body() body: unknown) {
+    if (!this.intentRecognitionRetry) throw new ServiceUnavailableException('INTENT_RECOGNITION_RETRY_UNAVAILABLE');
+    return ok(await this.intentRecognitionRetry.retry(sessionId, routingId, this.sessions.get(sessionId).ownerId, body));
+  }
+
+  @Post('sessions/:sessionId/message-routings/:routingId/corrections')
+  @HttpCode(202)
+  async correctMessageRouting(@Param('sessionId') sessionId: string, @Param('routingId') routingId: string, @Body() body: unknown) {
+    const session = this.sessions.get(sessionId);
+    if (!this.intentCorrections) throw new ServiceUnavailableException('INTENT_CORRECTION_UNAVAILABLE');
+    const result = await this.intentCorrections.accept(sessionId, routingId, session.ownerId, body);
+    if (['accepted', 'waiting_for_stop', 'validating', 'reconciliation_required'].includes(result.correction.status)) this.intentCorrections.schedule(result.correction);
+    const correction = result.correction;
+    return ok({ correctionId: correction.id, routingId, pendingIntentRevision: correction.pendingIntentRevision,
+      routingRevision: correction.routingRevision, correctionStatus: correction.status,
+      affectedExecutionIds: correction.affectedExecutionIds, idempotentReplay: result.idempotentReplay });
+  }
+
+  @Get('sessions/:sessionId/message-routings/:routingId/corrections')
+  @Header('Cache-Control', 'no-store')
+  correctionHistory(@Param('sessionId') sessionId: string, @Param('routingId') routingId: string) {
+    this.sessions.getIntentRouting(sessionId, routingId);
+    if (!this.intentCorrections) throw new ServiceUnavailableException('INTENT_CORRECTION_UNAVAILABLE');
+    return ok({ corrections: this.intentCorrections.list(sessionId, routingId), revisions: this.intentCorrections.history(sessionId, routingId) });
   }
 
   @Get('sessions/:sessionId/debug/intent-routing')
@@ -654,8 +750,9 @@ export class SessionsController {
   confirmBrief(
     @Param('sessionId') sessionId: string,
     @Param('briefId') briefId: string,
-    @Body() body: { confirmationId?: string; allowOpenQuestions?: boolean }
+    @Body() body: { confirmationId?: string; allowOpenQuestions?: boolean; contractVersion?: string }
   ) {
+    if (body?.contractVersion !== undefined) return this.sessions.confirmIntentBrief(sessionId, briefId, body).then(ok);
     return this.sessions.confirmBrief(sessionId, briefId, body?.confirmationId, {
       allowOpenQuestions: body?.allowOpenQuestions === true
     }).then(ok);
@@ -799,6 +896,7 @@ export class SessionsController {
     @Param('sessionId') sessionId: string,
     @Param('briefId') briefId: string,
     @Body() body: {
+      contractVersion?: string;
       reason?: string;
       userMessage?: string;
         confirmationId?: string;
@@ -806,6 +904,7 @@ export class SessionsController {
         questionAnswers?: Array<{ question: string; answer: string }>;
     }
   ) {
+    if (body.contractVersion !== undefined) return this.sessions.reviseIntentBrief(sessionId, briefId, body).then(ok);
     return this.sessions.reviseBrief(sessionId, briefId, body).then(ok);
   }
 

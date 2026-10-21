@@ -13,6 +13,7 @@ import { RuntimeRegistryService } from './runtime-registry.service.js';
 import { RuntimeSmartRouterService } from './runtime-smart-router.service.js';
 import { RuntimeService } from './runtime.service.js';
 import { TestRunnerRuntimeAdapterService } from './test-runner-runtime-adapter.service.js';
+import { IsolatedTestRunnerService } from './isolated-test-runner.service.js';
 import { CodeSearchTool } from '../tools/builtin/code-search.tool.js';
 import { FileReaderTool } from '../tools/builtin/file-reader.tool.js';
 import { AttachmentReaderTool } from '../tools/builtin/attachment-reader.tool.js';
@@ -40,6 +41,7 @@ import { DiscussionDocumentsModule } from '../discussion-documents/discussion-do
     RuntimeRegistryService,
     RuntimeSmartRouterService,
     TestRunnerRuntimeAdapterService,
+    IsolatedTestRunnerService,
     ToolRegistryService,
     ToolAuthorityResolverService,
     ToolInvocationAuditService,

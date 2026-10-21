@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import type {
   IntentContextSnapshot,
+  ClarifyIntentRoutingInput,
   SessionDetail,
   SessionFollowUpMessage,
   UserMessageHandlingPlan
@@ -27,6 +28,7 @@ export class RouteApplicationService {
     snapshot: IntentContextSnapshot;
     followUp: SessionFollowUpMessage;
     outcome: SemanticIntentRoutingOutcome;
+    clarification?: ClarifyIntentRoutingInput;
     additionalEvents?: import('@agent-cluster/shared').CollaborationEvent[];
   }): Promise<RouteApplicationResult> {
     const handlingPlan = toHandlingPlan(input.outcome);
@@ -38,6 +40,7 @@ export class RouteApplicationService {
       followUpId: input.followUp.id,
       decision: input.outcome.decision,
       validation: input.outcome.validation,
+      clarification: input.clarification,
       handlingPlan,
       additionalEvents: input.additionalEvents,
       routeEventFactory: (route) => this.events.createDraft({
@@ -65,7 +68,7 @@ export class RouteApplicationService {
         relation: input.outcome.decision.scopeRelation
       });
     }
-    return { ...applied, handlingPlan };
+    return { ...applied, handlingPlan: applied.idempotentReplay ? applied.followUp.handlingPlan : handlingPlan };
   }
 }
 

@@ -1,5 +1,5 @@
 /** Planned capability IDs that are mapped now but not yet part of defaultCapabilities. */
-export const PLANNED_TOOL_CAPABILITY_IDS = ['cap-file-read', 'cap-code-search'] as const;
+export const PLANNED_TOOL_CAPABILITY_IDS: readonly string[] = [];
 
 export const TOOL_WORKSPACE_CAPABILITY_MAPPING = {
   read_file: ['read'],
@@ -11,6 +11,7 @@ export const TOOL_WORKSPACE_CAPABILITY_MAPPING = {
 
 /** Maps runtime capability IDs to executable tool names. */
 export const CAPABILITY_TOOL_MAPPING: Record<string, string[]> = {
+  'cap-isolated-test': ['run_test'],
   'cap-file-read': ['read_file'],
   'cap-attachment-read': ['read_attachment'],
   'cap-file-write': ['read_file', 'write_file'],

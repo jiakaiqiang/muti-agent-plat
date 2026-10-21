@@ -6,6 +6,7 @@ import { Injectable, Optional } from '@nestjs/common';
 import { CapabilitiesService } from '../../capabilities/capabilities.service.js';
 import { CapabilityAuditService } from '../../capabilities/capability-audit.service.js';
 import type { Tool, ToolExecutionContext, ToolResult } from '../tool.interface.js';
+import { IsolatedTestRunnerService, type IsolatedTestResult } from '../../runtimes/isolated-test-runner.service.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -29,6 +30,7 @@ export type TestRunnerOutput = {
   stderr: string;
   timedOut: boolean;
   aborted: boolean;
+  isolation?: IsolatedTestResult['isolation'];
 };
 
 type CommandResult = {
@@ -66,13 +68,20 @@ export class TestRunnerTool implements Tool {
   constructor(
     private readonly capabilities: CapabilitiesService,
     @Optional()
-    private readonly audit?: CapabilityAuditService
+    private readonly audit?: CapabilityAuditService,
+    @Optional() private readonly isolated?: IsolatedTestRunnerService
   ) {}
 
   async execute(params: unknown, context: ToolExecutionContext): Promise<ToolResult> {
     let input: TestRunnerParams;
     try {
       input = this.parseParams(params);
+      if (context.intentTestBinding) {
+        if (!context.requireTestIsolation || !context.testExecution || context.testExecution.sessionId !== context.sessionId || !this.isolated) {
+          return this.failure('ISOLATED_TEST_AUTHORITY_REQUIRED');
+        }
+        await this.isolated.authorize(context.testExecution, context.workingDirectory, input.script, context.intentTestBinding);
+      }
       const scripts = await this.detectPackageScripts(context.workingDirectory);
       if (!Object.prototype.hasOwnProperty.call(scripts, input.script)) {
         return this.failure(`Npm script not found: ${input.script}`);
@@ -86,10 +95,10 @@ export class TestRunnerTool implements Tool {
       agentId: context.agentId,
       reason: `run npm script ${input.script}`
     };
-    const approval = this.capabilities.checkInvocation('cap-command-run', auditInput);
-    this.audit?.recordCheck(auditInput, approval);
+    const approval = context.intentTestBinding ? undefined : this.capabilities.checkInvocation('cap-command-run', auditInput);
+    if (approval) this.audit?.recordCheck(auditInput, approval);
 
-    if (!approval.allowed) {
+    if (approval && !approval.allowed) {
       return {
         success: false,
         output: null,
@@ -102,10 +111,20 @@ export class TestRunnerTool implements Tool {
     }
 
     const start = Date.now();
-    const commandResult = await this.runNpmScript(input, context);
+    let commandResult: CommandResult;
+    let isolation: IsolatedTestResult['isolation'] | undefined;
+    if (context.requireTestIsolation || this.isolated?.isConfigured()) {
+      if (!this.isolated?.isConfigured()) return this.failure('ISOLATED_TEST_IMAGE_REQUIRED');
+      try {
+        const isolated = await this.isolated.run({ workingDirectory: context.workingDirectory, script: input.script,
+          timeoutMs: this.timeout(input.timeout), signal: context.signal, execution: context.testExecution });
+        commandResult = isolated; isolation = isolated.isolation;
+      } catch (error) { return this.failure(error); }
+    } else commandResult = await this.runNpmScript(input, context);
     const duration = Date.now() - start;
     const output = this.toOutput(input.script, duration, commandResult);
-    const success = commandResult.exitCode === 0 && !commandResult.timedOut && !commandResult.aborted;
+    if (isolation) output.isolation = isolation;
+    const success = commandResult.exitCode === 0 && !commandResult.timedOut && !commandResult.aborted && !commandResult.error;
 
     if (success) {
       this.audit?.recordToolCompleted(auditInput, output);
@@ -210,10 +229,10 @@ export class TestRunnerTool implements Tool {
   }
 
   private parseSummary(output: string): TestRunnerOutput['summary'] {
-    const total = this.numberFrom(output, /(\d+)\s+tests?/i);
-    const passed = this.numberFrom(output, /(\d+)\s+(?:tests?\s+)?passed/i);
-    const failed = this.numberFrom(output, /(\d+)\s+(?:tests?\s+)?failed/i);
-    const skipped = this.numberFrom(output, /(\d+)\s+(?:tests?\s+)?skipped/i);
+    const total = this.numberFrom(output, /^# tests (\d+)$/m) || this.numberFrom(output, /(\d+)\s+tests?/i);
+    const passed = this.numberFrom(output, /^# pass (\d+)$/m) || this.numberFrom(output, /(\d+)\s+(?:tests?\s+)?passed/i);
+    const failed = this.numberFrom(output, /^# fail (\d+)$/m) || this.numberFrom(output, /(\d+)\s+(?:tests?\s+)?failed/i);
+    const skipped = this.numberFrom(output, /^# skipped (\d+)$/m) || this.numberFrom(output, /(\d+)\s+(?:tests?\s+)?skipped/i);
     return {
       total: total || passed + failed + skipped,
       passed,

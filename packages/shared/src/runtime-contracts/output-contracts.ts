@@ -1,6 +1,7 @@
 import { Type, type Static } from '@sinclair/typebox';
 import { RuntimeArtifactOutputSchema, RuntimeTaskEvidenceRefSchema } from './artifact-contracts.js';
 import { RUNTIME_OUTPUT_SCHEMA_VERSION } from './contract-types.js';
+import { IntentUnderstandingOutputSchema, intentUnderstandingExample, type IntentUnderstandingOutput } from './intent-understanding.js';
 import {
   NonEmptyString,
   NullableString,
@@ -277,6 +278,7 @@ export const runtimeOutputSchemas = {
   final_delivery: FinalDeliveryOutputSchema,
   user_message_handling_plan: UserMessageHandlingPlanOutputSchema,
   intent_routing_decision: IntentRoutingDecisionOutputSchema,
+  intent_understanding: IntentUnderstandingOutputSchema,
   discussion_plan: DiscussionPlanOutputSchema
 } as const;
 
@@ -305,6 +307,7 @@ export type RuntimeOutput =
   | FinalDeliveryOutput
   | UserMessageHandlingPlanOutput
   | IntentRoutingDecisionOutput
+  | IntentUnderstandingOutput
   | DiscussionPlanOutput;
 
 export type RuntimeOutputByKind = {
@@ -312,6 +315,7 @@ export type RuntimeOutputByKind = {
 };
 
 export const runtimeOutputExamples = {
+  intent_understanding: intentUnderstandingExample,
   agent_message: {
     schemaVersion: '1.0',
     kind: 'agent_message',

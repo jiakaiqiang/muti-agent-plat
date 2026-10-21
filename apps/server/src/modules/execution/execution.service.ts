@@ -9,6 +9,12 @@ import {
 import { ExecutionOutcome, OrchestratorService } from '../orchestrator/orchestrator.service.js';
 import { ExecutionQueue } from '../queue/execution.queue.js';
 import { extractRuntimeError } from '../../common/runtime-error.js';
+import { IntentExecutionSupersededError } from '../message-routing/intent-execution-guard.js';
+import { bindIntentResume, readIntentResumeState } from '../message-routing/intent-resume-guard.js';
+import { PersistenceService } from '../persistence/persistence.service.js';
+import { Optional } from '@nestjs/common';
+import type { IntentResumeBinding, IntentRetryBinding } from '@agent-cluster/shared';
+import { bindIntentRetry, readIntentRetryState } from '../message-routing/intent-retry-guard.js';
 
 /**
  * Drives the post-confirmation execution pipeline in the background so HTTP
@@ -25,7 +31,8 @@ export class ExecutionService implements BeforeApplicationShutdown {
 
   constructor(
     private readonly orchestrator: OrchestratorService,
-    private readonly executionQueue: ExecutionQueue
+    private readonly executionQueue: ExecutionQueue,
+    @Optional() private readonly persistence?: PersistenceService
   ) {}
 
   start(
@@ -33,8 +40,18 @@ export class ExecutionService implements BeforeApplicationShutdown {
     brief: TaskBrief,
     tasks: AgentTask[],
     onOutcome: (outcome: ExecutionOutcome) => void,
-    sessionGeneration?: number
+    sessionGeneration?: number,
+    intentResumeBinding?: IntentResumeBinding,
+    intentRetryBinding?: IntentRetryBinding
   ) {
+    if (session.intentContractVersion === 'intent-understanding-v1' && intentRetryBinding) {
+      if (!this.persistence) throw new Error('INTENT_RESUME_AUTHORITY_UNPROVEN');
+      bindIntentRetry(readIntentRetryState(this.persistence), session.id, session.ownerId, intentRetryBinding, true);
+    }
+    if (session.intentContractVersion === 'intent-understanding-v1' && intentResumeBinding) {
+      if (!this.persistence) throw new Error('INTENT_RESUME_AUTHORITY_UNPROVEN');
+      bindIntentResume(readIntentResumeState(this.persistence), session.id, session.ownerId, intentResumeBinding, true);
+    }
     if (this.shuttingDown) {
       onOutcome({
         kind: 'cancelled',
@@ -53,7 +70,8 @@ export class ExecutionService implements BeforeApplicationShutdown {
         sessionId: session.id,
         briefId: brief.id,
         dataEpoch: session.dataEpoch,
-        sessionGeneration
+        sessionGeneration,
+        ...(intentResumeBinding ? { intentResumeBinding } : {}), ...(intentRetryBinding ? { intentRetryBinding } : {})
       }).catch((error) => {
         this.logger.error(`Failed to enqueue execution for session ${session.id}: ${String(error)}`);
         onOutcome({
@@ -68,15 +86,16 @@ export class ExecutionService implements BeforeApplicationShutdown {
     const existing = this.running.get(session.id);
     if (existing) {
       if (existing.controller.signal.aborted) {
-        void existing.done.finally(() => this.start(session, brief, tasks, onOutcome, sessionGeneration));
+        void existing.done.finally(() => this.start(session, brief, tasks, onOutcome, sessionGeneration, intentResumeBinding, intentRetryBinding));
       }
       return;
     }
 
     const controller = new AbortController();
     const done = this.orchestrator
-      .runPipeline(session, brief, tasks, controller.signal)
-      .catch((error): ExecutionOutcome => {
+      .runPipeline(session, brief, tasks, controller.signal, intentRetryBinding)
+      .catch((error): ExecutionOutcome | undefined => {
+        if (error instanceof IntentExecutionSupersededError) return undefined;
         const termination = terminationFromSignal(controller.signal);
         if (termination && error instanceof Error && error.message === 'SESSION_ADMISSION_CLOSED') {
           return {
@@ -100,7 +119,7 @@ export class ExecutionService implements BeforeApplicationShutdown {
         if (current?.controller === controller) {
           this.running.delete(session.id);
         }
-        onOutcome(outcome);
+        if (outcome) onOutcome(outcome);
       })
       .catch((error) => {
         this.logger.error(`Execution outcome handling failed for session ${session.id}: ${String(error)}`);

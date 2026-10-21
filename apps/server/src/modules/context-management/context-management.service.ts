@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import type {
   AgentTask,
   Artifact,
   DecisionRecord,
   DecisionRecordKind,
   CollaborationEvent,
+  ClarifyIntentRoutingInput,
   IntentContextSnapshot,
   IntentSnapshotMessageExcerpt,
   PendingConfirmationContext,
@@ -24,7 +25,12 @@ import type {
 import type { MemoryItem } from '@agent-cluster/shared';
 import { PersistenceService, type PersistedState } from '../persistence/persistence.service.js';
 import { SUMMARY_CHECKPOINTS_COLLECTION } from '../memory/summary-checkpoint-store.js';
-import { briefQuestionKey } from '@agent-cluster/shared';
+import { briefQuestionKey, createMetadata, validateRuntimeOutput } from '@agent-cluster/shared';
+import { effectiveDecisions } from './effective-decisions.js';
+import { validateIntentRoutingDecision } from '../message-routing/intent-policy.service.js';
+import { bindIntentClarification } from '../message-routing/intent-clarification.js';
+import { operationPolicy } from '../runtimes/logical-operation-store.js';
+import { intentEffectAuthoritySnapshot } from '../message-routing/intent-test-authority.js';
 import { buildWorkItemArchiveIndex, recallWorkItems } from './work-item-recall.js';
 
 type BySession<T> = Record<string, T[]>;
@@ -56,6 +62,7 @@ export type CreateWorkItemInput = {
 };
 
 export type AppliedIntentRoute = {
+  idempotentReplay?: boolean;
   routing: IntentRoutingRecord;
   workItem: WorkItem;
   followUp: SessionFollowUpMessage;
@@ -119,24 +126,7 @@ export class ContextManagementService {
   }
 
   validDecisions(sessionId: string, workItemId: string) {
-    const workItem = this.getWorkItem(sessionId, workItemId);
-    const validIds = new Set([...workItem.inheritedDecisionIds]);
-    const valid = this.listDecisions(sessionId).filter(
-      (decision) => decision.status === 'confirmed' &&
-        (decision.workItemId === workItemId || validIds.has(decision.id))
-    );
-    const effectiveAnswers = new Map<string, DecisionRecord>();
-    for (const decision of valid) {
-      if (!decision.question || !decision.answer) continue;
-      const key = briefQuestionKey(decision.question);
-      const previous = effectiveAnswers.get(key);
-      if (!previous || decision.workItemId === workItemId || previous.workItemId !== workItemId) {
-        effectiveAnswers.set(key, decision);
-      }
-    }
-    return valid.filter((decision) =>
-      !decision.question || effectiveAnswers.get(briefQuestionKey(decision.question))?.id === decision.id
-    );
+    return effectiveDecisions(this.listDecisions(sessionId), this.getWorkItem(sessionId, workItemId));
   }
 
   listSnapshots(sessionId: string) {
@@ -209,11 +199,13 @@ export class ContextManagementService {
       this.collection<AgentTask>('tasksBySession')[session.id] ?? []);
   }
 
-  async reserveRoutingRebuild(sessionId: string, routingId: string): Promise<boolean> {
+  async reserveRoutingRebuild(sessionId: string, routingId: string, recognitionOperationId?: string): Promise<boolean> {
     return this.serialized(sessionId, () => this.mutate((draft) => {
       const route = collectionFromDraft<IntentRoutingRecord>(draft, 'intentRoutingRecordsBySession')[sessionId]
         ?.find(item => item.id === routingId);
       if (!route || ['ROUTED', 'REJECTED'].includes(route.status) || (route.snapshotRebuildCount ?? 0) >= 1) return false;
+      if ((recognitionOperationId !== undefined || route.recognitionOperationId !== undefined) &&
+        recognitionOperationId !== (route.recognitionOperationId ?? route.id)) return false;
       route.snapshotRebuildCount = 1;
       return true;
     }, sessionId));
@@ -227,6 +219,7 @@ export class ContextManagementService {
   ) {
     const current = this.activeWorkItem(session);
     if (current) return current;
+    if (session.intentContractVersion === 'intent-understanding-v1') throw new ConflictException('INTENT_PLAN_COMPILER_REQUIRED');
     return this.createWorkItem({
       session,
       sourceEventId,
@@ -323,48 +316,13 @@ export class ContextManagementService {
     content: string;
     confirmed?: boolean;
     supersedesDecisionId?: string;
+    expectedDecisionRevision?: number;
   }) {
     return this.serialized(input.session.id, async () => {
-      this.getWorkItem(input.session.id, input.workItemId);
-      if (input.supersedesDecisionId) {
-        const superseded = this.listDecisions(input.session.id).find((item) => item.id === input.supersedesDecisionId);
-        if (!superseded) throw new BadRequestException(`Decision does not belong to Session: ${input.supersedesDecisionId}`);
-      }
-      const now = new Date().toISOString();
-      const decision: DecisionRecord = {
-        id: crypto.randomUUID(),
-        sessionId: input.session.id,
-        workItemId: input.workItemId,
-        kind: input.kind,
-        status: input.confirmed === false ? 'proposed' : 'confirmed',
-        content: input.content.trim(),
-        sourceEventId: input.sourceEventId,
-        supersedesDecisionId: input.supersedesDecisionId,
-        revision: 1,
-        confirmedBy: input.confirmed === false ? undefined : { type: 'user', id: input.session.ownerId },
-        createdAt: now,
-        updatedAt: now
-      };
-      if (!decision.content) throw new BadRequestException('Decision content is required.');
-
-      await this.mutate((draft) => {
-        const decisions = collectionFromDraft<DecisionRecord>(draft, 'decisionRecordsBySession');
-        const sessionDecisions = (decisions[input.session.id] ??= []);
-        if (input.supersedesDecisionId) {
-          const superseded = sessionDecisions.find((item) => item.id === input.supersedesDecisionId);
-          if (superseded) {
-            superseded.status = 'superseded';
-            superseded.revision += 1;
-            superseded.updatedAt = now;
-          }
-        }
-        sessionDecisions.push(decision);
-        draft.decisionRecordsBySession = decisions;
-        updateDecisionLedgerProjection(draft, input.session.id);
-      });
-      input.session.decisionLedgerRevision = (input.session.decisionLedgerRevision ?? 0) + 1;
-      input.session.revision = (input.session.revision ?? 1) + 1;
-      return decision;
+      const committed = await this.mutate(draft => appendDecisionInDraft(draft, input), input.session.id);
+      input.session.decisionLedgerRevision = committed.ledgerRevision;
+      input.session.revision = committed.sessionRevision;
+      return committed.decision;
     });
   }
 
@@ -450,6 +408,7 @@ export class ContextManagementService {
     currentMessage: string;
     latestEventSeq: number;
     explicitWorkItemIds?: string[];
+    decisionWorkItemIds?: string[];
     mentionedAgentIds?: string[];
     skillRef?: GroupChatSkillRef;
     agentRefs?: GroupChatAgentRef[];
@@ -516,7 +475,37 @@ export class ContextManagementService {
         omittedCandidateWorkItems: Math.max(0, ranked.length - candidates.length),
         omittedRecentMessages: Math.max(0, relevantEvents.length - recentRelevantMessages.length)
       };
-      const activeDecisions = active ? this.validDecisions(input.session.id, active.id) : [];
+      const activeDecisions = uniqueById([
+        ...(active ? this.validDecisions(input.session.id, active.id) : []),
+        ...(input.decisionWorkItemIds ?? []).flatMap(id => this.validDecisions(input.session.id, id))
+      ]);
+      const candidateIds = new Set(candidates.map(item => item.id));
+      const inheritedArtifactIds = new Set(candidates.flatMap(item => item.inheritedArtifactIds));
+      const artifactState = this.persistence.getCollection<{ artifactsById: Record<string, Artifact>; artifactIdsBySession: Record<string, string[]> }>(
+        'artifacts', { artifactsById: {}, artifactIdsBySession: {} });
+      const candidateArtifacts = [...new Set(artifactState.artifactIdsBySession[input.session.id] ?? [])]
+        .map(id => artifactState.artifactsById[id])
+        .filter((item): item is Artifact => Boolean(item && item.sessionId === input.session.id && item.dataEpoch === input.session.dataEpoch &&
+          ((item.workItemId && candidateIds.has(item.workItemId)) || inheritedArtifactIds.has(item.id))))
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id));
+      const validArtifacts = candidateArtifacts.slice(0, 16).map(item => ({ id: item.id, workItemId: item.workItemId,
+        type: item.type, title: item.title.slice(0, 200), contentSummary: item.contentSummary?.slice(0, 400) }));
+      const followUps = this.listFollowUps(input.session.id);
+      const routeRecords = this.listRoutingRecords(input.session.id);
+      const correctionCandidates = routeRecords
+        .filter(route => route.sourceEventId !== input.sourceEventId)
+        .map(route => {
+          const original = route.correctionTargetRoutingId ? routeRecords.find(row => row.id === route.correctionTargetRoutingId) ?? route : route;
+          return { routingId: original.id, routingRevision: original.routingRevision ?? 1, sourceEventId: original.sourceEventId,
+          referenceEventId: route.sourceEventId,
+          workItemIds: [...new Set([route.forcedWorkItemId, route.decision?.selectedWorkItemId,
+            ...((original.semanticPlan?.outcome === 'applicable' ? original.semanticPlan.steps : []) ?? []).map(step => step.target.workItemId),
+            ...activeDecisions.filter(decision => decision.sourceEventId === route.sourceEventId).map(decision => decision.workItemId),
+            ...followUps.filter(follow => follow.routingId === route.id).map(follow => follow.workItemId)])]
+            .filter((id): id is string => Boolean(id && candidateIds.has(id))),
+          decisionIds: activeDecisions.filter(decision => decision.sourceEventId === route.sourceEventId).map(decision => decision.id) }; })
+        .filter(candidate => candidate.workItemIds.length || candidate.decisionIds.length || candidate.referenceEventId === replyTarget?.id)
+        .reverse().sort((a, b) => Number(b.referenceEventId === replyTarget?.id) - Number(a.referenceEventId === replyTarget?.id));
       const revision = {
         sessionRevision: input.session.revision ?? 1,
         activeWorkItemId: active?.id,
@@ -532,6 +521,8 @@ export class ContextManagementService {
         activeWorkItemId: active?.id,
         activeWorkItem: active ? workItemSummary(active) : undefined,
         currentMessage: input.currentMessage,
+        correctionCandidates: correctionCandidates.slice(0, 8),
+        omittedCorrectionCandidates: Math.max(0, correctionCandidates.length - 8),
         mentionedAgentIds,
         skillRef: input.skillRef,
         agentRefs: input.agentRefs,
@@ -554,6 +545,9 @@ export class ContextManagementService {
         pendingConfirmation: input.pendingConfirmation,
         pendingConfirmationContext: input.pendingConfirmationContext,
         validDecisionIds: activeDecisions.map((item) => item.id),
+        validArtifactIds: validArtifacts.map(item => item.id),
+        validArtifacts,
+        omittedArtifacts: Math.max(0, candidateArtifacts.length - validArtifacts.length),
         validDecisions: activeDecisions.map((item) => ({
           id: item.id,
           kind: item.kind,
@@ -564,6 +558,7 @@ export class ContextManagementService {
         candidateWorkItemIds: candidates.map((item) => item.id),
         candidateWorkItems: candidates.map(workItemSummary),
         failureCheckpoint: input.failureCheckpoint,
+        ...(input.session.intentContractVersion === 'intent-understanding-v1' ? { effectAuthority: intentEffectAuthoritySnapshot(input.session) } : {}),
         revision
       };
       const snapshot: IntentContextSnapshot = {
@@ -787,6 +782,15 @@ export class ContextManagementService {
         const followUps = collectionFromDraft<SessionFollowUpMessage>(draft, 'followUpMessagesBySession');
         const sessionFollowUps = (followUps[sessionId] ??= []);
         const index = sessionFollowUps.findIndex((item) => item.id === followUp.id);
+        if (['queued', 'planning', 'executing'].includes(followUp.status)) {
+          const route = (collectionFromDraft<IntentRoutingRecord>(draft, 'intentRoutingRecordsBySession')[sessionId] ?? [])
+            .find(row => row.id === followUp.routingId);
+          const work = (collectionFromDraft<WorkItem>(draft, 'workItemsBySession')[sessionId] ?? []).find(row => row.id === followUp.workItemId);
+          if (route?.dispatchHold || work?.dispatchHold ||
+            (route?.correctionId && index >= 0 && sessionFollowUps[index].status === 'cancelled')) {
+            throw new ConflictException('INTENT_FOLLOW_UP_SUPERSEDED');
+          }
+        }
         const copy = structuredClone(followUp);
         if (index >= 0) sessionFollowUps[index] = copy;
         else sessionFollowUps.push(copy);
@@ -803,6 +807,7 @@ export class ContextManagementService {
     followUpId: string;
     decision: IntentRoutingDecisionV2;
     validation: IntentRoutingValidation;
+    clarification?: ClarifyIntentRoutingInput;
     expectedLeaseOwner?: string;
     handlingPlan?: SessionFollowUpMessage['handlingPlan'];
     routeEventFactory?: (route: Omit<AppliedIntentRoute, 'committedEvent' | 'committedEvents' | 'followUp'>) => CollaborationEvent;
@@ -821,31 +826,44 @@ export class ContextManagementService {
         const workItems = collectionFromDraft<WorkItem>(draft, 'workItemsBySession');
         const sessionWorkItems = (workItems[input.session.id] ??= []);
         const snapshots = collectionFromDraft<IntentContextSnapshot>(draft, 'contextSnapshotsBySession');
-        const snapshot = (snapshots[input.session.id] ?? []).find((item) => item.id === input.snapshotId);
-        if (!snapshot) throw new NotFoundException(`IntentContextSnapshot not found: ${input.snapshotId}`);
         const routings = collectionFromDraft<IntentRoutingRecord>(draft, 'intentRoutingRecordsBySession');
         const routing = (routings[input.session.id] ?? []).find((item) => item.id === input.routingId);
         if (!routing) throw new NotFoundException(`IntentRoutingRecord not found: ${input.routingId}`);
+        if (routing.semanticProposal || routing.semanticContractVersion) throw new ConflictException('INTENT_PLAN_COMPILER_REQUIRED');
+        if (routing.dispatchHold) throw new ConflictException('INTENT_DISPATCH_HELD');
         const followUps = collectionFromDraft<SessionFollowUpMessage>(draft, 'followUpMessagesBySession');
         const followUp = (followUps[input.session.id] ?? []).find((item) => item.id === input.followUpId);
         if (!followUp) throw new NotFoundException(`SessionFollowUpMessage not found: ${input.followUpId}`);
+        if (projectedSession.dataEpoch !== input.session.dataEpoch || followUp.routingId !== routing.id ||
+          followUp.sourceEventId !== routing.sourceEventId) throw new ConflictException('ROUTING_BINDING_MISMATCH');
+        const sessionEvents = collectionFromDraft<CollaborationEvent>(draft, 'eventsBySession')[input.session.id] ?? [];
+        const clarification = input.clarification ? bindIntentClarification(routing, sessionEvents, input.clarification) : undefined;
+        if (clarification && routings[input.session.id].some(item => item.id !== routing.id &&
+          item.resolution?.idempotencyKey === clarification.idempotencyKey)) throw new ConflictException('IDEMPOTENCY_PAYLOAD_CONFLICT');
 
         if (routing.status === 'ROUTED') {
+          if (input.clarification && !clarification?.replay) throw new ConflictException('CLARIFICATION_RECEIPT_MISSING');
           const existing = sessionWorkItems.find((item) => item.id === followUp.workItemId);
           if (!existing) throw new BadRequestException('Applied routing has no valid WorkItem projection.');
           const current = sessionWorkItems.find((item) => item.id === projectedSession.activeWorkItemId);
           const deferredActivation = routing.deferredActivation ??
             (existing.id !== current?.id && isExecutionActive(projectedSession));
-          applied = { routing, workItem: existing, followUp, createdWorkItem: false, deferredActivation };
+          applied = { routing, workItem: existing, followUp, createdWorkItem: false, deferredActivation, idempotentReplay: true };
           return;
         }
-        if (routing.status !== 'VALIDATING' || !input.validation.safeToApply) {
+        if (!clarification && routing.status !== 'VALIDATING') {
           throw new BadRequestException(`Intent route is not safe to apply from state ${routing.status}.`);
         }
         assertRoutingLease(routing, input.expectedLeaseOwner);
+        const snapshot = (snapshots[input.session.id] ?? []).find((item) => item.id === input.snapshotId);
+        if (!snapshot) throw new NotFoundException(`IntentContextSnapshot not found: ${input.snapshotId}`);
+        if (snapshot.sourceEventId !== routing.sourceEventId || (!clarification && routing.snapshotId !== snapshot.id)) {
+          throw new ConflictException('ROUTING_SNAPSHOT_MISMATCH');
+        }
         if (!snapshotMatchesProjection(projectedSession, sessionWorkItems, snapshot,
           collectionFromDraft<CollaborationEvent>(draft, 'eventsBySession')[input.session.id] ?? [],
           collectionFromDraft<AgentTask>(draft, 'tasksBySession')[input.session.id] ?? [])) {
+          if (clarification) throw new ConflictException('CLARIFICATION_SNAPSHOT_STALE');
           routing.status = 'PENDING_RETRY';
           routing.reasonCodes = [...new Set([...routing.reasonCodes, 'SNAPSHOT_STALE'])];
           routing.updatedAt = new Date().toISOString();
@@ -855,6 +873,36 @@ export class ContextManagementService {
         }
 
         const current = sessionWorkItems.find((item) => item.id === projectedSession.activeWorkItemId);
+        if (clarification && input.clarification) {
+          const actions = { continue_current: 'continue_active_work_item', related_new: 'create_related_work_item', independent_new: 'create_independent_work_item' };
+          if (actions[input.clarification.choice] !== input.decision.requestedAction) throw new ConflictException('CLARIFICATION_PLAN_MISMATCH');
+          const payload = clarification.card.metadata.payload ?? {};
+          if (input.clarification.choice !== 'independent_new' && payload.activeWorkItemId && payload.activeWorkItemId !== current?.id) {
+            throw new ConflictException('CLARIFICATION_TARGET_CHANGED');
+          }
+          if (input.clarification.choice === 'related_new') {
+            for (const [key, selected] of [['inheritedDecisionIds', input.decision.selectedDecisionIds], ['inheritedArtifactIds', input.decision.selectedArtifactIds]] as const) {
+              const bound = Array.isArray(payload[key]) ? payload[key] as string[] : [];
+              if (selected.some(id => !bound.includes(id))) throw new ConflictException('CLARIFICATION_INHERITANCE_MISMATCH');
+            }
+          }
+        }
+        if (routing.decision?.dialogueAct === 'correction' || input.decision.dialogueAct === 'correction' ||
+          routing.reasonCodes.includes('CORRECTION_TARGET_REQUIRED')) {
+          throw new ConflictException('CORRECTION_REQUIRES_VERSIONED_ENDPOINT');
+        }
+        const schema = validateRuntimeOutput('intent_routing_decision', {
+          ...input.decision, requestedAgentIds: input.decision.requestedAgentIds ?? [],
+          modelConfidence: input.decision.modelConfidence ?? null,
+          selectedWorkItemId: input.decision.selectedWorkItemId ?? null,
+          schemaVersion: '1.0', kind: 'intent_routing_decision'
+        });
+        if (!schema.valid) throw new BadRequestException(`INTENT_SCHEMA_INVALID: ${schema.errors.join('; ')}`);
+        const validation = validateIntentRoutingDecision({ session: projectedSession, snapshot, decision: input.decision,
+          snapshotCurrent: true, inheritedArtifactIds: current?.inheritedArtifactIds ?? [] });
+        if (!validation.safeToApply || input.decision.requestedAction === 'clarify') {
+          throw new BadRequestException(`INTENT_POLICY_REJECTED: ${validation.errors.join(', ')}`);
+        }
         const previousWorkItemId = current?.id;
         const forcedTarget = routing.forcedWorkItemId
           ? sessionWorkItems.find((item) => item.id === routing.forcedWorkItemId)
@@ -884,7 +932,7 @@ export class ContextManagementService {
           target = {
             id: crypto.randomUUID(),
             sessionId: input.session.id,
-            parentWorkItemId: related ? current?.id : undefined,
+            parentWorkItemId: related ? target?.id : undefined,
             title: goal.slice(0, 120) || '新需求',
             goal,
             status: 'OPEN',
@@ -915,8 +963,10 @@ export class ContextManagementService {
             : input.handlingPlan;
         }
         routing.status = 'ROUTED';
+        routing.routingRevision = (routing.routingRevision ?? 1) + 1;
+        routing.snapshotId = snapshot.id;
         routing.decision = input.decision;
-        routing.validation = input.validation;
+        routing.validation = validation;
         routing.finalAction = input.decision.requestedAction;
         routing.deferredActivation = deferredActivation;
         routing.actionStatus = ['pause', 'cancel', 'resume', 'replan'].includes(input.decision.requestedAction)
@@ -925,6 +975,12 @@ export class ContextManagementService {
         delete routing.leaseOwner;
         delete routing.leaseExpiresAt;
         routing.updatedAt = projectedSession.updatedAt;
+        if (clarification && input.clarification) routing.resolution = {
+          confirmationId: clarification.confirmationId, canonicalChoiceHash: clarification.canonicalChoiceHash,
+          idempotencyKey: clarification.idempotencyKey, choice: input.clarification.choice,
+          resolvedRevision: routing.routingRevision, resultWorkItemId: target.id,
+          actorId: projectedSession.ownerId, resolvedAt: routing.updatedAt
+        };
         draft.sessions = sessions;
         draft.workItemsBySession = workItems;
         draft.followUpMessagesBySession = followUps;
@@ -962,7 +1018,15 @@ export class ContextManagementService {
           }
         }
         const committedEvent = input.routeEventFactory?.(route);
-        const committedEvents = [...(committedEvent ? [committedEvent] : []), ...(input.additionalEvents ?? [])];
+        const resolvedEvent: CollaborationEvent | undefined = clarification ? {
+          id: crypto.randomUUID(), sessionId: projectedSession.id, type: 'user_confirmation_resolved',
+          toAgentIds: [], actor: { type: 'user', id: projectedSession.ownerId }, createdAt: routing.updatedAt,
+          content: '任务关系已确认。', metadata: createMetadata('system_notice', {
+            confirmationId: clarification.confirmationId, routingId: routing.id,
+            routingRevision: routing.routingRevision, status: 'approved', selectedOptionKey: input.clarification!.choice
+          })
+        } : undefined;
+        const committedEvents = [...(committedEvent ? [committedEvent] : []), ...(resolvedEvent ? [resolvedEvent] : []), ...(input.additionalEvents ?? [])];
         if (committedEvents.length) {
           const events = collectionFromDraft<CollaborationEvent>(draft, 'eventsBySession');
           (events[input.session.id] ??= []).push(...committedEvents);
@@ -973,6 +1037,7 @@ export class ContextManagementService {
       }, input.session.id);
       if (stale) throw new BadRequestException('SNAPSHOT_STALE: intent route must be rebuilt before apply.');
       if (!applied) throw new BadRequestException('Intent route apply produced no result.');
+      if (applied.idempotentReplay) return applied;
       if (!applied.deferredActivation) input.session.activeWorkItemId = applied.workItem.id;
       if (projectedDecisionLedgerRevision !== undefined) {
         input.session.decisionLedgerRevision = projectedDecisionLedgerRevision;
@@ -1004,7 +1069,7 @@ export class ContextManagementService {
     routingId: string,
     patch: Partial<Pick<IntentRoutingRecord,
       'status' | 'snapshotId' | 'invocationId' | 'decision' | 'validation' | 'finalAction' | 'actionStatus' |
-      'leaseOwner' | 'leaseExpiresAt' | 'reasonCodes' | 'retryCount'>>,
+      'leaseOwner' | 'leaseExpiresAt' | 'reasonCodes' | 'retryCount' | 'blockedReason' | 'failureClass'>>,
     expectedLeaseOwner?: string
   ) {
     return this.serialized(sessionId, async () => {
@@ -1016,6 +1081,7 @@ export class ContextManagementService {
       const updated: IntentRoutingRecord = {
         ...current,
         ...patch,
+        routingRevision: (current.routingRevision ?? 1) + 1,
         id: current.id,
         sessionId: current.sessionId,
         sourceEventId: current.sourceEventId,
@@ -1026,7 +1092,7 @@ export class ContextManagementService {
         createdAt: current.createdAt,
         updatedAt: new Date().toISOString()
       };
-      if (['ROUTED', 'CLARIFICATION_REQUIRED', 'REJECTED'].includes(updated.status)) {
+      if (['ROUTED', 'CLARIFICATION_REQUIRED', 'REJECTED', 'BLOCKED'].includes(updated.status)) {
         delete updated.leaseOwner;
         delete updated.leaseExpiresAt;
       }
@@ -1035,14 +1101,42 @@ export class ContextManagementService {
         const index = (routings[sessionId] ?? []).findIndex((record) => record.id === routingId);
         if (index < 0) throw new NotFoundException(`IntentRoutingRecord not found during mutation: ${routingId}`);
         const fresh = routings[sessionId][index];
+        if ((fresh.semanticProposal || fresh.semanticContractVersion) && (patch.status === 'CLASSIFYING' || 'decision' in patch ||
+          'validation' in patch || 'finalAction' in patch || 'actionStatus' in patch)) {
+          throw new ConflictException('INTENT_PLAN_COMPILER_REQUIRED');
+        }
+        if (fresh.dispatchHold) throw new ConflictException('INTENT_DISPATCH_HELD');
         if (expectedLeaseOwner) assertRoutingLease(fresh, expectedLeaseOwner);
-        if (fresh.updatedAt !== current.updatedAt || fresh.status !== current.status || fresh.leaseOwner !== current.leaseOwner) {
+        if (fresh.routingRevision !== current.routingRevision || fresh.updatedAt !== current.updatedAt || fresh.status !== current.status || fresh.leaseOwner !== current.leaseOwner) {
           throw new BadRequestException('ROUTING_LEASE_LOST: routing changed during update.');
         }
         routings[sessionId][index] = { ...updated, snapshotRebuildCount: fresh.snapshotRebuildCount };
         draft.intentRoutingRecordsBySession = routings;
       }, sessionId);
       return updated;
+    });
+  }
+
+  async reserveIntentClassificationAttempt(sessionId: string, routingId: string, invocationId: string, reason: string, expectedLeaseOwner?: string) {
+    return this.serialized(sessionId, async () => {
+      let attempt: number | undefined;
+      await this.mutate(draft => {
+        const records = collectionFromDraft<IntentRoutingRecord>(draft, 'intentRoutingRecordsBySession');
+        const routing = (records[sessionId] ?? []).find(item => item.id === routingId);
+        if (!routing) throw new NotFoundException(`IntentRoutingRecord not found: ${routingId}`);
+        if (routing.semanticProposal || routing.semanticContractVersion) throw new ConflictException('INTENT_CONTRACT_WORKER_UNSUPPORTED');
+        assertRoutingLease(routing, expectedLeaseOwner);
+        if (routing.status !== 'CLASSIFYING') throw new ConflictException('INTENT_ATTEMPT_NOT_CLASSIFYING');
+        const policy = operationPolicy('user_message_routing');
+        routing.classificationDeadlineAt ??= new Date(Date.now() + policy.timeoutMs).toISOString();
+        if ((routing.classificationAttempts ?? 0) >= policy.maxAttempts || Date.parse(routing.classificationDeadlineAt) <= Date.now()) return;
+        attempt = routing.classificationAttempts = (routing.classificationAttempts ?? 0) + 1;
+        routing.attemptLog = [...(routing.attemptLog ?? []), { invocationId, attempt, reason, startedAt: new Date().toISOString() }];
+        routing.routingRevision = (routing.routingRevision ?? 1) + 1;
+        routing.updatedAt = new Date().toISOString();
+        draft.intentRoutingRecordsBySession = records;
+      }, sessionId);
+      return attempt;
     });
   }
 
@@ -1080,7 +1174,9 @@ export class ContextManagementService {
     routingId: string,
     snapshotId: string,
     workerId: string,
-    leaseMs = 120_000
+    leaseMs = 120_000,
+    supportedSemanticContract?: 'intent-understanding-v1',
+    recognitionOperationId?: string
   ): Promise<IntentRoutingClaimResult> {
     return this.serialized(sessionId, async () => {
       let result: IntentRoutingClaimResult | undefined;
@@ -1089,13 +1185,19 @@ export class ContextManagementService {
         const records = routings[sessionId] ?? [];
         const current = records.find((item) => item.id === routingId);
         if (!current) throw new NotFoundException(`IntentRoutingRecord not found: ${routingId}`);
-        if (['ROUTED', 'CLARIFICATION_REQUIRED', 'REJECTED'].includes(current.status)) {
+        if (recognitionOperationId && recognitionOperationId !== (current.recognitionOperationId ?? current.id)) {
+          throw new ConflictException('INTENT_RECOGNITION_SUPERSEDED');
+        }
+        if ((current.semanticProposal || current.semanticContractVersion) && (current.semanticProposal?.contractVersion ?? current.semanticContractVersion) !== supportedSemanticContract) {
+          throw new ConflictException('INTENT_CONTRACT_WORKER_UNSUPPORTED');
+        }
+        if (current.dispatchHold || ['ROUTED', 'CLARIFICATION_REQUIRED', 'REJECTED', 'BLOCKED'].includes(current.status)) {
           result = { state: 'terminal', routing: structuredClone(current) };
           return;
         }
         const earlier = records
           .filter((item) => item.sessionSeq < current.sessionSeq &&
-            !['ROUTED', 'CLARIFICATION_REQUIRED', 'REJECTED'].includes(item.status))
+            !['ROUTED', 'CLARIFICATION_REQUIRED', 'REJECTED', 'BLOCKED'].includes(item.status))
           .sort((left, right) => left.sessionSeq - right.sessionSeq)[0];
         if (earlier) {
           result = {
@@ -1108,7 +1210,7 @@ export class ContextManagementService {
         const now = Date.now();
         const active = ['CLASSIFYING', 'VALIDATING', 'APPLYING'].includes(current.status);
         const leaseExpiresAt = Date.parse(current.leaseExpiresAt ?? '');
-        if (active && (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt > now)) {
+        if ((active || (current.semanticProposal && current.leaseOwner)) && (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt > now)) {
           result = { state: 'blocked', routing: structuredClone(current) };
           return;
         }
@@ -1291,11 +1393,12 @@ function snapshotMatchesProjection(
     snapshot.revision.workflowRevision === session.workflowRun?.currentStepIndex;
 }
 
-function routingBusinessFingerprint(session: SessionDetail, workItems: WorkItem[], events: CollaborationEvent[], tasks: AgentTask[]) {
+export function routingBusinessFingerprint(session: SessionDetail, workItems: WorkItem[], events: CollaborationEvent[], tasks: AgentTask[]) {
   const businessEvents = new Set(['user_message', 'user_confirmation_requested', 'user_confirmation_resolved',
     'intent_clarification_required', 'brief_confirmed', 'brief_revised']);
   return createHash('sha256').update(stableJson({
     sessionRevision: session.revision ?? 1, status: session.status, goal: session.originalInput,
+    ...(session.intentContractVersion === 'intent-understanding-v1' ? { effectAuthority: intentEffectAuthoritySnapshot(session) } : {}),
     contractGoal: session.latestContractGoal, activeWorkItemId: session.activeWorkItemId,
     decisionLedgerRevision: session.decisionLedgerRevision ?? 0,
     workflowRunId: session.workflowRunId, workflowStep: session.workflowRun?.currentStepIndex,
@@ -1315,16 +1418,61 @@ function assertRoutingLease(routing: IntentRoutingRecord, expectedLeaseOwner?: s
   }
 }
 
+/** Reusable mutation for route corrections: all target/revision checks share the commit. */
+export function appendDecisionInDraft(draft: PersistedState, input: {
+  session: SessionDetail; workItemId: string; sourceEventId: string; kind: DecisionRecordKind;
+  content: string; confirmed?: boolean; supersedesDecisionId?: string; expectedDecisionRevision?: number;
+  question?: string; answer?: string;
+}) {
+  const sessions = (draft.sessions ?? []) as SessionDetail[];
+  const session = sessions.find(item => item.id === input.session.id);
+  if (!session || session.dataEpoch !== input.session.dataEpoch) throw new ConflictException('DECISION_SESSION_STALE');
+  const work = (collectionFromDraft<WorkItem>(draft, 'workItemsBySession')[session.id] ?? []).find(item => item.id === input.workItemId);
+  if (!work) throw new NotFoundException(`WorkItem not found during decision mutation: ${input.workItemId}`);
+  const content = input.content.trim();
+  if (!content) throw new BadRequestException('Decision content is required.');
+  const decisions = collectionFromDraft<DecisionRecord>(draft, 'decisionRecordsBySession');
+  const records = (decisions[session.id] ??= []);
+  const previous = records.find(item => item.sourceEventId === input.sourceEventId && item.workItemId === work.id &&
+    item.kind === input.kind && (item.supersedesDecisionId ?? item.overridesDecisionId) === input.supersedesDecisionId &&
+    item.content === content && (input.confirmed !== false ? item.status !== 'proposed' : item.status === 'proposed'));
+  if (previous) return { decision: previous, ledgerRevision: session.decisionLedgerRevision ?? 0, sessionRevision: session.revision ?? 1 };
+  const old = input.supersedesDecisionId ? records.find(item => item.id === input.supersedesDecisionId) : undefined;
+  if (input.supersedesDecisionId) {
+    if (!old || (old.workItemId !== work.id && !work.inheritedDecisionIds.includes(old.id))) {
+      throw new BadRequestException('DECISION_TARGET_OUTSIDE_WORK_ITEM');
+    }
+    if (old.status !== 'confirmed' || (input.expectedDecisionRevision !== undefined && old.revision !== input.expectedDecisionRevision) ||
+      records.some(item => item.workItemId === work.id && item.status === 'confirmed' && item.overridesDecisionId === old.id)) {
+      throw new ConflictException('DECISION_REVISION_CONFLICT');
+    }
+  }
+  const now = new Date().toISOString();
+  const inherited = Boolean(old && old.workItemId !== work.id);
+  const decision: DecisionRecord = { id: crypto.randomUUID(), sessionId: session.id, workItemId: work.id,
+    ...(input.question && input.answer ? { question: input.question, answer: input.answer } : {}),
+    kind: input.kind, status: input.confirmed === false ? 'proposed' : 'confirmed', content, sourceEventId: input.sourceEventId,
+    ...(old ? inherited ? { overridesDecisionId: old.id } : { supersedesDecisionId: old.id,
+      ...(old.overridesDecisionId ? { overridesDecisionId: old.overridesDecisionId } : {}) } : {}), revision: 1,
+    ...(input.confirmed !== false ? { confirmedBy: { type: 'user' as const, id: session.ownerId } } : {}), createdAt: now, updatedAt: now };
+  if (old && !inherited && input.confirmed !== false) { old.status = 'superseded'; old.revision += 1; old.updatedAt = now; }
+  records.push(decision);
+  draft.decisionRecordsBySession = decisions;
+  updateDecisionLedgerProjection(draft, session.id);
+  return { decision, ledgerRevision: session.decisionLedgerRevision ?? 0, sessionRevision: session.revision ?? 1 };
+}
+
 function allowedRoutingTransitions(status: IntentRoutingRecord['status']): IntentRoutingRecord['status'][] {
   const transitions: Record<IntentRoutingRecord['status'], IntentRoutingRecord['status'][]> = {
     RECEIVED: ['SNAPSHOT_READY', 'REJECTED'],
     SNAPSHOT_READY: ['CLASSIFYING', 'REJECTED'],
-    CLASSIFYING: ['VALIDATING', 'PENDING_RETRY', 'CLARIFICATION_REQUIRED', 'REJECTED'],
-    VALIDATING: ['APPLYING', 'ROUTED', 'CLARIFICATION_REQUIRED', 'PENDING_RETRY', 'REJECTED'],
+    CLASSIFYING: ['VALIDATING', 'PENDING_RETRY', 'CLARIFICATION_REQUIRED', 'BLOCKED', 'REJECTED'],
+    VALIDATING: ['APPLYING', 'ROUTED', 'CLARIFICATION_REQUIRED', 'PENDING_RETRY', 'BLOCKED', 'REJECTED'],
     APPLYING: ['ROUTED', 'PENDING_RETRY', 'REJECTED'],
     ROUTED: [],
     CLARIFICATION_REQUIRED: ['SNAPSHOT_READY', 'REJECTED'],
-    PENDING_RETRY: ['SNAPSHOT_READY', 'CLASSIFYING', 'CLARIFICATION_REQUIRED', 'REJECTED'],
+    PENDING_RETRY: ['SNAPSHOT_READY', 'CLASSIFYING', 'CLARIFICATION_REQUIRED', 'BLOCKED', 'REJECTED'],
+    BLOCKED: [],
     REJECTED: []
   };
   return transitions[status];

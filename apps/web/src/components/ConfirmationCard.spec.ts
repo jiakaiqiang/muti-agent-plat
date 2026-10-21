@@ -175,3 +175,24 @@ describe('ConfirmationCard', () => {
     owner.unmount()
   })
 })
+
+
+describe('input budget decision card', () => {
+  it('shows continue/end for this task and emits only the selected scoped decision', async () => {
+    const confirmation: ConfirmationCardState = {
+      confirmationId: 'budget-hold', reason: 'input_budget_exceeded', title: '本次调用输入预算超限',
+      description: '输入估算 8404，输出保留 1500，有效上限 5400 tokens。继续仅放行本次重跑，会话保留。',
+      status: 'pending', relatedTaskId: 'task',
+      options: [{ key: 'continue', label: '继续执行（本次放行）', style: 'primary' }, { key: 'end', label: '结束此任务', style: 'default' }]
+    }
+    const wrapper = mount(ConfirmationCard, { props: { confirmation }, global: { plugins: [createPinia()] } })
+    expect(wrapper.text()).toContain('8404')
+    expect(wrapper.text()).toContain('会话保留')
+    const end = wrapper.findAll('button').find(button => button.text() === '结束此任务')!
+    await end.trigger('click')
+    expect(wrapper.emitted('resolve')).toEqual([['end']])
+    await wrapper.setProps({ confirmation: { ...confirmation, status: 'approved' } })
+    expect(wrapper.findAll('button').some(button => button.text().includes('本次放行'))).toBe(false)
+    wrapper.unmount()
+  })
+})

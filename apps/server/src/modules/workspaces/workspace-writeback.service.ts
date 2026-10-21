@@ -13,7 +13,9 @@ import type {
   WorkspaceWritebackRecord
 } from '@agent-cluster/shared';
 import { workspaceMetrics } from '../../common/workspace-metrics.js';
-import { PersistenceService } from '../persistence/persistence.service.js';
+import { PersistenceService, type PersistedState } from '../persistence/persistence.service.js';
+import { assertIntentExecutionCurrent, INTENT_EXECUTION_COLLECTIONS } from '../message-routing/intent-execution-guard.js';
+import type { RuntimeInvocationLog } from '../runtimes/runtime.service.js';
 import { SessionLifecycleStore } from '../runtimes/session-lifecycle-store.js';
 import type { WorkspaceProvider } from './workspace-provider.js';
 import { WorkspaceProviderResolver } from './workspace-provider-resolver.js';
@@ -158,6 +160,7 @@ export class WorkspaceWritebackService {
     const record: StoredWriteback = {
       id: crypto.randomUUID(),
       sessionId: input.session.id,
+      dataEpoch: input.session.dataEpoch,
       ...(sessionGeneration !== undefined ? { sessionGeneration } : {}),
       ...(input.taskId ? { taskId: input.taskId } : {}),
       invocationId: input.invocationId,
@@ -171,7 +174,7 @@ export class WorkspaceWritebackService {
       updatedAt: now
     };
     this.records.set(record.id, record);
-    const operation = this.persist()
+    const operation = this.update(record, {})
       .then(() => this.scheduleSerialized(record, input.session, false))
       .catch((error) => {
         if (record.status === 'queued') this.records.delete(record.id);
@@ -411,8 +414,25 @@ export class WorkspaceWritebackService {
   }
 
   private async update(record: StoredWriteback, patch: Partial<StoredWriteback>) {
-    Object.assign(record, patch, { updatedAt: new Date().toISOString() });
-    await this.persist();
+    const committed = await this.persistence.mutateCollections([COLLECTION, 'sessions', 'sessionLifecyclesBySession',
+      'runtimeInvocationsBySession', ...INTENT_EXECUTION_COLLECTIONS], draft => {
+      const next = { ...record, ...patch, updatedAt: new Date().toISOString() };
+      const session = (draft.sessions as SessionDetail[] | undefined)?.find(item => item.id === next.sessionId);
+      const lifecycle = (draft.sessionLifecyclesBySession as Record<string, { state: string }> | undefined)?.[next.sessionId];
+      if (next.dataEpoch && (!session || session.dataEpoch !== next.dataEpoch || session.archivedAt ||
+        (lifecycle && lifecycle.state !== 'active'))) {
+        if (['queued', 'merging', 'applying'].includes(next.status)) throw new ConflictException('INTENT_EXECUTION_STALE');
+        return { record: { ...next, status: 'failed' as const, error: 'INTENT_EXECUTION_STALE' }, persisted: false };
+      }
+      if (['queued', 'merging', 'applying'].includes(next.status)) assertWritebackIntent(draft, next);
+      const records = (draft[COLLECTION] ??= []) as StoredWriteback[];
+      const index = records.findIndex(item => item.id === next.id);
+      if (index < 0) records.push(next);
+      else records[index] = next;
+      return { record: structuredClone(next), persisted: true };
+    }, { sessionIds: [record.sessionId] });
+    Object.assign(record, committed.record);
+    if (!committed.persisted) this.records.delete(record.id);
     return publicRecord(record);
   }
 
@@ -427,6 +447,21 @@ export class WorkspaceWritebackService {
       throw new ConflictException('SESSION_ADMISSION_CLOSED');
     }
   }
+}
+
+/** This check and the applying receipt share the correction transaction's locked facts. */
+function assertWritebackIntent(draft: PersistedState, record: StoredWriteback) {
+  const session = (draft.sessions as SessionDetail[] | undefined)?.find(item => item.id === record.sessionId);
+  if (record.dataEpoch && (!session || session.dataEpoch !== record.dataEpoch || session.archivedAt)) throw new ConflictException('INTENT_EXECUTION_STALE');
+  const invocation = (draft.runtimeInvocationsBySession as Record<string, RuntimeInvocationLog[]> | undefined)?.[record.sessionId]
+    ?.find(item => item.invocationId === record.invocationId);
+  if (invocation?.intentAdmission?.status === 'superseded') throw new ConflictException('INTENT_EXECUTION_SUPERSEDED');
+  if (invocation && (invocation.taskId !== record.taskId || (record.dataEpoch && invocation.dataEpoch !== record.dataEpoch))) {
+    throw new ConflictException('INTENT_EXECUTION_TARGET_MISMATCH');
+  }
+  record.workItemId ??= invocation?.workItemId;
+  record.executionBinding ??= invocation?.executionBinding;
+  assertIntentExecutionCurrent(draft, record);
 }
 
 function publicRecord(record: StoredWriteback): WorkspaceWritebackRecord {

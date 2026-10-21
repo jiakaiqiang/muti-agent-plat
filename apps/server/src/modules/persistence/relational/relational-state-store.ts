@@ -3,6 +3,7 @@ import type { CollaborationEvent } from '@agent-cluster/shared';
 import type { Pool, PoolClient } from 'pg';
 import { computePersistenceRevision } from '../postgres-cutover-transaction.js';
 import { ContentReferenceCodec } from '../content-reference-codec.js';
+import { INTENT_RECORD_TABLES, immutableIntentPayload, intentRecordIdentity, type IntentRecordCollection } from '../intent-record-invariants.js';
 import {
   assertWithinCollectionScope, changedById, isPlainRecord, scopedSessionIds, type CollectionScope
 } from '../collection-scope.js';
@@ -20,6 +21,7 @@ import {
   RELATIONAL_SCHEMA_V19_TABLES,
   RELATIONAL_SCHEMA_V20_TABLES,
   RELATIONAL_SCHEMA_V21_TABLES,
+  RELATIONAL_SCHEMA_V23_TABLES,
   RELATIONAL_TABLES
 } from './relational-schema.js';
 
@@ -78,6 +80,7 @@ export type McpObservationRecord = {
  * a key missing here is a session remnant that cannot be forgotten locally.
  */
 export const SESSION_KEYED_COLLECTIONS = [
+  ...Object.keys(INTENT_RECORD_TABLES),
   'runtimeHealthBySession',
   'sessionLifecyclesBySession',
   'logicalOperationsBySession',
@@ -104,6 +107,7 @@ export const SESSION_KEYED_COLLECTIONS = [
 ] as const;
 
 const KNOWN_COLLECTIONS = new Set([
+  ...Object.keys(INTENT_RECORD_TABLES),
   'runtimeHealthBySession',
   'sessionLifecyclesBySession',
   'logicalOperationsBySession',
@@ -180,7 +184,8 @@ const REPLACEABLE_RELATIONAL_TABLES = [
   ...RELATIONAL_SCHEMA_V17_TABLES,
   ...RELATIONAL_SCHEMA_V19_TABLES,
   ...RELATIONAL_SCHEMA_V20_TABLES,
-  ...RELATIONAL_SCHEMA_V21_TABLES
+  ...RELATIONAL_SCHEMA_V21_TABLES,
+  ...RELATIONAL_SCHEMA_V23_TABLES
 ]
   .map((definition) => definition.name)
   .filter((name) => !RETAINED_OPERATIONAL_TABLES.has(name))
@@ -466,6 +471,10 @@ export class RelationalStateStore {
   private async loadCollectionsWithClient(client: PoolClient, keys: string[], sessionIds?: string[]): Promise<PersistedState> {
     const state: PersistedState = {};
     for (const key of keys) {
+      if (Object.hasOwn(INTENT_RECORD_TABLES, key)) {
+        state[key] = await this.loadIntentRecords(client, key as IntentRecordCollection);
+        continue;
+      }
       switch (key) {
         case 'agents':
           state.agents = await sourceRecords(client, `select av.configuration->'sourceRecord' value from agent_cluster.agents a join agent_cluster.agent_versions av on av.id=a.current_version_id where a.deleted_at is null order by a.id`);
@@ -599,6 +608,9 @@ export class RelationalStateStore {
     await this.loadRuntime(client, state);
     await this.loadWorkflowRuntime(client, state);
     await this.loadAutopilotAndAudits(client, state);
+    for (const key of Object.keys(INTENT_RECORD_TABLES) as IntentRecordCollection[]) {
+      state[key] = await this.loadIntentRecords(client, key);
+    }
     return this.codec.hydrate(state);
   }
 
@@ -935,6 +947,7 @@ export class RelationalStateStore {
   }
 
   private async writeCollectionWithClient(client: PoolClient, key: string, value: unknown): Promise<void> {
+    if (Object.hasOwn(INTENT_RECORD_TABLES, key)) return this.writeIntentRecords(client, key as IntentRecordCollection, record(value));
     switch (key) {
       case 'runtimeHealthBySession': return this.writeRuntimeHealth(client, record(value));
       case 'logicalOperationsBySession': return this.writeLogicalOperations(client, record(value));
@@ -984,6 +997,39 @@ export class RelationalStateStore {
       case 'eventOutbox': return this.writeEventOutbox(client, array(value));
       case 'systemAgentRuntimePolicies': return this.writeSystemAgentRuntimePolicies(client, record(value));
       default: throw new Error(`RELATIONAL_COLLECTION_UNMAPPED: ${key}`);
+    }
+  }
+
+  private async loadIntentRecords(client: PoolClient, key: IntentRecordCollection) {
+    return groupedSources(client, `select s.external_id group_id,r.source_snapshot->'sourceRecord' value
+      from agent_cluster.${INTENT_RECORD_TABLES[key]} r join agent_cluster.sessions s on s.id=r.session_id
+      where s.deleted_at is null order by s.id,r.created_at,r.external_id`);
+  }
+
+  private async writeIntentRecords(client: PoolClient, key: IntentRecordCollection, groups: Record<string, unknown>) {
+    const table = INTENT_RECORD_TABLES[key];
+    for (const [sessionExternalId, values] of Object.entries(groups)) {
+      for (const item of array(values).map(record)) {
+        if (item.sessionId !== sessionExternalId) throw new Error('INTENT_RECORD_SESSION_MISMATCH');
+        const identity = intentRecordIdentity(key, item);
+        const binding = await client.query<{ session_id: string; routing_id: string }>(
+          `select s.id::text session_id,r.id::text routing_id from agent_cluster.sessions s
+           join agent_cluster.intent_routing_records r on r.session_id=s.id
+           where s.external_id=$1 and s.deleted_at is null and r.external_id=$2
+           and s.metadata->'sourceRecord'->>'dataEpoch'=$3`, [sessionExternalId, item.routingId, item.dataEpoch]);
+        if (!binding.rows[0]) throw new Error('INTENT_RECORD_BINDING_MISMATCH');
+        const result = await client.query(`insert into agent_cluster.${table}
+          (external_id,session_id,routing_id,data_epoch,identity_key,immutable_payload,source_snapshot,status,created_at,updated_at)
+          values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+          on conflict (external_id) do update set source_snapshot=excluded.source_snapshot,status=excluded.status,updated_at=excluded.updated_at
+          where ${table}.session_id=excluded.session_id and ${table}.routing_id=excluded.routing_id
+            and ${table}.data_epoch=excluded.data_epoch and ${table}.identity_key=excluded.identity_key
+            and ${table}.immutable_payload=excluded.immutable_payload returning external_id`,
+        [item.id, binding.rows[0].session_id, binding.rows[0].routing_id, item.dataEpoch, identity,
+          json(immutableIntentPayload(key, item)), json({ sourceRecord: item }), item.status ?? null,
+          item.createdAt, item.updatedAt ?? item.createdAt]);
+        if (!result.rows.length) throw new Error('INTENT_RECORD_IMMUTABLE');
+      }
     }
   }
 
@@ -2736,6 +2782,7 @@ export class RelationalStateStore {
 function collectionWriteOrder(state: PersistedState): string[] {
   const order = ['systemDataMetadata','agents','systemAgentRuntimePolicies','skills','capabilities','workflowCatalog','workflows','sessions','codeHostAuthorizations','codeHostOAuthStates','githubConflictsBySession','sessionLifecyclesBySession','workItemBudgetsBySession','workItemsBySession','decisionRecordsBySession','contextSnapshotsBySession','intentRoutingRecordsBySession','followUpMessagesBySession','summaryCheckpointsBySession','discussionsBySession','requirementDocumentsBySession','discussionDocumentsBySession','workflowStartRequestsBySession','changeRequestsBySession','runtimeSwitchRequestsBySession','fileRevisions','workspaceWritebacks','eventsBySession','briefsBySession','suggestedTasksByBriefId','tasksBySession','memoriesBySession','knowledge','runtimeModelConfig','runtimeInvocationsBySession','artifacts','workflowRuntime','autopilots','autopilotRuns','localRuntimeDevices','localRuntimeOperationAudits','eventOutbox','cutoverAudits'];
   order.push('logicalOperationsBySession', 'sessionStopRequestsBySession', 'runtimeHealthBySession');
+  order.push(...Object.keys(INTENT_RECORD_TABLES));
   return order.filter((key) => Object.prototype.hasOwnProperty.call(state, key));
 }
 
@@ -2890,7 +2937,8 @@ function eventOutboxRecordSql(alias: string): string {
   )`;
 }
 /** Per-Session record lists whose writers only upsert by record id. */
-const UPSERT_ONLY_GROUPED_COLLECTIONS = new Set(['eventsBySession', 'sessionStopRequestsBySession', 'logicalOperationsBySession']);
+const UPSERT_ONLY_GROUPED_COLLECTIONS = new Set(['eventsBySession', 'sessionStopRequestsBySession', 'logicalOperationsBySession',
+  ...Object.keys(INTENT_RECORD_TABLES)]);
 
 /**
  * Narrows a changed collection to the records a transaction actually added or

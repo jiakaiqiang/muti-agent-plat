@@ -6,6 +6,287 @@ import { join } from 'node:path';
 import type { AgentTask, SessionDetail, UserMessageHandlingPlan, WorkspaceWritebackRecord } from '@agent-cluster/shared';
 import { requirementConfirmationFingerprint } from '@agent-cluster/shared';
 import { SessionsService } from './sessions.service.js';
+import { seedApprovedResume } from '../message-routing/intent-resume.fixture.js';
+import { seedFailedRetry } from '../message-routing/intent-retry.fixture.js';
+
+async function failedRetryFixture() {
+  const taskItems: AgentTask[] = [];
+  const fixture = makeService({ taskItems });
+  const { session } = await fixture.service.create({ input: 'Retry the one failed read task' });
+  const service = fixture.service as any; service.briefGenerationRuns.delete(session.id); service.persist();
+  await service.persistence.mutateCollections(['sessions', 'sessionLifecyclesBySession', 'workItemsBySession', 'briefsBySession',
+    'tasksBySession', 'logicalOperationsBySession', 'runtimeInvocationsBySession', 'intentRoutingRecordsBySession',
+    'intentRouteRevisionsBySession', 'intentPlanStepsBySession', 'decisionRecordsBySession'], (draft: any) => {
+    const saved = draft.sessions.find((row: SessionDetail) => row.id === session.id);
+    const work = { id: 'work', sessionId: session.id, status: 'EXECUTING', revision: 1 };
+    draft.workItemsBySession = { [session.id]: [work] }; seedFailedRetry(draft, saved, work as never);
+  });
+  Object.assign(session, service.persistence.getCollection('sessions', [])[0]);
+  taskItems.push(...service.persistence.getCollection('tasksBySession', {})[session.id],
+    { id: 'sibling', sessionId: session.id, workItemId: 'work', status: 'failed' } as AgentTask,
+    { id: 'upstream', sessionId: session.id, workItemId: 'work', status: 'completed' } as AgentTask);
+  await service.persistence.setCollection('tasksBySession', { [session.id]: taskItems });
+  const update = service.tasks.update.bind(service.tasks);
+  service.tasks.update = (task: AgentTask, patch: Partial<AgentTask>) => {
+    update(task, patch); service.persistence.setCollection('tasksBySession', { [session.id]: taskItems }); return task;
+  };
+  return { ...fixture, service, session, taskItems };
+}
+
+test('R8 exact retry/continue execution and semantic retry dispatch the same one bound task', async () => {
+  for (const entry of ['重试', '继续执行', 'semantic']) {
+    const f = await failedRetryFixture(), before = structuredClone(f.taskItems.slice(1));
+    const calls: any[][] = [];
+    f.service.execution.start = (...args: any[]) => { calls.push(args); };
+    if (entry === 'semantic') {
+      const binding = f.session.activeRecoveryCheckpoint!.retryBinding;
+      await f.service.persistence.mutateCollections(['intentPlanStepsBySession', 'intentRoutingRecordsBySession'], (draft: any) => {
+        draft.intentPlanStepsBySession[f.session.id].push({ id: 'retry-step', routingId: 'retry-route', intentRevision: 1,
+          status: 'queued', step: { action: 'retry_failed_step' }, retryBinding: binding });
+        draft.intentRoutingRecordsBySession[f.session.id].push({ id: 'retry-route', effectiveIntentRevision: 1 });
+      });
+      await f.service.resumeControl.dispatch({ sessionId: f.session.id, stepId: 'retry-step' });
+      await f.service.resumeControl.dispatch({ sessionId: f.session.id, stepId: 'retry-step' });
+    } else await f.service.sendMessage(f.session.id, entry);
+    assert.equal(calls.length, 1, entry); assert.deepEqual(calls[0][2].map((task: AgentTask) => task.id), ['original-task']);
+    assert.equal(calls[0][6].failure.invocationId, 'failed-call');
+    assert.equal(f.session.status, 'EXECUTING'); assert.equal(f.session.activeRecoveryCheckpoint, undefined);
+    assert.deepEqual(f.taskItems.slice(1), before, 'sibling and completed upstream remain unchanged');
+    const receipt = f.service.persistence.getCollection('intentPlanStepsBySession', {})[f.session.id][0].retryReceipts[0];
+    assert.equal(receipt.status, 'applied');
+  }
+});
+
+test('R8 failure checkpoint captures exact evidence; missing proof leaves an ordinary card', async () => {
+  for (const proof of [true, false]) {
+    const f = await failedRetryFixture();
+    f.taskItems[0].lastExecutionFailure = { invocationId: 'failed-call', phase: 'task_execution' };
+    if (!proof) await f.service.persistence.setCollection('runtimeInvocationsBySession', {});
+    f.service.createRecoveryCheckpoint(f.session, 'retry_failed_execution', { phase: 'task_execution', failedTaskId: 'original-task' });
+    assert.equal(Boolean(f.session.activeRecoveryCheckpoint?.retryBinding), proof);
+    if (proof) assert.equal(f.session.activeRecoveryCheckpoint?.retryBinding?.failure.invocationId, 'failed-call');
+  }
+});
+
+test('R8 pending budget hold and ended task cannot be bypassed by exact or semantic retry', async () => {
+  for (const semantic of [false, true]) for (const ended of [false, true]) {
+    const f = await failedRetryFixture();
+    if (ended) f.service.tasks.update(f.taskItems[0], { status: 'cancelled' });
+    else await f.service.persistence.mutateCollections(['logicalOperationsBySession'], (draft: any) => {
+      draft.logicalOperationsBySession[f.session.id][0].inputBudgetDecisions = [{ status: 'pending',
+        dataEpoch: f.session.dataEpoch, sessionGeneration: 1 }];
+    });
+    const keys = ['sessions', 'tasksBySession', 'logicalOperationsBySession'];
+    const before = keys.map(key => f.service.persistence.getCollection(key, {}));
+    await assert.rejects(semantic ? f.service.resume(f.session.id) : f.service.sendMessage(f.session.id, '重试'),
+      ended ? /INTENT_RETRY_TARGET_OBSOLETE/ : /INPUT_BUDGET_STRUCTURED_DECISION_REQUIRED/);
+    assert.deepEqual(keys.map(key => f.service.persistence.getCollection(key, {})), before);
+    assert.equal(f.executionStarts.length, 0);
+  }
+});
+
+test('R8 legacy failed exact retry still uses the existing retryFailedSession path', async () => {
+  const f = makeService(), { session } = await f.service.create({ input: 'Legacy retry regression' });
+  const service = f.service as any; service.briefGenerationRuns.delete(session.id); session.status = 'FAILED'; service.persist();
+  let calls = 0;
+  service.retryFailedSession = (current: SessionDetail) => { assert.equal(current.id, session.id); calls++; };
+  await f.service.sendMessage(session.id, '重试'); assert.equal(calls, 1);
+});
+
+test('R7 legacy exact continue preserves one execution start and the existing PAUSED to EXECUTING transition', async () => {
+  const fixture = makeService(), { session } = await fixture.service.create({ input: 'Legacy resume regression' });
+  const service = fixture.service as any; service.briefGenerationRuns.delete(session.id);
+  session.status = 'EXECUTING'; session.currentTaskBriefId = 'legacy-approved-brief';
+  await fixture.service.pause(session.id);
+  const starts = fixture.executionStarts.length;
+  await fixture.service.sendMessage(session.id, '继续');
+  assert.equal(session.status, 'EXECUTING'); assert.equal(session.pauseState, undefined);
+  assert.equal(fixture.executionStarts.length - starts, 1);
+  await fixture.service.sendMessage(session.id, '继续');
+  assert.equal(fixture.executionStarts.length - starts, 1);
+});
+
+test('R7 exact continue during a pending budget hold leaves hold, session, tasks and invocation count unchanged', async () => {
+  for (const status of ['WAIT_USER_DECISION', 'PAUSED'] as const) {
+    const fixture = makeService(), { session } = await fixture.service.create({ input: 'Budget decision fence' });
+    const service = fixture.service as any; service.briefGenerationRuns.delete(session.id);
+    session.intentContractVersion = 'intent-understanding-v1'; session.status = status; service.persist();
+    await service.persistence.setCollection('logicalOperationsBySession', { [session.id]: [{ id: 'hold-operation',
+      inputBudgetDecisions: [{ id: 'hold', status: 'pending', dataEpoch: session.dataEpoch, sessionGeneration: service.lifecycle.generation(session.id) }] }] });
+    const before = ['sessions', 'tasksBySession', 'logicalOperationsBySession'].map(key => service.persistence.getCollection(key, {}));
+    const starts = fixture.executionStarts.length;
+    await assert.rejects(fixture.service.sendMessage(session.id, '继续'), /INPUT_BUDGET_STRUCTURED_DECISION_REQUIRED/);
+    assert.deepEqual(['sessions', 'tasksBySession', 'logicalOperationsBySession'].map(key => service.persistence.getCollection(key, {})), before);
+    assert.equal(fixture.executionStarts.length, starts);
+  }
+});
+
+test('R7 exact and semantic resume control use the same Sessions resume execution path', async () => {
+  for (const semantic of [false, true]) {
+    const taskItems: AgentTask[] = [];
+    const fixture = makeService({ taskItems }), { session } = await fixture.service.create({ input: 'Original approved task' });
+    const service = fixture.service as any; service.briefGenerationRuns.delete(session.id);
+    service.persist();
+    await service.persistence.mutateCollections(['sessions', 'workItemsBySession', 'briefsBySession', 'tasksBySession', 'logicalOperationsBySession',
+      'intentRoutingRecordsBySession', 'intentRouteRevisionsBySession', 'intentPlanStepsBySession', 'decisionRecordsBySession'], (draft: any) => {
+      const saved = draft.sessions.find((row: SessionDetail) => row.id === session.id);
+      const work = { id: 'work', sessionId: session.id, status: 'EXECUTING', revision: 1 };
+      draft.workItemsBySession = { [session.id]: [work] }; seedApprovedResume(draft, saved, work as never);
+    });
+    taskItems.push(...service.persistence.getCollection('tasksBySession', {})[session.id],
+      { id: 'unbound-task', sessionId: session.id, status: 'running' } as AgentTask);
+    Object.assign(session, service.persistence.getCollection('sessions', [])[0]);
+    const starts = fixture.executionStarts.length;
+    if (semantic) {
+      const { bindIntentResume, readIntentResumeState } = await import('../message-routing/intent-resume-guard.js');
+      const binding = bindIntentResume(readIntentResumeState(service.persistence), session.id, session.ownerId);
+      await service.persistence.mutateCollections(['intentPlanStepsBySession', 'intentRoutingRecordsBySession'], (draft: any) => {
+        draft.intentPlanStepsBySession[session.id].push({ id: 'resume-step', routingId: 'resume-route', intentRevision: 1,
+          status: 'queued', step: { action: 'resume' }, resumeBinding: binding });
+        draft.intentRoutingRecordsBySession[session.id].push({ id: 'resume-route', effectiveIntentRevision: 1 });
+      });
+      await service.resumeControl.dispatch({ sessionId: session.id, stepId: 'resume-step' });
+    } else await fixture.service.sendMessage(session.id, '继续');
+    assert.equal(session.status, 'EXECUTING'); assert.equal(fixture.executionStarts.length - starts, 1);
+    assert.equal(fixture.executionStarts.at(-1)?.taskCount, 1, 'only the original bound task is resumed');
+    assert.equal(taskItems[1].status, 'running', 'unbound tasks are not reset');
+  }
+});
+
+test('input budget wait keeps an executing follow-up pending until its resumed execution settles', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Continue current task' });
+  const service = fixture.service as any;
+  service.briefGenerationRuns.delete(session.id);
+  session.status = 'EXECUTING';
+  session.activeFollowUpMessageId = 'budget-follow-up';
+  session.pendingFollowUpMessages = [{ id: 'budget-follow-up', status: 'executing' }] as SessionDetail['pendingFollowUpMessages'];
+  const generation = service.lifecycle.generation(session.id);
+  await service.applyFollowUpOutcome(session.id, 'budget-follow-up', {
+    kind: 'input_budget_exceeded', taskId: 'task', reason: 'budget', error: { code: 'INPUT_BUDGET_EXCEEDED', message: 'budget' }
+  }, generation);
+  assert.equal(session.status, 'WAIT_USER_DECISION');
+  assert.equal(session.activeFollowUpMessageId, 'budget-follow-up');
+  assert.equal(session.pendingFollowUpMessages?.[0]?.status, 'executing');
+  session.status = 'EXECUTING'; session.currentTaskBriefId = 'budget-brief';
+  service.orchestrator.getBrief = () => ({ id: 'budget-brief' });
+  let settle: ((outcome: unknown) => unknown) | undefined;
+  service.execution.start = (_session: unknown, _brief: unknown, _tasks: unknown, callback: typeof settle) => { settle = callback; };
+  service.resumeExecution(session, { followUpMessageId: 'budget-follow-up' });
+  assert.ok(settle);
+  await settle({ kind: 'failed', reason: 'Task ended' });
+  assert.equal(session.activeFollowUpMessageId, undefined);
+  assert.equal(session.pendingFollowUpMessages?.length, 0);
+});
+
+test('session cache observes committed correction ledger revisions and does not overwrite them on persist', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Keep corrected constraints current' });
+  const service = fixture.service as any;
+  service.briefGenerationRuns.delete(session.id);
+  session.revision = 5;
+  session.decisionLedgerRevision = 2;
+  service.persist();
+  const commitLedger = async (ledger: number, revision: number, dataEpoch = session.dataEpoch) => {
+    await service.persistence.mutateCollections(['sessions'], (draft: { sessions: SessionDetail[] }) => {
+      const row = draft.sessions.find(item => item.id === session.id)!;
+      row.decisionLedgerRevision = ledger;
+      row.revision = revision;
+      row.dataEpoch = dataEpoch;
+    });
+  };
+  await commitLedger(3, 6);
+  assert.equal(fixture.service.get(session.id), session, 'preserves live object identity');
+  assert.equal(session.decisionLedgerRevision, 3);
+  assert.equal(session.revision, 6);
+  await commitLedger(4, 7);
+  service.persist();
+  const saved = service.persistence.getCollection('sessions', []).find((row: SessionDetail) => row.id === session.id);
+  assert.equal(saved.decisionLedgerRevision, 4);
+  assert.equal(saved.revision, 7);
+  await commitLedger(2, 3);
+  fixture.service.get(session.id);
+  assert.equal(session.decisionLedgerRevision, 4);
+  assert.equal(session.revision, 7);
+  await commitLedger(99, 100, 'different-epoch');
+  fixture.service.get(session.id);
+  assert.equal(session.decisionLedgerRevision, 4, 'never imports another data epoch');
+  assert.equal(session.revision, 7);
+});
+
+test('new-contract Session cache cannot restore a revoked workspace authority on a later persist', async () => {
+  const fixture = makeService(); const { session } = await fixture.service.create({ input: 'Inspect workspace' });
+  const service = fixture.service as any; service.briefGenerationRuns.delete(session.id);
+  session.intentContractVersion = 'intent-understanding-v1';
+  session.intentWorkspaceReadAuthority = { bindingHash: 'binding', grant: { id: 'grant', effect: 'read_workspace',
+    resource: { kind: 'workspace', refId: session.workspaceId }, sourceEventId: 'selection', revision: 1 } };
+  service.persist();
+  await service.persistence.mutateCollections(['sessions'], (draft: { sessions: SessionDetail[] }) => {
+    const current = draft.sessions.find(row => row.id === session.id)!;
+    current.intentWorkspaceReadAuthority!.grant.revokedAt = '2026-10-19T00:00:00Z';
+    current.intentWorkspaceReadAuthority!.grant.revision = 2;
+  });
+  assert.equal(session.intentWorkspaceReadAuthority.grant.revision, 1);
+  session.title = 'Unrelated update'; service.persist();
+  assert.equal(fixture.service.get(session.id).intentWorkspaceReadAuthority?.grant.revision, 2);
+  assert.equal(fixture.persistedSessions[0].intentWorkspaceReadAuthority?.grant.revokedAt, '2026-10-19T00:00:00Z');
+});
+
+test('new-contract Session cache preserves test grant revocation committed outside SessionsService', async () => {
+  const fixture = makeService(); const { session } = await fixture.service.create({ input: 'Run isolated tests' });
+  const service = fixture.service as any; service.briefGenerationRuns.delete(session.id);
+  session.intentContractVersion = 'intent-understanding-v1';
+  session.intentTestAuthority = { binding: { runnerId: 'docker-npm-tests-v1', resourceId: 'runner', bindingHash: 'binding',
+    workspaceBindingHash: 'workspace-binding', workspaceId: session.workspaceId, imageId: `sha256:${'a'.repeat(64)}`, script: 'test' },
+    grant: { id: 'test-grant', effect: 'run_tests', resource: { kind: 'test_runner', refId: 'runner' }, sourceEventId: 'grant-event', revision: 1 } };
+  service.persist();
+  await service.persistence.mutateCollections(['sessions'], (draft: { sessions: SessionDetail[] }) => {
+    const current = draft.sessions.find(row => row.id === session.id)!;
+    current.intentTestAuthority!.grant.revokedAt = '2026-10-19T00:00:00Z'; current.intentTestAuthority!.grant.revision = 2;
+  });
+  session.title = 'Unrelated title update'; service.persist();
+  assert.equal(fixture.service.get(session.id).intentTestAuthority?.grant.revision, 2);
+  assert.equal(fixture.persistedSessions[0].intentTestAuthority?.grant.revokedAt, '2026-10-19T00:00:00Z');
+});
+
+test('new-contract server source completion calls the intent pipeline and preserves cache on failed commit', async () => {
+  const fixture = makeService(); const service = fixture.service as any;
+  const { session } = await fixture.service.create({ input: 'Read repository', executionLocation: 'server',
+    codeSource: { kind: 'remote_repository', provider: 'github', repositoryUrl: 'https://github.com/example/project' } });
+  session.intentContractVersion = 'intent-understanding-v1'; service.persist();
+  const awaiting = fixture.service.updateServerSourcePreparation(session.id, 1, { state: 'awaiting_base_branch',
+    authorizationRef: 'auth', workspaceId: session.workspaceId, cacheKey: 'cache' });
+  const prepared = { workspaceId: session.workspaceId, workspacePath: 'C:/managed/session', cacheKey: 'cache', baseBranch: 'main', baseSha: 'a'.repeat(40) };
+  let attempts = 0;
+  service.intentPipeline = { sourceReady: async (draft: SessionDetail, version: number) => {
+    attempts++; assert.equal(version, awaiting.version); assert.equal(draft.sourceBinding?.state, 'ready');
+    assert.equal(draft.workingDirectory?.path, prepared.workspacePath);
+    if (attempts === 1) throw new Error('source commit failed');
+    draft.status = 'AGENT_DISCUSSING'; service.persistence.setCollection('sessions', [draft]); return draft;
+  } };
+  await assert.rejects(fixture.service.completeServerSourcePreparation(session.id, awaiting.version, prepared), /source commit failed/);
+  assert.equal(fixture.service.get(session.id).sourceBinding?.state, 'awaiting_base_branch');
+  assert.equal(fixture.service.get(session.id).workingDirectory, undefined);
+  await fixture.service.completeServerSourcePreparation(session.id, awaiting.version, prepared);
+  assert.equal(fixture.service.get(session.id).sourceBinding?.state, 'ready'); assert.equal(attempts, 2);
+  assert.equal(fixture.discussionStarts.length, 0);
+});
+
+test('message correction lookup uses exact persisted source event within the requested session', () => {
+  const fixture = makeService();
+  const calls: string[] = [];
+  const service = fixture.service as any;
+  service.get = (sessionId: string) => { if (sessionId !== 's1') throw new Error('Session not found'); return { id: sessionId }; };
+  service.contextManagement = { listRoutingRecords: (sessionId: string) => {
+    calls.push(sessionId);
+    return [{ id: 'r1', sessionId, sourceEventId: 'source/1' }, { id: 'r2', sessionId, sourceEventId: 'source/2' }];
+  } };
+  assert.deepEqual(fixture.service.listIntentRoutingsForMessage('s1', 'source/1').map(row => row.id), ['r1']);
+  assert.deepEqual(fixture.service.listIntentRoutingsForMessage('s1', 'source'), []);
+  assert.throws(() => fixture.service.listIntentRoutingsForMessage('s1', ''), /SOURCE_EVENT_ID_REQUIRED/);
+  assert.throws(() => fixture.service.listIntentRoutingsForMessage('s2', 'source/1'), /Session not found/);
+  assert.deepEqual(calls, ['s1', 's1']);
+});
 
 test('runtime switch command bypasses paused message queue, preserves task scope and is idempotent', async () => {
   const fixture = makeService();
@@ -35,6 +316,46 @@ test('runtime switch command bypasses paused message queue, preserves task scope
   await fixture.service.sendMessage(session.id, '换成 Claude，继续把剩下的做完', [], 'switch-message');
   assert.equal(executions, 1);
   assert.equal(preflights, 2, 'one preflight before stopping and one before applying');
+});
+
+test('natural language resumes a stopped Claude fallback with Codex at its original phase', async () => {
+  for (const previousStatus of ['AGENT_DISCUSSING', 'EXECUTING'] as const) {
+    for (const content of ['你使用codex 进行处理\n', '使用codex继续进行任务']) {
+      const fixture = makeService();
+      const { session } = await fixture.service.create({ input: 'Analyze the existing project' });
+      const service = fixture.service as any;
+      service.briefGenerationRuns.delete(session.id);
+      session.status = previousStatus;
+      session.activeWorkItemId = 'work-existing';
+      if (previousStatus === 'EXECUTING') session.currentTaskBriefId = 'brief-existing';
+      session.runtimePreference = { preferredRuntimeType: 'codex', allowedRuntimeTypes: ['codex', 'claude_code'] };
+      session.runtimeFailover = { workItemId: 'work-existing', runtimeType: 'claude_code', preferenceRevision: 0 };
+      service.persist();
+      service.runtime = { hasUnconfirmedStops: () => false, activeInvocationCount: () => 0,
+        listInvocations: () => [], cancelSessionAndWait: async () => ({ requested: 0, completed: 0, timedOut: false }) };
+      await fixture.service.pause(session.id);
+      let generations = 0;
+      let executions = 0;
+      service.orchestrator.preflightRuntimeSwitch = async () => {};
+      service.generateBriefInBackground = () => { generations++; };
+      service.resumeExecution = () => { executions++; };
+
+      const result = await fixture.service.sendMessage(session.id, content, [], 'resume-with-codex');
+      assert.equal(result.deferred, false, content);
+      assert.equal(session.status, previousStatus);
+      assert.equal(session.activeWorkItemId, 'work-existing');
+      assert.equal(session.currentTaskBriefId, previousStatus === 'EXECUTING' ? 'brief-existing' : undefined);
+      assert.equal(session.pendingFollowUpMessages?.length ?? 0, 0, 'control must not wait in the paused message queue');
+      assert.equal(fixture.followUpRecognitions.length, 0, 'control bypasses semantic classification');
+      assert.equal(fixture.service.runtimeSwitchState(session.id).request?.status, 'completed');
+      assert.equal(fixture.service.runtimeSwitchState(session.id).request?.fromRuntimeType, 'claude_code');
+      assert.equal(fixture.service.runtimeSwitchState(session.id).preference?.preferredRuntimeType, 'codex');
+      assert.equal(session.runtimeFailover, undefined, 'explicit selection clears the previous fallback');
+      await fixture.service.sendMessage(session.id, content, [], 'resume-with-codex');
+      assert.equal(generations, previousStatus === 'AGENT_DISCUSSING' ? 1 : 0);
+      assert.equal(executions, previousStatus === 'EXECUTING' ? 1 : 0);
+    }
+  }
 });
 
 test('unavailable target keeps healthy execution and an unconfirmed stop never starts a replacement', async () => {
@@ -1909,6 +2230,25 @@ test('retry falls back to the latest failure phase when no interruption phase wa
 
   assert.equal(fixture.service.get(session.id).status, 'AGENT_DISCUSSING');
   assert.equal(generations, 1);
+});
+
+test('new-contract confirmation can be paused without executing or losing its checkpoint', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Pause while reviewing a brief' });
+  session.intentContractVersion = 'intent-understanding-v1'; session.status = 'WAIT_USER_CONFIRM';
+  await fixture.service.pause(session.id);
+  assert.equal(session.status, 'PAUSED');
+  assert.equal(session.pauseState?.previousStatus, 'WAIT_USER_CONFIRM');
+});
+
+test('invalid pause does not close lifecycle admission', async () => {
+  const fixture = makeService();
+  const { session } = await fixture.service.create({ input: 'Completed session' });
+  session.status = 'COMPLETED';
+  const lifecycle = (fixture.service as any).lifecycle;
+  const before = structuredClone(lifecycle.get(session.id));
+  await assert.rejects(fixture.service.pause(session.id), /Invalid session transition/);
+  assert.deepEqual(lifecycle.get(session.id), before);
 });
 
 test('pause stops Session execution and Runtime work while preserving a resumable checkpoint', async () => {
@@ -5144,4 +5484,39 @@ test('a bare stop does not invent a queued change', async () => {
   assert.equal((fixture.service as unknown as {
     changeRequests: { list(sessionId: string): unknown[] };
   }).changeRequests.list(session.id).length, 0, 'a pure control message queues nothing');
+});
+
+
+test('ordinary correction routing delegates to the versioned service and never starts legacy follow-up planning', async () => {
+  for (const ambiguous of [false, true]) {
+    const fixture = makeService();
+    const { session } = await fixture.service.create({ input: 'Correct timeout' });
+    const service = fixture.service as any;
+    service.briefGenerationRuns.delete(session.id);
+    session.status = 'PAUSED';
+    const follow = { id: 'correct-follow', routingId: 'correction-source', sourceEventId: 'correct-event', status: 'queued' };
+    session.pendingFollowUpMessages = [follow] as any;
+    const routing = { id: follow.routingId, sessionId: session.id, sourceEventId: follow.sourceEventId, status: 'VALIDATING',
+      routingRevision: 3, rolloutMode: 'enforce_all_current_epoch', reasonCodes: [], leaseOwner: 'classifier' };
+    service.contextManagement = { claimIntentRouting: async () => ({ state: 'claimed', routing }), listSnapshots: () => [{ id: 'snapshot' }] };
+    service.semanticIntentRouter = { classify: async () => ({ routing, decision: { dialogueAct: 'correction' },
+      autoApplicable: !ambiguous, validation: { errors: [] } }) };
+    const calls: string[] = [];
+    service.intentCorrections = {
+      acceptMessage: async (...args: unknown[]) => {
+        assert.deepEqual(args, [session.id, session.ownerId, routing.id, 'classifier']);
+        calls.push('accept'); return { correction: { id: 'saved-correction' } };
+      },
+      schedule: (correction: { id: string }) => { assert.equal(correction.id, 'saved-correction'); calls.push('schedule'); },
+      clarifyMessage: async (...args: unknown[]) => {
+        assert.deepEqual(args.slice(0, 3), [session.id, routing.id, 3]); calls.push('clarify');
+      }
+    };
+    service.routeApplication = { apply: () => { throw new Error('legacy route application must never receive correction'); } };
+    service.scheduleFollowUpPlanning = () => { throw new Error('correction must not resume/planning'); };
+    await service.processIntentRouting(session.id, routing.id, 'snapshot', follow.id);
+    assert.deepEqual(calls, ambiguous ? ['clarify'] : ['accept', 'schedule']);
+    assert.equal(session.pendingFollowUpMessages?.length, 0);
+    assert.equal(session.status, 'PAUSED');
+  }
 });

@@ -22,6 +22,15 @@ import { GitHubCodeHostAdapter } from '../code-hosts/github-code-host.adapter.js
 import { GitRepositoryWorkspaceManager } from '../repository-workspaces/repository-workspace-manager.js';
 import { SourcePreparationCoordinator } from './source-preparation-coordinator.js';
 import { DeliveryCoordinator } from '../delivery/delivery-coordinator.js';
+import { IntentCorrectionService } from '../message-routing/intent-correction.service.js';
+import { IntentCorrectionPlannerService } from '../message-routing/intent-correction-planner.service.js';
+import { IntentMessagePipelineService } from '../message-routing/intent-message-pipeline.service.js';
+import { IntentWorkspaceAuthorityService } from '../message-routing/intent-workspace-authority.service.js';
+import { IntentTestAuthorityService } from '../message-routing/intent-test-authority.service.js';
+import { SemanticClarificationService } from '../message-routing/semantic-clarification.service.js';
+import { IntentAuthorizationRetryService } from '../message-routing/intent-authorization-retry.service.js';
+import { IntentRecognitionRetryService } from '../message-routing/intent-recognition-retry.service.js';
+import { IntentBriefConfirmationService } from '../message-routing/intent-brief-confirmation.service.js';
 
 @Module({
   imports: [
@@ -45,6 +54,15 @@ import { DeliveryCoordinator } from '../delivery/delivery-coordinator.js';
   controllers: [SessionsController],
   providers: [
     SessionsService,
+    IntentCorrectionService,
+    IntentCorrectionPlannerService,
+    IntentMessagePipelineService,
+    IntentWorkspaceAuthorityService,
+    IntentTestAuthorityService,
+    SemanticClarificationService,
+    IntentAuthorizationRetryService,
+    IntentRecognitionRetryService,
+    IntentBriefConfirmationService,
     GitHubCodeHostAdapter,
     GitHubAuthorizationService,
     { provide: GitRepositoryWorkspaceManager, useFactory: () => new GitRepositoryWorkspaceManager() },

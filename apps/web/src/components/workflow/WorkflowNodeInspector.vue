@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import type { AgentDefinition, WorkflowNode } from '@/types/contracts'
 import UiIcon from '../UiIcon.vue'
+import WorkflowEffectsEditor from './WorkflowEffectsEditor.vue'
 
 const props = defineProps<{
   node?: WorkflowNode
@@ -77,6 +78,8 @@ function toggleDecision(decision: 'approve' | 'revise' | 'cancel', checked: bool
       </div>
 
       <div v-else-if="activeTab === 'config'" class="inspector-form">
+        <WorkflowEffectsEditor :node-id="node.id" :value="node.intentEffects" :human="node.type === 'human_approval'"
+          @update="updateNode({ intentEffects: $event })" />
         <label>
           <span>节点名称</span>
           <input :value="node.name || ''" maxlength="50" placeholder="请输入节点名称" @input="updateNode({ name: ($event.target as HTMLInputElement).value })" />

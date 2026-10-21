@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { RuntimeOutput, MinimalTaskSubmission } from '@agent-cluster/shared';
+import type { RuntimeOutput, MinimalTaskSubmission, InvocationPlan, LocalRuntimePermissionPolicy } from '@agent-cluster/shared';
 import { codexExecObserver, getVersionedRuntimeOutputContract, validateRuntimeOutput } from '@agent-cluster/shared';
 import { detectRuntimeVersion, parseConfiguredArgs, runRuntimeCommand } from '../runtime-process.js';
 import type { LocalRuntimeAdapter } from './adapter.js';
@@ -23,9 +23,8 @@ export class CodexLocalRuntimeAdapter implements LocalRuntimeAdapter {
   async execute({ plan, cwd, signal, permissions, providerConnection, emit }: Parameters<LocalRuntimeAdapter['execute']>[0]) {
     const command = process.env.AGENT_RUNTIME_CODEX_COMMAND?.trim() || 'codex';
     const configuredArgs = process.env.AGENT_RUNTIME_CODEX_ARGS_JSON?.trim();
-    const baseArgs = configuredArgs
-      ? parseConfiguredArgs(configuredArgs, 'AGENT_RUNTIME_CODEX_ARGS_JSON')
-      : buildCodexArgs(plan.submissionRepair);
+    const baseArgs = buildCodexInvocationArgs(plan, permissions, configuredArgs
+      ? parseConfiguredArgs(configuredArgs, 'AGENT_RUNTIME_CODEX_ARGS_JSON') : undefined);
     if (providerConnection && providerConnection.provider !== 'openai-compatible') {
       throw new Error('MODEL_PROTOCOL_MISMATCH: Codex requires an OpenAI-compatible connection.');
     }
@@ -68,6 +67,20 @@ export class CodexLocalRuntimeAdapter implements LocalRuntimeAdapter {
 
 export function buildCodexArgs(readOnly = false) {
   return ['exec', '--json', '--sandbox', readOnly ? 'read-only' : 'workspace-write', '--skip-git-repo-check', '-'];
+}
+
+/** The adapter owns sandbox selection, including when an operator supplies CLI arguments. */
+export function buildCodexInvocationArgs(plan: InvocationPlan, permissions: LocalRuntimePermissionPolicy, configured?: string[]) {
+  const canWrite = !plan.submissionRepair && plan.executionTarget.writeMode !== 'none' &&
+    permissions.workspace_write === 'allow' && plan.toolCatalog.tools?.some(tool => tool.name === 'write_file');
+  if (!configured) return buildCodexArgs(!canWrite);
+  if (plan.submissionRepair || configured.some(argument =>
+    /^(?:--(?:dangerously-bypass-approvals-and-sandbox|yolo|full-auto|sandbox|config|add-dir|cd|profile|enable|disable)|-[scCp])(?:=|$)/.test(argument) ||
+    /^-[scCp].+/.test(argument))) throw new Error('CODEX_UNSAFE_CUSTOM_ARGS');
+  const sandboxArgs = ['--sandbox', canWrite ? 'workspace-write' : 'read-only'];
+  const promptIndex = configured.lastIndexOf('-');
+  return promptIndex < 0 ? [...configured, ...sandboxArgs] :
+    [...configured.slice(0, promptIndex), ...sandboxArgs, ...configured.slice(promptIndex)];
 }
 
 /**

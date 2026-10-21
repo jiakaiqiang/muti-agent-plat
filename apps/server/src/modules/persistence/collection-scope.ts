@@ -1,4 +1,5 @@
 import type { PersistedState } from './persistence.service.js';
+import { assertIntentRecordMutation } from './intent-record-invariants.js';
 
 /**
  * Limits a collection transaction to the Sessions it names. Only the
@@ -20,6 +21,7 @@ export function assertWithinCollectionScope(
   scope: CollectionScope | undefined
 ) {
   const sessionIds = scopedSessionIds(scope);
+  assertIntentRecordMutation(before, after, sessionIds ? new Set(sessionIds) : undefined);
   if (!sessionIds) return;
   const allowed = new Set(sessionIds);
   if (isPlainRecord(after.eventsBySession)) {

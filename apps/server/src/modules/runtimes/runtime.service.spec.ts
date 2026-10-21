@@ -6,6 +6,19 @@ import { makeInvocationPlan } from './invocation-plan.fixture.js';
 import { RuntimeService } from './runtime.service.js';
 import { createExecutionTermination } from '../../common/execution-termination.js';
 import { WorktreeExecutionService } from '../worktree-execution/worktree-execution.service.js';
+import { SessionLifecycleStore } from './session-lifecycle-store.js';
+
+test('R8 final Runtime selection blocks unproven adapters before any adapter start', () => {
+  for (const type of ['codex', 'claude_code', 'test_runner', 'mcp_tool', 'human'] as const) {
+    let starts = 0;
+    const selected = adapter(type, async plan => { starts++; return completed(plan); });
+    const { service, persisted } = createService([selected]);
+    const plan = makeInvocationPlan({ executionTarget: { runtimeType: type } });
+    persisted.set('sessions', [{ id: plan.sessionId, intentContractVersion: 'intent-understanding-v1' }]);
+    plan.intentRetryBinding = {} as NonNullable<InvocationPlan['intentRetryBinding']>;
+    assert.throws(() => service.start(plan), /INTENT_RETRY_RECONCILIATION_REQUIRED/); assert.equal(starts, 0);
+  }
+});
 
 function completed(plan: InvocationPlan, runtimeType: RuntimeType = plan.executionTarget.runtimeType): AgentRunResult {
   return {
@@ -105,6 +118,128 @@ function createService(
   );
   return { service, persisted, persistence };
 }
+
+test('scoped Codex and Claude tasks stop before adapter startup when input is over budget', async () => {
+  for (const type of ['codex', 'claude_code'] as const) {
+    let starts = 0;
+    const selected = adapter(type, async plan => { starts++; return completed(plan); });
+    const { service, persistence, persisted } = createService([selected]);
+    persisted.set('sessions', [{ id: 'session', dataEpoch: 'epoch', ownerId: 'user', status: 'EXECUTING' }]);
+    persisted.set('tasksBySession', { session: [{ id: 'task', sessionId: 'session', status: 'running' }] });
+    await new SessionLifecycleStore(persistence as never).initialize('session', 'epoch');
+    const plan = makeInvocationPlan({ sessionId: 'session', taskId: 'task', invocationId: `budget-${type}`,
+      executionTarget: { runtimeType: type }, budget: { maxInputTokens: 1, maxOutputTokens: 50 },
+      inputBudgetPolicy: { kind: 'agent_task', taskId: 'task', actorId: 'user', dataEpoch: 'epoch', sessionGeneration: 1, slot: `task:${type}` } });
+    const result = await service.start(plan).result;
+    assert.equal(starts, 0); assert.equal(result.status, 'blocked', JSON.stringify(result.error));
+    assert.equal(result.error?.code, 'INPUT_BUDGET_EXCEEDED');
+    assert.equal(service.operations.list('session')[0].status, 'paused');
+  }
+});
+
+test('a correction arriving during asynchronous budget preparation prevents the actual adapter from starting', async () => {
+  let started = 0;
+  const selected = adapter('mock', async plan => { started += 1; return completed(plan); });
+  const { service, persisted } = createService([selected]);
+  const plan = makeInvocationPlan({ sessionId: 'correction-session', workItemId: 'held-work' });
+  (service as any).commitRequirementBudget = async () => {
+    persisted.set('workItemsBySession', { 'correction-session': [{ id: 'held-work', executionEpoch: 2,
+      dispatchHold: { correctionId: 'correction', reason: 'intent_correction', createdAt: new Date().toISOString() } }] });
+    return undefined;
+  };
+  const result = await service.start(plan).result;
+  assert.equal(started, 0);
+  assert.equal(result.status, 'failed');
+  assert.match(JSON.stringify(result.error), /INTENT_DISPATCH_HELD/);
+});
+
+test('correction stop targets exact invocation ids without cancelling another WorkItem', async () => {
+  const cancelled: string[] = [];
+  const started: string[] = [];
+  const selected: AgentRuntimeAdapter = { type: 'mock', start(plan) {
+    started.push(plan.invocationId);
+    let finish!: (value: AgentRunResult) => void;
+    const result = new Promise<AgentRunResult>(resolve => { finish = resolve; });
+    return { result, events: (async function* () {})(), async cancel() { cancelled.push(plan.invocationId); finish(completed(plan)); } };
+  } };
+  const { service } = createService([selected]);
+  const first = service.start(makeInvocationPlan({ sessionId: 'correction-session', invocationId: 'affected', workItemId: 'one' }));
+  const second = service.start(makeInvocationPlan({ sessionId: 'correction-session', invocationId: 'unaffected', workItemId: 'two' }));
+  // A deterministic barrier ensures both process handles have started.
+  await waitForSettlement(() => started.length === 2, 'both correction test adapters started');
+  const stopped = await service.cancelIntentExecutionsAndWait('correction-session', ['affected'], 1000);
+  assert.equal(stopped.stopConfirmed, true);
+  assert.deepEqual(cancelled, ['affected']);
+  assert.equal(service.activeInvocationCount('correction-session'), 1);
+  await second.cancel(); await first.result;
+});
+
+for (const originalStatus of ['completed', 'failed'] as const) {
+  test(`a late ${originalStatus} result is audited atomically and has no executable payload after correction`, async () => {
+    let finish!: () => void;
+    let started = false;
+    const selected = adapter('mock', async plan => {
+      started = true;
+      await new Promise<void>(resolve => { finish = resolve; });
+      return { ...completed(plan), status: originalStatus,
+        runtimeSession: { cliSessionId: 'old-conversation' },
+        ...(originalStatus === 'failed' ? { error: { code: 'MODEL_ERROR' as const, message: 'HTTP 503', retryable: true } } : {}) };
+    });
+    const { service, persisted } = createService([selected]);
+    persisted.set('sessions', [{ id: 'late-session', dataEpoch: 'epoch-test' }]);
+    persisted.set('workItemsBySession', { 'late-session': [{ id: 'work', executionEpoch: 1 }] });
+    const plan = makeInvocationPlan({ sessionId: 'late-session', workItemId: 'work', taskId: 'task' });
+    const running = service.start(plan);
+    await waitForSettlement(() => started, 'adapter must be running before the correction');
+    persisted.set('workItemsBySession', { 'late-session': [{ id: 'work', executionEpoch: 2,
+      dispatchHold: { correctionId: 'correction', reason: 'intent_correction', createdAt: new Date().toISOString() } }] });
+    finish();
+    const result = await running.result;
+    assert.equal(result.status, 'failed');
+    assert.equal(result.intentAdmission?.status, 'superseded');
+    assert.equal(result.error?.retryable, false);
+    assert.equal(result.error?.details?.operationFailure, 'INTENT_EXECUTION_SUPERSEDED');
+    assert.equal(result.executionCandidate, undefined);
+    assert.equal(result.workspaceExecution, undefined);
+    assert.equal(result.runtimeSession, undefined);
+    assert.deepEqual(result.artifacts, []);
+    assert.notDeepEqual(result.output, completed(plan).output);
+    const log = service.listInvocations(plan.sessionId)[0];
+    assert.equal(log.status, originalStatus);
+    assert.equal(log.supersededResult?.status, originalStatus);
+    assert.deepEqual(log.supersededResult?.output, completed(plan).output);
+    assert.equal(log.intentAdmission?.reason, 'INTENT_DISPATCH_HELD');
+    assert.equal(service.findPriorInvocation(plan.sessionId, plan.agent.agentId, 'task', 'mock'), undefined);
+    assert.equal(service.findExecutionCandidate(plan), undefined);
+  });
+}
+
+test('a correction to an unrelated WorkItem leaves the current result usable', async () => {
+  const { service, persisted } = createService([adapter('mock')]);
+  persisted.set('workItemsBySession', { 'session-1': [{ id: 'unrelated', executionEpoch: 2,
+    dispatchHold: { correctionId: 'correction', reason: 'intent_correction', createdAt: new Date().toISOString() } }] });
+  const result = await service.run(makeInvocationPlan({ sessionId: 'session-1', workItemId: 'current' }));
+  assert.equal(result.status, 'completed');
+  assert.equal(result.intentAdmission?.status, 'current');
+});
+
+test('a result after Session deletion cannot restore the audit collection from the process cache', async () => {
+  let finish!: () => void;
+  let started = false;
+  const { service, persisted } = createService([adapter('mock', async plan => {
+    started = true; await new Promise<void>(resolve => { finish = resolve; }); return completed(plan);
+  })]);
+  persisted.set('sessions', [{ id: 'deleted-session', dataEpoch: 'epoch-test' }]);
+  const running = service.start(makeInvocationPlan({ sessionId: 'deleted-session', workItemId: 'work' }));
+  await waitForSettlement(() => started, 'adapter must start before deletion');
+  persisted.set('sessions', []);
+  persisted.set('runtimeInvocationsBySession', {});
+  finish();
+  const result = await running.result;
+  assert.equal(result.intentAdmission?.status, 'superseded');
+  assert.deepEqual(persisted.get('runtimeInvocationsBySession'), {});
+  assert.deepEqual(service.listInvocations('deleted-session'), []);
+});
 
 test('fails closed when a required discussion document has no complete read receipt', async () => {
   const requiredDocument = {

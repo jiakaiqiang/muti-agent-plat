@@ -8,7 +8,7 @@ export type ServerRuntimeCredential = {
 };
 
 export type ServerRuntimeWorkerRequest =
-  | { kind: 'worker.start'; payload: { plan: InvocationPlan; workDir: string; credential?: ServerRuntimeCredential } }
+  | { kind: 'worker.start'; payload: { plan: InvocationPlan; workDir?: string; credential?: ServerRuntimeCredential } }
   | { kind: 'worker.cancel'; payload: { invocationId: string; termination?: ExecutionTermination } };
 
 export type ServerRuntimeWorkerResponse =

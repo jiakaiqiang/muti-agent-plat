@@ -1,7 +1,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { CHINESE_RUNTIME_OUTPUT_INSTRUCTION, localizeBuiltInNotice, localizeSystemError, runtimePhaseLabel } from './user-facing-language.js';
+import { CHINESE_RUNTIME_OUTPUT_INSTRUCTION, contextSupplementNotice, isContextSupplementResolved, localizeBuiltInNotice, localizeSystemError, runtimePhaseLabel } from './user-facing-language.js';
 import { buildStructuredOutputInstructions, RUNTIME_OUTPUT_KINDS } from './runtime-contracts/index.js';
+
+test('supplement completion never claims envelope readiness or hides unsuccessful outcomes', () => {
+  const reason = 'Context v2 blocked an ungrounded runtime call: evidence-empty.';
+  assert.equal(isContextSupplementResolved({ hydratedPaths: ['game.js'], failedPaths: [], deferredPaths: [] }), true);
+  for (const outcome of ['partial', 'cancelled', 'exhausted'] as const) {
+    assert.equal(isContextSupplementResolved({ outcome, hydratedPaths: ['game.js'] }), false);
+  }
+  assert.equal(isContextSupplementResolved(undefined), false);
+  assert.match(contextSupplementNotice({ outcome: 'resolved' }, reason), /重新组装并检查/);
+  assert.doesNotMatch(contextSupplementNotice({ outcome: 'resolved' }, reason), /evidence-empty|已就绪/);
+  assert.match(contextSupplementNotice({ outcome: 'partial' }, reason), /部分上下文/);
+  assert.equal(contextSupplementNotice({ outcome: 'cancelled' }, reason), '上下文准备已取消。');
+  assert.match(contextSupplementNotice({ outcome: 'exhausted' }, reason), /未完成.*evidence-empty/);
+});
 
 test('every model output kind requires Chinese human language without translating the protocol', () => {
   for (const kind of RUNTIME_OUTPUT_KINDS) {

@@ -106,7 +106,8 @@ describe('ChatTimeline discussion document', () => {
     resolveFirst?.(markdown)
     await flushPromises()
 
-    expect(wrapper.findAll('.discussion-document-content')).toHaveLength(1)
+    // WebCrypto digest completes outside the flushPromises microtask batch.
+    await vi.waitFor(() => expect(wrapper.findAll('.discussion-document-content')).toHaveLength(1))
     expect(wrapper.text()).toContain('session-2')
     expect(wrapper.text()).not.toContain('session-1/plan-revision')
   })

@@ -31,7 +31,10 @@ export class IntentRecognitionService {
     const isExecuting = ['EXECUTING', 'REWORKING', 'POST_REVIEW'].includes(status);
     const isConstraint = intent === 'constraint' || this.constraintPattern().test(message);
     const requirementRelation = this.detectRequirementRelation(message);
-    const failedExecutionAction = status === 'FAILED' && requirementRelation === 'continuation'
+    const exactCommand = matchExactUserCommand(message)?.command;
+    const explicitRecovery = !/(不要|不能|禁止|do not|don't|must not)/i.test(message) &&
+      (exactCommand === 'resume' || exactCommand === 'retry' || /继续.*(?:失败|原需求|当前任务|修复)|恢复.*(?:任务|执行)|retry|resume/i.test(message) || this.shouldReplanFailedExecution(message));
+    const failedExecutionAction = status === 'FAILED' && requirementRelation === 'continuation' && explicitRecovery
       ? this.shouldReplanFailedExecution(message) ? 'replan' : 'resume'
       : 'none';
 
@@ -80,7 +83,10 @@ export class IntentRecognitionService {
   }
 
   private requiresCodeChanges(input: string, intent: TaskIntent) {
-    if (intent === 'implementation') return true;
+    // Compatibility projection only. Explicit source/read-only limits take
+    // precedence while consumers migrate to the validated effect scope.
+    if (/(?:不要|禁止|不能|不需要|无需|不允许)(?:再|直接|任何|自动|进行|做|去|实际|的)*\s*(?:改动|修改|更改|重构|编写|写)(?:任何|项目|现有|的|源)*\s*(?:代码|源码)|只(?:做|需要)?(?:分析|评审|讨论|解释|询问|评测)|(?:do not|don't|must not|without)\s+(?:modify|modifying|change|changing|write|writing|edit|editing|implement|implementing)\s+(?:(?:any|the|source)\s+)*(?:code|source|implementation|anything)\b|read[- ]only/i.test(input)) return false;
+    if (intent === 'implementation') return /(实现|开发|修复|编码|写代码|fix|implement|refactor|build.*(?:app|api|feature))/i.test(input);
     return /(修复|改动|修改|重构|实现|编码|写代码|fix|implement|refactor|code change)/i.test(input);
   }
 
@@ -107,7 +113,9 @@ export class IntentRecognitionService {
   }
 
   private detectRequirementRelation(message: string): UserMessageHandlingPlan['requirementRelation'] {
-    if (/(新需求|新任务|另外(?:一个|一项)?|无关(?:需求|任务)?|separate task|new requirement|new task|unrelated)/i.test(message)) {
+    const affirmative = message.replace(/(?:不是|并非|不算|不要(?:创建|新建|增加|启动)?|不需要(?:创建|新建)?)(?:一个|新的|这是一项|一项)?\s*(?:新需求|新任务)/g, '')
+      .replace(/(?:not|no|don't create|do not create)\s+(?:a\s+)?(?:new\s+(?:task|requirement)|separate\s+task)/gi, '');
+    if (/(新需求|新任务|另外(?:一个|一项)|无关(?:需求|任务)|separate task|new requirement|new task|unrelated)/i.test(affirmative)) {
       return 'new_requirement';
     }
     return 'continuation';

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-const props = defineProps<{ content: string }>()
+const props = withDefaults(defineProps<{ content: string; showCopy?: boolean }>(), { showCopy: true })
 const limit = ref(32_000)
 const feedback = ref('')
 const shown = computed(() => props.content.slice(0, limit.value))
@@ -14,7 +14,7 @@ async function copy() {
   <div class="bounded-text">
     <pre>{{ shown }}</pre>
     <button v-if="limit < content.length" type="button" @click="limit += 32_000">继续显示（尚有 {{ content.length - limit }} 个字符）</button>
-    <button type="button" @click="copy">复制完整内容</button>
+    <button v-if="showCopy" type="button" @click="copy">复制完整内容</button>
     <span role="status" aria-live="polite">{{ feedback }}</span>
   </div>
 </template>

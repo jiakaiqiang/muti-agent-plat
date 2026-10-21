@@ -2,7 +2,7 @@ import { runtimeRecoveryContext } from '@agent-cluster/shared';
 import { runtimePhaseLabel } from "@agent-cluster/shared";
 import { Injectable, Optional } from '@nestjs/common';
 import { execFile } from 'node:child_process';
-import { readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { extname, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -51,6 +51,8 @@ import {
   sanitizeClaudeProcessError
 } from './claude-cli-launcher.js';
 import { ToolInvocationAuditService } from '../tools/tool-invocation-audit.service.js';
+import { assertClaudeClassification, claudeClassificationArgs, claudeClassificationEnv,
+  claudeClassificationPrompt, classificationError, parseClaudeClassification } from './claude-intent-classification.js';
 
 export function buildClaudeStreamingOptions(params: {
   command: string;
@@ -178,6 +180,7 @@ const maxSnapshotFileBytes = 200_000;
 
 @Injectable()
 export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
+  private readonly classificationHandles = new Map<UUID, AgentRuntimeRunHandle>();
   readonly type = 'claude_code' as const;
   readonly metadata = {
     name: 'claude-code',
@@ -223,6 +226,7 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
     if (process.env.CLAUDE_CODE_ENABLED !== 'true') {
       return withStructuredTermination(settledHandle(this.blockedResult(input, 'Claude Code runtime is disabled. Set CLAUDE_CODE_ENABLED=true to run controlled local coding agents.')), input, signal);
     }
+    if (input.admissionClass === 'routing') return this.startClassification(input, signal);
     const rootPath = this.workspaceBindings.resolveServerRoot(input);
     if (!rootPath) {
       return withStructuredTermination(settledHandle(this.blockedResult(input, 'Claude Code runtime requires a server_local working directory.')), input, signal);
@@ -244,6 +248,47 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
       result: runner.result,
       cancel: runner.cancel
     }, input, signal);
+  }
+
+  private startClassification(input: InvocationPlan, signal?: AbortSignal): AgentRuntimeRunHandle {
+    try { assertClaudeClassification(input); } catch {
+      return withStructuredTermination(settledHandle(this.failedResult(input,
+        classificationError('CAPABILITY_BLOCKED', 'RESTRICTED_ROUTING_CAPABILITY_UNAVAILABLE'))), input, signal);
+    }
+    const controller = new AbortController();
+    const abort = () => controller.abort(signal?.reason);
+    if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
+    const result = this.executeClassification(input, controller.signal).finally(() => {
+      signal?.removeEventListener('abort', abort);
+      this.classificationHandles.delete(input.invocationId);
+    });
+    const handle = withStructuredTermination({ events: emptyEvents(), result,
+      cancel: async () => { controller.abort(); await result; } }, input, controller.signal);
+    this.classificationHandles.set(input.invocationId, handle);
+    return handle;
+  }
+
+  private async executeClassification(input: InvocationPlan, signal: AbortSignal): Promise<AgentRunResult> {
+    let directory: string | undefined;
+    try {
+      signal.throwIfAborted();
+      const args = claudeClassificationArgs(input, process.env.ANTHROPIC_MODEL);
+      directory = await mkdtemp(join(tmpdir(), 'agent-cluster-intent-'));
+      signal.throwIfAborted();
+      const { stdout } = await this.runBufferedCommand(resolveClaudeCommand().executable, args,
+        claudeClassificationPrompt(input), { cwd: directory, timeout: 0, signal,
+          env: claudeClassificationEnv(input, process.env), maxBuffer: 2 * 1024 * 1024, diagnosticRef: input.invocationId });
+      signal.throwIfAborted();
+      const parsed = parseClaudeClassification(stdout, input);
+      return { invocationId: input.invocationId, runtimeType: this.type, status: 'completed', ...parsed,
+        events: [], artifacts: [], systemEvidence: emptyRuntimeSystemEvidence(input.invocationId) };
+    } catch (error) {
+      const result = this.failedResult(input, error);
+      result.usage.measurement = 'unknown';
+      return result;
+    } finally {
+      if (directory) await rm(directory, { recursive: true, force: true });
+    }
   }
 
   private async execute(input: InvocationPlan, signal?: AbortSignal): Promise<AgentRunResult> {
@@ -577,7 +622,7 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
   ): Promise<{ stdout: string; stderr: string }> {
     return new Promise((resolveCommand, rejectCommand) => {
       const { diagnosticRef, ...execOptions } = options;
-      const child = execFile(command, args, { ...execOptions, shell: false, encoding: 'utf8' }, (error, stdout, stderr) => {
+      const child = execFile(command, args, { ...execOptions, shell: false, windowsHide: true, encoding: 'utf8' }, (error, stdout, stderr) => {
         if (error) {
           const failure = Object.assign(error, { stdout, stderr });
           const sanitized = sanitizeClaudeProcessError(failure, diagnosticRef);
@@ -949,6 +994,7 @@ export class ClaudeCodeRuntimeAdapterService implements AgentRuntimeAdapter {
   }
 
   async cancel(invocationId: UUID): Promise<void> {
+    await this.classificationHandles.get(invocationId)?.cancel();
     await this.streamingHandles.get(invocationId)?.cancel();
   }
 

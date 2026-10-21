@@ -5,11 +5,17 @@ import { apiGetText } from '@/api/client'
 import { onBeforeUnmount } from 'vue'
 import { DocumentCache } from '@/utils/documentCache'
 import BoundedText from '@/components/BoundedText.vue'
+import MessageCopyButton from '@/components/MessageCopyButton.vue'
+import IntentCorrectionPanel from '@/components/IntentCorrectionPanel.vue'
+import IntentAuthorizationRetryPanel from '@/components/IntentAuthorizationRetryPanel.vue'
+import IntentRecognitionRetryPanel from '@/components/IntentRecognitionRetryPanel.vue'
+import IntentBriefRetryPanel from '@/components/IntentBriefRetryPanel.vue'
+import IntentMultiSegmentReview from '@/components/IntentMultiSegmentReview.vue'
 import { useAgentStore } from '@/stores/agent'
 import { actorAgentId } from '@/composables/useActor'
 import { formatDateTime } from '@/utils/dateTime'
 import { chatMessageText } from '@/utils/userFacingCopy'
-import { localizeBuiltInNotice, localizeSystemError } from '@agent-cluster/shared'
+import { isContextSupplementResolved, localizeBuiltInNotice, localizeSystemError } from '@agent-cluster/shared'
 import type {
   ArtifactEventPayload,
   ChatMessage,
@@ -266,7 +272,7 @@ function requestedContextStatus(message: ChatMessage) {
   if (payload?.rejectionReason) return { label: '已拒绝', tone: 'failed' }
   const resolution = requestedContextResolution(message)
   if (!resolution) return { label: '等待中', tone: 'waiting' }
-  if (resolution.outcome === 'resolved') return { label: '已补充', tone: 'completed' }
+  if (resolution.outcome === 'resolved') return { label: '补读完成', tone: 'completed' }
   if (resolution.outcome === 'partial') return { label: '部分完成', tone: 'running' }
   if (resolution.outcome === 'cancelled') return { label: '已取消', tone: 'failed' }
   if (resolution.outcome === 'exhausted') {
@@ -277,7 +283,7 @@ function requestedContextStatus(message: ChatMessage) {
   if (resolution.hydratedPaths.length && (resolution.failedPaths.length || resolution.deferredPaths.length)) {
     return { label: '部分完成', tone: 'running' }
   }
-  if (resolution.hydratedPaths.length) return { label: '已补充', tone: 'completed' }
+  if (resolution.hydratedPaths.length) return { label: '补读完成', tone: 'completed' }
   if (resolution.failedPaths.length) return { label: '读取失败', tone: 'failed' }
   if (resolution.deferredPaths.length) return { label: '已延期', tone: 'running' }
   return { label: '无可用内容', tone: 'failed' }
@@ -811,6 +817,18 @@ function yesNo(value?: boolean) {
           <strong>{{ senderLabel(message) }}</strong>
           <span>{{ formatDateTime(message.createdAt) }}</span>
         </header>
+        <IntentCorrectionPanel v-if="message.senderType === 'user'"
+          :session-id="message.sessionId" :source-event-id="message.rawEventId"
+          :original-content="message.content" :disabled="disconnected" />
+        <IntentAuthorizationRetryPanel v-if="message.payload?.authorizationRetry"
+          :session-id="message.sessionId" :descriptor="message.payload.authorizationRetry" :disabled="disconnected" />
+        <IntentBriefRetryPanel v-if="message.payload?.briefRecovery"
+          :session-id="message.sessionId" :descriptor="message.payload.briefRecovery" :disabled="disconnected" />
+        <IntentRecognitionRetryPanel v-if="message.payload?.recognitionRetry"
+          :session-id="message.sessionId" :descriptor="message.payload.recognitionRetry" :disabled="disconnected" />
+        <IntentMultiSegmentReview v-if="message.payload?.multiSegmentReview"
+          :session-id="message.sessionId" :descriptor="message.payload.multiSegmentReview" :disconnected="disconnected" />
+
 
         <ConfirmationCard
           v-if="confirmationFromMessage(message)"
@@ -849,7 +867,7 @@ function yesNo(value?: boolean) {
             <div><dt>主 Agent</dt><dd>{{ discussionDocumentPayload(message)?.readStatus === 'completed' ? '已读取' : discussionDocumentPayload(message)?.readStatus === 'failed' ? `读取失败：${discussionDocumentPayload(message)?.readErrorCode ?? '未知错误'}` : '正在读取' }}</dd></div>
           </dl>
           <p v-if="discussionDocuments[message.id]?.status === 'failed'" class="error-text">{{ discussionDocuments[message.id]?.error }}</p>
-          <BoundedText v-else-if="discussionDocuments[message.id]?.status === 'loaded' && (discussionDocuments[message.id]?.content?.length ?? 0) > 32000" :content="discussionDocuments[message.id]?.content ?? ''" />
+          <BoundedText v-else-if="discussionDocuments[message.id]?.status === 'loaded' && (discussionDocuments[message.id]?.content?.length ?? 0) > 32000" :content="discussionDocuments[message.id]?.content ?? ''" :show-copy="false" />
           <pre v-else-if="discussionDocuments[message.id]?.status === 'loaded'" class="discussion-document-content">{{ discussionDocuments[message.id]?.content }}</pre>
           <p v-else class="muted-text">正在加载方案 Markdown...</p>
         </section>
@@ -858,7 +876,7 @@ function yesNo(value?: boolean) {
           <div v-if="discussionRound(message)" class="discussion-message-meta">
             第 {{ discussionRound(message) }} 轮 · {{ messageKindLabel(message) ?? 'Agent 讨论' }}
           </div>
-          <BoundedText v-if="chatMessageText(message).length > 32000" :content="chatMessageText(message)" />
+          <BoundedText v-if="chatMessageText(message).length > 32000" :content="chatMessageText(message)" :show-copy="false" />
           <div v-else class="message-content message-document">
             <section
               v-for="(block, blockIndex) in messageDocumentBlocks(chatMessageText(message))"
@@ -974,12 +992,16 @@ function yesNo(value?: boolean) {
                 {{ requestedContextStatus(message).label }}
               </span>
             </div>
-            <dl>
+            <details v-if="isContextSupplementResolved(requestedContextResolution(message))" class="context-request-history">
+              <summary>历史补读原因（已处理）</summary>
+              <p>{{ localizeBuiltInNotice(requestedContextPayload(message)?.reason ?? '') }}</p>
+            </details>
+            <dl v-else>
               <div v-if="requestedContextPayload(message)?.reason">
                 <dt>原因</dt>
                 <dd>{{ localizeBuiltInNotice(requestedContextPayload(message)?.reason ?? '') }}</dd>
               </div>
-              <div v-if="requestedContextPayload(message)?.followUpInstruction">
+              <div v-if="requestedContextPayload(message)?.followUpInstruction && requestedContextResolution(message)?.outcome !== 'cancelled'">
                 <dt>下一步指令</dt>
                 <dd>{{ localizeBuiltInNotice(requestedContextPayload(message)?.followUpInstruction ?? '') }}</dd>
               </div>
@@ -1198,6 +1220,11 @@ function yesNo(value?: boolean) {
               <span class="status-pill" :class="artifactPayload(message)?.type">{{ artifactTypeLabel(artifactPayload(message)?.type) }}</span>
             </div>
             <p v-if="artifactPayload(message)?.contentSummary">{{ artifactPayload(message)?.contentSummary }}</p>
+            <details v-if="artifactPayload(message)?.intentTestReport" class="runtime-test-report-list">
+              <summary>查看隔离测试报告</summary>
+              <p v-if="artifactPayload(message)?.intentTestReport?.supersedesArtifactIds?.length">本报告按纠正后的要求生成，关联的 {{ artifactPayload(message)?.intentTestReport?.supersedesArtifactIds?.length }} 份旧报告仍保留在会话记录中。</p>
+              <pre>{{ artifactPayload(message)?.intentTestReport?.content }}</pre>
+            </details>
             <p v-if="artifactPayload(message)?.relatedCapabilityId">
               Capability: {{ capabilityLabel(artifactPayload(message)?.relatedCapabilityId) }}
             </p>
@@ -1279,6 +1306,7 @@ function yesNo(value?: boolean) {
             </p>
           </div>
         </template>
+        <MessageCopyButton :content="discussionDocuments[message.id]?.content ?? (message.messageType === 'delivery' ? deliveryReport(message)?.content : undefined) ?? chatMessageText(message)" />
       </div>
     </article>
   </ChatScrollArea>

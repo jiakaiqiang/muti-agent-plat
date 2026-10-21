@@ -210,6 +210,43 @@ function resolve(
   });
 }
 
+test('restricted classification selects Claude server adapter but excludes local bridge and Codex', () => {
+  const input = { admissionClass: 'routing' as const, phase: 'user_message_routing' as const, dataEpoch: 'epoch', taskId: undefined,
+    expectedOutput: { kind: 'intent_understanding' as const, schemaVersion: '1.0' as const },
+    taskOverride: { runtimeType: 'claude_code' as const } };
+  const server = setup({ runtimeCandidates: [candidate('claude_code')], compiledIdentity: toolFreeIdentity, blockedCatalog: true, blockedReasons: ['PHASE_BLOCKED'] });
+  assert.equal(resolve(server.resolver, input).executionTarget.runtimeType, 'claude_code');
+  for (const type of ['claude_code', 'codex'] as const) {
+    const bridge = setup({ localRuntimeCandidates: [candidate(type)], compiledIdentity: toolFreeIdentity, blockedCatalog: true });
+    assert.throws(() => resolve(bridge.resolver, { ...input,
+      workspace: { workspaceId: 'workspace-1', providerKind: 'local_bridge', capabilities: workspaceCapabilities } }), /No eligible runtime/);
+  }
+  const codex = setup({ runtimeCandidates: [candidate('codex')], compiledIdentity: toolFreeIdentity, blockedCatalog: true });
+  assert.throws(() => resolve(codex.resolver, input), /No eligible runtime/);
+});
+
+test('committed read scope overrides legacy write flags and excludes an unenforceable CLI', () => {
+  const { resolver, calls } = setup();
+  const effectScope = { effects: [{ kind: 'read_workspace' as const,
+    target: { kind: 'workspace' as const, refId: 'workspace-1' }, evidenceRefs: ['request'] }],
+    prohibitions: [], grantIds: ['read-grant'], scopeHash: 'read-hash' };
+  const plan = resolve(resolver, { effectScope, taskRequiresCodeChanges: true,
+    writeModeOverride: 'direct_audited', taskOverride: { runtimeType: 'codex' } });
+  assert.equal(plan.executionTarget.runtimeType, 'generic_llm');
+  assert.equal(plan.executionTarget.writeMode, 'none');
+  assert.deepEqual(plan.executionTarget.requiredCapabilities, ['read']);
+  assert.deepEqual(calls[0].allowedToolNames, ['read_file', 'search_code']);
+  effectScope.grantIds.push('later-mutation');
+  assert.deepEqual(plan.effectScope?.grantIds, ['read-grant']);
+});
+
+test('scoped tests without isolated runner support cannot fall back to an unrestricted runtime', () => {
+  const { resolver } = setup();
+  assert.throws(() => resolve(resolver, { effectScope: { effects: [{ kind: 'run_tests',
+    target: { kind: 'test_runner', refId: 'tests' }, evidenceRefs: ['request'] }],
+    prohibitions: [], grantIds: ['test-grant'], scopeHash: 'test-hash' } }), /No eligible runtime/);
+});
+
 test('compiles an immutable Agent identity before producing the InvocationPlan', () => {
   const { resolver } = setup();
   const plan = resolve(resolver);

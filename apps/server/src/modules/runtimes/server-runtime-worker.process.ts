@@ -6,6 +6,7 @@ import { CodexRuntimeAdapterService } from './codex-runtime-adapter.service.js';
 import { InvocationWorkspaceBindingsService } from './invocation-workspace-bindings.service.js';
 import type { ServerRuntimeWorkerRequest, ServerRuntimeWorkerResponse } from './server-runtime-worker.protocol.js';
 import { WorkdirBriefService } from './streaming/workdir-brief.service.js';
+import { assertClaudeClassification } from './claude-intent-classification.js';
 
 let active: { invocationId: string; controller: AbortController; handle: AgentRuntimeRunHandle } | undefined;
 
@@ -57,7 +58,11 @@ async function handleMessage(message: ServerRuntimeWorkerRequest) {
   }
   const restoreCredentialEnvironment = credential ? applyRuntimeCredential(plan, credential) : undefined;
   const bindings = new InvocationWorkspaceBindingsService();
-  bindings.bindInvocation(plan.invocationId, workDir);
+  if (plan.admissionClass === 'routing') assertClaudeClassification(plan);
+  else {
+    if (!workDir) throw new Error('Server Runtime Worker requires an execution directory.');
+    bindings.bindInvocation(plan.invocationId, workDir);
+  }
   const brief = new WorkdirBriefService(bindings);
   const adapter = plan.executionTarget.runtimeType === 'codex'
     ? new CodexRuntimeAdapterService(bindings, brief)

@@ -181,6 +181,15 @@ export class MockRuntimeService implements AgentRuntimeAdapter {
           questionsForUser: [],
           readyToSummarize: false
         };
+      case 'intent_understanding':
+        return {
+          schemaVersion: '1.0', kind: 'intent_understanding', semanticContractVersion: 'intent-understanding-v1',
+          segments: [{ localKey: 'clarification', dialogueAct: 'clarification', goal: goal.slice(0, 4000) || '请明确任务目标',
+            scopeRelation: 'ambiguous', suggestedAction: 'clarify', contextPolicy: 'ask_user',
+            target: { workItemId: null, decisionIds: [], artifactIds: [], agentIds: [], confirmationId: null, correctionOfRoutingId: null },
+            correction: null, requestedEffects: [], prohibitions: [], evidence: [], dependencies: [] }],
+          missingFields: ['requirement_relation'], ambiguityReasons: ['MOCK_INTENT_ROUTING_REQUIRES_USER_CHOICE'], modelConfidence: null
+        };
       case 'intent_routing_decision':
         // A deterministic test Runtime must still honor the strict router output
         // contract. It intentionally chooses clarification instead of guessing

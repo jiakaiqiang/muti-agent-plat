@@ -1,4 +1,5 @@
 export * from './contract-types.js';
+export * from './intent-understanding.js';
 export {
   RuntimeTaskEvidenceRefSchema,
   RuntimeFileChangeProposalSchema,

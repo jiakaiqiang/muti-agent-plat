@@ -26,6 +26,7 @@ import {
 import { ContentReferenceCodec } from './content-reference-codec.js';
 import { LocalContentStore } from './local-content-store.js';
 import { applyStateDelta } from './state-delta.js';
+import { assertIntentRecordMutation, INTENT_RECORD_TABLES } from './intent-record-invariants.js';
 import {
   assertWithinCollectionScope, mergeScopedCollection, scopedSessionIds, SESSION_SCOPED_COLLECTIONS,
   type CollectionScope
@@ -140,6 +141,10 @@ export class PersistenceService implements OnModuleDestroy {
       return Promise.resolve(true);
     }
     this.assertWritable();
+    if (Object.hasOwn(INTENT_RECORD_TABLES, key) || key === 'briefsBySession' || key === 'intentRoutingRecordsBySession') {
+      assertIntentRecordMutation({ [key]: this.state[key] }, { [key]: value,
+        sessions: this.state.sessions, intentRoutingRecordsBySession: this.state.intentRoutingRecordsBySession });
+    }
     const baseline = structuredClone(this.state[key]);
     this.state[key] = this.clone(value);
     if (this.backend === 'postgres') {
@@ -240,6 +245,9 @@ export class PersistenceService implements OnModuleDestroy {
         const result = mutator(draft);
         if (result && typeof (result as { then?: unknown }).then === 'function') throw new Error('ATOMIC_MUTATOR_MUST_BE_SYNCHRONOUS');
         for (const key of Object.keys(draft)) if (!keys.includes(key)) throw new Error(`ATOMIC_MUTATION_OUTSIDE_SCOPE: ${key}`);
+        if (keys.some(key => Object.hasOwn(INTENT_RECORD_TABLES, key))) {
+          assertIntentRecordMutation(this.state, { ...this.state, ...draft });
+        }
         assertWithinCollectionScope(before, draft, scope);
         for (const key of keys) if (key in this.state && !(key in draft)) throw new Error(`ATOMIC_COLLECTION_DELETE_UNSUPPORTED: ${key}`);
         const next = { ...this.state, ...draft };

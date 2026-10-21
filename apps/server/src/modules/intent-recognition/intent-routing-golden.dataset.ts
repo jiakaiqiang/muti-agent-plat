@@ -24,6 +24,15 @@ export type IntentRoutingGoldenCase = {
   tags: string[];
 };
 
+// V1 below is the historical evaluation oracle. V2 corrects command-state
+// expectations using the same resolver as the actual message entry.
+export function currentIntentRoutingGoldenDataset(): IntentRoutingGoldenCase[] {
+  const corrected = new Set(['continue-completed-zh', 'confirm-without-target', 'reject-without-target']);
+  return INTENT_ROUTING_GOLDEN_DATASET_V1.map(item => corrected.has(item.id)
+    ? { ...item, expected: { relation: 'ambiguous', contextPolicy: 'ask_user', action: 'clarify', autoApply: false } }
+    : structuredClone(item));
+}
+
 export const INTENT_ROUTING_GOLDEN_DATASET_V1: IntentRoutingGoldenCase[] = [
   { id: 'continue-failed-zh', message: '继续', sessionStatus: 'FAILED', hasActiveWorkItem: true,
     expected: { relation: 'same_requirement', contextPolicy: 'inherit_confirmed', action: 'resume', autoApply: true }, tags: ['exact_command', 'recovery'] },
@@ -70,3 +79,5 @@ export const INTENT_ROUTING_GOLDEN_DATASET_V1: IntentRoutingGoldenCase[] = [
     mentionedAgentIds: ['agent-quality'], expectedAgentIds: [],
     expected: { relation: 'same_requirement', contextPolicy: 'inherit_confirmed', action: 'continue_active_work_item', autoApply: false }, tags: ['mention', 'target_dropped', 'fail_closed'] }
 ];
+
+export const INTENT_ROUTING_GOLDEN_DATASET_V2 = currentIntentRoutingGoldenDataset();

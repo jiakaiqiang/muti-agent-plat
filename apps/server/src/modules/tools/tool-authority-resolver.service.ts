@@ -27,7 +27,8 @@ const PHASE_ALLOWED_CAPABILITIES: Readonly<Record<AgentRunPhase, readonly Worksp
   revision_synthesis: ['read'],
   post_review: ['read', 'command', 'test'],
   final_delivery: ['read'],
-  user_message_routing: []
+  user_message_routing: [],
+  user_message_response: ['read']
 };
 
 export function isToolBlockedByPhase(phase: AgentRunPhase, toolName: string) {
@@ -40,6 +41,8 @@ export function isToolBlockedByPhase(phase: AgentRunPhase, toolName: string) {
 }
 
 export type ResolveToolAuthorityInput = {
+  /** Eligibility only; the isolated runner must still verify the live, persisted grant. */
+  isolatedTest?: boolean;
   identity: CompiledAgentIdentity;
   phase: AgentRunPhase;
   workspaceCapabilities: WorkspaceCapabilities;
@@ -72,6 +75,10 @@ export class ToolAuthorityResolverService {
     const decisions: ToolAuthorityDecision[] = [];
 
     for (const toolId of requestedIds) {
+      if (toolId === 'cap-isolated-test' && !input.isolatedTest) {
+        decisions.push({ toolId, toolKey: 'tool.isolated_test', status: 'blocked', reasons: ['INTENT_TEST_AUTHORITY_REQUIRED'] });
+        continue;
+      }
       const definition = this.capabilities.findDefinitionById(toolId);
       const toolKey = definition?.key ?? requestedKeys.get(toolId) ?? toolId;
       const reasons: string[] = [];
@@ -106,7 +113,7 @@ export class ToolAuthorityResolverService {
       }
 
       for (const name of executableNames) {
-        const requirements = TOOL_WORKSPACE_CAPABILITY_MAPPING[
+        const requirements = input.isolatedTest && name === 'run_test' ? ['test'] as const : TOOL_WORKSPACE_CAPABILITY_MAPPING[
           name as keyof typeof TOOL_WORKSPACE_CAPABILITY_MAPPING
         ] as readonly WorkspaceCapabilityKey[] | undefined;
         if (!requirements) {
@@ -126,7 +133,7 @@ export class ToolAuthorityResolverService {
         if (!tool) reasons.push(`TOOL_EXECUTOR_UNAVAILABLE:${name}`);
       }
 
-      const approval = this.capabilities.checkInvocation(toolId, {
+      const approval = input.isolatedTest && toolId === 'cap-isolated-test' ? { allowed: true, approvalKey: undefined } : this.capabilities.checkInvocation(toolId, {
         sessionId: input.sessionId,
         agentId: input.identity.agentId,
         reason: `Invocation ${input.taskId ?? 'session'} requests ${toolKey}`
@@ -146,7 +153,15 @@ export class ToolAuthorityResolverService {
       }
 
       for (const { tool } of executableTools) {
-        if (tool) descriptors.set(tool.name, toWorkspaceToolDescriptor(tool));
+        if (tool) {
+          const descriptor = toWorkspaceToolDescriptor(tool);
+          if (input.phase === 'user_message_response' && tool.name === 'search_code') {
+            descriptor.description = 'Search literal text in the authorized workspace. Regular expressions are not evaluated in an answer.';
+            descriptor.inputSchema = { ...descriptor.inputSchema, properties: { ...(descriptor.inputSchema.properties as Record<string, unknown>),
+              pattern: { type: 'string', description: 'Literal text to search for; regex characters are matched as text.' } } };
+          }
+          descriptors.set(tool.name, descriptor);
+        }
       }
       decisions.push({
         toolId,

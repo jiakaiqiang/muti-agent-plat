@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import type { AgentRunResult } from '@agent-cluster/shared';
+import type { AgentRunResult, InputBudgetPolicy } from '@agent-cluster/shared';
 import type { ResolveInvocationInput } from '../runtime-routing/invocation-resolver.service.js';
 import { InvocationResolverService } from '../runtime-routing/invocation-resolver.service.js';
 import { RuntimeService } from '../runtimes/runtime.service.js';
@@ -11,12 +11,18 @@ export class RuntimeInvocationService {
     private readonly runtime: RuntimeService
   ) {}
 
-  async invoke(input: ResolveInvocationInput, signal?: AbortSignal): Promise<AgentRunResult> {
-    let operation = await this.runtime.operations.begin({ id: input.operationId ?? input.invocationId,
-      sessionId: input.sessionId, taskId: input.taskId, phase: input.phase });
-    if (operation.status === 'paused') operation = await this.runtime.operations.resume(input.sessionId, operation.id);
+  async invoke(input: ResolveInvocationInput & { inputBudgetScope?: Omit<InputBudgetPolicy, 'sessionGeneration'> }, signal?: AbortSignal): Promise<AgentRunResult> {
     const plan = this.resolver.resolve(input);
+    let operation = await this.runtime.operations.begin({ id: input.operationId ?? input.invocationId,
+      parentId: input.parentOperationId,
+      deadlineCeilingAt: input.operationDeadlineAt,
+      sessionId: input.sessionId, taskId: input.taskId, phase: input.phase,
+      admissionClass: plan.admissionClass, dataEpoch: plan.dataEpoch,
+      intentStepId: plan.intentStepId,
+      workItemId: plan.workItemId, executionBinding: plan.executionBinding });
+    if (operation.status === 'paused') operation = await this.runtime.operations.resume(input.sessionId, operation.id);
     plan.operation = operation;
+    if (input.inputBudgetScope) plan.inputBudgetPolicy = { ...input.inputBudgetScope, sessionGeneration: operation.sessionGeneration! };
     if (plan.pendingApprovals?.length) {
       throw new BadRequestException('System Runtime invocation cannot wait for Tool approval.');
     }

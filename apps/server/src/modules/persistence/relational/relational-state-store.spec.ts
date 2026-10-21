@@ -2,6 +2,18 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { RelationalStateStore } from './relational-state-store.js';
 
+test('intent record projection refuses a route from a different session or epoch and refuses historical payload overwrite', async () => {
+  const store = new RelationalStateStore({} as never, {} as never) as any;
+  const item = { id: 'revision-1', sessionId: 'session', dataEpoch: 'epoch', routingId: 'route', intentRevision: 1,
+    authorizationState: 'unknown', createdAt: '2026-10-19T00:00:00.000Z' };
+  let insertAttempted = false;
+  const mismatch = { async query(sql: string) { if (sql.includes('insert into')) insertAttempted = true; return { rows: [] }; } };
+  await assert.rejects(store.writeIntentRecords(mismatch, 'intentRouteRevisionsBySession', { session: [item] }), /BINDING_MISMATCH/);
+  assert.equal(insertAttempted, false);
+  const conflict = { async query(sql: string) { return { rows: sql.includes('select s.id') ? [{ session_id: '1', routing_id: '2' }] : [] }; } };
+  await assert.rejects(store.writeIntentRecords(conflict, 'intentRouteRevisionsBySession', { session: [item] }), /INTENT_RECORD_IMMUTABLE/);
+});
+
 test('runtime health projection binds the Session and guards monotonic versions without storing reasoning', async () => {
   const calls: Array<{ sql: string; values?: unknown[] }> = [];
   const client = { async query(sql: string, values?: unknown[]) {

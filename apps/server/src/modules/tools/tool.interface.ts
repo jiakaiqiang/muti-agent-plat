@@ -1,4 +1,4 @@
-import type { WorkspaceToolDescriptor } from '@agent-cluster/shared';
+import type { IntentTestRunnerBinding, WorkspaceToolDescriptor } from '@agent-cluster/shared';
 
 /** Server-side category used to group executable tools. */
 export type ToolCategory = 'file' | 'code' | 'test' | 'db' | 'network' | 'custom';
@@ -12,11 +12,16 @@ export type ToolInputSchema = {
 
 /** Context passed to a tool when the server executes it. */
 export type ToolExecutionContext = {
+  intentTestBinding?: IntentTestRunnerBinding;
   workingDirectory: string;
   sessionId: string;
   agentId?: string;
   taskId?: string;
   signal?: AbortSignal;
+  /** New intent-bound executions must never fall back to the host shell. */
+  requireTestIsolation?: boolean;
+  /** Server-owned invocation identity; never supplied through tool arguments. */
+  testExecution?: { sessionId: string; dataEpoch: string; operationId: string; invocationId: string };
 };
 
 /** Normalized result returned by server-side tools. */

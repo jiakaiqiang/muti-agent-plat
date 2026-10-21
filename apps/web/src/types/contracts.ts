@@ -188,6 +188,7 @@ export { DEFAULT_CONTEXT_PIPELINE_VERSION, SUPPORTED_CONTEXT_PIPELINE_VERSIONS }
 export type SessionViewMode = 'collaboration_plan' | 'chat' | 'collaboration_graph' | 'workflow' | 'workflow_details' | 'debug'
 
 export type ConfirmationReason =
+  | 'input_budget_exceeded'
   | 'confirm_task_brief'
   | 'select_workflow'
   | 'confirm_workflow_member_mapping'
@@ -316,6 +317,7 @@ export type ConfirmationRequestedPayload = {
     reasons: string[]
   }>
   routingId?: string
+  routingRevision?: number
   followUpMessageId?: string
   reasonCodes?: string[]
 }
@@ -405,6 +407,7 @@ export type ToolEventPayload = {
 }
 
 export type ArtifactEventPayload = {
+  intentTestReport?: import('@agent-cluster/shared').ArtifactMetadata['intentTestReport']
   artifactId: string
   type: string
   title: string
@@ -520,6 +523,7 @@ export type AgentCardState = {
 }
 
 export type ConfirmationCardState = {
+  inputBudgetDecision?: import('@agent-cluster/shared').InputBudgetDecision
   confirmationId: string
   reason: ConfirmationReason
   title: string
@@ -566,6 +570,7 @@ export type ConfirmationCardState = {
   outputSummary?: string
   workflowOptions?: ConfirmationRequestedPayload['workflowOptions']
   routingId?: string
+  routingRevision?: number
   followUpMessageId?: string
   reasonCodes?: string[]
 }

@@ -15,6 +15,7 @@ import type { ServerRuntimeWorkerRequest, ServerRuntimeWorkerResponse } from './
 import type { ServerRuntimeCredential } from './server-runtime-worker.protocol.js';
 import { modelProviderSupportsRuntime } from '@agent-cluster/shared';
 import { RuntimeModelConfigService } from './runtime-model-config.service.js';
+import { assertClaudeClassification } from './claude-intent-classification.js';
 
 type ActiveWorker = {
   child: ChildProcess;
@@ -30,14 +31,19 @@ export class ServerRuntimeWorkerService implements OnModuleDestroy {
 
   constructor(@Optional() private readonly modelConfig?: RuntimeModelConfigService) {}
 
-  start(plan: InvocationPlan, workDir: string): AgentRuntimeRunHandle {
+  start(plan: InvocationPlan, workDir?: string): AgentRuntimeRunHandle {
     if (plan.executionTarget.executionLocation !== 'server') {
       return settledHandle(failedResult(plan, 'SERVER_RUNTIME_ROUTE_MISMATCH', 'Server Worker rejects a non-server target.'));
     }
     if (!['codex', 'claude_code'].includes(plan.executionTarget.runtimeType)) {
       return settledHandle(failedResult(plan, 'SERVER_RUNTIME_WORKER_UNSUPPORTED', `Worker does not support ${plan.executionTarget.runtimeType}.`));
     }
-    if (!workDir) return settledHandle(failedResult(plan, 'SERVER_RUNTIME_WORKDIR_REQUIRED', 'Server Worker requires an isolated execution directory.'));
+    if (plan.admissionClass === 'routing') {
+      try { assertClaudeClassification(plan); } catch {
+        return settledHandle(failedResult(plan, 'RESTRICTED_ROUTING_CAPABILITY_UNAVAILABLE', 'Worker rejected an invalid classifier profile.'));
+      }
+      workDir = undefined;
+    } else if (!workDir) return settledHandle(failedResult(plan, 'SERVER_RUNTIME_WORKDIR_REQUIRED', 'Server Worker requires an isolated execution directory.'));
     const credential = this.credentialFor(plan);
     if (credential instanceof Error) return settledHandle(failedResult(plan, 'SERVER_RUNTIME_MODEL_INCOMPATIBLE', credential.message));
     if (this.active.has(plan.invocationId)) {

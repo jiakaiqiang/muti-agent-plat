@@ -8,6 +8,7 @@ import type {
 import { ToolAuthorityResolverService } from './tool-authority-resolver.service.js';
 
 const definitions: CapabilityDefinition[] = [
+  { id: 'cap-isolated-test', key: 'tool.isolated_test', kind: 'tool', name: 'Isolated test', riskLevel: 'medium', status: 'active', systemOwned: true },
   {
     id: 'cap-file-read',
     key: 'tool.file_read',
@@ -109,6 +110,18 @@ test('allows a requested Tool only when the Agent capability grant exists', () =
   const catalog = resolve(setup(), identity(['cap-file-read']));
   assert.deepEqual(catalog.tools.map((tool) => tool.name), ['read_file']);
   assert.equal(catalog.decisions[0]?.status, 'allowed');
+});
+
+test('isolated test eligibility requires its dedicated lane and does not require or grant shell permission', () => {
+  let approvalChecks = 0;
+  const resolver = setup({ onCheckInvocation: () => { approvalChecks++; } }), agent = identity(['cap-isolated-test']);
+  assert.deepEqual(resolve(resolver, agent).tools, []);
+  const candidate = resolve(resolver, agent, { isolatedTest: true, allowedToolNames: ['run_test'],
+    workspaceCapabilities: { read: false, write: false, command: false, test: true } });
+  assert.deepEqual(candidate.tools.map(tool => tool.name), ['run_test']); assert.equal(approvalChecks, 0);
+  assert.deepEqual(resolve(resolver, identity(['cap-isolated-test'], []), { isolatedTest: true }).tools, []);
+  assert.deepEqual(resolve(resolver, agent, { isolatedTest: true, phase: 'user_message_routing' }).tools, []);
+  assert.deepEqual(resolve(resolver, agent, { isolatedTest: true, workspaceCapabilities: { read: true, write: true, command: true, test: false } }).tools, []);
 });
 
 test('never exposes a granted Tool that the Profile did not request', () => {

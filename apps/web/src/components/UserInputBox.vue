@@ -28,6 +28,8 @@ export type ComposerAttachment = GroupChatAttachmentRef & {
 const props = withDefaults(
   defineProps<{
     disabled?: boolean
+    connectionUnavailable?: boolean
+    sessionReady?: boolean
     busy?: boolean
     placeholder?: string
     error?: string
@@ -43,6 +45,8 @@ const props = withDefaults(
   }>(),
   {
     disabled: false,
+    connectionUnavailable: false,
+    sessionReady: true,
     busy: false,
     placeholder: '输入消息...（支持 /Skill、@Agent、上传图片或文件）',
     attachments: () => [],
@@ -134,14 +138,15 @@ onBeforeUnmount(() => {
   else for (const attachment of localAttachments.value) revokePreviewUrl(attachment.previewUrl)
 })
 
-const activity = computed(() => taskActivity({
+// Loading/error feedback belongs to the workspace; disabled alone says nothing about connectivity.
+const activity = computed(() => props.sessionReady ? taskActivity({
   session: sessionStore.currentSession,
   events: sessionStore.currentSession ? eventStore.eventsForSession(sessionStore.currentSession.id) : [],
   connectedSessionId: eventStore.connectedSessionId,
   connectionState: eventStore.sseConnectionState,
-  unavailable: props.disabled,
+  unavailable: props.connectionUnavailable,
   now: now.value
-}))
+}) : undefined)
 const { messageDraft: draft } = storeToRefs(workspaceUiStore)
 const unresolvedAgentMention = computed(() => draft.value.includes('@'))
 const visibleError = computed(() => {

@@ -1,4 +1,4 @@
-import { runtimePhaseLabel, isUsableWorkspaceEvidencePath } from "@agent-cluster/shared";
+import { runtimePhaseLabel, isUsableWorkspaceEvidencePath, assertIntentInvocationScope } from "@agent-cluster/shared";
 import { createHash, randomUUID } from 'node:crypto';
 import { cp, lstat, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -53,6 +53,10 @@ export async function executeLocalInvocation(
   let githubCandidate: AgentRunResult['githubCandidate'];
   let repairBaseline: Map<string, WorkspaceFileSnapshot> | undefined;
   try {
+    assertIntentInvocationScope(plan);
+    if (plan.executionTarget.writeMode === 'none' && plan.recoveryCandidate && !plan.submissionRepair) {
+      throw new Error('INTENT_SOURCE_WRITE_NOT_AUTHORIZED');
+    }
     if (providerConnectionError) throw new Error(providerConnectionError);
     if (request.workspaceId !== workspace.state.workspaceId) throw new Error('Invocation workspaceId mismatch.');
     const currentRevision = await workspace.revision();
@@ -63,7 +67,7 @@ export async function executeLocalInvocation(
     const effectivePermissions = intersectPermissionPolicies(request.permissions, localPermissions);
     assertInvocationPermissions(plan, effectivePermissions);
     const githubSessionId = /^github-session:([0-9a-f-]{36})$/i.exec(workspace.state.workspaceId)?.[1];
-    const githubTask = githubSessionId && plan.phase === 'task_execution' && plan.taskId &&
+    const githubTask = plan.executionTarget.writeMode !== 'none' && githubSessionId && plan.phase === 'task_execution' && plan.taskId &&
       githubSessionId === plan.sessionId ? { sessionId: githubSessionId, taskId: plan.taskId } : undefined;
     let stagingRoot: string;
     let githubBaseCommit: string | undefined;
@@ -148,6 +152,9 @@ export async function executeLocalInvocation(
       throw new Error('CANDIDATE_REPAIR_SIDE_EFFECT_DETECTED');
     }
     const changeSet = captureState && after ? buildChangeSet(currentRevision, captureState.before, after) : null;
+    if (!plan.submissionRepair && plan.executionTarget.writeMode === 'none' && changeSet?.changes.length) {
+      throw new Error('READ_ONLY_SIDE_EFFECT_DETECTED: read-only invocation changed staged workspace files.');
+    }
     if (githubTask && githubBaseCommit) {
       githubCandidate = await captureGitTaskCandidate({ worktreePath: stagingRoot,
         sessionId: githubTask.sessionId, taskId: githubTask.taskId, baseCommit: githubBaseCommit });
@@ -206,7 +213,7 @@ export async function executeLocalInvocation(
   } catch (error) {
     if (String(error).includes('CANDIDATE_REPAIR_SIDE_EFFECT')) executionCandidate = undefined;
     // Adapter execution resolves/rejects only after its process closes. Preserve bounded text evidence before staging cleanup.
-    if (captureState && !String(error).includes('CANDIDATE_')) {
+    if (captureState && plan.executionTarget.writeMode !== 'none' && !String(error).includes('CANDIDATE_')) {
       try {
         const after = await snapshotWorkspaceFiles(captureState.stagingRoot, true);
         const changeSet = buildChangeSet(captureState.revision, captureState.before, after);

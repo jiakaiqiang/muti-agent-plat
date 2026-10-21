@@ -27,6 +27,25 @@ import { GitHubCodeHostAdapter } from '../../code-hosts/github-code-host.adapter
 
 const databaseUrl = process.env.RELATIONAL_TEST_DATABASE_URL;
 
+// Other integration fixtures share this isolated database and may leave more
+// than one batch pending. Keep production batch limits and inspect each claim.
+async function claimThroughEvent(persistence: PersistenceService, workerId: string, eventId: string) {
+  const claimed = [], seen = new Set<string>();
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const batch = await persistence.claimPendingEventOutbox(workerId, 100, 60_000);
+    assert.ok(batch.length > 0, `Outbox exhausted before ${eventId}`);
+    for (const row of batch) {
+      assert.ok(typeof row.id === 'string', 'Claimed outbox records must have an ID');
+      assert.equal(seen.has(row.id), false, 'A live lease must not be claimed again');
+      seen.add(row.id);
+      claimed.push(row);
+    }
+    if (seen.has(`outbox:${eventId}`)) return claimed;
+  }
+  assert.fail(`Outbox claim deadline exceeded for ${eventId}`);
+}
+
 test('PostgreSQL consumes a device-bound GitHub OAuth state once without persisting its token',
   { skip: !databaseUrl }, async () => {
     const first = new PersistenceService({ enabled: true, backend: 'postgres', databaseUrl });
@@ -264,7 +283,7 @@ test('online PostgreSQL mutations preserve concurrent sessions and are independe
       content: 'concurrent event', metadata: { schemaVersion: '0.1' as const, payload: {} }, createdAt: now };
     // first's full state revision is now stale, including missing outbox fields.
     await second.appendEvent(event);
-    const claimed = await second.claimPendingEventOutbox('test-worker', 100);
+    const claimed = await claimThroughEvent(second, 'test-worker', event.id);
     assert.ok(claimed.some(item => item.id === `outbox:${event.id}`));
     await Promise.all([
       second.markEventPublished(event.id),
@@ -469,7 +488,7 @@ test('PostgreSQL deduplicates cross-connection stop receipt replay and recovers 
     const stopOutbox = restored.getCollection<any[]>('eventOutbox', [])
       .filter(record => stopEvents.some(event => record.id === `outbox:${event.id}`));
     assert.equal(stopOutbox.length, 3);
-    const claimedAfterRestart = await restored.claimPendingEventOutbox('restart-worker', 100);
+    const claimedAfterRestart = await claimThroughEvent(restored, 'restart-worker', `runtime-stop:${request.id}:3`);
     assert.equal(claimedAfterRestart.filter(record => record.id === `outbox:runtime-stop:${request.id}:3`).length, 1);
   } finally {
     await Promise.all([first.onModuleDestroy(), second.onModuleDestroy(), restored.onModuleDestroy()]);

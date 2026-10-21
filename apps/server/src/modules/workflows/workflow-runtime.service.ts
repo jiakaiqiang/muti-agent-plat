@@ -25,6 +25,9 @@ import { SessionLifecycleStore } from '../runtimes/session-lifecycle-store.js';
 import { TasksService } from '../tasks/tasks.service.js';
 import { WorkflowsService } from './workflows.service.js';
 import { WorkflowFileHistoryService } from './workflow-file-history.service.js';
+import { bindIntentResume, readIntentResumeState } from '../message-routing/intent-resume-guard.js';
+import { bindIntentRetry, readIntentRetryState } from '../message-routing/intent-retry-guard.js';
+import type { IntentResumeBinding } from '@agent-cluster/shared';
 
 const RUNTIME_KEY = 'workflowRuntime';
 
@@ -424,10 +427,30 @@ export class WorkflowRuntimeService {
       brief: TaskBrief;
       coordinatorId: string;
       sessionGeneration?: number;
+      intentResumeBinding?: IntentResumeBinding;
+      intentRetryBinding?: import('@agent-cluster/shared').IntentRetryBinding;
+      inputBudgetResume?: boolean;
     }
   ) {
     return this.serialize(runId, async () => {
       const run = this.get(runId);
+      const state = readIntentResumeState(this.persistence);
+      const session = (state.sessions as SessionDetail[] | undefined)?.find(row => row.id === run.sessionId) ?? recoveryContext?.session;
+      if (session?.intentContractVersion === 'intent-understanding-v1' && recoveryContext?.intentRetryBinding) {
+        const binding = bindIntentRetry(readIntentRetryState(this.persistence), session.id, session.ownerId, recoveryContext.intentRetryBinding, true);
+        const node = this.listNodeRuns(run.id).find(row => row.id === binding.workflow?.nodeRunId);
+        const task = this.tasks.find(session.id, binding.task.taskId);
+        if (!node || !task || run.status !== 'failed' || node.status !== 'failed' || this.execution.isRunning(session.id)) return false;
+        this.contexts.set(run.id, recoveryContext);
+        run.status = 'running'; run.failure = undefined; run.completedAt = undefined; run.revision += 1; run.updatedAt = nowIso();
+        node.status = 'running'; node.completedAt = undefined; node.error = undefined;
+        this.persist();
+        await this.scheduleTaskExecution(run, node, task, true, undefined, binding);
+        return true;
+      }
+      if (session?.intentContractVersion === 'intent-understanding-v1' && !recoveryContext?.inputBudgetResume) {
+        bindIntentResume(state, session.id, session.ownerId, recoveryContext?.intentResumeBinding, true);
+      }
       if (this.execution.isRunning(run.sessionId)) return false;
       if (this.awaitsAgentSubstitution(run.id)) return false;
       if (this.awaitsUpstreamRerun(run.id)) return false;
@@ -469,7 +492,7 @@ export class WorkflowRuntimeService {
       this.restoreWorkflowNodeAgent(run, task);
       this.reconcileTaskDependencies(run, nodeRun, task);
       this.tasks.update(task, { status: 'pending', resultSummary: undefined });
-      await this.scheduleTaskExecution(run, nodeRun, task, true);
+      await this.scheduleTaskExecution(run, nodeRun, task, true, recoveryContext?.intentResumeBinding);
       return true;
     });
   }
@@ -1201,7 +1224,9 @@ export class WorkflowRuntimeService {
     run: WorkflowRun,
     nodeRun: WorkflowNodeRun,
     task?: AgentTask,
-    forceRestart = false
+    forceRestart = false,
+    intentResumeBinding?: IntentResumeBinding,
+    intentRetryBinding?: import('@agent-cluster/shared').IntentRetryBinding
   ) {
     const context = this.context(run.id);
     const currentTask = task ?? (nodeRun.relatedTaskId ? this.tasks.find(run.sessionId, nodeRun.relatedTaskId) : undefined);
@@ -1221,7 +1246,7 @@ export class WorkflowRuntimeService {
     };
     await this.publishProjection(run);
     const startExecution = () => {
-      const executionTasks = [
+      const executionTasks = intentRetryBinding ? [currentTask] : [
         ...currentTask.dependsOnTaskIds
           .map((taskId) => this.tasks.find(run.sessionId, taskId))
           .filter((item): item is AgentTask => Boolean(item)),
@@ -1229,7 +1254,7 @@ export class WorkflowRuntimeService {
       ];
       this.execution.start(context.session, context.brief, executionTasks, (outcome) => {
         void this.serialize(run.id, () => this.handleExecutionOutcome(run.id, nodeRun.id, outcome));
-      }, run.sessionGeneration);
+      }, run.sessionGeneration, intentResumeBinding, intentRetryBinding);
     };
     if (forceRestart) {
       startExecution();
@@ -1301,7 +1326,7 @@ export class WorkflowRuntimeService {
       });
       return;
     }
-    if (outcome.kind === 'approval_required') {
+    if (outcome.kind === 'approval_required' || outcome.kind === 'input_budget_exceeded') {
       this.updatesSubject.next({
         kind: 'session_outcome',
         sessionId: run.sessionId,

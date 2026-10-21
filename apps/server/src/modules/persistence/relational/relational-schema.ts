@@ -1281,6 +1281,31 @@ export const RELATIONAL_SCHEMA_V22_SQL = [
   'create index if not exists event_outbox_aggregate_idx on agent_cluster.event_outbox (aggregate_type, aggregate_external_id)'
 ].map((statement) => statement.endsWith(';') ? statement : `${statement};`).join('\n\n');
 
+// Additive only: old routing rows remain readable and gain no inferred permissions.
+export const RELATIONAL_SCHEMA_V23_TABLES: RelationalTableDefinition[] = [
+  ['intent_route_revisions', '不可变意图版本；历史权限保持 unknown。'],
+  ['intent_resolution_receipts', '不可变澄清选择收据。'],
+  ['intent_corrections', '纠错请求、幂等身份及持久化处理状态。'],
+  ['intent_plan_steps', '版本化计划步骤及执行状态。']
+].map(([name, comment]) => table(name, comment, [
+  column('external_id', 'text primary key', '实体标识。'),
+  column('session_id', 'bigint not null references agent_cluster.sessions(id) on delete cascade', '所属会话。'),
+  column('routing_id', 'bigint not null', '所属同会话路由。'),
+  column('data_epoch', 'text not null', '创建时的数据纪元。'),
+  column('identity_key', 'text not null', '版本/确认卡/用户幂等键/步骤的规范化唯一身份。'),
+  column('immutable_payload', 'jsonb not null', '不可变语义及身份，用于拒绝历史覆盖。'),
+  column('source_snapshot', 'jsonb not null', '完整领域记录。'),
+  column('status', 'text', '可变处理状态；不可变收据无状态。'),
+  column('created_at', 'timestamptz not null', '首次创建时间。'),
+  column('updated_at', 'timestamptz not null', '最近状态更新时间。')
+], [`unique (session_id,data_epoch,identity_key)`,
+  'foreign key (routing_id,session_id) references agent_cluster.intent_routing_records(id,session_id) on delete cascade'], [
+  `create index if not exists ${name}_routing_idx on agent_cluster.${name}(routing_id)`,
+  `create index if not exists ${name}_status_idx on agent_cluster.${name}(session_id,status,updated_at)`
+]));
+export const RELATIONAL_SCHEMA_V23_SQL = 'create unique index if not exists intent_routing_records_id_session_uq on agent_cluster.intent_routing_records(id,session_id);\n\n' +
+  renderTables(RELATIONAL_SCHEMA_V23_TABLES);
+
 export function expectedRelationalComments() {
   return [
     SCHEMA_MIGRATIONS_TABLE,
@@ -1302,7 +1327,8 @@ export function expectedRelationalComments() {
     ...RELATIONAL_SCHEMA_V18_TABLES,
     ...RELATIONAL_SCHEMA_V19_TABLES,
     ...RELATIONAL_SCHEMA_V20_TABLES,
-    ...RELATIONAL_SCHEMA_V21_TABLES
+    ...RELATIONAL_SCHEMA_V21_TABLES,
+    ...RELATIONAL_SCHEMA_V23_TABLES
   ].flatMap((definition) => [
     { table: definition.name, column: null, comment: definition.comment },
     ...definition.columns.map((item) => ({ table: definition.name, column: item.name, comment: item.comment }))

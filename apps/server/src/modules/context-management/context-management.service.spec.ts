@@ -535,6 +535,9 @@ test('route application creates a related WorkItem with only explicit inheritanc
   const context = await fixture();
   try {
     const first = await context.service.ensureInitialWorkItem(context.session, 'event-1');
+    await context.persistence.setCollection('workItemsBySession', {
+      [context.session.id]: [{ ...first, inheritedArtifactIds: ['artifact-1'] }]
+    });
     const confirmed = await context.service.recordDecision({
       session: context.session,
       workItemId: first.id,
@@ -628,7 +631,7 @@ test('route application creates a related WorkItem with only explicit inheritanc
   }
 });
 
-test('independent route creates a clean WorkItem even when the model selects old context', async () => {
+test('application policy rejects inherited context on independent routes even with forged safeToApply', async () => {
   const context = await fixture();
   try {
     const first = await context.service.ensureInitialWorkItem(context.session, 'event-1');
@@ -664,9 +667,14 @@ test('independent route creates a clean WorkItem even when the model selects old
     };
     await context.service.updateRoutingRecord(context.session.id, routing.id, { status: 'VALIDATING', decision, validation });
 
-    const applied = await context.service.applyIntentRoute({
+    await assert.rejects(context.service.applyIntentRoute({
       session: context.session, routingId: routing.id, snapshotId: snapshot.id,
       followUpId: followUp.id, decision, validation
+    }), /INTENT_POLICY_REJECTED/);
+    assert.equal(context.service.listWorkItems(context.session.id).length, 1);
+    const applied = await context.service.applyIntentRoute({
+      session: context.session, routingId: routing.id, snapshotId: snapshot.id,
+      followUpId: followUp.id, decision: { ...decision, selectedDecisionIds: [], selectedArtifactIds: [] }, validation
     });
 
     assert.equal(applied.workItem.parentWorkItemId, undefined);
@@ -1058,4 +1066,174 @@ test('a real Session artifact can still be inherited explicitly', async () => {
   } finally {
     await context.cleanup();
   }
+});
+
+async function clarificationFixture() {
+  const context = await fixture();
+  const work = await context.service.ensureInitialWorkItem(context.session, 'initial');
+  const route = await context.service.createRoutingRecord({ session: context.session, sourceEventId: 'question',
+    idempotencyKey: 'clarify-route', rolloutMode: 'enforce_all_current_epoch' });
+  const followUp: SessionFollowUpMessage = { id: 'clarify-followup', sourceEventId: 'question', content: '处理这个新问题',
+    mentionedAgentIds: [], workItemId: work.id, routingId: route.id, status: 'queued', queuedAt: new Date().toISOString(),
+    handlingPlan: { intent: 'clarification', priority: 'normal', shouldPause: false, affectedTaskIds: [], affectedAgentIds: [],
+      requiresBriefRevision: false, requiresUserConfirmation: true, coordinatorInstruction: 'pending' } };
+  await context.service.saveFollowUp(context.session.id, followUp);
+  await context.service.updateRoutingRecord(context.session.id, route.id, { status: 'SNAPSHOT_READY' });
+  await context.service.updateRoutingRecord(context.session.id, route.id, { status: 'CLASSIFYING' });
+  const pending = await context.service.updateRoutingRecord(context.session.id, route.id, { status: 'CLARIFICATION_REQUIRED' });
+  const card: CollaborationEvent = { id: 'card-event', sessionId: context.session.id, type: 'intent_clarification_required',
+    content: '选择任务关系', toAgentIds: [], actor: { type: 'system', id: 'system' }, createdAt: new Date().toISOString(),
+    metadata: createMetadata('confirmation_card', { confirmationId: 'card-1', routingId: route.id,
+      routingRevision: pending.routingRevision, expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      options: [{ key: 'continue_current' }, { key: 'related_new' }, { key: 'independent_new' }] }) };
+  await context.persistence.setCollection('eventsBySession', { [context.session.id]: [card] });
+  const snapshot = await context.service.buildIntentSnapshot({ session: context.session, sourceEventId: 'question',
+    currentMessage: followUp.content, latestEventSeq: 1 });
+  const input = { session: context.session, routingId: route.id, snapshotId: snapshot.id, followUpId: followUp.id,
+    decision: { dialogueAct: 'command', scopeRelation: 'independent_new_requirement', contextPolicy: 'clean_task_context',
+      requestedAction: 'create_independent_work_item', selectedWorkItemId: work.id, selectedDecisionIds: [], selectedArtifactIds: [],
+      goalSegments: [followUp.content], missingFields: [], ambiguityReasons: [], reasonCodes: ['USER_CLARIFIED'], riskLevel: 'low'
+    } as IntentRoutingDecisionV2,
+    validation: { schemaValid: true, referencesValid: true, transitionValid: true, snapshotCurrent: true,
+      safeToApply: true, serverConfidence: 1, errors: [] },
+    clarification: { contractVersion: 'intent-clarify-v1' as const, confirmationId: 'card-1',
+      expectedRoutingRevision: pending.routingRevision, choice: 'independent_new' as const, idempotencyKey: 'choice-1' } };
+  return { ...context, input, card, initialOutboxCount: context.persistence.getCollection<unknown[]>('eventOutbox', []).length };
+}
+
+test('clarification transaction has one effect under replay and rejects opposite choices after restart', async () => {
+  const context = await clarificationFixture();
+  try {
+    const restored = new ContextManagementService(context.persistence);
+    const results = await Promise.all([context.service.applyIntentRoute(context.input), restored.applyIntentRoute(context.input)]);
+    assert.equal(results[0].workItem.id, results[1].workItem.id);
+    assert.equal(results.filter(item => item.idempotentReplay).length, 1);
+    assert.equal(context.service.listWorkItems(context.session.id).length, 2);
+    const events = context.persistence.getCollection<Record<string, CollaborationEvent[]>>('eventsBySession', {})[context.session.id];
+    assert.equal(events.filter(event => event.type === 'user_confirmation_resolved').length, 1);
+    const outbox = context.persistence.getCollection<Array<{event: CollaborationEvent}>>('eventOutbox', []);
+    assert.equal(outbox.length, context.initialOutboxCount + 1);
+    assert.equal(results[0].routing.resolution?.choice, 'independent_new');
+    await assert.rejects(restored.applyIntentRoute({ ...context.input, clarification: {
+      ...context.input.clarification, choice: 'continue_current', idempotencyKey: 'opposite-choice'
+    } }), /CLARIFICATION_CHOICE_CONFLICT/);
+    await assert.rejects(restored.applyIntentRoute({ ...context.input, clarification: {
+      ...context.input.clarification, choice: 'continue_current'
+    } }), /IDEMPOTENCY_PAYLOAD_CONFLICT/);
+  } finally { await context.cleanup(); }
+});
+
+test('clarification rejects wrong binding, stale revision and expiry without changing projections', async () => {
+  const context = await clarificationFixture();
+  try {
+    await assert.rejects(context.service.applyIntentRoute({ ...context.input, clarification: {
+      ...context.input.clarification, choice: 'continue_current'
+    } }), /CLARIFICATION_PLAN_MISMATCH/);
+    await assert.rejects(context.service.applyIntentRoute({ ...context.input, clarification: {
+      ...context.input.clarification, confirmationId: 'unrelated-card'
+    } }), /CLARIFICATION_CONFIRMATION_MISMATCH/);
+    await assert.rejects(context.service.applyIntentRoute({ ...context.input, clarification: {
+      ...context.input.clarification, expectedRoutingRevision: 999
+    } }), /CLARIFICATION_REVISION_CONFLICT/);
+    context.card.metadata.payload!.expiresAt = new Date(0).toISOString();
+    await context.persistence.setCollection('eventsBySession', { [context.session.id]: [context.card] });
+    await assert.rejects(context.service.applyIntentRoute(context.input), /CLARIFICATION_EXPIRED/);
+    assert.equal(context.service.listWorkItems(context.session.id).length, 1);
+    assert.equal(context.service.listRoutingRecords(context.session.id)[0].resolution, undefined);
+  } finally { await context.cleanup(); }
+});
+
+test('clarification commit failure rolls back receipt, work item and outbox together', async () => {
+  const context = await clarificationFixture();
+  try {
+    await assert.rejects(context.service.applyIntentRoute({ ...context.input,
+      routeEventFactory: () => { throw new Error('injected commit failure'); }
+    }), /injected commit failure/);
+    assert.equal(context.service.listWorkItems(context.session.id).length, 1);
+    assert.equal(context.service.listRoutingRecords(context.session.id)[0].status, 'CLARIFICATION_REQUIRED');
+    assert.equal(context.service.listRoutingRecords(context.session.id)[0].resolution, undefined);
+    assert.equal(context.persistence.getCollection<unknown[]>('eventOutbox', []).length, context.initialOutboxCount);
+    const applied = await context.service.applyIntentRoute(context.input);
+    assert.equal(applied.routing.status, 'ROUTED');
+  } finally { await context.cleanup(); }
+});
+
+test('classification attempt budget and deadline survive reconstruction and concurrent reservation', async () => {
+  const context = await fixture();
+  try {
+    const routing = await context.service.createRoutingRecord({ session: context.session, sourceEventId: 'message',
+      idempotencyKey: 'attempt-budget', rolloutMode: 'enforce_all_current_epoch' });
+    await context.service.updateRoutingRecord(context.session.id, routing.id, { status: 'SNAPSHOT_READY' });
+    await context.service.updateRoutingRecord(context.session.id, routing.id, { status: 'CLASSIFYING' });
+    const restored = new ContextManagementService(context.persistence);
+    const reserved = await Promise.all([context.service.reserveIntentClassificationAttempt(context.session.id, routing.id, 'attempt-1', 'classification'),
+      restored.reserveIntentClassificationAttempt(context.session.id, routing.id, 'attempt-2', 'schema_repair')]);
+    assert.deepEqual(reserved.sort(), [1, 2]);
+    const deadline = context.service.listRoutingRecords(context.session.id)[0].classificationDeadlineAt;
+    assert.equal(await new ContextManagementService(context.persistence).reserveIntentClassificationAttempt(context.session.id, routing.id, 'attempt-3', 'rebuild'), undefined);
+    assert.equal(context.service.listRoutingRecords(context.session.id)[0].classificationDeadlineAt, deadline);
+    assert.equal(context.service.listRoutingRecords(context.session.id)[0].attemptLog?.length, 2);
+  } finally { await context.cleanup(); }
+});
+
+
+test('a corrected timeout supersedes the old Decision and the next snapshot excludes the old value', async () => {
+  const context = await fixture();
+  try {
+    const work = await context.service.ensureInitialWorkItem(context.session, 'initial');
+    const old = await context.service.recordDecision({ session: context.session, workItemId: work.id,
+      sourceEventId: 'timeout-old', kind: 'constraint', content: '超时必须为 10 分钟' });
+    const corrected = await context.service.recordDecision({ session: context.session, workItemId: work.id,
+      sourceEventId: 'timeout-correction', kind: 'correction', content: '超时改为 20 分钟',
+      supersedesDecisionId: old.id, expectedDecisionRevision: old.revision });
+    const snapshot = await context.service.buildIntentSnapshot({ session: context.session, sourceEventId: 'next',
+      currentMessage: '按照最新超时限制处理', latestEventSeq: 1 });
+    assert.deepEqual(snapshot.validDecisionIds, [corrected.id]);
+    assert.equal(context.service.listDecisions(context.session.id).find(item => item.id === old.id)?.status, 'superseded');
+    const replay = await context.service.recordDecision({ session: context.session, workItemId: work.id,
+      sourceEventId: 'timeout-correction', kind: 'correction', content: '超时改为 20 分钟',
+      supersedesDecisionId: old.id, expectedDecisionRevision: old.revision });
+    assert.equal(replay.id, corrected.id);
+    assert.equal(context.service.listDecisions(context.session.id).length, 2);
+  } finally { await context.cleanup(); }
+});
+
+test('concurrent corrections to the same Decision revision have one winner', async () => {
+  const context = await fixture();
+  try {
+    const work = await context.service.ensureInitialWorkItem(context.session, 'initial');
+    const old = await context.service.recordDecision({ session: context.session, workItemId: work.id,
+      sourceEventId: 'timeout-old', kind: 'constraint', content: '超时为 10 分钟' });
+    const second = new ContextManagementService(context.persistence);
+    const results = await Promise.allSettled([context.service, second].map((service, index) => service.recordDecision({
+      session: context.session, workItemId: work.id, sourceEventId: `correction-${index}`, kind: 'correction',
+      content: `超时改为 ${20 + index} 分钟`, supersedesDecisionId: old.id, expectedDecisionRevision: 1 })));
+    assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+    const rejected = results.find(result => result.status === 'rejected');
+    assert.ok(rejected?.status === 'rejected');
+    assert.match(String(rejected.reason), /DECISION_REVISION_CONFLICT/);
+    assert.equal(context.service.validDecisions(context.session.id, work.id).length, 1);
+  } finally { await context.cleanup(); }
+});
+
+test('inherited constraint corrections remain local through repeated replacement', async () => {
+  const context = await fixture();
+  try {
+    const parent = await context.service.ensureInitialWorkItem(context.session, 'initial');
+    const old = await context.service.recordDecision({ session: context.session, workItemId: parent.id,
+      sourceEventId: 'timeout-old', kind: 'constraint', content: '超时为 10 分钟' });
+    const child = await context.service.createWorkItem({ session: context.session, sourceEventId: 'child',
+      title: '子任务', goal: '子任务', parentWorkItemId: parent.id, inheritedDecisionIds: [old.id] });
+    const sibling = await context.service.createWorkItem({ session: context.session, sourceEventId: 'sibling',
+      title: '同级任务', goal: '同级任务', parentWorkItemId: parent.id, inheritedDecisionIds: [old.id] });
+    const override = await context.service.recordDecision({ session: context.session, workItemId: child.id,
+      sourceEventId: 'override', kind: 'correction', content: '本任务超时为 20 分钟', supersedesDecisionId: old.id, expectedDecisionRevision: 1 });
+    const next = await context.service.recordDecision({ session: context.session, workItemId: child.id,
+      sourceEventId: 'next-override', kind: 'correction', content: '本任务超时为 30 分钟', supersedesDecisionId: override.id, expectedDecisionRevision: 1 });
+    assert.equal(next.overridesDecisionId, old.id);
+    assert.deepEqual(context.service.validDecisions(context.session.id, child.id).map(item => item.id), [next.id]);
+    assert.deepEqual(context.service.validDecisions(context.session.id, parent.id).map(item => item.id), [old.id]);
+    assert.deepEqual(context.service.validDecisions(context.session.id, sibling.id).map(item => item.id), [old.id]);
+    assert.equal(context.service.listDecisions(context.session.id).find(item => item.id === old.id)?.status, 'confirmed');
+  } finally { await context.cleanup(); }
 });

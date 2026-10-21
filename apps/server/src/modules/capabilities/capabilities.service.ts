@@ -37,7 +37,7 @@ export type CapabilityApprovalListener = (context: {
 }) => Promise<void> | void;
 
 /** 内置能力中可作为 Tool 插入的 key 集合，其余内置能力视为 internal。 */
-const defaultToolKeys = new Set(['tool.file_write', 'tool.command_run']);
+const defaultToolKeys = new Set(['tool.file_write', 'tool.command_run', 'tool.file_read', 'tool.code_search', 'tool.isolated_test']);
 const defaultCapabilityIds = new Set(defaultCapabilities.map((capability) => capability.id));
 
 @Injectable()

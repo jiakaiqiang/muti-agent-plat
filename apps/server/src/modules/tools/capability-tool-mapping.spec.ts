@@ -58,7 +58,7 @@ test('all current default capabilities have explicit mapping entries', () => {
 test('planned tool capabilities are explicitly tracked outside default capabilities', () => {
   const defaultCapabilityIds = new Set(defaultCapabilities.map((capability) => capability.id));
 
-  assert.deepEqual(PLANNED_TOOL_CAPABILITY_IDS, ['cap-file-read', 'cap-code-search']);
+  assert.ok(['cap-file-read', 'cap-code-search'].every(id => defaultCapabilityIds.has(id)));
   assert.deepEqual(
     PLANNED_TOOL_CAPABILITY_IDS.filter((capabilityId) => defaultCapabilityIds.has(capabilityId)),
     []

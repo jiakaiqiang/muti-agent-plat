@@ -89,6 +89,42 @@ test('exposes stable test runner metadata', () => {
   assert.equal((tool.inputSchema.properties.script as { type: string }).type, 'string');
 });
 
+test('untrusted test bindings cannot bypass live journal authority even when broad command approval is granted', async () => {
+  const { capabilities, calls } = makeCapabilities(allowedCheck());
+  let launched = 0, checked = 0;
+  const isolated = { isConfigured: () => true, authorize: async () => { checked++; throw new Error('ISOLATED_TEST_STEP_STALE'); },
+    run: async () => { launched++; } };
+  const tool = new TestRunnerTool(capabilities, undefined, isolated as never);
+  const context = { sessionId: 'session', workingDirectory: 'D:/workspace', requireTestIsolation: true, intentTestBinding: {} as never,
+    testExecution: { sessionId: 'session', dataEpoch: 'epoch', operationId: 'operation', invocationId: 'invocation' } };
+  const denied = await tool.execute({ script: 'test:unit' }, context);
+  assert.equal(denied.error, 'ISOLATED_TEST_STEP_STALE'); assert.equal(checked, 1); assert.equal(launched, 0); assert.equal(calls.length, 0);
+  const missing = await tool.execute({ script: 'test:unit' }, { ...context, testExecution: undefined });
+  assert.equal(missing.error, 'ISOLATED_TEST_AUTHORITY_REQUIRED'); assert.equal(checked, 1);
+});
+
+test('intent-bound tests cannot fall back to a host command when isolation is unavailable', async () => {
+  await withPackage({ test: 'node -e "require(\'fs\').writeFileSync(\'marker.txt\',\'ran\')"' }, async workspace => {
+    const { capabilities } = makeCapabilities(allowedCheck());
+    const tool = new TestRunnerTool(capabilities);
+    const result = await tool.execute({ script: 'test' }, { workingDirectory: workspace, sessionId: 'session-1', requireTestIsolation: true });
+    assert.equal(result.success, false); assert.equal(result.error, 'ISOLATED_TEST_IMAGE_REQUIRED');
+    await assert.rejects(access(join(workspace, 'marker.txt')));
+  });
+});
+
+test('configured isolation returns TAP counts and audit evidence without executing the host script', async () => {
+  await withPackage({ test: 'node -e "require(\'fs\').writeFileSync(\'marker.txt\',\'ran\')"' }, async workspace => {
+    const { capabilities } = makeCapabilities(allowedCheck());
+    const isolated = { isConfigured: () => true, run: async () => ({ stdout: '# tests 2\n# pass 2\n# fail 0\n# skipped 0', stderr: '', exitCode: 0,
+      timedOut: false, aborted: false, isolation: { runnerId: 'fixture', stopConfirmed: true, snapshotHash: 'hash' } }) };
+    const tool = new TestRunnerTool(capabilities, undefined, isolated as never);
+    const result = await tool.execute({ script: 'test' }, { workingDirectory: workspace, sessionId: 'session-1' });
+    assert.equal(result.success, true); assert.deepEqual(output(result).summary, { total: 2, passed: 2, failed: 0, skipped: 0 });
+    assert.equal(output(result).isolation?.snapshotHash, 'hash'); await assert.rejects(access(join(workspace, 'marker.txt')));
+  });
+});
+
 test('blocks command execution before approval', async () => {
   await withPackage({ test: 'node -e "require(\'fs\').writeFileSync(\'marker.txt\',\'ran\')"' }, async (workspace) => {
     const { capabilities, calls } = makeCapabilities(blockedCheck());
@@ -202,5 +238,21 @@ test('defaults to the test script', async () => {
     assert.equal(result.success, true);
     assert.equal(output(result).script, 'test');
     assert.equal(await readFile(join(workspace, 'default.txt'), 'utf8'), 'ok');
+  });
+});
+
+test('isolated cleanup failure cannot turn exit zero into success and identity reaches the runner', async () => {
+  await withPackage({ test: 'node -e "process.exit(0)"' }, async workspace => {
+    const { capabilities } = makeCapabilities(allowedCheck());
+    let received: unknown;
+    const isolated = { isConfigured: () => true, run: async (input: unknown) => { received = input; return {
+      exitCode: 0, stdout: '', stderr: '', timedOut: false, aborted: false, error: 'ISOLATED_TEST_CLEANUP_FAILED',
+      isolation: { stopConfirmed: true, cleanupRequired: true }
+    }; } };
+    const tool = new TestRunnerTool(capabilities, undefined, isolated as never);
+    const testExecution = { sessionId: 's1', dataEpoch: 'epoch', operationId: 'operation', invocationId: 'invocation' };
+    const result = await tool.execute({ script: 'test' }, { workingDirectory: workspace, sessionId: 's1', testExecution });
+    assert.equal(result.success, false); assert.equal(result.error, 'ISOLATED_TEST_CLEANUP_FAILED');
+    assert.deepEqual((received as { execution: unknown }).execution, testExecution);
   });
 });

@@ -10,6 +10,7 @@ import type {
   TaskExecutionResultOutput
 } from '@agent-cluster/shared';
 import {
+  assertIntentInvocationScope,
   createAgentMessageOutput,
   createRuntimeArtifactOutput,
   createRuntimeArtifactSystemEvidence
@@ -61,7 +62,14 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
   }
 
   start(input: InvocationPlan, signal?: AbortSignal): AgentRuntimeRunHandle {
-    return withStructuredTermination(promiseHandle(this.execute(input, signal)), input, signal);
+    assertIntentInvocationScope(input);
+    const controller = new AbortController();
+    const forward = () => controller.abort(signal?.reason);
+    if (signal?.aborted) forward(); else signal?.addEventListener('abort', forward, { once: true });
+    const result = this.execute(input, controller.signal).finally(() => signal?.removeEventListener('abort', forward));
+    const handle = promiseHandle(result);
+    handle.cancel = async () => { controller.abort(); };
+    return withStructuredTermination(handle, input, controller.signal);
   }
 
   private async execute(input: InvocationPlan, signal?: AbortSignal): Promise<AgentRunResult> {
@@ -83,6 +91,10 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
             workingDirectory: this.workspaceBindings.resolveServerRoot(input) ?? '',
             sessionId: input.sessionId,
             agentId: input.agent.agentId,
+            ...(input.intentTestBinding ? { intentTestBinding: input.intentTestBinding } : {}),
+            ...(input.effectScope || input.executionBinding ? { requireTestIsolation: true } : {}),
+            ...(input.operation && input.dataEpoch ? { testExecution: { sessionId: input.sessionId, dataEpoch: input.dataEpoch,
+              operationId: input.operation.id, invocationId: input.invocationId } } : {}),
             signal
           }
         );
@@ -130,8 +142,8 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
     if (persisted === false) this.logger.warn(`Tool audit was not persisted for ${input.invocationId}:run_test`);
   }
 
-  private testScript(_input: InvocationPlan) {
-    return 'test';
+  private testScript(input: InvocationPlan) {
+    return input.intentTestBinding?.script ?? 'test';
   }
 
   private generateReport(output: unknown): TestReport {
@@ -156,7 +168,7 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
       invocationId: input.invocationId,
       runtimeType: this.type,
       status: 'completed',
-      output: this.output(report),
+      output: { ...this.output(report), ...(input.intentTestBinding ? { changedArtifacts: [] } : {}) },
       events: [
         {
           invocationId: input.invocationId,
@@ -167,9 +179,9 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
         },
         {
           invocationId: input.invocationId,
-          type: 'artifact_created',
+          type: input.intentTestBinding ? 'runtime_progress' : 'artifact_created',
           visibility: 'user',
-          content: '已创建测试报告产物',
+          content: input.intentTestBinding ? '测试结果已记录，未发布产物。' : '已创建测试报告产物',
           createdAt: nowIso()
         },
         {
@@ -180,7 +192,7 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
           createdAt: nowIso()
         }
       ],
-      artifacts: [
+      artifacts: input.intentTestBinding ? [] : [
         createRuntimeArtifactOutput({
           type: 'test_report',
           title: '测试报告',
@@ -211,9 +223,10 @@ export class TestRunnerRuntimeAdapterService implements AgentRuntimeAdapter {
   private failedResult(input: InvocationPlan, error: unknown, startedAt: string): AgentRunResult {
     const message = error instanceof Error ? error.message : String(error);
     const runtimeError: RuntimeError = {
-      code: 'UNKNOWN_ERROR',
+      code: message === 'ISOLATED_TEST_STOP_UNCONFIRMED' ? 'RUNTIME_INVOCATION_ERROR' : 'UNKNOWN_ERROR',
       message,
-      retryable: false
+      retryable: false,
+      ...(message === 'ISOLATED_TEST_STOP_UNCONFIRMED' ? { details: { stopUnconfirmed: true, operationFailure: 'OPERATION_STOP_UNCONFIRMED' } } : {})
     };
     return {
       invocationId: input.invocationId,

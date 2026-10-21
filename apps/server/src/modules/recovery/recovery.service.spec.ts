@@ -15,6 +15,25 @@ function makeSession(status: SessionDetail['status']): SessionDetail {
   } as SessionDetail;
 }
 
+test('new semantic Sessions never receive legacy bootstrap tasks or generic stage interruption on restart', async () => {
+  const previous = process.env.AGENT_CLUSTER_WORKITEM_MIGRATION_MODE;
+  process.env.AGENT_CLUSTER_WORKITEM_MIGRATION_MODE = 'apply';
+  try {
+    const session = { ...makeSession('AGENT_DISCUSSING'), intentContractVersion: 'intent-understanding-v1' as const, currentTaskBriefId: undefined };
+    const f = makeFixture([session], undefined, { activeWorkItem: () => undefined,
+      ensureInitialWorkItem: async () => { throw new Error('new-contract bootstrap must not run'); } }, {}, {
+      report: () => { throw new Error('apply fixture'); },
+      apply: async sessions => { assert.equal(sessions.length, 0); return { sessionCount: 0, migratedRecordCount: 0, issues: [] }; }
+    });
+    await f.service.onApplicationBootstrap();
+    assert.deepEqual(f.interruptions, []); assert.deepEqual(f.reconciledSessions, []);
+    assert.equal(session.status, 'AGENT_DISCUSSING');
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_CLUSTER_WORKITEM_MIGRATION_MODE;
+    else process.env.AGENT_CLUSTER_WORKITEM_MIGRATION_MODE = previous;
+  }
+});
+
 function makeFixture(sessions: SessionDetail[], events?: {
   list(sessionId: string): Array<Record<string, unknown>>;
   create(input: Record<string, unknown>): unknown;

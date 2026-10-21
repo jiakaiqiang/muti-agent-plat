@@ -51,6 +51,25 @@ test('WorkflowsService manages multiple workflows and canonical linear edges', (
   assert.equal((collections.get('workflows') as unknown[]).length, 2);
 });
 
+test('workflow effect declarations survive publication and change the pinned definition hash', () => {
+  const { service } = setup();
+  const intentEffects = { contractVersion: 'intent-workflow-effects-v1' as const, effects: [] };
+  const draft = service.create({ name: 'Scoped', nodes: [{ id: 'node', type: 'agent', agentId: 'requirements', order: 0,
+    stageDescription: '分析需求', outputContract: ['需求说明'], intentEffects }] });
+  const first = service.publish(draft.id, { expectedDraftRevision: draft.draftRevision });
+  const firstVersion = service.getVersion(draft.id);
+  assert.deepEqual(firstVersion.nodes[0].intentEffects, intentEffects);
+  const detached = service.catalog()[0];
+  detached.nodes[0].intentEffects!.effects.push({ kind: 'run_command', target: { kind: 'command', refId: 'injected' } });
+  assert.deepEqual(service.getVersion(draft.id).nodes[0].intentEffects, intentEffects);
+  const updated = service.update(draft.id, { nodes: [{ ...firstVersion.nodes[0], intentEffects: {
+    contractVersion: 'intent-workflow-effects-v1', effects: [{ kind: 'read_workspace', target: { kind: 'workspace', refId: 'w' } }] } }] });
+  service.publish(draft.id, { expectedDraftRevision: updated.draftRevision });
+  assert.notEqual(service.getVersion(draft.id).definitionHash, firstVersion.definitionHash);
+  assert.deepEqual(service.getVersion(draft.id, first.currentPublishedVersion).nodes[0].intentEffects, intentEffects);
+  assert.throws(() => service.update(draft.id, { nodes: [{ ...firstVersion.nodes[0], intentEffects: { ...intentEffects, grantIds: ['fake'] } as never }] }), /EFFECTS_INVALID/);
+});
+
 test('WorkflowsService rejects duplicate names and unknown agents', () => {
   const { service } = setup();
   service.create({ name: 'Release' });

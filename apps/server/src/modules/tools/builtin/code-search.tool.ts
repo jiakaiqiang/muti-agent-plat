@@ -28,6 +28,7 @@ export type CodeSearchOutput = {
 
 type CodeSearchParams = {
   pattern: string;
+  literal?: boolean;
   filePattern?: string;
   maxResults?: number;
   caseSensitive?: boolean;
@@ -70,7 +71,7 @@ export class CodeSearchTool implements Tool {
     let regex: RegExp;
     try {
       input = this.parseParams(params);
-      regex = new RegExp(input.pattern, input.caseSensitive ? 'g' : 'gi');
+      regex = new RegExp(input.literal ? this.escapeRegex(input.pattern) : input.pattern, input.caseSensitive ? 'g' : 'gi');
     } catch (error) {
       return this.failure(error);
     }
@@ -193,9 +194,11 @@ export class CodeSearchTool implements Tool {
     if (input.caseSensitive !== undefined && typeof input.caseSensitive !== 'boolean') {
       throw new Error('search_code caseSensitive must be a boolean when provided.');
     }
+    if (input.literal !== undefined && typeof input.literal !== 'boolean') throw new Error('search_code literal must be a boolean.');
 
     return {
       pattern: input.pattern,
+      literal: input.literal,
       filePattern: input.filePattern,
       maxResults: input.maxResults,
       caseSensitive: input.caseSensitive

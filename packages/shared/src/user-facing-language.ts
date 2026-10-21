@@ -1,3 +1,20 @@
+import type { SupplementalContextResolution } from './contracts.js';
+
+/** A completed read is not yet proof that the rebuilt envelope passed its gate. */
+export function isContextSupplementResolved(resolution?: Partial<SupplementalContextResolution>): boolean {
+  if (!resolution) return false;
+  if (resolution.outcome) return resolution.outcome === 'resolved';
+  return Boolean((resolution.hydratedPaths?.length || resolution.resolvedRefs?.length) &&
+    !resolution.failedPaths?.length && !resolution.failedRefs?.length && !resolution.deferredPaths?.length);
+}
+
+export function contextSupplementNotice(resolution: Partial<SupplementalContextResolution>, reason: string): string {
+  if (isContextSupplementResolved(resolution)) return '所需上下文已补充，正在重新组装并检查证据。';
+  if (resolution.outcome === 'partial') return '已补充部分上下文，正在检查是否足以继续。';
+  if (resolution.outcome === 'cancelled') return '上下文准备已取消。';
+  return `上下文准备未完成：${localizeBuiltInNotice(reason)}`;
+}
+
 /** Natural language only: protocol identifiers, code, paths and diagnostic payloads stay unchanged. */
 export const CHINESE_RUNTIME_OUTPUT_INSTRUCTION =
   '语言要求：所有面向用户的自然语言必须使用简体中文，包括进度、回复、标题、摘要、任务说明、风险、问题、阻塞原因、下一步建议、requestedContext.reason 和 followUpInstruction，以及产物中的说明文字。代码、命令、路径、URL、标识符、JSON 字段名、枚举值和错误码保持原样，不要翻译；引用外文原文时附中文解释。其他角色提示中的语言要求与本条冲突时，以本条语言规则为准。此要求适用于所有阶段和重试，不改变输出合同或安全边界。';
@@ -46,6 +63,14 @@ export function localizeBuiltInNotice(text: string): string {
 }
 
 const errorCopy: Record<string, string> = {
+  CLARIFICATION_CHOICE_CONFLICT: '这张确认卡已经采用了其他选择，已刷新当前结果。如需修改，请纠正原消息。',
+  IDEMPOTENCY_PAYLOAD_CONFLICT: '该请求已提交过不同内容，请刷新后查看实际处理结果。',
+  CLARIFICATION_CONFIRMATION_MISMATCH: '该确认卡不属于当前消息或已不可用，请刷新群聊。',
+  CLARIFICATION_REVISION_CONFLICT: '任务关系已发生变化，请查看刷新后的确认卡。',
+  CLARIFICATION_EXPIRED: '该确认卡已过期，请重新说明要处理的任务关系。',
+  CLARIFICATION_SUPERSEDED: '该确认已被后续纠正替代，请查看最新结果。',
+  CLARIFICATION_TARGET_CHANGED: '当前任务已变化，请刷新后重新确认目标。',
+  INTENT_PROCESSING_BLOCKED: '意图识别暂时无法完成，消息尚未执行，请先处理模型连接或运行错误。',
   GITHUB_APP_OAUTH_NOT_CONFIGURED: '平台尚未配置 GitHub App 授权，请联系管理员配置，或使用访问令牌授权。',
   GITHUB_APP_CALLBACK_INVALID: 'GitHub 授权回调地址无效，请配置合法的 HTTPS 地址。',
   GITHUB_TOKEN_INVALID: 'GitHub 访问令牌格式无效，请重新填写。',

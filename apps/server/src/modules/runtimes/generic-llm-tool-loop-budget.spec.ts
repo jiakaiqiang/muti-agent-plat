@@ -82,9 +82,11 @@ async function runWithToolLoop(overrides: Parameters<typeof runToolLoop>[0]) {
   const previousRetries = process.env.LLM_MAX_RETRIES;
   const previousFallback = process.env.LLM_MOCK_FALLBACK;
   const previousStreaming = process.env.LLM_REMOTE_STREAMING;
+  const previousMargin = process.env.LLM_INPUT_SAFETY_MARGIN_RATIO;
   process.env.LLM_MAX_RETRIES = '0';
   process.env.LLM_MOCK_FALLBACK = 'false';
   process.env.LLM_REMOTE_STREAMING = 'false';
+  process.env.LLM_INPUT_SAFETY_MARGIN_RATIO = '0';
   try {
     const harness = runToolLoop(overrides);
     const result = await makeService().start(harness.plan).result;
@@ -94,6 +96,7 @@ async function runWithToolLoop(overrides: Parameters<typeof runToolLoop>[0]) {
     if (previousRetries === undefined) delete process.env.LLM_MAX_RETRIES; else process.env.LLM_MAX_RETRIES = previousRetries;
     if (previousFallback === undefined) delete process.env.LLM_MOCK_FALLBACK; else process.env.LLM_MOCK_FALLBACK = previousFallback;
     if (previousStreaming === undefined) delete process.env.LLM_REMOTE_STREAMING; else process.env.LLM_REMOTE_STREAMING = previousStreaming;
+    if (previousMargin === undefined) delete process.env.LLM_INPUT_SAFETY_MARGIN_RATIO; else process.env.LLM_INPUT_SAFETY_MARGIN_RATIO = previousMargin;
   }
 }
 
@@ -103,11 +106,29 @@ const TOOL_CALL = [
   '<<END_TOOL_CALL>>'
 ].join('\n');
 
+test('model tool calls outside the resolved catalog are rejected before tool execution', async () => {
+  const { result, requestBodies } = await runWithToolLoop({ responses: [
+    '<<TOOL_CALL>>\n{"name":"read_attachment","input":{"attachmentId":"foreign"}}\n<<END_TOOL_CALL>>'
+  ] });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'CAPABILITY_BLOCKED');
+  assert.equal(result.error?.details?.reason, 'TOOL_NOT_AUTHORIZED');
+  assert.equal(result.error?.retryable, false);
+  assert.equal(requestBodies.length, 1);
+});
+
 test('tool loop counts every round and fails with a clear capacity code when input exceeds budget', async () => {
+  // Discover the fixed prompt cost through the public capacity error. Changes to
+  // language/schema instructions must not accidentally turn this into a round-0 test.
+  const probe = await runWithToolLoop({ budget: { maxInputTokens: 1, maxOutputTokens: 500, maxTotalTokens: 10_000 }, responses: [] });
+  assert.equal(probe.result.error?.code, 'TOKEN_BUDGET_EXCEEDED');
+  assert.equal(probe.requestBodies.length, 0);
+  const initialCost = Number(probe.result.error?.details?.estimatedInputTokens);
+  assert.ok(Number.isFinite(initialCost) && initialCost > 0);
   const { result, requestBodies } = await runWithToolLoop({
     // The initial request fits; the tool round that follows pushes the conversation
     // past the cap, so the guard must block the NEXT send rather than truncate it.
-    budget: { maxInputTokens: 1_000, maxOutputTokens: 500, maxTotalTokens: 1_500 },
+    budget: { maxInputTokens: initialCost + 100, maxOutputTokens: 500, maxTotalTokens: initialCost + 600 },
     responses: [TOOL_CALL, TOOL_CALL]
   });
 

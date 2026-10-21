@@ -47,6 +47,73 @@ import { makeInvocationPlan } from '../runtimes/invocation-plan.fixture.js';
 import { TasksService } from '../tasks/tasks.service.js';
 import { agent, makeService, session, type ServiceRecorder } from './orchestrator.test-fixtures.js';
 import { InvocationResolutionError } from '../runtime-routing/invocation-resolver.service.js';
+import { IntentExecutionSupersededError } from '../message-routing/intent-execution-guard.js';
+import { InputBudgetStore } from '../runtimes/input-budget-store.js';
+
+test('stale input admission never becomes a budget confirmation without a hold', async t => {
+  t.mock.method(InputBudgetStore.prototype, 'assert', async () => { throw new Error('INPUT_BUDGET_SCOPE_STALE'); });
+  const service = makeService() as any;
+  const active = { ...session(), workspaceMode: 'bootstrap' };
+  service.refreshWorkspaceIndex = async () => {};
+  service.invocationWorkspace = () => ({});
+  service.tasks.find = () => ({ id: 'task' });
+  service.invocationResolver = { resolve: () => makeInvocationPlan({ sessionId: active.id, taskId: 'task',
+    phase: 'task_execution', agent: { agentId: 'backend' }, budget: { maxInputTokens: 100 } }) };
+  service.runtime.start = () => assert.fail('stale admission must not start an adapter');
+  const result = await service.runRuntimeAttempt(active, { invocationId: 'stale', sessionId: active.id,
+    taskId: 'task', inputBudgetTask: true, phase: 'task_execution', agent: agent('backend'),
+    contextAssembly: { taskContext: { requiresCodeChanges: false, evidenceSelection: { strategy: 'none' } } },
+    expectedOutput: { kind: 'task_execution_result', schemaVersion: '1.0' }, budget: { maxInputTokens: 100 } });
+  assert.equal(result.error?.code, 'CAPABILITY_BLOCKED');
+  assert.equal(result.error?.details?.inputBudgetAdmissionDenied, true);
+});
+
+test('approval retry exposes the same input budget waiting card as initial Agent execution', async () => {
+  const task: any = { id: 'task', sessionId: 'session', status: 'running', title: 'Inspect' };
+  const events: any[] = [];
+  const result: any = { status: 'blocked', error: { code: 'INPUT_BUDGET_EXCEEDED', message: 'budget',
+    details: { inputBudgetDecision: { id: 'hold', estimatedInputTokens: 100, outputReservationTokens: 20, effectiveMaxInputTokens: 90 } } } };
+  const service: any = { requireExecutableSessionAgent: () => ({ id: 'backend' }),
+    tasks: { find: () => task, update: (row: any, patch: any) => Object.assign(row, patch) },
+    briefsBySession: new Map(), createContextAssembly: () => ({ budget: {} }), runtime: {},
+    runRuntime: async () => result,
+    events: { create: (event: any) => events.push(event), createOnce: (_id: string, event: any) => events.push(event) } };
+  service.markInputBudgetWaiting = (OrchestratorService.prototype as any).markInputBudgetWaiting;
+  assert.equal(await OrchestratorService.prototype.retryPendingApprovalInvocation.call(service, { id: 'session' } as never,
+    { sessionId: 'session', taskId: 'task', agentId: 'backend', phase: 'task_execution' } as never), result);
+  assert.equal(task.status, 'waiting');
+  assert.equal(events.filter(event => event.type === 'user_confirmation_requested').length, 1);
+});
+
+test('obsolete Runtime results stop before provider retry, token projection or business result handling', async () => {
+  for (const boundary of ['receipt', 'after-events'] as const) {
+    const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+    const service = makeService([], recorder) as any;
+    const active = { ...session(), workspaceMode: 'bootstrap' };
+    service.refreshWorkspaceIndex = async () => {};
+    service.invocationWorkspace = () => ({});
+    service.invocationResolver = { resolve: () => makeInvocationPlan({ phase: 'discussion', agent: { agentId: 'backend' } }) };
+    service.recordTokenUsage = () => assert.fail('stale output must not project into Session state');
+    service.recordRuntimeProviderRetry = () => assert.fail('stale output must not spend a provider retry');
+    service.recordRuntimeProviderFallback = () => assert.fail('stale output must not choose another provider');
+    service.runtime.operations = { assertCurrentIntent: async () => { throw new Error('INTENT_DISPATCH_HELD'); } };
+    service.runtime.start = (plan: InvocationPlan) => {
+      recorder.runtimeCalls += 1;
+      return { hasStreamingEvents: false, events: (async function* () {})(), cancel: async () => {},
+        result: Promise.resolve({ invocationId: plan.invocationId, status: 'completed', runtimeType: 'mock',
+          ...(boundary === 'receipt' ? { intentAdmission: { status: 'superseded', reason: 'INTENT_DISPATCH_HELD' } } : {}),
+          output: createAgentMessageOutput({ messageKind: 'answer', content: 'obsolete answer' }), events: [], artifacts: [],
+          systemEvidence: createRuntimeArtifactSystemEvidence(plan.invocationId), usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } }) };
+    };
+    await assert.rejects(service.runRuntimeProviderAttemptsWithinDeadline(active, { invocationId: 'obsolete', sessionId: active.id,
+      phase: 'discussion', agent: agent('backend'), contextAssembly: { taskContext: { requiresCodeChanges: false,
+        evidenceSelection: { strategy: 'none' } } }, expectedOutput: { kind: 'agent_message', schemaVersion: '1.0' }, budget: {} }),
+    IntentExecutionSupersededError);
+    assert.equal(recorder.runtimeCalls, 1);
+    assert.deepEqual(recorder.taskUpdates, []);
+    assert.equal(recorder.events.some(item => ['task_completed', 'artifact_created', 'task_failed'].includes(item.type)), false);
+  }
+});
 
 test('confirmed CLI exit moves directly to ordered backup; provider faults retry once; unknown stop blocks', async () => {
   const service = makeService() as any;
@@ -169,7 +236,7 @@ test('ordinary and directed Brief revisions publish converged questions despite 
     suggestedTasks: []
   });
   service.shouldWriteGeneratedFiles = () => false;
-  service.persistBriefs = () => undefined;
+  service.persistBriefs = async () => undefined;
   service.applyServerLocalArtifactChanges = async () => undefined;
   service.publishRequirementDocument = async () => undefined;
   service.createSummaryMemoryCheckpoint = async () => undefined;
@@ -3381,7 +3448,7 @@ test('deliver_with_limitations skips repeated Post Review and enters final deliv
   assert.deepEqual(finalDeliveryLimitations, ['src/feature.ts was not reviewed.']);
 });
 
-test('execution artifacts keep runtime proposals separate from platform system evidence', () => {
+test('execution artifacts keep runtime proposals separate from platform system evidence', async () => {
   const service = makeService() as unknown as {
     shouldWriteGeneratedFiles(session: SessionDetail): boolean;
     createExecutionArtifact(
@@ -3391,7 +3458,7 @@ test('execution artifacts keep runtime proposals separate from platform system e
       output: TaskExecutionResultOutput,
       systemEvidence: AgentRunResult['systemEvidence'],
       allowFileChanges: boolean
-    ): Artifact;
+    ): Promise<Artifact>;
   };
   const runtimeArtifact: RuntimeArtifactOutput = createRuntimeArtifactOutput({
     type: 'markdown',
@@ -3425,7 +3492,7 @@ test('execution artifacts keep runtime proposals separate from platform system e
   };
   const readOnlySession = { ...architectureSession(), requiresCodeChanges: false };
 
-  const readOnlyArtifact = service.createExecutionArtifact(
+  const readOnlyArtifact = await service.createExecutionArtifact(
     readOnlySession.id,
     architectureTask(),
     'architect',
@@ -3441,7 +3508,7 @@ test('execution artifacts keep runtime proposals separate from platform system e
     ...readOnlySession,
     originalInput: '分析当前项目架构，并写入 agent-output/project-architecture-analysis.md'
   };
-  const writeArtifact = service.createExecutionArtifact(
+  const writeArtifact = await service.createExecutionArtifact(
     explicitWriteSession.id,
     architectureTask(),
     'architect',
@@ -3626,7 +3693,7 @@ test('local architecture report is written only after the matching user confirma
   }
 });
 
-test('completed historical architecture sessions receive one local-save confirmation and close the old Feishu prompt', () => {
+test('completed historical architecture sessions receive one local-save confirmation and close the old Feishu prompt', async () => {
   const createdArtifacts: Artifact[] = [
     {
       id: 'artifact-historical-report',
@@ -3680,7 +3747,7 @@ test('completed historical architecture sessions receive one local-save confirma
     }
   );
   const service = makeService(createdArtifacts, recorder) as unknown as {
-    ensureArchitectureReportSaveConfirmation(session: SessionDetail): boolean;
+    ensureArchitectureReportSaveConfirmation(session: SessionDetail): Promise<boolean>;
   };
   const completedSession: SessionDetail = {
     ...architectureSession(),
@@ -3694,8 +3761,8 @@ test('completed historical architecture sessions receive one local-save confirma
     }
   };
 
-  assert.equal(service.ensureArchitectureReportSaveConfirmation(completedSession), true);
-  assert.equal(service.ensureArchitectureReportSaveConfirmation(completedSession), false);
+  assert.equal(await service.ensureArchitectureReportSaveConfirmation(completedSession), true);
+  assert.equal(await service.ensureArchitectureReportSaveConfirmation(completedSession), false);
   assert.equal(
     recorder.events.filter(
       (event) =>
@@ -3841,6 +3908,51 @@ const requiredDiscussionDocumentForRuntimePolicy = {
   relativePath: '.agent-cluster/discussion-documents/session-1/plan-revision-001.md',
   contentHash: 'a'.repeat(64)
 };
+
+test('evidence preparation is progress until a rebuilt envelope passes the gate', async () => {
+  const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+  const service = makeService([], recorder) as any;
+  const plan = makeInvocationPlan({ phase: 'discussion', contextEnvelope: {
+    L1: { navigation: { entries: [{ path: 'game.js', kind: 'file', size: 23, generated: false, sensitive: false }] } }
+  } });
+  service.invocationResolver = { resolve: () => plan };
+  const input = { invocationId: plan.invocationId, sessionId: 'session-1', phase: 'discussion', agent: agent('backend'),
+    contextAssembly: { taskContext: { intent: 'architecture_analysis', requiresCodeChanges: false,
+      evidenceSelection: { strategy: 'architecture_analysis' }, evidenceRefs: [], taskMap: { items: [] } } },
+    expectedOutput: { kind: 'agent_message', schemaVersion: '1.0' }, budget: {} };
+  const missing = await service.runRuntimeAttempt(session(), input);
+  assert.equal(missing.error.code, 'CONTEXT_INSUFFICIENT');
+  assert.equal(recorder.runtimeCalls, 0);
+  assert.equal(recorder.events.at(-1)?.metadata.payload?.contextPreparationState, 'preparing');
+  assert.equal(recorder.events.some(event => event.type === 'runtime_failed' || event.type === 'runtime_started'), false);
+
+  plan.contextEnvelope.L3 = { files: [{ path: 'game.js', content: 'export const game = 1;', byteLength: 22 }],
+    totalByteLength: 22, truncated: false };
+  const completed = await service.runRuntimeAttempt(session(), input);
+  assert.equal(completed.status, 'completed');
+  assert.equal(recorder.runtimeCalls, 1);
+  const ready = recorder.events.findIndex(event => event.metadata.payload?.contextPreparationState === 'ready');
+  const started = recorder.events.findIndex(event => event.type === 'runtime_started');
+  assert.ok(ready >= 0 && started > ready);
+  assert.equal(recorder.events[ready]?.metadata.payload?.gateReason, 'ready');
+  assert.equal(recorder.events.some(event => event.type === 'runtime_failed'), false);
+});
+
+test('successful supplemental read retains its diagnostic reason only in metadata and audit memory', () => {
+  const recorder: ServiceRecorder = { events: [], taskUpdates: [], runtimeCalls: 0 };
+  const service = makeService([], recorder) as any;
+  let auditContent = '';
+  service.memories = { create: ({ content }: { content: string }) => { auditContent = content; return { id: 'memory-context' }; } };
+  service.recordSupplementalContextRequest(session(), undefined, 'backend', {
+    reason: 'Context v2 blocked an ungrounded runtime call: evidence-empty.', requestedRefs: [],
+    requestedFiles: [{ path: 'game.js' }]
+  }, { outcome: 'resolved', hydratedPaths: ['game.js'], failedPaths: [], deferredPaths: [], contentBytes: 22 }, 'discussion');
+  const event = recorder.events.at(-1)!;
+  assert.equal(event.content, '所需上下文已补充，正在重新组装并检查证据。');
+  assert.match((event.metadata.payload?.requestedContext as RuntimeContextRequest).reason, /evidence-empty/);
+  assert.match(auditContent, /evidence-empty/);
+  assert.equal(recorder.runtimeCalls, 0);
+});
 
 test('local_bridge runtime pre-read satisfies required document policy without an Agent read_file receipt', async () => {
   const service = makeService() as any;

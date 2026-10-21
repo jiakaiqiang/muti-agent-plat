@@ -1,5 +1,7 @@
-import type { AgentRunPhase, LogicalOperation, SessionStopRequest, SessionStopTargetState } from '@agent-cluster/shared';
+import type { AgentRunPhase, LogicalOperation, SessionDetail, SessionStopRequest, SessionStopTargetState } from '@agent-cluster/shared';
 import { phaseTimeoutMs } from '../../common/runtime-config.js';
+import { isDeepStrictEqual } from 'node:util';
+import { assertIntentExecutionCurrent, INTENT_EXECUTION_COLLECTIONS, type IntentExecutionIdentity } from '../message-routing/intent-execution-guard.js';
 import type { PersistenceService, PersistedState } from '../persistence/persistence.service.js';
 import { SESSION_STOP_REQUESTS_COLLECTION, type StopRequestsBySession } from './session-stop-state-store.js';
 import { appendRuntimeStopStateEvent } from './runtime-stop-event.js';
@@ -14,7 +16,7 @@ type Operations = Record<string, LogicalOperation[]>;
 const STOPPED_SESSION_STATUSES = new Set(['PAUSED', 'INTERRUPTED', 'CANCELLED', 'COMPLETED']);
 
 export function operationPolicy(phase: AgentRunPhase) {
-  const control = phase === 'user_message_routing' || phase === 'task_acceptance';
+  const control = phase === 'user_message_routing' || phase === 'user_message_response' || phase === 'task_acceptance';
   const configured = phaseTimeoutMs(phase);
   const raw = process.env[`PHASE_TIMEOUT_${phase.toUpperCase()}_MS`]?.trim();
   const finiteConfigured = configured > 0 && configured <= 2_147_483_647 ? configured : undefined;
@@ -49,10 +51,21 @@ export class LogicalOperationStore {
       (!lifecycle || item.sessionGeneration === lifecycle.generation));
   }
 
-  begin(input: { id: string; sessionId: string; taskId?: string; phase: AgentRunPhase; parentId?: string; previousId?: string; scopeKey?: string }) {
-    return this.mutateStopAware(input.sessionId, (operations, _requests, draft) => {
+  begin(input: { id: string; sessionId: string; taskId?: string; phase: AgentRunPhase; parentId?: string; previousId?: string; scopeKey?: string;
+    intentStepId?: string;
+    deadlineCeilingAt?: string;
+    admissionClass?: LogicalOperation['admissionClass']; dataEpoch?: string; workItemId?: string; executionBinding?: LogicalOperation['executionBinding'] }) {
+    return this.mutateStopAware(input.sessionId, (operations, requests, draft) => {
+      const ceiling = input.deadlineCeilingAt === undefined ? Infinity : Date.parse(input.deadlineCeilingAt);
+      if (Number.isNaN(ceiling)) throw new Error('OPERATION_DEADLINE_INVALID');
       const lifecycle = ((draft[SESSION_LIFECYCLES_COLLECTION] ?? {}) as SessionLifecyclesBySession)[input.sessionId];
-      if (lifecycle && (lifecycle.state !== 'active' || lifecycle.admission !== 'open')) {
+      const restricted = input.admissionClass === 'routing' || input.admissionClass === 'response';
+      assertIntentExecutionCurrent(draft, input);
+      if (restricted) assertRestrictedRoutingAdmission(draft, input, requests, operations);
+      if (restricted && lifecycle && operations.some(item => item.id === input.id && item.sessionGeneration !== lifecycle.generation)) {
+        throw new Error('SESSION_ADMISSION_CLOSED');
+      }
+      if (lifecycle && (lifecycle.state !== 'active' || (!restricted && lifecycle.admission !== 'open'))) {
         throw new Error('SESSION_ADMISSION_CLOSED');
       }
       const id = lifecycle && operations.some(item =>
@@ -60,7 +73,20 @@ export class LogicalOperationStore {
         ? generationOperationId(input.id, lifecycle.generation)
         : input.id;
       const existing = operations.find(item => item.id === id);
-      if (existing) return structuredClone(existing);
+      if (existing) {
+        if (existing.intentStepId !== input.intentStepId || (existing.workItemId && input.workItemId && existing.workItemId !== input.workItemId) ||
+          !isDeepStrictEqual(existing.executionBinding, input.executionBinding)) throw new Error('OPERATION_INTENT_BINDING_MISMATCH');
+        existing.workItemId ??= input.workItemId;
+        if ((existing.admissionClass ?? 'business') !== (input.admissionClass ?? 'business') ||
+          (restricted && (existing.dataEpoch !== input.dataEpoch || existing.phase !== input.phase))) throw new Error('OPERATION_ADMISSION_MISMATCH');
+        if (input.deadlineCeilingAt !== undefined) {
+          const limit = Math.min(ceiling, existing.deadlineCeilingAt ? Date.parse(existing.deadlineCeilingAt) : Infinity);
+          existing.deadlineCeilingAt = new Date(limit).toISOString();
+          existing.deadlineAt = new Date(Math.min(Date.parse(existing.deadlineAt), limit)).toISOString();
+          existing.remainingActiveMs = Math.min(existing.remainingActiveMs, Math.max(0, limit - this.now()));
+        }
+        return structuredClone(existing);
+      }
       const policy = operationPolicy(input.phase);
       const now = this.now();
       const parentId = input.parentId && lifecycle && operations.some(item =>
@@ -69,7 +95,7 @@ export class LogicalOperationStore {
         : input.parentId;
       const parent = parentId ? operations.find(item => item.id === parentId) : undefined;
       if (input.parentId && !parent) throw new Error('OPERATION_PARENT_MISSING');
-      const deadline = Math.min(now + policy.timeoutMs, parent ? Date.parse(parent.deadlineAt) : Infinity);
+      const deadline = Math.min(now + policy.timeoutMs, parent ? Date.parse(parent.deadlineAt) : Infinity, ceiling);
       const operation: LogicalOperation = { ...input, id, ...(parentId ? { parentId } : {}),
         ...(lifecycle ? { sessionGeneration: lifecycle.generation } : {}),
         policyVersion: policy.policyVersion, status: 'ready',
@@ -82,23 +108,30 @@ export class LogicalOperationStore {
   }
 
   reserve(sessionId: string, operationId: string, invocationId: string,
-    binding?: { transport?: LogicalOperation['transport']; outputContractKey?: string; executionKind?: LogicalOperation['executionKind'] }) {
+    binding?: { transport?: LogicalOperation['transport']; outputContractKey?: string; executionKind?: LogicalOperation['executionKind'];
+      admissionClass?: LogicalOperation['admissionClass'] }) {
     return this.mutateStopAware(sessionId, (operations, requests, draft) => {
+      const operation = this.require(operations, operationId);
+      const restricted = operation.admissionClass === 'routing' || operation.admissionClass === 'response';
+      if ((binding?.admissionClass ?? 'business') !== (operation.admissionClass ?? 'business')) throw new Error('OPERATION_ADMISSION_MISMATCH');
+      if (restricted) assertRestrictedRoutingAdmission(draft, operation, requests, operations);
       const session = Array.isArray(draft.sessions)
         ? (draft.sessions as Array<{ id?: string; status?: string }>).find(item => item.id === sessionId)
         : undefined;
       const lifecycle = ((draft[SESSION_LIFECYCLES_COLLECTION] ?? {}) as SessionLifecyclesBySession)[sessionId];
-      if (lifecycle && (lifecycle.state !== 'active' || lifecycle.admission !== 'open' ||
+      if (lifecycle && (lifecycle.state !== 'active' || (!restricted && lifecycle.admission !== 'open') ||
         operationGenerationMismatch(operations, operationId, lifecycle.generation))) {
         throw new Error('SESSION_ADMISSION_CLOSED');
       }
-      if (session?.status && STOPPED_SESSION_STATUSES.has(session.status)) {
+      // Preserve the lifecycle admission contract before checking narrower intent revisions.
+      // Both checks run in this reservation transaction, before consuming an attempt.
+      assertIntentExecutionCurrent(draft, operation);
+      if (!restricted && session?.status && STOPPED_SESSION_STATUSES.has(session.status)) {
         throw new Error('OPERATION_STOP_UNCONFIRMED');
       }
       if (requests.at(-1)?.status !== undefined && requests.at(-1)?.status !== 'confirmed') {
         throw new Error('OPERATION_STOP_UNCONFIRMED');
       }
-      const operation = this.require(operations, operationId);
       if (operations.some(item => item.stopState === 'unconfirmed' ||
         (item.status === 'running' && item.executionKind !== 'internal' && item.ownerId !== this.ownerId))) throw new Error('OPERATION_STOP_UNCONFIRMED');
       if (operation.status === 'paused' || operation.status === 'interrupted') throw new Error('OPERATION_REQUIRES_RESUME');
@@ -128,6 +161,9 @@ export class LogicalOperationStore {
     return this.mutateStopAware(sessionId, (operations, requests, draft) => {
       const operation = this.require(operations, operationId);
       if (operation.activeInvocationId !== invocationId) return;
+      const isolated = operation.isolatedTestAttempts?.find(row => row.invocationId === invocationId);
+      // A late adapter callback cannot release a recovery-owned process tombstone.
+      if (isolated && (isolated.phase !== 'finished' || !isolated.stopConfirmed)) stopState = 'unconfirmed';
       if (operation.stopState !== 'unconfirmed') operation.remainingActiveMs = Math.max(0, Date.parse(operation.deadlineAt) - this.now());
       operation.stopState = stopState;
       operation.pauseRequested ||= pause;
@@ -153,8 +189,10 @@ export class LogicalOperationStore {
       if (operation.stopState !== 'confirmed' || operation.activeInvocationId) throw new Error('OPERATION_STOP_UNCONFIRMED');
       if (operation.remainingActiveMs <= 0 || operation.attemptsUsed >= operation.maxAttempts) throw new Error('OPERATION_BUDGET_EXHAUSTED');
       const parent = operation.parentId ? this.require(operations, operation.parentId) : undefined;
+      if (operation.deadlineCeilingAt && Date.parse(operation.deadlineCeilingAt) <= this.now()) throw new Error('OPERATION_BUDGET_EXHAUSTED');
       operation.deadlineAt = new Date(Math.min(this.now() + operation.remainingActiveMs,
-        parent ? Date.parse(parent.deadlineAt) : Infinity)).toISOString();
+        parent ? Date.parse(parent.deadlineAt) : Infinity,
+        operation.deadlineCeilingAt ? Date.parse(operation.deadlineCeilingAt) : Infinity)).toISOString();
       operation.status = 'ready';
       operation.pauseRequested = false;
       return structuredClone(operation);
@@ -166,12 +204,33 @@ export class LogicalOperationStore {
       (item.status === 'running' && item.executionKind !== 'internal' && item.ownerId !== this.ownerId));
   }
 
+  /** Re-read durable dispatch facts after all async preparation, immediately before launch. */
+  assertCurrentIntent(input: IntentExecutionIdentity) {
+    return this.persistence.mutateCollections(['sessions', SESSION_LIFECYCLES_COLLECTION, ...INTENT_EXECUTION_COLLECTIONS],
+      draft => assertIntentExecutionCurrent(draft, input), { sessionIds: [input.sessionId] });
+  }
+
+  requestIntentStop(sessionId: string, invocationIds: string[]) {
+    return this.mutateStopAware(sessionId, operations => {
+      for (const operation of operations) {
+        if (operation.activeInvocationId && invocationIds.includes(operation.activeInvocationId)) {
+          operation.pauseRequested = true;
+          if (operation.stopState !== 'unconfirmed') operation.stopState = 'requested';
+          operation.updatedAt = new Date(this.now()).toISOString();
+        }
+      }
+    });
+  }
+
   reserveCorrection(sessionId: string, operationId: string) {
-    return this.mutateStopAware(sessionId, (operations, _requests, draft) => {
+    return this.mutateStopAware(sessionId, (operations, requests, draft) => {
       const operation = this.require(operations, operationId);
+      const restricted = operation.admissionClass === 'routing' || operation.admissionClass === 'response';
+      if (restricted) assertRestrictedRoutingAdmission(draft, operation, requests, operations);
       const lifecycle = ((draft[SESSION_LIFECYCLES_COLLECTION] ?? {}) as SessionLifecyclesBySession)[sessionId];
-      if (lifecycle && (lifecycle.state !== 'active' || lifecycle.admission !== 'open' ||
+      if (lifecycle && (lifecycle.state !== 'active' || (!restricted && lifecycle.admission !== 'open') ||
         operation.sessionGeneration !== lifecycle.generation)) throw new Error('SESSION_ADMISSION_CLOSED');
+      assertIntentExecutionCurrent(draft, operation);
       const activeCall = operation.status === 'running' && operation.activeInvocationId;
       if ((operation.correctionsUsed ?? 0) >= 1 || (!activeCall && Date.parse(operation.deadlineAt) <= this.now())) return false;
       operation.correctionsUsed = 1;
@@ -264,7 +323,7 @@ export class LogicalOperationStore {
       let committed: Operations | undefined;
       const result = await this.persistence.mutateCollections(
         ['sessions', SESSION_LIFECYCLES_COLLECTION, collection, SESSION_STOP_REQUESTS_COLLECTION,
-          'eventsBySession', 'eventOutbox'],
+          'eventsBySession', 'eventOutbox', ...INTENT_EXECUTION_COLLECTIONS],
         (draft: PersistedState) => {
           const all = (draft[collection] ??= {}) as Operations;
           const stopRequests = (draft[SESSION_STOP_REQUESTS_COLLECTION] ??= {}) as StopRequestsBySession;
@@ -287,7 +346,21 @@ function generationOperationId(baseId: string, generation: number) {
   return `${baseId}:generation:${generation}`;
 }
 
-function updateStopTarget(
+function assertRestrictedRoutingAdmission(draft: PersistedState,
+  input: { sessionId: string; phase: AgentRunPhase; taskId?: string; dataEpoch?: string; admissionClass?: LogicalOperation['admissionClass'] },
+  requests: SessionStopRequest[], operations: LogicalOperation[]) {
+  const requiredPhase = input.admissionClass === 'response' ? 'user_message_response' : 'user_message_routing';
+  if (input.phase !== requiredPhase || input.taskId || !input.dataEpoch) throw new Error('ROUTING_ADMISSION_INVALID');
+  const session = (draft.sessions as SessionDetail[] | undefined)?.find(item => item.id === input.sessionId);
+  const lifecycle = ((draft[SESSION_LIFECYCLES_COLLECTION] ?? {}) as SessionLifecyclesBySession)[input.sessionId];
+  if (!session || session.archivedAt || session.dataEpoch !== input.dataEpoch || session.status === 'CANCELLED' ||
+    (lifecycle && (lifecycle.state !== 'active' || lifecycle.dataEpoch !== input.dataEpoch))) throw new Error('SESSION_ADMISSION_CLOSED');
+  if ((requests.at(-1) && requests.at(-1)!.status !== 'confirmed') ||
+    operations.some(item => item.stopState === 'unconfirmed' || item.stopState === 'requested') ||
+    (lifecycle && !['idle', 'confirmed'].includes(lifecycle.stopStatus))) throw new Error('OPERATION_STOP_UNCONFIRMED');
+}
+
+export function updateStopTarget(
   request: SessionStopRequest | undefined,
   invocationId: string,
   state: SessionStopTargetState,
