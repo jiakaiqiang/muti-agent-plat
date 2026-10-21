@@ -1,0 +1,30 @@
+{
+  "port": 42161,
+  "isolatedDataDirectory": "C:\\Users\\kaiqj\\AppData\\Local\\Temp\\intent-r6-smoke",
+  "before": {
+    "status": "ok",
+    "processId": 114116,
+    "buildId": "bb3d278-dirty:unknown",
+    "runtimeBuildStale": false
+  },
+  "after": {
+    "status": "ok",
+    "processId": 108940,
+    "buildId": "bb3d278-dirty:unknown",
+    "runtimeBuildStale": false
+  },
+  "invalidDecision": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "INPUT_BUDGET_DECISION_INVALID",
+        "message": "操作未完成，请查看运行日志中的原因（INPUT_BUDGET_DECISION_INVALID）。"
+      },
+      "requestId": "503956d3-630a-4453-8367-b9dbd65309c2"
+    }
+  },
+  "createdSessions": 0,
+  "modelInferenceCalls": 0,
+  "startupConnectionProbe": "Existing generic_llm availability probe returned HTTP 401; no inference evaluation was run.",
+  "cleanedUp": true
+}

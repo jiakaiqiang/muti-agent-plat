@@ -1,0 +1,12 @@
+- main [ref=e3]:
+  - heading "工作区读取授权验证" [level=1] [ref=e4]
+  - paragraph [ref=e5]: 共享产品组件 · 隔离真实 API · 临时工作区
+  - region "工作区读取授权" [ref=e6]:
+    - generic [ref=e7]:
+      - strong [ref=e8]: 工作区读取
+      - status [ref=e9]: 已允许读取
+      - generic [ref=e10]: authority-ui-2qPZTC
+      - generic [ref=e11]:
+        - button "刷新状态" [ref=e12] [cursor=pointer]
+        - button "撤销读取授权" [ref=e13] [cursor=pointer]
+    - paragraph [ref=e14]: 读取授权用于查看和搜索工作区文件。撤销后将阻止后续读取及尚未发布的回答。

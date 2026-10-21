@@ -1,0 +1,16 @@
+{
+  "label": "r5-formal-20261020-r1-current-2-4",
+  "startedAt": "2026-10-20T11:59:39.739Z",
+  "hashes": {
+    "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+    "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+    "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+  },
+  "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+  "buildHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+  "fixtureVersion": "production-status-v2",
+  "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+  "model": "local config: gpt-6-astra/high",
+  "transportTimeoutMs": 160000,
+  "operationTimeoutMs": 330000
+}

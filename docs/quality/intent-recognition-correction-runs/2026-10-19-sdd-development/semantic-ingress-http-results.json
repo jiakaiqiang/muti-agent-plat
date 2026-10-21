@@ -1,0 +1,89 @@
+{
+  "executedAt": "2026-10-19T13:28:36.814Z",
+  "method": "actual Sessions create/messages API, process restart, isolated File, Generic LLM HTTP with deterministic localhost fixture; explicit new-contract cohort",
+  "results": [
+    {
+      "id": "IN01",
+      "passed": true,
+      "actual": {
+        "routingId": "593ca147-cc70-462c-be59-c19493b6f18e",
+        "workItems": 0,
+        "briefs": 0,
+        "requests": [
+          {
+            "semantic": true,
+            "answering": false,
+            "sourceEventId": "947999d5-f45f-4472-b961-7c148ddeda30",
+            "tools": [],
+            "mode": "answer"
+          }
+        ]
+      }
+    },
+    {
+      "id": "IN02",
+      "passed": true,
+      "actual": {
+        "step": "completed",
+        "requests": [
+          {
+            "semantic": true,
+            "answering": false,
+            "sourceEventId": "947999d5-f45f-4472-b961-7c148ddeda30",
+            "tools": [],
+            "mode": "answer"
+          },
+          {
+            "semantic": false,
+            "answering": true,
+            "sourceEventId": "947999d5-f45f-4472-b961-7c148ddeda30",
+            "tools": [],
+            "mode": "answer"
+          }
+        ]
+      }
+    },
+    {
+      "id": "IN03",
+      "passed": true,
+      "actual": {
+        "routingId": "995cdf32-1009-4d46-9a27-b2af0ac4de60",
+        "routeCount": 2,
+        "requests": 4
+      }
+    },
+    {
+      "id": "IN04",
+      "passed": true,
+      "actual": {
+        "replay": true,
+        "sameRouting": true,
+        "requests": 4
+      }
+    },
+    {
+      "id": "IN05",
+      "passed": true,
+      "actual": {
+        "status": 409
+      }
+    },
+    {
+      "id": "IN06",
+      "passed": true,
+      "actual": {
+        "activeWorkItemId": "25b9a117-6e92-4bc7-980b-ee3aed3f2a5e",
+        "works": 1,
+        "briefs": false
+      }
+    },
+    {
+      "id": "IN07",
+      "passed": true,
+      "actual": {
+        "requestDelta": 1,
+        "route": "BLOCKED"
+      }
+    }
+  ]
+}

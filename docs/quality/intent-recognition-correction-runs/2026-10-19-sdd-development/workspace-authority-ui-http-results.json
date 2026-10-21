@@ -1,0 +1,120 @@
+{
+  "executedAt": "2026-10-19T14:27:36.483Z",
+  "method": "actual Sessions API + Generic LLM text tool protocol + real temporary files; deterministic provider; no model accuracy claim",
+  "results": [
+    {
+      "id": "WR01",
+      "passed": true,
+      "actual": {
+        "status": "completed",
+        "providerRequests": 3,
+        "scope": {
+          "effects": [
+            {
+              "kind": "answer",
+              "target": {
+                "kind": "unresolved",
+                "refId": null
+              },
+              "evidenceRefs": [
+                "request"
+              ]
+            },
+            {
+              "kind": "read_workspace",
+              "target": {
+                "kind": "workspace",
+                "refId": "server-bd1180fe299ebe12827d795fbcdcc5ea"
+              },
+              "evidenceRefs": [
+                "request"
+              ]
+            }
+          ],
+          "prohibitions": [
+            {
+              "effectKind": "modify_source",
+              "object": {
+                "kind": "workspace",
+                "refId": "server-bd1180fe299ebe12827d795fbcdcc5ea"
+              },
+              "scope": "message",
+              "evidenceRefs": [
+                "request"
+              ]
+            }
+          ],
+          "grantIds": [
+            "workspace-read:888d6dd0-3690-486d-b748-a80c9f7422ba:7c3a2836bee45dfaa0a0b79e45c0b9850837fd84160346ddaf5d818e785c417b"
+          ],
+          "scopeHash": "0b9e5fe0e23246e34f6deddf5a9527c237f6c2a1fb1480ae724f3f8a75232cd5"
+        }
+      }
+    },
+    {
+      "id": "WR02",
+      "passed": true,
+      "actual": {
+        "workItems": 0,
+        "invocationStatus": "completed"
+      }
+    },
+    {
+      "id": "WR03",
+      "passed": true,
+      "actual": {
+        "traversalRejected": true,
+        "sensitiveRejected": true,
+        "junctionEscapeRejected": true
+      }
+    },
+    {
+      "id": "WR04",
+      "passed": true,
+      "actual": {
+        "failureCode": "CAPABILITY_BLOCKED",
+        "requestDelta": 2
+      }
+    },
+    {
+      "id": "WA01",
+      "passed": true,
+      "actual": {
+        "invalidatedBefore": "tool-read",
+        "attemptsUsed": 1,
+        "providerRequestDelta": 2
+      }
+    },
+    {
+      "id": "WA02",
+      "passed": true,
+      "actual": {
+        "invalidatedBefore": "answer-publication",
+        "attemptsUsed": 1,
+        "providerRequestDelta": 3
+      }
+    },
+    {
+      "id": "WA03",
+      "passed": true,
+      "actual": {
+        "freshGrantRevision": 5,
+        "priorPlansStayInvalidated": true
+      }
+    },
+    {
+      "id": "WR05",
+      "passed": true,
+      "actual": {
+        "before": [
+          "13022f3e17dd517d622c3b590d26c8ba524c8361c72b982e897c22d1586e7898",
+          "0303d067d84acab9d4d4cfe7993f4c2015618bf0b40c45545be82b2da7308088"
+        ],
+        "after": [
+          "13022f3e17dd517d622c3b590d26c8ba524c8361c72b982e897c22d1586e7898",
+          "0303d067d84acab9d4d4cfe7993f4c2015618bf0b40c45545be82b2da7308088"
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,108 @@
+{
+  "runId": "SDD-2026-10-19-plan-commit",
+  "capturedAt": "2026-10-19T12:55:24.724Z",
+  "node": "v20.19.6",
+  "head": "bb3d278db3e734b643abef015bdd2190ef578638",
+  "baselineManifest": "baseline-manifest.json",
+  "previousMilestone": "semantic-proposal-manifest.json",
+  "sourceHashes": {
+    "packages/shared/src/contracts.ts": "a7a1fa4566842aace2825b9762b52f44f560c4902072d553da38e4798c1cfbe4",
+    "apps/server/src/modules/message-routing/intent-plan-commit.service.ts": "94676f70fb8168224427cc841415fd5207581922e6f77288bc1cc4903c0bae52",
+    "apps/server/src/modules/message-routing/intent-plan-commit.service.spec.ts": "e117995c2fd66867ebc2e769216687242b3c45adae5f11e4f9f1fb45f7b0d1f8",
+    "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "1b686fa62e3c9f3853a71a2259feebc42dd6e6a87f523f868efaa927e9630efa",
+    "apps/server/src/modules/message-routing/route-plan-compiler.service.spec.ts": "1196a1cadd5974557644ee0abfbebf88e604dcc36d366a02b0b9128d94adbdc0",
+    "apps/server/src/modules/message-routing/intent-execution-guard.ts": "70237fb1cd9973754026d1d496eb0cbe133ccb169c14dd1724a0ff4c47f397f3",
+    "apps/server/src/modules/message-routing/message-routing.module.ts": "b5ca0f1e790162d45672cc289f27d1c80b9c83acbd2ed493198eee490f200018",
+    "apps/server/src/modules/context-management/context-management.service.ts": "c067069da1b7720304cf773f86856a83e126a91207313e5bdff6395467403364",
+    "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "f12f451cbafce0de912f28979cbd0efdae40d18934c60fffbac27d3ee67c0d18",
+    "apps/web/src/stores/event.ts": "aa2b9256716067a908e7c5b57655cc8ed1d82d96fc29088714c182abd8087fbe",
+    "apps/web/src/stores/event-normalization.spec.ts": "9601b368938879653e33fd1eadab9521efdd4e044b4a524022c85520fb118869",
+    "tests/evaluation/run-intent-semantic-proposal-sdd.mjs": "1ed2a598caf32c193162a159422fac0f40702885078d52645fb5f7d9d673644d",
+    "tests/evaluation/capture-intent-plan-commit-manifest.mjs": "45203bc2f96311ec5256b02f1b3d302e48ec0e647374752ef8bbf73f256fff2d"
+  },
+  "documentHashes": {
+    "docs/product/intent-recognition-correction-spec-v1.md": "60ef5c9f7128c21572c1485fe11d8fee3ab7d15676f0af0a5bd2e423bb23706d",
+    "docs/design/intent-recognition-correction-plan-v1.md": "fdd075e1b2333c2e770915c427c297fb3cd7817c2d97f9011eddf63c28c0afcd",
+    "docs/implementation/intent-recognition-correction-task-v1.md": "1099fcdd9bd0a0bdd297592a949966d738a28273a56042126dc2169908c50699",
+    "docs/quality/intent-recognition-correction-checklist-v1.md": "5b7bc1cd7a4b548334fe0db41cc523289665368bdf4e280d2c05f2f4bd60f052",
+    "docs/quality/intent-recognition-correction-runs/2026-10-19-sdd-development/plan-commit-report.md": "e0fdbe24a219e022114084a605a4c4237da66bb256e7752e44019854f656ccc8"
+  },
+  "evidenceHashes": {
+    "plan-commit-runtime-results.json": "76b77c350b5e6d815b5d77072f0e3d383a0d84ae7c8487708087309ed9afa0cb"
+  },
+  "checks": [
+    {
+      "command": "npm run test -w @agent-cluster/server",
+      "log": "plan-commit-server-tests.log",
+      "exitCode": 0,
+      "logSha256": "88cc75e5e10a1e650eef09fbd7ba537a3fceb3cc7c53c3b4863531a1c6a7fffa"
+    },
+    {
+      "command": "npx tsx --test --tsconfig apps/server/tsconfig.json apps/server/src/modules/message-routing/intent-plan-commit.service.spec.ts apps/server/src/modules/message-routing/route-plan-compiler.service.spec.ts apps/server/src/modules/message-routing/intent-correction-planner.service.spec.ts apps/server/src/modules/runtimes/logical-operation-store.spec.ts",
+      "log": "plan-commit-epoch-regression.log",
+      "exitCode": 0,
+      "logSha256": "7a2979896a146aa85bf3f0963120ef5940d0c221af4e11d50f48215b5d81442a"
+    },
+    {
+      "command": "npm run test -w @project/web -- src/stores/event-normalization.spec.ts",
+      "log": "plan-commit-web-tests.log",
+      "exitCode": 0,
+      "logSha256": "c21a66522f0f47eee041b1ba643aa2bc2a74c370419ad4725f25d97f3f8aa1f0"
+    },
+    {
+      "command": "npm run typecheck",
+      "log": "plan-commit-workspace-typecheck-final.log",
+      "exitCode": 0,
+      "logSha256": "9018b27583539853ac8c03817518ed16ca562e330c3300be73c796e126a0cafd"
+    },
+    {
+      "command": "npm run build -w @agent-cluster/server",
+      "log": "plan-commit-epoch-build.log",
+      "exitCode": 0,
+      "logSha256": "a46e428c4d8f1ab9ac5e91206859bd48555deced87128f7fa383e2f9fddb92b3"
+    },
+    {
+      "command": "npm run test:harness",
+      "log": "plan-commit-harness.log",
+      "exitCode": 0,
+      "logSha256": "635b13e9ff39ef37867bfdb9e5a53a8f8ce75da100ac861bac6725ba35a600c5"
+    },
+    {
+      "command": "node tests/evaluation/run-intent-semantic-proposal-sdd.mjs --commit-plan",
+      "log": "plan-commit-runtime-final.log",
+      "exitCode": 0,
+      "logSha256": "5437ac7ebb2506a1a1b4653107916d8f3373ec1e5a688cac9be68bac240a5157"
+    },
+    {
+      "command": "git diff --check",
+      "log": "plan-commit-diff-check.log",
+      "exitCode": 0,
+      "logSha256": "368d343a35aa7eedea352cf5734b684e912b1c40c7416a3ee4734d65e3d82c4a"
+    }
+  ],
+  "tests": {
+    "serverPassed": 2013,
+    "serverDevScriptsPassed": 7,
+    "postgresSkipped": 21,
+    "finalRelatedPassed": 51,
+    "webEventsPassed": 13,
+    "runtimeCasesPassed": 7,
+    "countsOverlap": true
+  },
+  "scope": {
+    "ingress": "direct Nest classifier and plan commit service; not Sessions first-turn API",
+    "backend": "isolated File",
+    "runtime": "actual Generic LLM HTTP with deterministic localhost responses",
+    "mainIngressMigrated": false,
+    "answerExecutionImplemented": false,
+    "modelAccuracyEvaluated": false,
+    "fullWorkspaceTestsRerun": false,
+    "realPostgresVerified": false
+  },
+  "limitations": [
+    "full server test run preceded the final non-applicable execution guard test and constraint epoch increment; final 51-test regression and server build cover these changes",
+    "answer is queued only; source/test/artifact executors and execution-producing corrections remain unavailable",
+    "Sessions migration, real clients/DB/CLI, complete projection transactions, independent annotations and release gates remain",
+    "unrelated dirty files preserved; previous logs/manifests are historical evidence"
+  ]
+}

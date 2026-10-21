@@ -1,0 +1,164 @@
+{
+  "executedAt": "2026-10-19T08:20:17.774Z",
+  "runtimeType": "codex",
+  "model": "local Codex config (gpt-6-astra, xhigh)",
+  "method": "real configured provider; default Agent profiles; isolated synthetic sessions; actual recognition methods; route application not executed",
+  "overrides": {
+    "transportRetries": 0,
+    "schemaRepairAttempts": 0,
+    "maxOutputTokens": "Codex default",
+    "isolatedWorkspace": "C:\\Users\\kaiqj\\AppData\\Local\\Temp\\intent-eval-Df1qFy",
+    "workspaceMode": "bootstrap",
+    "workdirBrief": false
+  },
+  "providerRequests": 0,
+  "providerRequestObservation": "CLI runs in child worker; HTTP count not observable; use recorded invocations; zero usage is adapter placeholder, not free execution",
+  "rawCalls": [
+    {
+      "case": "L20:v2",
+      "invocationId": "f4f6cf8d-8bd6-4328-96b2-9409ba0aa322",
+      "runtimeType": "codex",
+      "phase": "user_message_routing",
+      "writeMode": "none",
+      "codexSandbox": "read-only",
+      "toolNames": [],
+      "transport": "actual server runtime worker; parent fetch does not observe CLI HTTP requests"
+    }
+  ],
+  "results": [
+    {
+      "id": "L20",
+      "path": "v2",
+      "feature": "纠正后的约束",
+      "message": "更正：当前登录任务的超时时间改为 30 分钟，之前的 10 分钟要求作废。",
+      "sessionStatus": "WAIT_USER_CONFIRM",
+      "fixture": {
+        "seedPriorTimeout": true
+      },
+      "expected": {
+        "goal": "实现一个登录接口，使用 PostgreSQL，保持现有数据库表结构。",
+        "status": "WAIT_USER_CONFIRM",
+        "id": "L20",
+        "feature": "纠正后的约束",
+        "message": "更正：当前登录任务的超时时间改为 30 分钟，之前的 10 分钟要求作废。",
+        "relation": "same_requirement",
+        "action": [
+          "continue_active_work_item",
+          "replan"
+        ],
+        "dialogue": [
+          "correction",
+          "constraint"
+        ]
+      },
+      "passed": true,
+      "checks": [
+        {
+          "field": "scopeRelation",
+          "pass": true
+        },
+        {
+          "field": "requestedAction",
+          "pass": true
+        },
+        {
+          "field": "autoApplicable",
+          "pass": true
+        },
+        {
+          "field": "selectedWorkItemId",
+          "pass": true
+        },
+        {
+          "field": "dialogueAct",
+          "pass": true
+        }
+      ],
+      "actual": {
+        "decision": {
+          "dialogueAct": "correction",
+          "scopeRelation": "same_requirement",
+          "contextPolicy": "inherit_selected",
+          "requestedAction": "continue_active_work_item",
+          "selectedWorkItemId": "c824ebaa-4a1b-4678-a120-c2f9fe35c47d",
+          "selectedDecisionIds": [
+            "14c596cf-cb1b-4ac0-8370-afc0f6fe07f5"
+          ],
+          "selectedArtifactIds": [],
+          "requestedAgentIds": [],
+          "goalSegments": [
+            "将当前登录任务的超时时间更正为 30 分钟，废止原 10 分钟要求，并保留使用 PostgreSQL、保持现有数据库表结构的约束。"
+          ],
+          "missingFields": [],
+          "ambiguityReasons": [],
+          "reasonCodes": [
+            "ACTIVE_WORK_ITEM_REFERENCE",
+            "EXPLICIT_CORRECTION",
+            "SUPERSEDED_CONSTRAINT_EXCLUDED",
+            "UNAFFECTED_CONSTRAINTS_PRESERVED"
+          ],
+          "riskLevel": "low",
+          "modelConfidence": 0.99
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": true,
+          "serverConfidence": 1,
+          "errors": []
+        },
+        "autoApplicable": true
+      },
+      "resolutionErrors": [],
+      "durationMs": 21910,
+      "providerRequests": 0,
+      "invocations": [
+        {
+          "case": "L20:v2",
+          "invocationId": "f4f6cf8d-8bd6-4328-96b2-9409ba0aa322",
+          "runtimeType": "codex",
+          "status": "completed",
+          "usage": {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "totalTokens": 0,
+            "model": "codex"
+          },
+          "output": {
+            "schemaVersion": "1.0",
+            "kind": "intent_routing_decision",
+            "dialogueAct": "correction",
+            "scopeRelation": "same_requirement",
+            "contextPolicy": "inherit_selected",
+            "requestedAction": "continue_active_work_item",
+            "selectedWorkItemId": "c824ebaa-4a1b-4678-a120-c2f9fe35c47d",
+            "selectedDecisionIds": [
+              "14c596cf-cb1b-4ac0-8370-afc0f6fe07f5"
+            ],
+            "selectedArtifactIds": [],
+            "requestedAgentIds": [],
+            "goalSegments": [
+              "将当前登录任务的超时时间更正为 30 分钟，废止原 10 分钟要求，并保留使用 PostgreSQL、保持现有数据库表结构的约束。"
+            ],
+            "missingFields": [],
+            "ambiguityReasons": [],
+            "reasonCodes": [
+              "ACTIVE_WORK_ITEM_REFERENCE",
+              "EXPLICIT_CORRECTION",
+              "SUPERSEDED_CONSTRAINT_EXCLUDED",
+              "UNAFFECTED_CONSTRAINTS_PRESERVED"
+            ],
+            "riskLevel": "low",
+            "modelConfidence": 0.99
+          },
+          "envelopeHash": "62320d425b96399d7354318a2cb7da434e6835af8f85ecb9577625394faf284e",
+          "currentUserMessage": "更正：当前登录任务的超时时间改为 30 分钟，之前的 10 分钟要求作废。",
+          "writeMode": "none",
+          "toolCount": 0
+        }
+      ]
+    }
+  ]
+}

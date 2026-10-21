@@ -1,0 +1,16 @@
+{
+  "executedAt": "2026-10-19T20:57:07.615Z",
+  "imageId": "sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50",
+  "imageDigests": [
+    "postgres@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50"
+  ],
+  "scope": "isolated local PostgreSQL container, independent database connections, service fixtures; no production connection or real-model accuracy claim",
+  "tests": [
+    "intent-correction.integration.spec.ts",
+    "intent-semantic-transactions.integration.spec.ts",
+    "postgres-migration-runner.integration.spec.ts"
+  ],
+  "exitCode": 1,
+  "cleanupConfirmed": true,
+  "serverVersion": "16.13"
+}

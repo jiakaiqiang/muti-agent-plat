@@ -1,0 +1,19 @@
+{
+  "scope": "Playwright CLI, shared component fixture, real isolated Nest API/File, two browser tabs; not complete Web/Desktop/Electron application",
+  "checks": {
+    "initialGrantDisplayed": true,
+    "revokePersisted": true,
+    "staleOtherTab409AndRefresh": true,
+    "explicitRegrantPersisted": true,
+    "keyboardTabEnterRevokePersisted": true,
+    "viewportWidth": 390,
+    "scrollWidth": 390,
+    "visibleFocusOutline": "solid",
+    "finalGrantRevision": 4,
+    "authorityEvents": 3
+  },
+  "consoleNotes": [
+    "fixture favicon 404",
+    "expected stale request HTTP 409"
+  ]
+}

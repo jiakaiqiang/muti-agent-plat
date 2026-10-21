@@ -1,0 +1,84 @@
+{
+  "executedAt": "2026-10-19T18:42:48.555Z",
+  "method": "real Nest HTTP, actual Generic LLM adapter with deterministic local provider, File persistence and process restart; no model accuracy claim",
+  "results": [
+    {
+      "id": "RR01",
+      "passed": true,
+      "actual": {
+        "failure": "auth",
+        "modelCalls": 1,
+        "noAutomaticAuthRetryOrTask": true
+      }
+    },
+    {
+      "id": "RR02",
+      "passed": true,
+      "actual": {
+        "injectedBudgetAndStaleIdentitiesRejected": true
+      }
+    },
+    {
+      "id": "RR03",
+      "passed": true,
+      "actual": {
+        "explicitRetryGetsSeparateBoundedOperation": true,
+        "providerCircuitStillBlocksNetwork": true,
+        "modelCalls": 1,
+        "blockedReason": "INTENT_PROVIDER_CIRCUIT_OPEN",
+        "failureClass": "transient"
+      }
+    },
+    {
+      "id": "RR04",
+      "passed": true,
+      "actual": {
+        "oneAcceptanceAndOneReplay": true
+      }
+    },
+    {
+      "id": "RR05",
+      "passed": true,
+      "actual": {
+        "modelCalls": 2,
+        "operations": [
+          {
+            "id": "2e1b148a-ab5a-4563-b6e3-9fcd047b165c",
+            "attemptsUsed": 1,
+            "maxAttempts": 2,
+            "deadlineAt": "2026-10-19T18:42:43.238Z"
+          },
+          {
+            "id": "2e1b148a-ab5a-4563-b6e3-9fcd047b165c:recognition:2223e3cf-fdb4-46da-adea-012d5666927e",
+            "attemptsUsed": 1,
+            "maxAttempts": 2,
+            "deadlineAt": "2026-10-19T18:42:43.362Z"
+          },
+          {
+            "id": "2e1b148a-ab5a-4563-b6e3-9fcd047b165c:recognition:97a1b5c9-05d8-46ef-9afa-cf746c75a4d4",
+            "attemptsUsed": 1,
+            "maxAttempts": 2,
+            "deadlineAt": "2026-10-19T18:44:44.376Z"
+          }
+        ],
+        "oneTaskNoBrief": true
+      }
+    },
+    {
+      "id": "RR06",
+      "passed": true,
+      "actual": {
+        "originalMessageAndBudgetsPreserved": true,
+        "linkedHistory": true
+      }
+    },
+    {
+      "id": "RR07",
+      "passed": true,
+      "actual": {
+        "realRestart": true,
+        "bothReceiptsReplayWithoutAnotherModelOrRestoringOldOperation": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,104 @@
+{
+  "runId": "SDD-2026-10-19-correction-ui",
+  "capturedAt": "2026-10-19T11:37:37.228Z",
+  "node": "v20.19.6",
+  "head": "bb3d278db3e734b643abef015bdd2190ef578638",
+  "baselineManifest": "baseline-manifest.json",
+  "previousMilestone": "correction-activation-manifest.json",
+  "sourceHashes": {
+    "apps/server/src/modules/sessions/sessions.controller.ts": "08e269f99d355314d48904ad3b1950205519ef0a55ce4f1e72d8170186ac392e",
+    "apps/server/src/modules/sessions/sessions.service.ts": "9e1707c84821f81d0e20bc0e201e2ac4dbaf8bf5ecf6170522082c346d7cc953",
+    "apps/server/src/modules/sessions/sessions.service.spec.ts": "d56dc69634a7404b8d4e083e1a384c063a4750061f0164236d05cfc54930ce88",
+    "apps/web/src/utils/intentCorrectionModel.ts": "67f589aa3ce9d1f98199a09d1a0f1a92744739b1eba4cab04a9288ba688c7a1d",
+    "apps/web/src/stores/intentCorrection.ts": "a98cc66277504c0b950088ef8b77b804a18fe6ff280a97afd402da84d32eb4b8",
+    "apps/web/src/stores/intentCorrection.spec.ts": "15b7c1ffb2f71e8b757f8e3598801036f07bae9cc6c3278922817b10269ef2a8",
+    "apps/web/src/components/IntentCorrectionPanel.vue": "f9dcc1a9559873b62c42305ed9bfe4a46550a77d5cdbd743be636d870401788c",
+    "apps/web/src/components/IntentCorrectionPanel.spec.ts": "8372703536a8695f24ab479ff66e3f65b282ceba67f9c309c2b25b021fb2c555",
+    "apps/web/src/components/ChatTimeline.vue": "0a7a3a7807a96642eb502a6579deb0dccb0183e6be0e00e014538d196f332f3d",
+    "apps/desktop/renderer/components/ChatTimeline.vue": "5cc24fe543f60a3bcd10f21d7cd44c9c5f6bedc7baca16c55d598c2a506c4cc1",
+    "apps/web/vitest.config.ts": "b46bf420a81a0b7a0ec63677b4088cdb3413086a6ce7d7045216369f1d2c2da6",
+    "tests/evaluation/run-intent-correction-activation-sdd.mjs": "4b15c45541805fae2697f11a505870ea840c3bb2ef65ee2c1fd12adcf16ec85d",
+    "tests/evaluation/intent-correction-ui/index.html": "a97efa66008e67950be135327603ef4203263e22ca94d480ac95426e1eb9e613",
+    "tests/evaluation/intent-correction-ui/main.ts": "18f733cce51b09b402f5e66e4082beef8093b2e983bef22cb120313e3934a5a9",
+    "tests/evaluation/serve-intent-correction-ui.mjs": "553bf9d170801f3764a322b917810d2a1371ec91dc975b7d2f6e3144b338339c",
+    "tests/evaluation/capture-intent-correction-ui-manifest.mjs": "97a6fd4a69df306822b73cde0393b38b91e4b2f4274203fbd665a05bc93e76b8"
+  },
+  "documentHashes": {
+    "docs/product/intent-recognition-correction-spec-v1.md": "e4eb6c9b43be64cb87593381678014f0b86f2cc5145e4ad64f87233df4f2591a",
+    "docs/design/intent-recognition-correction-plan-v1.md": "f3548d8c47ec1f49b49340a910b99b56c259333eabb9f0fcd0c222421c41bb35",
+    "docs/implementation/intent-recognition-correction-task-v1.md": "a9c48be18ddebb5f9075136f2bfb8fd3eaf920c4a0f7d246a68513b1bb842a85",
+    "docs/quality/intent-recognition-correction-checklist-v1.md": "b8f46ebae17e790c60b2f2f332d521346489fe74538663256ada57a72ae9a814",
+    "docs/contracts/ui-state-contract-v0.1.md": "c09af50086e172b0fa6ce68ce709763b07992140e09b97b6da6573e94d356cc9",
+    "docs/quality/intent-recognition-correction-runs/2026-10-19-sdd-development/correction-ui-report.md": "bea040f19beb95bc838e1608af77379c34fe9792004be09b6471fe490ee86e54"
+  },
+  "evidenceHashes": {
+    "correction-ui-http-results.json": "042b182c4bac055e968d8de730f1ebcc9e94d8abdaeaa06af2abc7c2be8092d5",
+    "correction-ui-browser-accepted.txt": "b9325a33befbad8e06bac4fc98b99492bfc7a62cbb472ecefd0d8a4d402fd25e",
+    "correction-ui-browser-applied.txt": "6b5efaaa5de18a5090384582b993f492a01b2b6f4225a828e37287cab870fc77",
+    "correction-ui-browser.png": "7600fa3cc4a8fd132369071940055fee257b8b7b175c692426117cbebd682c6f"
+  },
+  "checks": [
+    {
+      "command": "npm run test --workspace @project/web",
+      "log": "correction-ui-web-regression-final.log",
+      "exitCode": 0,
+      "logSha256": "c17b3956a78c01e28362debaec3d8fc3d2ee7d3567d588c4b9075bae4be44152"
+    },
+    {
+      "command": "npx tsx --test --tsconfig apps/server/tsconfig.json apps/server/src/modules/sessions/sessions.service.spec.ts",
+      "log": "correction-ui-session-regression.log",
+      "exitCode": 0,
+      "logSha256": "d0e65e03da8bfb54094b1a9bba66ed7fbd43f591173c7cd5860b1e3742c4f5cd"
+    },
+    {
+      "command": "npm run typecheck",
+      "log": "correction-ui-typecheck-final.log",
+      "exitCode": 0,
+      "logSha256": "9018b27583539853ac8c03817518ed16ca562e330c3300be73c796e126a0cafd"
+    },
+    {
+      "command": "npm run build",
+      "log": "correction-ui-build-final.log",
+      "exitCode": 0,
+      "logSha256": "8297e62e4b590c46e492662252a56bce95760283fc4bf580ab7bf57d3fa270d5"
+    },
+    {
+      "command": "npm run test:harness",
+      "log": "correction-ui-harness.log",
+      "exitCode": 0,
+      "logSha256": "c7aa8dd3df1661a3c3011ce4283dbcabd3d2166d6e8b4a7f6f33eea0eeba391e"
+    },
+    {
+      "command": "INTENT_CORRECTION_UI_CHECKS=1 node tests/evaluation/run-intent-correction-activation-sdd.mjs",
+      "log": "correction-ui-http.log",
+      "exitCode": 0,
+      "logSha256": "f2c1074151a65d65d55c0570e34214a0de296f2d8911db91780ee3dd85b59b29"
+    },
+    {
+      "command": "git diff --check",
+      "log": "correction-ui-diff-check.log",
+      "exitCode": 0,
+      "logSha256": "f8cf98cc2b8440daf96cd848d92a15cf2d1cf69ff66bf928a2fc0e60c56f04ec"
+    }
+  ],
+  "tests": {
+    "newClientScenarios": 21,
+    "webIncludingDesktopComponents": 466,
+    "sessionsService": 148,
+    "http": 9,
+    "fullWorkspaceTestRerun": false
+  },
+  "scope": {
+    "backend": "isolated File backend; actual Generic LLM HTTP to deterministic localhost provider; process restart",
+    "browser": "IAB interaction with real shared Vue/Element Plus component and in-memory fetch fixture",
+    "desktop": "renderer component tests and full build; actual Electron runtime not exercised",
+    "modelAccuracyEvaluated": false
+  },
+  "finalDelta": "Final HTTP backend was built before the HTTP run. Later changes only affect client status ordering and duplicate-submit protection; final Web tests, full workspace typecheck/build and browser screenshot cover these changes.",
+  "limitations": [
+    "IR10/IRC-AC15/X02/G3 remain partial; no actual Web+Electron dual-client/SSE fault injection",
+    "ordinary chat correction, no-target clarification and executing correction dispatcher remain incomplete",
+    "no PostgreSQL/real CLI verification, independent double annotation, full 58-case acceptance or release approval",
+    "existing unrelated workspace changes preserved; listed modified files may contain prior milestone changes"
+  ]
+}

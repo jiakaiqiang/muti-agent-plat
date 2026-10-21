@@ -1,5 +1,9 @@
 # Quality Docs
 
+- [意图识别、路由与纠错 Checklist v1](intent-recognition-correction-checklist-v1.md)：SDD 验收执行入口，映射 20 项 AC、58 个原场景及专项证据，记录阶段门与实际运行结果；当前待执行。
+
+- [意图识别、路由与纠错验收矩阵 v1](intent-recognition-correction-acceptance-v1.md)：覆盖权限、澄清冲突、约束作废、版本守卫和故障恢复的待执行验收标准，区别于已有评测结果。
+
 - `runtime-output-contract-hard-cutover-verification-v1.md`：Runtime 输出合约集中管理、Schema 3 硬切换、事件隔离和真实 Codex 验收证据。
 
 - `workflow-v1-implementation-acceptance.md`：工作流管理、低代码编辑器、显式确认节点和运行时 V1 的实现映射与验收证据。

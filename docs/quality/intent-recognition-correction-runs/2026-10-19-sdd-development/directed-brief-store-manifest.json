@@ -1,0 +1,48 @@
+{
+  "runId": "SDD-2026-10-20-directed-brief-store",
+  "capturedAt": "2026-10-20T01:23:28.518086+00:00",
+  "previousMilestone": "directed-brief-plan-manifest.json",
+  "sourceHashes": {
+    "apps/server/src/modules/message-routing/intent-brief-reviews.ts": "307064b8a04341617fae4aee5ac59edf263d75ffaef27d524f1e857914bd3d52",
+    "apps/server/src/modules/message-routing/intent-brief-review-store.service.ts": "fbb7cc67af828a71c8d314b22deafbf0ff600bcf70628b1e815c97a9c1c29d95",
+    "apps/server/src/modules/message-routing/intent-brief-store.service.ts": "d00d7cc8cb8a7f39bf296b2092b08461b956ef5154ad66cc68978d0663a7f6d5",
+    "apps/server/src/modules/message-routing/intent-brief-executor.service.ts": "85168bfb608c5c5b134e940ca9a136c0285de8905db85e962c71892062d748bc",
+    "apps/server/src/modules/message-routing/intent-brief-executor.service.spec.ts": "d5f65793a9a10f31d0ccd5f32748db2e57394188f2fc64a260d932e63d1c81d3",
+    "apps/server/src/modules/message-routing/intent-directed-brief-plan.spec.ts": "5968ad951f33a82531cc34d1b175d7fc9d8ad13784f3149c06a8b9f67d8c695f",
+    "apps/server/src/modules/message-routing/intent-execution-guard.ts": "f1e60fea80759dca3823f198814a077b0bd6f54fb577ce7e97ffb78f0512dc3f",
+    "apps/server/src/modules/persistence/intent-record-invariants.ts": "90105cbbb4c2021764aa126faa5aab9ee49eefe88d411b4e65cb7edbfa95bdf8"
+  },
+  "checks": [
+    {
+      "log": "directed-brief-store-server-tests.log",
+      "exitCode": 0,
+      "sha256": "971159b5b2149df219463c3f3d40710087098392b1525e937631d265aaa46b6c"
+    },
+    {
+      "log": "directed-brief-store-tests-complete.log",
+      "exitCode": 0,
+      "sha256": "1e9559898f58b6957f27fe7cd7e1170d0891b081fb3cc8efe5ea8ab0a03b05bc"
+    },
+    {
+      "log": "directed-brief-store-typecheck-verified.log",
+      "exitCode": 0,
+      "sha256": "8f96b35ac9a2a925648f1580c8472232f82900b07a52478ddcf444f40b815a41"
+    },
+    {
+      "log": "directed-brief-store-diff.log",
+      "exitCode": 0,
+      "sha256": "726fe7840678b636be6d1467baa2ee667c65a2b8ce91a629be66d00c376dc955"
+    }
+  ],
+  "serverPassed": 2218,
+  "serverDevScriptsPassed": 7,
+  "relatedPassed": 52,
+  "countsOverlap": true,
+  "scope": "Real File transaction and stub invocation; reviewer results manually submitted. No HTTP/PostgreSQL/browser/build validation.",
+  "remaining": [
+    "review runtime executor",
+    "structured assignments",
+    "per-target retry",
+    "environment matrix"
+  ]
+}

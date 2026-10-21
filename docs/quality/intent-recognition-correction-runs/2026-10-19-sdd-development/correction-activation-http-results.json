@@ -1,0 +1,84 @@
+{
+  "executedAt": "2026-10-19T11:17:04.288Z",
+  "method": "real localhost API and Generic LLM HTTP transport; deterministic local provider (not semantic accuracy); isolated File backend; actual process restart",
+  "results": [
+    {
+      "id": "CA01",
+      "feature": "并发 HTTP 接收同一纠错且尚未生效",
+      "actual": {
+        "statuses": [
+          202,
+          202
+        ],
+        "errors": [
+          null,
+          null
+        ],
+        "correctionId": "fe308490-2661-4aaa-88dd-5bcd3d2766fd"
+      },
+      "passed": true
+    },
+    {
+      "id": "CA02",
+      "feature": "等待模型期间保留持久化屏障",
+      "actual": {
+        "hold": {
+          "correctionId": "fe308490-2661-4aaa-88dd-5bcd3d2766fd",
+          "reason": "intent_correction",
+          "createdAt": "2026-10-19T11:16:59.890Z"
+        }
+      },
+      "passed": true
+    },
+    {
+      "id": "CA03",
+      "feature": "真实 Generic LLM HTTP 传输激活新版本",
+      "actual": {
+        "status": "applied",
+        "reasons": [],
+        "requests": [
+          {
+            "model": "intent-activation-fixture",
+            "tools": [],
+            "sourceEventId": "intent-correction:fe308490-2661-4aaa-88dd-5bcd3d2766fd:input",
+            "originalInputPresent": true,
+            "contractPresent": true
+          }
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "CA04",
+      "feature": "新版本与需求版本激活，屏障原子释放",
+      "actual": {
+        "current": 2,
+        "effective": 2,
+        "requirement": 2,
+        "epoch": 2
+      },
+      "passed": true
+    },
+    {
+      "id": "CA05",
+      "feature": "旧约束失效、新约束持久化且未隐式推进会话",
+      "actual": {
+        "old": "superseded",
+        "replacement": "超时改为 30 分钟",
+        "sessionStatus": "WAIT_USER_CONFIRM"
+      },
+      "passed": true
+    },
+    {
+      "id": "CA06",
+      "feature": "进程重启后原请求重放不再次分类或追加版本",
+      "actual": {
+        "status": 202,
+        "correctionId": "fe308490-2661-4aaa-88dd-5bcd3d2766fd",
+        "revisions": 2,
+        "modelRequests": 1
+      },
+      "passed": true
+    }
+  ]
+}

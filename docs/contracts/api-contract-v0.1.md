@@ -1179,3 +1179,41 @@ POST 返回已持久化的请求本身，不等待切换完成；切换进度通
 目标 Runtime 未授权、离线、Workspace/Capability/Tool 不匹配时，接口返回结构化错误，当前执行与首选 Runtime 均保持不变；预检失败不得先停止仍健康的当前 Runtime。停止未取得可信证据时请求保持 `stopping`，重复提交幂等，接口不得以 HTTP 成功暗示已完成切换。
 
 灰度开关 `SESSION_RUNTIME_SWITCH_ENABLED` 关闭时，两个接口返回明确的不支持错误，聊天切换命令也不得退化为普通需求排队。
+
+## 意图隔离测试与会话报告授权（2026-10-20）
+
+### 原消息识别失败后的显式重试
+
+`POST /api/sessions/:sessionId/message-routings/:routingId/retry-recognition` 严格接收 `{ contractVersion: "intent-recognition-retry-v1", dataEpoch, expectedRoutingRevision, idempotencyKey }`。返回 **202** 和 `{ routing, receipt, idempotentReplay }`，只代表已受理；客户端仍通过路由查询和事件确认结果。actor 从既有会话所有者上下文派生，不接收新文本、模型输出、权限或预算参数。
+
+仅新合同、非 shadow、无有效执行版本/语义计划/纠错屏障且因 auth/config/transient/schema/budget 阻塞的识别可重试。已保存合法语义但缺权限时使用 retry-authorization；有歧义时走澄清；已执行意图使用 corrections。未知停止、活跃旧 invocation、删除/归档、epoch/generation 变化均不能新建识别操作。
+
+事务保留原 sourceEventId，向 `recognitionRetryReceipts` 归档前次操作 ID、失败原因、attemptLog、分类次数与 deadline、快照和提案；生成新 recognitionOperationId，与路由 revision、事件 `intent_recognition_retry_requested` 和 Outbox 一起保存。旧 LogicalOperation 不重置。只有用户显式提交新键才能开始新预算；自动恢复、格式修复和快照重建仍共享当前操作的有限预算。服务端不隐式恢复暂停，也不绕过 provider circuit；等待期用 `INTENT_PROVIDER_CIRCUIT_OPEN` 表示。
+
+相同键及完全相同请求返回原回执和当前路由，不恢复旧操作；同键异参、跨路由复用键、过期 CAS 返回 409，字段非法为 400。旧 worker、timer、模型结果以及预约/启动前检查绑定 recognitionOperationId，过期操作不能覆盖新结果。阻塞事件的 `metadata.payload.recognitionRetry` 提供 routingId、sourceEventId、dataEpoch、expectedRoutingRevision，客户端显示入口，但该描述不授权执行。
+
+### 原请求的显式授权重校验
+
+`POST /api/sessions/:sessionId/message-routings/:routingId/retry-authorization` 严格接收 `{ contractVersion: "intent-authorization-retry-v1", dataEpoch, expectedRoutingRevision, idempotencyKey }`，成功返回 200，包含 `routing/plan/idempotentReplay`。actor 沿用现有会话所有者上下文，不能通过请求体设置。禁止客户端传 plan、模型结果、权限对象或新的任务目标。
+
+仅当原计划未执行、非 shadow、没有纠错屏障且错误全部为 `EFFECT_NOT_AUTHORIZED/EFFECT_CAPABILITY_UNAVAILABLE` 时可用。重新读取当前会话范围及授权，保留原 sourceEventId、完整语义提案、原始引用和效果；不调用模型、不重置分类预算、不自动恢复暂停。快照和权限在提交事务中再次核验；条件仍不满足返回 409（含 reasonCodes），不增加执行版本、任务或步骤。
+
+首次任务和受限测试/报告可同事务提交，执行在提交后启动。原非执行诊断版本保留为 unknown，新版本须 validated；成功回执保存在 route.authorizationRetryReceipts，并与新版本和 Outbox 一起持久化。相同键及请求重放返回原计划回执；修改请求复用键、过期版本、错 epoch、状态/工作区/目标变化均不绕过校验。已执行请求不能用新键再执行，后续变更仍走版本化 corrections。
+
+缺授权事件携带 `metadata.payload.authorizationRetry={ routingId, dataEpoch, expectedRoutingRevision, sourceEventId }`，用于显示客户端操作入口；该描述本身不构成执行权限。字段非法返回 400，服务不可用返回 503。
+
+### 测试与报告授权
+
+`GET/POST /api/sessions/:sessionId/intent-test-authority` 仅用于新意图合同会话。GET 返回 `sessionId/dataEpoch/sessionRevision/enabled/availableBindings/authority`；`authority` 包含固定 runner 的 `binding/grant`，可选 `reportGrant`。
+
+POST 严格接收 `{ action, script, dataEpoch, expectedBindingHash, expectedGrantRevision, idempotencyKey, writeReport? }`。action 为 grant/revoke；script 仅允许 test/test:unit/test:integration。`writeReport` 只能在 grant 时提供布尔值，缺省或 false 表示仅授权测试并移除旧报告授权；true 同时签发独立 `write_artifact` grant，资源为 `artifact/test-report:<bindingHash>`。revoke 同时撤销测试与报告权限。镜像、命令、权限对象和源码写入参数不能由客户端提交。
+
+授权更新以当前 grant revision 和 binding hash 做 CAS，与事件、Outbox 同事务。相同幂等键和请求重放返回当前授权状态，不恢复历史 grant；不同请求复用键或版本冲突返回 409。400 表示字段非法；成功 POST 为 201。授权本身不执行测试，旧计划不会因重新授权自动复活。
+
+用户另行发送“运行 test:unit 并保存报告”后，只有编译出匹配当前双重授权的单步骤计划才会执行。报告存入会话产物，并可通过既有 `GET /api/sessions/:sessionId/artifacts` 的 `data.items` 或 `GET /api/artifacts/:artifactId` 读取。`metadata.intentTestReport` 包含 format=markdown、content、stepId、invocationId、bindingHash、snapshotHash、script 和 exitCode。报告仅来自隔离测试日志；失败断言保存失败报告，超时/取消/未知停止等异常不发布报告。保存报告不授予源码、任意文件或网络写入能力。
+
+报告、artifact_created 事件、步骤结果与 Outbox 原子保存。结果发布前再次验证当前授权/版本/epoch/generation；保存失败恢复复用已持久化测试日志，不再次运行测试。客户端将报告正文按转义文本显示，测试输出中的 HTML 不执行。
+
+已发布报告的纠错仍使用原版本化 corrections API，不新增绕过授权的重跑接口。接收时将目标路由已有报告的执行纳入 affectedExecutionIds；`effectReconciliation.policyVersion=isolated-test-reconciliation-v2` 区分 `isolated_scratch_discarded` 与 `published_report_retained`，后者包含 artifactId 和 Markdown 正文 SHA-256 的 artifactContentHash。缺少执行/停止/历史授权/报告正文证明时维持 reconciliation_required 和派发屏障。
+
+纠错生效事件可包含 `retainedArtifactIds`。新计划仍须获得当前测试及报告授权，`IntentPlanStepRecord.supersedesArtifactIds` 在激活事务中冻结，发布后的 `metadata.intentTestReport.supersedesArtifactIds` 描述关联的历史报告。旧报告、原完成/失败记录和正文均保留；新测试失败或尚未执行不等于旧效果已撤销。只记录要求的纠错可以保留报告而不启动测试。v1 对账记录兼容读取；新 v2 对账不适用于源码写回、通用产物或外部服务补偿。

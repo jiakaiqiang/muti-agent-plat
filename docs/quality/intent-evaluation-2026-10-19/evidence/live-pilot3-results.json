@@ -1,0 +1,131 @@
+{
+  "executedAt": "2026-10-19T07:51:25.075Z",
+  "model": "deepseek-v4-flash",
+  "method": "real configured provider; default Agent profiles; isolated synthetic sessions; actual recognition methods; route application not executed",
+  "overrides": {
+    "transportRetries": 0,
+    "schemaRepairAttempts": 0,
+    "maxOutputTokens": 1600
+  },
+  "providerRequests": 0,
+  "rawCalls": [],
+  "results": [
+    {
+      "id": "L01",
+      "path": "legacy",
+      "feature": "同一需求补充",
+      "message": "在当前登录接口中增加空密码校验。",
+      "sessionStatus": "WAIT_USER_CONFIRM",
+      "expected": {
+        "goal": "实现一个登录接口，使用 PostgreSQL，保持现有数据库表结构。",
+        "status": "WAIT_USER_CONFIRM",
+        "id": "L01",
+        "feature": "同一需求补充",
+        "message": "在当前登录接口中增加空密码校验。",
+        "relation": "same_requirement",
+        "action": "continue_active_work_item"
+      },
+      "passed": false,
+      "checks": [],
+      "error": {
+        "name": "Error",
+        "message": "generic_llm 在 user_message_handling_plan 阶段失败：操作未完成，请检查配置和运行日志后重试。"
+      },
+      "resolutionErrors": [
+        {
+          "case": "L01:legacy",
+          "code": "NO_ELIGIBLE_RUNTIME",
+          "message": "No eligible runtime for phase=user_message_routing, providerKind=server_local, requiredCapabilities=none, requiredTools=none, allowedRuntimeTypes=generic_llm"
+        }
+      ],
+      "durationMs": 72,
+      "providerRequests": 0,
+      "invocations": []
+    },
+    {
+      "id": "L01",
+      "path": "v2",
+      "feature": "同一需求补充",
+      "message": "在当前登录接口中增加空密码校验。",
+      "sessionStatus": "WAIT_USER_CONFIRM",
+      "expected": {
+        "goal": "实现一个登录接口，使用 PostgreSQL，保持现有数据库表结构。",
+        "status": "WAIT_USER_CONFIRM",
+        "id": "L01",
+        "feature": "同一需求补充",
+        "message": "在当前登录接口中增加空密码校验。",
+        "relation": "same_requirement",
+        "action": "continue_active_work_item"
+      },
+      "passed": false,
+      "checks": [
+        {
+          "field": "scopeRelation",
+          "pass": false
+        },
+        {
+          "field": "requestedAction",
+          "pass": false
+        },
+        {
+          "field": "autoApplicable",
+          "pass": false
+        },
+        {
+          "field": "selectedWorkItemId",
+          "pass": false
+        }
+      ],
+      "actual": {
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "ambiguous",
+          "contextPolicy": "ask_user",
+          "requestedAction": "clarify",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "goalSegments": [],
+          "missingFields": [
+            "intent_runtime_decision"
+          ],
+          "ambiguityReasons": [
+            "INTENT_RUNTIME_UNAVAILABLE"
+          ],
+          "reasonCodes": [
+            "INTENT_RUNTIME_UNAVAILABLE",
+            "USER_CHOICE_REQUIRED"
+          ],
+          "riskLevel": "low"
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": false,
+          "serverConfidence": 0.5,
+          "errors": [
+            "REQUIRED_FIELDS_MISSING",
+            "INTENT_AMBIGUOUS"
+          ]
+        },
+        "autoApplicable": false
+      },
+      "resolutionErrors": [
+        {
+          "case": "L01:v2",
+          "code": "NO_ELIGIBLE_RUNTIME",
+          "message": "No eligible runtime for phase=user_message_routing, providerKind=server_local, requiredCapabilities=none, requiredTools=none, allowedRuntimeTypes=generic_llm"
+        },
+        {
+          "case": "L01:v2",
+          "code": "NO_ELIGIBLE_RUNTIME",
+          "message": "No eligible runtime for phase=user_message_routing, providerKind=server_local, requiredCapabilities=none, requiredTools=none, allowedRuntimeTypes=generic_llm"
+        }
+      ],
+      "durationMs": 86,
+      "providerRequests": 0,
+      "invocations": []
+    }
+  ]
+}

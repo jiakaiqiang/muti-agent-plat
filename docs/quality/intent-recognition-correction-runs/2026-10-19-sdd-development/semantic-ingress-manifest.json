@@ -1,0 +1,118 @@
+{
+  "runId": "SDD-2026-10-19-semantic-ingress",
+  "capturedAt": "2026-10-19T13:30:10.629Z",
+  "node": "v20.19.6",
+  "head": "bb3d278db3e734b643abef015bdd2190ef578638",
+  "baselineManifest": "baseline-manifest.json",
+  "previousMilestone": "answer-executor-manifest.json",
+  "sourceHashes": {
+    "packages/shared/src/contracts.ts": "9069716dd1f4807dc94d9076b149947be7e7cddc2544810d0a202a6bab6812e4",
+    "apps/server/src/modules/message-routing/intent-plan-commit.service.ts": "9b95fe572d07a6cf97b37814e23989e45e5482ff3b56281f5468e25849e2f469",
+    "apps/server/src/modules/message-routing/intent-plan-commit.service.spec.ts": "f6ce10e8fa092ce257fb12840b9c211b3e94861c31daf313eb55716635928e43",
+    "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "1b686fa62e3c9f3853a71a2259feebc42dd6e6a87f523f868efaa927e9630efa",
+    "apps/server/src/modules/message-routing/route-plan-compiler.service.spec.ts": "1196a1cadd5974557644ee0abfbebf88e604dcc36d366a02b0b9128d94adbdc0",
+    "apps/server/src/modules/message-routing/intent-execution-guard.ts": "68bb2560bf76b605f4b7f60510e6000faf4a88ee70269d6ef6ac48a927076fc4",
+    "apps/server/src/modules/message-routing/message-routing.module.ts": "ca666526a474e6bba4a6e41028dd7db826af1106a4d1df3b32ad8dc2f8896423",
+    "apps/server/src/modules/context-management/context-management.service.ts": "e403cd4ba2c8f0d5d26ddc5f052aa3e2db634c450587de502b90f586fa368f57",
+    "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "f12f451cbafce0de912f28979cbd0efdae40d18934c60fffbac27d3ee67c0d18",
+    "apps/web/src/stores/event.ts": "aa2b9256716067a908e7c5b57655cc8ed1d82d96fc29088714c182abd8087fbe",
+    "apps/web/src/stores/event-normalization.spec.ts": "9601b368938879653e33fd1eadab9521efdd4e044b4a524022c85520fb118869",
+    "tests/evaluation/run-intent-semantic-proposal-sdd.mjs": "0599cf94549c1d1846a2774af73cc1ca758aa99b675df0dc1860a37fa6fda42a",
+    "tests/evaluation/capture-intent-plan-commit-manifest.mjs": "45203bc2f96311ec5256b02f1b3d302e48ec0e647374752ef8bbf73f256fff2d",
+    "packages/shared/src/intent-correction-contracts.ts": "58cd3c671b3da6f84b900d3a6df18e8e4a8f1d1c557bc12af4e3fa4dcb6425ee",
+    "packages/shared/src/intent-runtime-policy.ts": "c7667ca605f2a4ea44082cbb8e86b1118e7ef887c48d5c16cf13d5d8ffb7949b",
+    "packages/shared/src/intent-runtime-policy.spec.ts": "0637a9a658616d818189052bcb96acf72d12c4b6cf032b6a6741048e94b4393c",
+    "apps/server/src/modules/message-routing/intent-answer-executor.service.ts": "8867f2b8884387ac2eb4abce35f19ebabf957f88af6623655a9ca48f4a178365",
+    "apps/server/src/modules/message-routing/intent-answer-executor.service.spec.ts": "b08a07f7492075693210c3b445a8a3378b6cc067357e38804ff22749271f5ee6",
+    "apps/server/src/modules/persistence/intent-record-invariants.ts": "94f7f881caf7ab543864b630fe89ee29a12d27e298e53b4975215c9a84e3cd8f",
+    "apps/server/src/modules/tools/tool-authority-resolver.service.ts": "dbf46da52dd1a74df1c7026367fe901954498ae3f53f04ed91d9ce666162c87d",
+    "apps/server/src/modules/runtime-routing/invocation-resolver.service.ts": "e4c777aa6ab8f92d94a11588edd685a91d547187a71228cf1c128dfcf47c240a",
+    "apps/server/src/modules/runtime-invocation/runtime-invocation.service.ts": "71e901e145e4a3eb643e8db4d6e3eec3a7cbe9436d87c983f20bf2adfb3aa726",
+    "apps/server/src/modules/runtimes/logical-operation-store.ts": "6006dce974d38d7d9764ca2acf66269b3c4b531d3e31356722c5b2daaa6bf7df",
+    "apps/server/src/modules/runtimes/generic-llm-runtime.service.ts": "797ef66c38b5696763f41a207e67c830e236392f5fb68c4513f59ddcb7f2a4a1",
+    "apps/server/src/modules/runtimes/runtime.service.ts": "668b80e46ed6d6f8693b586503d9e3ea1650dda5c5bb8b566bca03b8a935406b",
+    "tests/evaluation/capture-intent-answer-executor-manifest.mjs": "4e3f44ec2e0e0e23d6ce439a4dae211c0aec86d6d90172b9b4b46241fcf4bb47",
+    "apps/server/src/modules/message-routing/intent-message-pipeline.service.ts": "3c06916ae727b770518690cc67e27e568377887861aadf78a3049be5bf83e4e4",
+    "apps/server/src/modules/message-routing/intent-message-pipeline.service.spec.ts": "867875d6d7dac56f4c4453364ce559c873095653e6087703810ff410c760fc3b",
+    "apps/server/src/modules/recovery/recovery.service.ts": "721b86435bf36771b1e9676ea5c20ba4928f6b160949f238808746a796dbdf01",
+    "apps/server/src/modules/recovery/recovery.service.spec.ts": "3767364b6de9a0e2ea40a23862200dd4cd1d183897fcb530c6dac14e597ce7aa",
+    "tests/evaluation/run-intent-semantic-ingress-sdd.mjs": "3c05959103d22e8a717ffaf0477e7296bf0b64a021992af9e12b7a36430ee5e3",
+    "tests/evaluation/capture-intent-semantic-ingress-manifest.mjs": "bf126f2dd17915b2512dd805a4cd722a14732da3f31ec99a1907a2d31a6fc00e"
+  },
+  "documentHashes": {
+    "docs/product/intent-recognition-correction-spec-v1.md": "60ef5c9f7128c21572c1485fe11d8fee3ab7d15676f0af0a5bd2e423bb23706d",
+    "docs/design/intent-recognition-correction-plan-v1.md": "a6c2cd6f42545856f40123bc74c151ab8e4cbc2ca2484b70f02c2507dc04f9ff",
+    "docs/implementation/intent-recognition-correction-task-v1.md": "c91f95878aac9aaaaccf548bcfddf276ea84871be8bb029cd945b5c5546f8356",
+    "docs/quality/intent-recognition-correction-checklist-v1.md": "58531957fbd64a073c86c1f0950e726a7c2b0a592bd4021a914eacc7a816f4dd",
+    "docs/quality/intent-recognition-correction-runs/2026-10-19-sdd-development/semantic-ingress-report.md": "3747a6f9689e51cfbc6b84a6231eb7047052b9b694025d842aa93404b6b91ac1"
+  },
+  "evidenceHashes": {
+    "semantic-ingress-http-results.json": "71c721fc7f0c14f1d36cdc61f9c4f4b3fc16520bef6ad7bf65b2bf9274d9ca47"
+  },
+  "checks": [
+    {
+      "command": "npm run test -w @agent-cluster/server",
+      "log": "semantic-ingress-server-tests.log",
+      "exitCode": 0,
+      "logSha256": "d033deb28722c29ab0be9b4b2c5439c7aa7583be22eb977414bb6440925aec2d"
+    },
+    {
+      "command": "npx tsx --test --tsconfig apps/server/tsconfig.json apps/server/src/modules/message-routing/intent-message-pipeline.service.spec.ts apps/server/src/modules/message-routing/intent-plan-commit.service.spec.ts",
+      "log": "semantic-ingress-final-regression.log",
+      "exitCode": 0,
+      "logSha256": "001d2ba69be8e275abaa6de67cbecfa15616251c1610396f22e40fa4c5464b83"
+    },
+    {
+      "command": "npm run typecheck",
+      "log": "semantic-ingress-verified-typecheck.log",
+      "exitCode": 0,
+      "logSha256": "9018b27583539853ac8c03817518ed16ca562e330c3300be73c796e126a0cafd"
+    },
+    {
+      "command": "npm run build -w @agent-cluster/server",
+      "log": "semantic-ingress-verified-build.log",
+      "exitCode": 0,
+      "logSha256": "a46e428c4d8f1ab9ac5e91206859bd48555deced87128f7fa383e2f9fddb92b3"
+    },
+    {
+      "command": "npm run test:harness",
+      "log": "semantic-ingress-harness.log",
+      "exitCode": 0,
+      "logSha256": "e91309c52f5d3aeaa43f85a518b024c16891bd63337a5f50d5b7f7eb3ba38db7"
+    },
+    {
+      "command": "node tests/evaluation/run-intent-semantic-ingress-sdd.mjs",
+      "log": "semantic-ingress-verified-http.log",
+      "exitCode": 0,
+      "logSha256": "edb38cba9cd266bd37bfcab8106855870eb6d3eb0d47937155bf9c63717caf76"
+    },
+    {
+      "command": "git diff --check",
+      "log": "semantic-ingress-diff-check.log",
+      "exitCode": 0,
+      "logSha256": "7b794aca527ea81526e333a86738e864f0a940c987be7fd66771f3428f6a06fd"
+    }
+  ],
+  "tests": {
+    "serverPassed": 2033,
+    "serverDevScriptsPassed": 7,
+    "postgresSkipped": 21,
+    "finalRelatedPassed": 22,
+    "httpCasesPassed": 7,
+    "countsOverlap": true
+  },
+  "scope": {
+    "ingress": "actual Sessions create/messages API; explicit new-contract cohort",
+    "backend": "isolated File",
+    "runtime": "actual Generic LLM HTTP with deterministic localhost responses",
+    "modelAccuracyEvaluated": false,
+    "realPostgresVerified": false,
+    "fullWorkspaceTestsRerun": false,
+    "productionFlagChanged": false
+  },
+  "limitations": [
+    "Full server run precedes final late-block/receipt guard; final regression, typecheck, build and HTTP cover that increment",
+    "New-contract corrections, controlled Brief/business executors and special ingress paths remain incomplete",
+    "Real clients/DB/CLI, independent annotation and release gates remain incomplete"
+  ]
+}

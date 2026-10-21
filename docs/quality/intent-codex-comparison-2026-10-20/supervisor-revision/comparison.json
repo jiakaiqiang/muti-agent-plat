@@ -1,0 +1,2480 @@
+{
+  "diagnostic": {
+    "before": {
+      "count": 20,
+      "passed": 10,
+      "validOutputs": 15,
+      "notReached": [
+        "L16",
+        "L17",
+        "L18"
+      ],
+      "providerCalls": 23,
+      "outcomes": {
+        "needs_clarification": 7,
+        "blocked": 2,
+        "applicable": 5,
+        "no_plan": 5,
+        "rejected": 1
+      }
+    },
+    "after": {
+      "count": 20,
+      "passed": 3,
+      "validOutputs": 3,
+      "notReached": [
+        "L03",
+        "L04",
+        "L05",
+        "L06",
+        "L07",
+        "L08",
+        "L09",
+        "L12",
+        "L13",
+        "L14",
+        "L15",
+        "L16",
+        "L17",
+        "L18"
+      ],
+      "providerCalls": 9,
+      "outcomes": {
+        "needs_clarification": 1,
+        "no_plan": 17,
+        "applicable": 2
+      }
+    }
+  },
+  "holdout": {
+    "before": {
+      "count": 12,
+      "passed": 6,
+      "validOutputs": 12,
+      "notReached": [],
+      "providerCalls": 12,
+      "outcomes": {
+        "needs_clarification": 8,
+        "blocked": 3,
+        "applicable": 1
+      }
+    },
+    "after": {
+      "count": 12,
+      "passed": 0,
+      "validOutputs": 0,
+      "notReached": [
+        "H01",
+        "H02",
+        "H03",
+        "H04",
+        "H05",
+        "H06",
+        "H07",
+        "H09",
+        "H10",
+        "H11",
+        "H12"
+      ],
+      "providerCalls": 2,
+      "outcomes": {
+        "no_plan": 12
+      }
+    }
+  },
+  "regressions": [
+    {
+      "id": "B01",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "B01",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "B01",
+      "check": "action",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "B01",
+      "check": "noExecutionEffects",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "B01",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "B01",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "B01",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "B01",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "B01",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "B01",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H01",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "H01",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H01",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H01",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H01",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H01",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H01",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H01",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H02",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "H02",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H02",
+      "check": "noExecutionEffects",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H02",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H02",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H02",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H03",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "H03",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H03",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H03",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H03",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H03",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H04",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "H04",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H04",
+      "check": "action",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H04",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H04",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H04",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H04",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H04",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H04",
+      "check": "contextPolicy",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H05",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "H05",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H05",
+      "check": "action",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H05",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H05",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H05",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H05",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H05",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H05",
+      "check": "contextPolicy",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H05",
+      "check": "inheritDecision",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H06",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "H06",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H06",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H06",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H06",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H06",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H06",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H06",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H06",
+      "check": "safeClarification",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H07",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "H07",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H07",
+      "check": "noExecutionEffects",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H07",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H07",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H07",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H07",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H07",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H08",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "H08",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H08",
+      "check": "action",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H08",
+      "check": "noExecutionEffects",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H08",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H08",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H08",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H08",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H08",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H08",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H09",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "H09",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H09",
+      "check": "action",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H09",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H09",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H09",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H09",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H09",
+      "check": "safeClarification",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H10",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "H10",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H10",
+      "check": "action",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H10",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H10",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H10",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H10",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H10",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H10",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H11",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "H11",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H11",
+      "check": "action",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H11",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H11",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H11",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H11",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H11",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H11",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H12",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "H12",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H12",
+      "check": "action",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H12",
+      "check": "noExecutionEffects",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H12",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H12",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H12",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H12",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H12",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "H12",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L02",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "L02",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L02",
+      "check": "action",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L02",
+      "check": "noExecutionEffects",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L02",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L02",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L02",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L02",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L02",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L02",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L03",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "L03",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L03",
+      "check": "action",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L03",
+      "check": "noExecutionEffects",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L03",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L03",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L03",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L03",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L03",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L03",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L04",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "L04",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L04",
+      "check": "action",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L04",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L04",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L04",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L04",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L04",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L04",
+      "check": "contextPolicy",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L05",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "L05",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L05",
+      "check": "action",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L05",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L05",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L05",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L05",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L05",
+      "check": "inheritDecision",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L06",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "L06",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L06",
+      "check": "action",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L06",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L06",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L06",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L06",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L06",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L06",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L07",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "L07",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L07",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L07",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L07",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L07",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L08",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "L08",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L08",
+      "check": "action",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L08",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L08",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L08",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L08",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L08",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L08",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L11",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "L11",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L11",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L11",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L11",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L11",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L11",
+      "check": "safeClarification",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L12",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "L12",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L12",
+      "check": "action",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L12",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L12",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L12",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L12",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L12",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L12",
+      "check": "safeClarification",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L13",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "L13",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L13",
+      "check": "action",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L13",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L13",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L13",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L13",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L13",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L13",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L13",
+      "check": "mentionedAgents",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L14",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "L14",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L14",
+      "check": "action",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L14",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L14",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L14",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L14",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L20",
+      "check": "schema",
+      "before": "通过",
+      "after": "失败"
+    },
+    {
+      "id": "L20",
+      "check": "relation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L20",
+      "check": "noExecutionEffects",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L20",
+      "check": "workItemTarget",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L20",
+      "check": "routeReferencesAndRelation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L20",
+      "check": "routeState",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L20",
+      "check": "goalSegmentation",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L20",
+      "check": "evidence",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L20",
+      "check": "noUnauthorizedExecution",
+      "before": "通过",
+      "after": "未检查"
+    },
+    {
+      "id": "L20",
+      "check": "correctionBinding",
+      "before": "通过",
+      "after": "未检查"
+    }
+  ],
+  "improvements": [],
+  "builds": {
+    "baseline": "88d1b375d3f1679e603e141581e032442511c8091a62072b3a152e4c7e6f13ca",
+    "final": "5d3586dc10f1957c7ed2f3b876acc26e8d61aebd4e26ff8a27bfc21d959bcab2",
+    "frozenSource": "8abc792ae92b062ca8bdf1f738c819184a4007de8823b2376caf5c0c15f5a821",
+    "startedAt": "2026-10-20T02:48:21.408Z"
+  },
+  "restoration": {
+    "restored": true,
+    "actualHash": "5d3586dc10f1957c7ed2f3b876acc26e8d61aebd4e26ff8a27bfc21d959bcab2",
+    "expectedHash": "5d3586dc10f1957c7ed2f3b876acc26e8d61aebd4e26ff8a27bfc21d959bcab2",
+    "sourceUnchanged": true,
+    "finishedAt": "2026-10-20T03:20:55.014Z"
+  },
+  "initialBudget": {
+    "before": {
+      "id": "B01",
+      "message": "请解释当前登录模块为什么采用现有的令牌过期策略，只作说明。",
+      "expected": {
+        "relation": "same_requirement",
+        "actions": [
+          "answer_in_chat"
+        ],
+        "multi": false,
+        "readOnly": true
+      },
+      "checks": [
+        {
+          "field": "schema",
+          "pass": false
+        }
+      ],
+      "actual": {
+        "status": "RECEIVED",
+        "reasonCodes": []
+      },
+      "fixture": {
+        "productionWorkItemStatus": "WAITING_USER",
+        "sessionStatus": "WAIT_USER_CONFIRM",
+        "activeWorkItemId": "f692780b-5933-44f8-8c86-823b018b2794",
+        "decisionId": "6754505c-461a-45ee-bf77-f28d2061975b",
+        "snapshot": {
+          "id": "10b6b21b-0445-412f-8aeb-3f963f7441d3",
+          "sessionId": "713a7bfb-c717-4956-944c-f291687a1c04",
+          "sourceEventId": "31dfade6-7a8e-4a2b-bf02-99ac37b55be6",
+          "activeWorkItemId": "f692780b-5933-44f8-8c86-823b018b2794",
+          "activeWorkItem": {
+            "id": "f692780b-5933-44f8-8c86-823b018b2794",
+            "title": "实现一个登录接口，使用 PostgreSQL，保持现有数",
+            "goal": "实现一个登录接口，使用 PostgreSQL，保持现有数据库表结构。",
+            "status": "WAITING_USER",
+            "revision": 2
+          },
+          "currentMessage": "请解释当前登录模块为什么采用现有的令牌过期策略，只作说明。",
+          "correctionCandidates": [
+            {
+              "routingId": "0e1c2ca0-9493-41e8-a487-b3f9636a7d6b",
+              "routingRevision": 1,
+              "sourceEventId": "a3d7612b-3d47-41cc-a032-b603d712886c",
+              "referenceEventId": "a3d7612b-3d47-41cc-a032-b603d712886c",
+              "workItemIds": [
+                "f692780b-5933-44f8-8c86-823b018b2794"
+              ],
+              "decisionIds": [
+                "5441a631-919b-4da3-b2a8-50358645253f",
+                "4bb15f7d-94a5-49f4-981b-ddb4d181e948"
+              ]
+            },
+            {
+              "routingId": "77c0008e-49bf-42f8-84d8-8017f8f4089e",
+              "routingRevision": 1,
+              "sourceEventId": "4b61848d-78e1-4e61-a4ef-e7b7ff27a9cc",
+              "referenceEventId": "4b61848d-78e1-4e61-a4ef-e7b7ff27a9cc",
+              "workItemIds": [
+                "f692780b-5933-44f8-8c86-823b018b2794"
+              ],
+              "decisionIds": [
+                "dcdf0848-fbbe-4e9c-b247-424453fb6bb9",
+                "2c110231-3d91-4aa0-aa5d-671dbd66455b"
+              ]
+            },
+            {
+              "routingId": "8ba426a7-cfb8-430a-9ffa-695a4d0fb03d",
+              "routingRevision": 1,
+              "sourceEventId": "c351f9c8-8396-4539-b6dd-a96eb8242a8b",
+              "referenceEventId": "c351f9c8-8396-4539-b6dd-a96eb8242a8b",
+              "workItemIds": [
+                "f692780b-5933-44f8-8c86-823b018b2794"
+              ],
+              "decisionIds": [
+                "c2ce7f40-6d00-4e71-a5dc-52803b3dfb00",
+                "93e45eb6-04e6-4104-b6ee-24c0f5778a77"
+              ]
+            },
+            {
+              "routingId": "258cbbb1-ee22-403c-b01c-6c19d0bfed00",
+              "routingRevision": 1,
+              "sourceEventId": "1bee4790-7f87-4491-a8e5-0f29a2131aaa",
+              "referenceEventId": "1bee4790-7f87-4491-a8e5-0f29a2131aaa",
+              "workItemIds": [
+                "f692780b-5933-44f8-8c86-823b018b2794"
+              ],
+              "decisionIds": [
+                "605ee2ee-3747-4a1e-90b9-96c28630af11",
+                "20c22af2-bffa-4d52-8ff4-fc3743cb72bf"
+              ]
+            },
+            {
+              "routingId": "65c3cd8d-110e-4d0a-b4b3-292832c7c1ab",
+              "routingRevision": 1,
+              "sourceEventId": "a15a9770-5d80-4e70-a05a-7992a9828741",
+              "referenceEventId": "a15a9770-5d80-4e70-a05a-7992a9828741",
+              "workItemIds": [
+                "f692780b-5933-44f8-8c86-823b018b2794"
+              ],
+              "decisionIds": [
+                "aebdf0ce-eea1-4002-901b-67693163c7fd",
+                "dfb1e499-cf75-4ffd-907e-cd06e55bd00b"
+              ]
+            },
+            {
+              "routingId": "058a0ebc-adda-4646-a4b4-cfe0ffb9c1d0",
+              "routingRevision": 1,
+              "sourceEventId": "44610cb1-ba8d-4821-9b06-e7b259eebd43",
+              "referenceEventId": "44610cb1-ba8d-4821-9b06-e7b259eebd43",
+              "workItemIds": [
+                "f692780b-5933-44f8-8c86-823b018b2794"
+              ],
+              "decisionIds": [
+                "30f1fea8-904f-406e-81de-bf076b28da97",
+                "31c628bc-0b93-4c6f-8cf0-70e8ad25e314"
+              ]
+            },
+            {
+              "routingId": "abcd19da-773a-4d6f-a423-5e48ac9ca2e1",
+              "routingRevision": 1,
+              "sourceEventId": "16d154d2-9dc0-45d7-be7c-37ac362b8dc2",
+              "referenceEventId": "16d154d2-9dc0-45d7-be7c-37ac362b8dc2",
+              "workItemIds": [
+                "f692780b-5933-44f8-8c86-823b018b2794"
+              ],
+              "decisionIds": [
+                "480e10a0-9569-4116-b5be-276de54b3afb",
+                "a7c81665-435f-4e43-8c31-2f228742dbd2"
+              ]
+            },
+            {
+              "routingId": "1cbed871-581d-4884-8fd3-8835603b5e62",
+              "routingRevision": 1,
+              "sourceEventId": "ba986028-5d6a-4f4a-8bdf-7a16b4d81226",
+              "referenceEventId": "ba986028-5d6a-4f4a-8bdf-7a16b4d81226",
+              "workItemIds": [
+                "f692780b-5933-44f8-8c86-823b018b2794"
+              ],
+              "decisionIds": [
+                "2657f2a3-9f21-4d85-a164-e54f84c5d6ab",
+                "8f4aee1e-6367-4aee-90f3-d36957e6b8c6"
+              ]
+            }
+          ],
+          "omittedCorrectionCandidates": 0,
+          "recentRelevantMessages": [
+            {
+              "eventId": "16d154d2-9dc0-45d7-be7c-37ac362b8dc2",
+              "role": "user",
+              "content": "历史登录讨论 2：已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接",
+              "truncated": true,
+              "createdAt": "2026-10-20T03:00:15.049Z"
+            },
+            {
+              "eventId": "44610cb1-ba8d-4821-9b06-e7b259eebd43",
+              "role": "user",
+              "content": "历史登录讨论 3：已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接",
+              "truncated": true,
+              "createdAt": "2026-10-20T03:00:15.123Z"
+            },
+            {
+              "eventId": "a15a9770-5d80-4e70-a05a-7992a9828741",
+              "role": "user",
+              "content": "历史登录讨论 4：已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接",
+              "truncated": true,
+              "createdAt": "2026-10-20T03:00:15.180Z"
+            },
+            {
+              "eventId": "1bee4790-7f87-4491-a8e5-0f29a2131aaa",
+              "role": "user",
+              "content": "历史登录讨论 5：已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接",
+              "truncated": true,
+              "createdAt": "2026-10-20T03:00:15.239Z"
+            },
+            {
+              "eventId": "c351f9c8-8396-4539-b6dd-a96eb8242a8b",
+              "role": "user",
+              "content": "历史登录讨论 6：已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接",
+              "truncated": true,
+              "createdAt": "2026-10-20T03:00:15.300Z"
+            },
+            {
+              "eventId": "4b61848d-78e1-4e61-a4ef-e7b7ff27a9cc",
+              "role": "user",
+              "content": "历史登录讨论 7：已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接",
+              "truncated": true,
+              "createdAt": "2026-10-20T03:00:15.359Z"
+            },
+            {
+              "eventId": "a3d7612b-3d47-41cc-a032-b603d712886c",
+              "role": "user",
+              "content": "历史登录讨论 8：已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接",
+              "truncated": true,
+              "createdAt": "2026-10-20T03:00:15.421Z"
+            },
+            {
+              "eventId": "31dfade6-7a8e-4a2b-bf02-99ac37b55be6",
+              "role": "user",
+              "content": "请解释当前登录模块为什么采用现有的令牌过期策略，只作说明。",
+              "createdAt": "2026-10-20T03:00:15.479Z"
+            }
+          ],
+          "bounds": {
+            "recentMessageLimit": 8,
+            "messageCharLimit": 400,
+            "candidateWorkItemLimit": 5,
+            "totalCandidateWorkItems": 1,
+            "omittedCandidateWorkItems": 0,
+            "omittedRecentMessages": 2
+          },
+          "recall": {
+            "availability": "ok",
+            "needsClarification": false,
+            "candidates": [
+              {
+                "workItemId": "f692780b-5933-44f8-8c86-823b018b2794",
+                "matchedBy": "lexical",
+                "matchedTerms": [
+                  "登录",
+                  "现有"
+                ]
+              }
+            ]
+          },
+          "validDecisionIds": [
+            "6754505c-461a-45ee-bf77-f28d2061975b",
+            "2657f2a3-9f21-4d85-a164-e54f84c5d6ab",
+            "8f4aee1e-6367-4aee-90f3-d36957e6b8c6",
+            "480e10a0-9569-4116-b5be-276de54b3afb",
+            "a7c81665-435f-4e43-8c31-2f228742dbd2",
+            "30f1fea8-904f-406e-81de-bf076b28da97",
+            "31c628bc-0b93-4c6f-8cf0-70e8ad25e314",
+            "aebdf0ce-eea1-4002-901b-67693163c7fd",
+            "dfb1e499-cf75-4ffd-907e-cd06e55bd00b",
+            "605ee2ee-3747-4a1e-90b9-96c28630af11",
+            "20c22af2-bffa-4d52-8ff4-fc3743cb72bf",
+            "c2ce7f40-6d00-4e71-a5dc-52803b3dfb00",
+            "93e45eb6-04e6-4104-b6ee-24c0f5778a77",
+            "dcdf0848-fbbe-4e9c-b247-424453fb6bb9",
+            "2c110231-3d91-4aa0-aa5d-671dbd66455b",
+            "5441a631-919b-4da3-b2a8-50358645253f",
+            "4bb15f7d-94a5-49f4-981b-ddb4d181e948"
+          ],
+          "validArtifactIds": [],
+          "validArtifacts": [],
+          "omittedArtifacts": 0,
+          "validDecisions": [
+            {
+              "id": "6754505c-461a-45ee-bf77-f28d2061975b",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "使用 PostgreSQL，保持现有数据库表结构。",
+              "revision": 1
+            },
+            {
+              "id": "2657f2a3-9f21-4d85-a164-e54f84c5d6ab",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 1-1：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "8f4aee1e-6367-4aee-90f3-d36957e6b8c6",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 1-2：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "480e10a0-9569-4116-b5be-276de54b3afb",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 2-1：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "a7c81665-435f-4e43-8c31-2f228742dbd2",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 2-2：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "30f1fea8-904f-406e-81de-bf076b28da97",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 3-1：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "31c628bc-0b93-4c6f-8cf0-70e8ad25e314",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 3-2：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "aebdf0ce-eea1-4002-901b-67693163c7fd",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 4-1：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "dfb1e499-cf75-4ffd-907e-cd06e55bd00b",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 4-2：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "605ee2ee-3747-4a1e-90b9-96c28630af11",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 5-1：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "20c22af2-bffa-4d52-8ff4-fc3743cb72bf",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 5-2：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "c2ce7f40-6d00-4e71-a5dc-52803b3dfb00",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 6-1：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "93e45eb6-04e6-4104-b6ee-24c0f5778a77",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 6-2：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "dcdf0848-fbbe-4e9c-b247-424453fb6bb9",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 7-1：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "2c110231-3d91-4aa0-aa5d-671dbd66455b",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 7-2：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "5441a631-919b-4da3-b2a8-50358645253f",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 8-1：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "4bb15f7d-94a5-49f4-981b-ddb4d181e948",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 8-2：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            }
+          ],
+          "candidateWorkItemIds": [
+            "f692780b-5933-44f8-8c86-823b018b2794"
+          ],
+          "candidateWorkItems": [
+            {
+              "id": "f692780b-5933-44f8-8c86-823b018b2794",
+              "title": "实现一个登录接口，使用 PostgreSQL，保持现有数",
+              "goal": "实现一个登录接口，使用 PostgreSQL，保持现有数据库表结构。",
+              "status": "WAITING_USER",
+              "revision": 2
+            }
+          ],
+          "revision": {
+            "sessionRevision": 20,
+            "activeWorkItemId": "f692780b-5933-44f8-8c86-823b018b2794",
+            "activeWorkItemRevision": 2,
+            "decisionLedgerRevision": 17,
+            "latestEventSeq": 11
+          },
+          "businessFingerprint": "67473920d331c76cfac5d38814b974aa7cf8117e1dc5acaac373fd94b6e7351f",
+          "snapshotHash": "9a4fab0234c2b677ca074e2e8309a6f9272a4a2d29da4af8e623cfb4a0c9ae99",
+          "createdAt": "2026-10-20T03:00:15.506Z"
+        }
+      },
+      "tokenEstimates": [],
+      "durationMs": 624,
+      "providerCalls": 0,
+      "invocations": [],
+      "passed": false
+    },
+    "after": {
+      "id": "B01",
+      "message": "请解释当前登录模块为什么采用现有的令牌过期策略，只作说明。",
+      "expected": {
+        "relation": "same_requirement",
+        "actions": [
+          "answer_in_chat"
+        ],
+        "multi": false,
+        "readOnly": true
+      },
+      "checks": [
+        {
+          "field": "schema",
+          "pass": false
+        }
+      ],
+      "actual": {
+        "status": "RECEIVED",
+        "reasonCodes": []
+      },
+      "fixture": {
+        "productionWorkItemStatus": "WAITING_USER",
+        "sessionStatus": "WAIT_USER_CONFIRM",
+        "activeWorkItemId": "021ec9be-bee0-4d04-9e03-47b6294db1dc",
+        "decisionId": "ce31eeb6-8b91-4395-a96a-970017abcbb4",
+        "snapshot": {
+          "id": "8bf6f595-d881-48e9-a410-279dfbc84824",
+          "sessionId": "5ec88487-ef7d-4ec5-bd5a-53d199871eea",
+          "sourceEventId": "212d101b-5787-4372-8eb6-5fa3ac12cac2",
+          "activeWorkItemId": "021ec9be-bee0-4d04-9e03-47b6294db1dc",
+          "activeWorkItem": {
+            "id": "021ec9be-bee0-4d04-9e03-47b6294db1dc",
+            "title": "实现一个登录接口，使用 PostgreSQL，保持现有数",
+            "goal": "实现一个登录接口，使用 PostgreSQL，保持现有数据库表结构。",
+            "status": "WAITING_USER",
+            "revision": 2
+          },
+          "currentMessage": "请解释当前登录模块为什么采用现有的令牌过期策略，只作说明。",
+          "correctionCandidates": [
+            {
+              "routingId": "cd341235-88df-457c-9375-6aef41e85d80",
+              "routingRevision": 1,
+              "sourceEventId": "eace02aa-6560-4438-8354-b5e8c919c9fa",
+              "referenceEventId": "eace02aa-6560-4438-8354-b5e8c919c9fa",
+              "workItemIds": [
+                "021ec9be-bee0-4d04-9e03-47b6294db1dc"
+              ],
+              "decisionIds": [
+                "f4597a86-330b-48f8-bc50-249d13b3470a",
+                "bac3e0f0-a8d8-41df-91e6-03a4d7a2174f"
+              ]
+            },
+            {
+              "routingId": "1f994e12-8cd3-4f73-800d-a6ea6fc2bbb3",
+              "routingRevision": 1,
+              "sourceEventId": "f3587a30-90f6-4f7f-8ec2-23abfd4b96f7",
+              "referenceEventId": "f3587a30-90f6-4f7f-8ec2-23abfd4b96f7",
+              "workItemIds": [
+                "021ec9be-bee0-4d04-9e03-47b6294db1dc"
+              ],
+              "decisionIds": [
+                "f1d82b03-5848-4a6d-a70b-a9c937d51ced",
+                "5b2034f1-34ea-47f6-aa56-5ab020cea50a"
+              ]
+            },
+            {
+              "routingId": "526d4f82-9a6c-4bb7-a2c8-9ded822b74b2",
+              "routingRevision": 1,
+              "sourceEventId": "74f05b60-bf98-4d89-8ad1-cfaf2f94ae84",
+              "referenceEventId": "74f05b60-bf98-4d89-8ad1-cfaf2f94ae84",
+              "workItemIds": [
+                "021ec9be-bee0-4d04-9e03-47b6294db1dc"
+              ],
+              "decisionIds": [
+                "28240737-c8ca-496a-a046-b28ac5c035ff",
+                "b54c6d2a-589a-45e7-91a9-546ad1a85d60"
+              ]
+            },
+            {
+              "routingId": "46b581ed-7bb3-46b5-b8bf-19afc62af9c6",
+              "routingRevision": 1,
+              "sourceEventId": "e772f40f-9ae7-4211-aaed-c51335f514c3",
+              "referenceEventId": "e772f40f-9ae7-4211-aaed-c51335f514c3",
+              "workItemIds": [
+                "021ec9be-bee0-4d04-9e03-47b6294db1dc"
+              ],
+              "decisionIds": [
+                "54d021c9-314f-469b-a83a-1d1fc8fda332",
+                "da06ffa7-10f1-4498-a4a5-ac2c180aa1ae"
+              ]
+            },
+            {
+              "routingId": "57e70318-45e4-4b0a-bd89-7c6775ddc675",
+              "routingRevision": 1,
+              "sourceEventId": "e8e3356f-2ec1-4ba6-ab90-e23499fa06c8",
+              "referenceEventId": "e8e3356f-2ec1-4ba6-ab90-e23499fa06c8",
+              "workItemIds": [
+                "021ec9be-bee0-4d04-9e03-47b6294db1dc"
+              ],
+              "decisionIds": [
+                "01ab82a0-2feb-4d1b-aeeb-e660ab3cd778",
+                "52288d49-f9a5-49fa-8dfa-e07b0e81892f"
+              ]
+            },
+            {
+              "routingId": "eb3b70dc-2335-43c2-85f3-8b840485049c",
+              "routingRevision": 1,
+              "sourceEventId": "1e447de7-41d5-432e-893f-9f84398f4c8e",
+              "referenceEventId": "1e447de7-41d5-432e-893f-9f84398f4c8e",
+              "workItemIds": [
+                "021ec9be-bee0-4d04-9e03-47b6294db1dc"
+              ],
+              "decisionIds": [
+                "4b899bdc-0b83-49f1-9951-1252dd82a3af",
+                "0815b9af-6b79-4156-a83a-b3001c99a8a6"
+              ]
+            },
+            {
+              "routingId": "b5c40496-a601-4bca-a88d-9b03178cd5fb",
+              "routingRevision": 1,
+              "sourceEventId": "3422dfa2-ec60-455a-bc9f-6b29c986f5bb",
+              "referenceEventId": "3422dfa2-ec60-455a-bc9f-6b29c986f5bb",
+              "workItemIds": [
+                "021ec9be-bee0-4d04-9e03-47b6294db1dc"
+              ],
+              "decisionIds": [
+                "f56bd26d-e8f7-4f17-93a4-c9d4bbf351a5",
+                "91344b25-2ad8-4b52-869d-c54184e9d407"
+              ]
+            },
+            {
+              "routingId": "25c3ed6b-7077-4d1f-a8cd-dc37c2a0d1b0",
+              "routingRevision": 1,
+              "sourceEventId": "996ac81a-beef-4e1f-a9c5-afeb50a9235b",
+              "referenceEventId": "996ac81a-beef-4e1f-a9c5-afeb50a9235b",
+              "workItemIds": [
+                "021ec9be-bee0-4d04-9e03-47b6294db1dc"
+              ],
+              "decisionIds": [
+                "ebdd2bd6-70d8-43b1-8864-ab3252a7231a",
+                "3ad1b081-1371-48c0-8184-171cd48b457a"
+              ]
+            }
+          ],
+          "omittedCorrectionCandidates": 0,
+          "recentRelevantMessages": [
+            {
+              "eventId": "3422dfa2-ec60-455a-bc9f-6b29c986f5bb",
+              "role": "user",
+              "content": "历史登录讨论 2：已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接",
+              "truncated": true,
+              "createdAt": "2026-10-20T03:18:34.321Z"
+            },
+            {
+              "eventId": "1e447de7-41d5-432e-893f-9f84398f4c8e",
+              "role": "user",
+              "content": "历史登录讨论 3：已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接",
+              "truncated": true,
+              "createdAt": "2026-10-20T03:18:34.354Z"
+            },
+            {
+              "eventId": "e8e3356f-2ec1-4ba6-ab90-e23499fa06c8",
+              "role": "user",
+              "content": "历史登录讨论 4：已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接",
+              "truncated": true,
+              "createdAt": "2026-10-20T03:18:34.387Z"
+            },
+            {
+              "eventId": "e772f40f-9ae7-4211-aaed-c51335f514c3",
+              "role": "user",
+              "content": "历史登录讨论 5：已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接",
+              "truncated": true,
+              "createdAt": "2026-10-20T03:18:34.422Z"
+            },
+            {
+              "eventId": "74f05b60-bf98-4d89-8ad1-cfaf2f94ae84",
+              "role": "user",
+              "content": "历史登录讨论 6：已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接",
+              "truncated": true,
+              "createdAt": "2026-10-20T03:18:34.458Z"
+            },
+            {
+              "eventId": "f3587a30-90f6-4f7f-8ec2-23abfd4b96f7",
+              "role": "user",
+              "content": "历史登录讨论 7：已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接",
+              "truncated": true,
+              "createdAt": "2026-10-20T03:18:34.490Z"
+            },
+            {
+              "eventId": "eace02aa-6560-4438-8354-b5e8c919c9fa",
+              "role": "user",
+              "content": "历史登录讨论 8：已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接口遵循最小披露原则；客户端缓存令牌，服务端统一检查有效期。已确认登录接",
+              "truncated": true,
+              "createdAt": "2026-10-20T03:18:34.525Z"
+            },
+            {
+              "eventId": "212d101b-5787-4372-8eb6-5fa3ac12cac2",
+              "role": "user",
+              "content": "请解释当前登录模块为什么采用现有的令牌过期策略，只作说明。",
+              "createdAt": "2026-10-20T03:18:34.560Z"
+            }
+          ],
+          "bounds": {
+            "recentMessageLimit": 8,
+            "messageCharLimit": 400,
+            "candidateWorkItemLimit": 5,
+            "totalCandidateWorkItems": 1,
+            "omittedCandidateWorkItems": 0,
+            "omittedRecentMessages": 2
+          },
+          "recall": {
+            "availability": "ok",
+            "needsClarification": false,
+            "candidates": [
+              {
+                "workItemId": "021ec9be-bee0-4d04-9e03-47b6294db1dc",
+                "matchedBy": "lexical",
+                "matchedTerms": [
+                  "登录",
+                  "现有"
+                ]
+              }
+            ]
+          },
+          "validDecisionIds": [
+            "ce31eeb6-8b91-4395-a96a-970017abcbb4",
+            "ebdd2bd6-70d8-43b1-8864-ab3252a7231a",
+            "3ad1b081-1371-48c0-8184-171cd48b457a",
+            "f56bd26d-e8f7-4f17-93a4-c9d4bbf351a5",
+            "91344b25-2ad8-4b52-869d-c54184e9d407",
+            "4b899bdc-0b83-49f1-9951-1252dd82a3af",
+            "0815b9af-6b79-4156-a83a-b3001c99a8a6",
+            "01ab82a0-2feb-4d1b-aeeb-e660ab3cd778",
+            "52288d49-f9a5-49fa-8dfa-e07b0e81892f",
+            "54d021c9-314f-469b-a83a-1d1fc8fda332",
+            "da06ffa7-10f1-4498-a4a5-ac2c180aa1ae",
+            "28240737-c8ca-496a-a046-b28ac5c035ff",
+            "b54c6d2a-589a-45e7-91a9-546ad1a85d60",
+            "f1d82b03-5848-4a6d-a70b-a9c937d51ced",
+            "5b2034f1-34ea-47f6-aa56-5ab020cea50a",
+            "f4597a86-330b-48f8-bc50-249d13b3470a",
+            "bac3e0f0-a8d8-41df-91e6-03a4d7a2174f"
+          ],
+          "validArtifactIds": [],
+          "validArtifacts": [],
+          "omittedArtifacts": 0,
+          "validDecisions": [
+            {
+              "id": "ce31eeb6-8b91-4395-a96a-970017abcbb4",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "使用 PostgreSQL，保持现有数据库表结构。",
+              "revision": 1
+            },
+            {
+              "id": "ebdd2bd6-70d8-43b1-8864-ab3252a7231a",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 1-1：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "3ad1b081-1371-48c0-8184-171cd48b457a",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 1-2：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "f56bd26d-e8f7-4f17-93a4-c9d4bbf351a5",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 2-1：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "91344b25-2ad8-4b52-869d-c54184e9d407",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 2-2：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "4b899bdc-0b83-49f1-9951-1252dd82a3af",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 3-1：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "0815b9af-6b79-4156-a83a-b3001c99a8a6",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 3-2：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "01ab82a0-2feb-4d1b-aeeb-e660ab3cd778",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 4-1：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "52288d49-f9a5-49fa-8dfa-e07b0e81892f",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 4-2：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "54d021c9-314f-469b-a83a-1d1fc8fda332",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 5-1：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "da06ffa7-10f1-4498-a4a5-ac2c180aa1ae",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 5-2：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "28240737-c8ca-496a-a046-b28ac5c035ff",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 6-1：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "b54c6d2a-589a-45e7-91a9-546ad1a85d60",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 6-2：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "f1d82b03-5848-4a6d-a70b-a9c937d51ced",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 7-1：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "5b2034f1-34ea-47f6-aa56-5ab020cea50a",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 7-2：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "f4597a86-330b-48f8-bc50-249d13b3470a",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 8-1：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            },
+            {
+              "id": "bac3e0f0-a8d8-41df-91e6-03a4d7a2174f",
+              "kind": "constraint",
+              "status": "confirmed",
+              "content": "历史约束 8-2：错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。错误响应不包含凭证，审计事件只记录非敏感摘要。",
+              "revision": 1
+            }
+          ],
+          "candidateWorkItemIds": [
+            "021ec9be-bee0-4d04-9e03-47b6294db1dc"
+          ],
+          "candidateWorkItems": [
+            {
+              "id": "021ec9be-bee0-4d04-9e03-47b6294db1dc",
+              "title": "实现一个登录接口，使用 PostgreSQL，保持现有数",
+              "goal": "实现一个登录接口，使用 PostgreSQL，保持现有数据库表结构。",
+              "status": "WAITING_USER",
+              "revision": 2
+            }
+          ],
+          "revision": {
+            "sessionRevision": 20,
+            "activeWorkItemId": "021ec9be-bee0-4d04-9e03-47b6294db1dc",
+            "activeWorkItemRevision": 2,
+            "decisionLedgerRevision": 17,
+            "latestEventSeq": 11
+          },
+          "businessFingerprint": "f325275bc86c0d7f5130c5dd041275424e1b5fb48ecaddf271a3dc9ed5804c80",
+          "snapshotHash": "92c8cf654399963eecd8fe541ada24c322927cda4e64cd26fa79166b5ed8421a",
+          "createdAt": "2026-10-20T03:18:34.582Z"
+        }
+      },
+      "tokenEstimates": [],
+      "durationMs": 364,
+      "providerCalls": 0,
+      "invocations": [],
+      "passed": false
+    }
+  },
+  "connectionEvidence": [
+    {
+      "build": "before",
+      "file": "review-before-1/provider-1.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-1/provider-10.jsonl",
+      "http429": true,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-1/provider-11.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-1/provider-2.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-1/provider-3.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-1/provider-4.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-1/provider-5.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-1/provider-6.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-1/provider-7.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-1/provider-9.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-2/provider-1.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-2/provider-10.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-2/provider-2.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-2/provider-3.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-2/provider-4.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-2/provider-5.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-2/provider-6.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-2/provider-7.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-2/provider-8.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-2/provider-9.jsonl",
+      "http429": true,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-3/provider-1.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-3/provider-2.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-3/provider-3.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-3/provider-4.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-3/provider-5.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-3/provider-6.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-3/provider-7.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-3/provider-9.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-4/provider-1.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-4/provider-2.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-4/provider-3.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-4/provider-4.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-before-4/provider-5.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-budget-before-v2/provider-1.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "before",
+      "file": "review-budget-before-v2/provider-2.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "after",
+      "file": "review-after-1/provider-1.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "after",
+      "file": "review-after-1/provider-2.jsonl",
+      "http429": true,
+      "timeout": true
+    },
+    {
+      "build": "after",
+      "file": "review-after-1/provider-3.jsonl",
+      "http429": true,
+      "timeout": true
+    },
+    {
+      "build": "after",
+      "file": "review-after-2/provider-1.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "after",
+      "file": "review-after-2/provider-2.jsonl",
+      "http429": true,
+      "timeout": true
+    },
+    {
+      "build": "after",
+      "file": "review-after-2/provider-3.jsonl",
+      "http429": true,
+      "timeout": true
+    },
+    {
+      "build": "after",
+      "file": "review-after-3/provider-1.jsonl",
+      "http429": false,
+      "timeout": true
+    },
+    {
+      "build": "after",
+      "file": "review-after-3/provider-2.jsonl",
+      "http429": true,
+      "timeout": true
+    },
+    {
+      "build": "after",
+      "file": "review-after-3/provider-3.jsonl",
+      "http429": true,
+      "timeout": true
+    },
+    {
+      "build": "after",
+      "file": "review-after-4/provider-1.jsonl",
+      "http429": true,
+      "timeout": true
+    },
+    {
+      "build": "after",
+      "file": "review-after-4/provider-2.jsonl",
+      "http429": true,
+      "timeout": true
+    },
+    {
+      "build": "after",
+      "file": "review-budget-after-v2/provider-1.jsonl",
+      "http429": true,
+      "timeout": true
+    }
+  ],
+  "configurationUnchanged": true
+}

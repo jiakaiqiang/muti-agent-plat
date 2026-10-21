@@ -1,0 +1,79 @@
+{
+  "executedAt": "2026-10-20T01:10:38.051Z",
+  "method": "Actual Sessions HTTP/Nest/Generic LLM/File with deterministic provider and process restart; not model accuracy",
+  "results": [
+    {
+      "id": "RY01",
+      "passed": true,
+      "actual": {
+        "status": "failed",
+        "failureCode": "RUNTIME_OUTPUT_CONTRACT_VIOLATION",
+        "attempts": 2
+      }
+    },
+    {
+      "id": "RY02",
+      "passed": true,
+      "actual": {
+        "view": {
+          "sessionId": "671be3a1-c85d-4b38-b9dc-e83fc6790ae9",
+          "stepId": "7bab931e-8527-4c77-8e3d-e5b45aeb8b13",
+          "dataEpoch": "c622b254-2d26-4c3a-acac-be9626ffc7c0",
+          "routingId": "f2bff2a0-6ac6-47a0-906c-b9d4ea640035",
+          "routingRevision": 8,
+          "intentRevision": 1,
+          "operationId": "brief:7bab931e-8527-4c77-8e3d-e5b45aeb8b13",
+          "status": "failed",
+          "failureCode": "RUNTIME_OUTPUT_CONTRACT_VIOLATION",
+          "canRetry": true
+        },
+        "invalidStatus": 400,
+        "staleStatus": 409,
+        "noModelCalls": true
+      }
+    },
+    {
+      "id": "RY03",
+      "passed": true,
+      "actual": {
+        "sameOperation": true,
+        "replays": [
+          false,
+          true
+        ],
+        "previousAttempts": 2
+      }
+    },
+    {
+      "id": "RY04",
+      "passed": true,
+      "actual": {
+        "status": "completed",
+        "briefs": 1,
+        "operationIds": [
+          "brief:7bab931e-8527-4c77-8e3d-e5b45aeb8b13",
+          "brief:7bab931e-8527-4c77-8e3d-e5b45aeb8b13:retry:b25e4a20-df18-4252-9475-8d84c21cb0d2"
+        ],
+        "noRepeatedClassification": true
+      }
+    },
+    {
+      "id": "RY05",
+      "passed": true,
+      "actual": {
+        "completedCannotRetry": true,
+        "status": 409,
+        "canRetry": false
+      }
+    },
+    {
+      "id": "RY06",
+      "passed": true,
+      "actual": {
+        "realRestart": true,
+        "originalReceipt": true,
+        "noRepeatedModelCall": true
+      }
+    }
+  ]
+}

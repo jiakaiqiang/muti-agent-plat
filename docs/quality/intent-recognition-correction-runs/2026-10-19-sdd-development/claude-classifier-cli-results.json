@@ -1,0 +1,202 @@
+{
+  "version": "2.1.283 (Claude Code)",
+  "results": [
+    {
+      "id": "CLI-valid",
+      "passed": true,
+      "status": "completed",
+      "usage": {
+        "inputTokens": 100,
+        "outputTokens": 50,
+        "totalTokens": 150,
+        "model": "claude-sonnet-4-20250514",
+        "measurement": "actual",
+        "cacheReadInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "logicalInputTokens": 100
+      },
+      "requests": [
+        {
+          "scenario": "valid",
+          "tools": [],
+          "sourcePreserved": true,
+          "sourceEventPreserved": true,
+          "privateContextLoaded": false,
+          "maxTokens": 2000,
+          "model": "claude-sonnet-4-20250514"
+        }
+      ]
+    },
+    {
+      "id": "CLI-invalid",
+      "passed": true,
+      "status": "failed",
+      "code": "RUNTIME_OUTPUT_CONTRACT_VIOLATION",
+      "message": "Claude classification output failed schema validation.",
+      "usage": {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "totalTokens": 0,
+        "model": "claude_code",
+        "measurement": "unknown"
+      },
+      "requests": [
+        {
+          "scenario": "invalid",
+          "tools": [],
+          "sourcePreserved": true,
+          "sourceEventPreserved": true,
+          "privateContextLoaded": false,
+          "maxTokens": 2000,
+          "model": "claude-sonnet-4-20250514"
+        }
+      ]
+    },
+    {
+      "id": "CLI-auth",
+      "passed": true,
+      "status": "failed",
+      "code": "MODEL_ERROR",
+      "message": "Claude model provider rejected authentication (HTTP 401).",
+      "usage": {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "totalTokens": 0,
+        "model": "claude_code",
+        "measurement": "unknown"
+      },
+      "requests": [
+        {
+          "scenario": "auth",
+          "tools": [],
+          "sourcePreserved": true,
+          "sourceEventPreserved": true,
+          "privateContextLoaded": false,
+          "maxTokens": 2000,
+          "model": "claude-sonnet-4-20250514"
+        }
+      ]
+    },
+    {
+      "id": "CLI-rate",
+      "passed": true,
+      "status": "failed",
+      "code": "MODEL_ERROR",
+      "message": "Claude Code exited before producing a valid Runtime result.",
+      "usage": {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "totalTokens": 0,
+        "model": "claude_code",
+        "measurement": "unknown"
+      },
+      "requests": [
+        {
+          "scenario": "rate",
+          "tools": [],
+          "sourcePreserved": true,
+          "sourceEventPreserved": true,
+          "privateContextLoaded": false,
+          "maxTokens": 2000,
+          "model": "claude-sonnet-4-20250514"
+        }
+      ]
+    },
+    {
+      "id": "CLI-tool",
+      "passed": true,
+      "status": "failed",
+      "code": "MODEL_ERROR",
+      "message": "Claude Code exited before producing a valid Runtime result.",
+      "usage": {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "totalTokens": 0,
+        "model": "claude_code",
+        "measurement": "unknown"
+      },
+      "requests": [
+        {
+          "scenario": "tool",
+          "tools": [],
+          "sourcePreserved": true,
+          "sourceEventPreserved": true,
+          "privateContextLoaded": false,
+          "maxTokens": 2000,
+          "model": "claude-sonnet-4-20250514"
+        }
+      ]
+    },
+    {
+      "id": "CLI-isolation",
+      "passed": true,
+      "hookRan": false
+    },
+    {
+      "id": "CLI-durable-repair",
+      "passed": true,
+      "status": "VALIDATING",
+      "attempts": 2,
+      "errors": [
+        "INTENT_UNDERSTANDING_READY"
+      ],
+      "requests": [
+        {
+          "scenario": "durable",
+          "tools": [],
+          "sourcePreserved": true,
+          "sourceEventPreserved": true,
+          "privateContextLoaded": false,
+          "maxTokens": 3000,
+          "model": "claude-sonnet-4-20250514"
+        },
+        {
+          "scenario": "durable",
+          "tools": [],
+          "sourcePreserved": true,
+          "sourceEventPreserved": true,
+          "privateContextLoaded": false,
+          "maxTokens": 3000,
+          "model": "claude-sonnet-4-20250514"
+        }
+      ],
+      "failures": [
+        {
+          "status": "failed",
+          "error": {
+            "code": "RUNTIME_OUTPUT_CONTRACT_VIOLATION",
+            "message": "Claude classification output failed schema validation.",
+            "retryable": false,
+            "details": {
+              "provider": "claude_code",
+              "schemaRepairOwner": "intent_classifier",
+              "previousOutput": "{\"invalid\":true}",
+              "validationErrors": [
+                "/ must have required property: schemaVersion",
+                "/ must have required property: kind",
+                "/ must have required property: semanticContractVersion",
+                "/ must have required property: segments",
+                "/ must have required property: missingFields",
+                "/ must have required property: ambiguityReasons",
+                "/ must have required property: modelConfidence",
+                "/ must NOT have additional properties: invalid"
+              ],
+              "phase": "user_message_routing",
+              "failureClass": "schema",
+              "providerFailure": false,
+              "operationId": "93b871e1-4b97-4bb2-9c5b-bf7b661a9513"
+            }
+          }
+        },
+        {
+          "status": "completed"
+        }
+      ]
+    },
+    {
+      "id": "CLI-replay",
+      "passed": true
+    }
+  ],
+  "scope": "Installed native CLI + actual adapter and Nest Runtime/Worker/File classifier + deterministic local Anthropic fixture; not model accuracy or Sessions HTTP ingress"
+}

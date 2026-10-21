@@ -1,0 +1,4765 @@
+[
+  {
+    "id": "L01",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L01",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L01",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L01",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L01",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L01",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L01",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L01",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L01",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L02",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L02",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L02",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L02",
+    "field": "noExecutionEffects",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L02",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L02",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L02",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L02",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L02",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L02",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L03",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L03",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L03",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L03",
+    "field": "noExecutionEffects",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L03",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L03",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L03",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L03",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L03",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L03",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L04",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L04",
+    "field": "contextPolicy",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L04",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L04",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L04",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L04",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L04",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L04",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L04",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L05",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L05",
+    "field": "contextPolicy",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L05",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L05",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L05",
+    "field": "inheritDecision",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L05",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L05",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L05",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L05",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L05",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L06",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L06",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L06",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L06",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L06",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L06",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L06",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L06",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L06",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L07",
+    "field": "action",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L07",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L07",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L07",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L07",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L07",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L07",
+    "field": "routeState",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L07",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L07",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L08",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L08",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L08",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L08",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L08",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L08",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L08",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L08",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L08",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L09",
+    "field": "action",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L09",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L09",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L09",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L09",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L09",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L09",
+    "field": "routeState",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L09",
+    "field": "safeClarification",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L09",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L09",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L10",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L10",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L10",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L10",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L10",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L10",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L10",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L10",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L10",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L11",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L11",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L11",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L11",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L11",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L11",
+    "field": "routeState",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L11",
+    "field": "safeClarification",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L11",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L12",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L12",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L12",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L12",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L12",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L12",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L12",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L12",
+    "field": "safeClarification",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L12",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L13",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L13",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L13",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L13",
+    "field": "mentionedAgents",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L13",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L13",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L13",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L13",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L13",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L13",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L14",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L14",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L14",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L14",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L14",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L14",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L14",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L14",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L14",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L15",
+    "field": "action",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L15",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L15",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L15",
+    "field": "noExecutionEffects",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L15",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L15",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L15",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L15",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L15",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L15",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L16",
+    "field": "action",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L16",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L16",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L16",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L16",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L16",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L16",
+    "field": "routeState",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L16",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L16",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L17",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L17",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L17",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L17",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L17",
+    "field": "relation",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L17",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L17",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L17",
+    "field": "safeClarification",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L17",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L18",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L18",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L18",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L18",
+    "field": "noExecutionEffects",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L18",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L18",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L18",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L18",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L18",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L18",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L19",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L19",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L19",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L19",
+    "field": "noExecutionEffects",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L19",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L19",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L19",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L19",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L19",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L19",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L20",
+    "field": "action",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L20",
+    "field": "correctionBinding",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L20",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L20",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L20",
+    "field": "noExecutionEffects",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L20",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L20",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L20",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L20",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L20",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "L20",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H01",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H01",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H01",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H01",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H01",
+    "field": "positiveResumeApplicable",
+    "values": {
+      "baseline": true,
+      "previous": false,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H01",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H01",
+    "field": "resumeDeclaresNoEffects",
+    "values": {
+      "baseline": true,
+      "previous": false,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H01",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H01",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H01",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H01",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H02",
+    "field": "action",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H02",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H02",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H02",
+    "field": "noExecutionEffects",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H02",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H02",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H02",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H02",
+    "field": "routeState",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H02",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H02",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H03",
+    "field": "action",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H03",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H03",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": false,
+      "previous": false,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H03",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H03",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H03",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H03",
+    "field": "routeState",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H03",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H03",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H04",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H04",
+    "field": "contextPolicy",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H04",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H04",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H04",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H04",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H04",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H04",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H04",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H05",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H05",
+    "field": "contextPolicy",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H05",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H05",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H05",
+    "field": "inheritDecision",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H05",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H05",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H05",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H05",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H05",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H06",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H06",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H06",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H06",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H06",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H06",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H06",
+    "field": "safeClarification",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H06",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H06",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H07",
+    "field": "action",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H07",
+    "field": "correctionBinding",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H07",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H07",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H07",
+    "field": "noExecutionEffects",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H07",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H07",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H07",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H07",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H07",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H07",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H08",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H08",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H08",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H08",
+    "field": "noExecutionEffects",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H08",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H08",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H08",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H08",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H08",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H08",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H09",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H09",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H09",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H09",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H09",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H09",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H09",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H09",
+    "field": "safeClarification",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H09",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H10",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H10",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H10",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H10",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H10",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H10",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H10",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H10",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H10",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H11",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H11",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H11",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H11",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H11",
+    "field": "positiveResumeApplicable",
+    "values": {
+      "baseline": false,
+      "previous": false,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H11",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H11",
+    "field": "resumeDeclaresNoEffects",
+    "values": {
+      "baseline": false,
+      "previous": false,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H11",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H11",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H11",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H11",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H12",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H12",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H12",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H12",
+    "field": "noExecutionEffects",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H12",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H12",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H12",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H12",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H12",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "H12",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V01",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V01",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V01",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V01",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V01",
+    "field": "positiveResumeApplicable",
+    "values": {
+      "baseline": false,
+      "previous": false,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V01",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V01",
+    "field": "resumeDeclaresNoEffects",
+    "values": {
+      "baseline": false,
+      "previous": false,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V01",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V01",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V01",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V01",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V02",
+    "field": "action",
+    "values": {
+      "baseline": false,
+      "previous": false,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V02",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V02",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": false,
+      "previous": false,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V02",
+    "field": "noExecutionEffects",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V02",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V02",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": false,
+      "current-2": false,
+      "current-3": false
+    }
+  },
+  {
+    "id": "V02",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V02",
+    "field": "routeState",
+    "values": {
+      "baseline": false,
+      "previous": false,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V02",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V02",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": null,
+      "current-2": null,
+      "current-3": null
+    }
+  },
+  {
+    "id": "V03",
+    "field": "action",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V03",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V03",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V03",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V03",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V03",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V03",
+    "field": "routeState",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V03",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V03",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V04",
+    "field": "action",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V04",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V04",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": false,
+      "previous": false,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V04",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V04",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V04",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V04",
+    "field": "routeState",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V04",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V04",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V05",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V05",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V05",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V05",
+    "field": "noExecutionEffects",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V05",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V05",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V05",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V05",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V05",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V05",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V06",
+    "field": "action",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V06",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V06",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V06",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V06",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V06",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V06",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V06",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V06",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V07",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V07",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V07",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V07",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V07",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V07",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V07",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V07",
+    "field": "safeClarification",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V07",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V07",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V08",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V08",
+    "field": "contextPolicy",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V08",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V08",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V08",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V08",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V08",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V08",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V08",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V09",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V09",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V09",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V09",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V09",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V09",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V09",
+    "field": "safeClarification",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V09",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V09",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V10",
+    "field": "action",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V10",
+    "field": "correctionBinding",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V10",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V10",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V10",
+    "field": "noExecutionEffects",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V10",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V10",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V10",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V10",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V10",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V10",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V11",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V11",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V11",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": false,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V11",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V11",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V11",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V11",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V11",
+    "field": "safeClarification",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V11",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V12",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V12",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V12",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V12",
+    "field": "noExecutionEffects",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V12",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V12",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V12",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V12",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V12",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "V12",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "B01",
+    "field": "action",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "B01",
+    "field": "evidence",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "B01",
+    "field": "goalSegmentation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "B01",
+    "field": "noExecutionEffects",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "B01",
+    "field": "noUnauthorizedExecution",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "B01",
+    "field": "relation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "B01",
+    "field": "routeReferencesAndRelation",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "B01",
+    "field": "routeState",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "B01",
+    "field": "schema",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  },
+  {
+    "id": "B01",
+    "field": "workItemTarget",
+    "values": {
+      "baseline": true,
+      "previous": true,
+      "current-1": true,
+      "current-2": true,
+      "current-3": true
+    }
+  }
+]

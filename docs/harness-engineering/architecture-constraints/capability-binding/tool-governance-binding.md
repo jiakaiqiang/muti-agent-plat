@@ -12,9 +12,12 @@
 | message.route | low | 允许执行，需要记录路由理由。 |
 | runtime.dry_run | medium | 允许执行，需要留存调用日志。 |
 | test.report | medium | 允许执行，需要把证据映射到对应任务。 |
+| tool.isolated_test | medium | 仅在版本计划测试通道候选中暴露；实际工具核对持久化步骤与当前独立 grant，再按固定镜像/脚本/目录运行隔离容器。候选检查不签发权限，不授予宿主命令、源码写入或产物发布。 |
 | review.post | medium | 允许执行，需要独立的评审决策。 |
 | notification.feishu_draft | medium | 只允许生成草稿，发送必须由人工确认。 |
 | tool.file_write | high | 必须经过确认，并限定在工作区边界内。 |
+| tool.file_read | low | 仅在有效工作区读取授权、阶段与执行版本内读取非敏感文本；根目录/realpath 校验，不能授予写入。 |
+| tool.code_search | low | 只读搜索已授权工作区；跳过敏感路径、生成目录和符号链接，留存工具调用审计。 |
 | tool.attachment_read | medium | 仅允许在当前 Session 边界内按稳定附件 ID 读取，必须留存引用审计，不得直接暴露二进制内容。 |
 | tool.command_run | high | 必须确认命令、cwd 与副作用。 |
 

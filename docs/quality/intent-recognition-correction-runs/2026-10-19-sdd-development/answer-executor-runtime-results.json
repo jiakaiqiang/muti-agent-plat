@@ -1,0 +1,150 @@
+{
+  "executedAt": "2026-10-19T13:09:21.219Z",
+  "method": "actual Nest module graph and Generic LLM HTTP to deterministic localhost provider; direct classifier/optional plan commit service ingress, not Sessions API or semantic accuracy",
+  "results": [
+    {
+      "id": "SP01",
+      "passed": true,
+      "actual": {
+        "status": "VALIDATING",
+        "attempts": 2,
+        "requests": [
+          {
+            "tools": [],
+            "newContract": true,
+            "exactSource": true,
+            "repairFeedback": false,
+            "answering": false,
+            "answerRepairFeedback": false
+          },
+          {
+            "tools": [],
+            "newContract": true,
+            "exactSource": true,
+            "repairFeedback": true,
+            "answering": false,
+            "answerRepairFeedback": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "SP02",
+      "passed": true,
+      "actual": {
+        "operation": {
+          "attempts": 2,
+          "deadlineAt": "2026-10-19T13:11:20.885Z",
+          "deadlineCeilingAt": "2026-10-19T13:11:20.885Z",
+          "admissionClass": "routing",
+          "outputContractKey": "intent_understanding@1.0"
+        },
+        "routeDeadline": "2026-10-19T13:11:20.885Z"
+      }
+    },
+    {
+      "id": "SP03",
+      "passed": true,
+      "actual": {
+        "workItems": 0,
+        "sessionStatus": "PAUSED",
+        "admission": "closed"
+      }
+    },
+    {
+      "id": "SP04",
+      "passed": true,
+      "actual": {
+        "routingRevision": 6,
+        "modelRequests": 2
+      }
+    },
+    {
+      "id": "PC01",
+      "passed": true,
+      "actual": {
+        "outcome": "applicable",
+        "stepStatus": "queued",
+        "actionStatus": "pending",
+        "workItems": 0
+      }
+    },
+    {
+      "id": "PC02",
+      "passed": true,
+      "actual": {
+        "replay": true,
+        "modelRequests": 2,
+        "planId": "7e2d5725-f0d3-4e1b-843c-d1c835c891a2"
+      }
+    },
+    {
+      "id": "PC03",
+      "passed": true,
+      "actual": {
+        "workItems": 1,
+        "replays": [
+          false,
+          true
+        ],
+        "modelRequests": 3,
+        "steps": [
+          {
+            "action": "answer_in_chat",
+            "status": "queued"
+          },
+          {
+            "action": "create_initial_work_item",
+            "status": "completed"
+          }
+        ]
+      }
+    },
+    {
+      "id": "AP01",
+      "passed": true,
+      "actual": {
+        "stepStatus": "completed",
+        "events": 1,
+        "attempts": 2,
+        "requests": [
+          {
+            "tools": [],
+            "newContract": false,
+            "exactSource": true,
+            "repairFeedback": false,
+            "answering": true,
+            "answerRepairFeedback": false
+          },
+          {
+            "tools": [],
+            "newContract": false,
+            "exactSource": true,
+            "repairFeedback": false,
+            "answering": true,
+            "answerRepairFeedback": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "AP02",
+      "passed": true,
+      "actual": {
+        "attempts": 2,
+        "admissionClass": "response",
+        "sessionStatus": "PAUSED",
+        "deadlineAt": "2026-10-19T13:11:21.089Z",
+        "stepDeadline": "2026-10-19T13:11:21.089Z"
+      }
+    },
+    {
+      "id": "AP03",
+      "passed": true,
+      "actual": {
+        "requestsBefore": 5,
+        "requestsAfter": 5
+      }
+    }
+  ]
+}

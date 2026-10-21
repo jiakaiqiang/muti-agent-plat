@@ -1,0 +1,49 @@
+{
+  "runId": "SDD-2026-10-20-reviewer-recovery-http",
+  "capturedAt": "2026-10-20T01:47:00.481537+00:00",
+  "previousMilestone": "reviewer-recovery-manifest.json",
+  "sourceHashes": {
+    "apps/server/src/modules/message-routing/intent-brief-reviews.ts": "fbed5c33211da52cbfb550c5d7831ac9f12e2727d74110991f7fda9c4a75f2ec",
+    "apps/server/src/modules/message-routing/intent-brief-executor.service.ts": "af60f07607b77685e6120fdc989ed2d606ef86ebbf05533aa9a13dd78ad3e698",
+    "apps/server/src/modules/message-routing/intent-brief-executor.service.spec.ts": "fc6dc4d678c82d2706a8986c5310689d0828be27eec70e00129741512d86b52e",
+    "apps/server/src/modules/message-routing/intent-brief-retry.service.ts": "99bfa5b4c6ac3cbe1e2c8775b8e0180285a923a02639af4d5be6cc7abec9d439",
+    "tests/evaluation/run-intent-reviewer-recovery-sdd.mjs": "3b6a8000116b6e12510321081322f83f0375176db110b9ac53a481c55c7ec339"
+  },
+  "checks": [
+    {
+      "log": "reviewer-recovery-aggregate-tests.log",
+      "exitCode": 0,
+      "sha256": "a59af8abec57c5adf7e838c6264b32386ab61237ffa8fa0e070cf63da4ffbeb0"
+    },
+    {
+      "log": "reviewer-recovery-aggregate-build.log",
+      "exitCode": 0,
+      "sha256": "a46e428c4d8f1ab9ac5e91206859bd48555deced87128f7fa383e2f9fddb92b3"
+    },
+    {
+      "log": "reviewer-recovery-aggregate-diff.log",
+      "exitCode": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "log": "reviewer-recovery-http-final.log",
+      "exitCode": 0,
+      "sha256": "977b479acfc90a92983e7e8170231e161b76869191cbe46f46c6776c64c406eb"
+    }
+  ],
+  "evidenceHashes": {
+    "reviewer-recovery-http-results.json": "cd628f22a627a956d72792741eed69326c57131168af0ecfd29d674a7fb4a7b0",
+    "reviewer-recovery-http-before-aggregate.json": "fb176a478ce4f7a1dfb5cf8837290fb404abf738df734b96c43e5ffa9995fb37",
+    "reviewer-recovery-http-report.md": "a275515e1a6ed8eca4de1f82fcb8d5521f3b800a70bc4865447730b2f9a3e957"
+  },
+  "tests": {
+    "serverRelatedPassed": 41,
+    "actualHttpPassed": 12
+  },
+  "limitations": [
+    "Deterministic local provider; not semantic accuracy",
+    "Graceful shutdown/restart, not hard-crash evidence",
+    "No new PostgreSQL/browser/Electron/SSE verification",
+    "Full SDD remains incomplete"
+  ]
+}

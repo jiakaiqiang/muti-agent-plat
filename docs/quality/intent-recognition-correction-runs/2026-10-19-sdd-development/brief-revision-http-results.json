@@ -1,0 +1,54 @@
+{
+  "executedAt": "2026-10-19T21:00:54.366Z",
+  "method": "Actual Sessions HTTP/Nest/Generic LLM/File with deterministic provider and process restart; not model accuracy",
+  "results": [
+    {
+      "id": "RV01",
+      "passed": true,
+      "actual": {
+        "staleAndUnknownInputRejectedBeforeModel": true
+      }
+    },
+    {
+      "id": "RV02",
+      "passed": true,
+      "actual": {
+        "sameRouting": true,
+        "once": true
+      }
+    },
+    {
+      "id": "RV03",
+      "passed": true,
+      "actual": {
+        "answersBound": true,
+        "pausedWithoutGeneration": true
+      }
+    },
+    {
+      "id": "RV04",
+      "passed": true,
+      "actual": {
+        "answeredQuestionRemoved": true,
+        "oldDraftRetained": true,
+        "noTasks": true
+      }
+    },
+    {
+      "id": "RV05",
+      "passed": true,
+      "actual": {
+        "newDraftConfirmable": true
+      }
+    },
+    {
+      "id": "RV06",
+      "passed": true,
+      "actual": {
+        "realRestart": true,
+        "sameReceipt": true,
+        "noRepeatedModelCall": true
+      }
+    }
+  ]
+}

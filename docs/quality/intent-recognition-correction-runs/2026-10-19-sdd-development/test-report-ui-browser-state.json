@@ -1,0 +1,141 @@
+{
+  "sessionId": "19970169-0b3f-4a9b-9d78-31cc46bfcc64",
+  "authority": {
+    "binding": {
+      "runnerId": "docker-npm-tests-v1",
+      "workspaceBindingHash": "78a816ed28618f5583e1ad63606ec78e4b58d9c5def4c3255a00bce6d0e5bf1c",
+      "workspaceId": "server-cba68c0ad3a62bfd859db94d6ed2ce6e",
+      "imageId": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "script": "test:unit",
+      "bindingHash": "aa54ea79cf46359694cadd92b5915b28e5ab4923ed150ede43fb28533d1d7756",
+      "resourceId": "test-runner:aa54ea79cf46359694cadd92b5915b28e5ab4923ed150ede43fb28533d1d7756"
+    },
+    "grant": {
+      "id": "isolated-test:19970169-0b3f-4a9b-9d78-31cc46bfcc64:aa54ea79cf46359694cadd92b5915b28e5ab4923ed150ede43fb28533d1d7756",
+      "effect": "run_tests",
+      "resource": {
+        "kind": "test_runner",
+        "refId": "test-runner:aa54ea79cf46359694cadd92b5915b28e5ab4923ed150ede43fb28533d1d7756"
+      },
+      "revision": 4,
+      "sourceEventId": "e4223163-fc69-4cde-bc61-417419b7a4bc"
+    }
+  },
+  "events": [
+    {
+      "id": "322e9520-fca5-4fd6-91ca-3e7e06deac1b",
+      "sessionId": "19970169-0b3f-4a9b-9d78-31cc46bfcc64",
+      "type": "intent_test_authority_changed",
+      "createdAt": "2026-10-19T17:43:04.363Z",
+      "toAgentIds": [],
+      "actor": {
+        "type": "user",
+        "id": "local-user"
+      },
+      "content": "已授权在隔离环境运行 test:unit 测试并保存会话测试报告。",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "system_notice",
+        "idempotencyKey": "a5838d6d-5ddd-4e17-a5d6-dd1b98daafcc",
+        "payload": {
+          "request": {
+            "action": "grant",
+            "script": "test:unit",
+            "dataEpoch": "af84a1dc-dce0-4f61-8b97-d914945376a1",
+            "expectedBindingHash": "aa54ea79cf46359694cadd92b5915b28e5ab4923ed150ede43fb28533d1d7756",
+            "expectedGrantRevision": 0,
+            "idempotencyKey": "a5838d6d-5ddd-4e17-a5d6-dd1b98daafcc",
+            "writeReport": true
+          },
+          "grantRevision": 1
+        }
+      }
+    },
+    {
+      "id": "98e6b950-b9c6-4bff-87c0-1cac171e7ae5",
+      "sessionId": "19970169-0b3f-4a9b-9d78-31cc46bfcc64",
+      "type": "intent_test_authority_changed",
+      "createdAt": "2026-10-19T17:43:39.775Z",
+      "toAgentIds": [],
+      "actor": {
+        "type": "user",
+        "id": "local-user"
+      },
+      "content": "已授权在隔离环境运行 test:unit 测试。",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "system_notice",
+        "idempotencyKey": "310c2170-3b90-423c-a69a-10fd9b24044f",
+        "payload": {
+          "request": {
+            "action": "grant",
+            "script": "test:unit",
+            "dataEpoch": "af84a1dc-dce0-4f61-8b97-d914945376a1",
+            "expectedBindingHash": "aa54ea79cf46359694cadd92b5915b28e5ab4923ed150ede43fb28533d1d7756",
+            "expectedGrantRevision": 1,
+            "idempotencyKey": "310c2170-3b90-423c-a69a-10fd9b24044f"
+          },
+          "grantRevision": 2
+        }
+      }
+    },
+    {
+      "id": "43bb2044-90f6-4a5c-a78c-8bf5dd7f1426",
+      "sessionId": "19970169-0b3f-4a9b-9d78-31cc46bfcc64",
+      "type": "intent_test_authority_changed",
+      "createdAt": "2026-10-19T17:43:39.884Z",
+      "toAgentIds": [],
+      "actor": {
+        "type": "user",
+        "id": "local-user"
+      },
+      "content": "已授权在隔离环境运行 test:unit 测试并保存会话测试报告。",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "system_notice",
+        "idempotencyKey": "74b4be31-0607-4e27-a945-da801a7d8cbe",
+        "payload": {
+          "request": {
+            "action": "grant",
+            "script": "test:unit",
+            "dataEpoch": "af84a1dc-dce0-4f61-8b97-d914945376a1",
+            "expectedBindingHash": "aa54ea79cf46359694cadd92b5915b28e5ab4923ed150ede43fb28533d1d7756",
+            "expectedGrantRevision": 2,
+            "idempotencyKey": "74b4be31-0607-4e27-a945-da801a7d8cbe",
+            "writeReport": true
+          },
+          "grantRevision": 3
+        }
+      }
+    },
+    {
+      "id": "e4223163-fc69-4cde-bc61-417419b7a4bc",
+      "sessionId": "19970169-0b3f-4a9b-9d78-31cc46bfcc64",
+      "type": "intent_test_authority_changed",
+      "createdAt": "2026-10-19T17:43:40.256Z",
+      "toAgentIds": [],
+      "actor": {
+        "type": "user",
+        "id": "local-user"
+      },
+      "content": "已授权在隔离环境运行 test:unit 测试。",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "system_notice",
+        "idempotencyKey": "bba68dbf-5757-4f2c-8d9d-e55bf3a0a67c",
+        "payload": {
+          "request": {
+            "action": "grant",
+            "script": "test:unit",
+            "dataEpoch": "af84a1dc-dce0-4f61-8b97-d914945376a1",
+            "expectedBindingHash": "aa54ea79cf46359694cadd92b5915b28e5ab4923ed150ede43fb28533d1d7756",
+            "expectedGrantRevision": 3,
+            "idempotencyKey": "bba68dbf-5757-4f2c-8d9d-e55bf3a0a67c"
+          },
+          "grantRevision": 4
+        }
+      }
+    }
+  ],
+  "testInvocations": []
+}

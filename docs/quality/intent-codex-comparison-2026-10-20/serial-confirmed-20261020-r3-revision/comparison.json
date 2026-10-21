@@ -1,0 +1,116 @@
+{
+  "label": "serial-confirmed-20261020-r3",
+  "groups": {
+    "diagnostic": {
+      "before": {
+        "total": 20,
+        "passed": 13,
+        "valid": 20,
+        "providerCalls": 21,
+        "cooldownRetries": 0,
+        "waitMs": 0,
+        "noProvider": [],
+        "outcomes": {
+          "needs_clarification": 11,
+          "blocked": 3,
+          "applicable": 5,
+          "rejected": 1
+        }
+      },
+      "after": {
+        "total": 20,
+        "passed": 20,
+        "valid": 20,
+        "providerCalls": 20,
+        "cooldownRetries": 0,
+        "waitMs": 0,
+        "noProvider": [],
+        "outcomes": {
+          "needs_clarification": 12,
+          "blocked": 3,
+          "applicable": 5
+        }
+      }
+    },
+    "holdout": {
+      "before": {
+        "total": 12,
+        "passed": 6,
+        "valid": 12,
+        "providerCalls": 12,
+        "cooldownRetries": 0,
+        "waitMs": 0,
+        "noProvider": [],
+        "outcomes": {
+          "needs_clarification": 6,
+          "blocked": 2,
+          "applicable": 4
+        }
+      },
+      "after": {
+        "total": 12,
+        "passed": 9,
+        "valid": 12,
+        "providerCalls": 12,
+        "cooldownRetries": 0,
+        "waitMs": 0,
+        "noProvider": [],
+        "outcomes": {
+          "needs_clarification": 6,
+          "blocked": 1,
+          "applicable": 5
+        }
+      }
+    },
+    "budget": {
+      "before": {
+        "total": 1,
+        "passed": 1,
+        "valid": 1,
+        "providerCalls": 1,
+        "cooldownRetries": 0,
+        "waitMs": 0,
+        "noProvider": [],
+        "outcomes": {
+          "blocked": 1
+        }
+      },
+      "after": {
+        "total": 1,
+        "passed": 1,
+        "valid": 1,
+        "providerCalls": 1,
+        "cooldownRetries": 0,
+        "waitMs": 0,
+        "noProvider": [],
+        "outcomes": {
+          "blocked": 1
+        }
+      }
+    }
+  },
+  "regressed": [],
+  "connections": [],
+  "providerErrors": [
+    {
+      "side": "before",
+      "file": "serial-confirmed-20261020-r3-before-2/provider-4.json",
+      "error": "Error: CODEX_EVALUATION_TIMEOUT"
+    }
+  ],
+  "builds": {
+    "baseline": "88d1b375d3f1679e603e141581e032442511c8091a62072b3a152e4c7e6f13ca",
+    "final": "5d3586dc10f1957c7ed2f3b876acc26e8d61aebd4e26ff8a27bfc21d959bcab2",
+    "frozenSource": "8abc792ae92b062ca8bdf1f738c819184a4007de8823b2376caf5c0c15f5a821",
+    "startedAt": "2026-10-20T05:48:16.469Z"
+  },
+  "restore": {
+    "restored": true,
+    "actualHash": "5d3586dc10f1957c7ed2f3b876acc26e8d61aebd4e26ff8a27bfc21d959bcab2",
+    "expectedHash": "5d3586dc10f1957c7ed2f3b876acc26e8d61aebd4e26ff8a27bfc21d959bcab2",
+    "sourceUnchanged": true,
+    "finishedAt": "2026-10-20T06:10:30.476Z"
+  },
+  "casesHash": "3d8dd5d3dc5aa5a4faa5344050cdf23ce1947c402e1fb3539532a721292e6772",
+  "configurationUnchanged": true
+}

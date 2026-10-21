@@ -1,0 +1,63 @@
+{
+  "executedAt": "2026-10-19T20:44:00.068Z",
+  "method": "Actual Sessions HTTP/Nest/Generic LLM/File with deterministic provider and process restart; not model accuracy",
+  "results": [
+    {
+      "id": "BR01",
+      "passed": true,
+      "actual": {
+        "version": 2,
+        "constraints": [
+          "超时为 10 分钟"
+        ]
+      }
+    },
+    {
+      "id": "BR02",
+      "passed": true,
+      "actual": {
+        "queuedWithoutBudget": true,
+        "status": "PAUSED",
+        "previous": "REVISING_BRIEF"
+      }
+    },
+    {
+      "id": "BR03",
+      "passed": true,
+      "actual": {
+        "version": 3,
+        "constraints": [
+          "超时改为 30 分钟"
+        ],
+        "historicalConstraints": [
+          "超时为 10 分钟"
+        ],
+        "noTasks": true
+      }
+    },
+    {
+      "id": "BR04",
+      "passed": true,
+      "actual": {
+        "oldConfirmationStatus": 409
+      }
+    },
+    {
+      "id": "BR05",
+      "passed": true,
+      "actual": {
+        "realRestart": true,
+        "noRepeatedCalls": true,
+        "briefVersions": 3
+      }
+    },
+    {
+      "id": "BR06",
+      "passed": true,
+      "actual": {
+        "confirmedVersion": 3,
+        "noTasks": true
+      }
+    }
+  ]
+}

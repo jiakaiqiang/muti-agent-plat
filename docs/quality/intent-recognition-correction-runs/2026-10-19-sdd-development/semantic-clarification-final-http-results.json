@@ -1,0 +1,1266 @@
+{
+  "executedAt": "2026-10-19T17:10:15.421Z",
+  "method": "real localhost Nest HTTP and File persistence with deterministic classifier; no model accuracy claim",
+  "results": [
+    {
+      "id": "SC01",
+      "passed": true,
+      "actual": {
+        "noFakeTask": true,
+        "card": {
+          "id": "semantic-clarification:0d1b9623-1043-41c2-89d9-e006c6a00e14:6",
+          "sessionId": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc",
+          "type": "intent_clarification_required",
+          "actor": {
+            "type": "system",
+            "id": "intent-plan"
+          },
+          "toAgentIds": [],
+          "createdAt": "2026-10-19T17:10:10.771Z",
+          "content": "请确认这条消息与现有任务的关系。选择关系不会授予执行权限。",
+          "metadata": {
+            "schemaVersion": "0.1",
+            "renderAs": "confirmation_card",
+            "payload": {
+              "confirmationId": "semantic-clarification:0d1b9623-1043-41c2-89d9-e006c6a00e14:6",
+              "confirmationType": "intent_routing",
+              "reason": "intent_relation_clarification",
+              "routingId": "0d1b9623-1043-41c2-89d9-e006c6a00e14",
+              "routingRevision": 6,
+              "status": "pending",
+              "options": [
+                {
+                  "key": "independent_new",
+                  "label": "创建独立任务"
+                }
+              ],
+              "dataEpoch": "9ebcd7b9-4661-4a42-ac70-0a25acf6a749",
+              "sessionGeneration": 1,
+              "inheritedDecisionIds": [],
+              "inheritedArtifactIds": [],
+              "inheritanceSummary": "相关任务不继承旧约束或产物。",
+              "title": "确认任务关系",
+              "description": "处理天气查询需求\n相关任务不继承旧约束或产物。",
+              "sourceEventId": "7c0a3ec9-a49b-4959-957d-27b229cb1f6d",
+              "expiresAt": "2026-10-20T17:10:10.771Z",
+              "businessFingerprint": "8793e4e0e4c394230fdbf25eb40a6d623bfa154875c24d0c901f7f92bfd0bc61"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "SC02",
+      "passed": true,
+      "actual": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "CLARIFICATION_CONFIRMATION_MISMATCH",
+            "message": "该确认卡不属于当前消息或已不可用，请刷新群聊。（CLARIFICATION_CONFIRMATION_MISMATCH）"
+          },
+          "requestId": "7257d7b9-5e27-4946-8006-24a1434cf111"
+        }
+      }
+    },
+    {
+      "id": "SC03",
+      "passed": true,
+      "actual": {
+        "resolved": {
+          "status": 200,
+          "body": {
+            "data": {
+              "routing": {
+                "id": "0d1b9623-1043-41c2-89d9-e006c6a00e14",
+                "sessionId": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc",
+                "sourceEventId": "7c0a3ec9-a49b-4959-957d-27b229cb1f6d",
+                "semanticContractVersion": "intent-understanding-v1",
+                "sessionSeq": 1,
+                "semanticIngress": {
+                  "dataEpoch": "9ebcd7b9-4661-4a42-ac70-0a25acf6a749",
+                  "sessionGeneration": 1,
+                  "entryPoint": "first_message"
+                },
+                "routingRevision": 7,
+                "status": "ROUTED",
+                "policyVersion": "intent-policy-v1",
+                "rolloutMode": "enforce_all_current_epoch",
+                "reasonCodes": [],
+                "retryCount": 0,
+                "idempotencyKey": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc:7c0a3ec9-a49b-4959-957d-27b229cb1f6d:intent-understanding-v1",
+                "createdAt": "2026-10-19T17:10:10.688Z",
+                "updatedAt": "2026-10-19T17:10:10.872Z",
+                "snapshotId": "62fb74ef-a635-4052-be27-c6a875b3dee6",
+                "semanticProposal": {
+                  "contractVersion": "intent-understanding-v1",
+                  "dataEpoch": "9ebcd7b9-4661-4a42-ac70-0a25acf6a749",
+                  "sessionGeneration": 1,
+                  "snapshotId": "62fb74ef-a635-4052-be27-c6a875b3dee6",
+                  "understanding": {
+                    "schemaVersion": "1.0",
+                    "kind": "intent_understanding",
+                    "semanticContractVersion": "intent-understanding-v1",
+                    "segments": [
+                      {
+                        "localKey": "goal",
+                        "dialogueAct": "command",
+                        "goal": "处理天气查询需求",
+                        "scopeRelation": "initial_requirement",
+                        "suggestedAction": "create_initial_work_item",
+                        "contextPolicy": "clean_task_context",
+                        "target": {
+                          "workItemId": null,
+                          "decisionIds": [],
+                          "artifactIds": [],
+                          "agentIds": [],
+                          "confirmationId": null,
+                          "correctionOfRoutingId": null
+                        },
+                        "correction": null,
+                        "requestedEffects": [],
+                        "prohibitions": [],
+                        "dependencies": [],
+                        "evidence": [
+                          {
+                            "refId": "request",
+                            "sourceEventId": "7c0a3ec9-a49b-4959-957d-27b229cb1f6d",
+                            "start": 0,
+                            "end": 8,
+                            "quote": "处理天气查询需求"
+                          }
+                        ]
+                      }
+                    ],
+                    "missingFields": [],
+                    "ambiguityReasons": [],
+                    "modelConfidence": null
+                  }
+                },
+                "classificationDeadlineAt": "2026-10-19T17:12:10.712Z",
+                "invocationId": "b7807f07-21b9-4802-b14b-74e17bd757d7",
+                "classificationAttempts": 1,
+                "attemptLog": [
+                  {
+                    "invocationId": "b7807f07-21b9-4802-b14b-74e17bd757d7",
+                    "attempt": 1,
+                    "reason": "classification",
+                    "startedAt": "2026-10-19T17:10:10.712Z"
+                  }
+                ],
+                "semanticPlan": {
+                  "planId": "224492b3-f2dd-43d1-b713-fa515b85ec2a",
+                  "routingId": "0d1b9623-1043-41c2-89d9-e006c6a00e14",
+                  "routingRevision": 7,
+                  "intentRevision": 2,
+                  "sourceEventId": "7c0a3ec9-a49b-4959-957d-27b229cb1f6d",
+                  "snapshotId": "62fb74ef-a635-4052-be27-c6a875b3dee6",
+                  "businessFingerprint": "8793e4e0e4c394230fdbf25eb40a6d623bfa154875c24d0c901f7f92bfd0bc61",
+                  "policyVersion": "intent-policy-v1",
+                  "outcome": "applicable",
+                  "steps": [
+                    {
+                      "stepId": "ba5501b8-1dd3-4623-b27d-adea0b694656",
+                      "segmentId": "2bbf9078-b9cf-42f9-9784-830db7b08351",
+                      "segmentKey": "goal",
+                      "action": "create_initial_work_item",
+                      "goal": "处理天气查询需求",
+                      "target": {
+                        "workItemId": "77f9dc40-f534-4253-a454-80617b0c30d8",
+                        "decisionIds": [],
+                        "artifactIds": [],
+                        "agentIds": [],
+                        "confirmationId": null,
+                        "correctionOfRoutingId": null
+                      },
+                      "contextPolicy": "clean_task_context",
+                      "correction": null,
+                      "dependencies": [],
+                      "evidence": [
+                        {
+                          "refId": "request",
+                          "sourceEventId": "7c0a3ec9-a49b-4959-957d-27b229cb1f6d",
+                          "start": 0,
+                          "end": 8,
+                          "quote": "处理天气查询需求"
+                        }
+                      ],
+                      "expectedSessionStatus": "AGENT_DISCUSSING",
+                      "effectScope": {
+                        "effects": [],
+                        "prohibitions": [],
+                        "grantIds": [],
+                        "scopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8"
+                      },
+                      "executionBinding": {
+                        "routingId": "0d1b9623-1043-41c2-89d9-e006c6a00e14",
+                        "intentRevision": 2,
+                        "requirementRevision": 1,
+                        "executionEpoch": 1,
+                        "sessionGeneration": 1,
+                        "effectScopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8",
+                        "decisionSetHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                      },
+                      "idempotencyKey": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc:7c0a3ec9-a49b-4959-957d-27b229cb1f6d:2:2bbf9078-b9cf-42f9-9784-830db7b08351:ba5501b8-1dd3-4623-b27d-adea0b694656"
+                    }
+                  ],
+                  "validation": {
+                    "schemaValid": true,
+                    "referencesValid": true,
+                    "relationActionValid": true,
+                    "stateValid": true,
+                    "authorizationValid": true,
+                    "snapshotCurrent": true,
+                    "errorCodes": [],
+                    "validationScore": 1
+                  }
+                },
+                "semanticClarification": {
+                  "request": {
+                    "contractVersion": "intent-clarify-v1",
+                    "confirmationId": "semantic-clarification:0d1b9623-1043-41c2-89d9-e006c6a00e14:6",
+                    "expectedRoutingRevision": 6,
+                    "choice": "independent_new",
+                    "idempotencyKey": "choice:semantic-clarification:0d1b9623-1043-41c2-89d9-e006c6a00e14:6:independent_new"
+                  },
+                  "canonicalChoiceHash": "9d4c9e604192a010472f183cb97bb14cf338b72a0950219a7783c41ef7ea5264",
+                  "actorId": "local-user",
+                  "dataEpoch": "9ebcd7b9-4661-4a42-ac70-0a25acf6a749",
+                  "sessionGeneration": 1,
+                  "status": "completed",
+                  "attemptsUsed": 1,
+                  "invocationIds": [
+                    "5feaa217-bf6a-4bda-a750-eb86da2babf6"
+                  ],
+                  "deadlineAt": "2026-10-19T17:12:10.815Z",
+                  "ownerId": "9b756926-3c8f-4564-809f-2fc48e3557ee",
+                  "leaseExpiresAt": "2026-10-19T17:10:40.819Z",
+                  "snapshotId": "62fb74ef-a635-4052-be27-c6a875b3dee6",
+                  "understanding": {
+                    "schemaVersion": "1.0",
+                    "kind": "intent_understanding",
+                    "semanticContractVersion": "intent-understanding-v1",
+                    "segments": [
+                      {
+                        "localKey": "goal",
+                        "dialogueAct": "command",
+                        "goal": "处理天气查询需求",
+                        "scopeRelation": "initial_requirement",
+                        "suggestedAction": "create_initial_work_item",
+                        "contextPolicy": "clean_task_context",
+                        "target": {
+                          "workItemId": null,
+                          "decisionIds": [],
+                          "artifactIds": [],
+                          "agentIds": [],
+                          "confirmationId": null,
+                          "correctionOfRoutingId": null
+                        },
+                        "correction": null,
+                        "requestedEffects": [],
+                        "prohibitions": [],
+                        "dependencies": [],
+                        "evidence": [
+                          {
+                            "refId": "request",
+                            "sourceEventId": "7c0a3ec9-a49b-4959-957d-27b229cb1f6d",
+                            "start": 0,
+                            "end": 8,
+                            "quote": "处理天气查询需求"
+                          }
+                        ]
+                      }
+                    ],
+                    "missingFields": [],
+                    "ambiguityReasons": [],
+                    "modelConfidence": null
+                  }
+                },
+                "deferredActivation": false,
+                "effectiveIntentRevision": 2,
+                "currentIntentRevision": 2,
+                "executionEpoch": 1,
+                "actionStatus": "applied",
+                "resolution": {
+                  "confirmationId": "semantic-clarification:0d1b9623-1043-41c2-89d9-e006c6a00e14:6",
+                  "choice": "independent_new",
+                  "canonicalChoiceHash": "9d4c9e604192a010472f183cb97bb14cf338b72a0950219a7783c41ef7ea5264",
+                  "idempotencyKey": "choice:semantic-clarification:0d1b9623-1043-41c2-89d9-e006c6a00e14:6:independent_new",
+                  "resolvedRevision": 7,
+                  "resultWorkItemId": "77f9dc40-f534-4253-a454-80617b0c30d8",
+                  "actorId": "local-user",
+                  "resolvedAt": "2026-10-19T17:10:10.872Z"
+                }
+              },
+              "plan": {
+                "planId": "224492b3-f2dd-43d1-b713-fa515b85ec2a",
+                "routingId": "0d1b9623-1043-41c2-89d9-e006c6a00e14",
+                "routingRevision": 7,
+                "intentRevision": 2,
+                "sourceEventId": "7c0a3ec9-a49b-4959-957d-27b229cb1f6d",
+                "snapshotId": "62fb74ef-a635-4052-be27-c6a875b3dee6",
+                "businessFingerprint": "8793e4e0e4c394230fdbf25eb40a6d623bfa154875c24d0c901f7f92bfd0bc61",
+                "policyVersion": "intent-policy-v1",
+                "outcome": "applicable",
+                "steps": [
+                  {
+                    "stepId": "ba5501b8-1dd3-4623-b27d-adea0b694656",
+                    "segmentId": "2bbf9078-b9cf-42f9-9784-830db7b08351",
+                    "segmentKey": "goal",
+                    "action": "create_initial_work_item",
+                    "goal": "处理天气查询需求",
+                    "target": {
+                      "workItemId": "77f9dc40-f534-4253-a454-80617b0c30d8",
+                      "decisionIds": [],
+                      "artifactIds": [],
+                      "agentIds": [],
+                      "confirmationId": null,
+                      "correctionOfRoutingId": null
+                    },
+                    "contextPolicy": "clean_task_context",
+                    "correction": null,
+                    "dependencies": [],
+                    "evidence": [
+                      {
+                        "refId": "request",
+                        "sourceEventId": "7c0a3ec9-a49b-4959-957d-27b229cb1f6d",
+                        "start": 0,
+                        "end": 8,
+                        "quote": "处理天气查询需求"
+                      }
+                    ],
+                    "expectedSessionStatus": "AGENT_DISCUSSING",
+                    "effectScope": {
+                      "effects": [],
+                      "prohibitions": [],
+                      "grantIds": [],
+                      "scopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8"
+                    },
+                    "executionBinding": {
+                      "routingId": "0d1b9623-1043-41c2-89d9-e006c6a00e14",
+                      "intentRevision": 2,
+                      "requirementRevision": 1,
+                      "executionEpoch": 1,
+                      "sessionGeneration": 1,
+                      "effectScopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8",
+                      "decisionSetHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                    },
+                    "idempotencyKey": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc:7c0a3ec9-a49b-4959-957d-27b229cb1f6d:2:2bbf9078-b9cf-42f9-9784-830db7b08351:ba5501b8-1dd3-4623-b27d-adea0b694656"
+                  }
+                ],
+                "validation": {
+                  "schemaValid": true,
+                  "referencesValid": true,
+                  "relationActionValid": true,
+                  "stateValid": true,
+                  "authorizationValid": true,
+                  "snapshotCurrent": true,
+                  "errorCodes": [],
+                  "validationScore": 1
+                }
+              },
+              "idempotentReplay": false,
+              "workItem": {
+                "id": "77f9dc40-f534-4253-a454-80617b0c30d8",
+                "sessionId": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc",
+                "title": "处理天气查询需求",
+                "goal": "处理天气查询需求",
+                "status": "OPEN",
+                "revision": 1,
+                "requirementRevision": 1,
+                "executionEpoch": 1,
+                "createdFromEventId": "7c0a3ec9-a49b-4959-957d-27b229cb1f6d",
+                "inheritedDecisionIds": [],
+                "inheritedArtifactIds": [],
+                "createdAt": "2026-10-19T17:10:10.872Z",
+                "updatedAt": "2026-10-19T17:10:10.872Z"
+              }
+            },
+            "requestId": "f29b5bd9-d40f-4b5f-8cdc-9be2e145aaf5"
+          }
+        },
+        "preservedHistory": true,
+        "noFollowUp": true
+      }
+    },
+    {
+      "id": "SC04",
+      "passed": true,
+      "actual": {
+        "status": 200,
+        "body": {
+          "data": {
+            "routing": {
+              "id": "0d1b9623-1043-41c2-89d9-e006c6a00e14",
+              "sessionId": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc",
+              "sourceEventId": "7c0a3ec9-a49b-4959-957d-27b229cb1f6d",
+              "semanticContractVersion": "intent-understanding-v1",
+              "sessionSeq": 1,
+              "semanticIngress": {
+                "dataEpoch": "9ebcd7b9-4661-4a42-ac70-0a25acf6a749",
+                "sessionGeneration": 1,
+                "entryPoint": "first_message"
+              },
+              "routingRevision": 7,
+              "status": "ROUTED",
+              "policyVersion": "intent-policy-v1",
+              "rolloutMode": "enforce_all_current_epoch",
+              "reasonCodes": [],
+              "retryCount": 0,
+              "idempotencyKey": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc:7c0a3ec9-a49b-4959-957d-27b229cb1f6d:intent-understanding-v1",
+              "createdAt": "2026-10-19T17:10:10.688Z",
+              "updatedAt": "2026-10-19T17:10:10.872Z",
+              "snapshotId": "62fb74ef-a635-4052-be27-c6a875b3dee6",
+              "semanticProposal": {
+                "contractVersion": "intent-understanding-v1",
+                "dataEpoch": "9ebcd7b9-4661-4a42-ac70-0a25acf6a749",
+                "sessionGeneration": 1,
+                "snapshotId": "62fb74ef-a635-4052-be27-c6a875b3dee6",
+                "understanding": {
+                  "schemaVersion": "1.0",
+                  "kind": "intent_understanding",
+                  "semanticContractVersion": "intent-understanding-v1",
+                  "segments": [
+                    {
+                      "localKey": "goal",
+                      "dialogueAct": "command",
+                      "goal": "处理天气查询需求",
+                      "scopeRelation": "initial_requirement",
+                      "suggestedAction": "create_initial_work_item",
+                      "contextPolicy": "clean_task_context",
+                      "target": {
+                        "workItemId": null,
+                        "decisionIds": [],
+                        "artifactIds": [],
+                        "agentIds": [],
+                        "confirmationId": null,
+                        "correctionOfRoutingId": null
+                      },
+                      "correction": null,
+                      "requestedEffects": [],
+                      "prohibitions": [],
+                      "dependencies": [],
+                      "evidence": [
+                        {
+                          "refId": "request",
+                          "sourceEventId": "7c0a3ec9-a49b-4959-957d-27b229cb1f6d",
+                          "start": 0,
+                          "end": 8,
+                          "quote": "处理天气查询需求"
+                        }
+                      ]
+                    }
+                  ],
+                  "missingFields": [],
+                  "ambiguityReasons": [],
+                  "modelConfidence": null
+                }
+              },
+              "classificationDeadlineAt": "2026-10-19T17:12:10.712Z",
+              "invocationId": "b7807f07-21b9-4802-b14b-74e17bd757d7",
+              "classificationAttempts": 1,
+              "attemptLog": [
+                {
+                  "invocationId": "b7807f07-21b9-4802-b14b-74e17bd757d7",
+                  "attempt": 1,
+                  "reason": "classification",
+                  "startedAt": "2026-10-19T17:10:10.712Z"
+                }
+              ],
+              "semanticPlan": {
+                "planId": "224492b3-f2dd-43d1-b713-fa515b85ec2a",
+                "routingId": "0d1b9623-1043-41c2-89d9-e006c6a00e14",
+                "routingRevision": 7,
+                "intentRevision": 2,
+                "sourceEventId": "7c0a3ec9-a49b-4959-957d-27b229cb1f6d",
+                "snapshotId": "62fb74ef-a635-4052-be27-c6a875b3dee6",
+                "businessFingerprint": "8793e4e0e4c394230fdbf25eb40a6d623bfa154875c24d0c901f7f92bfd0bc61",
+                "policyVersion": "intent-policy-v1",
+                "outcome": "applicable",
+                "steps": [
+                  {
+                    "stepId": "ba5501b8-1dd3-4623-b27d-adea0b694656",
+                    "segmentId": "2bbf9078-b9cf-42f9-9784-830db7b08351",
+                    "segmentKey": "goal",
+                    "action": "create_initial_work_item",
+                    "goal": "处理天气查询需求",
+                    "target": {
+                      "workItemId": "77f9dc40-f534-4253-a454-80617b0c30d8",
+                      "decisionIds": [],
+                      "artifactIds": [],
+                      "agentIds": [],
+                      "confirmationId": null,
+                      "correctionOfRoutingId": null
+                    },
+                    "contextPolicy": "clean_task_context",
+                    "correction": null,
+                    "dependencies": [],
+                    "evidence": [
+                      {
+                        "refId": "request",
+                        "sourceEventId": "7c0a3ec9-a49b-4959-957d-27b229cb1f6d",
+                        "start": 0,
+                        "end": 8,
+                        "quote": "处理天气查询需求"
+                      }
+                    ],
+                    "expectedSessionStatus": "AGENT_DISCUSSING",
+                    "effectScope": {
+                      "effects": [],
+                      "prohibitions": [],
+                      "grantIds": [],
+                      "scopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8"
+                    },
+                    "executionBinding": {
+                      "routingId": "0d1b9623-1043-41c2-89d9-e006c6a00e14",
+                      "intentRevision": 2,
+                      "requirementRevision": 1,
+                      "executionEpoch": 1,
+                      "sessionGeneration": 1,
+                      "effectScopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8",
+                      "decisionSetHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                    },
+                    "idempotencyKey": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc:7c0a3ec9-a49b-4959-957d-27b229cb1f6d:2:2bbf9078-b9cf-42f9-9784-830db7b08351:ba5501b8-1dd3-4623-b27d-adea0b694656"
+                  }
+                ],
+                "validation": {
+                  "schemaValid": true,
+                  "referencesValid": true,
+                  "relationActionValid": true,
+                  "stateValid": true,
+                  "authorizationValid": true,
+                  "snapshotCurrent": true,
+                  "errorCodes": [],
+                  "validationScore": 1
+                }
+              },
+              "semanticClarification": {
+                "request": {
+                  "contractVersion": "intent-clarify-v1",
+                  "confirmationId": "semantic-clarification:0d1b9623-1043-41c2-89d9-e006c6a00e14:6",
+                  "expectedRoutingRevision": 6,
+                  "choice": "independent_new",
+                  "idempotencyKey": "choice:semantic-clarification:0d1b9623-1043-41c2-89d9-e006c6a00e14:6:independent_new"
+                },
+                "canonicalChoiceHash": "9d4c9e604192a010472f183cb97bb14cf338b72a0950219a7783c41ef7ea5264",
+                "actorId": "local-user",
+                "dataEpoch": "9ebcd7b9-4661-4a42-ac70-0a25acf6a749",
+                "sessionGeneration": 1,
+                "status": "completed",
+                "attemptsUsed": 1,
+                "invocationIds": [
+                  "5feaa217-bf6a-4bda-a750-eb86da2babf6"
+                ],
+                "deadlineAt": "2026-10-19T17:12:10.815Z",
+                "ownerId": "9b756926-3c8f-4564-809f-2fc48e3557ee",
+                "leaseExpiresAt": "2026-10-19T17:10:40.819Z",
+                "snapshotId": "62fb74ef-a635-4052-be27-c6a875b3dee6",
+                "understanding": {
+                  "schemaVersion": "1.0",
+                  "kind": "intent_understanding",
+                  "semanticContractVersion": "intent-understanding-v1",
+                  "segments": [
+                    {
+                      "localKey": "goal",
+                      "dialogueAct": "command",
+                      "goal": "处理天气查询需求",
+                      "scopeRelation": "initial_requirement",
+                      "suggestedAction": "create_initial_work_item",
+                      "contextPolicy": "clean_task_context",
+                      "target": {
+                        "workItemId": null,
+                        "decisionIds": [],
+                        "artifactIds": [],
+                        "agentIds": [],
+                        "confirmationId": null,
+                        "correctionOfRoutingId": null
+                      },
+                      "correction": null,
+                      "requestedEffects": [],
+                      "prohibitions": [],
+                      "dependencies": [],
+                      "evidence": [
+                        {
+                          "refId": "request",
+                          "sourceEventId": "7c0a3ec9-a49b-4959-957d-27b229cb1f6d",
+                          "start": 0,
+                          "end": 8,
+                          "quote": "处理天气查询需求"
+                        }
+                      ]
+                    }
+                  ],
+                  "missingFields": [],
+                  "ambiguityReasons": [],
+                  "modelConfidence": null
+                }
+              },
+              "deferredActivation": false,
+              "effectiveIntentRevision": 2,
+              "currentIntentRevision": 2,
+              "executionEpoch": 1,
+              "actionStatus": "applied",
+              "resolution": {
+                "confirmationId": "semantic-clarification:0d1b9623-1043-41c2-89d9-e006c6a00e14:6",
+                "choice": "independent_new",
+                "canonicalChoiceHash": "9d4c9e604192a010472f183cb97bb14cf338b72a0950219a7783c41ef7ea5264",
+                "idempotencyKey": "choice:semantic-clarification:0d1b9623-1043-41c2-89d9-e006c6a00e14:6:independent_new",
+                "resolvedRevision": 7,
+                "resultWorkItemId": "77f9dc40-f534-4253-a454-80617b0c30d8",
+                "actorId": "local-user",
+                "resolvedAt": "2026-10-19T17:10:10.872Z"
+              }
+            },
+            "plan": {
+              "planId": "224492b3-f2dd-43d1-b713-fa515b85ec2a",
+              "routingId": "0d1b9623-1043-41c2-89d9-e006c6a00e14",
+              "routingRevision": 7,
+              "intentRevision": 2,
+              "sourceEventId": "7c0a3ec9-a49b-4959-957d-27b229cb1f6d",
+              "snapshotId": "62fb74ef-a635-4052-be27-c6a875b3dee6",
+              "businessFingerprint": "8793e4e0e4c394230fdbf25eb40a6d623bfa154875c24d0c901f7f92bfd0bc61",
+              "policyVersion": "intent-policy-v1",
+              "outcome": "applicable",
+              "steps": [
+                {
+                  "stepId": "ba5501b8-1dd3-4623-b27d-adea0b694656",
+                  "segmentId": "2bbf9078-b9cf-42f9-9784-830db7b08351",
+                  "segmentKey": "goal",
+                  "action": "create_initial_work_item",
+                  "goal": "处理天气查询需求",
+                  "target": {
+                    "workItemId": "77f9dc40-f534-4253-a454-80617b0c30d8",
+                    "decisionIds": [],
+                    "artifactIds": [],
+                    "agentIds": [],
+                    "confirmationId": null,
+                    "correctionOfRoutingId": null
+                  },
+                  "contextPolicy": "clean_task_context",
+                  "correction": null,
+                  "dependencies": [],
+                  "evidence": [
+                    {
+                      "refId": "request",
+                      "sourceEventId": "7c0a3ec9-a49b-4959-957d-27b229cb1f6d",
+                      "start": 0,
+                      "end": 8,
+                      "quote": "处理天气查询需求"
+                    }
+                  ],
+                  "expectedSessionStatus": "AGENT_DISCUSSING",
+                  "effectScope": {
+                    "effects": [],
+                    "prohibitions": [],
+                    "grantIds": [],
+                    "scopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8"
+                  },
+                  "executionBinding": {
+                    "routingId": "0d1b9623-1043-41c2-89d9-e006c6a00e14",
+                    "intentRevision": 2,
+                    "requirementRevision": 1,
+                    "executionEpoch": 1,
+                    "sessionGeneration": 1,
+                    "effectScopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8",
+                    "decisionSetHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                  },
+                  "idempotencyKey": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc:7c0a3ec9-a49b-4959-957d-27b229cb1f6d:2:2bbf9078-b9cf-42f9-9784-830db7b08351:ba5501b8-1dd3-4623-b27d-adea0b694656"
+                }
+              ],
+              "validation": {
+                "schemaValid": true,
+                "referencesValid": true,
+                "relationActionValid": true,
+                "stateValid": true,
+                "authorizationValid": true,
+                "snapshotCurrent": true,
+                "errorCodes": [],
+                "validationScore": 1
+              }
+            },
+            "idempotentReplay": true,
+            "workItem": {
+              "id": "77f9dc40-f534-4253-a454-80617b0c30d8",
+              "sessionId": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc",
+              "title": "处理天气查询需求",
+              "goal": "处理天气查询需求",
+              "status": "OPEN",
+              "revision": 1,
+              "requirementRevision": 1,
+              "executionEpoch": 1,
+              "createdFromEventId": "7c0a3ec9-a49b-4959-957d-27b229cb1f6d",
+              "inheritedDecisionIds": [],
+              "inheritedArtifactIds": [],
+              "createdAt": "2026-10-19T17:10:10.872Z",
+              "updatedAt": "2026-10-19T17:10:10.872Z"
+            }
+          },
+          "requestId": "5d5e88a7-dc7d-44ee-ada7-eaef4a7ae638"
+        }
+      }
+    },
+    {
+      "id": "SC05",
+      "passed": true,
+      "actual": {
+        "related": {
+          "status": 200,
+          "body": {
+            "data": {
+              "routing": {
+                "id": "661de1c1-8641-4740-9205-973b1397851b",
+                "sessionId": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc",
+                "sourceEventId": "4355a60f-f0c0-4c6f-883e-477115151082",
+                "semanticContractVersion": "intent-understanding-v1",
+                "sessionSeq": 2,
+                "semanticIngress": {
+                  "dataEpoch": "9ebcd7b9-4661-4a42-ac70-0a25acf6a749",
+                  "sessionGeneration": 1,
+                  "entryPoint": "message"
+                },
+                "routingRevision": 7,
+                "status": "ROUTED",
+                "policyVersion": "intent-policy-v1",
+                "rolloutMode": "enforce_all_current_epoch",
+                "reasonCodes": [],
+                "retryCount": 0,
+                "idempotencyKey": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc:4355a60f-f0c0-4c6f-883e-477115151082:intent-understanding-v1",
+                "createdAt": "2026-10-19T17:10:10.908Z",
+                "updatedAt": "2026-10-19T17:10:11.110Z",
+                "snapshotId": "24f83376-7f94-485b-9119-7e3bfa01d262",
+                "semanticProposal": {
+                  "contractVersion": "intent-understanding-v1",
+                  "dataEpoch": "9ebcd7b9-4661-4a42-ac70-0a25acf6a749",
+                  "sessionGeneration": 1,
+                  "snapshotId": "24f83376-7f94-485b-9119-7e3bfa01d262",
+                  "understanding": {
+                    "schemaVersion": "1.0",
+                    "kind": "intent_understanding",
+                    "semanticContractVersion": "intent-understanding-v1",
+                    "segments": [
+                      {
+                        "localKey": "goal",
+                        "dialogueAct": "command",
+                        "goal": "处理与天气相关的另一项需求",
+                        "scopeRelation": "related_new_requirement",
+                        "suggestedAction": "create_related_work_item",
+                        "contextPolicy": "inherit_selected",
+                        "target": {
+                          "workItemId": "77f9dc40-f534-4253-a454-80617b0c30d8",
+                          "decisionIds": [],
+                          "artifactIds": [],
+                          "agentIds": [],
+                          "confirmationId": null,
+                          "correctionOfRoutingId": null
+                        },
+                        "correction": null,
+                        "requestedEffects": [],
+                        "prohibitions": [],
+                        "dependencies": [],
+                        "evidence": [
+                          {
+                            "refId": "request",
+                            "sourceEventId": "4355a60f-f0c0-4c6f-883e-477115151082",
+                            "start": 0,
+                            "end": 13,
+                            "quote": "处理与天气相关的另一项需求"
+                          }
+                        ]
+                      }
+                    ],
+                    "missingFields": [],
+                    "ambiguityReasons": [],
+                    "modelConfidence": null
+                  }
+                },
+                "classificationDeadlineAt": "2026-10-19T17:12:10.933Z",
+                "invocationId": "564619cc-7916-4929-8cdc-12d116ce26cc",
+                "classificationAttempts": 1,
+                "attemptLog": [
+                  {
+                    "invocationId": "564619cc-7916-4929-8cdc-12d116ce26cc",
+                    "attempt": 1,
+                    "reason": "classification",
+                    "startedAt": "2026-10-19T17:10:10.933Z"
+                  }
+                ],
+                "semanticPlan": {
+                  "planId": "d2f62ed7-0d17-4273-8837-ee0e1d440993",
+                  "routingId": "661de1c1-8641-4740-9205-973b1397851b",
+                  "routingRevision": 7,
+                  "intentRevision": 2,
+                  "sourceEventId": "4355a60f-f0c0-4c6f-883e-477115151082",
+                  "snapshotId": "24f83376-7f94-485b-9119-7e3bfa01d262",
+                  "businessFingerprint": "df58b708507de66a8240894c69b4c671176f95d0a748d9a094ea1760c958d238",
+                  "policyVersion": "intent-policy-v1",
+                  "outcome": "applicable",
+                  "steps": [
+                    {
+                      "stepId": "6263450f-8b2c-4648-ad44-5de81a6a4081",
+                      "segmentId": "dcf2823b-72a0-41e8-a4c5-020cc7f4fc88",
+                      "segmentKey": "goal",
+                      "action": "create_related_work_item",
+                      "goal": "处理与天气相关的另一项需求",
+                      "target": {
+                        "workItemId": "5069936d-af7c-498d-8269-559c5f3d2b37",
+                        "decisionIds": [],
+                        "artifactIds": [],
+                        "agentIds": [],
+                        "confirmationId": null,
+                        "correctionOfRoutingId": null
+                      },
+                      "contextPolicy": "inherit_selected",
+                      "correction": null,
+                      "dependencies": [],
+                      "evidence": [
+                        {
+                          "refId": "request",
+                          "sourceEventId": "4355a60f-f0c0-4c6f-883e-477115151082",
+                          "start": 0,
+                          "end": 13,
+                          "quote": "处理与天气相关的另一项需求"
+                        }
+                      ],
+                      "expectedSessionStatus": "AGENT_DISCUSSING",
+                      "effectScope": {
+                        "effects": [],
+                        "prohibitions": [],
+                        "grantIds": [],
+                        "scopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8"
+                      },
+                      "executionBinding": {
+                        "routingId": "661de1c1-8641-4740-9205-973b1397851b",
+                        "intentRevision": 2,
+                        "requirementRevision": 1,
+                        "executionEpoch": 1,
+                        "sessionGeneration": 1,
+                        "effectScopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8",
+                        "decisionSetHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                      },
+                      "idempotencyKey": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc:4355a60f-f0c0-4c6f-883e-477115151082:2:dcf2823b-72a0-41e8-a4c5-020cc7f4fc88:6263450f-8b2c-4648-ad44-5de81a6a4081"
+                    }
+                  ],
+                  "validation": {
+                    "schemaValid": true,
+                    "referencesValid": true,
+                    "relationActionValid": true,
+                    "stateValid": true,
+                    "authorizationValid": true,
+                    "snapshotCurrent": true,
+                    "errorCodes": [],
+                    "validationScore": 1
+                  }
+                },
+                "semanticClarification": {
+                  "request": {
+                    "contractVersion": "intent-clarify-v1",
+                    "confirmationId": "semantic-clarification:661de1c1-8641-4740-9205-973b1397851b:6",
+                    "expectedRoutingRevision": 6,
+                    "choice": "related_new",
+                    "idempotencyKey": "choice:semantic-clarification:661de1c1-8641-4740-9205-973b1397851b:6:related_new"
+                  },
+                  "canonicalChoiceHash": "ea2e6589290504ffe1177bfd41a9a9a70c150433dc453ee5b32e009a23648b61",
+                  "actorId": "local-user",
+                  "dataEpoch": "9ebcd7b9-4661-4a42-ac70-0a25acf6a749",
+                  "sessionGeneration": 1,
+                  "status": "completed",
+                  "attemptsUsed": 1,
+                  "invocationIds": [
+                    "6b445697-e26e-44d2-a123-e9811e315e61"
+                  ],
+                  "deadlineAt": "2026-10-19T17:12:11.038Z",
+                  "ownerId": "8c47a17b-8cd1-4b90-abf0-805456ce5bca",
+                  "leaseExpiresAt": "2026-10-19T17:10:41.042Z",
+                  "snapshotId": "24f83376-7f94-485b-9119-7e3bfa01d262",
+                  "understanding": {
+                    "schemaVersion": "1.0",
+                    "kind": "intent_understanding",
+                    "semanticContractVersion": "intent-understanding-v1",
+                    "segments": [
+                      {
+                        "localKey": "goal",
+                        "dialogueAct": "command",
+                        "goal": "处理与天气相关的另一项需求",
+                        "scopeRelation": "related_new_requirement",
+                        "suggestedAction": "create_related_work_item",
+                        "contextPolicy": "inherit_selected",
+                        "target": {
+                          "workItemId": "77f9dc40-f534-4253-a454-80617b0c30d8",
+                          "decisionIds": [],
+                          "artifactIds": [],
+                          "agentIds": [],
+                          "confirmationId": null,
+                          "correctionOfRoutingId": null
+                        },
+                        "correction": null,
+                        "requestedEffects": [],
+                        "prohibitions": [],
+                        "dependencies": [],
+                        "evidence": [
+                          {
+                            "refId": "request",
+                            "sourceEventId": "4355a60f-f0c0-4c6f-883e-477115151082",
+                            "start": 0,
+                            "end": 13,
+                            "quote": "处理与天气相关的另一项需求"
+                          }
+                        ]
+                      }
+                    ],
+                    "missingFields": [],
+                    "ambiguityReasons": [],
+                    "modelConfidence": null
+                  }
+                },
+                "deferredActivation": false,
+                "effectiveIntentRevision": 2,
+                "currentIntentRevision": 2,
+                "executionEpoch": 1,
+                "actionStatus": "applied",
+                "resolution": {
+                  "confirmationId": "semantic-clarification:661de1c1-8641-4740-9205-973b1397851b:6",
+                  "choice": "related_new",
+                  "canonicalChoiceHash": "ea2e6589290504ffe1177bfd41a9a9a70c150433dc453ee5b32e009a23648b61",
+                  "idempotencyKey": "choice:semantic-clarification:661de1c1-8641-4740-9205-973b1397851b:6:related_new",
+                  "resolvedRevision": 7,
+                  "resultWorkItemId": "5069936d-af7c-498d-8269-559c5f3d2b37",
+                  "actorId": "local-user",
+                  "resolvedAt": "2026-10-19T17:10:11.110Z"
+                }
+              },
+              "plan": {
+                "planId": "d2f62ed7-0d17-4273-8837-ee0e1d440993",
+                "routingId": "661de1c1-8641-4740-9205-973b1397851b",
+                "routingRevision": 7,
+                "intentRevision": 2,
+                "sourceEventId": "4355a60f-f0c0-4c6f-883e-477115151082",
+                "snapshotId": "24f83376-7f94-485b-9119-7e3bfa01d262",
+                "businessFingerprint": "df58b708507de66a8240894c69b4c671176f95d0a748d9a094ea1760c958d238",
+                "policyVersion": "intent-policy-v1",
+                "outcome": "applicable",
+                "steps": [
+                  {
+                    "stepId": "6263450f-8b2c-4648-ad44-5de81a6a4081",
+                    "segmentId": "dcf2823b-72a0-41e8-a4c5-020cc7f4fc88",
+                    "segmentKey": "goal",
+                    "action": "create_related_work_item",
+                    "goal": "处理与天气相关的另一项需求",
+                    "target": {
+                      "workItemId": "5069936d-af7c-498d-8269-559c5f3d2b37",
+                      "decisionIds": [],
+                      "artifactIds": [],
+                      "agentIds": [],
+                      "confirmationId": null,
+                      "correctionOfRoutingId": null
+                    },
+                    "contextPolicy": "inherit_selected",
+                    "correction": null,
+                    "dependencies": [],
+                    "evidence": [
+                      {
+                        "refId": "request",
+                        "sourceEventId": "4355a60f-f0c0-4c6f-883e-477115151082",
+                        "start": 0,
+                        "end": 13,
+                        "quote": "处理与天气相关的另一项需求"
+                      }
+                    ],
+                    "expectedSessionStatus": "AGENT_DISCUSSING",
+                    "effectScope": {
+                      "effects": [],
+                      "prohibitions": [],
+                      "grantIds": [],
+                      "scopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8"
+                    },
+                    "executionBinding": {
+                      "routingId": "661de1c1-8641-4740-9205-973b1397851b",
+                      "intentRevision": 2,
+                      "requirementRevision": 1,
+                      "executionEpoch": 1,
+                      "sessionGeneration": 1,
+                      "effectScopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8",
+                      "decisionSetHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                    },
+                    "idempotencyKey": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc:4355a60f-f0c0-4c6f-883e-477115151082:2:dcf2823b-72a0-41e8-a4c5-020cc7f4fc88:6263450f-8b2c-4648-ad44-5de81a6a4081"
+                  }
+                ],
+                "validation": {
+                  "schemaValid": true,
+                  "referencesValid": true,
+                  "relationActionValid": true,
+                  "stateValid": true,
+                  "authorizationValid": true,
+                  "snapshotCurrent": true,
+                  "errorCodes": [],
+                  "validationScore": 1
+                }
+              },
+              "idempotentReplay": false,
+              "workItem": {
+                "id": "5069936d-af7c-498d-8269-559c5f3d2b37",
+                "sessionId": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc",
+                "title": "处理与天气相关的另一项需求",
+                "goal": "处理与天气相关的另一项需求",
+                "status": "OPEN",
+                "revision": 1,
+                "requirementRevision": 1,
+                "executionEpoch": 1,
+                "createdFromEventId": "4355a60f-f0c0-4c6f-883e-477115151082",
+                "parentWorkItemId": "77f9dc40-f534-4253-a454-80617b0c30d8",
+                "inheritedDecisionIds": [],
+                "inheritedArtifactIds": [],
+                "createdAt": "2026-10-19T17:10:11.110Z",
+                "updatedAt": "2026-10-19T17:10:11.110Z"
+              }
+            },
+            "requestId": "36a37347-1c03-4124-96c6-a47ad6a7e512"
+          }
+        },
+        "opposite": {
+          "status": 409,
+          "body": {
+            "error": {
+              "code": "CLARIFICATION_CHOICE_CONFLICT",
+              "message": "这张确认卡已经采用了其他选择，已刷新当前结果。如需修改，请纠正原消息。（CLARIFICATION_CHOICE_CONFLICT）"
+            },
+            "requestId": "c9943aa9-5c56-4ac6-a1c6-cda46e6d0386"
+          }
+        },
+        "child": {
+          "id": "5069936d-af7c-498d-8269-559c5f3d2b37",
+          "sessionId": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc",
+          "title": "处理与天气相关的另一项需求",
+          "goal": "处理与天气相关的另一项需求",
+          "status": "OPEN",
+          "revision": 1,
+          "requirementRevision": 1,
+          "executionEpoch": 1,
+          "createdFromEventId": "4355a60f-f0c0-4c6f-883e-477115151082",
+          "parentWorkItemId": "77f9dc40-f534-4253-a454-80617b0c30d8",
+          "inheritedDecisionIds": [],
+          "inheritedArtifactIds": [],
+          "createdAt": "2026-10-19T17:10:11.110Z",
+          "updatedAt": "2026-10-19T17:10:11.110Z"
+        },
+        "displayedInheritance": "处理与天气相关的另一项需求\n相关任务不继承旧约束或产物。"
+      }
+    },
+    {
+      "id": "SC06",
+      "passed": true,
+      "actual": {
+        "expanded": {
+          "status": 409,
+          "body": {
+            "error": {
+              "code": "CLARIFICATION_EFFECT_SCOPE_EXPANDED",
+              "message": "操作未完成，请查看运行日志中的原因（CLARIFICATION_EFFECT_SCOPE_EXPANDED）。"
+            },
+            "requestId": "d89f98f9-0821-4618-b977-661c273d142f"
+          }
+        },
+        "noExecutionAuthorityFromChoice": true
+      }
+    },
+    {
+      "id": "SC07",
+      "passed": true,
+      "actual": {
+        "denied": {
+          "status": 409,
+          "body": {
+            "error": {
+              "code": "INTENT_AUTH_FAILED",
+              "message": "操作未完成，请查看运行日志中的原因（INTENT_AUTH_FAILED）。"
+            },
+            "requestId": "a22267f6-66e6-47f4-abb0-99576d49f027"
+          }
+        },
+        "noAuthenticationRetry": true,
+        "routing": {
+          "id": "346bdb99-372e-4428-941e-fbdd1d9d2c92",
+          "sessionId": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc",
+          "sourceEventId": "2d98bbe2-e47c-4713-a76a-8395a2bcb7d0",
+          "semanticContractVersion": "intent-understanding-v1",
+          "sessionSeq": 4,
+          "semanticIngress": {
+            "dataEpoch": "9ebcd7b9-4661-4a42-ac70-0a25acf6a749",
+            "sessionGeneration": 1,
+            "entryPoint": "message"
+          },
+          "routingRevision": 7,
+          "status": "BLOCKED",
+          "policyVersion": "intent-policy-v1",
+          "rolloutMode": "enforce_all_current_epoch",
+          "reasonCodes": [
+            "INTENT_AUTH_FAILED"
+          ],
+          "retryCount": 0,
+          "idempotencyKey": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc:2d98bbe2-e47c-4713-a76a-8395a2bcb7d0:intent-understanding-v1",
+          "createdAt": "2026-10-19T17:10:11.362Z",
+          "updatedAt": "2026-10-19T17:10:11.585Z",
+          "snapshotId": "5b8ef01b-a370-4ee5-aca2-9bd07546df57",
+          "semanticProposal": {
+            "contractVersion": "intent-understanding-v1",
+            "dataEpoch": "9ebcd7b9-4661-4a42-ac70-0a25acf6a749",
+            "sessionGeneration": 1,
+            "snapshotId": "5b8ef01b-a370-4ee5-aca2-9bd07546df57",
+            "understanding": {
+              "schemaVersion": "1.0",
+              "kind": "intent_understanding",
+              "semanticContractVersion": "intent-understanding-v1",
+              "segments": [
+                {
+                  "localKey": "goal",
+                  "dialogueAct": "command",
+                  "goal": "处理另一项待确认需求",
+                  "scopeRelation": "ambiguous",
+                  "suggestedAction": "clarify",
+                  "contextPolicy": "ask_user",
+                  "target": {
+                    "workItemId": null,
+                    "decisionIds": [],
+                    "artifactIds": [],
+                    "agentIds": [],
+                    "confirmationId": null,
+                    "correctionOfRoutingId": null
+                  },
+                  "correction": null,
+                  "requestedEffects": [],
+                  "prohibitions": [],
+                  "dependencies": [],
+                  "evidence": [
+                    {
+                      "refId": "request",
+                      "sourceEventId": "2d98bbe2-e47c-4713-a76a-8395a2bcb7d0",
+                      "start": 0,
+                      "end": 10,
+                      "quote": "处理另一项待确认需求"
+                    }
+                  ]
+                }
+              ],
+              "missingFields": [],
+              "ambiguityReasons": [],
+              "modelConfidence": null
+            }
+          },
+          "classificationDeadlineAt": "2026-10-19T17:12:11.394Z",
+          "invocationId": "74ec8462-7dbc-41d7-beea-8d8bb377a910",
+          "classificationAttempts": 1,
+          "attemptLog": [
+            {
+              "invocationId": "74ec8462-7dbc-41d7-beea-8d8bb377a910",
+              "attempt": 1,
+              "reason": "classification",
+              "startedAt": "2026-10-19T17:10:11.394Z"
+            }
+          ],
+          "semanticPlan": {
+            "planId": "55b0d7ba-7a92-4fc0-866e-56e4706f33c2",
+            "routingId": "346bdb99-372e-4428-941e-fbdd1d9d2c92",
+            "routingRevision": 6,
+            "intentRevision": 1,
+            "sourceEventId": "2d98bbe2-e47c-4713-a76a-8395a2bcb7d0",
+            "snapshotId": "5b8ef01b-a370-4ee5-aca2-9bd07546df57",
+            "businessFingerprint": "33fbdf466fec92c96d390c794d35d3085888da670fcc961775dae4ea629b8bf9",
+            "policyVersion": "intent-policy-v1",
+            "outcome": "needs_clarification",
+            "steps": [
+              {
+                "stepId": "a37193a8-8fad-42e9-87e1-242dd3b28693",
+                "segmentId": "c9b0ddde-f76e-4389-9dfa-3a05e80dd485",
+                "segmentKey": "goal",
+                "action": "clarify",
+                "goal": "处理另一项待确认需求",
+                "target": {
+                  "workItemId": null,
+                  "decisionIds": [],
+                  "artifactIds": [],
+                  "agentIds": [],
+                  "confirmationId": null,
+                  "correctionOfRoutingId": null
+                },
+                "contextPolicy": "ask_user",
+                "correction": null,
+                "dependencies": [],
+                "evidence": [
+                  {
+                    "refId": "request",
+                    "sourceEventId": "2d98bbe2-e47c-4713-a76a-8395a2bcb7d0",
+                    "start": 0,
+                    "end": 10,
+                    "quote": "处理另一项待确认需求"
+                  }
+                ],
+                "expectedSessionStatus": "AGENT_DISCUSSING",
+                "effectScope": {
+                  "effects": [],
+                  "prohibitions": [],
+                  "grantIds": [],
+                  "scopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8"
+                },
+                "executionBinding": {
+                  "routingId": "346bdb99-372e-4428-941e-fbdd1d9d2c92",
+                  "intentRevision": 1,
+                  "requirementRevision": 1,
+                  "executionEpoch": 1,
+                  "sessionGeneration": 1,
+                  "effectScopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8",
+                  "decisionSetHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "idempotencyKey": "3a584b9a-c970-4eeb-8c0f-54053af2f7bc:2d98bbe2-e47c-4713-a76a-8395a2bcb7d0:1:c9b0ddde-f76e-4389-9dfa-3a05e80dd485:a37193a8-8fad-42e9-87e1-242dd3b28693"
+              }
+            ],
+            "validation": {
+              "schemaValid": true,
+              "referencesValid": true,
+              "relationActionValid": true,
+              "stateValid": true,
+              "authorizationValid": true,
+              "snapshotCurrent": true,
+              "errorCodes": [
+                "INTENT_AMBIGUOUS"
+              ],
+              "validationScore": 0.9
+            }
+          },
+          "semanticClarification": {
+            "request": {
+              "contractVersion": "intent-clarify-v1",
+              "confirmationId": "semantic-clarification:346bdb99-372e-4428-941e-fbdd1d9d2c92:6",
+              "expectedRoutingRevision": 6,
+              "choice": "independent_new",
+              "idempotencyKey": "choice:semantic-clarification:346bdb99-372e-4428-941e-fbdd1d9d2c92:6:independent_new"
+            },
+            "canonicalChoiceHash": "f66cc22e484d3e53fa1ec1a45c409ba02630d1cf5705faeb9fee89be09b80c54",
+            "actorId": "local-user",
+            "dataEpoch": "9ebcd7b9-4661-4a42-ac70-0a25acf6a749",
+            "sessionGeneration": 1,
+            "status": "blocked",
+            "attemptsUsed": 1,
+            "invocationIds": [
+              "6471919a-74cb-40cb-aebd-0083d9c775bd"
+            ],
+            "deadlineAt": "2026-10-19T17:12:11.498Z",
+            "ownerId": "934398da-cba8-45dd-8e50-f83c8ec2aac3",
+            "leaseExpiresAt": "2026-10-19T17:10:41.504Z",
+            "snapshotId": "8a158fa3-85bb-40a7-82b4-bfa3f99fe54f",
+            "failureCode": "INTENT_AUTH_FAILED"
+          },
+          "blockedReason": "INTENT_AUTH_FAILED"
+        }
+      }
+    },
+    {
+      "id": "SC08",
+      "passed": true,
+      "actual": {
+        "actualServerRestart": true,
+        "noRepeatedClassification": true,
+        "noRepeatedWorkItem": true,
+        "blockedBudgetPreserved": true
+      }
+    }
+  ]
+}

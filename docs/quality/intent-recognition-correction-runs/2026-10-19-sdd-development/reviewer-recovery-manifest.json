@@ -1,0 +1,44 @@
+{
+  "runId": "SDD-2026-10-20-reviewer-recovery",
+  "capturedAt": "2026-10-20T01:43:11.479222+00:00",
+  "previousMilestone": "directed-brief-entry-manifest.json",
+  "sourceHashes": {
+    "apps/server/src/modules/message-routing/intent-brief-retry.service.ts": "abf8baf25da17d84edb50cbc39eb50776b86112e84950cf21664d2ea6e3524b6",
+    "apps/server/src/modules/message-routing/intent-brief-executor.service.spec.ts": "be75c317ae1a1ed413345b7abb4aa38c390f0a9e66afd716f47c34af4ce5499e",
+    "apps/web/src/stores/intentBriefRetry.ts": "3903f7712b66eaad3f20087535772a3c809385d76976fa0a9b94893561db662c",
+    "apps/web/src/components/IntentBriefRetryPanel.vue": "96b28afa9014ecdf459e453f9a7b3dd178bdfbadfb0bf7c999f16f1b52f2b76a",
+    "apps/web/src/components/IntentBriefRetryPanel.spec.ts": "c0cb385988a81531e2518c447ac4015193671e965eebdc8595bbac1c7a8d4d72"
+  },
+  "checks": [
+    {
+      "log": "reviewer-recovery-server.log",
+      "exitCode": 0,
+      "sha256": "993ddd3bcb7f326fd71f59d42087d8bc2b14af0b8e1ae94903ad2f9e65ecbbb7"
+    },
+    {
+      "log": "reviewer-recovery-client.log",
+      "exitCode": 0,
+      "sha256": "bc44a8af8b1cb6d5d52e3d011711dc36b5c63f197420b4d58e8bae17b9d9b145"
+    },
+    {
+      "log": "reviewer-recovery-typecheck.log",
+      "exitCode": 0,
+      "sha256": "9018b27583539853ac8c03817518ed16ca562e330c3300be73c796e126a0cafd"
+    },
+    {
+      "log": "reviewer-recovery-diff.log",
+      "exitCode": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "reportSha256": "5ddd49de27af21f8cdef4ceb21dc5eee2d93b51403f7cfb4ba90aedc8e3a5b8a",
+  "tests": {
+    "relatedServerPassed": 40,
+    "componentPassed": 6
+  },
+  "limitations": [
+    "No new full-suite/build/HTTP/browser/Electron evidence",
+    "UI skill CLI fetch failed; local accessibility skill used",
+    "Complete SDD remains unfinished"
+  ]
+}

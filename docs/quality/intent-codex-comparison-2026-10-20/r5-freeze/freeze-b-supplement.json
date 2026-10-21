@@ -1,0 +1,738 @@
+{
+  "frozenAt": "2026-10-20T10:02:55.875Z",
+  "scope": "R5 recognition-only; development exploration, no official evaluation",
+  "scorerFrozenBeforePrompt": true,
+  "hashes": {
+    "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "a7214b47b90f1ff27f86cdfd8389abf9377523a01f042080fe5a8d0a046e93e9",
+    "apps/server/dist/apps/server/src/modules/intent-recognition/semantic-intent-router.service.js": "e03c15c59939dfcc6d4c1eaa1df1c77b6f21ac429b7658f83d4a642e0e906806",
+    "tests/evaluation/run-intent-codex-current.mjs": "beec4dae26002278cee6572df09d15585432e466a6ae962ff6dfd60b16fc714a",
+    "apps/server/src/modules/intent-recognition/semantic-intent-router.service.spec.ts": "778156427e585a1e7a48925eda66e4d88568b59c0fee152dd2b77e1f2f0ffd39",
+    "docs/design/intent-recognition-correction-system-development-design-v1.md": "46d129504250f3e7a4c120c7cfb73d7d3166c2ec1573732fd5e4129fd00c717e",
+    "tests/evaluation/measure-intent-r5-prompt.mjs": "9b79c2d9c09f0b87525f45b9870095b76bcd3154fb1ebd75af4dc46aa27c22c2",
+    "tests/evaluation/capture-intent-r5-freeze.mjs": "f5545b65cf4cf2ebd1d03df5f63ce233d10356e141043476ebee12c016738c9a",
+    "docs/quality/intent-codex-comparison-2026-10-20/r5-freeze/targeted-tests-final.log": "d45d17abc95caaa462c1e24746af78771c7f31e4b860f590a5587950c616a709",
+    "docs/quality/intent-codex-comparison-2026-10-20/r5-freeze/typecheck-final.log": "8f96b35ac9a2a925648f1580c8472232f82900b07a52478ddcf444f40b815a41",
+    "docs/quality/intent-codex-comparison-2026-10-20/r5-freeze/build-final.log": "a46e428c4d8f1ab9ac5e91206859bd48555deced87128f7fa383e2f9fddb92b3",
+    "docs/quality/intent-codex-comparison-2026-10-20/r5-freeze/transport-tests.log": "021f4a4c92b8a9116f445e7886e2ac7a2b2373f855423ecaf9bcaeaa33073a2b"
+  },
+  "protectedHashes": {
+    "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+    "apps/server/src/modules/runtime-routing/execution-scope-resolver.service.ts": "869d3c21614955dc8a8a35a5e3b88175b347e46dd41bd4b043685e3156da0678",
+    "apps/server/src/modules/message-routing/intent-plan-commit.service.ts": "948c2a69e2c4bc88efa96c55cf23c1f26c579d3977ecaa11398e88b020f11d03"
+  },
+  "measurement": {
+    "method": "Offline reconstruction of the same historical B01 provider request; replace only changed L0 rules. No inference, no score. UTF-16 chars; ceil(JSON.stringify({messages}).length/4).",
+    "sourceHash": "a7214b47b90f1ff27f86cdfd8389abf9377523a01f042080fe5a8d0a046e93e9",
+    "distHash": "e03c15c59939dfcc6d4c1eaa1df1c77b6f21ac429b7658f83d4a642e0e906806",
+    "l0": {
+      "before": 3901,
+      "after": 3748,
+      "delta": -153,
+      "ruleCount": 12
+    },
+    "b01": {
+      "before": 8412,
+      "after": 8374,
+      "configuredMaxInputTokens": 6000
+    },
+    "replacements": [
+      {
+        "before": "Choose actions using the supplied Session state, not the WorkItem status or the word continue alone. resume is only for PAUSED. retry_failed_step requires FAILED/INTERRUPTED and an explicit server-supplied failure checkpoint; otherwise clarify the recovery target. A request to abandon the old approach and plan again is replan, not resume or retry.",
+        "after": "Use Session state, not WorkItem state or a continuation word. resume requires PAUSED. Pure resumption of the approved plan has requestedEffects=[]; the server binds that plan and rechecks effects, grants and version. Empty effects grant no authority. New requirements accompanying resume form separate segments with their own evidenced effects. retry_failed_step requires FAILED/INTERRUPTED and a server-supplied checkpoint; otherwise clarify. Abandoning an approach to plan again is replan.",
+        "occurrences": 1
+      },
+      {
+        "before": "For additions or continuation of an existing requirement use enqueue_follow_up; record_constraint stores a constraint, record_information stores reference information/preferences, and answer_in_chat answers a question without starting implementation. A negated stop/cancel is not a stop/cancel command. Continuing an EXECUTING task does not mean resume.",
+        "after": "Use enqueue_follow_up for existing-requirement additions; record_constraint for constraints, record_information for reference/preferences, answer_in_chat for questions without implementation. In EXECUTING, continuation of the current plan is neither resume nor a separate goal: attach it to accompanying additions, without an extra segment. A negated stop/cancel is not a command.",
+        "occurrences": 1
+      },
+      {
+        "before": "Keep relation, action and target consistent: same_requirement selects the existing WorkItem and uses inherit_confirmed or inherit_selected, including when suggestedAction is clarify. contextPolicy describes context inheritance, not whether the response asks a question. ask_user is for an unresolved relation (ambiguous), not a missing execution checkpoint or confirmation on an already known task. related_new_requirement uses create_related_work_item with the parent WorkItem and inherit_selected; independent_new_requirement uses create_independent_work_item with null WorkItem, no inherited IDs and clean_task_context. Preserve multiple explicit goals as separate segments.",
+        "after": "same_requirement selects the existing WorkItem with inherit_confirmed/inherit_selected, even for clarify. contextPolicy governs inheritance; ask_user requires ambiguous relation, not a missing checkpoint or confirmation for a known task. related_new_requirement uses create_related_work_item, parent WorkItem and inherit_selected; independent_new_requirement uses create_independent_work_item, null WorkItem, no inherited IDs and clean_task_context.",
+        "occurrences": 1
+      },
+      {
+        "before": "A qualifier or negated alternative attached to one goal is not another goal: not a new task, do not create a task, and do not stop constrain the relation/action of the accompanying request. Keep these in that same segment. Split only distinct requested goals, not a request and its modifiers; retain actual scoped effect prohibitions on that segment.",
+        "after": "Split distinct goals, not modifiers or negated alternatives. Maintaining the current state is a qualifier of the accompanying request, not a new transition or segment. Keep relation/action qualifiers with their goal and preserve scoped effect prohibitions.",
+        "occurrences": 1
+      }
+    ]
+  },
+  "priorDevelopmentResults": [
+    {
+      "id": "L06",
+      "passedUnderPreviousOracle": true,
+      "failedChecks": [],
+      "note": "Historical result, not rescored. Previous oracle did not include resumeDeclaresNoEffects."
+    },
+    {
+      "id": "L07",
+      "passedUnderPreviousOracle": true,
+      "failedChecks": [],
+      "note": "Historical result, not rescored. Previous oracle did not include resumeDeclaresNoEffects."
+    },
+    {
+      "id": "L11",
+      "passedUnderPreviousOracle": true,
+      "failedChecks": [],
+      "note": "Historical result, not rescored. Previous oracle did not include resumeDeclaresNoEffects."
+    },
+    {
+      "id": "L16",
+      "passedUnderPreviousOracle": true,
+      "failedChecks": [],
+      "note": "Historical result, not rescored. Previous oracle did not include resumeDeclaresNoEffects."
+    },
+    {
+      "id": "L20",
+      "passedUnderPreviousOracle": true,
+      "failedChecks": [],
+      "note": "Historical result, not rescored. Previous oracle did not include resumeDeclaresNoEffects."
+    },
+    {
+      "id": "H01",
+      "passedUnderPreviousOracle": false,
+      "failedChecks": [
+        {
+          "field": "positiveResumeApplicable",
+          "pass": false
+        }
+      ],
+      "note": "Historical result, not rescored. Previous oracle did not include resumeDeclaresNoEffects."
+    },
+    {
+      "id": "H02",
+      "passedUnderPreviousOracle": true,
+      "failedChecks": [],
+      "note": "Historical result, not rescored. Previous oracle did not include resumeDeclaresNoEffects."
+    },
+    {
+      "id": "H03",
+      "passedUnderPreviousOracle": false,
+      "failedChecks": [
+        {
+          "field": "goalSegmentation",
+          "pass": false
+        }
+      ],
+      "note": "Historical result, not rescored. Previous oracle did not include resumeDeclaresNoEffects."
+    },
+    {
+      "id": "H10",
+      "passedUnderPreviousOracle": true,
+      "failedChecks": [],
+      "note": "Historical result, not rescored. Previous oracle did not include resumeDeclaresNoEffects."
+    },
+    {
+      "id": "H11",
+      "passedUnderPreviousOracle": false,
+      "failedChecks": [
+        {
+          "field": "positiveResumeApplicable",
+          "pass": false
+        }
+      ],
+      "note": "Historical result, not rescored. Previous oracle did not include resumeDeclaresNoEffects."
+    },
+    {
+      "id": "H12",
+      "passedUnderPreviousOracle": true,
+      "failedChecks": [],
+      "note": "Historical result, not rescored. Previous oracle did not include resumeDeclaresNoEffects."
+    }
+  ],
+  "exploration": [
+    {
+      "label": "explore-r5-a-20261020-h01-h03",
+      "finalCandidate": false,
+      "officialScore": false,
+      "sourceHash": "cec5952e18961f2a898b93148735ffb888f73fbef3abbcb0b1af2e1d4a421943",
+      "distHash": "b4b1d10073ec68c9c56609b105e21f8c74b2e8e47b52729b9bac7a84b725ee23",
+      "results": [
+        {
+          "id": "H01",
+          "passed": true,
+          "failedChecks": [],
+          "providerCalls": 1,
+          "modelOutputSeen": true,
+          "transport": {
+            "retryCount": 0,
+            "waitTotalMs": 0,
+            "stopReason": "result_retained",
+            "attempts": [
+              {
+                "attempt": 1,
+                "providerCalls": 1,
+                "modelOutputSeen": true,
+                "requestedWaitMs": 0,
+                "actualWaitMs": 0
+              }
+            ]
+          },
+          "segments": [
+            {
+              "action": "resume",
+              "effects": []
+            }
+          ],
+          "planOutcome": "applicable",
+          "planErrors": []
+        },
+        {
+          "id": "H02",
+          "passed": false,
+          "failedChecks": [
+            {
+              "field": "action",
+              "pass": false
+            },
+            {
+              "field": "routeState",
+              "pass": false
+            },
+            {
+              "field": "goalSegmentation",
+              "pass": false
+            }
+          ],
+          "providerCalls": 1,
+          "modelOutputSeen": true,
+          "transport": {
+            "retryCount": 0,
+            "waitTotalMs": 0,
+            "stopReason": "result_retained",
+            "attempts": [
+              {
+                "attempt": 1,
+                "providerCalls": 1,
+                "modelOutputSeen": true,
+                "requestedWaitMs": 0,
+                "actualWaitMs": 0
+              }
+            ]
+          },
+          "segments": [
+            {
+              "action": "pause",
+              "effects": []
+            },
+            {
+              "action": "answer_in_chat",
+              "effects": [
+                {
+                  "kind": "answer",
+                  "target": {
+                    "kind": "unresolved",
+                    "refId": null
+                  },
+                  "evidenceRefs": [
+                    "explanation_request"
+                  ]
+                }
+              ]
+            }
+          ],
+          "planOutcome": "needs_clarification",
+          "planErrors": [
+            "INTENT_AMBIGUOUS",
+            "MULTI_SEGMENT_CONFIRMATION_REQUIRED",
+            "CONTROL_ACTION_NOT_AUTHORIZED"
+          ]
+        },
+        {
+          "id": "H03",
+          "passed": true,
+          "failedChecks": [],
+          "providerCalls": 1,
+          "modelOutputSeen": true,
+          "transport": {
+            "retryCount": 0,
+            "waitTotalMs": 0,
+            "stopReason": "result_retained",
+            "attempts": [
+              {
+                "attempt": 1,
+                "providerCalls": 1,
+                "modelOutputSeen": true,
+                "requestedWaitMs": 0,
+                "actualWaitMs": 0
+              }
+            ]
+          },
+          "segments": [
+            {
+              "action": "enqueue_follow_up",
+              "effects": [
+                {
+                  "kind": "modify_source",
+                  "target": {
+                    "kind": "source",
+                    "refId": null
+                  },
+                  "evidenceRefs": [
+                    "empty_username_error"
+                  ]
+                }
+              ]
+            }
+          ],
+          "planOutcome": "needs_clarification",
+          "planErrors": [
+            "EFFECT_TARGET_UNRESOLVED"
+          ]
+        }
+      ]
+    },
+    {
+      "label": "explore-r5-b-20261020-h01-h03",
+      "finalCandidate": true,
+      "officialScore": false,
+      "sourceHash": "a7214b47b90f1ff27f86cdfd8389abf9377523a01f042080fe5a8d0a046e93e9",
+      "distHash": "e03c15c59939dfcc6d4c1eaa1df1c77b6f21ac429b7658f83d4a642e0e906806",
+      "results": [
+        {
+          "id": "H01",
+          "passed": true,
+          "failedChecks": [],
+          "providerCalls": 1,
+          "modelOutputSeen": true,
+          "transport": {
+            "retryCount": 0,
+            "waitTotalMs": 0,
+            "stopReason": "result_retained",
+            "attempts": [
+              {
+                "attempt": 1,
+                "providerCalls": 1,
+                "modelOutputSeen": true,
+                "requestedWaitMs": 0,
+                "actualWaitMs": 0
+              }
+            ]
+          },
+          "segments": [
+            {
+              "action": "resume",
+              "effects": []
+            }
+          ],
+          "planOutcome": "applicable",
+          "planErrors": []
+        },
+        {
+          "id": "H02",
+          "passed": true,
+          "failedChecks": [],
+          "providerCalls": 1,
+          "modelOutputSeen": true,
+          "transport": {
+            "retryCount": 0,
+            "waitTotalMs": 0,
+            "stopReason": "result_retained",
+            "attempts": [
+              {
+                "attempt": 1,
+                "providerCalls": 1,
+                "modelOutputSeen": true,
+                "requestedWaitMs": 0,
+                "actualWaitMs": 0
+              }
+            ]
+          },
+          "segments": [
+            {
+              "action": "answer_in_chat",
+              "effects": [
+                {
+                  "kind": "answer",
+                  "target": {
+                    "kind": "unresolved",
+                    "refId": null
+                  },
+                  "evidenceRefs": [
+                    "expiry_question"
+                  ]
+                }
+              ]
+            }
+          ],
+          "planOutcome": "blocked",
+          "planErrors": [
+            "INTENT_AMBIGUOUS",
+            "PROHIBITION_NOT_ENFORCEABLE"
+          ]
+        },
+        {
+          "id": "H03",
+          "passed": true,
+          "failedChecks": [],
+          "providerCalls": 1,
+          "modelOutputSeen": true,
+          "transport": {
+            "retryCount": 0,
+            "waitTotalMs": 0,
+            "stopReason": "result_retained",
+            "attempts": [
+              {
+                "attempt": 1,
+                "providerCalls": 1,
+                "modelOutputSeen": true,
+                "requestedWaitMs": 0,
+                "actualWaitMs": 0
+              }
+            ]
+          },
+          "segments": [
+            {
+              "action": "enqueue_follow_up",
+              "effects": [
+                {
+                  "kind": "modify_source",
+                  "target": {
+                    "kind": "source",
+                    "refId": null
+                  },
+                  "evidenceRefs": [
+                    "current_request"
+                  ]
+                }
+              ]
+            }
+          ],
+          "planOutcome": "needs_clarification",
+          "planErrors": [
+            "EFFECT_TARGET_UNRESOLVED"
+          ]
+        }
+      ]
+    },
+    {
+      "label": "explore-r5-b-20261020-h10-h12",
+      "finalCandidate": true,
+      "officialScore": false,
+      "sourceHash": "a7214b47b90f1ff27f86cdfd8389abf9377523a01f042080fe5a8d0a046e93e9",
+      "distHash": "e03c15c59939dfcc6d4c1eaa1df1c77b6f21ac429b7658f83d4a642e0e906806",
+      "results": [
+        {
+          "id": "H10",
+          "passed": true,
+          "failedChecks": [],
+          "providerCalls": 1,
+          "modelOutputSeen": true,
+          "transport": {
+            "retryCount": 0,
+            "waitTotalMs": 0,
+            "stopReason": "result_retained",
+            "attempts": [
+              {
+                "attempt": 1,
+                "providerCalls": 1,
+                "modelOutputSeen": true,
+                "requestedWaitMs": 0,
+                "actualWaitMs": 0
+              }
+            ]
+          },
+          "segments": [
+            {
+              "action": "replan",
+              "effects": [
+                {
+                  "kind": "answer",
+                  "target": {
+                    "kind": "unresolved",
+                    "refId": null
+                  },
+                  "evidenceRefs": [
+                    "replan_request"
+                  ]
+                }
+              ]
+            }
+          ],
+          "planOutcome": "applicable",
+          "planErrors": []
+        },
+        {
+          "id": "H11",
+          "passed": true,
+          "failedChecks": [],
+          "providerCalls": 1,
+          "modelOutputSeen": true,
+          "transport": {
+            "retryCount": 0,
+            "waitTotalMs": 0,
+            "stopReason": "result_retained",
+            "attempts": [
+              {
+                "attempt": 1,
+                "providerCalls": 1,
+                "modelOutputSeen": true,
+                "requestedWaitMs": 0,
+                "actualWaitMs": 0
+              }
+            ]
+          },
+          "segments": [
+            {
+              "action": "resume",
+              "effects": []
+            }
+          ],
+          "planOutcome": "applicable",
+          "planErrors": []
+        },
+        {
+          "id": "H12",
+          "passed": true,
+          "failedChecks": [],
+          "providerCalls": 1,
+          "modelOutputSeen": true,
+          "transport": {
+            "retryCount": 0,
+            "waitTotalMs": 0,
+            "stopReason": "result_retained",
+            "attempts": [
+              {
+                "attempt": 1,
+                "providerCalls": 1,
+                "modelOutputSeen": true,
+                "requestedWaitMs": 0,
+                "actualWaitMs": 0
+              }
+            ]
+          },
+          "segments": [
+            {
+              "action": "record_constraint",
+              "effects": []
+            }
+          ],
+          "planOutcome": "blocked",
+          "planErrors": [
+            "PROHIBITION_NOT_ENFORCEABLE"
+          ]
+        }
+      ]
+    },
+    {
+      "label": "explore-r5-b-20261020-l11",
+      "finalCandidate": true,
+      "officialScore": false,
+      "sourceHash": "a7214b47b90f1ff27f86cdfd8389abf9377523a01f042080fe5a8d0a046e93e9",
+      "distHash": "e03c15c59939dfcc6d4c1eaa1df1c77b6f21ac429b7658f83d4a642e0e906806",
+      "results": [
+        {
+          "id": "L11",
+          "passed": true,
+          "failedChecks": [],
+          "providerCalls": 1,
+          "modelOutputSeen": true,
+          "transport": {
+            "retryCount": 0,
+            "waitTotalMs": 0,
+            "stopReason": "result_retained",
+            "attempts": [
+              {
+                "attempt": 1,
+                "providerCalls": 1,
+                "modelOutputSeen": true,
+                "requestedWaitMs": 0,
+                "actualWaitMs": 0
+              }
+            ]
+          },
+          "segments": [
+            {
+              "action": "clarify",
+              "effects": []
+            },
+            {
+              "action": "create_independent_work_item",
+              "effects": []
+            }
+          ],
+          "planOutcome": "needs_clarification",
+          "planErrors": [
+            "INTENT_AMBIGUOUS",
+            "MULTI_SEGMENT_CONFIRMATION_REQUIRED"
+          ]
+        }
+      ]
+    },
+    {
+      "label": "explore-r5-b-20261020-l16",
+      "finalCandidate": true,
+      "officialScore": false,
+      "sourceHash": "a7214b47b90f1ff27f86cdfd8389abf9377523a01f042080fe5a8d0a046e93e9",
+      "distHash": "e03c15c59939dfcc6d4c1eaa1df1c77b6f21ac429b7658f83d4a642e0e906806",
+      "results": [
+        {
+          "id": "L16",
+          "passed": false,
+          "failedChecks": [
+            {
+              "field": "action",
+              "pass": false
+            },
+            {
+              "field": "routeState",
+              "pass": false
+            }
+          ],
+          "providerCalls": 1,
+          "modelOutputSeen": true,
+          "transport": {
+            "retryCount": 0,
+            "waitTotalMs": 0,
+            "stopReason": "result_retained",
+            "attempts": [
+              {
+                "attempt": 1,
+                "providerCalls": 1,
+                "modelOutputSeen": true,
+                "requestedWaitMs": 0,
+                "actualWaitMs": 0
+              }
+            ]
+          },
+          "segments": [
+            {
+              "action": "acknowledge",
+              "effects": []
+            }
+          ],
+          "planOutcome": "needs_clarification",
+          "planErrors": [
+            "STATE_TRANSITION_INVALID"
+          ]
+        }
+      ]
+    },
+    {
+      "label": "explore-r5-b-20261020-l06-l07",
+      "finalCandidate": true,
+      "officialScore": false,
+      "sourceHash": "a7214b47b90f1ff27f86cdfd8389abf9377523a01f042080fe5a8d0a046e93e9",
+      "distHash": "e03c15c59939dfcc6d4c1eaa1df1c77b6f21ac429b7658f83d4a642e0e906806",
+      "results": [
+        {
+          "id": "L06",
+          "passed": true,
+          "failedChecks": [],
+          "providerCalls": 1,
+          "modelOutputSeen": true,
+          "transport": {
+            "retryCount": 0,
+            "waitTotalMs": 0,
+            "stopReason": "result_retained",
+            "attempts": [
+              {
+                "attempt": 1,
+                "providerCalls": 1,
+                "modelOutputSeen": true,
+                "requestedWaitMs": 0,
+                "actualWaitMs": 0
+              }
+            ]
+          },
+          "segments": [
+            {
+              "action": "enqueue_follow_up",
+              "effects": [
+                {
+                  "kind": "modify_source",
+                  "target": {
+                    "kind": "source",
+                    "refId": null
+                  },
+                  "evidenceRefs": [
+                    "empty_password_requirement"
+                  ]
+                }
+              ]
+            }
+          ],
+          "planOutcome": "needs_clarification",
+          "planErrors": [
+            "EFFECT_TARGET_UNRESOLVED"
+          ]
+        },
+        {
+          "id": "L07",
+          "passed": false,
+          "failedChecks": [
+            {
+              "field": "action",
+              "pass": false
+            }
+          ],
+          "providerCalls": 1,
+          "modelOutputSeen": true,
+          "transport": {
+            "retryCount": 0,
+            "waitTotalMs": 0,
+            "stopReason": "result_retained",
+            "attempts": [
+              {
+                "attempt": 1,
+                "providerCalls": 1,
+                "modelOutputSeen": true,
+                "requestedWaitMs": 0,
+                "actualWaitMs": 0
+              }
+            ]
+          },
+          "segments": [
+            {
+              "action": "clarify",
+              "effects": []
+            }
+          ],
+          "planOutcome": "needs_clarification",
+          "planErrors": [
+            "INTENT_AMBIGUOUS"
+          ]
+        }
+      ]
+    },
+    {
+      "label": "explore-r5-b-20261020-l20",
+      "finalCandidate": true,
+      "officialScore": false,
+      "sourceHash": "a7214b47b90f1ff27f86cdfd8389abf9377523a01f042080fe5a8d0a046e93e9",
+      "distHash": "e03c15c59939dfcc6d4c1eaa1df1c77b6f21ac429b7658f83d4a642e0e906806",
+      "results": [
+        {
+          "id": "L20",
+          "passed": true,
+          "failedChecks": [],
+          "providerCalls": 1,
+          "modelOutputSeen": true,
+          "transport": {
+            "retryCount": 0,
+            "waitTotalMs": 0,
+            "stopReason": "result_retained",
+            "attempts": [
+              {
+                "attempt": 1,
+                "providerCalls": 1,
+                "modelOutputSeen": true,
+                "requestedWaitMs": 0,
+                "actualWaitMs": 0
+              }
+            ]
+          },
+          "segments": [
+            {
+              "action": "correct_route",
+              "effects": []
+            }
+          ],
+          "planOutcome": "applicable",
+          "planErrors": []
+        }
+      ]
+    }
+  ]
+}

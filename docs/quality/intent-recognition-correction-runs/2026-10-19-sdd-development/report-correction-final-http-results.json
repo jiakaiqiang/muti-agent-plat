@@ -1,0 +1,952 @@
+{
+  "executedAt": "2026-10-19T18:05:13.501Z",
+  "method": "real localhost Nest HTTP, File persistence, deterministic classifier, actual Docker tests and server restart; no model accuracy claim",
+  "results": [
+    {
+      "id": "TD01",
+      "passed": true,
+      "actual": {
+        "noGrantNoInvocation": true
+      }
+    },
+    {
+      "id": "TD02",
+      "passed": true,
+      "actual": {
+        "step": {
+          "id": "c4b80037-1122-44d5-a43f-da2c69c5388a",
+          "sessionId": "40625516-de86-4dff-8332-1cb8003d65d5",
+          "dataEpoch": "656191d8-f633-4672-883b-2e6de4015963",
+          "routingId": "4fc390f1-cd8b-4302-9d78-683a36cecd54",
+          "intentRevision": 1,
+          "localKey": "test-request",
+          "step": {
+            "stepId": "c4b80037-1122-44d5-a43f-da2c69c5388a",
+            "segmentId": "3c30d733-411b-4491-8a50-c3dcddc0abb1",
+            "segmentKey": "test-request",
+            "action": "enqueue_follow_up",
+            "goal": "只运行 test:unit 测试并保存报告，不修改源码",
+            "target": {
+              "workItemId": "898c83ec-85e0-4411-8b94-5a2f3c932009",
+              "decisionIds": [],
+              "artifactIds": [],
+              "agentIds": [],
+              "confirmationId": null,
+              "correctionOfRoutingId": null
+            },
+            "contextPolicy": "inherit_confirmed",
+            "correction": null,
+            "dependencies": [],
+            "evidence": [
+              {
+                "refId": "request",
+                "sourceEventId": "cd0b6cf8-abdf-4a0a-8d03-6ff21ba32c7c",
+                "start": 0,
+                "end": 27,
+                "quote": "只运行 test:unit 测试并保存报告，不修改源码"
+              }
+            ],
+            "expectedSessionStatus": "AGENT_DISCUSSING",
+            "effectScope": {
+              "effects": [
+                {
+                  "kind": "run_tests",
+                  "target": {
+                    "kind": "test_runner",
+                    "refId": "test-runner:ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3"
+                  },
+                  "evidenceRefs": [
+                    "request"
+                  ]
+                },
+                {
+                  "kind": "write_artifact",
+                  "target": {
+                    "kind": "artifact",
+                    "refId": "test-report:ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3"
+                  },
+                  "evidenceRefs": [
+                    "request"
+                  ]
+                }
+              ],
+              "prohibitions": [
+                {
+                  "effectKind": "modify_source",
+                  "object": {
+                    "kind": "workspace",
+                    "refId": "server-17eaf885619ee74ef4f644402a06390e"
+                  },
+                  "scope": "message",
+                  "evidenceRefs": [
+                    "request"
+                  ]
+                }
+              ],
+              "grantIds": [
+                "isolated-test-report:40625516-de86-4dff-8332-1cb8003d65d5:ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3",
+                "isolated-test:40625516-de86-4dff-8332-1cb8003d65d5:ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3"
+              ],
+              "scopeHash": "e2efe2930bb5f5dca23f1b0789d7c3174f58048218cd614bbdc646adfb256cf1"
+            },
+            "executionBinding": {
+              "routingId": "4fc390f1-cd8b-4302-9d78-683a36cecd54",
+              "intentRevision": 1,
+              "requirementRevision": 1,
+              "executionEpoch": 1,
+              "sessionGeneration": 1,
+              "effectScopeHash": "e2efe2930bb5f5dca23f1b0789d7c3174f58048218cd614bbdc646adfb256cf1",
+              "decisionSetHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+            },
+            "idempotencyKey": "40625516-de86-4dff-8332-1cb8003d65d5:cd0b6cf8-abdf-4a0a-8d03-6ff21ba32c7c:1:3c30d733-411b-4491-8a50-c3dcddc0abb1:c4b80037-1122-44d5-a43f-da2c69c5388a"
+          },
+          "status": "completed",
+          "reusedEffectIds": [],
+          "createdAt": "2026-10-19T18:04:47.995Z",
+          "updatedAt": "2026-10-19T18:04:51.575Z",
+          "processing": {
+            "ownerId": "72d31c66-89a2-4590-9b15-4dcc668e4e45",
+            "leaseExpiresAt": "2026-10-19T18:05:18.006Z",
+            "deadlineAt": "2026-10-19T18:06:48.006Z",
+            "attemptsUsed": 1,
+            "invocationId": "9a65126c-1b96-43c0-b905-98c017e45bf2"
+          },
+          "resultArtifactId": "intent-test-report:c4b80037-1122-44d5-a43f-da2c69c5388a",
+          "responseEventId": "intent-test-result:c4b80037-1122-44d5-a43f-da2c69c5388a"
+        },
+        "operation": {
+          "id": "intent-test:c4b80037-1122-44d5-a43f-da2c69c5388a",
+          "deadlineCeilingAt": "2026-10-19T18:06:48.006Z",
+          "sessionId": "40625516-de86-4dff-8332-1cb8003d65d5",
+          "phase": "task_execution",
+          "admissionClass": "business",
+          "dataEpoch": "656191d8-f633-4672-883b-2e6de4015963",
+          "intentStepId": "c4b80037-1122-44d5-a43f-da2c69c5388a",
+          "workItemId": "898c83ec-85e0-4411-8b94-5a2f3c932009",
+          "executionBinding": {
+            "routingId": "4fc390f1-cd8b-4302-9d78-683a36cecd54",
+            "intentRevision": 1,
+            "requirementRevision": 1,
+            "executionEpoch": 1,
+            "sessionGeneration": 1,
+            "effectScopeHash": "e2efe2930bb5f5dca23f1b0789d7c3174f58048218cd614bbdc646adfb256cf1",
+            "decisionSetHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+          },
+          "sessionGeneration": 1,
+          "policyVersion": "execution-reliability-v1",
+          "status": "ready",
+          "deadlineAt": "2026-10-19T18:06:48.006Z",
+          "remainingActiveMs": 116440,
+          "maxAttempts": 3,
+          "attemptsUsed": 1,
+          "stopState": "confirmed",
+          "invocationIds": [
+            "9a65126c-1b96-43c0-b905-98c017e45bf2"
+          ],
+          "diagnostics": [],
+          "createdAt": "2026-10-19T18:04:48.014Z",
+          "updatedAt": "2026-10-19T18:04:51.566Z",
+          "ownerId": "91a15c36-03b2-471a-95fa-59048d543a9c",
+          "executionKind": "process",
+          "outputContractKey": "task_execution_result@1.0",
+          "isolatedTestAttempts": [
+            {
+              "imageId": "sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402",
+              "script": "test:unit",
+              "workingDirectory": "C:\\Users\\kaiqj\\AppData\\Local\\Temp\\intent-test-dispatch-http-KlVabx\\workspace",
+              "ownerId": "387cfc79-d331-42f3-b7a2-da62812e9615",
+              "deadlineAt": "2026-10-19T18:05:48.049Z",
+              "authorityBinding": {
+                "runnerId": "docker-npm-tests-v1",
+                "workspaceBindingHash": "2b134c3a61446ca6870c4d6a7c62f820e826e032189c873a646d3ef8d14f1416",
+                "workspaceId": "server-17eaf885619ee74ef4f644402a06390e",
+                "imageId": "sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402",
+                "script": "test:unit",
+                "bindingHash": "ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3",
+                "resourceId": "test-runner:ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3"
+              },
+              "invocationId": "9a65126c-1b96-43c0-b905-98c017e45bf2",
+              "identityHash": "f159a2069767fbc5c0f4313b29766c627568c8a015e5f934b85aa8966f66e10f",
+              "containerName": "intent-test-f159a2069767fbc5c0f4313b29766c627568c8a0",
+              "phase": "finished",
+              "leaseExpiresAt": "2026-10-19T18:05:21.545Z",
+              "stopConfirmed": true,
+              "cleanupRequired": false,
+              "createdAt": "2026-10-19T18:04:48.050Z",
+              "updatedAt": "2026-10-19T18:04:51.545Z",
+              "daemonId": "43ca5ab9-423a-4944-a745-0f54920eeff9",
+              "snapshotDirectory": "C:\\Users\\kaiqj\\AppData\\Local\\Temp\\intent-test-snapshot-5e4e1e7c-bd6a-4125-9ff4-9ec593d6e398",
+              "snapshotHash": "0bda546b0a4eed995b91a5ae0aee8f5fa5ea923798591274aeb5986686759772",
+              "result": {
+                "stdout": "TAP version 13\n# Subtest: HTTP isolated test\nok 1 - HTTP isolated test\n  ---\n  duration_ms: 3.416747\n  type: 'test'\n  ...\n1..1\n# tests 1\n# suites 0\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 67.783203\n",
+                "stderr": "",
+                "exitCode": 0,
+                "timedOut": false,
+                "aborted": false,
+                "outputTruncated": false
+              }
+            }
+          ],
+          "pauseRequested": false
+        },
+        "runtime": [
+          {
+            "executionBinding": {
+              "routingId": "4fc390f1-cd8b-4302-9d78-683a36cecd54",
+              "intentRevision": 1,
+              "requirementRevision": 1,
+              "executionEpoch": 1,
+              "sessionGeneration": 1,
+              "effectScopeHash": "e2efe2930bb5f5dca23f1b0789d7c3174f58048218cd614bbdc646adfb256cf1",
+              "decisionSetHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+            },
+            "operationTelemetry": {
+              "operationId": "intent-test:c4b80037-1122-44d5-a43f-da2c69c5388a",
+              "policyVersion": "execution-reliability-v1",
+              "startedAt": "2026-10-19T18:04:48.017Z",
+              "adapterStartedAt": "2026-10-19T18:04:48.043Z",
+              "firstUsefulOutputAt": "2026-10-19T18:04:51.556Z",
+              "completedAt": "2026-10-19T18:04:51.569Z",
+              "elapsedMs": 3552,
+              "preparationMs": 26,
+              "observedToolMs": 0,
+              "unclassifiedMs": 3526,
+              "queueWaitMs": null,
+              "initialEvidenceBytes": 0,
+              "remainingMs": 116437,
+              "stopState": "confirmed",
+              "upstreamWaitMs": null,
+              "usageScope": "reported_cumulative",
+              "billableTokens": null
+            },
+            "operation": {
+              "id": "intent-test:c4b80037-1122-44d5-a43f-da2c69c5388a",
+              "deadlineAt": "2026-10-19T18:06:48.006Z",
+              "sessionGeneration": 1,
+              "maxAttempts": 3,
+              "policyVersion": "execution-reliability-v1"
+            },
+            "id": "27de62e0-094f-4290-ab50-f00b46f556bc",
+            "dataEpoch": "656191d8-f633-4672-883b-2e6de4015963",
+            "invocationId": "9a65126c-1b96-43c0-b905-98c017e45bf2",
+            "sessionId": "40625516-de86-4dff-8332-1cb8003d65d5",
+            "workItemId": "898c83ec-85e0-4411-8b94-5a2f3c932009",
+            "agentId": "00000000-0000-0000-0000-000000000006",
+            "agentKey": "test",
+            "runtimeType": "test_runner",
+            "phase": "task_execution",
+            "status": "completed",
+            "executionTarget": {
+              "runtimeType": "test_runner",
+              "source": "task_override",
+              "reason": "Task override selected test_runner",
+              "requiredCapabilities": [
+                "test"
+              ],
+              "requiredToolIds": [
+                "cap-isolated-test"
+              ],
+              "writeMode": "none",
+              "workspaceProviderKind": "server_local",
+              "executionLocation": "server",
+              "providerIdentity": {
+                "connectionId": "unknown:server:server-17eaf885619ee74ef4f644402a06390e",
+                "modelId": "unknown",
+                "protocol": "test_runner",
+                "source": "unknown"
+              }
+            },
+            "toolCatalog": {
+              "tools": [
+                {
+                  "name": "run_test",
+                  "description": "Run an allowed npm test script in the current workspace",
+                  "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                      "script": {
+                        "type": "string",
+                        "default": "test",
+                        "description": "package.json script name to run"
+                      },
+                      "timeout": {
+                        "type": "number",
+                        "default": 60000,
+                        "description": "Timeout in milliseconds"
+                      }
+                    }
+                  }
+                }
+              ],
+              "decisions": [
+                {
+                  "toolId": "cap-isolated-test",
+                  "toolKey": "tool.isolated_test",
+                  "status": "allowed",
+                  "reasons": [
+                    "PROFILE_REQUESTED",
+                    "AGENT_CAPABILITY_GRANTED",
+                    "PHASE_ALLOWED",
+                    "WORKSPACE_ALLOWED",
+                    "RUNTIME_SUPPORTED",
+                    "APPROVAL_SATISFIED"
+                  ]
+                }
+              ],
+              "catalogHash": "a349a39c5735cda28585277d64eb206534646884f84238d52ea905e0b823ab70"
+            },
+            "contextEnvelope": {
+              "version": "v2",
+              "createdAt": "2026-10-19T18:04:48.013Z",
+              "sessionId": "40625516-de86-4dff-8332-1cb8003d65d5",
+              "workspaceId": "server-17eaf885619ee74ef4f644402a06390e",
+              "L0": {
+                "systemRules": [
+                  "Execute only the server-bound isolated test."
+                ],
+                "agentId": "00000000-0000-0000-0000-000000000006",
+                "profileHash": "f1d897d3299726b835f8b008e8fbe4f52869f3300a89c8506f12992a6ee35349",
+                "profileRevision": 1,
+                "toolCatalogHash": "a349a39c5735cda28585277d64eb206534646884f84238d52ea905e0b823ab70",
+                "workspace": {
+                  "workspaceId": "server-17eaf885619ee74ef4f644402a06390e",
+                  "rootName": "workspace",
+                  "providerKind": "server_local",
+                  "revision": {
+                    "id": "intent:1",
+                    "observedAt": "2026-10-19T18:04:48.013Z"
+                  }
+                }
+              },
+              "L1": {
+                "sessionGoal": "只运行 test:unit 测试并保存报告，不修改源码",
+                "currentUserMessage": "只运行 test:unit 测试并保存报告，不修改源码",
+                "phase": "task_execution",
+                "navigation": {
+                  "entries": [],
+                  "truncated": false
+                }
+              },
+              "L2": {
+                "source": "generated",
+                "modules": []
+              },
+              "L3": {
+                "files": [],
+                "fileRevisions": [],
+                "totalByteLength": 0,
+                "truncated": false
+              },
+              "L4": {
+                "calls": []
+              },
+              "L5": {
+                "bullets": [],
+                "turnCount": 1
+              },
+              "L6": {
+                "changeSetIds": [],
+                "reportIds": []
+              },
+              "budget": {
+                "inputTokens": 1,
+                "navigationTokens": 0,
+                "projectMapTokens": 0,
+                "evidenceTokens": 0
+              }
+            },
+            "expectedOutput": {
+              "kind": "task_execution_result",
+              "schemaVersion": "1.0"
+            },
+            "outputContract": {
+              "contractId": "runtime.output.task_execution_result",
+              "contractVersion": "1.0",
+              "schemaHash": "fnv1a32:0823a6f0"
+            },
+            "budget": {
+              "maxInputTokens": 1,
+              "maxOutputTokens": 1,
+              "maxTotalTokens": 2
+            },
+            "usage": {
+              "inputTokens": 0,
+              "outputTokens": 0,
+              "totalTokens": 0,
+              "model": "test_runner"
+            },
+            "systemEvidence": {
+              "workspaceChangeSet": null,
+              "verifiedTestResults": [
+                {
+                  "command": "test:unit",
+                  "status": "passed",
+                  "exitCode": 0,
+                  "stdout": "TAP version 13\n# Subtest: HTTP isolated test\nok 1 - HTTP isolated test\n  ---\n  duration_ms: 3.416747\n  type: 'test'\n  ...\n1..1\n# tests 1\n# suites 0\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 67.783203\n",
+                  "stderr": "",
+                  "startedAt": "2026-10-19T18:04:48.042Z",
+                  "completedAt": "2026-10-19T18:04:51.556Z"
+                }
+              ],
+              "capturedAt": "2026-10-19T18:04:51.556Z",
+              "invocationId": "9a65126c-1b96-43c0-b905-98c017e45bf2"
+            },
+            "profileSnapshot": {
+              "agentId": "00000000-0000-0000-0000-000000000006",
+              "profileHash": "f1d897d3299726b835f8b008e8fbe4f52869f3300a89c8506f12992a6ee35349",
+              "profileRevision": 1,
+              "resolvedSkillIds": [],
+              "resolvedSkillRevisions": {},
+              "resolvedToolIds": [
+                "cap-isolated-test"
+              ]
+            },
+            "contextGeneration": 1,
+            "workspaceRevisionAtStart": {
+              "id": "intent:1",
+              "observedAt": "2026-10-19T18:04:48.013Z"
+            },
+            "supplementalContextAttempt": 0,
+            "supplementalContextDurationMs": 0,
+            "evidenceBytes": 0,
+            "evidencePaths": [],
+            "startedAt": "2026-10-19T18:04:48.017Z",
+            "completedAt": "2026-10-19T18:04:51.569Z",
+            "intentAdmission": {
+              "status": "current"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "TD03",
+      "passed": true,
+      "actual": {
+        "events": 1,
+        "artifacts": 1,
+        "noTaskOrBriefDispatch": true,
+        "attempts": 1
+      }
+    },
+    {
+      "id": "TR01",
+      "passed": true,
+      "actual": {
+        "artifact": {
+          "id": "intent-test-report:c4b80037-1122-44d5-a43f-da2c69c5388a",
+          "sessionId": "40625516-de86-4dff-8332-1cb8003d65d5",
+          "dataEpoch": "656191d8-f633-4672-883b-2e6de4015963",
+          "workItemId": "898c83ec-85e0-4411-8b94-5a2f3c932009",
+          "type": "test_report",
+          "title": "隔离测试报告：test:unit",
+          "contentSummary": "隔离测试退出码 0；报告保存在会话产物中。",
+          "runtimeProposals": [],
+          "platformProjections": [],
+          "systemEvidence": null,
+          "createdAt": "2026-10-19T18:04:51.575Z",
+          "metadata": {
+            "phase": "task_execution",
+            "status": "passed",
+            "intentTestReport": {
+              "format": "markdown",
+              "content": "# 隔离测试报告：test:unit\n\n退出码：0\n\n源码快照 SHA-256：0bda546b0a4eed995b91a5ae0aee8f5fa5ea923798591274aeb5986686759772\n\n```json\n{\n  \"stdout\": \"TAP version 13\\n# Subtest: HTTP isolated test\\nok 1 - HTTP isolated test\\n  ---\\n  duration_ms: 3.416747\\n  type: 'test'\\n  ...\\n1..1\\n# tests 1\\n# suites 0\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0\\n# duration_ms 67.783203\\n\",\n  \"stderr\": \"\",\n  \"truncated\": false\n}\n```\n",
+              "stepId": "c4b80037-1122-44d5-a43f-da2c69c5388a",
+              "invocationId": "9a65126c-1b96-43c0-b905-98c017e45bf2",
+              "bindingHash": "ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3",
+              "snapshotHash": "0bda546b0a4eed995b91a5ae0aee8f5fa5ea923798591274aeb5986686759772",
+              "script": "test:unit",
+              "exitCode": 0
+            }
+          }
+        },
+        "actualArtifactApi": true,
+        "atomicOutbox": true
+      }
+    },
+    {
+      "id": "TD04",
+      "passed": true,
+      "actual": {
+        "actualServerRestart": true,
+        "noRepeatedCompletedInvocation": true
+      }
+    },
+    {
+      "id": "TD05",
+      "passed": true,
+      "actual": {
+        "elapsedMs": 1430,
+        "actuallyRunningBeforeRevoke": true,
+        "step": {
+          "id": "3d02d767-7e4b-4f2e-8bb5-cf62f47028e2",
+          "sessionId": "40625516-de86-4dff-8332-1cb8003d65d5",
+          "dataEpoch": "656191d8-f633-4672-883b-2e6de4015963",
+          "routingId": "dedf9d2a-b38a-4f9a-ab9e-6c3b85da4e2f",
+          "intentRevision": 1,
+          "localKey": "test-request",
+          "step": {
+            "stepId": "3d02d767-7e4b-4f2e-8bb5-cf62f47028e2",
+            "segmentId": "99e217ab-9573-4c59-9126-52c51c04ca0c",
+            "segmentKey": "test-request",
+            "action": "enqueue_follow_up",
+            "goal": "只运行 test:unit 测试并保存报告，不修改源码",
+            "target": {
+              "workItemId": "898c83ec-85e0-4411-8b94-5a2f3c932009",
+              "decisionIds": [],
+              "artifactIds": [],
+              "agentIds": [],
+              "confirmationId": null,
+              "correctionOfRoutingId": null
+            },
+            "contextPolicy": "inherit_confirmed",
+            "correction": null,
+            "dependencies": [],
+            "evidence": [
+              {
+                "refId": "request",
+                "sourceEventId": "5412236d-7e34-464c-96a6-da42dcb13271",
+                "start": 0,
+                "end": 27,
+                "quote": "只运行 test:unit 测试并保存报告，不修改源码"
+              }
+            ],
+            "expectedSessionStatus": "AGENT_DISCUSSING",
+            "effectScope": {
+              "effects": [
+                {
+                  "kind": "run_tests",
+                  "target": {
+                    "kind": "test_runner",
+                    "refId": "test-runner:ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3"
+                  },
+                  "evidenceRefs": [
+                    "request"
+                  ]
+                },
+                {
+                  "kind": "write_artifact",
+                  "target": {
+                    "kind": "artifact",
+                    "refId": "test-report:ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3"
+                  },
+                  "evidenceRefs": [
+                    "request"
+                  ]
+                }
+              ],
+              "prohibitions": [
+                {
+                  "effectKind": "modify_source",
+                  "object": {
+                    "kind": "workspace",
+                    "refId": "server-17eaf885619ee74ef4f644402a06390e"
+                  },
+                  "scope": "message",
+                  "evidenceRefs": [
+                    "request"
+                  ]
+                }
+              ],
+              "grantIds": [
+                "isolated-test-report:40625516-de86-4dff-8332-1cb8003d65d5:ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3",
+                "isolated-test:40625516-de86-4dff-8332-1cb8003d65d5:ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3"
+              ],
+              "scopeHash": "e2efe2930bb5f5dca23f1b0789d7c3174f58048218cd614bbdc646adfb256cf1"
+            },
+            "executionBinding": {
+              "routingId": "dedf9d2a-b38a-4f9a-ab9e-6c3b85da4e2f",
+              "intentRevision": 1,
+              "requirementRevision": 1,
+              "executionEpoch": 1,
+              "sessionGeneration": 1,
+              "effectScopeHash": "e2efe2930bb5f5dca23f1b0789d7c3174f58048218cd614bbdc646adfb256cf1",
+              "decisionSetHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+            },
+            "idempotencyKey": "40625516-de86-4dff-8332-1cb8003d65d5:5412236d-7e34-464c-96a6-da42dcb13271:1:99e217ab-9573-4c59-9126-52c51c04ca0c:3d02d767-7e4b-4f2e-8bb5-cf62f47028e2"
+          },
+          "status": "invalidated",
+          "reusedEffectIds": [],
+          "createdAt": "2026-10-19T18:04:55.678Z",
+          "updatedAt": "2026-10-19T18:04:58.633Z",
+          "processing": {
+            "ownerId": "e23128ad-1958-455d-942d-3035633faa82",
+            "leaseExpiresAt": "2026-10-19T18:05:25.690Z",
+            "deadlineAt": "2026-10-19T18:06:55.690Z",
+            "attemptsUsed": 1,
+            "invocationId": "85de2e93-e712-4c76-afeb-a71856a74fa0"
+          },
+          "failureCode": "INTENT_EXECUTION_SUPERSEDED"
+        },
+        "attempt": {
+          "imageId": "sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402",
+          "script": "test:unit",
+          "workingDirectory": "C:\\Users\\kaiqj\\AppData\\Local\\Temp\\intent-test-dispatch-http-KlVabx\\workspace",
+          "ownerId": "db290f72-0c5a-4f61-a05a-222357079d0b",
+          "deadlineAt": "2026-10-19T18:05:55.742Z",
+          "authorityBinding": {
+            "runnerId": "docker-npm-tests-v1",
+            "workspaceBindingHash": "2b134c3a61446ca6870c4d6a7c62f820e826e032189c873a646d3ef8d14f1416",
+            "workspaceId": "server-17eaf885619ee74ef4f644402a06390e",
+            "imageId": "sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402",
+            "script": "test:unit",
+            "bindingHash": "ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3",
+            "resourceId": "test-runner:ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3"
+          },
+          "invocationId": "85de2e93-e712-4c76-afeb-a71856a74fa0",
+          "identityHash": "b4ed22d385c7e8d1b45405468fb8c19e41ea4e2d1e232dea7f4802840c026ab2",
+          "containerName": "intent-test-b4ed22d385c7e8d1b45405468fb8c19e41ea4e2d",
+          "phase": "finished",
+          "leaseExpiresAt": "2026-10-19T18:05:28.586Z",
+          "stopConfirmed": true,
+          "cleanupRequired": false,
+          "createdAt": "2026-10-19T18:04:55.744Z",
+          "updatedAt": "2026-10-19T18:04:58.586Z",
+          "daemonId": "43ca5ab9-423a-4944-a745-0f54920eeff9",
+          "snapshotDirectory": "C:\\Users\\kaiqj\\AppData\\Local\\Temp\\intent-test-snapshot-bc4d24af-0ac5-4d66-ba70-d42022830577",
+          "snapshotHash": "42368e1bf9b1ee1b242cec228659faadda97e9b65d0f1ec91d3b72b09d26e879",
+          "result": {
+            "stdout": "",
+            "stderr": "",
+            "exitCode": null,
+            "timedOut": false,
+            "aborted": true,
+            "error": "ISOLATED_TEST_ABORTED",
+            "outputTruncated": false
+          }
+        }
+      }
+    },
+    {
+      "id": "TD06",
+      "passed": true,
+      "actual": {
+        "noOldPlanReplay": true,
+        "attempts": 1
+      }
+    },
+    {
+      "id": "TD07",
+      "passed": true,
+      "actual": {
+        "failedStep": {
+          "id": "897f17ed-a30f-49a3-94ef-11dfd02101a7",
+          "sessionId": "40625516-de86-4dff-8332-1cb8003d65d5",
+          "dataEpoch": "656191d8-f633-4672-883b-2e6de4015963",
+          "routingId": "ced1fd57-c3d6-47fb-b773-c9369524c2ad",
+          "intentRevision": 1,
+          "localKey": "test-request",
+          "step": {
+            "stepId": "897f17ed-a30f-49a3-94ef-11dfd02101a7",
+            "segmentId": "11f6e14c-c661-438f-a33d-ca094b7ec724",
+            "segmentKey": "test-request",
+            "action": "enqueue_follow_up",
+            "goal": "只运行 test:unit 测试并保存报告，不修改源码",
+            "target": {
+              "workItemId": "898c83ec-85e0-4411-8b94-5a2f3c932009",
+              "decisionIds": [],
+              "artifactIds": [],
+              "agentIds": [],
+              "confirmationId": null,
+              "correctionOfRoutingId": null
+            },
+            "contextPolicy": "inherit_confirmed",
+            "correction": null,
+            "dependencies": [],
+            "evidence": [
+              {
+                "refId": "request",
+                "sourceEventId": "6aaeda9a-1296-4413-83b3-42348feb6bfa",
+                "start": 0,
+                "end": 27,
+                "quote": "只运行 test:unit 测试并保存报告，不修改源码"
+              }
+            ],
+            "expectedSessionStatus": "AGENT_DISCUSSING",
+            "effectScope": {
+              "effects": [
+                {
+                  "kind": "run_tests",
+                  "target": {
+                    "kind": "test_runner",
+                    "refId": "test-runner:ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3"
+                  },
+                  "evidenceRefs": [
+                    "request"
+                  ]
+                },
+                {
+                  "kind": "write_artifact",
+                  "target": {
+                    "kind": "artifact",
+                    "refId": "test-report:ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3"
+                  },
+                  "evidenceRefs": [
+                    "request"
+                  ]
+                }
+              ],
+              "prohibitions": [
+                {
+                  "effectKind": "modify_source",
+                  "object": {
+                    "kind": "workspace",
+                    "refId": "server-17eaf885619ee74ef4f644402a06390e"
+                  },
+                  "scope": "message",
+                  "evidenceRefs": [
+                    "request"
+                  ]
+                }
+              ],
+              "grantIds": [
+                "isolated-test-report:40625516-de86-4dff-8332-1cb8003d65d5:ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3",
+                "isolated-test:40625516-de86-4dff-8332-1cb8003d65d5:ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3"
+              ],
+              "scopeHash": "e2efe2930bb5f5dca23f1b0789d7c3174f58048218cd614bbdc646adfb256cf1"
+            },
+            "executionBinding": {
+              "routingId": "ced1fd57-c3d6-47fb-b773-c9369524c2ad",
+              "intentRevision": 1,
+              "requirementRevision": 1,
+              "executionEpoch": 1,
+              "sessionGeneration": 1,
+              "effectScopeHash": "e2efe2930bb5f5dca23f1b0789d7c3174f58048218cd614bbdc646adfb256cf1",
+              "decisionSetHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+            },
+            "idempotencyKey": "40625516-de86-4dff-8332-1cb8003d65d5:6aaeda9a-1296-4413-83b3-42348feb6bfa:1:11f6e14c-c661-438f-a33d-ca094b7ec724:897f17ed-a30f-49a3-94ef-11dfd02101a7"
+          },
+          "status": "failed",
+          "reusedEffectIds": [],
+          "createdAt": "2026-10-19T18:04:58.798Z",
+          "updatedAt": "2026-10-19T18:05:01.934Z",
+          "processing": {
+            "ownerId": "1ac74393-cde1-41fa-8385-ba4fe246d805",
+            "leaseExpiresAt": "2026-10-19T18:05:28.811Z",
+            "deadlineAt": "2026-10-19T18:06:58.811Z",
+            "attemptsUsed": 1,
+            "invocationId": "96db5edf-f5d4-4a40-90af-b7c786e0ecad"
+          },
+          "resultArtifactId": "intent-test-report:897f17ed-a30f-49a3-94ef-11dfd02101a7",
+          "failureCode": "ISOLATED_TEST_FAILED"
+        },
+        "attempts": 1
+      }
+    },
+    {
+      "id": "TR02",
+      "passed": true,
+      "actual": {
+        "failedTestEvidenceSaved": true,
+        "failedTestNotReportedAsSuccess": true,
+        "artifactId": "intent-test-report:897f17ed-a30f-49a3-94ef-11dfd02101a7"
+      }
+    },
+    {
+      "id": "TR03",
+      "passed": true,
+      "actual": {
+        "testOnlyStillWorks": true,
+        "noUnauthorizedReport": true,
+        "sourceUnchanged": true,
+        "noWriteback": true
+      }
+    },
+    {
+      "id": "RC01",
+      "passed": true,
+      "actual": {
+        "correction": {
+          "id": "e3a87132-0202-4406-bdc9-477bcb72bc6a",
+          "sessionId": "40625516-de86-4dff-8332-1cb8003d65d5",
+          "dataEpoch": "656191d8-f633-4672-883b-2e6de4015963",
+          "routingId": "4fc390f1-cd8b-4302-9d78-683a36cecd54",
+          "actorId": "local-user",
+          "sessionGeneration": 1,
+          "idempotencyKey": "replace-report",
+          "payloadHash": "39f678003252a0b01150f73ab0e075dbfbdd5ac60130e77c37e58a7c8a825f2c",
+          "request": {
+            "contractVersion": "intent-correction-v1",
+            "expectedRoutingRevision": 8,
+            "idempotencyKey": "replace-report",
+            "instruction": "纠正前面的测试请求：重新运行 test:unit 并保存报告，不修改源码",
+            "targetWorkItemId": "898c83ec-85e0-4411-8b94-5a2f3c932009",
+            "supersedesDecisionId": null,
+            "expectedDecisionRevision": null
+          },
+          "sourceEventId": "intent-correction:e3a87132-0202-4406-bdc9-477bcb72bc6a:input",
+          "previousIntentRevision": 1,
+          "pendingIntentRevision": 2,
+          "routingRevision": 12,
+          "status": "applied",
+          "affectedWorkItemIds": [
+            "898c83ec-85e0-4411-8b94-5a2f3c932009"
+          ],
+          "affectedExecutionIds": [
+            "9a65126c-1b96-43c0-b905-98c017e45bf2"
+          ],
+          "reasonCodes": [],
+          "createdAt": "2026-10-19T18:05:05.745Z",
+          "updatedAt": "2026-10-19T18:05:05.952Z",
+          "effectReconciliation": {
+            "policyVersion": "isolated-test-reconciliation-v2",
+            "confirmedAt": "2026-10-19T18:05:05.952Z",
+            "executions": [
+              {
+                "invocationId": "9a65126c-1b96-43c0-b905-98c017e45bf2",
+                "operationId": "intent-test:c4b80037-1122-44d5-a43f-da2c69c5388a",
+                "bindingHash": "ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3",
+                "snapshotHash": "0bda546b0a4eed995b91a5ae0aee8f5fa5ea923798591274aeb5986686759772",
+                "disposition": "published_report_retained",
+                "resultKnown": true,
+                "artifactId": "intent-test-report:c4b80037-1122-44d5-a43f-da2c69c5388a",
+                "artifactContentHash": "fd97ff80ba8f1077baae5b233fe7d3672ac17b4b7a665ffac697f94a19d0e27c"
+              }
+            ]
+          },
+          "processing": {
+            "ownerId": "ef16b9cf-8d5a-4a4b-9fc8-121ca80d07e0",
+            "deadlineAt": "2026-10-19T18:07:05.815Z",
+            "leaseExpiresAt": "2026-10-19T18:05:05.952Z",
+            "attemptsUsed": 1,
+            "repairsUsed": 0,
+            "snapshotRebuildsUsed": 0,
+            "invocationIds": [
+              "bfd780a8-c41e-44f6-993a-b913dc1c3712"
+            ],
+            "snapshotId": "0962ce1a-db3f-48ee-8988-d8c46490f831"
+          }
+        },
+        "oldCompletedExecutionReconciled": true
+      }
+    },
+    {
+      "id": "RC02",
+      "passed": true,
+      "actual": {
+        "oldArtifactUnchanged": true,
+        "replacement": {
+          "id": "intent-test-report:3794c4d0-600c-43f3-801b-f1b2f4e0606e",
+          "sessionId": "40625516-de86-4dff-8332-1cb8003d65d5",
+          "dataEpoch": "656191d8-f633-4672-883b-2e6de4015963",
+          "workItemId": "898c83ec-85e0-4411-8b94-5a2f3c932009",
+          "type": "test_report",
+          "title": "隔离测试报告：test:unit",
+          "contentSummary": "隔离测试退出码 0；报告保存在会话产物中。",
+          "runtimeProposals": [],
+          "platformProjections": [],
+          "systemEvidence": null,
+          "createdAt": "2026-10-19T18:05:09.193Z",
+          "metadata": {
+            "phase": "task_execution",
+            "status": "passed",
+            "intentTestReport": {
+              "format": "markdown",
+              "content": "# 隔离测试报告：test:unit\n\n退出码：0\n\n源码快照 SHA-256：aceb8d185ac8db6f4dd04e240e9c786c28baa31202bae75172550e3724b8b5ca\n\n```json\n{\n  \"stdout\": \"replacement-report-evidence\\n\",\n  \"stderr\": \"\",\n  \"truncated\": false\n}\n```\n",
+              "stepId": "3794c4d0-600c-43f3-801b-f1b2f4e0606e",
+              "invocationId": "c4a9f17e-ce98-4526-90b1-2d41f24fbb1d",
+              "bindingHash": "ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3",
+              "snapshotHash": "aceb8d185ac8db6f4dd04e240e9c786c28baa31202bae75172550e3724b8b5ca",
+              "script": "test:unit",
+              "exitCode": 0,
+              "supersedesArtifactIds": [
+                "intent-test-report:c4b80037-1122-44d5-a43f-da2c69c5388a"
+              ]
+            }
+          }
+        },
+        "sourceUnchanged": true
+      }
+    },
+    {
+      "id": "RC03",
+      "passed": true,
+      "actual": {
+        "actualRestart": true,
+        "noRepeatedTestOrReport": true
+      }
+    },
+    {
+      "id": "RC04",
+      "passed": true,
+      "actual": {
+        "deniedCorrection": {
+          "id": "9cb85753-ff8b-4e45-94eb-2e8d5e429cfe",
+          "sessionId": "40625516-de86-4dff-8332-1cb8003d65d5",
+          "dataEpoch": "656191d8-f633-4672-883b-2e6de4015963",
+          "routingId": "4fc390f1-cd8b-4302-9d78-683a36cecd54",
+          "actorId": "local-user",
+          "sessionGeneration": 1,
+          "idempotencyKey": "rejected-report-correction",
+          "payloadHash": "ffdbac09100729ffd8b17653cc7638fea60ec8b90e697370b11766752598e821",
+          "request": {
+            "contractVersion": "intent-correction-v1",
+            "expectedRoutingRevision": 14,
+            "idempotencyKey": "rejected-report-correction",
+            "instruction": "纠正前面的测试请求：重新运行 test:unit 并保存报告，不修改源码",
+            "targetWorkItemId": "898c83ec-85e0-4411-8b94-5a2f3c932009",
+            "supersedesDecisionId": null,
+            "expectedDecisionRevision": null
+          },
+          "sourceEventId": "intent-correction:9cb85753-ff8b-4e45-94eb-2e8d5e429cfe:input",
+          "previousIntentRevision": 2,
+          "pendingIntentRevision": 3,
+          "routingRevision": 18,
+          "status": "clarification_required",
+          "affectedWorkItemIds": [
+            "898c83ec-85e0-4411-8b94-5a2f3c932009"
+          ],
+          "affectedExecutionIds": [
+            "9a65126c-1b96-43c0-b905-98c017e45bf2",
+            "c4a9f17e-ce98-4526-90b1-2d41f24fbb1d"
+          ],
+          "reasonCodes": [
+            "EFFECT_NOT_AUTHORIZED"
+          ],
+          "createdAt": "2026-10-19T18:05:13.218Z",
+          "updatedAt": "2026-10-19T18:05:13.461Z",
+          "effectReconciliation": {
+            "policyVersion": "isolated-test-reconciliation-v2",
+            "confirmedAt": "2026-10-19T18:05:13.275Z",
+            "executions": [
+              {
+                "invocationId": "9a65126c-1b96-43c0-b905-98c017e45bf2",
+                "operationId": "intent-test:c4b80037-1122-44d5-a43f-da2c69c5388a",
+                "bindingHash": "ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3",
+                "snapshotHash": "0bda546b0a4eed995b91a5ae0aee8f5fa5ea923798591274aeb5986686759772",
+                "disposition": "published_report_retained",
+                "resultKnown": true,
+                "artifactId": "intent-test-report:c4b80037-1122-44d5-a43f-da2c69c5388a",
+                "artifactContentHash": "fd97ff80ba8f1077baae5b233fe7d3672ac17b4b7a665ffac697f94a19d0e27c"
+              },
+              {
+                "invocationId": "c4a9f17e-ce98-4526-90b1-2d41f24fbb1d",
+                "operationId": "intent-test:3794c4d0-600c-43f3-801b-f1b2f4e0606e",
+                "bindingHash": "ccaa23da3e7b0f6a248bb492d04622225730a129f5cc6395f8471aca58d175d3",
+                "snapshotHash": "aceb8d185ac8db6f4dd04e240e9c786c28baa31202bae75172550e3724b8b5ca",
+                "disposition": "published_report_retained",
+                "resultKnown": true,
+                "artifactId": "intent-test-report:3794c4d0-600c-43f3-801b-f1b2f4e0606e",
+                "artifactContentHash": "14f2cd4db90c486fefc532338966aebe49c6cae3f8748249ecba488890dda091"
+              }
+            ]
+          },
+          "processing": {
+            "ownerId": "60e6615b-0e57-491e-a3df-0b742500face",
+            "deadlineAt": "2026-10-19T18:07:13.294Z",
+            "leaseExpiresAt": "2026-10-19T18:05:13.461Z",
+            "attemptsUsed": 1,
+            "repairsUsed": 0,
+            "snapshotRebuildsUsed": 0,
+            "invocationIds": [
+              "9397f3b6-ac36-47a3-abe9-1024d673a53e"
+            ],
+            "snapshotId": "e0bd6f4c-46d7-4e02-b98e-b8db4b0755be"
+          }
+        },
+        "revokedReportGrantBlocksReplacement": true,
+        "historicalReportsRetained": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,220 @@
+{
+  "executedAt": "2026-10-19T18:20:54.785Z",
+  "method": "real Nest HTTP, File backend, deterministic semantic provider, actual Docker test and process restart; not an accuracy evaluation",
+  "results": [
+    {
+      "id": "AR01",
+      "passed": true,
+      "actual": {
+        "noGrantNoTaskOrBriefOrExecution": true,
+        "routeStatus": "CLARIFICATION_REQUIRED",
+        "modelCalls": 1
+      }
+    },
+    {
+      "id": "AR02",
+      "passed": true,
+      "actual": {
+        "clientPlanRejected": true,
+        "staleVersionRejected": true,
+        "missingGrantRejected": true
+      }
+    },
+    {
+      "id": "AR03",
+      "passed": true,
+      "actual": {
+        "reportRequiresSeparateGrant": true
+      }
+    },
+    {
+      "id": "AR04",
+      "passed": true,
+      "actual": {
+        "grantAloneDoesNotExecute": true,
+        "modelCalls": 1
+      }
+    },
+    {
+      "id": "AR05",
+      "passed": true,
+      "actual": {
+        "concurrentReplies": [
+          {
+            "status": 200,
+            "replay": false
+          },
+          {
+            "status": 200,
+            "replay": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "AR06",
+      "passed": true,
+      "actual": {
+        "workItems": 1,
+        "reports": 1,
+        "modelCalls": 1,
+        "step": {
+          "id": "7c131af6-1fb7-41db-8399-e6fde51dfc94",
+          "sessionId": "d35c4b5a-a2e8-4dd7-bf06-b25eb1a97b45",
+          "dataEpoch": "83a9f50e-4ff6-4546-8539-dedbb88fce60",
+          "routingId": "1e9956f9-105b-42a9-bf6e-2dff29b0949c",
+          "intentRevision": 2,
+          "localKey": "first-test",
+          "step": {
+            "stepId": "7c131af6-1fb7-41db-8399-e6fde51dfc94",
+            "segmentId": "76ea9d02-a3ff-4db0-b645-5bbbad9a26ae",
+            "segmentKey": "first-test",
+            "action": "create_initial_work_item",
+            "goal": "运行 test:unit 并保存测试报告，不修改源码",
+            "target": {
+              "workItemId": "6c8e426d-d854-4135-bf0c-13890ce3a4a0",
+              "decisionIds": [],
+              "artifactIds": [],
+              "agentIds": [],
+              "confirmationId": null,
+              "correctionOfRoutingId": null
+            },
+            "contextPolicy": "clean_task_context",
+            "correction": null,
+            "dependencies": [],
+            "evidence": [
+              {
+                "refId": "request",
+                "sourceEventId": "0289c59f-58fa-43a5-9314-448645fc11f6",
+                "start": 0,
+                "end": 26,
+                "quote": "运行 test:unit 并保存测试报告，不修改源码"
+              }
+            ],
+            "expectedSessionStatus": "AGENT_DISCUSSING",
+            "effectScope": {
+              "effects": [
+                {
+                  "kind": "run_tests",
+                  "target": {
+                    "kind": "test_runner",
+                    "refId": "test-runner:bbe5ae1a374ce53bb6dda9183dcb36a50cb9a55ccbecd7cb7fa6919b8843996f"
+                  },
+                  "evidenceRefs": [
+                    "request"
+                  ]
+                },
+                {
+                  "kind": "write_artifact",
+                  "target": {
+                    "kind": "artifact",
+                    "refId": "test-report:bbe5ae1a374ce53bb6dda9183dcb36a50cb9a55ccbecd7cb7fa6919b8843996f"
+                  },
+                  "evidenceRefs": [
+                    "request"
+                  ]
+                }
+              ],
+              "prohibitions": [
+                {
+                  "effectKind": "modify_source",
+                  "object": {
+                    "kind": "workspace",
+                    "refId": "server-5a5af156ec0e0809429524f49871ccc2"
+                  },
+                  "scope": "message",
+                  "evidenceRefs": [
+                    "request"
+                  ]
+                }
+              ],
+              "grantIds": [
+                "isolated-test-report:d35c4b5a-a2e8-4dd7-bf06-b25eb1a97b45:bbe5ae1a374ce53bb6dda9183dcb36a50cb9a55ccbecd7cb7fa6919b8843996f",
+                "isolated-test:d35c4b5a-a2e8-4dd7-bf06-b25eb1a97b45:bbe5ae1a374ce53bb6dda9183dcb36a50cb9a55ccbecd7cb7fa6919b8843996f"
+              ],
+              "scopeHash": "d690782165db615eb8fd5b9822ba088e0e859bae8f48dc67cdceecd7ae92e8b7"
+            },
+            "executionBinding": {
+              "routingId": "1e9956f9-105b-42a9-bf6e-2dff29b0949c",
+              "intentRevision": 2,
+              "requirementRevision": 1,
+              "executionEpoch": 1,
+              "sessionGeneration": 1,
+              "effectScopeHash": "d690782165db615eb8fd5b9822ba088e0e859bae8f48dc67cdceecd7ae92e8b7",
+              "decisionSetHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+            },
+            "idempotencyKey": "d35c4b5a-a2e8-4dd7-bf06-b25eb1a97b45:0289c59f-58fa-43a5-9314-448645fc11f6:2:76ea9d02-a3ff-4db0-b645-5bbbad9a26ae:7c131af6-1fb7-41db-8399-e6fde51dfc94"
+          },
+          "status": "completed",
+          "reusedEffectIds": [],
+          "createdAt": "2026-10-19T18:20:47.509Z",
+          "updatedAt": "2026-10-19T18:20:50.914Z",
+          "processing": {
+            "ownerId": "447de6ae-5fb8-4ad7-bc9d-3642a2eb39b4",
+            "leaseExpiresAt": "2026-10-19T18:21:17.526Z",
+            "deadlineAt": "2026-10-19T18:22:47.526Z",
+            "attemptsUsed": 1,
+            "invocationId": "deff59bd-b4a2-4667-a2fa-1331053a7c04"
+          },
+          "resultArtifactId": "intent-test-report:7c131af6-1fb7-41db-8399-e6fde51dfc94",
+          "responseEventId": "intent-test-result:7c131af6-1fb7-41db-8399-e6fde51dfc94"
+        },
+        "attempt": {
+          "imageId": "sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402",
+          "script": "test:unit",
+          "workingDirectory": "C:\\Users\\kaiqj\\AppData\\Local\\Temp\\intent-authorization-http-5eKv4h\\workspace",
+          "ownerId": "1b00c25d-5f01-4828-9580-6ecbf3f172a7",
+          "deadlineAt": "2026-10-19T18:21:47.574Z",
+          "authorityBinding": {
+            "runnerId": "docker-npm-tests-v1",
+            "workspaceBindingHash": "255dde12278acfc0feaa7734c730d429beafcd77b8a738dd216b67781f208dd5",
+            "workspaceId": "server-5a5af156ec0e0809429524f49871ccc2",
+            "imageId": "sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402",
+            "script": "test:unit",
+            "bindingHash": "bbe5ae1a374ce53bb6dda9183dcb36a50cb9a55ccbecd7cb7fa6919b8843996f",
+            "resourceId": "test-runner:bbe5ae1a374ce53bb6dda9183dcb36a50cb9a55ccbecd7cb7fa6919b8843996f"
+          },
+          "invocationId": "deff59bd-b4a2-4667-a2fa-1331053a7c04",
+          "identityHash": "40b6f74d4c3fb9c5d3465a38c5a93ea591593f72f9f211a91155a3f3bb859b36",
+          "containerName": "intent-test-40b6f74d4c3fb9c5d3465a38c5a93ea591593f72",
+          "phase": "finished",
+          "leaseExpiresAt": "2026-10-19T18:21:20.886Z",
+          "stopConfirmed": true,
+          "cleanupRequired": false,
+          "createdAt": "2026-10-19T18:20:47.575Z",
+          "updatedAt": "2026-10-19T18:20:50.886Z",
+          "daemonId": "43ca5ab9-423a-4944-a745-0f54920eeff9",
+          "snapshotDirectory": "C:\\Users\\kaiqj\\AppData\\Local\\Temp\\intent-test-snapshot-cf2a90bd-81c1-4501-a2a4-beb904549787",
+          "snapshotHash": "9c4f0528701d020230eb85e96e89dbfd6de6d55dded30ab5cfec74808ae22293",
+          "result": {
+            "stdout": "TAP version 13\n# Subtest: first request\nok 1 - first request\n  ---\n  duration_ms: 4.356992\n  type: 'test'\n  ...\n1..1\n# tests 1\n# suites 0\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 62.846441\n",
+            "stderr": "",
+            "exitCode": 0,
+            "timedOut": false,
+            "aborted": false,
+            "outputTruncated": false
+          }
+        },
+        "sourceUnchanged": true
+      }
+    },
+    {
+      "id": "AR07",
+      "passed": true,
+      "actual": {
+        "immutableOriginalPlanPreserved": true,
+        "exactUnderstandingReused": true,
+        "oneReceipt": true
+      }
+    },
+    {
+      "id": "AR08",
+      "passed": true,
+      "actual": {
+        "actualServerRestart": true,
+        "receiptReplay": true,
+        "noRepeatedModelTestTaskReport": true
+      }
+    }
+  ]
+}

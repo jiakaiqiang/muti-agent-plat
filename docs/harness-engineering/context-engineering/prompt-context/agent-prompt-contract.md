@@ -50,6 +50,7 @@ A prompt must include:
 | post_review | Compare execution results against the confirmed brief and recommend deliver/rework/ask_user. |
 | final_delivery | Summarize completed work, incomplete items, risks, and artifact references. |
 | user_message_routing | Classify user intent and decide whether to pause, revise, or continue. |
+| user_message_response | Answer the original question under a committed answer scope; optional workspace reads require a separate validated read grant and protocol tools. Never write, run commands, delegate task execution or resume business. |
 
 ## 越权与返工
 

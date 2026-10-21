@@ -1,5 +1,21 @@
 # Runtime Contract：Context v2 + Versioned Output Contracts
 
+2026-10-20 草稿重试：`intent-brief-retry-v1` 保留原 step/plan，显式 CAS 受理新增 briefOperationId；Runtime 不能用旧 operation ID 预约或启动。新预算最多两次调用/120 秒，旧 processing 只追加保存于 briefRetryReceipts。已有 briefResult 不得重生成，未知停止/暂停/失效版本拒绝；连接等待仍由 Runtime 拦截。GET brief-recovery 不改变预算，202 仅表示受理。详见[记录](../quality/intent-recognition-correction-runs/2026-10-19-sdd-development/brief-retry-report.md)。
+
+2026-10-20 结构化草稿修订：`intent-brief-revise-v1` 通过原 Brief reject API 接入统一消息管线，绑定 epoch/卡片/Brief 与意图版本，原请求不可变。受理不调用生成、不确认答案；合法同任务无效果计划提交后保存 typed question/answer Decision 并派生版本化 prepare_brief。暂停等待恢复，未知响应重试原身份。当前不支持指定生成 Agent，明确拒绝；详见[修订记录](../quality/intent-recognition-correction-runs/2026-10-19-sdd-development/brief-revision-report.md)。
+
+2026-10-20 纠错生成 Brief：派生步骤 replacesBrief 为服务器绑定的旧稿 ID/版本，空效果/工具/能力保持不变。生成来源取当前不可变 IntentRouteRevision 的 sourceEventId/snapshot，旧消息不能代替纠错输入。暂停中的新 queued 步骤不启动 operation/deadline；恢复后使用独立有限预算。新 Brief.supersedesBriefId 只表达历史替代，不撤销原确认收据或授予专业执行权限。
+
+2026-10-20 Brief 确认增量：`intent-brief-confirm-v1` 请求只认可已绑定草稿版本，不创建 Runtime invocation、不签发效果 grant。确认事务更新 Decision 和 requirementRevision；旧执行绑定因此不能跨需求版本启动。暂停确认不 reopen admission；新合同旧 workflow/select 入口返回 INTENT_WORKFLOW_PLAN_REQUIRED。版本化专业工作流尚待实现，详见[确认记录](../quality/intent-recognition-correction-runs/2026-10-19-sdd-development/brief-confirmation-report.md)。
+
+2026-10-20 Brief 执行增量：prepare_brief 现由真实首轮提交派生并持久化 queued；IntentBriefExecutorService 使用独立 `brief:<stepId>` operation、30 秒租约、总最多 2 次调用与最多 120 秒 deadline。Generic 适配器对该绑定阶段返回 schemaRepairOwner=intent_brief，由执行器持有一次格式修复，避免内外嵌套修复；401/403 不重试。候选已保存时恢复只发布，不再调用模型，未知停止进入 reconciliation_required。旧 Orchestrator 的新合同 Brief/确认/修订旁路均拒绝，实际范围见[记录](../quality/intent-recognition-correction-runs/2026-10-19-sdd-development/brief-executor-report.md)。
+
+2026-10-20 Brief 事务基础：携带 executionBinding 的 brief_generation 必须是 business 准入、明确 intentStepId/workItemId、task_brief 1.0、空工具/能力/效果/grant 和无 resume，当前只允许 generic_llm/mock。持久化 step 必须为不可变计划中的 prepare_brief、running 且租约/截止时间有效；运行阶段和 invocationId 不得借用父创建步骤。该服务端动作不能由 intent_understanding 模型输出。当前守卫与存储已实现，自动执行器尚未注册；完整范围见[记录](../quality/intent-recognition-correction-runs/2026-10-19-sdd-development/brief-store-report.md)。
+
+2026-10-20 指定回答增量：单段问题可按全部明确 Agent 目标编译为独立 answer step，所有 step 先原子保存后执行。response 准入携带 invocationId 时，运行 Agent 必须匹配持久化 step 的唯一目标；目标不可用失败，不改投 Coordinator。每个目标保留独立 operation、两次总尝试与同一绝对 deadline，权限仍仅限已绑定的回答/读取范围。路由汇总所有 step 的完成与失败，部分失败不被兄弟步骤覆盖。详见[验证记录](../quality/intent-recognition-correction-runs/2026-10-19-sdd-development/targeted-answer-report.md)。
+
+2026-10-20 受限意图分类增量：`routing` 的服务端 `claude_code` 只允许 intent_understanding/intent_routing_decision 1.0、空工具、零工作区能力、无写入和无 resume。分类保留独立 Worker，worker.start 可省略 workDir；只在该严格配置下不绑定项目，由适配器创建并清理临时空目录。普通业务 Worker 仍要求目录。固定 CLI 参数关闭工具/MCP/技能/自定义配置和持久会话；单 turn、关闭 API 重试，Schema 校验与一次修复由上层持久化分类器负责。Codex/旧 Bridge 分类和 Claude response 准入没有因此开放。验证与版本范围见[受限分类记录](../quality/intent-recognition-correction-runs/2026-10-19-sdd-development/claude-classifier-report.md)。
+
 主 Agent 协作新增身份/策略合同见 [阶段 0 冻结合同](./main-agent-collaboration-contract-v1.md)。ContextEnvelopeV2、InvocationPlan 和 Tool Authority 的现有边界不变；合同资格校验不等于模型调用已获授权。
 
 ## 1. 目标

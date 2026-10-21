@@ -1,0 +1,131 @@
+{
+  "diagnostic": {
+    "total": 70,
+    "passed": 52,
+    "failed": 18,
+    "byFeature": {
+      "首轮领域与写权限判断": {
+        "total": 20,
+        "passed": 11
+      },
+      "规则兜底的需求关系": {
+        "total": 8,
+        "passed": 4
+      },
+      "精确命令与否定边界": {
+        "total": 16,
+        "passed": 16
+      },
+      "执行期专项规则": {
+        "total": 8,
+        "passed": 7
+      },
+      "故障注入与服务端校验": {
+        "total": 18,
+        "passed": 14
+      }
+    }
+  },
+  "firstTurnMetrics": {
+    "intentCorrect": 16,
+    "codeChangeFlagCorrect": 13,
+    "readOnlyCount": 17,
+    "falseCodeChange": 7
+  },
+  "legacy": {
+    "total": 20,
+    "passed": 18,
+    "failed": 2
+  },
+  "v2": {
+    "total": 20,
+    "passed": 19,
+    "failed": 1
+  },
+  "correction": {
+    "total": 7,
+    "passed": 4,
+    "failed": 3
+  },
+  "legacyFields": {
+    "requirementRelation": {
+      "total": 17,
+      "passed": 17
+    },
+    "intent": {
+      "total": 6,
+      "passed": 6
+    },
+    "failedExecutionAction": {
+      "total": 2,
+      "passed": 2
+    },
+    "requiresUserConfirmation": {
+      "total": 3,
+      "passed": 1
+    }
+  },
+  "v2Fields": {
+    "scopeRelation": {
+      "total": 20,
+      "passed": 20
+    },
+    "requestedAction": {
+      "total": 20,
+      "passed": 19
+    },
+    "autoApplicable": {
+      "total": 20,
+      "passed": 19
+    },
+    "selectedWorkItemId": {
+      "total": 17,
+      "passed": 17
+    },
+    "dialogueAct": {
+      "total": 6,
+      "passed": 6
+    },
+    "contextPolicy": {
+      "total": 2,
+      "passed": 2
+    },
+    "selectedDecisionIds": {
+      "total": 1,
+      "passed": 1
+    },
+    "requestedAgentIds": {
+      "total": 1,
+      "passed": 1
+    }
+  },
+  "completedCodexRows": 40,
+  "runtimeInvocations": 40,
+  "supplementaryL20B": {
+    "passed": true,
+    "completedCodexRows": 1,
+    "precondition": "confirmed prior 10-minute constraint added",
+    "countedInPrimaryBenchmark": false
+  },
+  "prematureApply": [],
+  "clarificationsAgainstPreset": [
+    "L20"
+  ],
+  "manualAdjudication": {
+    "L11:legacy": "substantive multi-intent mismatch",
+    "L17:legacy": "safe refusal; preset label mismatch",
+    "L20:v2": "reasonable clarification; missing prior target in fixture"
+  },
+  "latency": {
+    "legacy": {
+      "p50": "28.34",
+      "p95": "39.31",
+      "mean": "29.38"
+    },
+    "v2": {
+      "p50": "20.06",
+      "p95": "39.22",
+      "mean": "23.00"
+    }
+  }
+}

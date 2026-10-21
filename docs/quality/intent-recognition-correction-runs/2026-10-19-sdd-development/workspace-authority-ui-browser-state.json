@@ -1,0 +1,100 @@
+{
+  "sessionId": "6e3b9539-ac5b-419c-b98b-f2589f49c198",
+  "authority": {
+    "bindingHash": "7d44a7a9c582c87bbd48ddb0b260ef3818e2b4f66b8d94f5a9e8e2fa1ac14843",
+    "grant": {
+      "id": "workspace-read:6e3b9539-ac5b-419c-b98b-f2589f49c198:7d44a7a9c582c87bbd48ddb0b260ef3818e2b4f66b8d94f5a9e8e2fa1ac14843",
+      "effect": "read_workspace",
+      "resource": {
+        "kind": "workspace",
+        "refId": "server-495ff2b804379c2f93daf336538680ca"
+      },
+      "revision": 4,
+      "sourceEventId": "d15de627-7bac-4230-aa7b-0f1fa23b0ccc",
+      "revokedAt": "2026-10-19T14:25:00.217Z"
+    }
+  },
+  "events": [
+    {
+      "id": "97f6e534-8ce4-45a9-886b-12ae403f6013",
+      "sessionId": "6e3b9539-ac5b-419c-b98b-f2589f49c198",
+      "type": "intent_workspace_authority_changed",
+      "createdAt": "2026-10-19T14:23:34.929Z",
+      "toAgentIds": [],
+      "actor": {
+        "type": "user",
+        "id": "local-user"
+      },
+      "content": "已撤销工作区读取授权。",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "system_notice",
+        "idempotencyKey": "6734d7b0-a0ca-4612-9153-2bf730e81652",
+        "payload": {
+          "request": {
+            "action": "revoke",
+            "dataEpoch": "4f8852bf-b9e6-4e05-97e4-edadbaa82be0",
+            "expectedBindingHash": "7d44a7a9c582c87bbd48ddb0b260ef3818e2b4f66b8d94f5a9e8e2fa1ac14843",
+            "expectedGrantRevision": 1,
+            "idempotencyKey": "6734d7b0-a0ca-4612-9153-2bf730e81652"
+          },
+          "grantRevision": 2
+        }
+      }
+    },
+    {
+      "id": "d15de627-7bac-4230-aa7b-0f1fa23b0ccc",
+      "sessionId": "6e3b9539-ac5b-419c-b98b-f2589f49c198",
+      "type": "intent_workspace_authority_changed",
+      "createdAt": "2026-10-19T14:24:13.591Z",
+      "toAgentIds": [],
+      "actor": {
+        "type": "user",
+        "id": "local-user"
+      },
+      "content": "已授权读取当前工作区。",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "system_notice",
+        "idempotencyKey": "d02db7d4-dda7-4dec-97df-881ab7772c19",
+        "payload": {
+          "request": {
+            "action": "grant",
+            "dataEpoch": "4f8852bf-b9e6-4e05-97e4-edadbaa82be0",
+            "expectedBindingHash": "7d44a7a9c582c87bbd48ddb0b260ef3818e2b4f66b8d94f5a9e8e2fa1ac14843",
+            "expectedGrantRevision": 2,
+            "idempotencyKey": "d02db7d4-dda7-4dec-97df-881ab7772c19"
+          },
+          "grantRevision": 3
+        }
+      }
+    },
+    {
+      "id": "778f7bfc-c5dd-4fd9-9a0f-44ef2e83e01d",
+      "sessionId": "6e3b9539-ac5b-419c-b98b-f2589f49c198",
+      "type": "intent_workspace_authority_changed",
+      "createdAt": "2026-10-19T14:25:00.217Z",
+      "toAgentIds": [],
+      "actor": {
+        "type": "user",
+        "id": "local-user"
+      },
+      "content": "已撤销工作区读取授权。",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "system_notice",
+        "idempotencyKey": "fa184757-7025-401c-b481-8422645cb518",
+        "payload": {
+          "request": {
+            "action": "revoke",
+            "dataEpoch": "4f8852bf-b9e6-4e05-97e4-edadbaa82be0",
+            "expectedBindingHash": "7d44a7a9c582c87bbd48ddb0b260ef3818e2b4f66b8d94f5a9e8e2fa1ac14843",
+            "expectedGrantRevision": 3,
+            "idempotencyKey": "fa184757-7025-401c-b481-8422645cb518"
+          },
+          "grantRevision": 4
+        }
+      }
+    }
+  ]
+}

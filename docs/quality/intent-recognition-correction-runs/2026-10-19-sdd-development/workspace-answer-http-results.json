@@ -1,0 +1,94 @@
+{
+  "executedAt": "2026-10-19T14:01:23.798Z",
+  "method": "actual Sessions API + Generic LLM text tool protocol + real temporary files; deterministic provider; no model accuracy claim",
+  "results": [
+    {
+      "id": "WR01",
+      "passed": true,
+      "actual": {
+        "status": "completed",
+        "providerRequests": 3,
+        "scope": {
+          "effects": [
+            {
+              "kind": "answer",
+              "target": {
+                "kind": "unresolved",
+                "refId": null
+              },
+              "evidenceRefs": [
+                "request"
+              ]
+            },
+            {
+              "kind": "read_workspace",
+              "target": {
+                "kind": "workspace",
+                "refId": "server-5f0ed89be8241315a7e7238e1c0f97e1"
+              },
+              "evidenceRefs": [
+                "request"
+              ]
+            }
+          ],
+          "prohibitions": [
+            {
+              "effectKind": "modify_source",
+              "object": {
+                "kind": "workspace",
+                "refId": "server-5f0ed89be8241315a7e7238e1c0f97e1"
+              },
+              "scope": "message",
+              "evidenceRefs": [
+                "request"
+              ]
+            }
+          ],
+          "grantIds": [
+            "workspace-read:3b943023-1584-4a48-b67c-86309d4041dc:3f81d7bb2dba62ecd286d81692f088a14f535cad143436c84b98c671a25d5983"
+          ],
+          "scopeHash": "fcfa547c122baf8caa0a10ba0fb1a5cfc652ed339fef4b9807b73bfb07b5fcc5"
+        }
+      }
+    },
+    {
+      "id": "WR02",
+      "passed": true,
+      "actual": {
+        "workItems": 0,
+        "invocationStatus": "completed"
+      }
+    },
+    {
+      "id": "WR03",
+      "passed": true,
+      "actual": {
+        "traversalRejected": true,
+        "sensitiveRejected": true,
+        "junctionEscapeRejected": true
+      }
+    },
+    {
+      "id": "WR04",
+      "passed": true,
+      "actual": {
+        "failureCode": "CAPABILITY_BLOCKED",
+        "requestDelta": 2
+      }
+    },
+    {
+      "id": "WR05",
+      "passed": true,
+      "actual": {
+        "before": [
+          "13022f3e17dd517d622c3b590d26c8ba524c8361c72b982e897c22d1586e7898",
+          "0303d067d84acab9d4d4cfe7993f4c2015618bf0b40c45545be82b2da7308088"
+        ],
+        "after": [
+          "13022f3e17dd517d622c3b590d26c8ba524c8361c72b982e897c22d1586e7898",
+          "0303d067d84acab9d4d4cfe7993f4c2015618bf0b40c45545be82b2da7308088"
+        ]
+      }
+    }
+  ]
+}

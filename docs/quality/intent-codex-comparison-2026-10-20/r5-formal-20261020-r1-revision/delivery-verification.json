@@ -1,0 +1,17 @@
+{
+  "verifiedAt": "2026-10-20T12:22:47.090Z",
+  "samples": 225,
+  "providerCalls": 226,
+  "outputs": 225,
+  "transportTestsPassed": 10,
+  "formalAssertionsPassed": true,
+  "files": {
+    "docs/quality/intent-codex-comparison-2026-10-20/report.md": "c11adf12d0961762ea486c55763497a0e21ed44a22e56201f39d5a752efbe0a5",
+    "tests/evaluation/run-intent-r5-formal.mjs": "f7c17345fda40df03539d5001c99ce1506f46782b2819225e4f71e4adcdfa2b3",
+    "tests/evaluation/report-intent-r5-formal.mjs": "7e123c7e2721dc274be3571c4dd813b3525ec58b511745d80dbc176264e4ffeb",
+    "tests/evaluation/run-intent-codex-current.mjs": "ca37950a03d3d2aa8d190e69318e07b51ec2ae7525618bcd396d2aecf2afe1d5",
+    "tests/evaluation/intent-holdout-v3-2026-10-20.mjs": "801ec752ff30a9ce67012004d569017b529382cb9c2aa3574e3e1022b925c1cd",
+    "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+    "apps/server/dist/apps/server/src/modules/intent-recognition/semantic-intent-router.service.js": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab"
+  }
+}

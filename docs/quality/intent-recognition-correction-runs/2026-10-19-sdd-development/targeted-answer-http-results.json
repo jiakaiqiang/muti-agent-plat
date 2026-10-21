@@ -1,0 +1,90 @@
+{
+  "executedAt": "2026-10-19T19:38:33.652Z",
+  "method": "Actual Sessions HTTP + Generic LLM + deterministic localhost provider + File persistence/restart, not model accuracy",
+  "results": [
+    {
+      "id": "TA01",
+      "passed": true,
+      "actual": {
+        "agents": [
+          "00000000-0000-0000-0000-000000000002",
+          "00000000-0000-0000-0000-000000000003"
+        ],
+        "steps": [
+          {
+            "target": [
+              "00000000-0000-0000-0000-000000000002"
+            ],
+            "status": "completed"
+          },
+          {
+            "target": [
+              "00000000-0000-0000-0000-000000000003"
+            ],
+            "status": "completed"
+          }
+        ]
+      }
+    },
+    {
+      "id": "TA02",
+      "passed": true,
+      "actual": {
+        "responders": [
+          "00000000-0000-0000-0000-000000000002",
+          "00000000-0000-0000-0000-000000000003"
+        ],
+        "sourceBound": true,
+        "calls": [
+          {
+            "stage": "success",
+            "answering": false,
+            "sourceEventId": "13666707-0a4f-467c-9ee2-dd3ae34acb2d",
+            "tools": []
+          },
+          {
+            "stage": "success",
+            "answering": true,
+            "agent": "00000000-0000-0000-0000-000000000002",
+            "sourceEventId": "13666707-0a4f-467c-9ee2-dd3ae34acb2d",
+            "tools": []
+          },
+          {
+            "stage": "success",
+            "answering": true,
+            "agent": "00000000-0000-0000-0000-000000000003",
+            "sourceEventId": "13666707-0a4f-467c-9ee2-dd3ae34acb2d",
+            "tools": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "TA03",
+      "passed": true,
+      "actual": {
+        "replay": true,
+        "modelCalls": 5
+      }
+    },
+    {
+      "id": "TA04",
+      "passed": true,
+      "actual": {
+        "statuses": [
+          "failed",
+          "completed"
+        ],
+        "route": "failed"
+      }
+    },
+    {
+      "id": "TA05",
+      "passed": true,
+      "actual": {
+        "realRestart": true,
+        "noDuplicateModelCall": true
+      }
+    }
+  ]
+}

@@ -19,6 +19,8 @@
 
 ## 推荐阅读路径
 
+意图识别、路由与纠错按 SDD 四件套推进：[Spec](product/intent-recognition-correction-spec-v1.md) → [Plan](design/intent-recognition-correction-plan-v1.md) → [Task](implementation/intent-recognition-correction-task-v1.md) → [Checklist](quality/intent-recognition-correction-checklist-v1.md)。依据 2026-10-19 评测与既有三份设计文档，包含 20 项规格、14 组共 56 个执行步骤及 58 个业务验收场景；当前待实施，文档生成不代表产品验证通过。
+
 主 Agent 主持群聊、多会话隔离与长会话治理的分阶段改造，请从 [实施总计划与 9 阶段 SDD 索引](roadmap/main-agent-collaboration-roadmap-v1.md) 开始。阶段 0 已实现[共享合同与兼容校验](contracts/main-agent-collaboration-contract-v1.md)，证据见[验收记录](quality/main-agent-collaboration-phase-0-checklist-v1.md)；其余阶段待实施，不表示新业务流程已上线。
 
 1. 产品与目标：`product/`

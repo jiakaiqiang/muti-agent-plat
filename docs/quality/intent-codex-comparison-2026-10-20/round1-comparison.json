@@ -1,0 +1,568 @@
+{
+  "before": {
+    "cases": 20,
+    "passed": 13,
+    "schema": 20,
+    "firstPassSchema": 20,
+    "relation": 19,
+    "action": 14,
+    "routeReferencesAndRelation": 18,
+    "evidence": 20,
+    "routeState": 17,
+    "goalSegmentation": 17,
+    "routeOutcomes": {
+      "needs_clarification": 10,
+      "blocked": 3,
+      "applicable": 6,
+      "rejected": 1
+    },
+    "providerCalls": 20,
+    "transportFailures": 0,
+    "websocketFallbacks": 20,
+    "secondAttempts": 0,
+    "cliUsage": {
+      "input_tokens": 452822,
+      "cached_input_tokens": 121344,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 11836,
+      "reasoning_output_tokens": 3834
+    }
+  },
+  "after": {
+    "cases": 20,
+    "passed": 17,
+    "schema": 20,
+    "firstPassSchema": 20,
+    "relation": 20,
+    "action": 18,
+    "routeReferencesAndRelation": 17,
+    "evidence": 20,
+    "routeState": 20,
+    "goalSegmentation": 20,
+    "routeOutcomes": {
+      "needs_clarification": 12,
+      "blocked": 3,
+      "applicable": 5
+    },
+    "providerCalls": 20,
+    "transportFailures": 0,
+    "websocketFallbacks": 0,
+    "secondAttempts": 0,
+    "cliUsage": {
+      "input_tokens": 466253,
+      "cached_input_tokens": 211072,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 9901,
+      "reasoning_output_tokens": 3022
+    }
+  },
+  "improved": [
+    "L07",
+    "L15",
+    "L16",
+    "L17"
+  ],
+  "regressed": [],
+  "remainingFailures": [
+    {
+      "id": "L09",
+      "checks": [
+        {
+          "field": "routeReferencesAndRelation",
+          "pass": false
+        }
+      ],
+      "actual": {
+        "status": "VALIDATING",
+        "reasonCodes": [
+          "INTENT_UNDERSTANDING_READY"
+        ],
+        "attempts": 1,
+        "understanding": {
+          "schemaVersion": "1.0",
+          "kind": "intent_understanding",
+          "semanticContractVersion": "intent-understanding-v1",
+          "segments": [
+            {
+              "localKey": "continue_failed_login",
+              "dialogueAct": "command",
+              "goal": "继续完成之前失败的登录任务，并保持原方案不变。已确定对应的现有任务，但缺少服务端失败检查点，需要澄清具体恢复步骤后才能路由重试。",
+              "scopeRelation": "same_requirement",
+              "suggestedAction": "clarify",
+              "target": {
+                "workItemId": "18f72fab-033a-435d-8739-8326f45c34c9",
+                "decisionIds": [
+                  "b70d086c-5252-4db5-ad40-4db67e967eaa"
+                ],
+                "artifactIds": [],
+                "agentIds": [],
+                "confirmationId": null,
+                "correctionOfRoutingId": null
+              },
+              "correction": null,
+              "contextPolicy": "ask_user",
+              "requestedEffects": [
+                {
+                  "kind": "modify_source",
+                  "target": {
+                    "kind": "unresolved",
+                    "refId": null
+                  },
+                  "evidenceRefs": [
+                    "continue_request"
+                  ]
+                }
+              ],
+              "prohibitions": [],
+              "evidence": [
+                {
+                  "refId": "continue_request",
+                  "sourceEventId": "ebf476f4-afc4-4082-a6d0-40ad2bb1d4a0",
+                  "start": 0,
+                  "end": 22,
+                  "quote": "继续完成之前失败的登录任务，保持原方案不变。"
+                }
+              ],
+              "dependencies": []
+            }
+          ],
+          "missingFields": [
+            "缺少服务端提供的失败检查点：需要明确登录任务失败的具体步骤及对应恢复目标。"
+          ],
+          "ambiguityReasons": [
+            "当前 Session 状态为 FAILED，但未提供失败检查点，不能选择 retry_failed_step；状态不是 PAUSED，不能选择 resume。用户要求保持原方案不变，也不应选择 replan。"
+          ],
+          "modelConfidence": 0.99
+        },
+        "plan": {
+          "planId": "82682764-d49d-4713-bc62-12456a68d10a",
+          "routingId": "b5c4ff02-887e-4550-a598-cd1b01619ee7",
+          "routingRevision": 1,
+          "intentRevision": 1,
+          "sourceEventId": "ebf476f4-afc4-4082-a6d0-40ad2bb1d4a0",
+          "snapshotId": "53166562-53c0-438e-9890-81e6f4da7f84",
+          "businessFingerprint": "2a26bc3c3f982ad7990a9611d7b1700044880b7496bb680e87040bce898a1b18",
+          "policyVersion": "intent-policy-v1",
+          "outcome": "needs_clarification",
+          "steps": [
+            {
+              "stepId": "21bc52b8-6409-456e-9423-feeb90786009",
+              "segmentId": "d9ee1944-8dd4-4cd5-8e37-5ac3fbcec680",
+              "segmentKey": "continue_failed_login",
+              "action": "clarify",
+              "goal": "继续完成之前失败的登录任务，并保持原方案不变。已确定对应的现有任务，但缺少服务端失败检查点，需要澄清具体恢复步骤后才能路由重试。",
+              "target": {
+                "workItemId": "18f72fab-033a-435d-8739-8326f45c34c9",
+                "decisionIds": [
+                  "b70d086c-5252-4db5-ad40-4db67e967eaa"
+                ],
+                "artifactIds": [],
+                "agentIds": [],
+                "confirmationId": null,
+                "correctionOfRoutingId": null
+              },
+              "contextPolicy": "ask_user",
+              "correction": null,
+              "dependencies": [],
+              "evidence": [
+                {
+                  "refId": "continue_request",
+                  "sourceEventId": "ebf476f4-afc4-4082-a6d0-40ad2bb1d4a0",
+                  "start": 0,
+                  "end": 22,
+                  "quote": "继续完成之前失败的登录任务，保持原方案不变。"
+                }
+              ],
+              "expectedSessionStatus": "FAILED",
+              "effectScope": {
+                "effects": [],
+                "prohibitions": [],
+                "grantIds": [],
+                "scopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8"
+              },
+              "executionBinding": {
+                "routingId": "b5c4ff02-887e-4550-a598-cd1b01619ee7",
+                "intentRevision": 1,
+                "requirementRevision": 1,
+                "executionEpoch": 1,
+                "sessionGeneration": 1,
+                "effectScopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8",
+                "decisionSetHash": "ad0aa2d1ede7890b76159e47fdf2728363fc4d29d9bee9679cda9e6827bfc8fb"
+              },
+              "idempotencyKey": "f1e0de39-fc47-4d2e-ad5c-353059a94378:ebf476f4-afc4-4082-a6d0-40ad2bb1d4a0:1:d9ee1944-8dd4-4cd5-8e37-5ac3fbcec680:21bc52b8-6409-456e-9423-feeb90786009"
+            }
+          ],
+          "validation": {
+            "schemaValid": true,
+            "referencesValid": true,
+            "relationActionValid": false,
+            "stateValid": true,
+            "authorizationValid": false,
+            "snapshotCurrent": true,
+            "errorCodes": [
+              "INTENT_AMBIGUOUS",
+              "RELATION_ACTION_CONFLICT",
+              "EFFECT_TARGET_UNRESOLVED"
+            ],
+            "validationScore": 0.7
+          }
+        }
+      }
+    },
+    {
+      "id": "L11",
+      "checks": [
+        {
+          "field": "routeReferencesAndRelation",
+          "pass": false
+        }
+      ],
+      "actual": {
+        "status": "VALIDATING",
+        "reasonCodes": [
+          "INTENT_UNDERSTANDING_READY"
+        ],
+        "attempts": 1,
+        "understanding": {
+          "schemaVersion": "1.0",
+          "kind": "intent_understanding",
+          "semanticContractVersion": "intent-understanding-v1",
+          "segments": [
+            {
+              "localKey": "continue_login",
+              "dialogueAct": "command",
+              "goal": "继续当前登录接口任务；会话处于 WAIT_USER_CONFIRM，但没有提供待确认事项，需澄清继续所对应的确认内容。",
+              "scopeRelation": "same_requirement",
+              "suggestedAction": "clarify",
+              "target": {
+                "workItemId": "f5910de0-8336-479f-b9f7-8ce8eb52b19b",
+                "decisionIds": [
+                  "65c36016-df91-456b-b281-519891feab13"
+                ],
+                "artifactIds": [],
+                "agentIds": [],
+                "confirmationId": null,
+                "correctionOfRoutingId": null
+              },
+              "correction": null,
+              "contextPolicy": "ask_user",
+              "requestedEffects": [],
+              "prohibitions": [],
+              "evidence": [
+                {
+                  "refId": "continue_login_request",
+                  "sourceEventId": "fbbc1b7a-f2cf-4db3-a61b-558ce8a162ac",
+                  "start": 0,
+                  "end": 9,
+                  "quote": "先继续当前登录任务"
+                }
+              ],
+              "dependencies": []
+            },
+            {
+              "localKey": "create_weather_task",
+              "dialogueAct": "command",
+              "goal": "在当前登录任务的继续请求完成路由后，创建一个独立的天气查询任务，不继承登录任务的约束。",
+              "scopeRelation": "independent_new_requirement",
+              "suggestedAction": "create_independent_work_item",
+              "target": {
+                "workItemId": null,
+                "decisionIds": [],
+                "artifactIds": [],
+                "agentIds": [],
+                "confirmationId": null,
+                "correctionOfRoutingId": null
+              },
+              "correction": null,
+              "contextPolicy": "clean_task_context",
+              "requestedEffects": [],
+              "prohibitions": [],
+              "evidence": [
+                {
+                  "refId": "weather_task_request",
+                  "sourceEventId": "fbbc1b7a-f2cf-4db3-a61b-558ce8a162ac",
+                  "start": 10,
+                  "end": 24,
+                  "quote": "再创建一个独立的天气查询任务"
+                }
+              ],
+              "dependencies": [
+                {
+                  "segmentKey": "continue_login",
+                  "condition": "route_committed"
+                }
+              ]
+            }
+          ],
+          "missingFields": [
+            "当前登录任务待确认事项的标识与具体内容；会话状态为 WAIT_USER_CONFIRM，但 Pending confirmation 为 null。"
+          ],
+          "ambiguityReasons": [
+            "登录任务目标明确，但缺少待确认事项，无法将“继续”安全映射为确认解决；当前会话也不满足 resume 或 retry_failed_step 的条件。"
+          ],
+          "modelConfidence": 0.95
+        },
+        "plan": {
+          "planId": "0bf4f1a8-5a33-4250-9e6b-c2ee46053748",
+          "routingId": "de4ae270-a346-4108-97bc-67f3d1ea0afd",
+          "routingRevision": 1,
+          "intentRevision": 1,
+          "sourceEventId": "fbbc1b7a-f2cf-4db3-a61b-558ce8a162ac",
+          "snapshotId": "e1e3373b-8de2-4ce5-b912-548eab174357",
+          "businessFingerprint": "60128914ac1e41048fe9b461024f7501884f6c8d947d98b9ff04d39b39e1aab7",
+          "policyVersion": "intent-policy-v1",
+          "outcome": "needs_clarification",
+          "steps": [
+            {
+              "stepId": "fec71a2f-78b3-4e36-b080-01163612ca2c",
+              "segmentId": "77a41023-8d26-4e5f-a189-5b5ba33bcf2a",
+              "segmentKey": "continue_login",
+              "action": "clarify",
+              "goal": "继续当前登录接口任务；会话处于 WAIT_USER_CONFIRM，但没有提供待确认事项，需澄清继续所对应的确认内容。",
+              "target": {
+                "workItemId": "f5910de0-8336-479f-b9f7-8ce8eb52b19b",
+                "decisionIds": [
+                  "65c36016-df91-456b-b281-519891feab13"
+                ],
+                "artifactIds": [],
+                "agentIds": [],
+                "confirmationId": null,
+                "correctionOfRoutingId": null
+              },
+              "contextPolicy": "ask_user",
+              "correction": null,
+              "dependencies": [],
+              "evidence": [
+                {
+                  "refId": "continue_login_request",
+                  "sourceEventId": "fbbc1b7a-f2cf-4db3-a61b-558ce8a162ac",
+                  "start": 0,
+                  "end": 9,
+                  "quote": "先继续当前登录任务"
+                }
+              ],
+              "expectedSessionStatus": "WAIT_USER_CONFIRM",
+              "effectScope": {
+                "effects": [],
+                "prohibitions": [],
+                "grantIds": [],
+                "scopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8"
+              },
+              "executionBinding": {
+                "routingId": "de4ae270-a346-4108-97bc-67f3d1ea0afd",
+                "intentRevision": 1,
+                "requirementRevision": 1,
+                "executionEpoch": 1,
+                "sessionGeneration": 1,
+                "effectScopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8",
+                "decisionSetHash": "1e6b04c61a8e19e0f0ab6b9dae0f1a5e3627571d6571084e397968f48dac20e3"
+              },
+              "idempotencyKey": "958d5fc3-5f6d-4158-b6a0-c0f1fbf775ad:fbbc1b7a-f2cf-4db3-a61b-558ce8a162ac:1:77a41023-8d26-4e5f-a189-5b5ba33bcf2a:fec71a2f-78b3-4e36-b080-01163612ca2c"
+            },
+            {
+              "stepId": "27e335c4-774e-4ec9-ad28-74df1167f0ae",
+              "segmentId": "62597bd8-f467-4761-8942-c2e36be9935e",
+              "segmentKey": "create_weather_task",
+              "action": "create_independent_work_item",
+              "goal": "在当前登录任务的继续请求完成路由后，创建一个独立的天气查询任务，不继承登录任务的约束。",
+              "target": {
+                "workItemId": null,
+                "decisionIds": [],
+                "artifactIds": [],
+                "agentIds": [],
+                "confirmationId": null,
+                "correctionOfRoutingId": null
+              },
+              "contextPolicy": "clean_task_context",
+              "correction": null,
+              "dependencies": [
+                {
+                  "segmentKey": "continue_login",
+                  "condition": "route_committed"
+                }
+              ],
+              "evidence": [
+                {
+                  "refId": "weather_task_request",
+                  "sourceEventId": "fbbc1b7a-f2cf-4db3-a61b-558ce8a162ac",
+                  "start": 10,
+                  "end": 24,
+                  "quote": "再创建一个独立的天气查询任务"
+                }
+              ],
+              "expectedSessionStatus": "WAIT_USER_CONFIRM",
+              "effectScope": {
+                "effects": [],
+                "prohibitions": [],
+                "grantIds": [],
+                "scopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8"
+              },
+              "executionBinding": {
+                "routingId": "de4ae270-a346-4108-97bc-67f3d1ea0afd",
+                "intentRevision": 1,
+                "requirementRevision": 1,
+                "executionEpoch": 1,
+                "sessionGeneration": 1,
+                "effectScopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8",
+                "decisionSetHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+              },
+              "idempotencyKey": "958d5fc3-5f6d-4158-b6a0-c0f1fbf775ad:fbbc1b7a-f2cf-4db3-a61b-558ce8a162ac:1:62597bd8-f467-4761-8942-c2e36be9935e:27e335c4-774e-4ec9-ad28-74df1167f0ae"
+            }
+          ],
+          "validation": {
+            "schemaValid": true,
+            "referencesValid": true,
+            "relationActionValid": false,
+            "stateValid": true,
+            "authorizationValid": true,
+            "snapshotCurrent": true,
+            "errorCodes": [
+              "INTENT_AMBIGUOUS",
+              "MULTI_SEGMENT_CONFIRMATION_REQUIRED",
+              "RELATION_ACTION_CONFLICT"
+            ],
+            "validationScore": 0.7
+          }
+        }
+      }
+    },
+    {
+      "id": "L20",
+      "checks": [
+        {
+          "field": "action",
+          "pass": false
+        },
+        {
+          "field": "correctionBinding",
+          "pass": false
+        },
+        {
+          "field": "routeReferencesAndRelation",
+          "pass": false
+        }
+      ],
+      "actual": {
+        "status": "VALIDATING",
+        "reasonCodes": [
+          "INTENT_UNDERSTANDING_READY"
+        ],
+        "attempts": 1,
+        "understanding": {
+          "schemaVersion": "1.0",
+          "kind": "intent_understanding",
+          "semanticContractVersion": "intent-understanding-v1",
+          "segments": [
+            {
+              "localKey": "correct_login_timeout",
+              "dialogueAct": "correction",
+              "goal": "将当前登录任务的超时时间从 10 分钟更正为 30 分钟，并废止原要求；需先明确可替换的服务端绑定更正目标。",
+              "scopeRelation": "same_requirement",
+              "suggestedAction": "clarify",
+              "target": {
+                "workItemId": "99e572af-138a-46ba-bb6d-50b17ff6ade5",
+                "decisionIds": [],
+                "artifactIds": [],
+                "agentIds": [],
+                "confirmationId": null,
+                "correctionOfRoutingId": null
+              },
+              "correction": null,
+              "contextPolicy": "ask_user",
+              "requestedEffects": [],
+              "prohibitions": [],
+              "evidence": [
+                {
+                  "refId": "timeout_correction",
+                  "sourceEventId": "52de0c2f-69c8-4ae5-9ab4-5c9b4919648f",
+                  "start": 0,
+                  "end": 37,
+                  "quote": "更正：当前登录任务的超时时间改为 30 分钟，之前的 10 分钟要求作废。"
+                }
+              ],
+              "dependencies": []
+            }
+          ],
+          "missingFields": [
+            "服务端绑定的更正候选及其修订号：当前更正候选列表为空，绑定更正请求为 null。"
+          ],
+          "ambiguityReasons": [
+            "有效 Decision 列表存在“当前登录任务的超时时间为 10 分钟。”，但该记录未列入服务端绑定的更正候选，不能自行将其选为替换目标；需澄清并补充绑定后再执行约束更正。"
+          ],
+          "modelConfidence": 0.98
+        },
+        "plan": {
+          "planId": "fd10b27e-b6d1-45bd-a37c-413458547536",
+          "routingId": "3dd95779-28c2-4e19-97d3-a281ceb352dc",
+          "routingRevision": 1,
+          "intentRevision": 1,
+          "sourceEventId": "52de0c2f-69c8-4ae5-9ab4-5c9b4919648f",
+          "snapshotId": "41c7a88f-39bd-441c-82c6-19dddeb95b17",
+          "businessFingerprint": "8baf49d1e557955b81d14dc7668ead02d9c3a7743fe007782e8281e67917702b",
+          "policyVersion": "intent-policy-v1",
+          "outcome": "needs_clarification",
+          "steps": [
+            {
+              "stepId": "42e20a11-0f9d-47e8-a97b-1158857cb9f7",
+              "segmentId": "fdc7283d-6035-4f55-a39a-1ba569382e4c",
+              "segmentKey": "correct_login_timeout",
+              "action": "clarify",
+              "goal": "将当前登录任务的超时时间从 10 分钟更正为 30 分钟，并废止原要求；需先明确可替换的服务端绑定更正目标。",
+              "target": {
+                "workItemId": "99e572af-138a-46ba-bb6d-50b17ff6ade5",
+                "decisionIds": [],
+                "artifactIds": [],
+                "agentIds": [],
+                "confirmationId": null,
+                "correctionOfRoutingId": null
+              },
+              "contextPolicy": "ask_user",
+              "correction": null,
+              "dependencies": [],
+              "evidence": [
+                {
+                  "refId": "timeout_correction",
+                  "sourceEventId": "52de0c2f-69c8-4ae5-9ab4-5c9b4919648f",
+                  "start": 0,
+                  "end": 37,
+                  "quote": "更正：当前登录任务的超时时间改为 30 分钟，之前的 10 分钟要求作废。"
+                }
+              ],
+              "expectedSessionStatus": "WAIT_USER_CONFIRM",
+              "effectScope": {
+                "effects": [],
+                "prohibitions": [],
+                "grantIds": [],
+                "scopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8"
+              },
+              "executionBinding": {
+                "routingId": "3dd95779-28c2-4e19-97d3-a281ceb352dc",
+                "intentRevision": 1,
+                "requirementRevision": 1,
+                "executionEpoch": 1,
+                "sessionGeneration": 1,
+                "effectScopeHash": "e123c10f89d5929ca9a0737b08eaa591141ee7ca97f0ba21bb90ea3e2b8d49c8",
+                "decisionSetHash": "69274351eebed3dbd0a7c4df8ab19ec9def9376cbd8d7625ff0e70c81ddbac07"
+              },
+              "idempotencyKey": "2cd5cda6-07f2-4749-b1c2-5c799af2025d:52de0c2f-69c8-4ae5-9ab4-5c9b4919648f:1:fdc7283d-6035-4f55-a39a-1ba569382e4c:42e20a11-0f9d-47e8-a97b-1158857cb9f7"
+            }
+          ],
+          "validation": {
+            "schemaValid": true,
+            "referencesValid": true,
+            "relationActionValid": false,
+            "stateValid": true,
+            "authorizationValid": true,
+            "snapshotCurrent": true,
+            "errorCodes": [
+              "INTENT_AMBIGUOUS",
+              "RELATION_ACTION_CONFLICT"
+            ],
+            "validationScore": 0.8
+          }
+        }
+      }
+    }
+  ],
+  "caseHash": "9b3265d04e3794a9e7aa9fe904cfeebc95f39e6590a663601b4ea50dc8aa8cf3"
+}

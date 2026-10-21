@@ -1,0 +1,22 @@
+{
+  "checkedAt": "2026-10-20T16:22:02.082Z",
+  "instruction": "M-001",
+  "scope": "Documentation only; no tests, builds, provider requests, commit or push",
+  "availabilityProbe": {
+    "method": "GET /models",
+    "unchangedVsGitHead": true,
+    "methodSha256": "51fd1a1e828e6b583a08a47af1f484ba3b53c806be4483445e121368fd69a4d2"
+  },
+  "prior401Evidence": {
+    "path": "docs/quality/intent-evaluation-2026-10-19/README.md",
+    "line": 106,
+    "sha256": "18d4be18967370af96db24cb425044177abbddb5d573bd31df47ab400e70e26c"
+  },
+  "r6Manifest": {
+    "path": "docs/quality/intent-input-budget-r6-2026-10-21/verification.json",
+    "allSourceHashesMatch": true,
+    "allBuildHashesMatch": true,
+    "allProtectedHashesMatch": true
+  },
+  "assessment": "Pre-existing authentication failure for locally configured provider connection; no R6 regression evidence. Specific key validity, gateway policy and upstream account status were not independently tested."
+}

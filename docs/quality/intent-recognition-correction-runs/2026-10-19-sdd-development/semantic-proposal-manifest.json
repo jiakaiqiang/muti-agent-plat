@@ -1,0 +1,114 @@
+{
+  "runId": "SDD-2026-10-19-semantic-proposal",
+  "capturedAt": "2026-10-19T12:34:59.512Z",
+  "node": "v20.19.6",
+  "head": "bb3d278db3e734b643abef015bdd2190ef578638",
+  "baselineManifest": "baseline-manifest.json",
+  "previousMilestone": "chat-correction-manifest.json",
+  "sourceHashes": {
+    "packages/shared/src/contracts.ts": "5e4aa92cebb12828d566eb7a000b0dc91b5fc479242ab5a46d3c2d7e572c240f",
+    "packages/shared/src/intent-correction-contracts.ts": "59a9240572bac29bac16c14fde8a51d499505aeeb15bf89e88a2a407f7713f83",
+    "apps/server/src/modules/intent-recognition/intent-understanding-routing.service.ts": "d282558252bebdf616548eae17be0747653f24e85512b8d94e7f3a83d1256c24",
+    "apps/server/src/modules/intent-recognition/intent-understanding-routing.service.spec.ts": "4c50f118b8f0b98d549c9c45513d1e1d4edafefe7e76f1a781852e750d2b51d9",
+    "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9f194e12200f4850fd6bb2bbeed4743af6cece782d3181739cf436bc780b8d2d",
+    "apps/server/src/modules/intent-recognition/semantic-intent-router.service.spec.ts": "77ea53d49bf4093af5b8e56476ad377bff704f21d335f59e9886d54dc75e0e78",
+    "apps/server/src/modules/intent-recognition/intent-recognition.module.ts": "df35f959d0cf7aef880ef4368ffb46e2f8d00d359ef6eadc36448e50e5f99f74",
+    "apps/server/src/modules/context-management/context-management.service.ts": "0c9d0be68c6a617da1ceb6ea7752fefa33fac10f4d906a9eff675ce89fb22c73",
+    "apps/server/src/modules/runtimes/generic-llm-runtime.service.ts": "75c6e89908a1d0c1c94814754b4e088c2bb46d2ee8febc50c632a4e05b28ca60",
+    "apps/server/src/modules/runtimes/generic-llm-runtime.service.spec.ts": "968ad4c36df570cbfd449c06ddb0c3d46859ee997e699f529d3de51fd7014822",
+    "apps/server/src/modules/runtimes/logical-operation-store.ts": "9abb976b23df090994f4efa5d7d791b6802ac1e4c93d24e4f39dd209685ac578",
+    "apps/server/src/modules/runtimes/logical-operation-store.spec.ts": "a5750d6d65523de9624dd160cb32ea3d4d6fe6b4654480366173d336f9fee18b",
+    "apps/server/src/modules/runtime-routing/invocation-resolver.service.ts": "92038068ff5b0289c8b627878a75824906155173f593f514cd03f04c256e4d28",
+    "apps/server/src/modules/runtime-invocation/runtime-invocation.service.ts": "04ff36045dbd8b1919acf542f0f66ff2d1b7da2d5a893d261c1c29ae2a0981a1",
+    "apps/server/src/modules/runtime-invocation/runtime-invocation.service.spec.ts": "2871259500704732e52df2692faae6f28857d822be0ab8c8cf45aab04970ce1e",
+    "apps/server/src/modules/message-routing/intent-correction-planner.service.ts": "c31fbb69b8538dd9add4672a8cdc7f0b5617f8ee752f47e900086d1606be6729",
+    "apps/server/src/modules/message-routing/intent-correction-planner.service.spec.ts": "4b73b4d18eb8dd55711ff42b6e76031f04bceb4a2b93f137bba2b2c43fcb9270",
+    "tests/evaluation/run-intent-semantic-proposal-sdd.mjs": "0eec5aa456b45443a1936e698ea0f83e4bbdbf22d4fbe945898b6ebe21c649ac",
+    "tests/evaluation/run-intent-chat-correction-sdd.mjs": "d6e0a89fa250bca95fc5bf0072971e1463a9e452b969dd4c97cf950938c94c3f",
+    "tests/evaluation/capture-intent-semantic-proposal-manifest.mjs": "4d2fcb2326ebeaf0c65ad786e5b37abb0d910baf10da022f88d7eabc98d2b907"
+  },
+  "documentHashes": {
+    "docs/product/intent-recognition-correction-spec-v1.md": "60ef5c9f7128c21572c1485fe11d8fee3ab7d15676f0af0a5bd2e423bb23706d",
+    "docs/design/intent-recognition-correction-plan-v1.md": "fdd075e1b2333c2e770915c427c297fb3cd7817c2d97f9011eddf63c28c0afcd",
+    "docs/implementation/intent-recognition-correction-task-v1.md": "b8fd248be6606f651333c963fffd8c50cefbc2413ad1526cd36e07f5035179c1",
+    "docs/quality/intent-recognition-correction-checklist-v1.md": "72bc60ebb0312a1ba668d27cb6afe1958755aecfe89a05f47a01a78858f8dbdb",
+    "docs/quality/intent-recognition-correction-runs/2026-10-19-sdd-development/semantic-proposal-report.md": "db9f521fccea2912afcc4bc1842c9e3aeb2549b78c9e77bb8e72aa6fb72bb5a5"
+  },
+  "evidenceHashes": {
+    "semantic-proposal-runtime-results.json": "fb05d3229d8445027c26c8c1bf9e43d80ecbea1fe92bc49b3e944384975c428c",
+    "semantic-proposal-chat-http-results.json": "21c499c5bc2e992a14043e540b267d8dc15a6854f281c94c969b90c612d5dfef"
+  },
+  "checks": [
+    {
+      "command": "npx tsx --test --tsconfig apps/server/tsconfig.json apps/server/src/modules/intent-recognition/intent-understanding-routing.service.spec.ts apps/server/src/modules/intent-recognition/semantic-intent-router.service.spec.ts apps/server/src/modules/context-management/context-management.service.spec.ts apps/server/src/modules/runtimes/logical-operation-store.spec.ts apps/server/src/modules/runtime-invocation/runtime-invocation.service.spec.ts apps/server/src/modules/message-routing/intent-correction.service.spec.ts apps/server/src/modules/message-routing/intent-correction-planner.service.spec.ts apps/server/src/modules/runtimes/generic-llm-runtime.service.spec.ts",
+      "log": "semantic-proposal-complete-regression.log",
+      "exitCode": 0,
+      "logSha256": "dd8c0eee45fa4ecc8811dc189cce11a99df33daad21874c4fd4d0564ea958a22"
+    },
+    {
+      "command": "npm run test --workspace @agent-cluster/server",
+      "log": "semantic-proposal-server-tests.log",
+      "exitCode": 0,
+      "logSha256": "84f2c9aeff64bfe90af1e79ca0614ab8ff4ff08c88bc6ec3b0044bb3fbd7fe2a"
+    },
+    {
+      "command": "npm run typecheck",
+      "log": "semantic-proposal-workspace-typecheck-final.log",
+      "exitCode": 0,
+      "logSha256": "9018b27583539853ac8c03817518ed16ca562e330c3300be73c796e126a0cafd"
+    },
+    {
+      "command": "npm run build --workspace @agent-cluster/server",
+      "log": "semantic-proposal-complete-build.log",
+      "exitCode": 0,
+      "logSha256": "a46e428c4d8f1ab9ac5e91206859bd48555deced87128f7fa383e2f9fddb92b3"
+    },
+    {
+      "command": "npm run test:harness",
+      "log": "semantic-proposal-harness.log",
+      "exitCode": 0,
+      "logSha256": "0093ece85adade38356363643081e197e946d8fd80694cbc4ad9199b9d743046"
+    },
+    {
+      "command": "node tests/evaluation/run-intent-semantic-proposal-sdd.mjs",
+      "log": "semantic-proposal-runtime-final.log",
+      "exitCode": 0,
+      "logSha256": "953680ae2fe61fa601e518104d0592051afdf9844e7581ddc8662ac7b702b166"
+    },
+    {
+      "command": "node tests/evaluation/run-intent-chat-correction-sdd.mjs --semantic-proposal",
+      "log": "semantic-proposal-chat-http-final.log",
+      "exitCode": 0,
+      "logSha256": "bb5fa6f608f354d96038b59dc178d63052af66b77f8d0f1891263fa32764540a"
+    },
+    {
+      "command": "git diff --check",
+      "log": "semantic-proposal-diff-check.log",
+      "exitCode": 0,
+      "logSha256": "7c9fa7c2228afe1fd0990c16e858099383e6652d1b1342ca44dcd1e399b88c15"
+    }
+  ],
+  "tests": {
+    "serverPassed": 2000,
+    "serverDevScriptsPassed": 7,
+    "postgresSkipped": 21,
+    "relatedPassed": 155,
+    "runtimeCasesPassed": 4,
+    "chatHttpCasesPassed": 7,
+    "countsOverlap": true
+  },
+  "scope": {
+    "newClassifierIngress": "direct Nest service; not Sessions first-turn API",
+    "backend": "isolated File",
+    "runtime": "actual Generic LLM HTTP with deterministic local responses",
+    "mainIngressMigrated": false,
+    "modelAccuracyEvaluated": false,
+    "fullWorkspaceTestsRerun": false,
+    "realPostgresVerified": false
+  },
+  "limitations": [
+    "semantic proposal is not an executable authorized plan; compiler/commit/first-turn wiring remains",
+    "real effect executors, complete projection transactions, real clients/DB/CLI, independent annotation and release gates remain incomplete",
+    "existing unrelated dirty work preserved; previous manifests/logs remain historical evidence"
+  ]
+}

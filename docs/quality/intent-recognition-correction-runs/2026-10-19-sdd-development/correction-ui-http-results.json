@@ -1,0 +1,114 @@
+{
+  "executedAt": "2026-10-19T11:32:14.373Z",
+  "method": "real localhost API and Generic LLM HTTP transport; deterministic local provider (not semantic accuracy); isolated File backend; actual process restart",
+  "results": [
+    {
+      "id": "CU01",
+      "feature": "按原消息查询持久化路由，非匹配来源不返回记录",
+      "actual": {
+        "ids": [
+          "52c65c0a-5727-46ca-99b8-070b6b630176"
+        ],
+        "absent": 0
+      },
+      "passed": true
+    },
+    {
+      "id": "CU02",
+      "feature": "缺少来源拒绝查询，其他会话不能取出原消息路由",
+      "actual": {
+        "missing": 400,
+        "wrongSession": 404
+      },
+      "passed": true
+    },
+    {
+      "id": "CA01",
+      "feature": "并发 HTTP 接收同一纠错且尚未生效",
+      "actual": {
+        "statuses": [
+          202,
+          202
+        ],
+        "errors": [
+          null,
+          null
+        ],
+        "correctionId": "a4ca2eb2-d985-4fee-82c8-725c0d35c1d0"
+      },
+      "passed": true
+    },
+    {
+      "id": "CA02",
+      "feature": "等待模型期间保留持久化屏障",
+      "actual": {
+        "hold": {
+          "correctionId": "a4ca2eb2-d985-4fee-82c8-725c0d35c1d0",
+          "reason": "intent_correction",
+          "createdAt": "2026-10-19T11:32:10.066Z"
+        }
+      },
+      "passed": true
+    },
+    {
+      "id": "CA03",
+      "feature": "真实 Generic LLM HTTP 传输激活新版本",
+      "actual": {
+        "status": "applied",
+        "reasons": [],
+        "requests": [
+          {
+            "model": "intent-activation-fixture",
+            "tools": [],
+            "sourceEventId": "intent-correction:a4ca2eb2-d985-4fee-82c8-725c0d35c1d0:input",
+            "originalInputPresent": true,
+            "contractPresent": true
+          }
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "CA04",
+      "feature": "新版本与需求版本激活，屏障原子释放",
+      "actual": {
+        "current": 2,
+        "effective": 2,
+        "requirement": 2,
+        "epoch": 2
+      },
+      "passed": true
+    },
+    {
+      "id": "CA05",
+      "feature": "旧约束失效、新约束持久化且未隐式推进会话",
+      "actual": {
+        "old": "superseded",
+        "replacement": "超时改为 30 分钟",
+        "sessionStatus": "WAIT_USER_CONFIRM"
+      },
+      "passed": true
+    },
+    {
+      "id": "CU03",
+      "feature": "重启后原消息查询可找回已纠错路由和当前版本",
+      "actual": {
+        "id": "52c65c0a-5727-46ca-99b8-070b6b630176",
+        "effective": 2,
+        "revision": 5
+      },
+      "passed": true
+    },
+    {
+      "id": "CA06",
+      "feature": "进程重启后原请求重放不再次分类或追加版本",
+      "actual": {
+        "status": 202,
+        "correctionId": "a4ca2eb2-d985-4fee-82c8-725c0d35c1d0",
+        "revisions": 2,
+        "modelRequests": 1
+      },
+      "passed": true
+    }
+  ]
+}

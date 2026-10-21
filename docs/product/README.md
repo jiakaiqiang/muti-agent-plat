@@ -2,6 +2,9 @@
 
 本目录存放产品需求与范围文档。
 
+- [意图识别、路由与纠错 Spec v1](intent-recognition-correction-spec-v1.md)：SDD 规格入口，定义 20 项行为要求与验收标准，串联 Plan、Task 和 Checklist；待实施。
+
+- [当前功能与页面优化 PRD](agent-cluster-current-product-and-page-design-prd-v1.md)：2026-10-17 代码与页面基线，包含具体功能点、功能关系、Web/Desktop 页面结构、优化需求与验收场景；后续页面设计优先参考。
 - `agent-cluster-prd-v1.md`：Agent Cluster v1 产品需求文档。
 - `coordinator-controlled-routing-node1-requirements-v1.md`：Coordinator 中心流转第一节点的需求文档。
 - `multica-refactor-production-readiness-requirements-v1.md`：Multica R1～R7 完成后的 P0/P1 统一闭环需求；P2 在闭环完成后进入独立后续计划。

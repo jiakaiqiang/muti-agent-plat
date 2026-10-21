@@ -1,0 +1,139 @@
+{
+  "executedAt": "2026-10-19T20:12:13.137Z",
+  "method": "Actual Sessions HTTP/Nest/Generic LLM/File with deterministic provider and process restart; not model accuracy",
+  "results": [
+    {
+      "id": "BE01",
+      "passed": true,
+      "actual": {
+        "status": "completed",
+        "calls": [
+          {
+            "stage": "success",
+            "brief": false,
+            "sourceEventId": "3083b116-529b-4ff9-a2a5-b8de09cc2d5e",
+            "tools": [],
+            "repair": false
+          },
+          {
+            "stage": "success",
+            "brief": true,
+            "sourceEventId": "3083b116-529b-4ff9-a2a5-b8de09cc2d5e",
+            "tools": [],
+            "repair": false
+          },
+          {
+            "stage": "repair",
+            "brief": false,
+            "sourceEventId": "a8e99d7b-5e84-46af-929c-f629375ac96c",
+            "tools": [],
+            "repair": false
+          },
+          {
+            "stage": "repair",
+            "brief": true,
+            "sourceEventId": "a8e99d7b-5e84-46af-929c-f629375ac96c",
+            "tools": [],
+            "repair": false
+          },
+          {
+            "stage": "repair",
+            "brief": true,
+            "sourceEventId": "a8e99d7b-5e84-46af-929c-f629375ac96c",
+            "tools": [],
+            "repair": true
+          },
+          {
+            "stage": "auth",
+            "brief": false,
+            "sourceEventId": "b06c2484-707e-492f-80f3-0ee1b06c980f",
+            "tools": [],
+            "repair": false
+          },
+          {
+            "stage": "auth",
+            "brief": true,
+            "sourceEventId": "b06c2484-707e-492f-80f3-0ee1b06c980f",
+            "tools": [],
+            "repair": false
+          }
+        ],
+        "briefs": 1
+      }
+    },
+    {
+      "id": "BE02",
+      "passed": true,
+      "actual": {
+        "currentBrief": "intent-brief:0630e54f-b4cc-4518-bfa2-eb3f87e2a5dc",
+        "status": "WAIT_USER_CONFIRM",
+        "workItemStatus": "WAITING_USER",
+        "durableRead": 1
+      }
+    },
+    {
+      "id": "BE03",
+      "passed": true,
+      "actual": {
+        "confirmationNotExecutionAuthority": true,
+        "status": 409
+      }
+    },
+    {
+      "id": "BE04",
+      "passed": true,
+      "actual": {
+        "status": "completed",
+        "calls": [
+          {
+            "stage": "repair",
+            "brief": true,
+            "sourceEventId": "a8e99d7b-5e84-46af-929c-f629375ac96c",
+            "tools": [],
+            "repair": false
+          },
+          {
+            "stage": "repair",
+            "brief": true,
+            "sourceEventId": "a8e99d7b-5e84-46af-929c-f629375ac96c",
+            "tools": [],
+            "repair": true
+          }
+        ],
+        "attempts": 2
+      }
+    },
+    {
+      "id": "BE05",
+      "passed": true,
+      "actual": {
+        "status": "failed",
+        "code": "MODEL_ERROR",
+        "calls": [
+          {
+            "stage": "auth",
+            "brief": false,
+            "sourceEventId": "b06c2484-707e-492f-80f3-0ee1b06c980f",
+            "tools": [],
+            "repair": false
+          },
+          {
+            "stage": "auth",
+            "brief": true,
+            "sourceEventId": "b06c2484-707e-492f-80f3-0ee1b06c980f",
+            "tools": [],
+            "repair": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "BE06",
+      "passed": true,
+      "actual": {
+        "realRestart": true,
+        "noRepeatedModelCall": true
+      }
+    }
+  ]
+}

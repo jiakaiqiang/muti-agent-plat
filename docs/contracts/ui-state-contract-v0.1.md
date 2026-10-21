@@ -1,5 +1,21 @@
 # UI State Contract v0.1
 
+## 多段意图的完整澄清展示（2026-10-20）
+
+计划事件的 `multiSegmentReview` 是不可变只读诊断，合同版本 intent-multi-segment-review-v1、mode=clarify_only，绑定 session/epoch/source/routing/revision。它携带完整 2–8 段 understanding 和服务器快照的引用名称。两端共享 IntentMultiSegmentReview，展示全部目标、成员、继承、请求效果、禁止范围、依赖、纠错替换及可键盘展开的原文引用；模型文本仅转义显示。
+
+首次显示或同路由事件通知只 GET 核对状态；跨身份、旧 revision、断连或读取失败不声称仍待澄清。匹配当前待澄清计划才显示整组未执行；当前拒绝/阻塞明确显示未获许可，变化后的内容标为历史。Desktop 只读视图仍允许阅读该诊断，不提供写操作。该面板不把任务关系选择或某段预览变成执行授权，也不提供绕过 ordered_plan 开关的批准按钮。未知/损坏合同不能截断成有效子集。
+
+客户端使用解释型 schema 校验，兼容 Desktop 的 script-src self CSP；禁止为此开启 unsafe-eval。
+
+## 原消息识别失败的恢复入口（2026-10-20）
+
+Web/Desktop 时间线根据服务端 `recognitionRetry` 描述显示共享 `IntentRecognitionRetryPanel`，以 session/epoch/routing/sourceEventId 绑定状态。首次显示、刷新或 SSE 事件只查询，不提交重试。按钮明确说明将再次调用模型，保留原文和此前失败记录；连接故障等待期显示“模型连接处于故障等待期，请稍后再试”。断连禁用写入，Desktop 只读时间线不显示写入口。
+
+用户点击后固定合同版本、epoch、期望 revision、幂等键到当前标签页 sessionStorage。未知响应或页面重载保留原请求，通过“核对原识别提交”重放；不能自动更换键或重置预算。POST 的路由身份、回执请求、操作 ID、已受理 revision 和路由内回执必须匹配后才能清除 pending。409/410 刷新事实，不自动再次提交；迟到查询不能倒退当前路由版本。
+
+202 显示“重新识别已受理，尚未完成识别与校验”。ROUTED 仅显示识别与路由完成，不等同实际任务成功；BLOCKED/CLARIFICATION_REQUIRED 保留明确状态。只有仍满足服务端同源资格的阻塞路由才提供新重试入口；已有合法语义的授权重校验和已执行意图纠错沿用各自入口。
+
 主 Agent 协作的新旧状态兼容规则见 [阶段 0 冻结合同](./main-agent-collaboration-contract-v1.md)。未知控制状态不可默认允许执行；本阶段不接入页面或共享 store，Web/桌面布局不变。
 
 ## 1. 目标
@@ -13,6 +29,12 @@ Web 与客户端的事件时间、历史记录和相关日期时间标签共用 
 此规范只影响展示；API、持久化事件、排序/状态判断、日志正文、原始诊断 JSON 的 ISO 时间不变。等待时长和工作流耗时仍使用相对时长，不转换为日期。消息头和日志头允许自然换行，以适应完整日期及窄屏。
 
 ## 2. 页面视图
+
+### 上下文准备与模型调用（2026-10-15）
+
+源码证据按需读取属于调用前准备。编排层内部保留 `CONTEXT_INSUFFICIENT` 作为有界补读控制信号，恢复期间不得据此发布 `runtime_failed`。`CONTEXT_PREPARATION_STARTED` 表示开始补充；`CONTEXT_EVIDENCE_ASSEMBLED` 的 `contextPreparationState` 为 `preparing` 或 `ready`，只有重组后的 Envelope 通过证据闸门才能报告 `ready`，之后才发布 `runtime_started`。补读失败或额度耗尽继续沿用原终止处理，不能绕过闸门。
+
+补读 `resolution.outcome=resolved` 仅表示请求已处理，不等于证据检查通过或模型调用成功。Web、桌面及协作日志根据 resolution 展示补读结果；成功卡片将原 reason 收入默认折叠的“历史补读原因（已处理）”，隐藏过时的 followUpInstruction。历史事件只改变展示，不改写持久化数据。部分成功、失败仍展示缺失原因与后续指令；取消不再提示继续读取。模型服务异常由 Runtime 健康状态独立展示，不由补读成功覆盖。
 
 ### 会话导航实现中的补充约束（2026-09-29）
 
@@ -511,3 +533,15 @@ Web/Desktop 共用 `GitHubSourcePreparation`。新建表单从服务端读取来
 ## 17. 会话侧栏归档与删除入口（2026-09-29）
 
 Web/Desktop 的归档管理复用会话卡片，并在更多操作中提供“恢复归档”和“删除会话”；恢复仍走 `restoreArchive`，删除仍走原确认流程。已删除会话卡片只读、不触发选择，不展示“恢复会话”或归档恢复入口，不保留 Workspace 的已删除恢复绑定。桌面只读条目不声明可点击 role/tabindex。此限制只针对 UI，不移除服务端墓碑或 `/restore` API，也不代表物理清除数据。
+
+## 意图纠错客户端增量（2026-10-19）
+
+2026-10-20 授权重校验：Web/Desktop 时间线共用 `IntentAuthorizationRetryPanel`，仅在服务器提供 authorizationRetry 描述时显示“授权后重新校验原请求”。面板 GET 核对 session/routing/sourceEvent/epoch/revision，不根据旧消息文本猜测执行目标；Desktop 只读模式隐藏入口。授予测试/报告权限不自动提交原请求。
+
+提交冻结 contractVersion/dataEpoch/expectedRoutingRevision/idempotencyKey，并按会话、epoch、路由和源消息保存到当前标签页 sessionStorage。超时或网络未知结果保留原请求，刷新后仍须点击“核对原提交结果”，不得重置键或自动执行；即使 GET 已看到成功计划，也能核对原回执。409/410 刷新状态，不静默采用新版重试。读取代次、routingRevision 和导航取消防止迟到状态覆盖；成功文案只表示重新校验已完成，实际测试进度以执行事件为准。
+
+用户消息的纠错面板按原 `sessionId/rawEventId` 调用 `GET /sessions/:sessionId/message-routings?sourceEventId=...`，唯一匹配后读取 route、corrections、work-items、decisions。查询以持久化记录为准并禁用 HTTP 缓存；空结果或多匹配不得自动采用当前活动任务。Desktop 只读消息视图不显示写入口。
+
+`CorrectIntentRoutingInput` 在首次提交前固定原 session/routing、revision、idempotencyKey、instruction 和被替换 Decision/revision。未知网络结果保留原请求，重试不得改目标、文字或版本；按同幂等键历史可确认已受理。409/410 刷新事实并显示冲突，不静默重发。运行时校验 API 的必要字段、所属关系及状态，未知/损坏数据不得显示成功。
+
+202 是受理；只有持久化 `applied` 才显示生效。停止中/校验中不可重复提交，`reconciliation_required` 显示效果待核对并禁止新提交，auth/config 不转换为语义澄清，纠错生效不自动恢复会话。历史先比较 routingRevision 再比较更新时间；请求代次防止迟到读覆盖新状态。面板查询最长 120 次，超时显示可刷新，关闭/卸载/消息切换取消查询。最终结果仍可重新打开按原消息恢复；普通聊天自动纠错、无目标纠错和实际双端/SSE 验收另见专项未完成清单。

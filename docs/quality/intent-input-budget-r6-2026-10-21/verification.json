@@ -1,0 +1,262 @@
+{
+  "capturedAt": "2026-10-20T16:06:10.652Z",
+  "root": "D:\\demo\\muti-agent\\muti-agent-plat",
+  "scope": "R6-M1/R6-M2; no real-model inference evaluation",
+  "validation": {
+    "serverSpecs": {
+      "passed": 496,
+      "failed": 0,
+      "files": [
+        "apps/server/src/modules/runtimes/generic-llm-input-budget.spec.ts",
+        "apps/server/src/modules/runtimes/generic-llm-tool-loop-budget.spec.ts",
+        "apps/server/src/modules/runtimes/generic-llm-runtime.service.spec.ts",
+        "apps/server/src/modules/runtimes/input-budget-store.spec.ts",
+        "apps/server/src/modules/runtimes/input-budget-tool-rerun.spec.ts",
+        "apps/server/src/modules/runtimes/logical-operation-store.spec.ts",
+        "apps/server/src/modules/runtimes/runtime.service.spec.ts",
+        "apps/server/src/modules/runtime-invocation/runtime-invocation.service.spec.ts",
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.spec.ts",
+        "apps/server/src/modules/intent-recognition/intent-understanding-routing.service.spec.ts",
+        "apps/server/src/modules/message-routing/intent-message-pipeline.service.spec.ts",
+        "apps/server/src/modules/orchestrator/orchestrator.service.spec.ts",
+        "apps/server/src/modules/sessions/sessions.service.spec.ts",
+        "apps/server/src/modules/workflows/workflow-runtime.service.spec.ts",
+        "apps/server/src/modules/recovery/recovery.service.spec.ts"
+      ],
+      "command": "node node_modules/tsx/dist/cli.mjs --tsconfig apps/server/tsconfig.json --test --test-concurrency=2 --test-force-exit apps/server/src/modules/runtimes/generic-llm-input-budget.spec.ts apps/server/src/modules/runtimes/generic-llm-tool-loop-budget.spec.ts apps/server/src/modules/runtimes/generic-llm-runtime.service.spec.ts apps/server/src/modules/runtimes/input-budget-store.spec.ts apps/server/src/modules/runtimes/input-budget-tool-rerun.spec.ts apps/server/src/modules/runtimes/logical-operation-store.spec.ts apps/server/src/modules/runtimes/runtime.service.spec.ts apps/server/src/modules/runtime-invocation/runtime-invocation.service.spec.ts apps/server/src/modules/intent-recognition/semantic-intent-router.service.spec.ts apps/server/src/modules/intent-recognition/intent-understanding-routing.service.spec.ts apps/server/src/modules/message-routing/intent-message-pipeline.service.spec.ts apps/server/src/modules/orchestrator/orchestrator.service.spec.ts apps/server/src/modules/sessions/sessions.service.spec.ts apps/server/src/modules/workflows/workflow-runtime.service.spec.ts apps/server/src/modules/recovery/recovery.service.spec.ts"
+    },
+    "serverTypecheck": {
+      "exitCode": 0,
+      "command": "npm run typecheck --workspace @agent-cluster/server"
+    },
+    "serverBuild": {
+      "exitCode": 0,
+      "command": "npm run build --workspace @agent-cluster/server"
+    },
+    "clients": {
+      "passed": 54,
+      "failed": 0,
+      "command": "npm run test --workspace @project/web -- src/components/SessionWorkspace.spec.ts src/components/ConfirmationCard.spec.ts ../desktop/renderer/components/ConfirmationCard.spec.ts src/components/IntentRecognitionRetryPanel.spec.ts src/stores/event-normalization.spec.ts src/stores/session-intent-routing.spec.ts"
+    },
+    "webTypecheck": {
+      "exitCode": 0,
+      "command": "npm run typecheck --workspace @project/web"
+    },
+    "desktopVueTsc": {
+      "exitCode": 0,
+      "command": "node apps/web/node_modules/vue-tsc/bin/vue-tsc.js --noEmit -p apps/desktop/renderer/tsconfig.json"
+    },
+    "existingToolLoopBudgetSpec": {
+      "before": {
+        "passed": 4,
+        "failed": 0
+      },
+      "after": {
+        "passed": 4,
+        "failed": 0
+      }
+    },
+    "smoke": {
+      "exitCode": 0,
+      "path": "evidence/smoke.json"
+    }
+  },
+  "protectedFiles": [
+    {
+      "path": "apps/server/src/modules/message-routing/route-plan-compiler.service.ts",
+      "before": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+      "after": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/runtime-routing/execution-scope-resolver.service.ts",
+      "before": "869d3c21614955dc8a8a35a5e3b88175b347e46dd41bd4b043685e3156da0678",
+      "after": "869d3c21614955dc8a8a35a5e3b88175b347e46dd41bd4b043685e3156da0678",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-plan-commit.service.ts",
+      "before": "948c2a69e2c4bc88efa96c55cf23c1f26c579d3977ecaa11398e88b020f11d03",
+      "after": "948c2a69e2c4bc88efa96c55cf23c1f26c579d3977ecaa11398e88b020f11d03",
+      "unchanged": true
+    },
+    {
+      "path": ".env",
+      "before": "68b050920d078df96450665f4f44047be37470a809441424ad2e86ee1fbfe358",
+      "after": "68b050920d078df96450665f4f44047be37470a809441424ad2e86ee1fbfe358",
+      "unchanged": true
+    }
+  ],
+  "semanticRouter": {
+    "baselinePath": "docs/quality/intent-codex-comparison-2026-10-20/r5-freeze/final-semantic-router.ts",
+    "baselineSha256": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+    "currentSha256": "8a6b149a525f39e2bc5fb094770e0e813f4bffdf75509d554bf3c892d901a8db",
+    "inverseOfSevenApprovedAdditionsMatchesEntireBaseline": true,
+    "L0Unchanged": true,
+    "legacyClassifierUnchanged": true
+  },
+  "sources": [
+    {
+      "path": "packages/shared/src/input-budget.ts",
+      "sha256": "1fc14ae720a74ac33f4547c4ccfcd3e267d8ea00c83157f5e8594dd3f3ab44be"
+    },
+    {
+      "path": "packages/shared/src/contracts.ts",
+      "sha256": "fde3dea1358c7e7346e43378fbf902bf1d9b6ac2b6a4d6d5c6732684d1bcfa1a"
+    },
+    {
+      "path": "packages/shared/src/index.ts",
+      "sha256": "721155805fbad27fe446376d04d1e05e24f3c8f9efce52f7446724e3d23252d7"
+    },
+    {
+      "path": "apps/server/src/modules/runtimes/input-budget-store.ts",
+      "sha256": "1f3f78261b98c1cdef112e15feaf0f04191a9d6f8b8e7cf872fc48ef6a38d504"
+    },
+    {
+      "path": "apps/server/src/modules/runtimes/generic-llm-runtime.service.ts",
+      "sha256": "3a73857ce3bb45fc03ff8c5600d4983533e912711596579459365cac7ed5a807"
+    },
+    {
+      "path": "apps/server/src/modules/runtimes/runtime.service.ts",
+      "sha256": "903e460cea38fe4aff4b13913359d790be680c3dbff5650ebc8b7c3d88430aa3"
+    },
+    {
+      "path": "apps/server/src/modules/runtime-invocation/runtime-invocation.service.ts",
+      "sha256": "763a854d786a8c2dc55caca28ec2b99580804a143f0cf421342c65d2821e98e6"
+    },
+    {
+      "path": "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts",
+      "sha256": "8a6b149a525f39e2bc5fb094770e0e813f4bffdf75509d554bf3c892d901a8db"
+    },
+    {
+      "path": "apps/server/src/modules/intent-recognition/intent-understanding-routing.service.ts",
+      "sha256": "41db7b8d49bc3a32543eb96f892695b5366799af49ee4dfb82cf4bd905272903"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-recognition-retry.service.ts",
+      "sha256": "ad708c47b6050cb1527935027bf17e5408e60cf8d612401dd3db75385bb7341d"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-message-pipeline.service.ts",
+      "sha256": "311f13664f3c170a460e16d7e50d486b0e17ec1b68b4ff7ec582f095ee0271e1"
+    },
+    {
+      "path": "apps/server/src/modules/orchestrator/orchestrator.service.ts",
+      "sha256": "d9a5163b99f97ebb693d772565b4de108ea1176969a856127efb3bd83b373bae"
+    },
+    {
+      "path": "apps/server/src/modules/sessions/sessions.service.ts",
+      "sha256": "c63a92f4dd6dbfac79abd0897b761fada35c2c4739f389dcd6bdd89cc4344e76"
+    },
+    {
+      "path": "apps/server/src/modules/sessions/sessions.controller.ts",
+      "sha256": "653bf4ca3016529e3bdf5acc1d600a6a74a9269e13952e543e32dd1f0d3e8791"
+    },
+    {
+      "path": "apps/server/src/modules/workflows/workflow-runtime.service.ts",
+      "sha256": "5e9c4e94d56b52b277f5dbcc0b3b0939274079a1b9c2b9038c789d94256b4aee"
+    },
+    {
+      "path": "apps/web/src/components/IntentRecognitionRetryPanel.vue",
+      "sha256": "ba2c3cd650e3bdfae33fe81059ff19781d92f4c8c10bf6e30a8b60612a973cf3"
+    },
+    {
+      "path": "apps/web/src/components/SessionWorkspace.vue",
+      "sha256": "9f1f2e64bdb2fe542fdd0fc278c221f12074d41e77399bce7900e26786f5978c"
+    },
+    {
+      "path": "apps/web/src/stores/intentRecognitionRetry.ts",
+      "sha256": "15ff3bf415216ac27540ecd4d41ba3df88c4028ea6349dce63499455a5e52e1e"
+    },
+    {
+      "path": "apps/web/src/stores/session.ts",
+      "sha256": "1e5e9ff1871b582fb7c3b0bfb575d82fbc1c9b75b584413033fdba40b9504494"
+    },
+    {
+      "path": "apps/web/src/stores/event.ts",
+      "sha256": "5955cc7aa781a35448285ef657dcbf2b54f68fc19ce1bb295e05b4221828d1f0"
+    },
+    {
+      "path": "apps/web/src/types/contracts.ts",
+      "sha256": "ff26987a3429c87b02465d6cdc620f21e657ca30e14677adbdfd132eb68ae663"
+    },
+    {
+      "path": "apps/desktop/renderer/components/SessionWorkspace.vue",
+      "sha256": "4506aa400b02392dc2bf28439565ff08819f07f7dea641421584deebb550f58a"
+    }
+  ],
+  "builds": [
+    {
+      "path": "packages/shared/dist/input-budget.js",
+      "sha256": "47659f7c15ff9b3c0744f565863ab3b5271feae2ee38fbaf2b8c07b5ab0837ee"
+    },
+    {
+      "path": "apps/server/dist/packages/shared/src/input-budget.js",
+      "sha256": "47659f7c15ff9b3c0744f565863ab3b5271feae2ee38fbaf2b8c07b5ab0837ee"
+    },
+    {
+      "path": "packages/shared/dist/contracts.js",
+      "sha256": "e1d0de0207f957e6006a81f6bba92e808ebc0b8b641f024659f282803239a881"
+    },
+    {
+      "path": "apps/server/dist/packages/shared/src/contracts.js",
+      "sha256": "e1d0de0207f957e6006a81f6bba92e808ebc0b8b641f024659f282803239a881"
+    },
+    {
+      "path": "packages/shared/dist/index.js",
+      "sha256": "21bfd1a8cae23d7b9f9828a264cba8949760ea2993d4de0ebd4f7db4876c9d04"
+    },
+    {
+      "path": "apps/server/dist/packages/shared/src/index.js",
+      "sha256": "21bfd1a8cae23d7b9f9828a264cba8949760ea2993d4de0ebd4f7db4876c9d04"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/runtimes/input-budget-store.js",
+      "sha256": "db68ff07444c2dfddf2954ce3c08127c03ef5dfc73b4d58aab9bf52fbbcca045"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/runtimes/generic-llm-runtime.service.js",
+      "sha256": "4b97da992ce08650d8aa1da93e840e66590ecabda122a13a4dec20586c472814"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/runtimes/runtime.service.js",
+      "sha256": "6f268e821280a4b96f1d89d0c4ab361b44ae26ffb3900ae1c8e0bddba4126454"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/runtime-invocation/runtime-invocation.service.js",
+      "sha256": "8cf994ee7396e0437b3784982a44d17ddcf38fc1fa3fc6ea017b07c0373a2e43"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/intent-recognition/semantic-intent-router.service.js",
+      "sha256": "282ccf2a1fdf608f15f3dd5d5eb890e7a7b496a6fbda740e7cb82dcda3d3ab59"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/intent-recognition/intent-understanding-routing.service.js",
+      "sha256": "560c62d2cc6d3f58182d5e2c807cce2d5e8dfa885a40c26c41303fa26e9bd8c8"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-recognition-retry.service.js",
+      "sha256": "19e4988177744ee976b811919f57c6136ea7fcb1061a41a80e75e026ebff85cd"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-message-pipeline.service.js",
+      "sha256": "37f0a48537d8a9607426ec79af01f06d3df1b78a7d9a66d9ec1beb3bcf0d0e0a"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/orchestrator/orchestrator.service.js",
+      "sha256": "f9c36b2d5a51183ea4b0f76e949809a0095d402513123a5ba3792c9a8e6b9f06"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/sessions/sessions.service.js",
+      "sha256": "7f32719934b55ef2d2083005d9c331eea501ae76486b14e6b125cc72d2b18862"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/sessions/sessions.controller.js",
+      "sha256": "ae597e91ed717ad04c95f744cd3ac2cc274ca8f286c4005d598c4cca275004fc"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/workflows/workflow-runtime.service.js",
+      "sha256": "aae3a68f0548acd888b10eac9a888c7808f9f4ef7516f6b1654d0b5f28a98c2d"
+    }
+  ]
+}

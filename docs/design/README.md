@@ -2,6 +2,10 @@
 
 本目录存放系统设计、专题设计和界面规范。
 
+- [意图识别、路由与纠错 Plan v1](intent-recognition-correction-plan-v1.md)：SDD 技术计划，关联规格、模块落点、开发依赖、验证门和兼容发布；沿用下述详细系统设计。
+
+- [意图识别、执行授权与版本化纠错系统开发设计 v1](intent-recognition-correction-system-development-design-v1.md)：依据 2026-10-19 评测，定义统一入口、语义/权限分离、纠错事务、重试预算、版本守卫和灰度收敛；状态为待实施。
+
 - `agent-cluster-system-design-v1.md`：总体系统设计。
 - `agent-collaboration-target-design-v1.md`：群聊 Agent 任务拆解与协作执行的目标态设计。
 - `workspace-aware-chat-agent-design-v1.md`：工作区感知聊天 Agent 专题设计。

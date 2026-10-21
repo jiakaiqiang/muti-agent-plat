@@ -1,0 +1,54 @@
+{
+  "executedAt": "2026-10-19T19:04:38.938Z",
+  "method": "Real Nest HTTP/Generic LLM adapter with deterministic provider, File persistence and restart; not model accuracy or ordered execution",
+  "results": [
+    {
+      "id": "MS01",
+      "passed": true,
+      "actual": {
+        "segments": 2,
+        "completeDiagnostic": true
+      }
+    },
+    {
+      "id": "MS02",
+      "passed": true,
+      "actual": {
+        "noPartialTaskStepBrief": true,
+        "diagnosticOutbox": true
+      }
+    },
+    {
+      "id": "MS03",
+      "passed": true,
+      "actual": {
+        "segments": 8,
+        "completeDiagnostic": true
+      }
+    },
+    {
+      "id": "MS04",
+      "passed": true,
+      "actual": {
+        "noPartialTaskStepBrief": true,
+        "diagnosticOutbox": true
+      }
+    },
+    {
+      "id": "MS05",
+      "passed": true,
+      "actual": {
+        "oneClassificationPerMessage": true,
+        "forgedRelationChoiceCannotExecuteSubset": true
+      }
+    },
+    {
+      "id": "MS06",
+      "passed": true,
+      "actual": {
+        "realRestart": true,
+        "noModelOrPartialExecution": true
+      }
+    }
+  ]
+}

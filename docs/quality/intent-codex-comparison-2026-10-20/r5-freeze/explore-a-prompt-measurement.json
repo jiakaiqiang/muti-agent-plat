@@ -1,0 +1,38 @@
+{
+  "method": "Offline reconstruction of the same historical B01 provider request; replace only changed L0 rules. No inference, no score. UTF-16 chars; ceil(JSON.stringify({messages}).length/4).",
+  "sourceHash": "cec5952e18961f2a898b93148735ffb888f73fbef3abbcb0b1af2e1d4a421943",
+  "distHash": "b4b1d10073ec68c9c56609b105e21f8c74b2e8e47b52729b9bac7a84b725ee23",
+  "l0": {
+    "before": 3901,
+    "after": 3641,
+    "delta": -260,
+    "ruleCount": 12
+  },
+  "b01": {
+    "before": 8412,
+    "after": 8347,
+    "configuredMaxInputTokens": 6000
+  },
+  "replacements": [
+    {
+      "before": "Choose actions using the supplied Session state, not the WorkItem status or the word continue alone. resume is only for PAUSED. retry_failed_step requires FAILED/INTERRUPTED and an explicit server-supplied failure checkpoint; otherwise clarify the recovery target. A request to abandon the old approach and plan again is replan, not resume or retry.",
+      "after": "Use Session state, not WorkItem state or a continuation word. resume requires PAUSED. Pure resumption of the approved plan has requestedEffects=[]; the server binds that plan and rechecks effects, grants and version. Empty effects grant no authority. New requirements accompanying resume form separate segments with their own evidenced effects. retry_failed_step requires FAILED/INTERRUPTED and a server-supplied checkpoint; otherwise clarify. Abandoning an approach to plan again is replan.",
+      "occurrences": 1
+    },
+    {
+      "before": "For additions or continuation of an existing requirement use enqueue_follow_up; record_constraint stores a constraint, record_information stores reference information/preferences, and answer_in_chat answers a question without starting implementation. A negated stop/cancel is not a stop/cancel command. Continuing an EXECUTING task does not mean resume.",
+      "after": "Use enqueue_follow_up for existing-requirement additions; record_constraint for constraints, record_information for reference/preferences, answer_in_chat for questions without implementation. In EXECUTING, continuation of the current plan is neither resume nor a separate goal: attach it to accompanying additions, without an extra segment. A negated stop/cancel is not a command.",
+      "occurrences": 1
+    },
+    {
+      "before": "Keep relation, action and target consistent: same_requirement selects the existing WorkItem and uses inherit_confirmed or inherit_selected, including when suggestedAction is clarify. contextPolicy describes context inheritance, not whether the response asks a question. ask_user is for an unresolved relation (ambiguous), not a missing execution checkpoint or confirmation on an already known task. related_new_requirement uses create_related_work_item with the parent WorkItem and inherit_selected; independent_new_requirement uses create_independent_work_item with null WorkItem, no inherited IDs and clean_task_context. Preserve multiple explicit goals as separate segments.",
+      "after": "same_requirement selects the existing WorkItem with inherit_confirmed/inherit_selected, even for clarify. contextPolicy governs inheritance; ask_user requires ambiguous relation, not a missing checkpoint or confirmation for a known task. related_new_requirement uses create_related_work_item, parent WorkItem and inherit_selected; independent_new_requirement uses create_independent_work_item, null WorkItem, no inherited IDs and clean_task_context.",
+      "occurrences": 1
+    },
+    {
+      "before": "A qualifier or negated alternative attached to one goal is not another goal: not a new task, do not create a task, and do not stop constrain the relation/action of the accompanying request. Keep these in that same segment. Split only distinct requested goals, not a request and its modifiers; retain actual scoped effect prohibitions on that segment.",
+      "after": "Split distinct goals, not modifiers or negated alternatives. Keep relation/action qualifiers with their goal and preserve scoped effect prohibitions.",
+      "occurrences": 1
+    }
+  ]
+}

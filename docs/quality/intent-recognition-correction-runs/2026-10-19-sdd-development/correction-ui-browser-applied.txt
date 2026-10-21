@@ -1,0 +1,38 @@
+Browser tab: 1, Title: "纠错组件验证", URL: "http://127.0.0.1:4187/".
+1 AXWebArea 纠错组件验证, URL: 127.0.0.1:4187/
+	2 container
+		3 heading 纠错组件验证, Value: 1
+			4 text 纠错组件验证
+		5 text 隔离浏览器 fixture · 验证共享组件显示与交互，不连接真实模型。
+		6 text 用户
+		7 text 请实现登录功能，超时为 10 分钟。
+		8 button 纠正理解
+	9 container 纠正这条消息的理解
+		10 container
+			32 heading 纠正这条消息的理解, Value: 2
+				33 text 纠正这条消息的理解
+			34 button Close this dialog
+			15 container
+				16 text 请实现登录功能，超时为 10 分钟。 已完成消息路由 纠错已生效。暂停的会话仍需单独恢复。
+				17 text 要纠正的任务
+				18 container
+					19 combo box (collapsed, settable) 要纠正的任务, ID: v-0-target, Secondary Actions: Expand
+					20 text 调整登录验证的超时限制
+					21 image
+				22 text 需要替换的已确认约束（可选）
+				23 container
+					24 combo box (collapsed, settable) 需要替换的已确认约束（可选）, ID: v-0-decision, Secondary Actions: Expand
+					38 text 超时为 10 分钟
+					39 image
+				27 text 正确的理解应该是什么
+				43 container
+					44 text entry area (settable) 正确的理解应该是什么, Value: 超时改为 30 分钟, ID: v-0-instruction
+					45 text 10 / 8000
+				31 text 提交后将暂停受影响的旧执行，待核对后再生效。已经发生的外部操作需要单独核对。
+				41 button (collapsed) 查看纠错记录（1）, Secondary Actions: Expand
+					42 text 查看纠错记录（1）
+			35 button 刷新结果
+			36 button 关闭
+			37 button (disabled) 提交纠正
+
+The focused UI element is 1 AXWebArea 纠错组件验证, URL: 127.0.0.1:4187/

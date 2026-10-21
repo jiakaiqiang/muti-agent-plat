@@ -1,0 +1,122 @@
+{
+  "runId": "SDD-2026-10-19-chat-correction",
+  "capturedAt": "2026-10-19T12:11:40.614Z",
+  "node": "v20.19.6",
+  "head": "bb3d278db3e734b643abef015bdd2190ef578638",
+  "baselineManifest": "baseline-manifest.json",
+  "previousMilestone": "correction-ui-manifest.json",
+  "sourceHashes": {
+    "packages/shared/src/contracts.ts": "43178b70fae6f766666a499d0a9508d7b12281af51118d70883628688100c198",
+    "packages/shared/src/intent-correction-contracts.ts": "c9b1eddda620b995235c43142633eaccef463f0a53f8f2f2aab1a0d2bf78ae5e",
+    "apps/server/src/modules/context-management/context-management.service.ts": "79c6083fb29d1e41b5852d169c795f8a33b68363c640d772522a73608596949c",
+    "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "ea3b4da806a95c8efffd460f65ba7bc7d96dfbda42392561510803acb587111d",
+    "apps/server/src/modules/message-routing/message-correction-target.ts": "b48ec3d4f88cdb8057db9d4381fcea4c8ec3bcf24d80b567b7dfc7e20063a7d3",
+    "apps/server/src/modules/message-routing/intent-correction.service.ts": "1e612f9533ba23a874964c1e9ffb547607c4265deff454d5595d8f34459f47f7",
+    "apps/server/src/modules/message-routing/intent-correction.service.spec.ts": "2f8cc2670b5d3be467f97190d45efc1831f628c09b0e9cc273a7d0aa298608f5",
+    "apps/server/src/modules/message-routing/intent-correction-planner.service.ts": "b61b1cbdd4260d3cc376d5cfef1796767bb755412a691d369bc1a91ee5f29486",
+    "apps/server/src/modules/message-routing/intent-correction-planner.service.spec.ts": "7c57248f76e2af25e366e26ab444e17e99ab385cc5378f9bcdacd30b40bd4c85",
+    "apps/server/src/modules/message-routing/intent-correction-state.ts": "8a75e0b5b6e0c948a833b55cebbf68c87f78d2c228b664393d1b9e0b087f48e3",
+    "apps/server/src/modules/persistence/intent-record-invariants.ts": "fe836ba2230824f2d99a1fbf2a04cbc88eadd648d6268e62e573507044ac1ab9",
+    "apps/server/src/modules/runtime-invocation/runtime-invocation.service.ts": "d2ee78819957354ebc94c5305ac5f70f63c81b39db923644275a86ff668746b8",
+    "apps/server/src/modules/runtime-invocation/runtime-invocation.service.spec.ts": "9d7fcf0ad8a42cc65b837fea632c7dce1f825d9f8232f5cbc06305520773f80f",
+    "apps/server/src/modules/runtime-routing/invocation-resolver.service.ts": "59e6dac1d556c7607c2f6b8975bdcf60b8d7925a328bb37d6b812daddc0ff68e",
+    "apps/server/src/modules/sessions/sessions.service.ts": "5bcfd95f3c25feae38720dcbbbaabf3442ff3ca8ab175526e6f08b2ef57d36e6",
+    "apps/server/src/modules/sessions/sessions.service.spec.ts": "727ac71b04fcfaded2345a1c03f4260ddd4499c9ec796f19d094711056c45266",
+    "apps/web/src/utils/intentCorrectionModel.ts": "b5a03d4b6b44ab989904e373b3b3734d25d7b1fa1b2229dcb8086f714a018f39",
+    "apps/web/src/components/IntentCorrectionPanel.vue": "6506fab126f450ee69db473facdbf8cb4157ac25d38d456a6f6bb2d2b377bcfe",
+    "apps/web/src/components/IntentCorrectionPanel.spec.ts": "81360f1e6e04801f064735d2c65db85280f7eaa333b58b7dd654e8e3bcaa5c51",
+    "apps/web/src/stores/event.ts": "8a97a1727099bf0d3e646602204c3c3121f72f84bbaf3b48b323014a7471de20",
+    "apps/web/src/stores/event-normalization.spec.ts": "e62653f88b5638c2f40d77f63813d817466eb3e9b19963cb30608b7b2995f992",
+    "apps/web/src/components/ChatTimelineDiscussionDocument.spec.ts": "4f68c2cbfda31f18a3deee8c548e069bba71e103a9cac71891bf165abb865093",
+    "tests/evaluation/run-intent-chat-correction-sdd.mjs": "50eabe3f57519275b616731f5a0325a3c803700a6c2c1d35f3234b734a593601",
+    "tests/evaluation/capture-intent-chat-correction-manifest.mjs": "a909dea3c0363875cc07b610335bbdf6a836810924623f79184bc5e1de965a8e"
+  },
+  "documentHashes": {
+    "docs/product/intent-recognition-correction-spec-v1.md": "60ef5c9f7128c21572c1485fe11d8fee3ab7d15676f0af0a5bd2e423bb23706d",
+    "docs/design/intent-recognition-correction-plan-v1.md": "fdd075e1b2333c2e770915c427c297fb3cd7817c2d97f9011eddf63c28c0afcd",
+    "docs/implementation/intent-recognition-correction-task-v1.md": "83a098e6815f757a6636ed56e27ef58925b8c747839fafc376d4a19b813c23f8",
+    "docs/quality/intent-recognition-correction-checklist-v1.md": "1e6efb3ea6802aff2141906d0aac350a278c4d593e77b95603fd45c2b4f69908",
+    "docs/quality/intent-recognition-correction-runs/2026-10-19-sdd-development/chat-correction-report.md": "b179f26f9b8bf55664038f911b61b5f638db240fa8a2dd872c75ed6d1b683c04"
+  },
+  "checks": [
+    {
+      "command": "npm run test",
+      "log": "chat-correction-workspace-tests-final.log",
+      "scope": "before final canonical routing and Session ledger cache changes",
+      "exitCode": 0,
+      "logSha256": "457a193de75bef86193103aa45ef294181684a6210ca878ac90a2e3f036ddbb6"
+    },
+    {
+      "command": "npx tsx --test --tsconfig apps/server/tsconfig.json apps/server/src/modules/message-routing/intent-correction.service.spec.ts apps/server/src/modules/message-routing/intent-correction-planner.service.spec.ts apps/server/src/modules/context-management/context-management.service.spec.ts apps/server/src/modules/intent-recognition/semantic-intent-router.service.spec.ts apps/server/src/modules/sessions/sessions.service.spec.ts apps/server/src/modules/runtime-invocation/runtime-invocation.service.spec.ts apps/server/src/modules/runtimes/logical-operation-store.spec.ts",
+      "log": "chat-correction-final-regression.log",
+      "scope": "final source",
+      "exitCode": 0,
+      "logSha256": "11ff92a87899d54981cd614669ce07f2076b155d6214143a34bab5280e4c2554"
+    },
+    {
+      "command": "npm run typecheck",
+      "log": "chat-correction-final-typecheck.log",
+      "scope": "before single-read optimization; server build covers final source",
+      "exitCode": 0,
+      "logSha256": "9018b27583539853ac8c03817518ed16ca562e330c3300be73c796e126a0cafd"
+    },
+    {
+      "command": "npm run build",
+      "log": "chat-correction-workspace-build.log",
+      "scope": "before final backend changes",
+      "exitCode": 0,
+      "logSha256": "01ab84350d39a76535e1b945fa9d0c26097aaae73559ec267e2605fc55c1993e"
+    },
+    {
+      "command": "npm run build --workspace @agent-cluster/server",
+      "log": "chat-correction-server-final-build.log",
+      "scope": "final source",
+      "exitCode": 0,
+      "logSha256": "a46e428c4d8f1ab9ac5e91206859bd48555deced87128f7fa383e2f9fddb92b3"
+    },
+    {
+      "command": "npm run test:harness",
+      "log": "chat-correction-harness-final.log",
+      "scope": "final runtime source",
+      "exitCode": 0,
+      "logSha256": "cf8a34a641971ed8531218cb96c8619d998e383d6264b096d4e2523d3b73c5e7"
+    },
+    {
+      "command": "node tests/evaluation/run-intent-chat-correction-sdd.mjs",
+      "log": "chat-correction-http-current-build.log",
+      "scope": "final server build",
+      "exitCode": 0,
+      "logSha256": "6bcdbd4917c110d7071d22d4483801e10fb1ca93b263b64293757e266f2fc61e"
+    },
+    {
+      "command": "git diff --check",
+      "log": "chat-correction-diff-check.log",
+      "scope": "tracked changes",
+      "exitCode": 0,
+      "logSha256": "3160eef132951b23df7210234abe7edfe64c06db9d85e50c84f8a947e83b8461"
+    }
+  ],
+  "evidenceHashes": {
+    "chat-correction-http-results.json": "69835c3a4103e94a925adb330bbab9e36c92569dfd4b6cd298709e78b005ec74"
+  },
+  "tests": {
+    "workspacePassed": 2890,
+    "postgresSkipped": 21,
+    "finalRelatedPassed": 250,
+    "httpPassed": 7,
+    "additiveCounts": false
+  },
+  "scope": {
+    "ingress": "enforce V2 ordinary chat correction only; initial classification remains legacy contract",
+    "backend": "isolated File; actual messages/corrections HTTP; deterministic localhost Generic LLM provider; real server restart",
+    "modelAccuracyEvaluated": false,
+    "postgresVerified": false,
+    "realElectronVerified": false
+  },
+  "limitations": [
+    "first-turn/unified semantic main path and special message branches remain incomplete",
+    "executing correction dispatch, scoped test/source/artifact executors and all projection transactions remain incomplete",
+    "no full 58-case acceptance, independent human double annotation, real database/CLI/dual-client matrix or release approval",
+    "unrelated dirty workspace preserved; source hashes cover current files including prior milestone changes"
+  ]
+}

@@ -74,6 +74,7 @@ Phase filtering must remain consistent with the grounded-evidence gate. Discussi
 | post_review | taskBrief, taskContext, summaryMemory, continuationState, artifacts, relevantEvents, verification evidence, budget | Unverified guesses or private speculation. |
 | final_delivery | review result, taskContext, summaryMemory, continuationState, artifacts, risks, memory candidates, budget | Private speculation or unconfirmed external send actions. |
 | user_message_routing | current state, currentUserMessage, taskContext, summaryMemory, continuationState, relevantEvents, constraints | Full history noise, currentUserMessage in L0/constraints, or irrelevant workspace contents. |
+| user_message_response | Original currentUserMessage, committed answer step and execution binding, selected confirmed context, bounded selected artifact summaries; explicit workspace read grant and read-only tool catalog when authorized | Write/command/test tools, implicit workspace reads, unselected task constraints, delegation or business resume. |
 
 ## Task Context Pack rules
 

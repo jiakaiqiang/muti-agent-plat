@@ -1,5 +1,11 @@
 # Event Contract v0.1
 
+指定回答增量（2026-10-20）：单段问题的每个目标 Agent 对应独立 `stepId`，`agent_message` 的 `fromAgentId` 与该 step 的唯一目标一致，payload 保留 `routingId/intentRevision/stepId/invocationId/replyToEventId`。每条回复与 Outbox 同事务保存，以 stepId 去重。某一目标失败的 `intent_plan_blocked` 同时携带 `targetAgentIds` 和 `replyToEventId`，只表示该步骤失败；其他完成的回复仍有效。路由 actionStatus 仅在全部预期回答完成时为 applied，任一步失败后不得被另一成功覆盖。详见[验证记录](../quality/intent-recognition-correction-runs/2026-10-19-sdd-development/targeted-answer-report.md)。
+
+多段意图诊断增量（2026-10-20）：`intent_plan_clarification_required` 或 `intent_plan_blocked` 的 payload 可携带 `multiSegmentReview`。该对象使用 intent-multi-segment-review-v1，mode=clarify_only，包含 sessionId/dataEpoch/routingId/sourceEventId/routingRevision、完整 understanding 和可选 referenceLabels。仅 schema 有效且包含 2–8 段的原提案产生该诊断；与计划状态和原事件 Outbox 同事务保存，重复提交不新增事件。模型目标/效果/禁止项及依赖全部保留，引用名称仅来自服务器快照。
+
+该对象是历史诊断，不是 confirmationId、执行授权或可提交的计划。消费者须核对当前路由身份与版本后展示待澄清状态；旧事件保留历史标记，不能以原提示覆盖当前结果。不能因为未知字段、段数越界或依赖非法而截取部分段执行。客户端行为见 UI State Contract 的多段意图章节。
+
 主 Agent 协作的生命周期、讨论/确认事件边界见 [阶段 0 冻结合同](./main-agent-collaboration-contract-v1.md)。本阶段不新增线上事件类型；后续必须携带归属/代次/版本并经 outbox 提交，不能以文案推断授权。
 
 ## 1. 目标

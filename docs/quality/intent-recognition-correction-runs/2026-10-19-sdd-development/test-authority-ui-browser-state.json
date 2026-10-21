@@ -1,0 +1,140 @@
+{
+  "sessionId": "78b6b84e-6345-4f3f-b7ac-6cc7897105cc",
+  "authority": {
+    "binding": {
+      "runnerId": "docker-npm-tests-v1",
+      "workspaceBindingHash": "eb68a539a2830fb6e7475210adbb57a3fd2103174d038239b6412a601e0e1e2b",
+      "workspaceId": "server-311c83fe1dd93e658f099e58c819b54e",
+      "imageId": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "script": "test:integration",
+      "bindingHash": "63a3cd5654d9fc556c3fad920dfe49096fa0bf607c0476f67468d2f84f8aeb58",
+      "resourceId": "test-runner:63a3cd5654d9fc556c3fad920dfe49096fa0bf607c0476f67468d2f84f8aeb58"
+    },
+    "grant": {
+      "id": "isolated-test:78b6b84e-6345-4f3f-b7ac-6cc7897105cc:63a3cd5654d9fc556c3fad920dfe49096fa0bf607c0476f67468d2f84f8aeb58",
+      "effect": "run_tests",
+      "resource": {
+        "kind": "test_runner",
+        "refId": "test-runner:63a3cd5654d9fc556c3fad920dfe49096fa0bf607c0476f67468d2f84f8aeb58"
+      },
+      "revision": 4,
+      "sourceEventId": "209fd392-1587-40b5-82c3-e06b8fd8e535",
+      "revokedAt": "2026-10-19T15:27:06.764Z"
+    }
+  },
+  "events": [
+    {
+      "id": "0e3f7031-cadb-4fc2-9500-e2d1cc707e37",
+      "sessionId": "78b6b84e-6345-4f3f-b7ac-6cc7897105cc",
+      "type": "intent_test_authority_changed",
+      "createdAt": "2026-10-19T15:27:04.122Z",
+      "toAgentIds": [],
+      "actor": {
+        "type": "user",
+        "id": "local-user"
+      },
+      "content": "已授权在隔离环境运行 test:unit 测试。",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "system_notice",
+        "idempotencyKey": "a65c3a46-d5f9-4d38-bc83-206b80833446",
+        "payload": {
+          "request": {
+            "action": "grant",
+            "script": "test:unit",
+            "dataEpoch": "bed2cfe4-404d-4b2d-b53f-2062f53fb9e7",
+            "expectedBindingHash": "30c47d7acb8f75db47249def1bf9911af281720b140aafaa5ffbf0ac1986e716",
+            "expectedGrantRevision": 0,
+            "idempotencyKey": "a65c3a46-d5f9-4d38-bc83-206b80833446"
+          },
+          "grantRevision": 1
+        }
+      }
+    },
+    {
+      "id": "ec70f348-9a4e-4cb4-8c55-f3ac4c9cd58a",
+      "sessionId": "78b6b84e-6345-4f3f-b7ac-6cc7897105cc",
+      "type": "intent_test_authority_changed",
+      "createdAt": "2026-10-19T15:27:04.253Z",
+      "toAgentIds": [],
+      "actor": {
+        "type": "user",
+        "id": "local-user"
+      },
+      "content": "已撤销隔离测试授权。",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "system_notice",
+        "idempotencyKey": "b0e4dcf8-d64d-476b-9d7f-7dd8da1b3ada",
+        "payload": {
+          "request": {
+            "action": "revoke",
+            "script": "test:unit",
+            "dataEpoch": "bed2cfe4-404d-4b2d-b53f-2062f53fb9e7",
+            "expectedBindingHash": "30c47d7acb8f75db47249def1bf9911af281720b140aafaa5ffbf0ac1986e716",
+            "expectedGrantRevision": 1,
+            "idempotencyKey": "b0e4dcf8-d64d-476b-9d7f-7dd8da1b3ada"
+          },
+          "grantRevision": 2
+        }
+      }
+    },
+    {
+      "id": "209fd392-1587-40b5-82c3-e06b8fd8e535",
+      "sessionId": "78b6b84e-6345-4f3f-b7ac-6cc7897105cc",
+      "type": "intent_test_authority_changed",
+      "createdAt": "2026-10-19T15:27:06.379Z",
+      "toAgentIds": [],
+      "actor": {
+        "type": "user",
+        "id": "local-user"
+      },
+      "content": "已授权在隔离环境运行 test:integration 测试。",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "system_notice",
+        "idempotencyKey": "d6acc8e4-3d89-4e9b-a71e-eddd7aaab0b1",
+        "payload": {
+          "request": {
+            "action": "grant",
+            "script": "test:integration",
+            "dataEpoch": "bed2cfe4-404d-4b2d-b53f-2062f53fb9e7",
+            "expectedBindingHash": "63a3cd5654d9fc556c3fad920dfe49096fa0bf607c0476f67468d2f84f8aeb58",
+            "expectedGrantRevision": 2,
+            "idempotencyKey": "d6acc8e4-3d89-4e9b-a71e-eddd7aaab0b1"
+          },
+          "grantRevision": 3
+        }
+      }
+    },
+    {
+      "id": "e60968b1-5d42-49b4-9ce0-9cd81e3be254",
+      "sessionId": "78b6b84e-6345-4f3f-b7ac-6cc7897105cc",
+      "type": "intent_test_authority_changed",
+      "createdAt": "2026-10-19T15:27:06.764Z",
+      "toAgentIds": [],
+      "actor": {
+        "type": "user",
+        "id": "local-user"
+      },
+      "content": "已撤销隔离测试授权。",
+      "metadata": {
+        "schemaVersion": "0.1",
+        "renderAs": "system_notice",
+        "idempotencyKey": "e57ecabe-6670-479a-93e6-517f20e8193c",
+        "payload": {
+          "request": {
+            "action": "revoke",
+            "script": "test:integration",
+            "dataEpoch": "bed2cfe4-404d-4b2d-b53f-2062f53fb9e7",
+            "expectedBindingHash": "63a3cd5654d9fc556c3fad920dfe49096fa0bf607c0476f67468d2f84f8aeb58",
+            "expectedGrantRevision": 3,
+            "idempotencyKey": "e57ecabe-6670-479a-93e6-517f20e8193c"
+          },
+          "grantRevision": 4
+        }
+      }
+    }
+  ],
+  "testInvocations": []
+}

@@ -15,7 +15,7 @@ Runtime Alignment 把一套既有的协作流程对齐到 Harness Engineering �
 | 对象 | 程度 | 说明 |
 | --- | --- | --- |
 | SessionStatus | 部分 | WAIT_USER_CONFIRM、EXECUTING、COMPLETED、FAILED、CANCELLED 已经具备阶段含义，review 与 rework 还需要更清晰的治理语义。 |
-| AgentRunPhase | 部分 | discussion、brief_generation、brief_revision、task_execution、post_review、final_delivery、user_message_routing 已映射到阶段工作流。 |
+| AgentRunPhase | 部分 | discussion、brief_generation、brief_revision、task_execution、post_review、final_delivery、user_message_routing、user_message_response 已映射到阶段工作流。 |
 | Events | 部分 | metadata.payload 应承载结构化决策，而不是只依赖聊天内容。 |
 | Artifacts | 部分 | ArtifactType 表达物料形式，harnessArtifactType 表达工程角色。 |
 

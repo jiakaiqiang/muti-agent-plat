@@ -1,0 +1,101 @@
+{
+  "executedAt": "2026-10-19T10:38:10.052Z",
+  "method": "real localhost HTTP; isolated File backend; mock classifier; server process restart; no real model or PostgreSQL",
+  "results": [
+    {
+      "id": "VC01",
+      "feature": "拒绝客户端授权字段",
+      "actual": {
+        "status": 400
+      },
+      "passed": true
+    },
+    {
+      "id": "VC02",
+      "feature": "过期版本拒绝",
+      "actual": {
+        "status": 409
+      },
+      "passed": true
+    },
+    {
+      "id": "VC03",
+      "feature": "并发重复接收一次纠错",
+      "actual": {
+        "statuses": [
+          202,
+          202
+        ],
+        "ids": [
+          "18c3de61-8b92-4dac-aa0d-f6cd099915f6",
+          "18c3de61-8b92-4dac-aa0d-f6cd099915f6"
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "VC04",
+      "feature": "纠错接收后路由与任务屏障同时持久化",
+      "actual": {
+        "routeHold": {
+          "correctionId": "18c3de61-8b92-4dac-aa0d-f6cd099915f6",
+          "reason": "intent_correction",
+          "createdAt": "2026-10-19T10:38:06.042Z"
+        },
+        "workHold": {
+          "correctionId": "18c3de61-8b92-4dac-aa0d-f6cd099915f6",
+          "reason": "intent_correction",
+          "createdAt": "2026-10-19T10:38:06.042Z"
+        },
+        "executionEpoch": 2,
+        "requirementRevision": 1
+      },
+      "passed": true
+    },
+    {
+      "id": "VC05",
+      "feature": "重复幂等键不能覆盖纠错",
+      "actual": {
+        "status": 409
+      },
+      "passed": true
+    },
+    {
+      "id": "VC06",
+      "feature": "旧确认卡不能绕过纠错屏障",
+      "actual": {
+        "status": 409
+      },
+      "passed": true
+    },
+    {
+      "id": "VC07",
+      "feature": "202不代表生效且历史权限未知",
+      "actual": {
+        "count": 1,
+        "status": "validating",
+        "revisions": [
+          {
+            "revision": 1,
+            "authorization": "unknown"
+          }
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "VC08",
+      "feature": "进程重启保持纠错身份和屏障",
+      "actual": {
+        "status": 202,
+        "id": "18c3de61-8b92-4dac-aa0d-f6cd099915f6",
+        "hold": {
+          "correctionId": "18c3de61-8b92-4dac-aa0d-f6cd099915f6",
+          "reason": "intent_correction",
+          "createdAt": "2026-10-19T10:38:06.042Z"
+        }
+      },
+      "passed": true
+    }
+  ]
+}

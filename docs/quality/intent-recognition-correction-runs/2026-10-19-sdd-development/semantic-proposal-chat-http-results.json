@@ -1,0 +1,105 @@
+{
+  "executedAt": "2026-10-19T12:32:23.425Z",
+  "method": "actual messages API + Generic LLM HTTP to deterministic local fixture, isolated File state, actual process restart; not semantic accuracy",
+  "results": [
+    {
+      "id": "CC01",
+      "passed": true,
+      "actual": {
+        "sourceRoutingId": "dfe9351b-7a2a-4827-9528-ba293246eff9",
+        "originalRoutingId": "95572d56-d7cd-4525-9327-c5fc1564d447",
+        "sourceEventId": "e86091bf-a16d-450f-a597-3f94f17ba2e6",
+        "correctionSourceEventId": "e86091bf-a16d-450f-a597-3f94f17ba2e6",
+        "status": "validating",
+        "hold": {
+          "correctionId": "93e38427-8c1c-4577-9b53-075935bf1c63",
+          "reason": "intent_correction",
+          "createdAt": "2026-10-19T12:32:18.780Z"
+        }
+      }
+    },
+    {
+      "id": "CC02",
+      "passed": true,
+      "actual": {
+        "status": "applied",
+        "reasons": [],
+        "requests": [
+          {
+            "kind": "message_classification",
+            "tools": [],
+            "mode": "correction"
+          },
+          {
+            "kind": "correction_validation",
+            "tools": [],
+            "sourceEventId": "e86091bf-a16d-450f-a597-3f94f17ba2e6",
+            "mode": "correction"
+          }
+        ]
+      }
+    },
+    {
+      "id": "CC03",
+      "passed": true,
+      "actual": {
+        "attempts": 2,
+        "sourceDeadline": "2026-10-19T12:34:18.723Z",
+        "correctionDeadline": "2026-10-19T12:34:18.717Z",
+        "ledgerDeadline": "2026-10-19T12:34:18.717Z",
+        "parentId": "dfe9351b-7a2a-4827-9528-ba293246eff9"
+      }
+    },
+    {
+      "id": "CC04",
+      "passed": true,
+      "actual": {
+        "old": "superseded",
+        "replacement": "超时改为 30 分钟，原 10 分钟作废。",
+        "sourceFollowUp": "cancelled",
+        "sessionStatus": "WAIT_USER_CONFIRM"
+      }
+    },
+    {
+      "id": "CC07",
+      "passed": true,
+      "actual": {
+        "statuses": [
+          "applied",
+          "applied"
+        ],
+        "revisions": 3,
+        "canonicalRoutingId": "95572d56-d7cd-4525-9327-c5fc1564d447",
+        "modelRequests": 4,
+        "previousStatus": "superseded",
+        "replacement": "超时改为 45 分钟，原 30 分钟作废。"
+      }
+    },
+    {
+      "id": "CC05",
+      "passed": true,
+      "actual": {
+        "status": "CLARIFICATION_REQUIRED",
+        "reasons": [
+          "CORRECTION_TARGET_REQUIRED",
+          "CORRECTION_TARGET_REQUIRED"
+        ],
+        "correctionCount": 2,
+        "modelRequests": 5,
+        "contextDecisionIds": [
+          "af4e6855-deb5-444e-b825-48e746b0b22f"
+        ]
+      }
+    },
+    {
+      "id": "CC06",
+      "passed": true,
+      "actual": {
+        "sourceEventId": "e86091bf-a16d-450f-a597-3f94f17ba2e6",
+        "routingId": "dfe9351b-7a2a-4827-9528-ba293246eff9",
+        "idempotentReplay": true,
+        "modelRequests": 5
+      }
+    }
+  ]
+}

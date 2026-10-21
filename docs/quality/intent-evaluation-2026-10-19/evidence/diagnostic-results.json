@@ -1,0 +1,1796 @@
+{
+  "executedAt": "2026-10-19T07:48:12.798Z",
+  "method": "actual compiled services; injected runtime only for V cases; no live model",
+  "summary": {
+    "total": 70,
+    "passed": 52,
+    "failed": 18,
+    "byFeature": {
+      "首轮领域与写权限判断": {
+        "total": 20,
+        "passed": 11
+      },
+      "规则兜底的需求关系": {
+        "total": 8,
+        "passed": 4
+      },
+      "精确命令与否定边界": {
+        "total": 16,
+        "passed": 16
+      },
+      "执行期专项规则": {
+        "total": 8,
+        "passed": 7
+      },
+      "故障注入与服务端校验": {
+        "total": 18,
+        "passed": 14
+      }
+    }
+  },
+  "results": [
+    {
+      "id": "T01",
+      "feature": "首轮领域与写权限判断",
+      "message": "实现一个登录接口",
+      "expected": {
+        "intents": [
+          "implementation"
+        ],
+        "requiresCodeChanges": true
+      },
+      "actual": {
+        "domain": "coding",
+        "intent": "implementation",
+        "requiresCodeChanges": true
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "T02",
+      "feature": "首轮领域与写权限判断",
+      "message": "分析当前项目架构",
+      "expected": {
+        "intents": [
+          "analysis"
+        ],
+        "requiresCodeChanges": false
+      },
+      "actual": {
+        "domain": "mixed",
+        "intent": "analysis",
+        "requiresCodeChanges": false
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "T03",
+      "feature": "首轮领域与写权限判断",
+      "message": "为什么登录失败？",
+      "expected": {
+        "intents": [
+          "inquiry",
+          "troubleshooting"
+        ],
+        "requiresCodeChanges": false
+      },
+      "actual": {
+        "domain": "non_coding",
+        "intent": "troubleshooting",
+        "requiresCodeChanges": false
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "T04",
+      "feature": "首轮领域与写权限判断",
+      "message": "排查登录失败原因",
+      "expected": {
+        "intents": [
+          "troubleshooting"
+        ],
+        "requiresCodeChanges": false
+      },
+      "actual": {
+        "domain": "non_coding",
+        "intent": "troubleshooting",
+        "requiresCodeChanges": false
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "T05",
+      "feature": "首轮领域与写权限判断",
+      "message": "运行现有测试并报告结果",
+      "expected": {
+        "intents": [
+          "validation"
+        ],
+        "requiresCodeChanges": false
+      },
+      "actual": {
+        "domain": "coding",
+        "intent": "validation",
+        "requiresCodeChanges": false
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "T06",
+      "feature": "首轮领域与写权限判断",
+      "message": "审查这次代码变更",
+      "expected": {
+        "intents": [
+          "review"
+        ],
+        "requiresCodeChanges": false
+      },
+      "actual": {
+        "domain": "coding",
+        "intent": "review",
+        "requiresCodeChanges": false
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "T07",
+      "feature": "首轮领域与写权限判断",
+      "message": "制定下个版本的开发计划",
+      "expected": {
+        "intents": [
+          "planning"
+        ],
+        "requiresCodeChanges": false
+      },
+      "actual": {
+        "domain": "mixed",
+        "intent": "planning",
+        "requiresCodeChanges": false
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "T08",
+      "feature": "首轮领域与写权限判断",
+      "message": "生成最终交付说明",
+      "expected": {
+        "intents": [
+          "delivery"
+        ],
+        "requiresCodeChanges": false
+      },
+      "actual": {
+        "domain": "non_coding",
+        "intent": "delivery",
+        "requiresCodeChanges": false
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "T09",
+      "feature": "首轮领域与写权限判断",
+      "message": "请介绍这个项目",
+      "expected": {
+        "intents": [
+          "analysis"
+        ],
+        "requiresCodeChanges": false
+      },
+      "actual": {
+        "domain": "coding",
+        "intent": "analysis",
+        "requiresCodeChanges": false
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "T10",
+      "feature": "首轮领域与写权限判断",
+      "message": "如何实现登录接口？只回答思路",
+      "expected": {
+        "intents": [
+          "inquiry",
+          "analysis",
+          "planning"
+        ],
+        "requiresCodeChanges": false
+      },
+      "actual": {
+        "domain": "coding",
+        "intent": "inquiry",
+        "requiresCodeChanges": true
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "T11",
+      "feature": "首轮领域与写权限判断",
+      "message": "只分析登录失败原因，不要修改代码",
+      "expected": {
+        "intents": [
+          "analysis",
+          "troubleshooting"
+        ],
+        "requiresCodeChanges": false
+      },
+      "actual": {
+        "domain": "mixed",
+        "intent": "troubleshooting",
+        "requiresCodeChanges": true
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "T12",
+      "feature": "首轮领域与写权限判断",
+      "message": "先讨论修复方案，不要实现",
+      "expected": {
+        "intents": [
+          "analysis",
+          "planning",
+          "inquiry",
+          "troubleshooting"
+        ],
+        "requiresCodeChanges": false
+      },
+      "actual": {
+        "domain": "mixed",
+        "intent": "implementation",
+        "requiresCodeChanges": true
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "T13",
+      "feature": "首轮领域与写权限判断",
+      "message": "帮我写一份会议纪要",
+      "expected": {
+        "intents": [
+          "analysis",
+          "implementation"
+        ],
+        "requiresCodeChanges": false
+      },
+      "actual": {
+        "domain": "non_coding",
+        "intent": "implementation",
+        "requiresCodeChanges": true
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "T14",
+      "feature": "首轮领域与写权限判断",
+      "message": "不要运行测试，只解释测试原理",
+      "expected": {
+        "intents": [
+          "inquiry",
+          "analysis"
+        ],
+        "requiresCodeChanges": false
+      },
+      "actual": {
+        "domain": "coding",
+        "intent": "validation",
+        "requiresCodeChanges": false
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "T15",
+      "feature": "首轮领域与写权限判断",
+      "message": "Can you explain how to implement login without changing code?",
+      "expected": {
+        "intents": [
+          "inquiry",
+          "analysis"
+        ],
+        "requiresCodeChanges": false
+      },
+      "actual": {
+        "domain": "non_coding",
+        "intent": "inquiry",
+        "requiresCodeChanges": true
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "T16",
+      "feature": "首轮领域与写权限判断",
+      "message": "修复登录失败的 bug",
+      "expected": {
+        "intents": [
+          "implementation",
+          "troubleshooting"
+        ],
+        "requiresCodeChanges": true
+      },
+      "actual": {
+        "domain": "coding",
+        "intent": "troubleshooting",
+        "requiresCodeChanges": true
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "T17",
+      "feature": "首轮领域与写权限判断",
+      "message": "请解释一下什么是缓存",
+      "expected": {
+        "intents": [
+          "inquiry",
+          "analysis"
+        ],
+        "requiresCodeChanges": false
+      },
+      "actual": {
+        "domain": "non_coding",
+        "intent": "implementation",
+        "requiresCodeChanges": true
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "T18",
+      "feature": "首轮领域与写权限判断",
+      "message": "不要发布，只评审发布方案",
+      "expected": {
+        "intents": [
+          "review",
+          "analysis"
+        ],
+        "requiresCodeChanges": false
+      },
+      "actual": {
+        "domain": "non_coding",
+        "intent": "review",
+        "requiresCodeChanges": false
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "T19",
+      "feature": "首轮领域与写权限判断",
+      "message": "这段代码需要重构吗？",
+      "expected": {
+        "intents": [
+          "inquiry",
+          "review",
+          "analysis"
+        ],
+        "requiresCodeChanges": false
+      },
+      "actual": {
+        "domain": "coding",
+        "intent": "inquiry",
+        "requiresCodeChanges": true
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "T20",
+      "feature": "首轮领域与写权限判断",
+      "message": "请实现 CSV 导出并补充测试",
+      "expected": {
+        "intents": [
+          "implementation"
+        ],
+        "requiresCodeChanges": true
+      },
+      "actual": {
+        "domain": "coding",
+        "intent": "validation",
+        "requiresCodeChanges": true
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "F01",
+      "feature": "规则兜底的需求关系",
+      "message": "这是一个新任务：做报表",
+      "status": "COMPLETED",
+      "expected": {
+        "relation": "new_requirement"
+      },
+      "actual": {
+        "intent": "clarification",
+        "requirementRelation": "new_requirement",
+        "failedExecutionAction": "none",
+        "priority": "normal",
+        "shouldPause": false,
+        "affectedTaskIds": [],
+        "affectedAgentIds": [],
+        "requiresBriefRevision": true,
+        "requiresUserConfirmation": false,
+        "coordinatorInstruction": "将用户消息路由给 Coordinator 处理。"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "F02",
+      "feature": "规则兜底的需求关系",
+      "message": "这不是新任务，是上一条的补充",
+      "status": "COMPLETED",
+      "expected": {
+        "relation": "continuation"
+      },
+      "actual": {
+        "intent": "constraint",
+        "requirementRelation": "new_requirement",
+        "failedExecutionAction": "none",
+        "priority": "high",
+        "shouldPause": false,
+        "affectedTaskIds": [],
+        "affectedAgentIds": [],
+        "requiresBriefRevision": true,
+        "requiresUserConfirmation": false,
+        "coordinatorInstruction": "将用户新增约束同步给相关 Agent，并检查是否影响已确认任务契约。"
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "F03",
+      "feature": "规则兜底的需求关系",
+      "message": "不要创建新任务，继续当前需求",
+      "status": "FAILED",
+      "expected": {
+        "relation": "continuation"
+      },
+      "actual": {
+        "intent": "constraint",
+        "requirementRelation": "new_requirement",
+        "failedExecutionAction": "none",
+        "priority": "high",
+        "shouldPause": false,
+        "affectedTaskIds": [],
+        "affectedAgentIds": [],
+        "requiresBriefRevision": true,
+        "requiresUserConfirmation": false,
+        "coordinatorInstruction": "将用户新增约束同步给相关 Agent，并检查是否影响已确认任务契约。"
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "F04",
+      "feature": "规则兜底的需求关系",
+      "message": "另外补充：当前登录接口要记录审计日志",
+      "status": "COMPLETED",
+      "expected": {
+        "relation": "continuation"
+      },
+      "actual": {
+        "intent": "constraint",
+        "requirementRelation": "new_requirement",
+        "failedExecutionAction": "none",
+        "priority": "high",
+        "shouldPause": false,
+        "affectedTaskIds": [],
+        "affectedAgentIds": [],
+        "requiresBriefRevision": true,
+        "requiresUserConfirmation": false,
+        "coordinatorInstruction": "将用户新增约束同步给相关 Agent，并检查是否影响已确认任务契约。"
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "F05",
+      "feature": "规则兜底的需求关系",
+      "message": "新任务是一个无关的天气工具",
+      "status": "COMPLETED",
+      "expected": {
+        "relation": "new_requirement"
+      },
+      "actual": {
+        "intent": "clarification",
+        "requirementRelation": "new_requirement",
+        "failedExecutionAction": "none",
+        "priority": "normal",
+        "shouldPause": false,
+        "affectedTaskIds": [],
+        "affectedAgentIds": [],
+        "requiresBriefRevision": true,
+        "requiresUserConfirmation": false,
+        "coordinatorInstruction": "将用户消息路由给 Coordinator 处理。"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "F06",
+      "feature": "规则兜底的需求关系",
+      "message": "继续完成之前失败的任务",
+      "status": "FAILED",
+      "expected": {
+        "relation": "continuation"
+      },
+      "actual": {
+        "intent": "clarification",
+        "requirementRelation": "continuation",
+        "failedExecutionAction": "resume",
+        "priority": "normal",
+        "shouldPause": false,
+        "affectedTaskIds": [],
+        "affectedAgentIds": [],
+        "requiresBriefRevision": true,
+        "requiresUserConfirmation": false,
+        "coordinatorInstruction": "将用户消息路由给 Coordinator 处理。"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "F07",
+      "feature": "规则兜底的需求关系",
+      "message": "This is not a new task; refine the current login task.",
+      "status": "COMPLETED",
+      "expected": {
+        "relation": "continuation"
+      },
+      "actual": {
+        "intent": "clarification",
+        "requirementRelation": "new_requirement",
+        "failedExecutionAction": "none",
+        "priority": "normal",
+        "shouldPause": false,
+        "affectedTaskIds": [],
+        "affectedAgentIds": [],
+        "requiresBriefRevision": true,
+        "requiresUserConfirmation": false,
+        "coordinatorInstruction": "将用户消息路由给 Coordinator 处理。"
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "F08",
+      "feature": "规则兜底的需求关系",
+      "message": "刚才的接口还需要处理空密码",
+      "status": "COMPLETED",
+      "expected": {
+        "relation": "continuation"
+      },
+      "actual": {
+        "intent": "clarification",
+        "requirementRelation": "continuation",
+        "failedExecutionAction": "none",
+        "priority": "normal",
+        "shouldPause": false,
+        "affectedTaskIds": [],
+        "affectedAgentIds": [],
+        "requiresBriefRevision": true,
+        "requiresUserConfirmation": false,
+        "coordinatorInstruction": "将用户消息路由给 Coordinator 处理。"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "C01",
+      "feature": "精确命令与否定边界",
+      "message": "继续",
+      "status": "PAUSED",
+      "expected": {
+        "action": "resume_session"
+      },
+      "actual": {
+        "action": "resume_session",
+        "message": "已收到继续指令，正在恢复当前任务。"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "C02",
+      "feature": "精确命令与否定边界",
+      "message": "继续执行",
+      "status": "FAILED",
+      "expected": {
+        "action": "retry_current"
+      },
+      "actual": {
+        "action": "retry_current",
+        "message": "已收到继续指令，正在重试当前任务。"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "C03",
+      "feature": "精确命令与否定边界",
+      "message": "重试",
+      "status": "INTERRUPTED",
+      "expected": {
+        "action": "retry_current"
+      },
+      "actual": {
+        "action": "retry_current",
+        "message": "已收到继续指令，正在重试当前任务。"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "C04",
+      "feature": "精确命令与否定边界",
+      "message": "continue",
+      "status": "EXECUTING",
+      "expected": {
+        "action": "acknowledge"
+      },
+      "actual": {
+        "action": "acknowledge",
+        "message": "当前任务已在执行，无需重复恢复。"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "C05",
+      "feature": "精确命令与否定边界",
+      "message": "继续执行",
+      "status": "COMPLETED",
+      "expected": {
+        "action": "clarify"
+      },
+      "actual": {
+        "action": "clarify",
+        "message": "当前任务已完成，请说明需要继续处理的具体内容。"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "C06",
+      "feature": "精确命令与否定边界",
+      "message": "暂停",
+      "status": "EXECUTING",
+      "expected": {
+        "action": "pause_session"
+      },
+      "actual": {
+        "action": "pause_session",
+        "message": "已收到暂停指令，正在停止当前执行。"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "C07",
+      "feature": "精确命令与否定边界",
+      "message": "暂停",
+      "status": "PAUSED",
+      "expected": {
+        "action": "acknowledge"
+      },
+      "actual": {
+        "action": "acknowledge",
+        "message": "当前会话已经暂停。"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "C08",
+      "feature": "精确命令与否定边界",
+      "message": "取消",
+      "status": "EXECUTING",
+      "expected": {
+        "action": "cancel_session"
+      },
+      "actual": {
+        "action": "cancel_session",
+        "message": "已收到取消指令，正在取消当前会话。"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "C09",
+      "feature": "精确命令与否定边界",
+      "message": "确认",
+      "status": "WAIT_USER_DECISION",
+      "expected": {
+        "action": "clarify"
+      },
+      "actual": {
+        "action": "clarify",
+        "message": "请在对应确认卡中选择具体操作；高风险确认不能通过通用聊天命令批准。"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "C10",
+      "feature": "精确命令与否定边界",
+      "message": "拒绝",
+      "status": "WAIT_USER_DECISION",
+      "expected": {
+        "action": "clarify"
+      },
+      "actual": {
+        "action": "clarify",
+        "message": "请在对应确认卡中选择具体操作；高风险确认不能通过通用聊天命令批准。"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "C11",
+      "feature": "精确命令与否定边界",
+      "message": " 继续！ ",
+      "status": "PAUSED",
+      "expected": {
+        "action": "resume_session"
+      },
+      "actual": {
+        "action": "resume_session",
+        "message": "已收到继续指令，正在恢复当前任务。"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "C12",
+      "feature": "精确命令与否定边界",
+      "message": "不要继续",
+      "status": "PAUSED",
+      "expected": {
+        "action": null
+      },
+      "actual": null,
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "C13",
+      "feature": "精确命令与否定边界",
+      "message": "为什么不能继续？",
+      "status": "PAUSED",
+      "expected": {
+        "action": null
+      },
+      "actual": null,
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "C14",
+      "feature": "精确命令与否定边界",
+      "message": "继续补充审计日志",
+      "status": "EXECUTING",
+      "expected": {
+        "action": null
+      },
+      "actual": null,
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "C15",
+      "feature": "精确命令与否定边界",
+      "message": "不要取消当前任务",
+      "status": "EXECUTING",
+      "expected": {
+        "action": null
+      },
+      "actual": null,
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "C16",
+      "feature": "精确命令与否定边界",
+      "message": "同意修改方案，但先别执行",
+      "status": "WAIT_USER_DECISION",
+      "expected": {
+        "action": null
+      },
+      "actual": null,
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "S01",
+      "feature": "执行期专项规则",
+      "message": "现在执行到哪一步了？",
+      "expected": true,
+      "actual": {
+        "normalizedText": "现在执行到哪一步了",
+        "reasonCode": "EXECUTION_STATUS_QUESTION"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "S02",
+      "feature": "执行期专项规则",
+      "message": "现在执行到哪一步了？另外加一个导出功能",
+      "expected": false,
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "S03",
+      "feature": "执行期专项规则",
+      "message": "先停下来，另外增加导出功能",
+      "expected": true,
+      "actual": {
+        "command": "pause",
+        "remainder": "另外增加导出功能",
+        "normalizedText": "先停下来,另外增加导出功能",
+        "reasonCode": "COMPOUND_PAUSE_BEFORE_FOLLOW_UP"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "S04",
+      "feature": "执行期专项规则",
+      "message": "不要暂停，继续补充说明",
+      "expected": false,
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "S05",
+      "feature": "执行期专项规则",
+      "message": "这个改动会不会影响数据库？",
+      "expected": true,
+      "actual": {
+        "normalizedText": "这个改动会不会影响数据库",
+        "reasonCode": "EXECUTION_CONSULTATION_QUESTION"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "S06",
+      "feature": "执行期专项规则",
+      "message": "能否另外增加一个导出功能？",
+      "expected": false,
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "S07",
+      "feature": "执行期专项规则",
+      "message": "另外增加一个导出功能",
+      "expected": true,
+      "actual": {
+        "normalizedText": "另外增加一个导出功能",
+        "reasonCode": "EXECUTION_SCOPE_CHANGE"
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "S08",
+      "feature": "执行期专项规则",
+      "message": "不要增加任何新功能",
+      "expected": false,
+      "actual": {
+        "normalizedText": "不要增加任何新功能",
+        "reasonCode": "EXECUTION_SCOPE_CHANGE"
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "V01",
+      "feature": "故障注入与服务端校验",
+      "message": "正确的同需求输出",
+      "expected": "允许应用且调用一次",
+      "actual": {
+        "calls": 1,
+        "autoApplicable": true,
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "same_requirement",
+          "contextPolicy": "inherit_confirmed",
+          "requestedAction": "continue_active_work_item",
+          "selectedWorkItemId": "93b084b7-dd43-457a-b8d3-ba2b4eea8569",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "requestedAgentIds": [],
+          "goalSegments": [
+            "补充当前任务"
+          ],
+          "missingFields": [],
+          "ambiguityReasons": [],
+          "reasonCodes": [
+            "EVALUATION"
+          ],
+          "riskLevel": "low",
+          "modelConfidence": 0.99
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": true,
+          "serverConfidence": 1,
+          "errors": []
+        },
+        "status": "VALIDATING",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "VALIDATING",
+          "VALIDATING"
+        ]
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "V02",
+      "feature": "故障注入与服务端校验",
+      "message": "第一次连接失败，第二次恢复",
+      "expected": "重试一次后恢复",
+      "actual": {
+        "calls": 2,
+        "autoApplicable": true,
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "same_requirement",
+          "contextPolicy": "inherit_confirmed",
+          "requestedAction": "continue_active_work_item",
+          "selectedWorkItemId": "88a9fa2d-6e24-4f8b-a46b-be2d631256ed",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "requestedAgentIds": [],
+          "goalSegments": [
+            "补充当前任务"
+          ],
+          "missingFields": [],
+          "ambiguityReasons": [],
+          "reasonCodes": [
+            "EVALUATION"
+          ],
+          "riskLevel": "low",
+          "modelConfidence": 0.99
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": true,
+          "serverConfidence": 1,
+          "errors": []
+        },
+        "status": "VALIDATING",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "PENDING_RETRY",
+          "CLASSIFYING",
+          "VALIDATING",
+          "VALIDATING"
+        ]
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "V03",
+      "feature": "故障注入与服务端校验",
+      "message": "两次连接失败",
+      "expected": "两次后澄清，不默认继续",
+      "actual": {
+        "calls": 2,
+        "autoApplicable": false,
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "ambiguous",
+          "contextPolicy": "ask_user",
+          "requestedAction": "clarify",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "goalSegments": [],
+          "missingFields": [
+            "intent_runtime_decision"
+          ],
+          "ambiguityReasons": [
+            "TEMPORARY_FAILURE"
+          ],
+          "reasonCodes": [
+            "TEMPORARY_FAILURE",
+            "USER_CHOICE_REQUIRED"
+          ],
+          "riskLevel": "low"
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": false,
+          "serverConfidence": 0.5,
+          "errors": [
+            "REQUIRED_FIELDS_MISSING",
+            "INTENT_AMBIGUOUS"
+          ]
+        },
+        "status": "CLARIFICATION_REQUIRED",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "PENDING_RETRY",
+          "CLASSIFYING",
+          "PENDING_RETRY",
+          "CLARIFICATION_REQUIRED"
+        ]
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "V04",
+      "feature": "故障注入与服务端校验",
+      "message": "第一次输出格式错误，第二次合法",
+      "expected": "两次后恢复",
+      "actual": {
+        "calls": 2,
+        "autoApplicable": true,
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "same_requirement",
+          "contextPolicy": "inherit_confirmed",
+          "requestedAction": "continue_active_work_item",
+          "selectedWorkItemId": "38c5325a-0a33-4f19-811b-5257dc7adea8",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "requestedAgentIds": [],
+          "goalSegments": [
+            "补充当前任务"
+          ],
+          "missingFields": [],
+          "ambiguityReasons": [],
+          "reasonCodes": [
+            "EVALUATION"
+          ],
+          "riskLevel": "low",
+          "modelConfidence": 0.99
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": true,
+          "serverConfidence": 1,
+          "errors": []
+        },
+        "status": "VALIDATING",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "PENDING_RETRY",
+          "CLASSIFYING",
+          "VALIDATING",
+          "VALIDATING"
+        ]
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "V05",
+      "feature": "故障注入与服务端校验",
+      "message": "格式修复是否带校验反馈",
+      "expected": "第二次输入包含本次输出校验错误反馈",
+      "actual": {
+        "calls": 2,
+        "autoApplicable": true,
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "same_requirement",
+          "contextPolicy": "inherit_confirmed",
+          "requestedAction": "continue_active_work_item",
+          "selectedWorkItemId": "b6c13d28-a9bd-482a-a0b3-204ee7c9f99a",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "requestedAgentIds": [],
+          "goalSegments": [
+            "补充当前任务"
+          ],
+          "missingFields": [],
+          "ambiguityReasons": [],
+          "reasonCodes": [
+            "EVALUATION"
+          ],
+          "riskLevel": "low",
+          "modelConfidence": 0.99
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": true,
+          "serverConfidence": 1,
+          "errors": []
+        },
+        "status": "VALIDATING",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "PENDING_RETRY",
+          "CLASSIFYING",
+          "VALIDATING",
+          "VALIDATING"
+        ]
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "V06",
+      "feature": "故障注入与服务端校验",
+      "message": "不可重试的认证失败",
+      "expected": "只调用一次并停止自动应用",
+      "actual": {
+        "calls": 1,
+        "autoApplicable": false,
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "ambiguous",
+          "contextPolicy": "ask_user",
+          "requestedAction": "clarify",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "goalSegments": [],
+          "missingFields": [
+            "intent_runtime_decision"
+          ],
+          "ambiguityReasons": [
+            "AUTH_FAILED"
+          ],
+          "reasonCodes": [
+            "AUTH_FAILED",
+            "USER_CHOICE_REQUIRED"
+          ],
+          "riskLevel": "low"
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": false,
+          "serverConfidence": 0.5,
+          "errors": [
+            "REQUIRED_FIELDS_MISSING",
+            "INTENT_AMBIGUOUS"
+          ]
+        },
+        "status": "CLARIFICATION_REQUIRED",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "CLARIFICATION_REQUIRED"
+        ]
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "V07",
+      "feature": "故障注入与服务端校验",
+      "message": "Runtime 停止状态未确认",
+      "expected": "只调用一次并停止自动应用",
+      "actual": {
+        "calls": 1,
+        "autoApplicable": false,
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "ambiguous",
+          "contextPolicy": "ask_user",
+          "requestedAction": "clarify",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "goalSegments": [],
+          "missingFields": [
+            "intent_runtime_decision"
+          ],
+          "ambiguityReasons": [
+            "STOP_UNKNOWN"
+          ],
+          "reasonCodes": [
+            "STOP_UNKNOWN",
+            "USER_CHOICE_REQUIRED"
+          ],
+          "riskLevel": "low"
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": false,
+          "serverConfidence": 0.5,
+          "errors": [
+            "REQUIRED_FIELDS_MISSING",
+            "INTENT_AMBIGUOUS"
+          ]
+        },
+        "status": "CLARIFICATION_REQUIRED",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "CLARIFICATION_REQUIRED"
+        ]
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "V08",
+      "feature": "故障注入与服务端校验",
+      "message": "模型虚构任务 ID",
+      "expected": "拦截快照外目标",
+      "actual": {
+        "calls": 1,
+        "autoApplicable": false,
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "same_requirement",
+          "contextPolicy": "inherit_confirmed",
+          "requestedAction": "continue_active_work_item",
+          "selectedWorkItemId": "f73efc65-ca8a-4e22-bae3-af762654b816",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "requestedAgentIds": [],
+          "goalSegments": [
+            "补充当前任务"
+          ],
+          "missingFields": [],
+          "ambiguityReasons": [],
+          "reasonCodes": [
+            "EVALUATION"
+          ],
+          "riskLevel": "low",
+          "modelConfidence": 0.99
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": false,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": false,
+          "serverConfidence": 0.65,
+          "errors": [
+            "REFERENCE_OUTSIDE_SNAPSHOT"
+          ]
+        },
+        "status": "CLARIFICATION_REQUIRED",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "VALIDATING",
+          "CLARIFICATION_REQUIRED"
+        ]
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "V09",
+      "feature": "故障注入与服务端校验",
+      "message": "模型遗漏用户 @ 对象",
+      "expected": "拦截遗漏 @",
+      "actual": {
+        "calls": 1,
+        "autoApplicable": false,
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "same_requirement",
+          "contextPolicy": "inherit_confirmed",
+          "requestedAction": "continue_active_work_item",
+          "selectedWorkItemId": "3c68e9da-7683-4f95-9e5c-bb3d40b97733",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "requestedAgentIds": [],
+          "goalSegments": [
+            "补充当前任务"
+          ],
+          "missingFields": [],
+          "ambiguityReasons": [],
+          "reasonCodes": [
+            "EVALUATION"
+          ],
+          "riskLevel": "low",
+          "modelConfidence": 0.99
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": false,
+          "serverConfidence": 0.7,
+          "errors": [
+            "MENTION_TARGET_DROPPED"
+          ]
+        },
+        "status": "CLARIFICATION_REQUIRED",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "VALIDATING",
+          "CLARIFICATION_REQUIRED"
+        ]
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "V10",
+      "feature": "故障注入与服务端校验",
+      "message": "模型添加未参加会话的 Agent",
+      "expected": "拦截越界 Agent",
+      "actual": {
+        "calls": 1,
+        "autoApplicable": false,
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "same_requirement",
+          "contextPolicy": "inherit_confirmed",
+          "requestedAction": "continue_active_work_item",
+          "selectedWorkItemId": "791544e3-eb21-4655-a5c5-cec933c4f9de",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "requestedAgentIds": [
+            "outsider"
+          ],
+          "goalSegments": [
+            "补充当前任务"
+          ],
+          "missingFields": [],
+          "ambiguityReasons": [],
+          "reasonCodes": [
+            "EVALUATION"
+          ],
+          "riskLevel": "low",
+          "modelConfidence": 0.99
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": false,
+          "serverConfidence": 0.7,
+          "errors": [
+            "AGENT_TARGET_OUTSIDE_SNAPSHOT"
+          ]
+        },
+        "status": "CLARIFICATION_REQUIRED",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "VALIDATING",
+          "CLARIFICATION_REQUIRED"
+        ]
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "V11",
+      "feature": "故障注入与服务端校验",
+      "message": "分类期间快照过期",
+      "expected": "拦截过期快照",
+      "actual": {
+        "calls": 1,
+        "autoApplicable": false,
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "same_requirement",
+          "contextPolicy": "inherit_confirmed",
+          "requestedAction": "continue_active_work_item",
+          "selectedWorkItemId": "6e4e784c-1a2c-4b4f-8bb7-3a912b88ee02",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "requestedAgentIds": [],
+          "goalSegments": [
+            "补充当前任务"
+          ],
+          "missingFields": [],
+          "ambiguityReasons": [],
+          "reasonCodes": [
+            "EVALUATION"
+          ],
+          "riskLevel": "low",
+          "modelConfidence": 0.99
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": false,
+          "safeToApply": false,
+          "serverConfidence": 0.65,
+          "errors": [
+            "SNAPSHOT_STALE"
+          ]
+        },
+        "status": "CLARIFICATION_REQUIRED",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "VALIDATING",
+          "CLARIFICATION_REQUIRED"
+        ]
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "V12",
+      "feature": "故障注入与服务端校验",
+      "message": "模型自报高置信度但有歧义",
+      "expected": "不得因高置信度放行",
+      "actual": {
+        "calls": 1,
+        "autoApplicable": false,
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "ambiguous",
+          "contextPolicy": "inherit_confirmed",
+          "requestedAction": "continue_active_work_item",
+          "selectedWorkItemId": "861bdc90-2f88-433f-b499-396ae2038284",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "requestedAgentIds": [],
+          "goalSegments": [
+            "补充当前任务"
+          ],
+          "missingFields": [],
+          "ambiguityReasons": [],
+          "reasonCodes": [
+            "EVALUATION"
+          ],
+          "riskLevel": "low",
+          "modelConfidence": 1
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": false,
+          "serverConfidence": 1,
+          "errors": [
+            "INTENT_AMBIGUOUS"
+          ]
+        },
+        "status": "CLARIFICATION_REQUIRED",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "VALIDATING",
+          "CLARIFICATION_REQUIRED"
+        ]
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "V13",
+      "feature": "故障注入与服务端校验",
+      "message": "独立任务错误继承旧上下文",
+      "expected": "拦截独立任务继承",
+      "actual": {
+        "calls": 1,
+        "autoApplicable": false,
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "independent_new_requirement",
+          "contextPolicy": "inherit_confirmed",
+          "requestedAction": "create_independent_work_item",
+          "selectedWorkItemId": "d74c828d-4cf7-4394-a184-ac9d088295ab",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "requestedAgentIds": [],
+          "goalSegments": [
+            "补充当前任务"
+          ],
+          "missingFields": [],
+          "ambiguityReasons": [],
+          "reasonCodes": [
+            "EVALUATION"
+          ],
+          "riskLevel": "low",
+          "modelConfidence": 0.99
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": false,
+          "snapshotCurrent": true,
+          "safeToApply": false,
+          "serverConfidence": 0.75,
+          "errors": [
+            "STATE_TRANSITION_INVALID"
+          ]
+        },
+        "status": "CLARIFICATION_REQUIRED",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "VALIDATING",
+          "CLARIFICATION_REQUIRED"
+        ]
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "V14",
+      "feature": "故障注入与服务端校验",
+      "message": "模型认为危险取消是高风险",
+      "expected": "要求用户确认",
+      "actual": {
+        "calls": 1,
+        "autoApplicable": false,
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "same_requirement",
+          "contextPolicy": "inherit_confirmed",
+          "requestedAction": "cancel",
+          "selectedWorkItemId": "359744e1-2161-4425-9b0b-918caafbd749",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "requestedAgentIds": [],
+          "goalSegments": [
+            "补充当前任务"
+          ],
+          "missingFields": [],
+          "ambiguityReasons": [],
+          "reasonCodes": [
+            "EVALUATION"
+          ],
+          "riskLevel": "high",
+          "modelConfidence": 0.99
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": false,
+          "serverConfidence": 0.7,
+          "errors": [
+            "HIGH_RISK_REQUIRES_CONFIRMATION"
+          ]
+        },
+        "status": "CLARIFICATION_REQUIRED",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "VALIDATING",
+          "CLARIFICATION_REQUIRED"
+        ]
+      },
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "id": "V15",
+      "feature": "故障注入与服务端校验",
+      "message": "模型把同样的取消动作标成低风险",
+      "expected": "服务端自行识别危险控制，不能仅依赖模型风险标签",
+      "actual": {
+        "calls": 1,
+        "autoApplicable": true,
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "same_requirement",
+          "contextPolicy": "inherit_confirmed",
+          "requestedAction": "cancel",
+          "selectedWorkItemId": "7e56d219-0807-4c15-90e2-ffc8a9caaaf9",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "requestedAgentIds": [],
+          "goalSegments": [
+            "补充当前任务"
+          ],
+          "missingFields": [],
+          "ambiguityReasons": [],
+          "reasonCodes": [
+            "EVALUATION"
+          ],
+          "riskLevel": "low",
+          "modelConfidence": 0.99
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": true,
+          "serverConfidence": 1,
+          "errors": []
+        },
+        "status": "VALIDATING",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "VALIDATING",
+          "VALIDATING"
+        ]
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "V16",
+      "feature": "故障注入与服务端校验",
+      "message": "模型输出合法目标但需求关系与动作冲突",
+      "expected": "拦截独立新需求继续旧任务的矛盾",
+      "actual": {
+        "calls": 1,
+        "autoApplicable": true,
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "independent_new_requirement",
+          "contextPolicy": "clean_task_context",
+          "requestedAction": "continue_active_work_item",
+          "selectedWorkItemId": "af19f4d8-318e-4aa0-905d-bee3d8e8c71c",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "requestedAgentIds": [],
+          "goalSegments": [
+            "补充当前任务"
+          ],
+          "missingFields": [],
+          "ambiguityReasons": [],
+          "reasonCodes": [
+            "EVALUATION"
+          ],
+          "riskLevel": "low",
+          "modelConfidence": 0.99
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": true,
+          "serverConfidence": 1,
+          "errors": []
+        },
+        "status": "VALIDATING",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "VALIDATING",
+          "VALIDATING"
+        ]
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "V17",
+      "feature": "故障注入与服务端校验",
+      "message": "已完成任务的继续命令与入口裁决一致",
+      "expected": "与命令入口一致，要求澄清",
+      "actual": {
+        "calls": 0,
+        "autoApplicable": true,
+        "decision": {
+          "dialogueAct": "command",
+          "selectedWorkItemId": "b43a6a8a-93ba-47a9-baad-6e2f83e76e71",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "requestedAgentIds": [],
+          "goalSegments": [],
+          "missingFields": [],
+          "ambiguityReasons": [],
+          "riskLevel": "low",
+          "modelConfidence": 1,
+          "scopeRelation": "same_requirement",
+          "contextPolicy": "inherit_confirmed",
+          "requestedAction": "continue_active_work_item",
+          "reasonCodes": [
+            "EXACT_RESUME_COMMAND"
+          ]
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": true,
+          "serverConfidence": 1,
+          "errors": []
+        },
+        "status": "VALIDATING",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "VALIDATING",
+          "VALIDATING"
+        ]
+      },
+      "passed": false,
+      "detail": ""
+    },
+    {
+      "id": "V18",
+      "feature": "故障注入与服务端校验",
+      "message": "低 modelConfidence 的合法输出",
+      "expected": "记录当前评分边界：serverConfidence 不代表语义概率",
+      "actual": {
+        "calls": 1,
+        "autoApplicable": true,
+        "decision": {
+          "dialogueAct": "clarification",
+          "scopeRelation": "same_requirement",
+          "contextPolicy": "inherit_confirmed",
+          "requestedAction": "continue_active_work_item",
+          "selectedWorkItemId": "1c2e559d-b960-40df-93f6-0319c8b2ae9d",
+          "selectedDecisionIds": [],
+          "selectedArtifactIds": [],
+          "requestedAgentIds": [],
+          "goalSegments": [
+            "补充当前任务"
+          ],
+          "missingFields": [],
+          "ambiguityReasons": [],
+          "reasonCodes": [
+            "EVALUATION"
+          ],
+          "riskLevel": "low",
+          "modelConfidence": 0.1
+        },
+        "validation": {
+          "schemaValid": true,
+          "referencesValid": true,
+          "transitionValid": true,
+          "snapshotCurrent": true,
+          "safeToApply": true,
+          "serverConfidence": 1,
+          "errors": []
+        },
+        "status": "VALIDATING",
+        "states": [
+          "SNAPSHOT_READY",
+          "CLASSIFYING",
+          "VALIDATING",
+          "VALIDATING"
+        ]
+      },
+      "passed": true,
+      "detail": ""
+    }
+  ]
+}

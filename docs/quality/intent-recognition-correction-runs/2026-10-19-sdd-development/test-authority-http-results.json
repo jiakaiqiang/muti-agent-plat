@@ -1,0 +1,84 @@
+{
+  "executedAt": "2026-10-19T15:15:09.666Z",
+  "method": "real localhost Nest HTTP, isolated File persistence, deterministic local provider, real server restart; no Docker execution or accuracy claim",
+  "results": [
+    {
+      "id": "TA01",
+      "passed": true,
+      "actual": {
+        "configuredCandidates": 3,
+        "initiallyAuthorized": false,
+        "readIndependent": true
+      }
+    },
+    {
+      "id": "TA02",
+      "passed": true,
+      "actual": {
+        "statuses": [
+          201,
+          201
+        ],
+        "revision": 1
+      }
+    },
+    {
+      "id": "TA03",
+      "passed": true,
+      "actual": {
+        "malformed": 400,
+        "wrongEpoch": 409
+      }
+    },
+    {
+      "id": "TA04",
+      "passed": true,
+      "actual": {
+        "status": "BLOCKED",
+        "reasons": [
+          "EFFECT_CAPABILITY_UNAVAILABLE"
+        ],
+        "authorizedCandidate": "test-runner:9260a8548a13c817cee2ae9ccf31438999ea1b878b5528bed991758f1124b859",
+        "noTestDispatch": true
+      }
+    },
+    {
+      "id": "TA05",
+      "passed": true,
+      "actual": {
+        "statuses": [
+          201,
+          409
+        ]
+      }
+    },
+    {
+      "id": "TA06",
+      "passed": true,
+      "actual": {
+        "revokedRevision": 2,
+        "oldRequestReplayEnabled": false,
+        "readGrantUnchanged": true
+      }
+    },
+    {
+      "id": "TA07",
+      "passed": true,
+      "actual": {
+        "oldPlanRemainsBlocked": true,
+        "classificationCalls": 2,
+        "grantRevision": 3
+      }
+    },
+    {
+      "id": "TA08",
+      "passed": true,
+      "actual": {
+        "enabled": true,
+        "grantRevision": 3,
+        "effectiveAuthorityEvents": 3,
+        "noModelReplay": true
+      }
+    }
+  ]
+}

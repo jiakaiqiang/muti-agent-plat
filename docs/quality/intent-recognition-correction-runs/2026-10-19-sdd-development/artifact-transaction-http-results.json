@@ -1,0 +1,37 @@
+{
+  "executedAt": "2026-10-19T17:27:31.365Z",
+  "method": "real localhost Nest/File, existing mock-runtime Brief and discussion document paths; no new write_artifact executor claim",
+  "results": [
+    {
+      "id": "AS01",
+      "passed": true,
+      "actual": {
+        "durableBriefArtifacts": 2
+      }
+    },
+    {
+      "id": "AS02",
+      "passed": true,
+      "actual": {
+        "duplicateDocumentId": "35f0d456-dd01-49cc-810d-dad34642d4fd",
+        "readableArtifactId": "512bd890-67df-47f7-9db7-2a4824a940be"
+      }
+    },
+    {
+      "id": "AS03",
+      "passed": true,
+      "actual": {
+        "historicalArtifactsPreserved": true,
+        "artifactCount": 4
+      }
+    },
+    {
+      "id": "AS04",
+      "passed": true,
+      "actual": {
+        "actualServerRestart": true,
+        "preservedArtifactCount": 4
+      }
+    }
+  ]
+}

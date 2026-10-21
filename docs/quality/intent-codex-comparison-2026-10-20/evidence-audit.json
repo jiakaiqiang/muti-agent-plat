@@ -1,0 +1,26 @@
+{
+  "checks": [
+    {
+      "round": "baseline",
+      "uniqueCases": 20,
+      "realCliCalls": 20,
+      "originalInputPreserved": true,
+      "noToolCalls": true
+    },
+    {
+      "round": "optimized",
+      "uniqueCases": 20,
+      "realCliCalls": 20,
+      "originalInputPreserved": true,
+      "noToolCalls": true
+    },
+    {
+      "round": "final",
+      "uniqueCases": 20,
+      "realCliCalls": 20,
+      "originalInputPreserved": true,
+      "noToolCalls": true
+    }
+  ],
+  "finalSourceHashesMatch": true
+}

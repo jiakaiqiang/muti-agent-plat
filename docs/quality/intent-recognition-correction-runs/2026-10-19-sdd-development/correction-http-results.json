@@ -1,0 +1,593 @@
+{
+  "executedAt": "2026-10-19T10:08:50.456Z",
+  "method": "real localhost HTTP; isolated file state; mock model; no real professional execution",
+  "results": [
+    {
+      "id": "H01",
+      "feature": "人工纠错参数校验",
+      "message": "先继续修复登录问题，再新增导出功能。",
+      "expected": "非法 choice 返回 HTTP 400",
+      "actual": {
+        "status": 400,
+        "body": {
+          "error": {
+            "code": "VALIDATION_ERROR",
+            "message": "提交的参数不符合要求，请检查输入。（VALIDATION_ERROR）"
+          },
+          "requestId": "2d92d872-628b-4846-ac2b-22ae43b95d1c"
+        }
+      },
+      "passed": true
+    },
+    {
+      "id": "H02",
+      "feature": "人工澄清为独立任务",
+      "message": "先继续修复登录问题，再新增导出功能。",
+      "expected": "产生一个新 WorkItem，clean_task_context，不继承旧决定",
+      "actual": {
+        "status": 201,
+        "before": {
+          "workItems": 1,
+          "routeEvents": 0,
+          "resolutionEvents": 0
+        },
+        "after": {
+          "workItems": 2,
+          "routeEvents": 1,
+          "resolutionEvents": 1
+        },
+        "routing": {
+          "id": "2b8e086d-279c-470d-9505-43c4609bb741",
+          "sessionId": "d3102c2e-e4cd-4104-84f0-d168e42dfce1",
+          "sourceEventId": "b07e54ca-2d67-4ff9-a7ef-9fd670801557",
+          "sessionSeq": 1,
+          "status": "ROUTED",
+          "policyVersion": "intent-v2.1",
+          "rolloutMode": "enforce_new_sessions",
+          "reasonCodes": [
+            "MOCK_INTENT_ROUTING_SAFE_CLARIFY",
+            "REQUIRED_FIELDS_MISSING",
+            "INTENT_AMBIGUOUS"
+          ],
+          "retryCount": 0,
+          "idempotencyKey": "d3102c2e-e4cd-4104-84f0-d168e42dfce1:b07e54ca-2d67-4ff9-a7ef-9fd670801557:intent-v2.1",
+          "createdAt": "2026-10-19T10:08:30.214Z",
+          "updatedAt": "2026-10-19T10:08:30.362Z",
+          "snapshotId": "7f3844b5-53c5-4af9-a90d-bc580cd6672c",
+          "routingRevision": 6,
+          "classificationDeadlineAt": "2026-10-19T10:10:30.251Z",
+          "classificationAttempts": 1,
+          "attemptLog": [
+            {
+              "invocationId": "c4412ade-5694-4fb2-a120-5be2623c38b2",
+              "attempt": 1,
+              "reason": "classification",
+              "startedAt": "2026-10-19T10:08:30.251Z"
+            }
+          ],
+          "invocationId": "c4412ade-5694-4fb2-a120-5be2623c38b2",
+          "decision": {
+            "dialogueAct": "command",
+            "scopeRelation": "independent_new_requirement",
+            "contextPolicy": "clean_task_context",
+            "requestedAction": "create_independent_work_item",
+            "selectedWorkItemId": "48b53f79-472d-4d13-bcd5-9d32b4d12f20",
+            "selectedDecisionIds": [],
+            "selectedArtifactIds": [],
+            "requestedAgentIds": [],
+            "goalSegments": [
+              "先继续修复登录问题，再新增导出功能。"
+            ],
+            "missingFields": [],
+            "ambiguityReasons": [],
+            "reasonCodes": [
+              "USER_CLARIFIED_INDEPENDENT_NEW"
+            ],
+            "riskLevel": "low"
+          },
+          "validation": {
+            "schemaValid": true,
+            "referencesValid": true,
+            "transitionValid": true,
+            "snapshotCurrent": true,
+            "safeToApply": true,
+            "serverConfidence": 1,
+            "validationScore": 1,
+            "errors": []
+          },
+          "finalAction": "create_independent_work_item",
+          "deferredActivation": false,
+          "actionStatus": "applied",
+          "resolution": {
+            "confirmationId": "6a8d7237-9031-4fc3-9460-feabe4a6577e",
+            "canonicalChoiceHash": "96e6c8c2e8b2b58a555e703e94a74934150097dc82e34e619cd7897caee91e7b",
+            "idempotencyKey": "legacy:96e6c8c2e8b2b58a555e703e94a74934150097dc82e34e619cd7897caee91e7b",
+            "choice": "independent_new",
+            "resolvedRevision": 6,
+            "resultWorkItemId": "3c985bb0-4108-4c35-a068-887ea1a0291f",
+            "actorId": "local-user",
+            "resolvedAt": "2026-10-19T10:08:30.362Z"
+          }
+        },
+        "workItem": {
+          "id": "3c985bb0-4108-4c35-a068-887ea1a0291f",
+          "sessionId": "d3102c2e-e4cd-4104-84f0-d168e42dfce1",
+          "title": "先继续修复登录问题，再新增导出功能。",
+          "goal": "先继续修复登录问题，再新增导出功能。",
+          "status": "OPEN",
+          "revision": 1,
+          "createdFromEventId": "b07e54ca-2d67-4ff9-a7ef-9fd670801557",
+          "inheritedDecisionIds": [],
+          "inheritedArtifactIds": [],
+          "createdAt": "2026-10-19T10:08:30.362Z",
+          "updatedAt": "2026-10-19T10:08:30.362Z"
+        }
+      },
+      "passed": true
+    },
+    {
+      "id": "H03",
+      "feature": "同一选择重复提交",
+      "message": "先继续修复登录问题，再新增导出功能。",
+      "expected": "重复提交不增加任务、路由或确认事件",
+      "actual": {
+        "status": 201,
+        "before": {
+          "workItems": 2,
+          "routeEvents": 1,
+          "resolutionEvents": 1
+        },
+        "after": {
+          "workItems": 2,
+          "routeEvents": 1,
+          "resolutionEvents": 1
+        }
+      },
+      "passed": true
+    },
+    {
+      "id": "H04",
+      "feature": "已应用路由再次纠正",
+      "message": "先继续修复登录问题，再新增导出功能。",
+      "expected": "相反选择应明确冲突，或生成可追踪的新纠正；不可静默成功返回旧选择",
+      "actual": {
+        "status": 409,
+        "before": {
+          "workItems": 2,
+          "routeEvents": 1,
+          "resolutionEvents": 1
+        },
+        "after": {
+          "workItems": 2,
+          "routeEvents": 1,
+          "resolutionEvents": 1
+        }
+      },
+      "passed": true
+    },
+    {
+      "id": "H05",
+      "feature": "确认目标绑定",
+      "message": "先继续修复登录问题，再新增导出功能。",
+      "expected": "传入不存在的 confirmationId 应拒绝；这是额外验收要求，当前 DTO 字段可选",
+      "actual": {
+        "status": 409,
+        "counts": {
+          "workItems": 1,
+          "routeEvents": 0,
+          "resolutionEvents": 0
+        }
+      },
+      "passed": true
+    },
+    {
+      "id": "H06",
+      "feature": "并发重复纠错",
+      "message": "先继续修复登录问题，再新增导出功能。",
+      "expected": "并发同选择只产生一个业务效果；另一个可重放或返回冲突",
+      "actual": {
+        "statuses": [
+          201,
+          201
+        ],
+        "before": {
+          "workItems": 1,
+          "routeEvents": 0,
+          "resolutionEvents": 0
+        },
+        "after": {
+          "workItems": 2,
+          "routeEvents": 1,
+          "resolutionEvents": 1
+        },
+        "responses": [
+          {
+            "status": 201,
+            "body": {
+              "data": {
+                "routing": {
+                  "id": "0aa96acf-0539-4249-864a-64374babe0b7",
+                  "sessionId": "e5a1e831-9264-40a8-be66-019ac61a1de1",
+                  "sourceEventId": "c1dd3015-080a-4da0-97bf-abe4e062c7be",
+                  "sessionSeq": 1,
+                  "status": "ROUTED",
+                  "policyVersion": "intent-v2.1",
+                  "rolloutMode": "enforce_new_sessions",
+                  "reasonCodes": [
+                    "MOCK_INTENT_ROUTING_SAFE_CLARIFY",
+                    "REQUIRED_FIELDS_MISSING",
+                    "INTENT_AMBIGUOUS"
+                  ],
+                  "retryCount": 0,
+                  "idempotencyKey": "e5a1e831-9264-40a8-be66-019ac61a1de1:c1dd3015-080a-4da0-97bf-abe4e062c7be:intent-v2.1",
+                  "createdAt": "2026-10-19T10:08:34.283Z",
+                  "updatedAt": "2026-10-19T10:08:34.613Z",
+                  "snapshotId": "5ba55e60-8e99-4224-8a57-fb938d95a2b3",
+                  "routingRevision": 6,
+                  "classificationDeadlineAt": "2026-10-19T10:10:34.376Z",
+                  "classificationAttempts": 1,
+                  "attemptLog": [
+                    {
+                      "invocationId": "7fdcc2af-ef01-40b0-9adf-f0ea56485951",
+                      "attempt": 1,
+                      "reason": "classification",
+                      "startedAt": "2026-10-19T10:08:34.376Z"
+                    }
+                  ],
+                  "invocationId": "7fdcc2af-ef01-40b0-9adf-f0ea56485951",
+                  "decision": {
+                    "dialogueAct": "command",
+                    "scopeRelation": "independent_new_requirement",
+                    "contextPolicy": "clean_task_context",
+                    "requestedAction": "create_independent_work_item",
+                    "selectedWorkItemId": "0ee7d24e-7c52-46b1-8790-e2e19a2bbba3",
+                    "selectedDecisionIds": [],
+                    "selectedArtifactIds": [],
+                    "requestedAgentIds": [],
+                    "goalSegments": [
+                      "先继续修复登录问题，再新增导出功能。"
+                    ],
+                    "missingFields": [],
+                    "ambiguityReasons": [],
+                    "reasonCodes": [
+                      "USER_CLARIFIED_INDEPENDENT_NEW"
+                    ],
+                    "riskLevel": "low"
+                  },
+                  "validation": {
+                    "schemaValid": true,
+                    "referencesValid": true,
+                    "transitionValid": true,
+                    "snapshotCurrent": true,
+                    "safeToApply": true,
+                    "serverConfidence": 1,
+                    "validationScore": 1,
+                    "errors": []
+                  },
+                  "finalAction": "create_independent_work_item",
+                  "deferredActivation": false,
+                  "actionStatus": "applied",
+                  "resolution": {
+                    "confirmationId": "d7d377de-ba38-4338-874b-0d6a652a3581",
+                    "canonicalChoiceHash": "2ee8648414630d7372cff25e6f51780305bd3932aa61706ed210dd4199b6533f",
+                    "idempotencyKey": "legacy:2ee8648414630d7372cff25e6f51780305bd3932aa61706ed210dd4199b6533f",
+                    "choice": "independent_new",
+                    "resolvedRevision": 6,
+                    "resultWorkItemId": "65ef93ec-9a4c-4f9b-8108-15debfdb0197",
+                    "actorId": "local-user",
+                    "resolvedAt": "2026-10-19T10:08:34.613Z"
+                  }
+                },
+                "workItem": {
+                  "id": "65ef93ec-9a4c-4f9b-8108-15debfdb0197",
+                  "sessionId": "e5a1e831-9264-40a8-be66-019ac61a1de1",
+                  "title": "先继续修复登录问题，再新增导出功能。",
+                  "goal": "先继续修复登录问题，再新增导出功能。",
+                  "status": "OPEN",
+                  "revision": 1,
+                  "createdFromEventId": "c1dd3015-080a-4da0-97bf-abe4e062c7be",
+                  "inheritedDecisionIds": [],
+                  "inheritedArtifactIds": [],
+                  "createdAt": "2026-10-19T10:08:34.613Z",
+                  "updatedAt": "2026-10-19T10:08:34.613Z"
+                }
+              },
+              "requestId": "75aae783-19dc-4474-90dd-cdbb67490a1c"
+            }
+          },
+          {
+            "status": 201,
+            "body": {
+              "data": {
+                "routing": {
+                  "id": "0aa96acf-0539-4249-864a-64374babe0b7",
+                  "sessionId": "e5a1e831-9264-40a8-be66-019ac61a1de1",
+                  "sourceEventId": "c1dd3015-080a-4da0-97bf-abe4e062c7be",
+                  "sessionSeq": 1,
+                  "status": "ROUTED",
+                  "policyVersion": "intent-v2.1",
+                  "rolloutMode": "enforce_new_sessions",
+                  "reasonCodes": [
+                    "MOCK_INTENT_ROUTING_SAFE_CLARIFY",
+                    "REQUIRED_FIELDS_MISSING",
+                    "INTENT_AMBIGUOUS"
+                  ],
+                  "retryCount": 0,
+                  "idempotencyKey": "e5a1e831-9264-40a8-be66-019ac61a1de1:c1dd3015-080a-4da0-97bf-abe4e062c7be:intent-v2.1",
+                  "createdAt": "2026-10-19T10:08:34.283Z",
+                  "updatedAt": "2026-10-19T10:08:34.613Z",
+                  "snapshotId": "5ba55e60-8e99-4224-8a57-fb938d95a2b3",
+                  "routingRevision": 6,
+                  "classificationDeadlineAt": "2026-10-19T10:10:34.376Z",
+                  "classificationAttempts": 1,
+                  "attemptLog": [
+                    {
+                      "invocationId": "7fdcc2af-ef01-40b0-9adf-f0ea56485951",
+                      "attempt": 1,
+                      "reason": "classification",
+                      "startedAt": "2026-10-19T10:08:34.376Z"
+                    }
+                  ],
+                  "invocationId": "7fdcc2af-ef01-40b0-9adf-f0ea56485951",
+                  "decision": {
+                    "dialogueAct": "command",
+                    "scopeRelation": "independent_new_requirement",
+                    "contextPolicy": "clean_task_context",
+                    "requestedAction": "create_independent_work_item",
+                    "selectedWorkItemId": "0ee7d24e-7c52-46b1-8790-e2e19a2bbba3",
+                    "selectedDecisionIds": [],
+                    "selectedArtifactIds": [],
+                    "requestedAgentIds": [],
+                    "goalSegments": [
+                      "先继续修复登录问题，再新增导出功能。"
+                    ],
+                    "missingFields": [],
+                    "ambiguityReasons": [],
+                    "reasonCodes": [
+                      "USER_CLARIFIED_INDEPENDENT_NEW"
+                    ],
+                    "riskLevel": "low"
+                  },
+                  "validation": {
+                    "schemaValid": true,
+                    "referencesValid": true,
+                    "transitionValid": true,
+                    "snapshotCurrent": true,
+                    "safeToApply": true,
+                    "serverConfidence": 1,
+                    "validationScore": 1,
+                    "errors": []
+                  },
+                  "finalAction": "create_independent_work_item",
+                  "deferredActivation": false,
+                  "actionStatus": "applied",
+                  "resolution": {
+                    "confirmationId": "d7d377de-ba38-4338-874b-0d6a652a3581",
+                    "canonicalChoiceHash": "2ee8648414630d7372cff25e6f51780305bd3932aa61706ed210dd4199b6533f",
+                    "idempotencyKey": "legacy:2ee8648414630d7372cff25e6f51780305bd3932aa61706ed210dd4199b6533f",
+                    "choice": "independent_new",
+                    "resolvedRevision": 6,
+                    "resultWorkItemId": "65ef93ec-9a4c-4f9b-8108-15debfdb0197",
+                    "actorId": "local-user",
+                    "resolvedAt": "2026-10-19T10:08:34.613Z"
+                  }
+                },
+                "workItem": {
+                  "id": "65ef93ec-9a4c-4f9b-8108-15debfdb0197",
+                  "sessionId": "e5a1e831-9264-40a8-be66-019ac61a1de1",
+                  "title": "先继续修复登录问题，再新增导出功能。",
+                  "goal": "先继续修复登录问题，再新增导出功能。",
+                  "status": "OPEN",
+                  "revision": 1,
+                  "createdFromEventId": "c1dd3015-080a-4da0-97bf-abe4e062c7be",
+                  "inheritedDecisionIds": [],
+                  "inheritedArtifactIds": [],
+                  "createdAt": "2026-10-19T10:08:34.613Z",
+                  "updatedAt": "2026-10-19T10:08:34.613Z"
+                }
+              },
+              "requestId": "434a89fd-81fc-4a08-97ba-fdbfcaa462f2"
+            }
+          }
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "H07",
+      "feature": "并发相反选择",
+      "message": "先继续修复登录问题，再新增导出功能。",
+      "expected": "一个选择生效，另一个明确返回 409；路由/确认事件各一个",
+      "actual": {
+        "statuses": [
+          201,
+          409
+        ],
+        "before": {
+          "workItems": 1,
+          "routeEvents": 0,
+          "resolutionEvents": 0
+        },
+        "after": {
+          "workItems": 2,
+          "routeEvents": 1,
+          "resolutionEvents": 1
+        },
+        "responses": [
+          {
+            "status": 201,
+            "body": {
+              "data": {
+                "routing": {
+                  "id": "ef7c3c19-ace9-461c-bbdc-f6d2ce64eeeb",
+                  "sessionId": "bb3de3bb-032e-47ca-b4ec-f8280536292d",
+                  "sourceEventId": "5d2128c1-e635-4040-9e0b-fb3296f931a2",
+                  "sessionSeq": 1,
+                  "status": "ROUTED",
+                  "policyVersion": "intent-v2.1",
+                  "rolloutMode": "enforce_new_sessions",
+                  "reasonCodes": [
+                    "MOCK_INTENT_ROUTING_SAFE_CLARIFY",
+                    "REQUIRED_FIELDS_MISSING",
+                    "INTENT_AMBIGUOUS"
+                  ],
+                  "retryCount": 0,
+                  "idempotencyKey": "bb3de3bb-032e-47ca-b4ec-f8280536292d:5d2128c1-e635-4040-9e0b-fb3296f931a2:intent-v2.1",
+                  "createdAt": "2026-10-19T10:08:38.520Z",
+                  "updatedAt": "2026-10-19T10:08:39.014Z",
+                  "snapshotId": "79b6b654-896b-4439-95fe-cf3534410084",
+                  "routingRevision": 6,
+                  "classificationDeadlineAt": "2026-10-19T10:10:38.666Z",
+                  "classificationAttempts": 1,
+                  "attemptLog": [
+                    {
+                      "invocationId": "ba010fb2-c937-48b3-9b94-1dc5ad8de707",
+                      "attempt": 1,
+                      "reason": "classification",
+                      "startedAt": "2026-10-19T10:08:38.666Z"
+                    }
+                  ],
+                  "invocationId": "ba010fb2-c937-48b3-9b94-1dc5ad8de707",
+                  "decision": {
+                    "dialogueAct": "command",
+                    "scopeRelation": "independent_new_requirement",
+                    "contextPolicy": "clean_task_context",
+                    "requestedAction": "create_independent_work_item",
+                    "selectedWorkItemId": "74fed271-a6bc-4587-bb9e-e3db4ad750db",
+                    "selectedDecisionIds": [],
+                    "selectedArtifactIds": [],
+                    "requestedAgentIds": [],
+                    "goalSegments": [
+                      "先继续修复登录问题，再新增导出功能。"
+                    ],
+                    "missingFields": [],
+                    "ambiguityReasons": [],
+                    "reasonCodes": [
+                      "USER_CLARIFIED_INDEPENDENT_NEW"
+                    ],
+                    "riskLevel": "low"
+                  },
+                  "validation": {
+                    "schemaValid": true,
+                    "referencesValid": true,
+                    "transitionValid": true,
+                    "snapshotCurrent": true,
+                    "safeToApply": true,
+                    "serverConfidence": 1,
+                    "validationScore": 1,
+                    "errors": []
+                  },
+                  "finalAction": "create_independent_work_item",
+                  "deferredActivation": false,
+                  "actionStatus": "applied",
+                  "resolution": {
+                    "confirmationId": "526ad301-f0e8-4758-bca6-e37422d7bd05",
+                    "canonicalChoiceHash": "1cc6b416d0da975337641bd6e9741b836fdd1f840d2299cf82c8c78178d583f9",
+                    "idempotencyKey": "legacy:1cc6b416d0da975337641bd6e9741b836fdd1f840d2299cf82c8c78178d583f9",
+                    "choice": "independent_new",
+                    "resolvedRevision": 6,
+                    "resultWorkItemId": "e4f6ad84-110c-4dcf-8e42-1f0c851e725c",
+                    "actorId": "local-user",
+                    "resolvedAt": "2026-10-19T10:08:39.014Z"
+                  }
+                },
+                "workItem": {
+                  "id": "e4f6ad84-110c-4dcf-8e42-1f0c851e725c",
+                  "sessionId": "bb3de3bb-032e-47ca-b4ec-f8280536292d",
+                  "title": "先继续修复登录问题，再新增导出功能。",
+                  "goal": "先继续修复登录问题，再新增导出功能。",
+                  "status": "OPEN",
+                  "revision": 1,
+                  "createdFromEventId": "5d2128c1-e635-4040-9e0b-fb3296f931a2",
+                  "inheritedDecisionIds": [],
+                  "inheritedArtifactIds": [],
+                  "createdAt": "2026-10-19T10:08:39.014Z",
+                  "updatedAt": "2026-10-19T10:08:39.014Z"
+                }
+              },
+              "requestId": "5b2712fd-0bba-426d-ac3a-20bf1a98032b"
+            }
+          },
+          {
+            "status": 409,
+            "body": {
+              "error": {
+                "code": "CLARIFICATION_CHOICE_CONFLICT",
+                "message": "这张确认卡已经采用了其他选择，已刷新当前结果。如需修改，请纠正原消息。（CLARIFICATION_CHOICE_CONFLICT）"
+              },
+              "requestId": "ba136237-aa5e-415f-8abe-21ccaed961d7"
+            }
+          }
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "H08",
+      "feature": "版本过期",
+      "message": "先继续修复登录问题，再新增导出功能。",
+      "expected": "错误版本返回 409",
+      "actual": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "CLARIFICATION_REVISION_CONFLICT",
+            "message": "任务关系已发生变化，请查看刷新后的确认卡。（CLARIFICATION_REVISION_CONFLICT）"
+          },
+          "requestId": "1dfcde2a-9502-4dce-a6ca-9f56cff18a61"
+        }
+      },
+      "passed": true
+    },
+    {
+      "id": "H09",
+      "feature": "严格合同",
+      "message": "先继续修复登录问题，再新增导出功能。",
+      "expected": "未声明字段返回 400",
+      "actual": {
+        "status": 400,
+        "body": {
+          "error": {
+            "code": "VALIDATION_ERROR",
+            "message": "提交的参数不符合要求，请检查输入。（VALIDATION_ERROR）"
+          },
+          "requestId": "e70e697a-8de0-44db-89ce-a26336b9bd1f"
+        }
+      },
+      "passed": true
+    },
+    {
+      "id": "H10",
+      "feature": "版本化幂等收据",
+      "message": "先继续修复登录问题，再新增导出功能。",
+      "expected": "首次及旧版本相同网络重放均成功，仅一项业务效果",
+      "actual": {
+        "statuses": [
+          201,
+          201
+        ],
+        "before": {
+          "workItems": 1,
+          "routeEvents": 0,
+          "resolutionEvents": 0
+        },
+        "after": {
+          "workItems": 2,
+          "routeEvents": 1,
+          "resolutionEvents": 1
+        },
+        "receipt": {
+          "confirmationId": "7243ab7a-7c3e-415f-8a25-c7d231be524c",
+          "canonicalChoiceHash": "f1ee1e9987c88d280f0b0dacc0e5409a151c1ee1cdc22f4a4fdd0f8b21924168",
+          "idempotencyKey": "modern-choice",
+          "choice": "independent_new",
+          "resolvedRevision": 6,
+          "resultWorkItemId": "c3435775-ffb0-4a9a-905c-a629ed1522ee",
+          "actorId": "local-user",
+          "resolvedAt": "2026-10-19T10:08:44.917Z"
+        }
+      },
+      "passed": true
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "executedAt": "2026-10-19T10:08:31.149Z",
+  "method": "real localhost HTTP; isolated File backend; mock classifier; no external execution",
+  "results": [
+    {
+      "caseId": "IA23-routing",
+      "taskIds": [
+        "IR06.2"
+      ],
+      "status": "passed",
+      "expected": "暂停后允许空工具分类；业务准入保持关闭、generation 不变，无新增业务调用",
+      "actual": {
+        "routingStatus": "CLARIFICATION_REQUIRED",
+        "sessionStatus": "PAUSED",
+        "beforeAdmission": "closed",
+        "afterAdmission": "closed",
+        "beforeGeneration": 1,
+        "afterGeneration": 1,
+        "operation": {
+          "admissionClass": "routing",
+          "phase": "user_message_routing",
+          "attemptsUsed": 1,
+          "maxAttempts": 2,
+          "stopState": "confirmed"
+        },
+        "newBusinessOperations": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,124 @@
+{
+  "executedAt": "2026-10-19T13:37:02.850Z",
+  "method": "actual Sessions create/messages API, process restart, isolated File, Generic LLM HTTP with deterministic localhost fixture; explicit new-contract cohort",
+  "results": [
+    {
+      "id": "IN01",
+      "passed": true,
+      "actual": {
+        "routingId": "9fb9d88d-c392-45f9-b331-c7876bc1b0e3",
+        "workItems": 0,
+        "briefs": 0,
+        "requests": [
+          {
+            "semantic": true,
+            "answering": false,
+            "sourceEventId": "16ee14b0-0dfd-4ae7-b1ad-40b4799025ff",
+            "tools": [],
+            "mode": "answer"
+          }
+        ]
+      }
+    },
+    {
+      "id": "IN02",
+      "passed": true,
+      "actual": {
+        "step": "completed",
+        "requests": [
+          {
+            "semantic": true,
+            "answering": false,
+            "sourceEventId": "16ee14b0-0dfd-4ae7-b1ad-40b4799025ff",
+            "tools": [],
+            "mode": "answer"
+          },
+          {
+            "semantic": false,
+            "answering": true,
+            "sourceEventId": "16ee14b0-0dfd-4ae7-b1ad-40b4799025ff",
+            "tools": [],
+            "mode": "answer"
+          }
+        ]
+      }
+    },
+    {
+      "id": "IN03",
+      "passed": true,
+      "actual": {
+        "routingId": "f4a47429-9790-4e12-ab5b-0307d7783702",
+        "routeCount": 2,
+        "requests": 4
+      }
+    },
+    {
+      "id": "IN04",
+      "passed": true,
+      "actual": {
+        "replay": true,
+        "sameRouting": true,
+        "requests": 4
+      }
+    },
+    {
+      "id": "IN05",
+      "passed": true,
+      "actual": {
+        "status": 409
+      }
+    },
+    {
+      "id": "IN06",
+      "passed": true,
+      "actual": {
+        "activeWorkItemId": "f4d7e501-66d3-42ac-adda-ec0da7603550",
+        "works": 1,
+        "briefs": false
+      }
+    },
+    {
+      "id": "SC01",
+      "passed": true,
+      "actual": {
+        "requests": 2,
+        "status": "applied",
+        "version": 2,
+        "attempts": 2
+      }
+    },
+    {
+      "id": "SC02",
+      "passed": true,
+      "actual": {
+        "replay": true,
+        "requestDelta": 0
+      }
+    },
+    {
+      "id": "SC03",
+      "passed": true,
+      "actual": {
+        "routingId": "ad79ee50-8bfd-4beb-81ac-ae7c6aca1ab1",
+        "version": 3
+      }
+    },
+    {
+      "id": "SC04",
+      "passed": true,
+      "actual": {
+        "requestDelta": 1,
+        "corrections": 2,
+        "status": "CLARIFICATION_REQUIRED"
+      }
+    },
+    {
+      "id": "IN07",
+      "passed": true,
+      "actual": {
+        "requestDelta": 1,
+        "route": "BLOCKED"
+      }
+    }
+  ]
+}

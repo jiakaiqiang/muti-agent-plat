@@ -1,0 +1,59 @@
+{
+  "executedAt": "2026-10-19T12:30:46.478Z",
+  "method": "actual Nest module graph and Generic LLM HTTP to deterministic localhost provider; direct classifier service ingress, not Sessions API or semantic accuracy",
+  "results": [
+    {
+      "id": "SP01",
+      "passed": true,
+      "actual": {
+        "status": "VALIDATING",
+        "attempts": 2,
+        "requests": [
+          {
+            "tools": [],
+            "newContract": true,
+            "exactSource": true,
+            "repairFeedback": false
+          },
+          {
+            "tools": [],
+            "newContract": true,
+            "exactSource": true,
+            "repairFeedback": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "SP02",
+      "passed": true,
+      "actual": {
+        "operation": {
+          "attempts": 2,
+          "deadlineAt": "2026-10-19T12:32:46.105Z",
+          "deadlineCeilingAt": "2026-10-19T12:32:46.105Z",
+          "admissionClass": "routing",
+          "outputContractKey": "intent_understanding@1.0"
+        },
+        "routeDeadline": "2026-10-19T12:32:46.105Z"
+      }
+    },
+    {
+      "id": "SP03",
+      "passed": true,
+      "actual": {
+        "workItems": 0,
+        "sessionStatus": "PAUSED",
+        "admission": "closed"
+      }
+    },
+    {
+      "id": "SP04",
+      "passed": true,
+      "actual": {
+        "routingRevision": 6,
+        "modelRequests": 2
+      }
+    }
+  ]
+}

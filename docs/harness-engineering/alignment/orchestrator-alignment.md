@@ -22,6 +22,7 @@
 | post_review | review | 带明确决策的评审报告。 |
 | final_delivery | delivery | 最终交付与记忆候选。 |
 | user_message_routing | human_intervention / feedback | 路由、优先级、暂停决定、目标阶段。 |
+| user_message_response | feedback | 执行已提交的回答计划，保存回复与完成收据；纯回答无工具，授权工作区读取仅用只读协议工具，不创建任务或恢复业务。 |
 
 ## 标准编排形态
 

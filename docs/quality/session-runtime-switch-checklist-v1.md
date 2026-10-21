@@ -8,6 +8,14 @@
 
 关联：[Spec](../product/session-runtime-switch-spec-v1.md) | [Plan](../design/session-runtime-switch-plan-v1.md) | [Tasks](../implementation/session-runtime-switch-tasks-v1.md)。
 
+### 2026-10-17：停止后通过自然语言切回 Codex
+
+- 只读核对会话 `acf6cec2-f8bc-4b27-b13b-4fe424c46f2f`：13:40:26 UTC 出现 `RUNTIME_PROVIDER_FALLBACK`，Codex 重试失败后转到 Claude Code；13:43:20 UTC 停止已确认；13:43:38 和 13:47:33 UTC 的“你使用codex 进行处理”仍进入普通后续消息队列，Session 保持 `PAUSED`，未产生 Runtime 切换请求。
+- 根因：控制语法未识别直接称呼“你”和“进行处理／继续进行任务”等通用续接尾句。修复 `parseRuntimeControlIntent`，这些表达按 Runtime 控制处理；具体新增需求、问句和否定句仍交由普通路由。
+- 新增回归覆盖实际表达、停止前讨论/执行两个阶段、Claude fallback 切回 Codex、保留 WorkItem/Brief、清除旧 fallback、重复提交不重复启动，以及不误识别业务需求。
+- 验证：shared 控制语法与别名 15 项通过；server sessions、switch coordinator、switch store 共 161 项通过，0 跳过；shared/server 类型检查通过。停止未知、目标离线和用户主动暂停的既有回归均通过。
+- 本轮未重启服务、未重放真实业务消息、未调用真实模型；历史已排队消息保持原状。此记录仅补充定向回归，不代表下方完整验收矩阵已完成。
+
 ## 1. 验收矩阵
 
 | AC | 对应任务 | 必须执行的验证 | 当前结果/证据 |

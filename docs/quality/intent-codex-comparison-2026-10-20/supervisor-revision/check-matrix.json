@@ -1,0 +1,3170 @@
+[
+  {
+    "id": "B01",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "B01",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "B01",
+    "check": "action",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "B01",
+    "check": "noExecutionEffects",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "B01",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "B01",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "B01",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "B01",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "B01",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "B01",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "B01",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "B01",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "B01",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "B01",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "B01",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "B01",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H01",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "H01",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H01",
+    "check": "action",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "H01",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H01",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H01",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H01",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H01",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H01",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H01",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H01",
+    "check": "positiveResumeApplicable",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "H01",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H01",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H01",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H01",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H01",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H02",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "H02",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H02",
+    "check": "action",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "H02",
+    "check": "noExecutionEffects",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H02",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H02",
+    "check": "routeReferencesAndRelation",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "H02",
+    "check": "routeState",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "H02",
+    "check": "goalSegmentation",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "H02",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H02",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H02",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H02",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H02",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H02",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H02",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H02",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H03",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "H03",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H03",
+    "check": "action",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "H03",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H03",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H03",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H03",
+    "check": "routeState",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "H03",
+    "check": "goalSegmentation",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "H03",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H03",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H03",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H03",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H03",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H03",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H03",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H03",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H04",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "H04",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H04",
+    "check": "action",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H04",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H04",
+    "check": "workItemTarget",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H04",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H04",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H04",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H04",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H04",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H04",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H04",
+    "check": "contextPolicy",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H04",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H04",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H04",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H04",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H05",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "H05",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H05",
+    "check": "action",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H05",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H05",
+    "check": "workItemTarget",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H05",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H05",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H05",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H05",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H05",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H05",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H05",
+    "check": "contextPolicy",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H05",
+    "check": "inheritDecision",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H05",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H05",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H05",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H06",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "H06",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H06",
+    "check": "action",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H06",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H06",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H06",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H06",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H06",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H06",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H06",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H06",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H06",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H06",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H06",
+    "check": "safeClarification",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H06",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H06",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H07",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "H07",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H07",
+    "check": "action",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "H07",
+    "check": "noExecutionEffects",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H07",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H07",
+    "check": "routeReferencesAndRelation",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "H07",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H07",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H07",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H07",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H07",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H07",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H07",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H07",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H07",
+    "check": "correctionBinding",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "H07",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H08",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "H08",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H08",
+    "check": "action",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H08",
+    "check": "noExecutionEffects",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H08",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H08",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H08",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H08",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H08",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H08",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H08",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H08",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H08",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H08",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H08",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H08",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H09",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "H09",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H09",
+    "check": "action",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H09",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H09",
+    "check": "workItemTarget",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H09",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H09",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H09",
+    "check": "goalSegmentation",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "H09",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H09",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H09",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H09",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H09",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H09",
+    "check": "safeClarification",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H09",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H09",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H10",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "H10",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H10",
+    "check": "action",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H10",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H10",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H10",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H10",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H10",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H10",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H10",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H10",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H10",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H10",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H10",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H10",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H10",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H11",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "H11",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H11",
+    "check": "action",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H11",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H11",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H11",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H11",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H11",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H11",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H11",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H11",
+    "check": "positiveResumeApplicable",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "H11",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H11",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H11",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H11",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H11",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H12",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "H12",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H12",
+    "check": "action",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H12",
+    "check": "noExecutionEffects",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H12",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H12",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H12",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H12",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H12",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H12",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "H12",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H12",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H12",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H12",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H12",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "H12",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L01",
+    "check": "schema",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L01",
+    "check": "relation",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L01",
+    "check": "action",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L01",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L01",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L01",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L01",
+    "check": "routeState",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L01",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L01",
+    "check": "evidence",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L01",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L01",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L01",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L01",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L01",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L01",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L01",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L02",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "L02",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L02",
+    "check": "action",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L02",
+    "check": "noExecutionEffects",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L02",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L02",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L02",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L02",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L02",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L02",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L02",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L02",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L02",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L02",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L02",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L02",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L03",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "L03",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L03",
+    "check": "action",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L03",
+    "check": "noExecutionEffects",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L03",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L03",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L03",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L03",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L03",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L03",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L03",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L03",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L03",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L03",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L03",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L03",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L04",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "L04",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L04",
+    "check": "action",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L04",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L04",
+    "check": "workItemTarget",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L04",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L04",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L04",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L04",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L04",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L04",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L04",
+    "check": "contextPolicy",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L04",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L04",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L04",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L04",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L05",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "L05",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L05",
+    "check": "action",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L05",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L05",
+    "check": "workItemTarget",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L05",
+    "check": "routeReferencesAndRelation",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "L05",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L05",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L05",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L05",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L05",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L05",
+    "check": "contextPolicy",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "L05",
+    "check": "inheritDecision",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L05",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L05",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L05",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L06",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "L06",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L06",
+    "check": "action",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L06",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L06",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L06",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L06",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L06",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L06",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L06",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L06",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L06",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L06",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L06",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L06",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L06",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L07",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "L07",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L07",
+    "check": "action",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "L07",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L07",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L07",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L07",
+    "check": "routeState",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "L07",
+    "check": "goalSegmentation",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "L07",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L07",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L07",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L07",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L07",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L07",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L07",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L07",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L08",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "L08",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L08",
+    "check": "action",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L08",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L08",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L08",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L08",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L08",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L08",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L08",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L08",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L08",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L08",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L08",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L08",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L08",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L09",
+    "check": "schema",
+    "before": "失败",
+    "after": "失败"
+  },
+  {
+    "id": "L09",
+    "check": "relation",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L09",
+    "check": "action",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L09",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L09",
+    "check": "workItemTarget",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L09",
+    "check": "routeReferencesAndRelation",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L09",
+    "check": "routeState",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L09",
+    "check": "goalSegmentation",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L09",
+    "check": "evidence",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L09",
+    "check": "noUnauthorizedExecution",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L09",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L09",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L09",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L09",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L09",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L09",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L10",
+    "check": "schema",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L10",
+    "check": "relation",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L10",
+    "check": "action",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L10",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L10",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L10",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L10",
+    "check": "routeState",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L10",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L10",
+    "check": "evidence",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L10",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L10",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L10",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L10",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L10",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L10",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L10",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L11",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "L11",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L11",
+    "check": "action",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L11",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L11",
+    "check": "workItemTarget",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L11",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L11",
+    "check": "routeState",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "L11",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L11",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L11",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L11",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L11",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L11",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L11",
+    "check": "safeClarification",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L11",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L11",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L12",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "L12",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L12",
+    "check": "action",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L12",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L12",
+    "check": "workItemTarget",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L12",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L12",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L12",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L12",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L12",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L12",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L12",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L12",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L12",
+    "check": "safeClarification",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L12",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L12",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L13",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "L13",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L13",
+    "check": "action",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L13",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L13",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L13",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L13",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L13",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L13",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L13",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L13",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L13",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L13",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L13",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L13",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L13",
+    "check": "mentionedAgents",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L14",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "L14",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L14",
+    "check": "action",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L14",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L14",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L14",
+    "check": "routeReferencesAndRelation",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "L14",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L14",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L14",
+    "check": "evidence",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "L14",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L14",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L14",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L14",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L14",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L14",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L14",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L15",
+    "check": "schema",
+    "before": "失败",
+    "after": "失败"
+  },
+  {
+    "id": "L15",
+    "check": "relation",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L15",
+    "check": "action",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L15",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L15",
+    "check": "workItemTarget",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L15",
+    "check": "routeReferencesAndRelation",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L15",
+    "check": "routeState",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L15",
+    "check": "goalSegmentation",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L15",
+    "check": "evidence",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L15",
+    "check": "noUnauthorizedExecution",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L15",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L15",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L15",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L15",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L15",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L15",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L16",
+    "check": "schema",
+    "before": "失败",
+    "after": "失败"
+  },
+  {
+    "id": "L16",
+    "check": "relation",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L16",
+    "check": "action",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L16",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L16",
+    "check": "workItemTarget",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L16",
+    "check": "routeReferencesAndRelation",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L16",
+    "check": "routeState",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L16",
+    "check": "goalSegmentation",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L16",
+    "check": "evidence",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L16",
+    "check": "noUnauthorizedExecution",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L16",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L16",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L16",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L16",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L16",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L16",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L17",
+    "check": "schema",
+    "before": "失败",
+    "after": "失败"
+  },
+  {
+    "id": "L17",
+    "check": "relation",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L17",
+    "check": "action",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L17",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L17",
+    "check": "workItemTarget",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L17",
+    "check": "routeReferencesAndRelation",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L17",
+    "check": "routeState",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L17",
+    "check": "goalSegmentation",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L17",
+    "check": "evidence",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L17",
+    "check": "noUnauthorizedExecution",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L17",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L17",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L17",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L17",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L17",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L17",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L18",
+    "check": "schema",
+    "before": "失败",
+    "after": "失败"
+  },
+  {
+    "id": "L18",
+    "check": "relation",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L18",
+    "check": "action",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L18",
+    "check": "noExecutionEffects",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L18",
+    "check": "workItemTarget",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L18",
+    "check": "routeReferencesAndRelation",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L18",
+    "check": "routeState",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L18",
+    "check": "goalSegmentation",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L18",
+    "check": "evidence",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L18",
+    "check": "noUnauthorizedExecution",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L18",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L18",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L18",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L18",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L18",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L18",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L19",
+    "check": "schema",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L19",
+    "check": "relation",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L19",
+    "check": "action",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L19",
+    "check": "noExecutionEffects",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L19",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L19",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L19",
+    "check": "routeState",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L19",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L19",
+    "check": "evidence",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L19",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "通过"
+  },
+  {
+    "id": "L19",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L19",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L19",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L19",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L19",
+    "check": "correctionBinding",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L19",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L20",
+    "check": "schema",
+    "before": "通过",
+    "after": "失败"
+  },
+  {
+    "id": "L20",
+    "check": "relation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L20",
+    "check": "action",
+    "before": "失败",
+    "after": "未检查"
+  },
+  {
+    "id": "L20",
+    "check": "noExecutionEffects",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L20",
+    "check": "workItemTarget",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L20",
+    "check": "routeReferencesAndRelation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L20",
+    "check": "routeState",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L20",
+    "check": "goalSegmentation",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L20",
+    "check": "evidence",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L20",
+    "check": "noUnauthorizedExecution",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L20",
+    "check": "positiveResumeApplicable",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L20",
+    "check": "contextPolicy",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L20",
+    "check": "inheritDecision",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L20",
+    "check": "safeClarification",
+    "before": "未检查",
+    "after": "未检查"
+  },
+  {
+    "id": "L20",
+    "check": "correctionBinding",
+    "before": "通过",
+    "after": "未检查"
+  },
+  {
+    "id": "L20",
+    "check": "mentionedAgents",
+    "before": "未检查",
+    "after": "未检查"
+  }
+]

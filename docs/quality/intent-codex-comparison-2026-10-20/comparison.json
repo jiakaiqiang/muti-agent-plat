@@ -1,0 +1,71 @@
+{
+  "before": {
+    "cases": 20,
+    "passed": 13,
+    "schema": 20,
+    "firstPassSchema": 20,
+    "relation": 19,
+    "action": 14,
+    "routeReferencesAndRelation": 18,
+    "evidence": 20,
+    "routeState": 17,
+    "goalSegmentation": 17,
+    "routeOutcomes": {
+      "needs_clarification": 10,
+      "blocked": 3,
+      "applicable": 6,
+      "rejected": 1
+    },
+    "providerCalls": 20,
+    "transportFailures": 0,
+    "websocketFallbacks": 20,
+    "secondAttempts": 0,
+    "cliUsage": {
+      "input_tokens": 452822,
+      "cached_input_tokens": 121344,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 11836,
+      "reasoning_output_tokens": 3834
+    }
+  },
+  "after": {
+    "cases": 20,
+    "passed": 20,
+    "schema": 20,
+    "firstPassSchema": 20,
+    "relation": 20,
+    "action": 19,
+    "routeReferencesAndRelation": 20,
+    "evidence": 20,
+    "routeState": 20,
+    "goalSegmentation": 20,
+    "routeOutcomes": {
+      "needs_clarification": 12,
+      "blocked": 3,
+      "applicable": 5
+    },
+    "providerCalls": 20,
+    "transportFailures": 0,
+    "websocketFallbacks": 20,
+    "secondAttempts": 0,
+    "cliUsage": {
+      "input_tokens": 465857,
+      "cached_input_tokens": 209664,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 9874,
+      "reasoning_output_tokens": 2814
+    }
+  },
+  "improved": [
+    "L07",
+    "L09",
+    "L11",
+    "L15",
+    "L16",
+    "L17",
+    "L20"
+  ],
+  "regressed": [],
+  "remainingFailures": [],
+  "caseHash": "9b3265d04e3794a9e7aa9fe904cfeebc95f39e6590a663601b4ea50dc8aa8cf3"
+}

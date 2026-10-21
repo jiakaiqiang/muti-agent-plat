@@ -1,0 +1,143 @@
+{
+  "executedAt": "2026-10-19T20:31:46.390Z",
+  "method": "Actual Sessions HTTP/Nest/Generic LLM/File with deterministic provider and process restart; not model accuracy",
+  "results": [
+    {
+      "id": "BE01",
+      "passed": true,
+      "actual": {
+        "status": "completed",
+        "calls": [
+          {
+            "stage": "success",
+            "brief": false,
+            "sourceEventId": "ff4c8941-af18-4f9d-8995-9cedfe5821fd",
+            "tools": [],
+            "repair": false
+          },
+          {
+            "stage": "success",
+            "brief": true,
+            "sourceEventId": "ff4c8941-af18-4f9d-8995-9cedfe5821fd",
+            "tools": [],
+            "repair": false
+          }
+        ],
+        "briefs": 1
+      }
+    },
+    {
+      "id": "BE02",
+      "passed": true,
+      "actual": {
+        "currentBrief": "intent-brief:cb08189f-e869-4c88-b323-330b58e5941f",
+        "status": "WAIT_USER_CONFIRM",
+        "workItemStatus": "WAITING_USER",
+        "durableRead": 1
+      }
+    },
+    {
+      "id": "BE03",
+      "passed": true,
+      "actual": {
+        "confirmationNotExecutionAuthority": true,
+        "status": 409
+      }
+    },
+    {
+      "id": "BC01",
+      "passed": true,
+      "actual": {
+        "status": "WAIT_WORKFLOW_SELECT",
+        "sameReceipt": true,
+        "noBusinessDispatch": true
+      }
+    },
+    {
+      "id": "BC02",
+      "passed": true,
+      "actual": {
+        "stale": 409,
+        "foreign": 409,
+        "extra": 400,
+        "unboundWorkflow": 409
+      }
+    },
+    {
+      "id": "BC03",
+      "passed": true,
+      "actual": {
+        "status": "PAUSED",
+        "pauseState": {
+          "previousStatus": "WAIT_WORKFLOW_SELECT",
+          "pausedAt": "2026-10-19T20:31:40.694Z",
+          "reason": "confirmation fixture pause"
+        }
+      }
+    },
+    {
+      "id": "BE04",
+      "passed": true,
+      "actual": {
+        "status": "completed",
+        "calls": [
+          {
+            "stage": "repair",
+            "brief": true,
+            "sourceEventId": "fff4552c-6066-4f23-9227-3f61e01c28de",
+            "tools": [],
+            "repair": false
+          },
+          {
+            "stage": "repair",
+            "brief": true,
+            "sourceEventId": "fff4552c-6066-4f23-9227-3f61e01c28de",
+            "tools": [],
+            "repair": true
+          }
+        ],
+        "attempts": 2
+      }
+    },
+    {
+      "id": "BE05",
+      "passed": true,
+      "actual": {
+        "status": "failed",
+        "code": "MODEL_ERROR",
+        "calls": [
+          {
+            "stage": "auth",
+            "brief": false,
+            "sourceEventId": "9c04ffad-fe3f-45e6-99e4-466fb29b07c6",
+            "tools": [],
+            "repair": false
+          },
+          {
+            "stage": "auth",
+            "brief": true,
+            "sourceEventId": "9c04ffad-fe3f-45e6-99e4-466fb29b07c6",
+            "tools": [],
+            "repair": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "BC04",
+      "passed": true,
+      "actual": {
+        "realRestart": true,
+        "sameReceipt": true
+      }
+    },
+    {
+      "id": "BE06",
+      "passed": true,
+      "actual": {
+        "realRestart": true,
+        "noRepeatedModelCall": true
+      }
+    }
+  ]
+}

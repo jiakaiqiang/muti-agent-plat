@@ -1,0 +1,58 @@
+{
+  "label": "r5-formal-20261020-r1",
+  "startedAt": "2026-10-20T11:05:06.428Z",
+  "expected": {
+    "baseline": "88d1b375d3f1679e603e141581e032442511c8091a62072b3a152e4c7e6f13ca",
+    "previous": "5d3586dc10f1957c7ed2f3b876acc26e8d61aebd4e26ff8a27bfc21d959bcab2",
+    "current": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+    "source": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+    "scorer": "ca37950a03d3d2aa8d190e69318e07b51ec2ae7525618bcd396d2aecf2afe1d5",
+    "v3": "801ec752ff30a9ce67012004d569017b529382cb9c2aa3574e3e1022b925c1cd"
+  },
+  "rounds": [
+    {
+      "name": "baseline",
+      "build": "baseline"
+    },
+    {
+      "name": "previous",
+      "build": "previous"
+    },
+    {
+      "name": "current-1",
+      "build": "current"
+    },
+    {
+      "name": "current-2",
+      "build": "current"
+    },
+    {
+      "name": "current-3",
+      "build": "current"
+    }
+  ],
+  "batches": [
+    [
+      0,
+      9
+    ],
+    [
+      9,
+      9
+    ],
+    [
+      18,
+      9
+    ],
+    [
+      27,
+      9
+    ],
+    [
+      36,
+      9
+    ]
+  ],
+  "completed": [],
+  "state": "running"
+}

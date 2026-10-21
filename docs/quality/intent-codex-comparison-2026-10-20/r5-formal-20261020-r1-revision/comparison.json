@@ -1,0 +1,765 @@
+{
+  "label": "r5-formal-20261020-r1",
+  "summary": {
+    "L": {
+      "baseline": {
+        "passed": 13,
+        "total": 20,
+        "connectionBlocked": 0,
+        "applicable": 6
+      },
+      "previous": {
+        "passed": 20,
+        "total": 20,
+        "connectionBlocked": 0,
+        "applicable": 5
+      },
+      "current-1": {
+        "passed": 20,
+        "total": 20,
+        "connectionBlocked": 0,
+        "applicable": 7
+      },
+      "current-2": {
+        "passed": 20,
+        "total": 20,
+        "connectionBlocked": 0,
+        "applicable": 8
+      },
+      "current-3": {
+        "passed": 20,
+        "total": 20,
+        "connectionBlocked": 0,
+        "applicable": 7
+      }
+    },
+    "H": {
+      "baseline": {
+        "passed": 7,
+        "total": 12,
+        "connectionBlocked": 0,
+        "applicable": 6
+      },
+      "previous": {
+        "passed": 9,
+        "total": 12,
+        "connectionBlocked": 0,
+        "applicable": 4
+      },
+      "current-1": {
+        "passed": 12,
+        "total": 12,
+        "connectionBlocked": 0,
+        "applicable": 7
+      },
+      "current-2": {
+        "passed": 12,
+        "total": 12,
+        "connectionBlocked": 0,
+        "applicable": 6
+      },
+      "current-3": {
+        "passed": 12,
+        "total": 12,
+        "connectionBlocked": 0,
+        "applicable": 7
+      }
+    },
+    "V": {
+      "baseline": {
+        "passed": 4,
+        "total": 12,
+        "connectionBlocked": 0,
+        "applicable": 0
+      },
+      "previous": {
+        "passed": 9,
+        "total": 12,
+        "connectionBlocked": 0,
+        "applicable": 1
+      },
+      "current-1": {
+        "passed": 11,
+        "total": 12,
+        "connectionBlocked": 0,
+        "applicable": 5
+      },
+      "current-2": {
+        "passed": 11,
+        "total": 12,
+        "connectionBlocked": 0,
+        "applicable": 5
+      },
+      "current-3": {
+        "passed": 11,
+        "total": 12,
+        "connectionBlocked": 0,
+        "applicable": 4
+      }
+    },
+    "B": {
+      "baseline": {
+        "passed": 1,
+        "total": 1,
+        "connectionBlocked": 0,
+        "applicable": 0
+      },
+      "previous": {
+        "passed": 1,
+        "total": 1,
+        "connectionBlocked": 0,
+        "applicable": 0
+      },
+      "current-1": {
+        "passed": 1,
+        "total": 1,
+        "connectionBlocked": 0,
+        "applicable": 0
+      },
+      "current-2": {
+        "passed": 1,
+        "total": 1,
+        "connectionBlocked": 0,
+        "applicable": 0
+      },
+      "current-3": {
+        "passed": 1,
+        "total": 1,
+        "connectionBlocked": 0,
+        "applicable": 0
+      }
+    }
+  },
+  "regressions": [
+    {
+      "id": "H01",
+      "field": "positiveResumeApplicable",
+      "from": "baseline",
+      "to": "previous",
+      "toValue": false,
+      "connectionBlocked": false
+    },
+    {
+      "id": "H01",
+      "field": "resumeDeclaresNoEffects",
+      "from": "baseline",
+      "to": "previous",
+      "toValue": false,
+      "connectionBlocked": false
+    },
+    {
+      "id": "V02",
+      "field": "relation",
+      "from": "baseline",
+      "to": "current-1",
+      "toValue": false,
+      "connectionBlocked": false
+    },
+    {
+      "id": "V02",
+      "field": "workItemTarget",
+      "from": "baseline",
+      "to": "current-1",
+      "toValue": null,
+      "connectionBlocked": false
+    },
+    {
+      "id": "V02",
+      "field": "relation",
+      "from": "baseline",
+      "to": "current-2",
+      "toValue": false,
+      "connectionBlocked": false
+    },
+    {
+      "id": "V02",
+      "field": "workItemTarget",
+      "from": "baseline",
+      "to": "current-2",
+      "toValue": null,
+      "connectionBlocked": false
+    },
+    {
+      "id": "V02",
+      "field": "relation",
+      "from": "baseline",
+      "to": "current-3",
+      "toValue": false,
+      "connectionBlocked": false
+    },
+    {
+      "id": "V02",
+      "field": "workItemTarget",
+      "from": "baseline",
+      "to": "current-3",
+      "toValue": null,
+      "connectionBlocked": false
+    },
+    {
+      "id": "V02",
+      "field": "relation",
+      "from": "previous",
+      "to": "current-1",
+      "toValue": false,
+      "connectionBlocked": false
+    },
+    {
+      "id": "V02",
+      "field": "workItemTarget",
+      "from": "previous",
+      "to": "current-1",
+      "toValue": null,
+      "connectionBlocked": false
+    },
+    {
+      "id": "V02",
+      "field": "relation",
+      "from": "previous",
+      "to": "current-2",
+      "toValue": false,
+      "connectionBlocked": false
+    },
+    {
+      "id": "V02",
+      "field": "workItemTarget",
+      "from": "previous",
+      "to": "current-2",
+      "toValue": null,
+      "connectionBlocked": false
+    },
+    {
+      "id": "V02",
+      "field": "relation",
+      "from": "previous",
+      "to": "current-3",
+      "toValue": false,
+      "connectionBlocked": false
+    },
+    {
+      "id": "V02",
+      "field": "workItemTarget",
+      "from": "previous",
+      "to": "current-3",
+      "toValue": null,
+      "connectionBlocked": false
+    }
+  ],
+  "transport": {
+    "baseline": {
+      "samples": 45,
+      "calls": 46,
+      "outputs": 45,
+      "errors": [
+        {
+          "batch": "r5-formal-20261020-r1-baseline-1",
+          "file": "provider-8.json",
+          "error": "Error: CODEX_EVALUATION_TIMEOUT"
+        }
+      ],
+      "cooldownRetries": 0,
+      "waitMs": 0,
+      "missingUsageCalls": 1,
+      "inputTokens": 1203567,
+      "cachedInputTokens": 408960,
+      "outputTokens": 34928
+    },
+    "previous": {
+      "samples": 45,
+      "calls": 45,
+      "outputs": 45,
+      "errors": [],
+      "cooldownRetries": 0,
+      "waitMs": 0,
+      "missingUsageCalls": 0,
+      "inputTokens": 1231198,
+      "cachedInputTokens": 599040,
+      "outputTokens": 28044
+    },
+    "current-1": {
+      "samples": 45,
+      "calls": 45,
+      "outputs": 45,
+      "errors": [],
+      "cooldownRetries": 0,
+      "waitMs": 0,
+      "missingUsageCalls": 0,
+      "inputTokens": 1230688,
+      "cachedInputTokens": 737280,
+      "outputTokens": 25589
+    },
+    "current-2": {
+      "samples": 45,
+      "calls": 45,
+      "outputs": 45,
+      "errors": [],
+      "cooldownRetries": 0,
+      "waitMs": 0,
+      "missingUsageCalls": 0,
+      "inputTokens": 1230738,
+      "cachedInputTokens": 789120,
+      "outputTokens": 25618
+    },
+    "current-3": {
+      "samples": 45,
+      "calls": 45,
+      "outputs": 45,
+      "errors": [],
+      "cooldownRetries": 0,
+      "waitMs": 0,
+      "missingUsageCalls": 0,
+      "inputTokens": 1230673,
+      "cachedInputTokens": 823680,
+      "outputTokens": 26112
+    }
+  },
+  "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+  "warnings": [
+    {
+      "round": "baseline",
+      "batch": "r5-formal-20261020-r1-baseline-1",
+      "file": "provider-8.jsonl",
+      "lines": [
+        "{\"type\":\"error\",\"message\":\"Reconnecting... waiting for network (Connection failed: error sending request)\"}",
+        "{\"type\":\"error\",\"message\":\"Reconnecting... waiting for network (Connection failed: error sending request)\"}",
+        "{\"type\":\"error\",\"message\":\"Reconnecting... waiting for network (Connection failed: error sending request)\"}",
+        "{\"type\":\"error\",\"message\":\"Reconnecting... waiting for network (Connection failed: error sending request)\"}",
+        "{\"type\":\"error\",\"message\":\"Reconnecting... waiting for network (Connection failed: error sending request)\"}"
+      ]
+    }
+  ],
+  "manifests": [
+    {
+      "label": "r5-formal-20261020-r1-baseline-1",
+      "startedAt": "2026-10-20T11:05:07.932Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "88d1b375d3f1679e603e141581e032442511c8091a62072b3a152e4c7e6f13ca",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-baseline-1"
+    },
+    {
+      "label": "r5-formal-20261020-r1-baseline-2",
+      "startedAt": "2026-10-20T11:10:36.347Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "88d1b375d3f1679e603e141581e032442511c8091a62072b3a152e4c7e6f13ca",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-baseline-2"
+    },
+    {
+      "label": "r5-formal-20261020-r1-baseline-3",
+      "startedAt": "2026-10-20T11:13:37.497Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "88d1b375d3f1679e603e141581e032442511c8091a62072b3a152e4c7e6f13ca",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-baseline-3"
+    },
+    {
+      "label": "r5-formal-20261020-r1-baseline-4",
+      "startedAt": "2026-10-20T11:17:06.500Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "88d1b375d3f1679e603e141581e032442511c8091a62072b3a152e4c7e6f13ca",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-baseline-4"
+    },
+    {
+      "label": "r5-formal-20261020-r1-baseline-5",
+      "startedAt": "2026-10-20T11:20:34.384Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "88d1b375d3f1679e603e141581e032442511c8091a62072b3a152e4c7e6f13ca",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-baseline-5"
+    },
+    {
+      "label": "r5-formal-20261020-r1-previous-1",
+      "startedAt": "2026-10-20T11:24:13.484Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "5d3586dc10f1957c7ed2f3b876acc26e8d61aebd4e26ff8a27bfc21d959bcab2",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-previous-1"
+    },
+    {
+      "label": "r5-formal-20261020-r1-previous-2",
+      "startedAt": "2026-10-20T11:26:39.835Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "5d3586dc10f1957c7ed2f3b876acc26e8d61aebd4e26ff8a27bfc21d959bcab2",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-previous-2"
+    },
+    {
+      "label": "r5-formal-20261020-r1-previous-3",
+      "startedAt": "2026-10-20T11:29:30.095Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "5d3586dc10f1957c7ed2f3b876acc26e8d61aebd4e26ff8a27bfc21d959bcab2",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-previous-3"
+    },
+    {
+      "label": "r5-formal-20261020-r1-previous-4",
+      "startedAt": "2026-10-20T11:32:19.840Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "5d3586dc10f1957c7ed2f3b876acc26e8d61aebd4e26ff8a27bfc21d959bcab2",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-previous-4"
+    },
+    {
+      "label": "r5-formal-20261020-r1-previous-5",
+      "startedAt": "2026-10-20T11:35:48.614Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "5d3586dc10f1957c7ed2f3b876acc26e8d61aebd4e26ff8a27bfc21d959bcab2",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-previous-5"
+    },
+    {
+      "label": "r5-formal-20261020-r1-current-1-1",
+      "startedAt": "2026-10-20T11:38:40.997Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-current-1-1"
+    },
+    {
+      "label": "r5-formal-20261020-r1-current-1-2",
+      "startedAt": "2026-10-20T11:41:07.736Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-current-1-2"
+    },
+    {
+      "label": "r5-formal-20261020-r1-current-1-3",
+      "startedAt": "2026-10-20T11:43:41.401Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-current-1-3"
+    },
+    {
+      "label": "r5-formal-20261020-r1-current-1-4",
+      "startedAt": "2026-10-20T11:46:20.002Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-current-1-4"
+    },
+    {
+      "label": "r5-formal-20261020-r1-current-1-5",
+      "startedAt": "2026-10-20T11:48:56.435Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-current-1-5"
+    },
+    {
+      "label": "r5-formal-20261020-r1-current-2-1",
+      "startedAt": "2026-10-20T11:51:55.567Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-current-2-1"
+    },
+    {
+      "label": "r5-formal-20261020-r1-current-2-2",
+      "startedAt": "2026-10-20T11:54:32.165Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-current-2-2"
+    },
+    {
+      "label": "r5-formal-20261020-r1-current-2-3",
+      "startedAt": "2026-10-20T11:57:03.051Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-current-2-3"
+    },
+    {
+      "label": "r5-formal-20261020-r1-current-2-4",
+      "startedAt": "2026-10-20T11:59:39.739Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-current-2-4"
+    },
+    {
+      "label": "r5-formal-20261020-r1-current-2-5",
+      "startedAt": "2026-10-20T12:02:28.041Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-current-2-5"
+    },
+    {
+      "label": "r5-formal-20261020-r1-current-3-1",
+      "startedAt": "2026-10-20T12:05:20.088Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-current-3-1"
+    },
+    {
+      "label": "r5-formal-20261020-r1-current-3-2",
+      "startedAt": "2026-10-20T12:07:52.195Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-current-3-2"
+    },
+    {
+      "label": "r5-formal-20261020-r1-current-3-3",
+      "startedAt": "2026-10-20T12:10:42.887Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-current-3-3"
+    },
+    {
+      "label": "r5-formal-20261020-r1-current-3-4",
+      "startedAt": "2026-10-20T12:14:12.507Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-current-3-4"
+    },
+    {
+      "label": "r5-formal-20261020-r1-current-3-5",
+      "startedAt": "2026-10-20T12:16:53.887Z",
+      "hashes": {
+        "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "9025a2428fa8d486f735683454f7c466a8ae22eddd5bc18e2e36685fb43e2828",
+        "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+        "packages/shared/src/runtime-contracts/structured-output-instructions.ts": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657"
+      },
+      "casesHash": "9111f43c60ff2e8f458e4669e4a5e4a7388ac2e0f9ea0e64a4f58cc04de16f5a",
+      "buildHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+      "fixtureVersion": "production-status-v2",
+      "method": "actual SemanticIntentRouter + durable IntentUnderstandingRouting + GenericLlmRuntime via isolated local Codex HTTP bridge + actual route compiler; no dispatch",
+      "model": "local config: gpt-6-astra/high",
+      "transportTimeoutMs": 160000,
+      "operationTimeoutMs": 330000,
+      "batch": "r5-formal-20261020-r1-current-3-5"
+    }
+  ],
+  "restoration": {
+    "restored": true,
+    "actualHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+    "expectedHash": "ae37404ea2212dfd525a61975f130b8d1aff45be1c74bbf2575ecb0cd691e4ab",
+    "sourceUnchanged": true,
+    "frozenFilesUnchanged": true,
+    "finishedAt": "2026-10-20T12:19:58.062Z"
+  }
+}

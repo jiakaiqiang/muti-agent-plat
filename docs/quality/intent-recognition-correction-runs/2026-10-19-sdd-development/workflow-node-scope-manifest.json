@@ -1,0 +1,39 @@
+{
+  "runId": "SDD-2026-10-20-workflow-node-scope",
+  "capturedAt": "2026-10-20T01:57:34.219613+00:00",
+  "sourceHashes": {
+    "packages/shared/src/intent-workflow-effects.ts": "cf3db3b2bcdcc2be5bcc7e628d55c783a4ed23e5aca2cba31ff1b888e7e14adc",
+    "packages/shared/src/contracts.ts": "75def2826bf8899b4b97fed0e49620bd5b61f214f3404c7fc472a123ec80f8d7",
+    "packages/shared/src/index.ts": "f85b2dd319e791acf417bb9cb03904b4c7e3fe6b59c0ec6949249e6bca2b152c",
+    "apps/server/src/modules/message-routing/intent-workflow-scope.ts": "39367a76ff2535d94f616af2bfe67916f79282701665bad606daf28ba405731f",
+    "apps/server/src/modules/message-routing/intent-workflow-scope.spec.ts": "7bd38d244ebf164c9384fe902d1e29724df04e5720216cc0aa19dd8f7f629585",
+    "apps/server/src/modules/workflows/workflows.service.ts": "8486c90d0c0078283e87cc537bf5367113ea6e69f85d35435e6aac995d36a0d8",
+    "apps/server/src/modules/workflows/workflows.service.spec.ts": "d04142380d61108c9d320ed7637783f84aa3b0e613799acfa1124dd411b45679"
+  },
+  "checks": [
+    {
+      "log": "workflow-node-scope-final-regression.log",
+      "exitCode": 0,
+      "sha256": "869cde2b49226e9e0a1ac9a32c0a8e605f13e64f502eb901103a86db15ffed9a"
+    },
+    {
+      "log": "workflow-node-scope-typecheck-final.log",
+      "exitCode": 0,
+      "sha256": "9018b27583539853ac8c03817518ed16ca562e330c3300be73c796e126a0cafd"
+    },
+    {
+      "log": "workflow-node-scope-diff.log",
+      "exitCode": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "tests": {
+    "relatedPassed": 23
+  },
+  "reportSha256": "a784e21c0a0c3f28431861cf899c0ffdeedb8f19d074a726029adddf03c5306f",
+  "limitations": [
+    "Compiler not connected to selection transaction or Runtime",
+    "Authoring UI not implemented",
+    "No new full build/HTTP/database/client or accuracy evidence"
+  ]
+}

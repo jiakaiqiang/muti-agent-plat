@@ -1,0 +1,43 @@
+{
+  "runId": "SDD-2026-10-20-directed-brief-plan",
+  "capturedAt": "2026-10-20T01:17:37.379582+00:00",
+  "previousMilestone": "brief-retry-manifest.json",
+  "sourceHashes": {
+    "packages/shared/src/intent-plan-contracts.ts": "0cc73262caa67b21e8baa9324aeb03584870929035f8bdb576afa42bf6d0ec4e",
+    "apps/server/src/modules/message-routing/intent-directed-brief-plan.ts": "9c5533a18280e65887f8bf11d67455f5a402825cdf0603dc9911505fd4697bc0",
+    "apps/server/src/modules/message-routing/intent-directed-brief-plan.spec.ts": "1059b127b317dea028fde82e88bd653f2598e7bd21553429eecaffb11d82f860",
+    "apps/server/src/modules/message-routing/intent-brief-store.service.ts": "8259a45ec44c760303697bae5cef1c7fcd8a9947119a48c1619638292a7b99c8",
+    "apps/server/src/modules/message-routing/intent-execution-guard.ts": "bae84a720ff50523b8d20a0f8a761aa8d8238905105076c1f9dbff6c45cbd7fe",
+    "docs/design/intent-directed-brief-revision-design-v1.md": "5334ff3db6a49ff9bccadacb6cae2844dcd28d2e745ab0ef793f4ff320e22035"
+  },
+  "checks": [
+    {
+      "log": "directed-brief-plan-tests.log",
+      "exitCode": 0,
+      "sha256": "7e544e571300afd7575d17ab089f1d240ffaaf6d81a3588944c2601822f27673"
+    },
+    {
+      "log": "directed-brief-plan-final-tests.log",
+      "exitCode": 0,
+      "sha256": "b3631a2937114d0943ba4d85fba9837facea61a48bddd8be909a9b8df253e747"
+    },
+    {
+      "log": "directed-brief-plan-typecheck-complete.log",
+      "exitCode": 0,
+      "sha256": "8f96b35ac9a2a925648f1580c8472232f82900b07a52478ddcf444f40b815a41"
+    },
+    {
+      "log": "directed-brief-plan-diff.log",
+      "exitCode": 0,
+      "sha256": "726fe7840678b636be6d1467baa2ee667c65a2b8ce91a629be66d00c376dc955"
+    }
+  ],
+  "scope": "Plan derivation foundation only; entrypoint remains disabled. No full workspace/build/HTTP/PostgreSQL/browser validation.",
+  "remaining": [
+    "assignment admission",
+    "review executor and results",
+    "finalizer dependency validation",
+    "per-target retries",
+    "dual-client and environment validation"
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "runId": "SDD-2026-10-20-workflow-selection-binding",
+  "capturedAt": "2026-10-20T01:52:13.562232+00:00",
+  "sourceHashes": {
+    "packages/shared/src/intent-workflow-selection.ts": "c110a5bf1061e81a4b0d4e1b21780e2be59aef19a789e83b79f62c5cf90fab8b",
+    "packages/shared/src/index.ts": "63691653b426e157ee6879fbee58eba17e19bef77135247c57e5cc8c961f1d2c",
+    "apps/server/src/modules/message-routing/intent-workflow-selection.ts": "3137d2c7c6493fff2f77023f5a25a906833bb53f7b4f39a0ada43cbe2309169e",
+    "apps/server/src/modules/message-routing/intent-brief-executor.service.spec.ts": "153b1fc4f55475c9117b5eafbfa31f79cef76e2cf6933e9c813653a2700901d7"
+  },
+  "designSha256": "c8644c9fc83aad2f838494fd199073cf161ef31b075b1d2aa955ed0a05946c0b",
+  "checks": [
+    {
+      "log": "workflow-selection-binding-tests.log",
+      "sha256": "9440a34b8ed694ee19c69f71acdfb560dabe5ed98a8ee3c8e2a09a83e2c48a17"
+    },
+    {
+      "log": "workflow-selection-binding-final.log",
+      "sha256": "c6bf79104639b5fa68d9db72c6e9ad228af09bc35b920d753c28b40902b510f1"
+    },
+    {
+      "log": "workflow-selection-binding-typecheck.log",
+      "sha256": "9018b27583539853ac8c03817518ed16ca562e330c3300be73c796e126a0cafd"
+    },
+    {
+      "log": "workflow-selection-binding-server-typecheck.log",
+      "sha256": "8f96b35ac9a2a925648f1580c8472232f82900b07a52478ddcf444f40b815a41"
+    },
+    {
+      "log": "workflow-selection-binding-diff.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "tests": {
+    "relatedPassed": 42,
+    "finalFocusedPassed": 1,
+    "finalNameFilterSkipped": 41
+  },
+  "limitations": [
+    "Binding helper only; production selection endpoint not connected",
+    "No workflow tasks or execution effects authorized",
+    "No new HTTP/PostgreSQL/browser/full-workspace/build validation"
+  ]
+}

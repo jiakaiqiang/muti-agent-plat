@@ -1,0 +1,147 @@
+{
+  "runId": "SDD-2026-10-19-answer-executor",
+  "capturedAt": "2026-10-19T13:12:13.982Z",
+  "node": "v20.19.6",
+  "head": "bb3d278db3e734b643abef015bdd2190ef578638",
+  "baselineManifest": "baseline-manifest.json",
+  "previousMilestone": "plan-commit-manifest.json",
+  "sourceHashes": {
+    "packages/shared/src/contracts.ts": "aaa04a4160ac0d1b23b1e08d6cfa4f726ac36650ac74c75607efcaa70469498e",
+    "apps/server/src/modules/message-routing/intent-plan-commit.service.ts": "e23e4e3dff54d84c0d100be4ef8159180385a21b0088d8871192450e4923804c",
+    "apps/server/src/modules/message-routing/intent-plan-commit.service.spec.ts": "f6ce10e8fa092ce257fb12840b9c211b3e94861c31daf313eb55716635928e43",
+    "apps/server/src/modules/message-routing/route-plan-compiler.service.ts": "1b686fa62e3c9f3853a71a2259feebc42dd6e6a87f523f868efaa927e9630efa",
+    "apps/server/src/modules/message-routing/route-plan-compiler.service.spec.ts": "1196a1cadd5974557644ee0abfbebf88e604dcc36d366a02b0b9128d94adbdc0",
+    "apps/server/src/modules/message-routing/intent-execution-guard.ts": "e9470ea3aafae1d6c8e2cdd1ac3762a56764b336a6840ddf1270cc39737a5683",
+    "apps/server/src/modules/message-routing/message-routing.module.ts": "ca666526a474e6bba4a6e41028dd7db826af1106a4d1df3b32ad8dc2f8896423",
+    "apps/server/src/modules/context-management/context-management.service.ts": "c067069da1b7720304cf773f86856a83e126a91207313e5bdff6395467403364",
+    "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "f12f451cbafce0de912f28979cbd0efdae40d18934c60fffbac27d3ee67c0d18",
+    "apps/web/src/stores/event.ts": "aa2b9256716067a908e7c5b57655cc8ed1d82d96fc29088714c182abd8087fbe",
+    "apps/web/src/stores/event-normalization.spec.ts": "9601b368938879653e33fd1eadab9521efdd4e044b4a524022c85520fb118869",
+    "tests/evaluation/run-intent-semantic-proposal-sdd.mjs": "0599cf94549c1d1846a2774af73cc1ca758aa99b675df0dc1860a37fa6fda42a",
+    "tests/evaluation/capture-intent-plan-commit-manifest.mjs": "45203bc2f96311ec5256b02f1b3d302e48ec0e647374752ef8bbf73f256fff2d",
+    "packages/shared/src/intent-correction-contracts.ts": "58cd3c671b3da6f84b900d3a6df18e8e4a8f1d1c557bc12af4e3fa4dcb6425ee",
+    "packages/shared/src/intent-runtime-policy.ts": "c7667ca605f2a4ea44082cbb8e86b1118e7ef887c48d5c16cf13d5d8ffb7949b",
+    "packages/shared/src/intent-runtime-policy.spec.ts": "0637a9a658616d818189052bcb96acf72d12c4b6cf032b6a6741048e94b4393c",
+    "apps/server/src/modules/message-routing/intent-answer-executor.service.ts": "8867f2b8884387ac2eb4abce35f19ebabf957f88af6623655a9ca48f4a178365",
+    "apps/server/src/modules/message-routing/intent-answer-executor.service.spec.ts": "b08a07f7492075693210c3b445a8a3378b6cc067357e38804ff22749271f5ee6",
+    "apps/server/src/modules/persistence/intent-record-invariants.ts": "94f7f881caf7ab543864b630fe89ee29a12d27e298e53b4975215c9a84e3cd8f",
+    "apps/server/src/modules/tools/tool-authority-resolver.service.ts": "dbf46da52dd1a74df1c7026367fe901954498ae3f53f04ed91d9ce666162c87d",
+    "apps/server/src/modules/runtime-routing/invocation-resolver.service.ts": "e4c777aa6ab8f92d94a11588edd685a91d547187a71228cf1c128dfcf47c240a",
+    "apps/server/src/modules/runtime-invocation/runtime-invocation.service.ts": "71e901e145e4a3eb643e8db4d6e3eec3a7cbe9436d87c983f20bf2adfb3aa726",
+    "apps/server/src/modules/runtimes/logical-operation-store.ts": "6006dce974d38d7d9764ca2acf66269b3c4b531d3e31356722c5b2daaa6bf7df",
+    "apps/server/src/modules/runtimes/generic-llm-runtime.service.ts": "797ef66c38b5696763f41a207e67c830e236392f5fb68c4513f59ddcb7f2a4a1",
+    "apps/server/src/modules/runtimes/runtime.service.ts": "668b80e46ed6d6f8693b586503d9e3ea1650dda5c5bb8b566bca03b8a935406b",
+    "tests/evaluation/capture-intent-answer-executor-manifest.mjs": "4e3f44ec2e0e0e23d6ce439a4dae211c0aec86d6d90172b9b4b46241fcf4bb47"
+  },
+  "documentHashes": {
+    "docs/product/intent-recognition-correction-spec-v1.md": "60ef5c9f7128c21572c1485fe11d8fee3ab7d15676f0af0a5bd2e423bb23706d",
+    "docs/design/intent-recognition-correction-plan-v1.md": "049f244c7f31261ffa53a221aba38fee80a6e86975949d945b48ff34234982a1",
+    "docs/design/intent-recognition-correction-system-development-design-v1.md": "ad51e41f2e68eba9e4fcc23cee2a3d640bf6c729098fbdff6f248a0f56590efc",
+    "docs/implementation/intent-recognition-correction-task-v1.md": "eda416a15c77890fe1014ef02a47f2292b98576e9b4d6120206d8629ca5000aa",
+    "docs/quality/intent-recognition-correction-checklist-v1.md": "0ac1b6c167aef526a37dad1b5aa521261b5d6f1489e892ce9d5f94d1a558891c",
+    "docs/harness-engineering/alignment/README.md": "079efa0b984befbaf0e8873730d5392340db8a884accb3cb4c1de89a6483ebcd",
+    "docs/harness-engineering/alignment/orchestrator-alignment.md": "7947a8635a4a6e032853f232008e8dd1fbb793d9d771d88727f1703f8830e7ce",
+    "docs/harness-engineering/context-engineering/prompt-context/agent-prompt-contract.md": "6bf3e55e6f924881d0de30e9bc8dc2888b6c82486febc0ccc5528a4638c26e53",
+    "docs/harness-engineering/context-engineering/prompt-context/runtime-context-contract.md": "6c4f53bb98a45f5b89d57cc305fa375ce0d0c32fa80cf8b54194016d779f468c",
+    "docs/quality/intent-recognition-correction-runs/2026-10-19-sdd-development/answer-executor-report.md": "5b1c7eaf4dab0530d32ebbc34d6b9a090a9cba0c43b48891c6626de58862b6f2"
+  },
+  "evidenceHashes": {
+    "answer-executor-runtime-results.json": "a69e15bfb293bc13eb513881d9591a1e72f845e2efef1a1247670dd0c5f1e859"
+  },
+  "checks": [
+    {
+      "command": "npm run test -w @agent-cluster/server",
+      "log": "answer-executor-server-tests.log",
+      "exitCode": 0,
+      "logSha256": "99b6541d09f377e0aeab8a27088355fadb0d93141ba1aa12b60b87ae1ed03cf0"
+    },
+    {
+      "command": "npm run test -w @agent-cluster/shared",
+      "log": "answer-executor-shared-tests.log",
+      "exitCode": 0,
+      "logSha256": "0bbf94d3989ab7d29ab8824a04139a93b268bc07283c400180ae5768833f1edc"
+    },
+    {
+      "command": "npx tsx --test --tsconfig apps/server/tsconfig.json apps/server/src/modules/message-routing/intent-answer-executor.service.spec.ts apps/server/src/modules/message-routing/intent-plan-commit.service.spec.ts apps/server/src/modules/runtimes/logical-operation-store.spec.ts apps/server/src/modules/runtime-routing/invocation-resolver.service.spec.ts apps/server/src/modules/runtimes/generic-llm-runtime.service.spec.ts packages/shared/src/intent-runtime-policy.spec.ts",
+      "log": "answer-executor-complete-regression.log",
+      "exitCode": 0,
+      "logSha256": "8e817d42b7ff2825b9dd1a1bfdc7abd4b89c455f381c1bfd44b774c6d7c7a93e"
+    },
+    {
+      "command": "npx tsx --test --tsconfig apps/server/tsconfig.json apps/server/src/modules/message-routing/intent-answer-executor.service.spec.ts",
+      "log": "answer-executor-restart-tests.log",
+      "exitCode": 0,
+      "logSha256": "d7f091db2f98d33eb88f5b2d29d007d678d75dd54f3c74cdcd781ace587564ca"
+    },
+    {
+      "command": "npx tsx --test --tsconfig apps/server/tsconfig.json apps/server/src/modules/message-routing/intent-answer-executor.service.spec.ts apps/server/src/modules/message-routing/intent-plan-commit.service.spec.ts",
+      "log": "answer-executor-final-status-tests.log",
+      "exitCode": 0,
+      "logSha256": "a8244e165a67afa398882630144fd7fb22a919d45d1b5182e1adbd208fdd7f31"
+    },
+    {
+      "command": "npm run typecheck",
+      "log": "answer-executor-workspace-typecheck-final.log",
+      "exitCode": 0,
+      "logSha256": "9018b27583539853ac8c03817518ed16ca562e330c3300be73c796e126a0cafd"
+    },
+    {
+      "command": "npm run typecheck -w @agent-cluster/server",
+      "log": "answer-executor-final-typecheck.log",
+      "exitCode": 0,
+      "logSha256": "8f96b35ac9a2a925648f1580c8472232f82900b07a52478ddcf444f40b815a41"
+    },
+    {
+      "command": "npm run build -w @agent-cluster/server",
+      "log": "answer-executor-complete-build.log",
+      "exitCode": 0,
+      "logSha256": "a46e428c4d8f1ab9ac5e91206859bd48555deced87128f7fa383e2f9fddb92b3"
+    },
+    {
+      "command": "npm run test:harness",
+      "log": "answer-executor-harness-complete.log",
+      "exitCode": 0,
+      "logSha256": "042024a836c9695c952662652f0956e25d424f0aa8f3826c4e31abb832fd1740"
+    },
+    {
+      "command": "node tests/evaluation/run-intent-semantic-proposal-sdd.mjs --execute-answer",
+      "log": "answer-executor-runtime-final.log",
+      "exitCode": 0,
+      "logSha256": "8f0d718b1611e438ef7d81960fcbcdfc9525a066e6bf28291599faa75e34c979"
+    },
+    {
+      "command": "git diff --check",
+      "log": "answer-executor-diff-check.log",
+      "exitCode": 0,
+      "logSha256": "64630fcbc0195b7f4fcedc98fee406d13be1b336dcc8e84404f6f4c83c162516"
+    }
+  ],
+  "tests": {
+    "serverPassed": 2022,
+    "serverDevScriptsPassed": 7,
+    "sharedPassed": 280,
+    "postgresSkipped": 21,
+    "relatedPassed": 118,
+    "fileReloadPassed": 10,
+    "finalStatusPassed": 24,
+    "runtimeCasesPassed": 10,
+    "countsOverlap": true
+  },
+  "scope": {
+    "ingress": "direct Nest classification, commit and explicitly driven answer executor; not Sessions API",
+    "backend": "isolated File",
+    "runtime": "actual Generic LLM HTTP with deterministic localhost responses",
+    "answerExecutionImplemented": true,
+    "mainIngressMigrated": false,
+    "modelAccuracyEvaluated": false,
+    "realPostgresVerified": false,
+    "fullWorkspaceTestsRerun": false
+  },
+  "limitations": [
+    "full server run preceded final scheduling/deadline/retry tests and deadline terminal handling; 118-test regression and build cover those increments",
+    "File-reload test and applying routingRevision increment were added after complete build/runtime run; final 10/24-test checks cover them",
+    "response has no workspace tools; read/test/source/artifact executors, Sessions migration and execution-producing corrections remain",
+    "real clients/DB/CLI, independent annotation, full scenario matrix and release gates remain incomplete",
+    "previous evidence stays historical; unrelated dirty work preserved"
+  ]
+}

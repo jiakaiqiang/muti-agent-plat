@@ -1,0 +1,31 @@
+{
+  "port": 56036,
+  "isolatedDataDirectory": "C:\\Users\\kaiqj\\AppData\\Local\\Temp\\intent-r7-smoke-J0237t",
+  "restartCommand": "npm run dev:restart-server (via node npm-cli.js)",
+  "before": {
+    "status": "ok",
+    "processId": 3392,
+    "runtimeBuildStale": false
+  },
+  "after": {
+    "status": "ok",
+    "processId": 102376,
+    "runtimeBuildStale": false
+  },
+  "invalidDecision": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "INPUT_BUDGET_DECISION_INVALID",
+        "message": "操作未完成，请查看运行日志中的原因（INPUT_BUDGET_DECISION_INVALID）。"
+      },
+      "requestId": "da45371a-a548-4791-8a04-2c006b8cd735"
+    }
+  },
+  "createdSessions": 0,
+  "runtimeInvocations": 0,
+  "realModelCalls": 0,
+  "environmentOverrides": "Child-only mock runtime; original .env untouched",
+  "processesStopped": true,
+  "isolatedDataRetained": true
+}

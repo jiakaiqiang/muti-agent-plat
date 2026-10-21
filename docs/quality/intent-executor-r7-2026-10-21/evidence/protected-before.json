@@ -1,0 +1,18 @@
+[
+  {
+    "Path": "apps/server/src/modules/message-routing/route-plan-compiler.service.ts",
+    "Hash": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9"
+  },
+  {
+    "Path": "apps/server/src/modules/runtime-routing/execution-scope-resolver.service.ts",
+    "Hash": "869d3c21614955dc8a8a35a5e3b88175b347e46dd41bd4b043685e3156da0678"
+  },
+  {
+    "Path": "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts",
+    "Hash": "8a6b149a525f39e2bc5fb094770e0e813f4bffdf75509d554bf3c892d901a8db"
+  },
+  {
+    "Path": ".env",
+    "Hash": "68b050920d078df96450665f4f44047be37470a809441424ad2e86ee1fbfe358"
+  }
+]

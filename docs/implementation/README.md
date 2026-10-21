@@ -2,6 +2,10 @@
 
 本目录存放面向执行的实施拆解文档。
 
+- [意图识别、路由与纠错 Task v1](intent-recognition-correction-task-v1.md)：SDD 执行清单，将原 IR00–IR13 拆为 56 个可验证步骤，实施状态以配套 Checklist 证据为准。
+
+- [意图识别与纠错开发任务 v1](intent-recognition-correction-development-v1.md)：14 个有依赖和完成条件的开发任务，覆盖安全修复、统一合同、版本纠错、验证与灰度；尚未实施。
+
 - `agent-team-implementation-breakdown-v1.md`：按 Agent Team 维度拆解系统实施任务。
 - `coordinator-controlled-routing-node1-development-v1.md`：Coordinator 中心流转第一节点的开发落地文档。
 - `context-pipeline-v2-only-agent-decoupling-development-v1.md`：v2 单轨、Agent 解耦、Tool Authority 与“活动数据零保留 + 外部加密只读归档”cutover 的分阶段开发实施文档。

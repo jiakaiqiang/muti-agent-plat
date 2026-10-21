@@ -71,3 +71,5 @@ junit.xml
 docs/quality/**/provider-*.json
 docs/quality/**/provider-*.jsonl
 docs/quality/**/transport-*.json
+docs/quality/**/results.json
+docs/quality/**/scored-results.json
