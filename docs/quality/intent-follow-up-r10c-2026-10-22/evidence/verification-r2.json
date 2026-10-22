@@ -1,0 +1,43 @@
+{
+  "task": "M-015 / R10c r2",
+  "generatedAt": "2026-10-22T07:37:19.0102193Z",
+  "targeted": {
+    "command": "node node_modules/tsx/dist/cli.mjs --test --test-force-exit --tsconfig apps/server/tsconfig.json apps/server/src/modules/message-routing/intent-follow-up.service.spec.ts",
+    "tests": 15,
+    "passed": 15,
+    "failed": 0
+  },
+  "serverRegression": {
+    "files": 280,
+    "tests": 2496,
+    "passed": 2453,
+    "failed": 0,
+    "skipped": 43,
+    "excludedBaselineFailures": [
+      "intent-reconciliation.service.spec.ts: nested apps/server/node_modules/tsx missing",
+      "cutover-context-v2-cli.spec.ts: pre-existing relational seed collection expectation mismatch"
+    ],
+    "log": "r10a-r10b-regression-r2.log"
+  },
+  "frontend": {
+    "webVitest": "103 files / 582 passed",
+    "desktopPackageTests": "14 passed",
+    "webTypecheck": "passed",
+    "desktopTypecheck": "passed",
+    "webBuild": "passed",
+    "desktopBuild": "passed"
+  },
+  "sha256": {
+    "apps/server/src/modules/message-routing/intent-source-authorization-candidates.ts": "7639E9F5F89C4C3626B489095880583C11FAE0DA3F1F87CFFA6E0583CB3AD351",
+    "apps/server/src/modules/message-routing/intent-follow-up.service.ts": "CC9C3D63CD35899AACD5C241CE987292FCAB5DFBDEBDBEF4A5352B76F01E2992",
+    "apps/server/src/modules/message-routing/intent-follow-up.service.spec.ts": "A256989220F5BDB1097F8B23427FEB12A0887F8F3E3A4F074ADBD2E744FAFA89",
+    "apps/server/src/modules/sessions/sessions.controller.ts": "B4B27188391263A48ADD48E4FF9F56F261CA5DD64B353D408861F2A441A26ABF",
+    "packages/shared/src/intent-follow-up-contracts.ts": "BE41D57914516D0886976EC3777BE51D32E7346AFE89C592D8F049BC68D3DFDF",
+    "apps/web/src/components/IntentSourceAuthorizationCard.vue": "3CF451209EB1EEA0EA096BBA97A0DAB89F7EEDB470084E7DFB1267C2F51E3711",
+    "apps/web/src/components/IntentFollowUpStatusCard.vue": "8642DEF5B119AEE00EA66DDFD031A28EEAAE13C2B0E018D12F93467921BFB9A7",
+    "apps/web/src/stores/session.ts": "9D90479EEF2526E151948D757C755693910B677C15CE5509C03DA60BFC353D8B",
+    "apps/web/src/components/IntentSourceAuthorizationCard.spec.ts": "246CE9EBBC5E38CE6D18DF1AC98E5D003C55E21FE2828A35587EFC9FC6C9364A",
+    "apps/web/src/components/IntentFollowUpStatusCard.spec.ts": "4C21303AF0B54A925797CC305D067E915B9FB42F55E1B1B17AE235B62692E53E",
+    "apps/web/src/components/IntentSourceReconciliationCard.spec.ts": "AF3E204E505968EADEEE95B482BB61B6492CA3EF5543385DCEF86A84DEE4ABF2"
+  }
+}

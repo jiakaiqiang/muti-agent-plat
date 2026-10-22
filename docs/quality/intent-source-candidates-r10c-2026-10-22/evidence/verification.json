@@ -1,0 +1,36 @@
+{
+  "task": "M-014 A / R10c source candidate authorization",
+  "generatedAt": "2026-10-22T06:36:16.3532429Z",
+  "regression": {
+    "files": 32,
+    "tests": 782,
+    "passed": 780,
+    "failed": 0,
+    "skipped": 2,
+    "log": "evidence/r10a-r10b-regression.log"
+  },
+  "targeted": {
+    "file": "apps/server/src/modules/message-routing/intent-follow-up.service.spec.ts",
+    "tests": 12,
+    "passed": 12,
+    "failed": 0
+  },
+  "server": {
+    "typecheck": "passed",
+    "build": "passed"
+  },
+  "sha256": {
+    "packages/shared/src/intent-follow-up-contracts.ts": "60711EAA79BAA2731CE07C04D2580FD3CB9101AF30BEFF0E3872559E020A22F6",
+    "apps/server/src/modules/message-routing/intent-source-authorization-candidates.ts": "FD29BC7D397F93C3768E00BF1B26625CB727D6F379DC69496912C3278307C714",
+    "apps/server/src/modules/message-routing/intent-source-authorization.service.ts": "C4EEC86496B012F05E9EE75C1872FAF51B17DD2163470CEA37A543F60B2D860C",
+    "apps/server/src/modules/sessions/sessions.controller.ts": "31CB578395E20F2E5DE01A1D28C58971A4F32F2831A655D0AFAB8E834415C7EA",
+    "apps/server/src/modules/message-routing/intent-source-authority.ts": "8E60C0EF83494D402D2DC42519D4B839DB02B4B28972D8AB62457F5B971AD7AA",
+    "apps/server/src/modules/message-routing/intent-source.test-support.ts": "C86C49C00FDCB3FEE4C0490C7DB3AFEAD41F4D78E4F47E44AEB7D1330E9F76B8",
+    "apps/server/src/modules/message-routing/intent-follow-up.service.spec.ts": "E6EED81E2F55060B33CD760EB9CF4A9D74B2CA573A176A2D87838A51BD59A80B",
+    "apps/server/src/modules/agent-profile/agent-profile-compiler.service.ts": "DD8D94EBFA0BC009463F0F283B0DBE054F1FA829C6B65C73EE614AC2BE12DDC1",
+    "apps/server/src/modules/runtime-routing/execution-scope-resolver.service.ts": "869D3C21614955DC8A8A35A5E3B88175B347E46DD41BD4B043685E3156DA0678",
+    "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts": "8A6B149A525F39E2BC5FB094770E0E813F4BFFDF75509D554BF3C892D901A8DB",
+    "packages/shared/src/intent-runtime-policy.ts": "ABDB42DDBE306EDDFDB96974A055292CAD62A9429E7168E532194C8A8928EEA8",
+    ".env": "68B050920D078DF96450665F4F44047BE37470A809441424AD2E86EE1FBFE358"
+  }
+}

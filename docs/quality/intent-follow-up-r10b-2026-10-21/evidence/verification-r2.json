@@ -1,0 +1,388 @@
+{
+  "schemaVersion": "r2",
+  "round": "M-012 / R10b-r2",
+  "capturedAt": "2026-10-22T02:15:08.1298739Z",
+  "sourceHashes": [
+    {
+      "path": "apps/server/src/modules/message-routing/intent-follow-up.service.ts",
+      "before": null,
+      "sha256": "05781cccc85fd7c538767b7370afe8b1bdd93416196a0e71ec73ca0e0e097548"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-follow-up.service.spec.ts",
+      "before": null,
+      "sha256": "4f03d746f252b0da148638e26229feacd8b10f4045136f83e09f7bac19366bbc"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-source-authorization.service.ts",
+      "before": null,
+      "sha256": "b38659e043f5c33ba734f9b8db45fb2bde6ddd91daae652251bf551ac5ccdeca"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-source-reconciliation.service.ts",
+      "before": null,
+      "sha256": "acf82662566b459d467b4581af62592736010e6fd9df5fe646f9b212cabee615"
+    },
+    {
+      "path": "packages/shared/src/intent-follow-up-contracts.ts",
+      "before": null,
+      "sha256": "092100b095b6cf67fa163dfa04a560f8b019184aaf0e132ec5bb3a639d75f2eb"
+    }
+  ],
+  "distHashes": [
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-follow-up.service.js",
+      "sha256": "a7a568c41dc68e37307c3b496c45eedadd148d18dd79333a06d65219cb0f04e4"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-follow-up.service.spec.js",
+      "sha256": "a65a88344bc17637c2d407c05dd278654b94c211ac11a0c7f059239049b9820f"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-source-authorization.service.js",
+      "sha256": "73eda15fb191548fb866e37f31961413d963dd5025cb14810256c4a8e952937d"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-source-reconciliation.service.js",
+      "sha256": "e3f1d93c1913532b2b069596be2d936bef8b41073f52081ec0b01601578b0504"
+    },
+    {
+      "path": "packages/shared/dist/intent-follow-up-contracts.js",
+      "sha256": "ac32501830b06e74195f7972416e509305d8e2ae1225300ff9f292ae3c62f627"
+    }
+  ],
+  "protectedHashes": [
+    {
+      "path": ".env",
+      "before": "68b050920d078df96450665f4f44047be37470a809441424ad2e86ee1fbfe358",
+      "sha256": "68b050920d078df96450665f4f44047be37470a809441424ad2e86ee1fbfe358",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/route-plan-compiler.service.ts",
+      "before": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+      "sha256": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/runtime-routing/execution-scope-resolver.service.ts",
+      "before": "869d3c21614955dc8a8a35a5e3b88175b347e46dd41bd4b043685e3156da0678",
+      "sha256": "869d3c21614955dc8a8a35a5e3b88175b347e46dd41bd4b043685e3156da0678",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts",
+      "before": "8a6b149a525f39e2bc5fb094770e0e813f4bffdf75509d554bf3c892d901a8db",
+      "sha256": "8a6b149a525f39e2bc5fb094770e0e813f4bffdf75509d554bf3c892d901a8db",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-plan-commit.service.ts",
+      "before": "41078c830b6580e27cf2027be08d850621256a9a29e08ee2ff4eb3f96f8e068a",
+      "sha256": "8a6b8ca653b9b871be09449c7a04f84b2efb987e7c7f690848f538252b5e1918",
+      "unchanged": false,
+      "preexistingFromM011": true,
+      "note": "相对 R10a 基线已由 M011 改动，本轮未改；不作为 M012 受保护文件判断。"
+    },
+    {
+      "path": "apps/server/src/modules/orchestrator/orchestrator.service.ts",
+      "before": "08f9c92d25024282a0ae3f090f30939c6dccc5a2091a68cbcf9525ef18ac54c2",
+      "sha256": "08f9c92d25024282a0ae3f090f30939c6dccc5a2091a68cbcf9525ef18ac54c2",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/sessions/sessions.module.ts",
+      "before": "80b08d11b27b9e7b9aafef467211f2aa6c1b17f2deab500ed1e5aa5cf9c0d051",
+      "sha256": "506ac38d1e98b0d9c92bf8280f054dd68e0ed114ae6244c17176b4f70775619a",
+      "unchanged": false,
+      "preexistingFromM011": true,
+      "note": "相对 R10a 基线已由 M011 改动，本轮未改；不作为 M012 受保护文件判断。"
+    }
+  ],
+  "intentRuntimePolicy": {
+    "before": "abdb42ddbe306eddfdb96974a055292cad62a9429e7168e532194c8a8928eea8",
+    "after": "abdb42ddbe306eddfdb96974a055292cad62a9429e7168e532194c8a8928eea8",
+    "unchanged": true,
+    "change": "本轮未修改"
+  },
+  "regression": {
+    "r10aBaseline": {
+      "files": 30,
+      "tests": 769,
+      "pass": 768,
+      "fail": 0,
+      "skipped": 1
+    },
+    "r2": {
+      "files": 32,
+      "tests": 776.0,
+      "pass": 774.0,
+      "fail": 0.0,
+      "skipped": 2.0,
+      "exitZero": true
+    },
+    "files": [
+      {
+        "file": "apps/server/src/modules/message-routing/intent-source-authority.spec.ts",
+        "tests": 12,
+        "pass": 12,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/message-routing/intent-source-candidate.spec.ts",
+        "tests": 33,
+        "pass": 33,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/message-routing/intent-reconciliation.service.spec.ts",
+        "tests": 38,
+        "pass": 38,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/message-routing/intent-plan-commit.service.spec.ts",
+        "tests": 31,
+        "pass": 31,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/message-routing/intent-resume-guard.spec.ts",
+        "tests": 40,
+        "pass": 40,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/message-routing/intent-retry-guard.spec.ts",
+        "tests": 45,
+        "pass": 45,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/message-routing/intent-message-pipeline.service.spec.ts",
+        "tests": 25,
+        "pass": 25,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/runtime-routing/invocation-resolver.service.spec.ts",
+        "tests": 38,
+        "pass": 38,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/runtimes/generic-llm-source-candidate.spec.ts",
+        "tests": 9,
+        "pass": 9,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/runtimes/generic-llm-runtime.service.spec.ts",
+        "tests": 40,
+        "pass": 40,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/runtimes/runtime.service.spec.ts",
+        "tests": 82,
+        "pass": 82,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/runtimes/generic-llm-input-budget.spec.ts",
+        "tests": 3,
+        "pass": 3,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/runtimes/input-budget-store.spec.ts",
+        "tests": 3,
+        "pass": 3,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/runtimes/input-budget-tool-rerun.spec.ts",
+        "tests": 1,
+        "pass": 1,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/runtimes/generic-llm-tool-loop-budget.spec.ts",
+        "tests": 4,
+        "pass": 4,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/orchestrator/intent-retry-task.spec.ts",
+        "tests": 4,
+        "pass": 4,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/orchestrator/orchestrator.service.spec.ts",
+        "tests": 93,
+        "pass": 93,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/sessions/sessions.service.spec.ts",
+        "tests": 163,
+        "pass": 163,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/workflows/workflow-runtime.service.spec.ts",
+        "tests": 36,
+        "pass": 36,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/execution/execution.service.spec.ts",
+        "tests": 7,
+        "pass": 7,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/queue/execution.worker.spec.ts",
+        "tests": 2,
+        "pass": 2,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/workspaces/intent-source-write-guard.spec.ts",
+        "tests": 15,
+        "pass": 14,
+        "fail": 0,
+        "skipped": 1,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/workspaces/workspace-source-apply.spec.ts",
+        "tests": 5,
+        "pass": 5,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/workspaces/workspace-source-writeback.spec.ts",
+        "tests": 7,
+        "pass": 7,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/workspaces/workspace-writeback-intent.spec.ts",
+        "tests": 4,
+        "pass": 4,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/workspaces/workspace-writeback.service.spec.ts",
+        "tests": 16,
+        "pass": 16,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/workspaces/workspace-apply-change-set.spec.ts",
+        "tests": 8,
+        "pass": 8,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/workspaces/workspace-apply-change-set-concurrency.spec.ts",
+        "tests": 1,
+        "pass": 1,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/workspaces/server-local-workspace-provider.spec.ts",
+        "tests": 1,
+        "pass": 1,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "packages/shared/src/intent-source-runtime.spec.ts",
+        "tests": 3,
+        "pass": 3,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/message-routing/intent-follow-up.service.spec.ts",
+        "tests": 6,
+        "pass": 6,
+        "fail": 0,
+        "skipped": 0,
+        "exitCode": 0
+      },
+      {
+        "file": "apps/server/src/modules/persistence/relational/intent-reconciliation.integration.spec.ts",
+        "tests": 1,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 1,
+        "exitCode": 0
+      }
+    ]
+  },
+  "fullChain": {
+    "path": "evidence/full-chain-smoke-r2.json",
+    "realModelCalls": 0,
+    "gitTemporaryRepository": true
+  }
+}

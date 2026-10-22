@@ -1,0 +1,450 @@
+{
+  "capturedAt": "2026-10-21T10:46:06.834Z",
+  "baselineCreatedAt": "2026-10-21T10:17:44.409Z",
+  "baselineFileCount": 2973,
+  "sourceFileCount": 34,
+  "sourceHashes": [
+    {
+      "path": "apps/server/src/modules/message-routing/intent-execution-guard.ts",
+      "before": "8d128cca0d12babaee6719d6cffb9d67ab0ef694a439f83f7ec35c7fd0a3831c",
+      "sha256": "77b849917da4cbd7db7ccbc69940bbeb5ffcbb10b306abb66f2f3bf7e2d389e1"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-source-authority.spec.ts",
+      "before": null,
+      "sha256": "ec736b5f41e09dbff356e2a701ac13ef047f76b2cbf10731ed8d49a01267cbfe"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-source-authority.ts",
+      "before": null,
+      "sha256": "7be165af087f19a23260f1c635cae793c1971beffcc54e8337f470de6eebf3e8"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-source-candidate.service.ts",
+      "before": null,
+      "sha256": "757013ee802295065289d1fa8e658fe31f261630be03eee942bb558ae65d3e44"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-source-candidate.spec.ts",
+      "before": null,
+      "sha256": "36cb707bfaa42ade1f1cd5041dd0a75da8ae8973a99922f2e4a0b0d127d0df24"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-source.test-support.ts",
+      "before": null,
+      "sha256": "a1451f5801ae3638728c3a84b8812e364addc27bd11111b03fb5c1792dd0b68f"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-test-authority.ts",
+      "before": "7f9fcbbb7d443dbd31c5d0554c089ca77d86b0af461876f64b631ae4f55c3426",
+      "sha256": "3ccd98dbb2e32d950d34628620d1f537bc4227feec3f7e58f92269307fb6c7ee"
+    },
+    {
+      "path": "apps/server/src/modules/persistence/intent-record-invariants.ts",
+      "before": "83bd6e3361452a65eafa6151b30937c78a1fa8bfeb31e454252f4edec7822392",
+      "sha256": "6a332ab9d9c263b60f261e221869dc8d5d7b54f26ca97dc6d903b6d9905464e7"
+    },
+    {
+      "path": "apps/server/src/modules/persistence/intent-source-state-invariants.ts",
+      "before": null,
+      "sha256": "e381694a0f113ac95e8cae7318c6d734295ac9ffb73fe977bf44cd92073ed2cd"
+    },
+    {
+      "path": "apps/server/src/modules/runtime-routing/invocation-resolver.service.spec.ts",
+      "before": "eb470be5952f34bfb5798ffdafbf9e319c190337b3cb3f9b8a586c706ebe2711",
+      "sha256": "c8c2f3e067d0bee16752e1cd45ec22b3794ea2ba1768271d839fa3e18926f749"
+    },
+    {
+      "path": "apps/server/src/modules/runtime-routing/invocation-resolver.service.ts",
+      "before": "7f92e7d5f270921766bae0b3f160af69ecab25512ae17d68333a6801bcb8eddc",
+      "sha256": "464af53cb22cf6df6eeb367b91374eb941dd23672cad3c9a2526d17c1137afb9"
+    },
+    {
+      "path": "apps/server/src/modules/runtimes/generic-llm-runtime.service.ts",
+      "before": "3a73857ce3bb45fc03ff8c5600d4983533e912711596579459365cac7ed5a807",
+      "sha256": "4854486613be762bb3bc43db631cd56ce9f6e99e8501fcffc923b7c5ab9ad2bb"
+    },
+    {
+      "path": "apps/server/src/modules/runtimes/generic-llm-source-candidate.spec.ts",
+      "before": null,
+      "sha256": "0680c9a76317745d6838a515b086350a01bc7412f837a44e1a695605d7a8a51c"
+    },
+    {
+      "path": "apps/server/src/modules/runtimes/runtime.service.spec.ts",
+      "before": "8109742d78ce9d03271b9e41f0f36b78000e845061d3e6564b6241e19737a4bb",
+      "sha256": "aa488e20220096c89fcede99cea1855015c8bd69dab164a9c1467575cc34ea6a"
+    },
+    {
+      "path": "apps/server/src/modules/runtimes/runtime.service.ts",
+      "before": "7ead6e731c7259f5717880cb2a61aefba8fda1112cf2c96d9d32eb34948d3bed",
+      "sha256": "9cf52a7902b30054ca7ac3720d21ed3fc955a423c95394a9c527b5eb1c201394"
+    },
+    {
+      "path": "apps/server/src/modules/workspaces/intent-source-write-guard.spec.ts",
+      "before": null,
+      "sha256": "106e7aa5fdea7b825c09d6d6fac744db0ffce331b07c061b52b7ca19f8710f58"
+    },
+    {
+      "path": "apps/server/src/modules/workspaces/intent-source-write-guard.ts",
+      "before": null,
+      "sha256": "e177de48ba4a51a8ebdaae31fe4da62c254d5ccc0911027b6164343c5e4ae1d0"
+    },
+    {
+      "path": "apps/server/src/modules/workspaces/server-local-workspace-provider.ts",
+      "before": "08b9d02a6dfc5db6c66f07b03dce6f082c29044011b1f62ac44c58116500ff7e",
+      "sha256": "4951216ac8c65fe76dbe580018f420293b0dd1fba6d599a13444cb9c37b90bba"
+    },
+    {
+      "path": "apps/server/src/modules/workspaces/workspace-apply-change-set.ts",
+      "before": "9a9ff769276db468f296187fa79835d1a49c1bec30676772cbde56d3a3f5dc16",
+      "sha256": "8aae28d24d23700ffaa10b0f6e70e7b468d018ccea6541499b4fe8e43bb7aaf6"
+    },
+    {
+      "path": "apps/server/src/modules/workspaces/workspace-provider.ts",
+      "before": "7dacacc23829fff215950894e284a64b3e0e6ae4a40f2ff200fea07eeaa4a089",
+      "sha256": "65b04c0f54bb58cec1aaad23195ce45aa749bb985bdcdf755d0660e3f70c4f55"
+    },
+    {
+      "path": "apps/server/src/modules/workspaces/workspace-source-apply.spec.ts",
+      "before": null,
+      "sha256": "bdab7db414f0031f561eaa2083ab725f5b60e38012f025dc1085cf79e521bc44"
+    },
+    {
+      "path": "apps/server/src/modules/workspaces/workspace-source-writeback.spec.ts",
+      "before": null,
+      "sha256": "8ae279eee84f0de22621c22dffa339426e3a0f966c49d2d7d258a5c74f13e27a"
+    },
+    {
+      "path": "apps/server/src/modules/workspaces/workspace-writeback.service.ts",
+      "before": "73763f668b64551a936f54526ce889a34533228abee4ddc23bce2198f8bb87db",
+      "sha256": "7e8d9c634523048609bb4183ea1bccc257278b5bd6c3de70405eff18dd188ef4"
+    },
+    {
+      "path": "packages/shared/src/contracts.ts",
+      "before": "06b9d6cee310f5dbfb7fca74837cd83ff81aa6dbfb3da71e8de8f760fcb77416",
+      "sha256": "8357cd90fa3df5b0a9512413499a8ac7d419ff2126e8a39fcf29f7a9193a80d2"
+    },
+    {
+      "path": "packages/shared/src/index.ts",
+      "before": "b1ace5ca1b0c46131cc523b25089eb5676ceb304c0ab6bc2bcc07c4c86b87fed",
+      "sha256": "8fd74281c1586301285812473dc1e669433c8a449938cabe99290855c937ed00"
+    },
+    {
+      "path": "packages/shared/src/intent-runtime-policy.ts",
+      "before": "d70d8257756cd9e87c034992b7a7959d54a2c2298b5082e16263d41827347be3",
+      "sha256": "abdb42ddbe306eddfdb96974a055292cad62a9429e7168e532194c8a8928eea8"
+    },
+    {
+      "path": "packages/shared/src/intent-source-authority-contracts.ts",
+      "before": null,
+      "sha256": "e6bcc2211f4842412bfe35cc6a69c391378ea52168867dfa184c1da884d3167c"
+    },
+    {
+      "path": "packages/shared/src/intent-source-contracts.ts",
+      "before": null,
+      "sha256": "fc8dc898afa0b3c8fccb73c657dfc4edf5b7a6b74d657cdfce9420aeb1e9ca0f"
+    },
+    {
+      "path": "packages/shared/src/intent-source-runtime.spec.ts",
+      "before": null,
+      "sha256": "aced4598b5ed9925780c8ddad96b88790e1d8548b6cc7e20188cef3e729e03d8"
+    },
+    {
+      "path": "packages/shared/src/runtime-contracts/contract-types.ts",
+      "before": "7bb567535fc92333a7b56b4be5b8a327fbcb235230a8a399553085e99f30053b",
+      "sha256": "aa4a436747b8ae785896bfcdfc4c094fbcee49767793b73a0faf50a73b50ac60"
+    },
+    {
+      "path": "packages/shared/src/runtime-contracts/index.ts",
+      "before": "db784e2262258038b112c8701bd8829cb3d9e095ce2a5e4846c60c177f3cb083",
+      "sha256": "378cbb9862b720c292f0cf63d9f578c36577745dce884ce31eca8eb59d401bca"
+    },
+    {
+      "path": "packages/shared/src/runtime-contracts/intent-source-candidate.ts",
+      "before": null,
+      "sha256": "6b2024cc4723dc340767389a1bb4b87979f76c77a9e86fb9342a21d1a99b4d57"
+    },
+    {
+      "path": "packages/shared/src/runtime-contracts/output-contracts.ts",
+      "before": "192d3d5d5251e0b17e303df3357bb80cfd37fb20cf00f4fdc17afd41ac0fdca8",
+      "sha256": "3bafbff3a7cf2ebee09acb04c79ef84c73477f07c745033f6ef082abdf6c0e68"
+    },
+    {
+      "path": "packages/shared/src/runtime-contracts/structured-output-instructions.ts",
+      "before": "c73e63da1d8da506158b5c9832f61891bfca13e7f7f45053a59b9b96b157c657",
+      "sha256": "a1103852caeb2d78a1834e1f5e14c11c7e0b914e4e327683df2b0529548c8b37"
+    }
+  ],
+  "serverDistHashes": [
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-execution-guard.js",
+      "sha256": "f33ba3a4c6aab4c9d8796832272a87ea565f09672d4a46f44f44bf4d3a911463"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-source-authority.spec.js",
+      "sha256": "2aa935017707393eec69684c6eddc0ea52f2410cbbb86b2fe0d6d4b6bc39ea88"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-source-authority.js",
+      "sha256": "bbd63b46b1f3f1d899edc48b62c70152dc565ac2ef8edcdebe50c0f68493cdbd"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-source-candidate.service.js",
+      "sha256": "23c219a034228a3d16b8f544839bc115803eb9bcc74453f3579f399823a59cab"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-source-candidate.spec.js",
+      "sha256": "55faae0789b9d79d28f327cb831e4255f92bfb08a9578ec3762758319b30fbaf"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-source.test-support.js",
+      "sha256": "d60f05fe72d4739677e6e2b635d9036660cbf0fbb6b7655321680d4df6dffe0e"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-test-authority.js",
+      "sha256": "5d688b928b35163170d3b290a97391c5bc3b39a92c40d1b550e63f2cb8fe0330"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/persistence/intent-record-invariants.js",
+      "sha256": "fa11eaeb8068b6573bf838e38744c720f1f277a5b45697a0639cb8e7509b03ad"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/persistence/intent-source-state-invariants.js",
+      "sha256": "101d904f80193a04ed2311de7bb2a0a49c91619b24e0be1e450c274926ffe70e"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/runtime-routing/invocation-resolver.service.spec.js",
+      "sha256": "69e086e93055f7a6741eb4556ae686983126d3129f29b8e2a15dc259e4d6e68f"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/runtime-routing/invocation-resolver.service.js",
+      "sha256": "97ae8752f802bcef6a382579d2b648a7aa3f9c363ffa1890b8d9b0c61e4f9365"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/runtimes/generic-llm-runtime.service.js",
+      "sha256": "6fe9eb3f7aee9a2b2312f5d539b6b86cc79b8c6f9979c21cc5ab16687fba7694"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/runtimes/generic-llm-source-candidate.spec.js",
+      "sha256": "f679c337d1c20c7cd8601a23e2fe6fb884feacc53bdcf396a00f05c6ec3f28a1"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/runtimes/runtime.service.spec.js",
+      "sha256": "6061e8d4a12c65751f1dac03fefeaf611f1f001bc9455fc076b31192558b754f"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/runtimes/runtime.service.js",
+      "sha256": "cb98c3aa9c62b2cedf15585867eafd6dc492107fa1b2672dc9f27d69261c7de0"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/workspaces/intent-source-write-guard.spec.js",
+      "sha256": "81ac5a96bbbe058744088bd21a2d5690e4758734f2fc22a280c7a1149259a2c8"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/workspaces/intent-source-write-guard.js",
+      "sha256": "0e872a55be7b8a00054f1af14010cf9410c2352ef7656a4f6d035394f04a4a6c"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/workspaces/server-local-workspace-provider.js",
+      "sha256": "d9e0a900a30466c04f8c3262a92d5cd7857f23d033d1c1e300e9fe2532d4b273"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/workspaces/workspace-apply-change-set.js",
+      "sha256": "470f874f27ce6e4b41e10bc5e7944453f746853333f9b7a03032620208a630e1"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/workspaces/workspace-provider.js",
+      "sha256": "a03abbcead20bc4ec262d1fef3a1dc826ec8bfb95551f011e38b1dae3aeb113e"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/workspaces/workspace-source-apply.spec.js",
+      "sha256": "7e51fda9984fc9f197218f044fa24689dc9ee19433511a966fbebbb848f9d07e"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/workspaces/workspace-source-writeback.spec.js",
+      "sha256": "f11aac1f985984ea14a38ea8e964f7bf20dbb96410a6349189f2d699e12822e3"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/workspaces/workspace-writeback.service.js",
+      "sha256": "edf98ab725b0981ab1d32bc795029561bd76ac0fb56fd1dbb64408c8603204da"
+    },
+    {
+      "path": "apps/server/dist/packages/shared/src/contracts.js",
+      "sha256": "e1d0de0207f957e6006a81f6bba92e808ebc0b8b641f024659f282803239a881"
+    },
+    {
+      "path": "apps/server/dist/packages/shared/src/index.js",
+      "sha256": "575e496c4edec5921fadfaa5f34082d3913e319b993a3b6e8fa9c4e4469c9862"
+    },
+    {
+      "path": "apps/server/dist/packages/shared/src/intent-runtime-policy.js",
+      "sha256": "443e023bbf7e905ecad1b8f535afe55a5b810b215cac7ac76f57d7f67f461f3f"
+    },
+    {
+      "path": "apps/server/dist/packages/shared/src/intent-source-authority-contracts.js",
+      "sha256": "8dbff2ffebcb862318439f31c8559993f75e0b9598a1885fd10e7dcf24b5ff23"
+    },
+    {
+      "path": "apps/server/dist/packages/shared/src/intent-source-contracts.js",
+      "sha256": "5606aa831dd0ea64193244ef78a58887a731549dae5d4c09b7362a0c43e83aa1"
+    },
+    {
+      "path": "apps/server/dist/packages/shared/src/runtime-contracts/contract-types.js",
+      "sha256": "c05760e9a3929f3d6f13def4af9c4e9223152bf512cb494c561332dc6beabb11"
+    },
+    {
+      "path": "apps/server/dist/packages/shared/src/runtime-contracts/index.js",
+      "sha256": "96df41e7f223cfc27eafb95b44a3e390117547e9c741806e8a45a95b38f86746"
+    },
+    {
+      "path": "apps/server/dist/packages/shared/src/runtime-contracts/intent-source-candidate.js",
+      "sha256": "359bf4089ae515bd60c309c753098420be890a49cf8917ba34cb214d2255dfc5"
+    },
+    {
+      "path": "apps/server/dist/packages/shared/src/runtime-contracts/output-contracts.js",
+      "sha256": "3e494f41dbe27b0882ab09c662a6dd318c2ef9b07c7f337538d0bd12226e0498"
+    },
+    {
+      "path": "apps/server/dist/packages/shared/src/runtime-contracts/structured-output-instructions.js",
+      "sha256": "65af61b2b7a320d7b8be3f40b765fa087a350811c55d5a5fd301b28abd0d3f96"
+    }
+  ],
+  "sharedDistHashes": [
+    {
+      "path": "packages/shared/dist/contracts.js",
+      "sha256": "e1d0de0207f957e6006a81f6bba92e808ebc0b8b641f024659f282803239a881"
+    },
+    {
+      "path": "packages/shared/dist/index.js",
+      "sha256": "575e496c4edec5921fadfaa5f34082d3913e319b993a3b6e8fa9c4e4469c9862"
+    },
+    {
+      "path": "packages/shared/dist/intent-runtime-policy.js",
+      "sha256": "443e023bbf7e905ecad1b8f535afe55a5b810b215cac7ac76f57d7f67f461f3f"
+    },
+    {
+      "path": "packages/shared/dist/intent-source-authority-contracts.js",
+      "sha256": "8dbff2ffebcb862318439f31c8559993f75e0b9598a1885fd10e7dcf24b5ff23"
+    },
+    {
+      "path": "packages/shared/dist/intent-source-contracts.js",
+      "sha256": "5606aa831dd0ea64193244ef78a58887a731549dae5d4c09b7362a0c43e83aa1"
+    },
+    {
+      "path": "packages/shared/dist/intent-source-runtime.spec.js",
+      "sha256": "07b7340b345c3d75e06714883f66b979a99e0c11e0d390b3bf95541133d23b69"
+    },
+    {
+      "path": "packages/shared/dist/runtime-contracts/contract-types.js",
+      "sha256": "c05760e9a3929f3d6f13def4af9c4e9223152bf512cb494c561332dc6beabb11"
+    },
+    {
+      "path": "packages/shared/dist/runtime-contracts/index.js",
+      "sha256": "96df41e7f223cfc27eafb95b44a3e390117547e9c741806e8a45a95b38f86746"
+    },
+    {
+      "path": "packages/shared/dist/runtime-contracts/intent-source-candidate.js",
+      "sha256": "359bf4089ae515bd60c309c753098420be890a49cf8917ba34cb214d2255dfc5"
+    },
+    {
+      "path": "packages/shared/dist/runtime-contracts/output-contracts.js",
+      "sha256": "3e494f41dbe27b0882ab09c662a6dd318c2ef9b07c7f337538d0bd12226e0498"
+    },
+    {
+      "path": "packages/shared/dist/runtime-contracts/structured-output-instructions.js",
+      "sha256": "65af61b2b7a320d7b8be3f40b765fa087a350811c55d5a5fd301b28abd0d3f96"
+    }
+  ],
+  "protectedHashes": [
+    {
+      "path": ".env",
+      "sha256": "68b050920d078df96450665f4f44047be37470a809441424ad2e86ee1fbfe358",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/route-plan-compiler.service.ts",
+      "sha256": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/runtime-routing/execution-scope-resolver.service.ts",
+      "sha256": "869d3c21614955dc8a8a35a5e3b88175b347e46dd41bd4b043685e3156da0678",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts",
+      "sha256": "8a6b149a525f39e2bc5fb094770e0e813f4bffdf75509d554bf3c892d901a8db",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-plan-commit.service.ts",
+      "sha256": "41078c830b6580e27cf2027be08d850621256a9a29e08ee2ff4eb3f96f8e068a",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/orchestrator/orchestrator.service.ts",
+      "sha256": "08f9c92d25024282a0ae3f090f30939c6dccc5a2091a68cbcf9525ef18ac54c2",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/sessions/sessions.module.ts",
+      "sha256": "80b08d11b27b9e7b9aafef467211f2aa6c1b17f2deab500ed1e5aa5cf9c0d051",
+      "unchanged": true
+    }
+  ],
+  "aggregates": {
+    "source": "59879d10f7e6a062da34e4ff7e8f98d43c5524dcdfc98cd7ac0caa9738c27354",
+    "serverDist": "8d8b0f9da131b4b2eab0f14b46ea49f85cf1901256c273ec661148d2870e002b",
+    "sharedDist": "e144d52cd6687f90ed577f6bc4d4b68b30b85de94de63fcc239e658b3b81b807"
+  },
+  "unchangedClientFiles": 241,
+  "changedSourcePaths": [
+    "apps/server/src/modules/message-routing/intent-execution-guard.ts",
+    "apps/server/src/modules/message-routing/intent-source-authority.spec.ts",
+    "apps/server/src/modules/message-routing/intent-source-authority.ts",
+    "apps/server/src/modules/message-routing/intent-source-candidate.service.ts",
+    "apps/server/src/modules/message-routing/intent-source-candidate.spec.ts",
+    "apps/server/src/modules/message-routing/intent-source.test-support.ts",
+    "apps/server/src/modules/message-routing/intent-test-authority.ts",
+    "apps/server/src/modules/persistence/intent-record-invariants.ts",
+    "apps/server/src/modules/persistence/intent-source-state-invariants.ts",
+    "apps/server/src/modules/runtime-routing/invocation-resolver.service.spec.ts",
+    "apps/server/src/modules/runtime-routing/invocation-resolver.service.ts",
+    "apps/server/src/modules/runtimes/generic-llm-runtime.service.ts",
+    "apps/server/src/modules/runtimes/generic-llm-source-candidate.spec.ts",
+    "apps/server/src/modules/runtimes/runtime.service.spec.ts",
+    "apps/server/src/modules/runtimes/runtime.service.ts",
+    "apps/server/src/modules/workspaces/intent-source-write-guard.spec.ts",
+    "apps/server/src/modules/workspaces/intent-source-write-guard.ts",
+    "apps/server/src/modules/workspaces/server-local-workspace-provider.ts",
+    "apps/server/src/modules/workspaces/workspace-apply-change-set.ts",
+    "apps/server/src/modules/workspaces/workspace-provider.ts",
+    "apps/server/src/modules/workspaces/workspace-source-apply.spec.ts",
+    "apps/server/src/modules/workspaces/workspace-source-writeback.spec.ts",
+    "apps/server/src/modules/workspaces/workspace-writeback.service.ts",
+    "packages/shared/src/contracts.ts",
+    "packages/shared/src/index.ts",
+    "packages/shared/src/intent-runtime-policy.ts",
+    "packages/shared/src/intent-source-authority-contracts.ts",
+    "packages/shared/src/intent-source-contracts.ts",
+    "packages/shared/src/intent-source-runtime.spec.ts",
+    "packages/shared/src/runtime-contracts/contract-types.ts",
+    "packages/shared/src/runtime-contracts/index.ts",
+    "packages/shared/src/runtime-contracts/intent-source-candidate.ts",
+    "packages/shared/src/runtime-contracts/output-contracts.ts",
+    "packages/shared/src/runtime-contracts/structured-output-instructions.ts"
+  ],
+  "removedBaselinePaths": [],
+  "productionCandidateProviderRegistered": false,
+  "realModelCalls": 0,
+  "newDatabaseMigrations": 0,
+  "postgresLiveTestRun": false,
+  "spec": {
+    "files": 30,
+    "total": 769,
+    "pass": 768,
+    "fail": 0,
+    "skipped": 1,
+    "skipReason": "Windows file symlink creation EPERM; junction and ancestor-junction negatives passed"
+  }
+}

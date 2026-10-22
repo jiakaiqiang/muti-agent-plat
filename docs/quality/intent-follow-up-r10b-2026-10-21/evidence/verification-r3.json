@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "r3",
+  "round": "M-013 A / R10b-r3",
+  "capturedAt": "2026-10-22T03:49:19.4728057Z",
+  "targetedTests": {
+    "file": "apps/server/src/modules/message-routing/intent-follow-up.service.spec.ts",
+    "tests": 10,
+    "pass": 10,
+    "fail": 0,
+    "skipped": 0,
+    "exitCode": 0
+  },
+  "sourceHashes": [
+    {
+      "path": "apps/server/src/modules/message-routing/intent-follow-up.service.ts",
+      "sha256": "34854b22e12f227515d16656fb2270d15140fdb5e15143975c3e3913426090f4"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-follow-up.service.spec.ts",
+      "sha256": "38ed0af8863a3b6e26580fb38336e4b533b65fd879924e31ea6688b9cfe2a2cf"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-source-authority.ts",
+      "sha256": "bc110d7c25eb088bb3ca61bf732bbbfd55a6f0dd27d8b77e5cfacec1b53da7bb"
+    }
+  ],
+  "protectedPaths": [
+    "apps/server/src/modules/runtime-routing/execution-scope-resolver.service.ts",
+    "packages/shared/src/intent-runtime-policy.ts",
+    ".env"
+  ],
+  "bBlocked": true,
+  "bBlockReason": "服务端没有候选文件列表字段/接口，且批准接口仍接收客户端 paths；按 M-013 停止，不改前端拼路径。",
+  "regression": {
+    "files": 32,
+    "tests": 780,
+    "pass": 778,
+    "fail": 0,
+    "skipped": 2,
+    "exitCode": 0,
+    "log": "evidence/regression-r3.log"
+  }
+}

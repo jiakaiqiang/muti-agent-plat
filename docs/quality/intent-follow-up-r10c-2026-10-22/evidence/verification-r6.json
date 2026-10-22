@@ -1,0 +1,46 @@
+{
+  "task": "M-019",
+  "date": "2026-10-22",
+  "test": "M015 candidate search applies the query while traversing beyond 500 entries and reaches deep files",
+  "command": "node node_modules/tsx/dist/cli.mjs --tsconfig apps/server/tsconfig.json --test --test-force-exit --test-name-pattern \"M015 candidate search applies the query while traversing beyond 500 entries and reaches deep files\" apps/server/src/modules/message-routing/intent-follow-up.service.spec.ts",
+  "current_green_before_legacy": {
+    "exitCode": 0,
+    "pass": 1,
+    "fail": 0,
+    "skipped": 14
+  },
+  "legacy_discriminating_run": {
+    "description": "Temporary legacy behavior inserted a breadth-first regular-file cap at 500 before query filtering.",
+    "exitCode": 1,
+    "pass": 0,
+    "fail": 1,
+    "assertion": "actual []; expected [\"z1/z2/z3/z4/needle.ts\"]"
+  },
+  "current_green_after_restore": {
+    "exitCode": 0,
+    "pass": 1,
+    "fail": 0,
+    "skipped": 14
+  },
+  "hashes": {
+    "file": "apps/server/src/modules/message-routing/intent-source-authorization-candidates.ts",
+    "beforeTemporarySha256": "7639E9F5F89C4C3626B489095880583C11FAE0DA3F1F87CFFA6E0583CB3AD351",
+    "temporaryLegacySha256": "0757A9B0CB4DFD11B74B35BAC6D0A546C03320A0F19DA99654BD82EC0BCAE6C0",
+    "afterRestoreSha256": "7639E9F5F89C4C3626B489095880583C11FAE0DA3F1F87CFFA6E0583CB3AD351",
+    "restoredEqualsBefore": true,
+    "temporaryBackupRemoved": true
+  },
+  "serverStandardTest": {
+    "command": "npm run test -w @agent-cluster/server",
+    "exitCode": 0,
+    "unit": { "tests": 2545, "pass": 2502, "fail": 0, "skipped": 43 },
+    "dev": { "tests": 7, "pass": 7, "fail": 0, "skipped": 0 },
+    "log": ".tmp/m019-server-test.log"
+  },
+  "constraints": {
+    "realModel": false,
+    "commit": false,
+    "push": false,
+    "persistentProductChange": false
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "task": "M-014 B / R10c web desktop cards",
+  "generatedAt": "2026-10-22T06:37:17.3316375Z",
+  "tests": {
+    "webFiles": 103,
+    "webTests": 580,
+    "webPassed": 580,
+    "desktopPackageTests": 14,
+    "desktopPackagePassed": 14,
+    "targetedNewComponentTests": 3
+  },
+  "checks": {
+    "webTypecheck": "passed",
+    "desktopTypecheck": "passed",
+    "webBuild": "passed",
+    "desktopBuild": "passed"
+  },
+  "note": "FollowUp cancel route is not exposed by current server; UI reports 404 explicitly and no server change was made in B.",
+  "sha256": {
+    "apps/web/src/components/IntentSourceAuthorizationCard.vue": "57AFCF8858BB6AC7618E104C586508B4A923855AE4293C2423539C9104B7BF5E",
+    "apps/web/src/components/IntentSourceAuthorizationCard.spec.ts": "3861FA4DAF791636952173B66D5C5990EE8D7BFCBA68EBCEF5709C19041A50F4",
+    "apps/web/src/components/IntentFollowUpStatusCard.vue": "8F95C05F056754EDC30FD7BB9F416863FB3B5E4FFA4C0F9515685C161612E89E",
+    "apps/web/src/components/IntentFollowUpStatusCard.spec.ts": "83FA506701483F7ACD1A7B16D21D564FC2570F3C605F6C24A66A33113B374DC5",
+    "apps/web/src/components/IntentReconciliationCard.vue": "2C3DAC589F197DC191F3DFAD4164D9533915132BCB1E25196891F68D01373713",
+    "apps/web/src/components/IntentSourceReconciliationCard.spec.ts": "8F4CB4433CE337234B75D1E38611391378D2DDDAB7B1C5D2F107B4E57C23E047",
+    "apps/web/src/components/ConfirmationCard.vue": "FAA1F1D0D2092D2EBAECF6BC0946FEF446006FA9D1FC3D560E284615706E1E21",
+    "apps/web/src/stores/session.ts": "4EC1A7626AA5BEF4AA3DF59FA56D4AE0AF7579271142A29EBAC7EDDF2F5F2F7C",
+    "apps/web/src/stores/event.ts": "6612FE9525645D1FFE9A2FA7FEA7D7F5A4A5214E2A54B1361359FEC882E4CAC4",
+    "apps/web/src/types/contracts.ts": "F901DFFFD6F08658E04AD1C2011358A4051D6E3071DB9CEC6F63627FEBA559BB",
+    "apps/web/src/components/SessionWorkspace.vue": "5EEA9FA692EB0F1426F4A504C19503C2E56168E9CF2653C7470B597E4582B156",
+    "apps/desktop/renderer/components/ConfirmationCard.vue": "82267A22D02A3BFD6DE4C498AC197E8BB5CEAD91E03C08FB67D912722BB70396",
+    "apps/desktop/renderer/components/ChatTimeline.vue": "5741E8E480B34198E60A234E607C0FE955AC668BEEE8AD11D4B20BBE0850967D",
+    "apps/desktop/renderer/components/SessionWorkspace.vue": "0A1F7065E6488811666813E149DA29760A00B945ED606BC99FBA939D1C1252F5"
+  }
+}

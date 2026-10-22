@@ -1,0 +1,49 @@
+{
+  "task": "M-018 / R10c r5",
+  "generatedAt": "2026-10-22",
+  "scope": {
+    "modifiedFiles": [
+      "apps/server/src/modules/message-routing/intent-reconciliation.service.spec.ts",
+      "apps/server/src/modules/message-routing/intent-follow-up.service.spec.ts"
+    ],
+    "productCodeChanged": false,
+    "realModel": false,
+    "commit": false,
+    "push": false
+  },
+  "changes": {
+    "intentReconciliationSpec": {
+      "pathResolution": "createRequire(import.meta.url).resolve('tsx/cli')",
+      "tsconfigResolution": "module-relative apps/server/tsconfig.json",
+      "childImportResolution": "repository-root anchored file URLs",
+      "sha256": "E5228438121E57AB682FB57AFF10D3C8895E1757D036C9FFEE21B6A6571CB8D4"
+    },
+    "intentFollowUpSpec": {
+      "deepSearchScanBudget": {"maxMs": 10000, "maxEntries": "production default"},
+      "fixture": "610 ordinary files under a temporary .gitignore noise directory plus a depth-4 needle file",
+      "sha256": "8B58F4CEC44E2AD4655B5CBC9DCFF9AD5C483909D98D3671C99F19B844A72A1B"
+    }
+  },
+  "targetedRegression": {
+    "cutoverContextV2Cli": {"tests": 11, "passed": 11, "failed": 0},
+    "intentReconciliationR9": {"tests": 38, "passed": 38, "failed": 0},
+    "intentFollowUpR10aToR10c": {"tests": 15, "passed": 15, "failed": 0},
+    "combined": {"tests": 64, "passed": 64, "failed": 0}
+  },
+  "standardServerTestRuns": [
+    {
+      "command": "npm run test -w @agent-cluster/server",
+      "unit": {"tests": 2545, "passed": 2502, "failed": 0, "skipped": 43},
+      "dev": {"tests": 7, "passed": 7, "failed": 0, "skipped": 0},
+      "exitCode": 0,
+      "log": ".tmp/m018-final-1.log"
+    },
+    {
+      "command": "npm run test -w @agent-cluster/server",
+      "unit": {"tests": 2545, "passed": 2502, "failed": 0, "skipped": 43},
+      "dev": {"tests": 7, "passed": 7, "failed": 0, "skipped": 0},
+      "exitCode": 0,
+      "log": ".tmp/m018-final-2.log"
+    }
+  ]
+}

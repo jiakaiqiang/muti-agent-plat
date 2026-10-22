@@ -1,0 +1,53 @@
+{
+  "task": "M-016 / R10c r3",
+  "generatedAt": "2026-10-22",
+  "r9Reconciliation": {
+    "command": "node node_modules/tsx/dist/cli.mjs --tsconfig apps/server/tsconfig.json --test apps/server/src/modules/message-routing/intent-reconciliation.service.spec.ts",
+    "tests": 38,
+    "passed": 38,
+    "failed": 0,
+    "log": "r9-reconciliation-r3.log"
+  },
+  "baselineCutover": {
+    "commit": "5ded526",
+    "command": "node node_modules/tsx/dist/cli.mjs --tsconfig apps/server/tsconfig.json --test apps/server/src/modules/persistence/cutover-context-v2-cli.spec.ts",
+    "tests": 11,
+    "passed": 11,
+    "failed": 0,
+    "result": "baseline does not reproduce the current relational seed mismatch"
+  },
+  "sourceAuthorizationTests": {
+    "command": "npm run test -w @project/web -- src/components/IntentSourceAuthorizationCard.spec.ts --run",
+    "tests": 4,
+    "passed": 4,
+    "failed": 0,
+    "added": [
+      "restores the server-backed decision and selection after remount",
+      "submits only once when approval is clicked repeatedly while the first request is pending"
+    ]
+  },
+  "frontend": {
+    "webVitest": "103 files / 584 passed",
+    "desktopPackageTests": "14 passed",
+    "webVueTypecheck": "passed",
+    "desktopRendererVueTypecheck": "passed",
+    "desktopTypecheck": "passed"
+  },
+  "desktopReuse": {
+    "result": "desktop reuses web components; covered by web tests",
+    "alias": "apps/desktop/vite.renderer.config.mjs: alias @ -> apps/web/src",
+    "imports": [
+      "apps/desktop/renderer/components/ConfirmationCard.vue -> @/components/IntentSourceAuthorizationCard.vue",
+      "apps/desktop/renderer/components/ConfirmationCard.vue -> @/components/IntentFollowUpStatusCard.vue",
+      "apps/desktop/renderer/components/ConfirmationCard.vue -> @/components/IntentReconciliationCard.vue"
+    ]
+  },
+  "sha256": {
+    "apps/web/src/components/IntentSourceAuthorizationCard.spec.ts": "544E8E363E3012B1A012DA84E749073AD3422ED1B30DB5D0556123C09A5F9A2E",
+    "apps/web/src/components/IntentSourceAuthorizationCard.vue": "3CF451209EB1EEA0EA096BBA97A0DAB89F7EEDB470084E7DFB1267C2F51E3711",
+    "apps/desktop/renderer/components/ConfirmationCard.vue": "82267A22D02A3BFD6DE4C498AC197E8BB5CEAD91E03C08FB67D912722BB70396",
+    "apps/desktop/vite.renderer.config.mjs": "7BE6ED473C36C2F87B87816E157C153DB454D288A25853B978744A92C28C7973",
+    "apps/desktop/renderer/tsconfig.json": "28B3BE660F7FAC592C1F5E4FB84733F3DC4B3F88B52FC8C3457FBBBFE2FAB21C",
+    "docs/quality/intent-follow-up-r10c-2026-10-22/evidence/r9-reconciliation-r3.log": "6A8C4DC73D9A9F6501893495805783F4FE7B9AA799191639D04B946A26985C40"
+  }
+}

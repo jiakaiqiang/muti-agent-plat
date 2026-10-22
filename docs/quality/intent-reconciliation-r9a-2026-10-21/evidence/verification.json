@@ -1,0 +1,411 @@
+{
+  "capturedAt": "2026-10-21T08:41:03.462Z",
+  "task": "M-007 / R9a",
+  "baseCommit": "5ded5262d39b20a0d4c2dfe3cd8a5457faa1b4c2",
+  "sourceAggregateSha256": "fa4cec7e7aad632e562c2aa9549e134cee4f6b2681be77c091929e50165ab70b",
+  "distAggregateSha256": "cd57003ac4ada54b2e3737b673b27117aa86b49e3e78a2c12676a9be3e1aa5d0",
+  "sources": [
+    {
+      "path": "apps/server/src/modules/execution/execution.service.ts",
+      "sha256": "9b4c8fb4b2bcfb66bba991e5d41123be8badd10d47f42b2fc1ea22cbc57c0f35"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-execution-guard.ts",
+      "sha256": "8d128cca0d12babaee6719d6cffb9d67ab0ef694a439f83f7ec35c7fd0a3831c"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-reconciliation-evidence.ts",
+      "sha256": "d79e730a9b8a0cd0e1f71817906dce193171f5e7882dedb86f9a3e3a2ef670ac"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-reconciliation-state.ts",
+      "sha256": "c5f0eab7a5c5eacc998a9cf6a9ab3bd020769cd5650bc1f479fad4ea90ee2f9c"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-reconciliation.service.spec.ts",
+      "sha256": "f60545f7cc60338212db6b27e091ca002d54ee2858f4ec95209a1a6249c16fbb"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-reconciliation.service.ts",
+      "sha256": "bb09046fa3e1c76ee2c81b54ddb6a81da1ed4bc19b5c224ac59460a03c2fc90d"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-resume-control.service.ts",
+      "sha256": "51c8be8595fc64530df1075b9dbea4572c437295ccc66520bd8cca231a7999fb"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-resume-guard.ts",
+      "sha256": "f9e0a3b98d35ac759dc207cc6f84e4ee6dc5be6044923007d1a7ec23005c4383"
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-retry-guard.ts",
+      "sha256": "c88715eee12344b39e8b6cc0d80679048dcb20ad870d26a6da60666ce55f43ac"
+    },
+    {
+      "path": "apps/server/src/modules/orchestrator/orchestrator.service.ts",
+      "sha256": "08f9c92d25024282a0ae3f090f30939c6dccc5a2091a68cbcf9525ef18ac54c2"
+    },
+    {
+      "path": "apps/server/src/modules/persistence/intent-record-invariants.ts",
+      "sha256": "83bd6e3361452a65eafa6151b30937c78a1fa8bfeb31e454252f4edec7822392"
+    },
+    {
+      "path": "apps/server/src/modules/persistence/relational/intent-reconciliation.integration.spec.ts",
+      "sha256": "07c81803eccc66b3aceb0a6e7165844f139eb6693cd9b3ef66f98b27649f42d1"
+    },
+    {
+      "path": "apps/server/src/modules/persistence/relational/postgres-migration-runner.ts",
+      "sha256": "a710f4c028d8ef8be9df39a9fdffd7ba504300fa0d12e345756cdef35d82a2d6"
+    },
+    {
+      "path": "apps/server/src/modules/persistence/relational/relational-schema.spec.ts",
+      "sha256": "cfaa7e7a1c6ee39b573e8380a9d7556abbc069f6fd6263132a724c01b9a8bd81"
+    },
+    {
+      "path": "apps/server/src/modules/persistence/relational/relational-schema.ts",
+      "sha256": "cbbc356f716bd7a29f7ee0b3cc182ee2cb58dc260513cbd453cd44388136f69e"
+    },
+    {
+      "path": "apps/server/src/modules/queue/execution.worker.ts",
+      "sha256": "6874785cc0e680dac471d08b214aad69ebe47e8440bebbb021b092b0f5d9cdae"
+    },
+    {
+      "path": "apps/server/src/modules/runtimes/logical-operation-store.ts",
+      "sha256": "874ccef25e7a300d9727371e280b0778feedb67d22813a0cc806439b8b4fdb9d"
+    },
+    {
+      "path": "apps/server/src/modules/runtimes/runtime.service.spec.ts",
+      "sha256": "8109742d78ce9d03271b9e41f0f36b78000e845061d3e6564b6241e19737a4bb"
+    },
+    {
+      "path": "apps/server/src/modules/runtimes/runtime.service.ts",
+      "sha256": "7ead6e731c7259f5717880cb2a61aefba8fda1112cf2c96d9d32eb34948d3bed"
+    },
+    {
+      "path": "apps/server/src/modules/sessions/sessions.controller.ts",
+      "sha256": "468720772585bee544fe1968cdc25685953182806e089e1f07e51640ba807271"
+    },
+    {
+      "path": "apps/server/src/modules/sessions/sessions.module.ts",
+      "sha256": "80b08d11b27b9e7b9aafef467211f2aa6c1b17f2deab500ed1e5aa5cf9c0d051"
+    },
+    {
+      "path": "apps/server/src/modules/sessions/sessions.service.ts",
+      "sha256": "d28826adcb52b4ed3a517f5ed9d43b40cebe6fbb89c2cf88443146e792a9c704"
+    },
+    {
+      "path": "apps/server/src/modules/tasks/tasks.service.ts",
+      "sha256": "444455e9fd9cc7a910782152951ae05b945ffe8524b2de752c7d6efa42da792a"
+    },
+    {
+      "path": "apps/server/src/modules/workflows/workflow-runtime.service.ts",
+      "sha256": "25f68ddd1d5d50950bc4a8e77979c3f5969813bb4e43ae5875a2a6d20823bcdf"
+    },
+    {
+      "path": "packages/shared/src/contracts.ts",
+      "sha256": "06b9d6cee310f5dbfb7fca74837cd83ff81aa6dbfb3da71e8de8f760fcb77416"
+    },
+    {
+      "path": "packages/shared/src/index.ts",
+      "sha256": "b1ace5ca1b0c46131cc523b25089eb5676ceb304c0ab6bc2bcc07c4c86b87fed"
+    },
+    {
+      "path": "packages/shared/src/intent-correction-contracts.ts",
+      "sha256": "85b7b4176c108563c967bb09fcd0153a515bcb848902dccb436827addfcbaeca"
+    },
+    {
+      "path": "packages/shared/src/intent-reconciliation-contracts.ts",
+      "sha256": "9cb95dd6c026ec83742e56224053421d6244fd43df71b7431c46fe2b244a4b79"
+    }
+  ],
+  "dist": [
+    {
+      "path": "apps/server/dist/apps/server/src/modules/execution/execution.service.js",
+      "sha256": "a5607884257550da62171b13a43442cad0dd9f35eb5975ed6afe97dc283581d5"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-execution-guard.js",
+      "sha256": "2b4a769f177f314efab89e2ca43f37397437ef333f840a817cbf9c820a4e3e4d"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-reconciliation-evidence.js",
+      "sha256": "7dec4ef1f27ada281f75829e67bdb75fadb32da5c940a0136fb96c620f4a8fd5"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-reconciliation-state.js",
+      "sha256": "e4206cd234e82dc7e97fbbd829b94750b9b4ccd61fbde8c34a401e9aa0b89286"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-reconciliation.service.spec.js",
+      "sha256": "179e323ca08a30150e4c5fe04713f65542d5db2d76feef1bc73d4aaf16f1c6b7"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-reconciliation.service.js",
+      "sha256": "ea0fb9f58643595682bc45ded2fd1c3e3c12f1815f25299e7de1f733a2dc4816"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-resume-control.service.js",
+      "sha256": "470fbf0556dc2894f96dc6ed64625ed9bf8e06a316f854abe3abb9ca62f5abbd"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-resume-guard.js",
+      "sha256": "0e1dce8544222801400d410230311f1e93570e3c8b545cec8669293bdecb3ed5"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/message-routing/intent-retry-guard.js",
+      "sha256": "0e9670fc96ab2f51fd228878e271471d1a42650fb3da1914ad7abf0bef15ddb0"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/orchestrator/orchestrator.service.js",
+      "sha256": "cde5d68488aa96d5704d86f8e8c6c72fa0ae2fd33f128f3c939db9c777574f78"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/persistence/intent-record-invariants.js",
+      "sha256": "4d852becf0985b5acf9dc0e55e95038d393ecfd110038ee2211737da5107b1b3"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/persistence/relational/intent-reconciliation.integration.spec.js",
+      "sha256": "c25c136529f251bebe98e60591b801f80601f3f59843086bdf82683a76d0ffd1"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/persistence/relational/postgres-migration-runner.js",
+      "sha256": "0a58823f13cca2642d50e08d274cae7939590b24f866f4b5c1fc7c9041b71a2c"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/persistence/relational/relational-schema.spec.js",
+      "sha256": "3c8917b721eaeb4af1c695b9878332ed90ec6f431e6b38fdb8a4cc18c71e3cfc"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/persistence/relational/relational-schema.js",
+      "sha256": "9f04a362b06235f692a58804db7e98e17d75c926c5a555a53e17d3dfc4bcb259"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/queue/execution.worker.js",
+      "sha256": "716ec4ac8a8d1ebd03f8284d2f1dc2d68cf7030fb891237a94496f7cd570b132"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/runtimes/logical-operation-store.js",
+      "sha256": "b32eec99035e338d1faa5736ae3cd290ca301450dc9e83dedbad9e8c1cd17f72"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/runtimes/runtime.service.spec.js",
+      "sha256": "ea8cef6ffbc10f04459ce980b729a2f6b0fdfed11744c8c89d47830885edf8ed"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/runtimes/runtime.service.js",
+      "sha256": "cdb30e0b950f5f5f47dde36edccb7b881ceb3475e61398c652e4ba50960e655f"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/sessions/sessions.controller.js",
+      "sha256": "4e431f47cb5f7c596222b8c85705a3c2b8b2465c7c20f10769e59d881f2f8a3c"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/sessions/sessions.module.js",
+      "sha256": "2b2616a6f75c59c7ea06eb1265ef08782ad6ea1a5ba8739558d98fd00960aa90"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/sessions/sessions.service.js",
+      "sha256": "2ac92a460d2e6aaf0462779d5fd9b1013e105a37155912ebc1ff7b430b8e26f3"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/tasks/tasks.service.js",
+      "sha256": "810da5a3f25942d41697988069a8fb3c6e81b57f8fcf5d5a6f021f08de028a0a"
+    },
+    {
+      "path": "apps/server/dist/apps/server/src/modules/workflows/workflow-runtime.service.js",
+      "sha256": "538ff8dba9752122971b60833d25b3eb8ad9251a3e74698180b6b50421bdeb3f"
+    },
+    {
+      "path": "apps/server/dist/packages/shared/src/contracts.js",
+      "sha256": "e1d0de0207f957e6006a81f6bba92e808ebc0b8b641f024659f282803239a881"
+    },
+    {
+      "path": "apps/server/dist/packages/shared/src/index.js",
+      "sha256": "88f1e44f9a002637facf5e3749847cece3e39f5bcf951fb94d285e968c7fddc4"
+    },
+    {
+      "path": "apps/server/dist/packages/shared/src/intent-correction-contracts.js",
+      "sha256": "ca89b6adcf32ab6873b6a2b48b0053df72989ff6dbdfcb03e9a255c3536dd10b"
+    },
+    {
+      "path": "apps/server/dist/packages/shared/src/intent-reconciliation-contracts.js",
+      "sha256": "fa998539f4bf9b70ac5f08ed413b0dfadfe909284b5dde7d53edc1957c5801bc"
+    }
+  ],
+  "protectedFiles": [
+    {
+      "path": ".env",
+      "baseline": "68b050920d078df96450665f4f44047be37470a809441424ad2e86ee1fbfe358",
+      "sha256": "68b050920d078df96450665f4f44047be37470a809441424ad2e86ee1fbfe358",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/common/runtime-config.ts",
+      "baseline": "ba7ee428537a06cbaf4a16fd0fbc648be15d64ee939fab22d4f66983756276ae",
+      "sha256": "ba7ee428537a06cbaf4a16fd0fbc648be15d64ee939fab22d4f66983756276ae",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/route-plan-compiler.service.ts",
+      "baseline": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+      "sha256": "c728f68feac4f2e51f96ee20eae0cfb414c72aacd396312c8c17a3583537a5b9",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/runtime-routing/execution-scope-resolver.service.ts",
+      "baseline": "869d3c21614955dc8a8a35a5e3b88175b347e46dd41bd4b043685e3156da0678",
+      "sha256": "869d3c21614955dc8a8a35a5e3b88175b347e46dd41bd4b043685e3156da0678",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/intent-recognition/semantic-intent-router.service.ts",
+      "baseline": "8a6b149a525f39e2bc5fb094770e0e813f4bffdf75509d554bf3c892d901a8db",
+      "sha256": "8a6b149a525f39e2bc5fb094770e0e813f4bffdf75509d554bf3c892d901a8db",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/capabilities/default-capabilities.ts",
+      "baseline": "7886371882febb0612a4f6e7e0181c2d173b5d7e8c6515d9a28df3be28dca9a0",
+      "sha256": "7886371882febb0612a4f6e7e0181c2d173b5d7e8c6515d9a28df3be28dca9a0",
+      "unchanged": true
+    },
+    {
+      "path": "packages/shared/src/default-agent-presets.ts",
+      "baseline": "cca7194b879dabeba06b32654357e56e01ebf7c327e145e88a282456d922a1a7",
+      "sha256": "cca7194b879dabeba06b32654357e56e01ebf7c327e145e88a282456d922a1a7",
+      "unchanged": true
+    },
+    {
+      "path": "apps/server/src/modules/message-routing/intent-plan-commit.service.ts",
+      "sha256": "41078c830b6580e27cf2027be08d850621256a9a29e08ee2ff4eb3f96f8e068a",
+      "baseline": "unchanged against HEAD",
+      "unchanged": true
+    },
+    {
+      "path": "packages/shared/src/intent-runtime-policy.ts",
+      "sha256": "d70d8257756cd9e87c034992b7a7959d54a2c2298b5082e16263d41827347be3",
+      "baseline": "unchanged against HEAD",
+      "unchanged": true
+    }
+  ],
+  "validation": {
+    "specs": {
+      "files": 18,
+      "total": 591,
+      "passed": 590,
+      "failed": 0,
+      "skipped": 1
+    },
+    "postgresIntegration": "skipped: RELATIONAL_TEST_DATABASE_URL absent; disposable-only test implemented",
+    "serverTypecheck": "passed",
+    "serverBuild": "passed",
+    "devRestartSmoke": "passed",
+    "realModelCalls": 0,
+    "webDesktop": "unchanged; R9b deferred",
+    "commitsAndPushes": "none"
+  },
+  "evidence": [
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/build-final.log",
+      "sha256": "0f4f327e23419ff9a24857285f28e90cc4a68df7701043ec7393e05ee1b1c7bd"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/crash-2.log",
+      "sha256": "cee89d88c9cef0d7d39930a2beae3292831c77e625006857115f5f1e1b36dfd8"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/crash-3.log",
+      "sha256": "1209d6c65f401d6b35da1e735675c3f04689adbc75b362f88f66c4dd2a6fcdf4"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/dev-restart-final.log",
+      "sha256": "ea7944c472ca5b532938db307b708e6a189a6dc5176d04df70f2beee59db8bd3"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/gaps-red.log",
+      "sha256": "4e57a9baf644c850039afce7532e253fe7badb828c2dfda76ca096ebfe67cdc3"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/red.log",
+      "sha256": "4bd30a866a57f5bdcefcdc120310f29d0446cf6ae8af2abc3706c0cc5d16d532"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/runtime-boundary-1.log",
+      "sha256": "51354240f8acd77896962f408c153c8d27f4063ffd0a02888894659b0dafaf92"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/runtime-boundary-2.log",
+      "sha256": "6544ae68dd5ea9d91295861d64c0935b2ed2cc6bcd21fc7008df8c9b3dcb179a"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/runtime-boundary-3.log",
+      "sha256": "567284a009c86fb9b8ad4064e046ba702ab0974fb3235b292fd947cdad1b608d"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/smoke-run.log",
+      "sha256": "9354b1a811726934ed5c56b4377d7b2c6ff98c08492717654b5eceff99258999"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/smoke-server-final.log",
+      "sha256": "abfbefef46deca6fd4cf33837df050ce59f36888d1ee0da2fe1b3474a36188ca"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/smoke.json",
+      "sha256": "f2824895a7c2d38b0ec6614169877eff7b33c04cf05d1c7b9cc6ced23633f2a2"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/spec-combined-1.log",
+      "sha256": "ec6b9109d3c8869879da82ccd5bd3f1c7b7cfc0b40296c5269036bfa2211e56b"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/spec-final.log",
+      "sha256": "dd087eb74f626c855d3d91fd6f73589d2d055cce27621b87d9c90ce7639b6c92"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/storage-1.log",
+      "sha256": "dcf80e7154a829b8577ffe6c7778e86815862aa970fd82ffae6dbc0c415726af"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/storage-2.log",
+      "sha256": "0c7d08bc141b463e2aff2f8f4d7ff1873171832cf9f195ba757ffd43a29967bc"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/typecheck-2.log",
+      "sha256": "2d9547cbd4ffc36e624f5fb79632e5e9ee6723d6b957fa1ae0646918c6d0baad"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/typecheck-3.log",
+      "sha256": "8f96b35ac9a2a925648f1580c8472232f82900b07a52478ddcf444f40b815a41"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/typecheck-final.log",
+      "sha256": "a5a70fc95b417bc5ab766d6d106320f964beaa52a4a74911a7fb2f72cdf6a820"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/typecheck-initial.log",
+      "sha256": "2ba8f2dbc93e8353fe2739fa58edef39522394712b0e731058e24c3a0740a418"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/unit-2.log",
+      "sha256": "c5c417c75cf745b7d67ae9f16339d0056ccbe4f96d71bd82b1f8b65e17155383"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/unit-3.log",
+      "sha256": "3f141420e682dd2e0ec112dddd5dd3cd3eadd275ee6041fc0400011eec79e956"
+    },
+    {
+      "path": "docs/quality/intent-reconciliation-r9a-2026-10-21/evidence/unit-initial.log",
+      "sha256": "166181b7ba73af17dc27d9ef95ca06240c26a0fdccdebfae1d47cf05844c3af1"
+    }
+  ],
+  "harnesses": [
+    {
+      "path": ".cache/supervisor/r9a-smoke.mjs",
+      "sha256": "7106ca2ec8d66f0f7fd224fc79b5e298e1b7a96a546731080b8184d19eb4d11f"
+    },
+    {
+      "path": ".cache/supervisor/r9a-capture-delivery.mjs",
+      "sha256": "362e61a7010b7aa01dcf4d8188cff6697719e63a0d9b066c75adbc85364cbbac"
+    }
+  ]
+}

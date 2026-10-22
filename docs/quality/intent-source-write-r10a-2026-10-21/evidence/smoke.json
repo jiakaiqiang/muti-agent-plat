@@ -1,0 +1,51 @@
+{
+  "port": 53958,
+  "isolatedDataDirectory": "C:\\Users\\kaiqj\\AppData\\Local\\Temp\\intent-r10a-smoke-I53xh8",
+  "restartCommand": "npm run dev:restart-server (via node npm-cli.js)",
+  "before": {
+    "status": "ok",
+    "processId": 95984,
+    "runtimeBuildStale": false
+  },
+  "after": {
+    "status": "ok",
+    "processId": 15348,
+    "runtimeBuildStale": false
+  },
+  "invalidDecision": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "INPUT_BUDGET_DECISION_INVALID",
+        "message": "操作未完成，请查看运行日志中的原因（INPUT_BUDGET_DECISION_INVALID）。"
+      },
+      "requestId": "cdfb7365-972a-496e-acfb-60c8f879ddd3"
+    }
+  },
+  "reconciliationList": {
+    "status": 404,
+    "body": {
+      "error": {
+        "code": "SESSION_NOT_FOUND",
+        "message": "未找到资源，请检查地址和访问权限（HTTP 404）。"
+      },
+      "requestId": "1bea2fec-cc3a-41c4-9000-eca34ed8f689"
+    }
+  },
+  "reconciliationDecision": {
+    "status": 404,
+    "body": {
+      "error": {
+        "code": "SESSION_NOT_FOUND",
+        "message": "未找到资源，请检查地址和访问权限（HTTP 404）。"
+      },
+      "requestId": "bfb48c02-185d-4694-8c59-8b056d68c081"
+    }
+  },
+  "createdSessions": 0,
+  "runtimeInvocations": 0,
+  "realModelCalls": 0,
+  "environmentOverrides": "Child-only mock runtime; original .env untouched",
+  "processesStopped": true,
+  "isolatedDataRetained": true
+}

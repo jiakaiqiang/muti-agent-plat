@@ -1,0 +1,20 @@
+{
+  "capturedAt": "2026-10-21T10:42:13.125Z",
+  "gitInitialized": true,
+  "temporaryWorkspace": "C:\\Users\\kaiqj\\AppData\\Local\\Temp\\intent-source-r10a-U7HbR4\\workspace",
+  "hashes": {
+    "initial": "61b2ebaa761646f5a64780bc9c1e15d193b0bf4e5144b23ca01c78a9eb0c5a4d",
+    "afterPrepare": "61b2ebaa761646f5a64780bc9c1e15d193b0bf4e5144b23ca01c78a9eb0c5a4d",
+    "afterCapture": "61b2ebaa761646f5a64780bc9c1e15d193b0bf4e5144b23ca01c78a9eb0c5a4d",
+    "afterWriteback": "71461ba39e80e0b3c137be34c8251c489b06c257c4f54ecc88ce07b76e19b0f8",
+    "afterRejectedProposal": "61b2ebaa761646f5a64780bc9c1e15d193b0bf4e5144b23ca01c78a9eb0c5a4d"
+  },
+  "writeback": {
+    "status": "applied",
+    "id": "5829321d-91d5-418a-b773-96aae60b479f"
+  },
+  "outOfScopeRejected": true,
+  "rejection": "Error: INTENT_SOURCE_FILE_OUTSIDE_MANIFEST",
+  "realModelCalls": 0,
+  "repositoryWorkspaceTouched": false
+}

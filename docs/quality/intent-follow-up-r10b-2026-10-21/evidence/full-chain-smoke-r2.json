@@ -1,0 +1,64 @@
+{
+  "smoke": "passed",
+  "gitInitialized": true,
+  "steps": [
+    {
+      "step": "git_init",
+      "status": "ready",
+      "requirementRevision": 1,
+      "hash": "273b939a846095b861891c0fab816f2e13585bdea633080776cf06ffd24a29d4"
+    },
+    {
+      "step": "authorization_requested",
+      "status": "pending",
+      "hash": "273b939a846095b861891c0fab816f2e13585bdea633080776cf06ffd24a29d4"
+    },
+    {
+      "step": "authorization_approved",
+      "status": "approved",
+      "authorityRevision": 2,
+      "hash": "273b939a846095b861891c0fab816f2e13585bdea633080776cf06ffd24a29d4"
+    },
+    {
+      "step": "followup_queued",
+      "status": "queued",
+      "requirementRevision": 1,
+      "executionEpoch": 1,
+      "hash": "273b939a846095b861891c0fab816f2e13585bdea633080776cf06ffd24a29d4"
+    },
+    {
+      "step": "brief_confirmed",
+      "status": "ready",
+      "requirementRevision": 2,
+      "createdFollowUpTasks": 1,
+      "hash": "273b939a846095b861891c0fab816f2e13585bdea633080776cf06ffd24a29d4"
+    },
+    {
+      "step": "candidate_prepared",
+      "status": "candidate_pending",
+      "requirementRevision": 2,
+      "hash": "273b939a846095b861891c0fab816f2e13585bdea633080776cf06ffd24a29d4"
+    },
+    {
+      "step": "out_of_scope_rejected",
+      "status": "rejected",
+      "hashUnchanged": true,
+      "hash": "273b939a846095b861891c0fab816f2e13585bdea633080776cf06ffd24a29d4"
+    },
+    {
+      "step": "candidate_captured",
+      "status": "candidate_captured",
+      "candidateId": "source-candidate:cf0b224e-1d78-4657-847a-eafab7575a87",
+      "hash": "273b939a846095b861891c0fab816f2e13585bdea633080776cf06ffd24a29d4"
+    },
+    {
+      "step": "writeback_applied",
+      "status": "applied",
+      "hashChanged": true,
+      "hash": "4fa0c0db95cc441b2b9c35ba5cd8035441b822b9339871cf8d6f70444e5e3b37"
+    }
+  ],
+  "initialHash": "273b939a846095b861891c0fab816f2e13585bdea633080776cf06ffd24a29d4",
+  "finalHash": "4fa0c0db95cc441b2b9c35ba5cd8035441b822b9339871cf8d6f70444e5e3b37",
+  "realModelCalls": 0
+}

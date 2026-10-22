@@ -1,0 +1,57 @@
+{
+  "task": "M-017 / R10c r4",
+  "generatedAt": "2026-10-22",
+  "change": {
+    "file": "apps/server/src/modules/persistence/cutover-context-v2.cli.ts",
+    "addedSeedKey": "intentReconciliationsBySession",
+    "sha256": "2731D7513BF7403BF3B7F8AD317FA1B13B7A1793ABDC6EDA67E2093ABCF45B7E"
+  },
+  "seedCoverage": {
+    "excludedKeys": ["systemDataMetadata", "cutoverAudits"],
+    "before": {
+      "missing": ["intentReconciliationsBySession"],
+      "extra": [],
+      "relationalKeyCount": 50,
+      "seedKeyCount": 49
+    },
+    "after": {
+      "missing": [],
+      "extra": [],
+      "relationalKeyCount": 50,
+      "seedKeyCount": 50
+    },
+    "verificationCommand": "node node_modules/tsx/dist/cli.mjs -e \"import { buildV2SeedState } from './apps/server/src/modules/persistence/cutover-context-v2.cli.ts'; import { relationalCollectionKeys } from './apps/server/src/modules/persistence/relational/relational-state-store.ts'; ...\""
+  },
+  "targetedRegression": {
+    "cutoverContextV2Cli": {"tests": 11, "passed": 11, "failed": 0},
+    "intentReconciliationR9": {"tests": 38, "passed": 38, "failed": 0},
+    "intentFollowUpR10aToR10c": {"tests": 15, "passed": 15, "failed": 0}
+  },
+  "serverFullSuiteAttempt": {
+    "command": "npm run test -w @agent-cluster/server",
+    "tests": 2545,
+    "passed": 2500,
+    "failed": 2,
+    "skipped": 43,
+    "failures": [
+      {
+        "name": "M015 candidate search applies the query while traversing beyond 500 entries and reaches deep files",
+        "reason": "full-suite timing/resource-sensitive failure; the targeted intent-follow-up spec passes 15/15"
+      },
+      {
+        "name": "R9a File claim survives a real process exit; restart never auto-dispatches and new attempt leaves old audit intact",
+        "reason": "full-suite child-process invocation expects apps/server/node_modules/tsx/dist/cli.mjs, which is absent; root tsx invocation passes the R9 reconciliation spec 38/38"
+      }
+    ]
+  },
+  "serverValidation": {
+    "typecheck": "passed",
+    "build": "passed"
+  },
+  "constraints": {
+    "realModel": false,
+    "commit": false,
+    "push": false,
+    "productFilesChanged": ["apps/server/src/modules/persistence/cutover-context-v2.cli.ts"]
+  }
+}
