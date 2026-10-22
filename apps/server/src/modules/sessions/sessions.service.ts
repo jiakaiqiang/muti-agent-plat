@@ -1,4 +1,6 @@
 import { InputBudgetStore } from '../runtimes/input-budget-store.js';
+import { IntentReconciliationService } from '../message-routing/intent-reconciliation.service.js';
+import { activeReconciliationAttempt, RECONCILIATIONS } from '../message-routing/intent-reconciliation-state.js';
 import { IntentResumeControlService } from '../message-routing/intent-resume-control.service.js';
 import { assertNoPendingInputBudget, bindIntentResume, readIntentResumeState } from '../message-routing/intent-resume-guard.js';
 import type { IntentResumeBinding, IntentRetryBinding } from '@agent-cluster/shared';
@@ -318,11 +320,16 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     @Optional() private readonly intentPipeline?: IntentMessagePipelineService,
     @Optional() private readonly semanticClarifications?: SemanticClarificationService,
     @Optional() private readonly intentBriefConfirmation?: IntentBriefConfirmationService,
-    @Optional() intentResumeControl?: IntentResumeControlService
+    @Optional() intentResumeControl?: IntentResumeControlService,
+    @Optional() private readonly intentReconciliations?: IntentReconciliationService
   ) {
     this.lifecycle = new SessionLifecycleStore(persistence);
     this.resumeControl = intentResumeControl ?? new IntentResumeControlService(persistence);
     this.resumeControl.bind(input => this.resume(input.sessionId, '用户恢复原已批准计划', undefined, input.stepId));
+    this.intentReconciliations?.bind((id, ref) => this.resume(id, '用户人工对账后重新派发一次', undefined, undefined, ref), {
+      committed: id => this.acceptReconciledState(id),
+      stop: (id, ids) => this.runtime?.cancelIntentExecutionsAndWait(id, ids) ?? Promise.resolve({ stopConfirmed: false })
+    });
     this.requirementDocuments = new RequirementDocumentStore(persistence);
     this.workflowStarts = new WorkflowStartStore(persistence);
     this.changeRequests = new ChangeRequestStore(persistence);
@@ -6352,21 +6359,23 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     return { session, event, confirmationEvent };
   }
 
-  async resume(sessionId: string, reason = '用户已继续会话', confirmationId?: string, controlStepId?: string): Promise<Awaited<ReturnType<SessionsService['resumeWithBinding']>>> {
+  async resume(sessionId: string, reason = '用户已继续会话', confirmationId?: string, controlStepId?: string,
+    reconciliationAttempt?: import('@agent-cluster/shared').IntentReconciliationAttemptRef): Promise<Awaited<ReturnType<SessionsService['resumeWithBinding']>>> {
     const session = this.get(sessionId);
     if (session.intentContractVersion !== 'intent-understanding-v1') return this.resumeWithBinding(sessionId, reason, confirmationId);
     const state = readIntentResumeState(this.persistence);
     assertNoPendingInputBudget(state, session);
     const retryControl = controlStepId && this.persistence.getCollection<Record<string, import('@agent-cluster/shared').IntentPlanStepRecord[]>>(
       'intentPlanStepsBySession', {})[sessionId]?.find(row => row.id === controlStepId)?.retryBinding;
-    if (['FAILED', 'INTERRUPTED'].includes(session.status) || retryControl) {
+    const reconciled = reconciliationAttempt && activeReconciliationAttempt(state, sessionId, reconciliationAttempt).row.binding;
+    if (['FAILED', 'INTERRUPTED'].includes(session.status) || retryControl || (reconciled && 'task' in reconciled)) {
       const result = await this.resumeControl.retry(sessionId, session.ownerId,
-        binding => this.retryWithBinding(sessionId, reason, confirmationId, binding), controlStepId);
+        binding => this.retryWithBinding(sessionId, reason, confirmationId, binding), controlStepId, reconciliationAttempt);
       return result ?? { session: this.get(sessionId), event: this.events.list(sessionId).at(-1), confirmationEvent: undefined };
     }
-    if (session.status === 'EXECUTING' && !controlStepId) return { session, event: this.events.list(sessionId).at(-1), confirmationEvent: undefined };
+    if (session.status === 'EXECUTING' && !controlStepId && !reconciliationAttempt) return { session, event: this.events.list(sessionId).at(-1), confirmationEvent: undefined };
     const result = await this.resumeControl.resume(sessionId, session.ownerId,
-      binding => this.resumeWithBinding(sessionId, reason, confirmationId, binding), controlStepId);
+      binding => this.resumeWithBinding(sessionId, reason, confirmationId, binding), controlStepId, reconciliationAttempt);
     return result ?? { session: this.get(sessionId), event: this.events.list(sessionId).at(-1), confirmationEvent: undefined };
   }
 
@@ -6377,7 +6386,7 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     if (confirmationId && confirmationId !== binding.checkpointId) throw new ConflictException('INTENT_RETRY_CHECKPOINT_STALE');
     if (this.execution.isRunning(sessionId)) throw new ConflictException('INTENT_RETRY_IN_PROGRESS');
     const task = this.tasks.find(sessionId, binding.task.taskId);
-    if (!task || task.status !== 'failed') throw new ConflictException('INTENT_RETRY_TARGET_OBSOLETE');
+    if (!task || !(binding.reconciliationAttempt ? ['failed', 'pending', 'assigned'] : ['failed']).includes(task.status)) throw new ConflictException('INTENT_RETRY_TARGET_OBSOLETE');
     if (this.lifecycle.get(sessionId)?.admission === 'closed') {
       const opened = await this.lifecycle.reopen(sessionId);
       if (opened.event) this.events.acceptCommitted(opened.event);
@@ -6397,6 +6406,10 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
   private async resumeWithBinding(sessionId: string, reason: string, confirmationId?: string, resumeBinding?: IntentResumeBinding) {
     const session = this.get(sessionId);
     if (!canStartSessionAgent(session)) throw new ConflictException('SOURCE_PREPARATION_REQUIRED');
+    if (resumeBinding?.reconciliationAttempt && session.status === 'EXECUTING') {
+      await this.resumeExecution(session, undefined, resumeBinding);
+      return { session, event: this.events.list(sessionId).at(-1), confirmationEvent: undefined };
+    }
     const history = this.events.list(sessionId);
     const pending = this.pendingConfirmationContext(sessionId);
     if (confirmationId) {
@@ -8530,6 +8543,18 @@ export class SessionsService implements BeforeApplicationShutdown, OnModuleDestr
     const durableSessions = new Map(this.persistence.getCollection<SessionDetail[]>('sessions', []).map(row => [row.id, row]));
     for (const session of this.sessions.values()) this.refreshIntentLedgerRevision(session, durableSessions);
     this.persistence.setCollection('sessions', [...this.sessions.values()]);
+  }
+
+  /** Keep live readers in sync with the atomic human decision before any notification or stop callback. */
+  private acceptReconciledState(sessionId: string) {
+    const committed = this.persistence.getCollection<SessionDetail[]>('sessions', []).find(row => row.id === sessionId);
+    const live = this.sessions.get(sessionId);
+    if (committed && live && committed.dataEpoch === live.dataEpoch) {
+      for (const key of Object.keys(live)) if (!(key in committed)) delete (live as any)[key];
+      Object.assign(live, committed);
+    }
+    this.tasks.acceptReconciledState(sessionId);
+    this.workflowRuntime?.acceptReconciledState(sessionId);
   }
 
   /** Correction activation commits the ledger outside this service's live Session object. */

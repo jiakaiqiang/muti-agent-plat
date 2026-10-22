@@ -1,14 +1,14 @@
-import { randomUUID } from 'node:crypto';
 import { ConflictException, Injectable } from '@nestjs/common';
 import type { IntentPlanStepRecord, IntentResumeBinding, IntentRetryBinding, IntentRoutingRecord, SessionDetail } from '@agent-cluster/shared';
 import { PersistenceService, type PersistedState } from '../persistence/persistence.service.js';
 import { bindIntentResume, INTENT_RESUME_COLLECTIONS } from './intent-resume-guard.js';
 import { assertNoPendingInputBudget } from './intent-resume-guard.js';
 import { bindIntentRetry, INTENT_RETRY_COLLECTIONS, isIntentRetryExecutionLocal } from './intent-retry-guard.js';
+import { activeReconciliationAttempt, reconciliationProcessId } from './intent-reconciliation-state.js';
 
 const rows = <T>(state: PersistedState, key: string, sessionId: string): T[] =>
   (state[key] as Record<string, T[]> | undefined)?.[sessionId] ?? [];
-const processId = randomUUID();
+const processId = reconciliationProcessId;
 
 /** Delivery bookkeeping only. Both command and semantic resume still execute SessionsService.resume. */
 @Injectable()
@@ -24,7 +24,9 @@ export class IntentResumeControlService {
     return this.port(input);
   }
 
-  async retry<T>(sessionId: string, actorId: string, invoke: (binding: IntentRetryBinding) => Promise<T>, controlStepId?: string): Promise<T | undefined> {
+  async retry<T>(sessionId: string, actorId: string, invoke: (binding: IntentRetryBinding) => Promise<T>, controlStepId?: string,
+    reconciliationAttempt?: import('@agent-cluster/shared').IntentReconciliationAttemptRef): Promise<T | undefined> {
+    if (reconciliationAttempt) return invoke(await this.claimReconciledBinding(sessionId, actorId, reconciliationAttempt, 'retry') as IntentRetryBinding);
     const previous = this.tails.get(sessionId) ?? Promise.resolve();
     const work = previous.catch(() => {}).then(async () => {
       const claim = await this.persistence.mutateCollections(INTENT_RETRY_COLLECTIONS, draft => {
@@ -103,7 +105,9 @@ export class IntentResumeControlService {
     }, { sessionIds: [sessionId] });
   }
 
-  async resume<T>(sessionId: string, actorId: string, invoke: (binding: IntentResumeBinding) => Promise<T>, controlStepId?: string): Promise<T | undefined> {
+  async resume<T>(sessionId: string, actorId: string, invoke: (binding: IntentResumeBinding) => Promise<T>, controlStepId?: string,
+    reconciliationAttempt?: import('@agent-cluster/shared').IntentReconciliationAttemptRef): Promise<T | undefined> {
+    if (reconciliationAttempt) return invoke(await this.claimReconciledBinding(sessionId, actorId, reconciliationAttempt, 'resume') as IntentResumeBinding);
     const previous = this.tails.get(sessionId) ?? Promise.resolve();
     const work = previous.catch(() => {}).then(async () => {
       const claim = await this.persistence.mutateCollections(INTENT_RESUME_COLLECTIONS, draft => {
@@ -153,6 +157,17 @@ export class IntentResumeControlService {
     });
     this.tails.set(sessionId, work);
     try { return await work; } finally { if (this.tails.get(sessionId) === work) this.tails.delete(sessionId); }
+  }
+
+  private claimReconciledBinding(sessionId: string, actorId: string, ref: import('@agent-cluster/shared').IntentReconciliationAttemptRef, kind: 'resume' | 'retry') {
+    return this.persistence.mutateCollections(INTENT_RETRY_COLLECTIONS, draft => {
+      const { row, attempt } = activeReconciliationAttempt(draft, sessionId, ref);
+      if (!row.binding || ('task' in row.binding) !== (kind === 'retry') || attempt.dispatchClaimedBy) throw new ConflictException('INTENT_RECONCILIATION_ALREADY_DISPATCHED');
+      const binding = { ...row.binding, reconciliationAttempt: ref };
+      const checked = 'task' in binding ? bindIntentRetry(draft, sessionId, actorId, binding, true) : bindIntentResume(draft, sessionId, actorId, binding, true);
+      attempt.dispatchClaimedBy = this.processId;
+      return checked;
+    }, { sessionIds: [sessionId] });
   }
 
   private finish(sessionId: string, binding: IntentResumeBinding, stepId?: string, failureCode?: string) {

@@ -52,7 +52,7 @@ export class LogicalOperationStore {
   }
 
   begin(input: { id: string; sessionId: string; taskId?: string; phase: AgentRunPhase; parentId?: string; previousId?: string; scopeKey?: string;
-    intentStepId?: string;
+    intentStepId?: string; reconciliationAttempt?: import('@agent-cluster/shared').IntentReconciliationAttemptRef;
     deadlineCeilingAt?: string;
     admissionClass?: LogicalOperation['admissionClass']; dataEpoch?: string; workItemId?: string; executionBinding?: LogicalOperation['executionBinding'] }) {
     return this.mutateStopAware(input.sessionId, (operations, requests, draft) => {
@@ -74,6 +74,7 @@ export class LogicalOperationStore {
         : input.id;
       const existing = operations.find(item => item.id === id);
       if (existing) {
+        if (input.reconciliationAttempt) existing.reconciliationAttempt = structuredClone(input.reconciliationAttempt);
         if (existing.intentStepId !== input.intentStepId || (existing.workItemId && input.workItemId && existing.workItemId !== input.workItemId) ||
           !isDeepStrictEqual(existing.executionBinding, input.executionBinding)) throw new Error('OPERATION_INTENT_BINDING_MISMATCH');
         existing.workItemId ??= input.workItemId;

@@ -37,6 +37,8 @@ import {
   RELATIONAL_SCHEMA_V22_SQL,
   RELATIONAL_SCHEMA_V23_SQL,
   RELATIONAL_SCHEMA_V23_TABLES,
+  RELATIONAL_SCHEMA_V24_SQL,
+  RELATIONAL_SCHEMA_V24_TABLES,
   RELATIONAL_SCHEMA_V14_TABLES,
   RELATIONAL_SCHEMA_V15_TABLES,
   RELATIONAL_SCHEMA_V16_TABLES,
@@ -69,7 +71,8 @@ test('every relational table and column has a non-empty Chinese explanation', ()
     ...RELATIONAL_SCHEMA_V19_TABLES,
     ...RELATIONAL_SCHEMA_V20_TABLES,
     ...RELATIONAL_SCHEMA_V21_TABLES,
-    ...RELATIONAL_SCHEMA_V23_TABLES
+    ...RELATIONAL_SCHEMA_V23_TABLES,
+    ...RELATIONAL_SCHEMA_V24_TABLES
   ];
   assert.ok(definitions.length >= 35, 'expected the complete relational domain schema');
 
@@ -94,7 +97,7 @@ test('rendered migration emits COMMENT statements for every declared table and c
     const prefix = expected.column ? 'comment on column' : 'comment on table';
     assert.ok(`${sql}\n${RELATIONAL_SCHEMA_V8_SQL}\n${RELATIONAL_SCHEMA_V9_SQL}\n${RELATIONAL_SCHEMA_V10_SQL}\n${RELATIONAL_SCHEMA_V11_SQL}\n${RELATIONAL_SCHEMA_V12_SQL}
 ${RELATIONAL_SCHEMA_V13_SQL}\n${RELATIONAL_SCHEMA_V14_SQL}\n${RELATIONAL_SCHEMA_V15_SQL}
-${RELATIONAL_SCHEMA_V16_SQL}\n${RELATIONAL_SCHEMA_V17_SQL}\n${RELATIONAL_SCHEMA_V18_SQL}\n${RELATIONAL_SCHEMA_V19_SQL}\n${RELATIONAL_SCHEMA_V20_SQL}\n${RELATIONAL_SCHEMA_V21_SQL}\n${RELATIONAL_SCHEMA_V23_SQL}`.includes(`${prefix} agent_cluster.${target} is `), `missing rendered SQL comment: ${target}`);
+${RELATIONAL_SCHEMA_V16_SQL}\n${RELATIONAL_SCHEMA_V17_SQL}\n${RELATIONAL_SCHEMA_V18_SQL}\n${RELATIONAL_SCHEMA_V19_SQL}\n${RELATIONAL_SCHEMA_V20_SQL}\n${RELATIONAL_SCHEMA_V21_SQL}\n${RELATIONAL_SCHEMA_V23_SQL}\n${RELATIONAL_SCHEMA_V24_SQL}`.includes(`${prefix} agent_cluster.${target} is `), `missing rendered SQL comment: ${target}`);
   }
 });
 
@@ -187,4 +190,14 @@ test('v19 stores GitHub source, delivery, conflict and encrypted authorization s
 test('v22 migration indexes outbox records by Session for scoped collection loads', () => {
   assert.match(RELATIONAL_SCHEMA_V22_SQL,
     /create index if not exists event_outbox_aggregate_idx on agent_cluster\.event_outbox \(aggregate_type, aggregate_external_id\);/);
+});
+
+test('v24 adds session/route/epoch bound reconciliation storage without rewriting existing tables', () => {
+  assert.equal(RELATIONAL_SCHEMA_V24_TABLES.length, 1);
+  assert.match(RELATIONAL_SCHEMA_V24_SQL, /create table if not exists agent_cluster\.intent_reconciliations/);
+  assert.match(RELATIONAL_SCHEMA_V24_SQL, /unique \(session_id,data_epoch,identity_key\)/);
+  assert.match(RELATIONAL_SCHEMA_V24_SQL, /foreign key \(routing_id,session_id\) references agent_cluster\.intent_routing_records/);
+  assert.doesNotMatch(RELATIONAL_SCHEMA_V24_SQL, /alter table|drop table|update agent_cluster/i);
+  const comments = expectedRelationalComments();
+  assert.ok(comments.some(item => JSON.stringify(item).includes('intent_reconciliations')));
 });

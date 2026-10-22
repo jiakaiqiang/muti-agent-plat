@@ -47,6 +47,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   resolveConfirmation: [optionKey: string, confirmationId: string]
+  reconciliationDecided: [sessionId: string]
   approveCapability: [sessionId: string, capabilityIds: string[], agentId?: string]
 }>()
 
@@ -192,9 +193,12 @@ function confirmationFromMessage(message: ChatMessage): ConfirmationCardState | 
   if (payload.reason === 'approve_capability' || Array.isArray(payload.pendingApprovals)) return undefined
   return {
     confirmationId: payload.confirmationId,
+    sessionId: message.sessionId,
+    reconciliationCaseId: (payload.reconciliationCaseId ?? payload.caseId) as string | undefined,
+    intentReconciliation: payload.intentReconciliation as ConfirmationCardState['intentReconciliation'],
     reason: payload.reason,
-    title: payload.title,
-    description: payload.description,
+    title: payload.title ?? (payload.reason === 'intent_reconciliation_required' ? '执行结果需要人工对账' : ''),
+    description: payload.description ?? '',
     status: (payload.status as ConfirmationCardState['status'] | undefined) ?? 'pending',
     options: payload.options,
     actions: payload.actions,
@@ -833,6 +837,7 @@ function yesNo(value?: boolean) {
         <ConfirmationCard
           v-if="confirmationFromMessage(message)"
           :confirmation="confirmationFromMessage(message)!"
+          @reconciliation-decided="emit('reconciliationDecided', $event)"
           compact
           @resolve="emit('resolveConfirmation', $event, confirmationFromMessage(message)!.confirmationId)"
         />

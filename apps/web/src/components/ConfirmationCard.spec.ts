@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia } from 'pinia'
 import ConfirmationCard from './ConfirmationCard.vue'
+import { intentReconciliationCardContract } from './intentReconciliationCard.test-support'
 import type { ConfirmationCardState, WorkflowDefinition } from '@/types/contracts'
+
+intentReconciliationCardContract(ConfirmationCard)
 
 function postReviewConfirmation(): ConfirmationCardState {
   return {

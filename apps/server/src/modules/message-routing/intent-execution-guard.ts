@@ -6,12 +6,15 @@ import { decisionSetHash, effectiveDecisions } from '../context-management/effec
 import { isReadOnlyAnswerScope } from '@agent-cluster/shared';
 import { currentWorkspaceReadGrant } from './intent-workspace-read.js';
 import { currentTestGrant, currentTestReportGrant } from './intent-test-authority.js';
+import { currentSourceGrants } from './intent-source-authority.js';
 import { completedBriefReviews } from './intent-brief-reviews.js';
+import { assertReconciliationFence, RECONCILIATIONS } from './intent-reconciliation-state.js';
 
-export const INTENT_EXECUTION_COLLECTIONS = ['workItemsBySession', 'tasksBySession',
+export const INTENT_EXECUTION_COLLECTIONS = [RECONCILIATIONS, 'workItemsBySession', 'tasksBySession',
   'intentRoutingRecordsBySession', 'intentRouteRevisionsBySession', 'intentPlanStepsBySession', 'decisionRecordsBySession'] as const;
 
 export type IntentExecutionIdentity = {
+  reconciliationAttempt?: import('@agent-cluster/shared').IntentReconciliationAttemptRef;
   /** LogicalOperation uses id; runtime input uses operationId. */
   id?: string;
   operationId?: string;
@@ -55,6 +58,9 @@ export function assertIntentExecutionCurrent(draft: PersistedState, input: Inten
   }
   const route = routes.find(item => item.id === binding?.routingId);
   const session = (draft.sessions as SessionDetail[] | undefined)?.find(item => item.id === input.sessionId);
+  assertReconciliationFence(draft, { sessionId: input.sessionId, taskId: input.taskId,
+    operationId: input.operation?.id ?? input.operationId ?? input.id, invocationId: input.invocationId,
+    reconciliationAttempt: input.reconciliationAttempt });
   const lifecycle = (draft.sessionLifecyclesBySession as SessionLifecyclesBySession | undefined)?.[input.sessionId];
   if ((input.dataEpoch && (!session || input.dataEpoch !== session.dataEpoch)) || session?.archivedAt ||
     (lifecycle && (lifecycle.state !== 'active' || (input.sessionGeneration !== undefined && lifecycle.generation !== input.sessionGeneration)))) {
@@ -85,6 +91,15 @@ export function assertIntentExecutionCurrent(draft: PersistedState, input: Inten
     step.executionBinding.effectScopeHash === binding.effectScopeHash)) throw new Error('INTENT_EXECUTION_SCOPE_STALE');
   const matchingSteps = revision.validatedPlan.steps.filter(step => (step.target.workItemId ?? undefined) === workItemId &&
     step.executionBinding.effectScopeHash === binding.effectScopeHash);
+  for (const step of matchingSteps.filter(step => step.effectScope.effects.some(effect => effect.kind === 'modify_source'))) {
+    const grants = currentSourceGrants(session);
+    for (const effect of step.effectScope.effects.filter(effect => effect.kind === 'modify_source')) {
+      const grant = grants.find(row => step.effectScope.grantIds.includes(row.id) && isDeepStrictEqual(row.resource, effect.target));
+      const authority = session.intentSourceAuthorities?.find(row => row.grant.id === grant?.id);
+      if (!grant || !authority || authority.workItemId !== workItemId || authority.sessionGeneration !== binding.sessionGeneration ||
+        !revision.authorityGrants?.some(saved => isDeepStrictEqual(saved, grant))) throw new Error('INTENT_SOURCE_AUTHORITY_STALE');
+    }
+  }
   if (matchingSteps.some(step => step.action === 'prepare_brief' || step.action === 'review_brief')) {
     const record = records<IntentPlanStepRecord>('intentPlanStepsBySession').find(row => row.id === input.intentStepId);
     const operationId = input.operation?.id ?? input.operationId ?? input.id;

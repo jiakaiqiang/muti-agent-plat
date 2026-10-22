@@ -82,6 +82,7 @@ export function buildV2SeedState(): Record<string, unknown> {
     intentResolutionReceiptsBySession: {},
     intentCorrectionsBySession: {},
     intentPlanStepsBySession: {},
+    intentReconciliationsBySession: {},
     followUpMessagesBySession: {},
     eventOutbox: [],
     fileRevisions: {},

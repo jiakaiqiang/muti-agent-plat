@@ -37,4 +37,7 @@ export interface WorkspaceProvider {
   readFile(input: ReadFileInput): Promise<ReadFileResult>;
   searchText(input: SearchTextInput): Promise<SearchTextResult>;
   applyChangeSet(input: WorkspaceChangeSet): Promise<ApplyChangeSetResult>;
+  /** Intent source candidates must be reauthorized against the actual merged bytes under file locks. */
+  applyChangeSetGuarded?(input: WorkspaceChangeSet,
+    guard: (rootPath: string, finalChangeSet: WorkspaceChangeSet) => Promise<void>): Promise<ApplyChangeSetResult>;
 }

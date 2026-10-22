@@ -12,6 +12,7 @@ import { WorkflowsModule } from '../workflows/workflows.module.js';
 import { CapabilitiesModule } from '../capabilities/capabilities.module.js';
 import { SessionsController } from './sessions.controller.js';
 import { SessionsService } from './sessions.service.js';
+import { IntentReconciliationService } from '../message-routing/intent-reconciliation.service.js';
 import { FileRevisionsModule } from '../file-revisions/file-revisions.module.js';
 import { ContextManagementModule } from '../context-management/context-management.module.js';
 import { MessageRoutingModule } from '../message-routing/message-routing.module.js';
@@ -31,6 +32,9 @@ import { SemanticClarificationService } from '../message-routing/semantic-clarif
 import { IntentAuthorizationRetryService } from '../message-routing/intent-authorization-retry.service.js';
 import { IntentRecognitionRetryService } from '../message-routing/intent-recognition-retry.service.js';
 import { IntentBriefConfirmationService } from '../message-routing/intent-brief-confirmation.service.js';
+import { IntentSourceAuthorizationService } from '../message-routing/intent-source-authorization.service.js';
+import { IntentFollowUpService } from '../message-routing/intent-follow-up.service.js';
+import { IntentSourceReconciliationService } from '../message-routing/intent-source-reconciliation.service.js';
 
 @Module({
   imports: [
@@ -54,6 +58,7 @@ import { IntentBriefConfirmationService } from '../message-routing/intent-brief-
   controllers: [SessionsController],
   providers: [
     SessionsService,
+    IntentReconciliationService,
     IntentCorrectionService,
     IntentCorrectionPlannerService,
     IntentMessagePipelineService,
@@ -63,6 +68,9 @@ import { IntentBriefConfirmationService } from '../message-routing/intent-brief-
     IntentAuthorizationRetryService,
     IntentRecognitionRetryService,
     IntentBriefConfirmationService,
+    IntentSourceAuthorizationService,
+    IntentFollowUpService,
+    IntentSourceReconciliationService,
     GitHubCodeHostAdapter,
     GitHubAuthorizationService,
     { provide: GitRepositoryWorkspaceManager, useFactory: () => new GitRepositoryWorkspaceManager() },

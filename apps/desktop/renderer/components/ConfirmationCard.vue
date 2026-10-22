@@ -2,6 +2,8 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import type { ConfirmationCardState, PostReviewAction } from '@/types/contracts'
 import { useTaskWorkspaceStore } from '@/stores/taskWorkspace'
+import IntentReconciliationCard from '@/components/IntentReconciliationCard.vue'
+import IntentSourceAuthorizationCard from '@/components/IntentSourceAuthorizationCard.vue'
 import WorkflowSelectionDialog, { type WorkflowSelectionOption } from '@/components/workflow/WorkflowSelectionDialog.vue'
 
 const props = defineProps<{
@@ -9,7 +11,7 @@ const props = defineProps<{
   compact?: boolean
   autoOpenWorkflowDialog?: boolean
 }>()
-const emit = defineEmits<{ resolve: [optionKey: string] }>()
+const emit = defineEmits<{ resolve: [optionKey: string]; reconciliationDecided: [sessionId: string] }>()
 const taskWorkspace = useTaskWorkspaceStore()
 const showWorkflowDialog = ref(
   Boolean(props.autoOpenWorkflowDialog) &&
@@ -105,7 +107,9 @@ function nodeTypeLabel(type: string) {
     <div class="confirmation-card__heading"><span class="status-dot" :class="confirmation.status"></span><div><h3>{{ confirmation.title }}</h3><p>{{ confirmation.description }}</p></div></div>
     <div class="confirmation-card__meta"><span>{{ confirmation.reason }}</span><span>{{ confirmation.status }}</span></div>
 
-    <div v-if="confirmation.status === 'pending' && confirmation.reason === 'select_workflow'" class="confirmation-card__workflow-selection">
+    <IntentSourceAuthorizationCard v-if="confirmation.reason === 'intent_source_authorization'" :confirmation="confirmation" @decided="emit('reconciliationDecided', $event)" />
+    <IntentReconciliationCard v-else-if="confirmation.reason === 'intent_reconciliation_required'" :confirmation="confirmation" @decided="emit('reconciliationDecided', $event)" />
+    <div v-else-if="confirmation.status === 'pending' && confirmation.reason === 'select_workflow'" class="confirmation-card__workflow-selection">
       <p>{{ availableWorkflows.length }} 个已发布工作流可用</p>
       <div class="confirmation-card__actions"><button class="action-button default" type="button" @click="manageWorkflows">管理工作流</button><button class="action-button primary" type="button" @click="showWorkflowDialog = true">选择工作流</button></div>
       <WorkflowSelectionDialog v-if="showWorkflowDialog" :workflows="availableWorkflows" @select="selectWorkflow" @manage="manageWorkflows" @close="showWorkflowDialog = false" />

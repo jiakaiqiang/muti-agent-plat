@@ -21,6 +21,7 @@ import type {
   CreateDiscussionDocumentInput
 } from '@agent-cluster/shared';
 import { SessionsService } from './sessions.service.js';
+import { IntentReconciliationService } from '../message-routing/intent-reconciliation.service.js';
 import { IntentCorrectionService } from '../message-routing/intent-correction.service.js';
 import { IntentWorkspaceAuthorityService } from '../message-routing/intent-workspace-authority.service.js';
 import { IntentTestAuthorityService } from '../message-routing/intent-test-authority.service.js';
@@ -34,6 +35,9 @@ import { GitHubAuthorizationService } from '../code-hosts/github-authorization.s
 import { DeliveryCoordinator } from '../delivery/delivery-coordinator.js';
 import type { RepositoryValidationCommand } from '@agent-cluster/shared';
 import { isRuntimeHealthWaitInput, type RuntimeHealthWaitInput } from '@agent-cluster/shared';
+import { IntentSourceAuthorizationService } from '../message-routing/intent-source-authorization.service.js';
+import { IntentSourceReconciliationService } from '../message-routing/intent-source-reconciliation.service.js';
+import { IntentFollowUpService } from '../message-routing/intent-follow-up.service.js';
 
 @Controller()
 export class SessionsController {
@@ -48,8 +52,71 @@ export class SessionsController {
     @Optional() private readonly intentTestAuthority?: IntentTestAuthorityService,
     @Optional() private readonly intentAuthorizationRetry?: IntentAuthorizationRetryService,
     @Optional() private readonly intentRecognitionRetry?: IntentRecognitionRetryService,
-    @Optional() private readonly intentBriefRetry?: IntentBriefRetryService
+    @Optional() private readonly intentBriefRetry?: IntentBriefRetryService,
+    @Optional() private readonly intentReconciliations?: IntentReconciliationService,
+    @Optional() private readonly intentSourceAuthorization?: IntentSourceAuthorizationService,
+    @Optional() private readonly intentSourceReconciliation?: IntentSourceReconciliationService,
+    @Optional() private readonly intentFollowUps?: IntentFollowUpService
   ) {}
+
+  @Get('sessions/:sessionId/intent-reconciliations')
+  @Header('Cache-Control', 'no-store')
+  async intentReconciliationsList(@Param('sessionId') sessionId: string) {
+    if (!this.intentReconciliations) throw new ServiceUnavailableException('INTENT_RECONCILIATION_UNAVAILABLE');
+    return ok(await this.intentReconciliations.list(sessionId, this.sessions.get(sessionId).ownerId));
+  }
+
+  @Post('sessions/:sessionId/intent-reconciliations/:caseId/decision')
+  @HttpCode(202)
+  async decideIntentReconciliation(@Param('sessionId') sessionId: string, @Param('caseId') caseId: string, @Body() body: unknown) {
+    if (!this.intentReconciliations) throw new ServiceUnavailableException('INTENT_RECONCILIATION_UNAVAILABLE');
+    return ok(await this.intentReconciliations.decide(sessionId, caseId, this.sessions.get(sessionId).ownerId, body));
+  }
+
+  @Post('sessions/:sessionId/intent-source-authorization')
+  @HttpCode(202)
+  async requestIntentSourceAuthorization(@Param('sessionId') sessionId: string, @Body() body: unknown) {
+    if (!this.intentSourceAuthorization) throw new ServiceUnavailableException('INTENT_SOURCE_AUTHORIZATION_UNAVAILABLE');
+    return ok(await this.intentSourceAuthorization.request(sessionId, this.sessions.get(sessionId).ownerId, body));
+  }
+
+  @Post('sessions/:sessionId/intent-source-authorization/:requestId/decision')
+  @HttpCode(202)
+  async decideIntentSourceAuthorization(@Param('sessionId') sessionId: string, @Param('requestId') requestId: string, @Body() body: unknown) {
+    if (!this.intentSourceAuthorization) throw new ServiceUnavailableException('INTENT_SOURCE_AUTHORIZATION_UNAVAILABLE');
+    return ok(await this.intentSourceAuthorization.decide(sessionId, requestId, this.sessions.get(sessionId).ownerId, body));
+  }
+
+  @Get('sessions/:sessionId/intent-source-authorization/:requestId/candidates')
+  @Header('Cache-Control', 'no-store')
+  async intentSourceAuthorizationCandidates(@Param('sessionId') sessionId: string, @Param('requestId') requestId: string,
+    @Query('query') query?: string, @Query('cursor') cursor?: string, @Query('limit') rawLimit?: string) {
+    if (!this.intentSourceAuthorization) throw new ServiceUnavailableException('INTENT_SOURCE_AUTHORIZATION_UNAVAILABLE');
+    const limit = rawLimit === undefined ? undefined : Number(rawLimit);
+    return ok(await this.intentSourceAuthorization.candidates(sessionId, requestId, this.sessions.get(sessionId).ownerId,
+      { ...(query === undefined ? {} : { query }), ...(cursor === undefined ? {} : { cursor }), ...(limit === undefined ? {} : { limit }) }));
+  }
+
+  @Get('sessions/:sessionId/intent-source-reconciliations')
+  @Header('Cache-Control', 'no-store')
+  async intentSourceReconciliations(@Param('sessionId') sessionId: string) {
+    if (!this.intentSourceReconciliation) throw new ServiceUnavailableException('INTENT_SOURCE_RECONCILIATION_UNAVAILABLE');
+    return ok(await this.intentSourceReconciliation.view(sessionId, this.sessions.get(sessionId).ownerId));
+  }
+
+  @Post('sessions/:sessionId/intent-source-reconciliations/:claimId/decision')
+  @HttpCode(202)
+  async decideIntentSourceReconciliation(@Param('sessionId') sessionId: string, @Param('claimId') claimId: string, @Body() body: unknown) {
+    if (!this.intentSourceReconciliation) throw new ServiceUnavailableException('INTENT_SOURCE_RECONCILIATION_UNAVAILABLE');
+    return ok(await this.intentSourceReconciliation.decide(sessionId, claimId, this.sessions.get(sessionId).ownerId, body));
+  }
+
+  @Post('sessions/:sessionId/intent-follow-ups/:followUpId/cancel')
+  @HttpCode(202)
+  async cancelIntentFollowUp(@Param('sessionId') sessionId: string, @Param('followUpId') followUpId: string, @Body() body: unknown) {
+    if (!this.intentFollowUps) throw new ServiceUnavailableException('INTENT_FOLLOW_UP_UNAVAILABLE');
+    return ok(await this.intentFollowUps.cancel(sessionId, followUpId, this.sessions.get(sessionId).ownerId, body as { expectedRevision: number; idempotencyKey: string }));
+  }
 
   @Post('sessions/:sessionId/input-budget/decision')
   @HttpCode(202)

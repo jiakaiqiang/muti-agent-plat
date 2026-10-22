@@ -1,6 +1,9 @@
 export * from './contracts.js';
 export * from './intent-plan-contracts.js';
+export * from './intent-source-contracts.js';
+export * from './intent-source-authority-contracts.js';
 export * from './intent-correction-contracts.js';
+export * from './intent-reconciliation-contracts.js';
 export * from './brief-question.js';
 export * from './brief-revision.js';
 export * from './group-chat-contracts.js';
@@ -52,3 +55,4 @@ export * from './intent-workflow-selection.js';
 export * from './intent-workflow-effects.js';
 export * from './intent-brief-retry.js';
 export * from './input-budget.js';
+export * from './intent-follow-up-contracts.js';

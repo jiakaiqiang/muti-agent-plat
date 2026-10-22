@@ -7,8 +7,9 @@ import type { PersistenceService, PersistedState } from '../persistence/persiste
 import type { SessionLifecyclesBySession } from '../runtimes/session-lifecycle-store.js';
 import { assertIntentExecutionCurrent } from './intent-execution-guard.js';
 import { intentEffectAuthoritySnapshot } from './intent-test-authority.js';
+import { activeReconciliationAttempt, originalReconciliationBinding, RECONCILIATIONS } from './intent-reconciliation-state.js';
 
-export const INTENT_RESUME_COLLECTIONS = ['sessions', 'sessionLifecyclesBySession', 'sessionStopRequestsBySession',
+export const INTENT_RESUME_COLLECTIONS = [RECONCILIATIONS, 'sessions', 'sessionLifecyclesBySession', 'sessionStopRequestsBySession',
   'logicalOperationsBySession', 'tasksBySession', 'briefsBySession', 'workItemsBySession', 'workflowRuntime',
   'intentRoutingRecordsBySession', 'intentRouteRevisionsBySession', 'intentPlanStepsBySession', 'decisionRecordsBySession', 'eventsBySession'];
 const rows = <T>(state: PersistedState, key: string, sessionId: string): T[] =>
@@ -57,18 +58,20 @@ export function assertActiveIntentContinuation(state: PersistedState, session: S
 /** No time-based fallback: only persisted, uniquely linked execution authority can be resumed. */
 export function bindIntentResume(state: PersistedState, sessionId: string, actorId: string,
   expected?: IntentResumeBinding, dispatch = false): IntentResumeBinding {
-  const authority = bindIntentRecoveryAuthority(state, sessionId, actorId, undefined, dispatch);
+  const ref = expected?.reconciliationAttempt;
+  if (ref) activeReconciliationAttempt(state, sessionId, ref, expected);
+  const authority = bindIntentRecoveryAuthority(state, sessionId, actorId, undefined, dispatch, ref);
   const session = (state.sessions as SessionDetail[]).find(row => row.id === sessionId)!;
   const result: IntentResumeBinding = { ...authority, pauseRevision: session.revision ?? 1,
     pausedAt: session.pauseState?.pausedAt ?? expected?.pausedAt ?? fail('INTENT_RESUME_STATE_INVALID') };
-  if (expected && !isDeepStrictEqual({ ...result, pauseRevision: expected.pauseRevision }, expected)) fail('INTENT_RESUME_VERSION_STALE');
+  if (expected && !isDeepStrictEqual({ ...result, pauseRevision: expected.pauseRevision }, originalReconciliationBinding(expected))) fail('INTENT_RESUME_VERSION_STALE');
   if (expected && !dispatch && result.pauseRevision !== expected.pauseRevision) fail('INTENT_RESUME_VERSION_STALE');
   return structuredClone(expected ?? result);
 }
 
 /** Common original-authority proof. Retry changes target/state checks, never authorization. */
 export function bindIntentRecoveryAuthority(state: PersistedState, sessionId: string, actorId: string,
-  retryTaskId?: string, dispatch = false): Omit<IntentResumeBinding, 'pausedAt' | 'pauseRevision'> {
+  retryTaskId?: string, dispatch = false, reconciliationAttempt?: import('@agent-cluster/shared').IntentReconciliationAttemptRef): Omit<IntentResumeBinding, 'pausedAt' | 'pauseRevision'> {
   const session = unique((state.sessions as SessionDetail[] | undefined ?? []).filter(row => row.id === sessionId));
   if (!session || session.intentContractVersion !== 'intent-understanding-v1' || session.ownerId !== actorId || session.archivedAt) {
     return fail('INTENT_RESUME_SESSION_UNAVAILABLE');
@@ -152,7 +155,7 @@ export function bindIntentRecoveryAuthority(state: PersistedState, sessionId: st
     }
     if (step.effectScope.effects.some(effect => effect.kind !== 'answer' && !(revision.authorityGrants ?? []).some(grant =>
       step.effectScope.grantIds.includes(grant.id) && grant.effect === effect.kind && isDeepStrictEqual(grant.resource, effect.target)))) fail('INTENT_RESUME_GRANT_STALE');
-    assertIntentExecutionCurrent(state, { ...operation, effectScope: step.effectScope });
+    assertIntentExecutionCurrent(state, { ...operation, reconciliationAttempt, effectScope: step.effectScope });
     taskBindings.push({ taskId: task.id, operationId: operation.id, stepId: step.stepId, executionBinding: structuredClone(binding) });
   }
   if (new Set(taskBindings.map(task => JSON.stringify([task.executionBinding.routingId, task.executionBinding.intentRevision]))).size !== 1) fail('INTENT_RESUME_PLAN_AMBIGUOUS');

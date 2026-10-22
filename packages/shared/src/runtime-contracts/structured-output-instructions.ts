@@ -47,6 +47,12 @@ export function buildStructuredOutputInstructions(
     );
   }
 
+  if (outputKind === 'intent_source_candidate') {
+    instructions.push('For intent_source_candidate, return summary and updates containing only path and full UTF-8 replacement content.',
+      'Use only files in the fixed sourceCandidateBaseline. These are update proposals; never create, delete, move, apply files, or claim they were written.',
+      'Do not supply authority, candidate identifiers, hashes, commands, or additional effects.');
+  }
+
   if (outputKind === 'task_acceptance_decision') {
     instructions.push(
       'For task_acceptance_decision, judge only whether the assigned Agent can start and execute the currentTask with its role, capabilities, and available minimum context.',

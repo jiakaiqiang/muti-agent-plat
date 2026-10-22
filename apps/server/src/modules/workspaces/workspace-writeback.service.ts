@@ -13,16 +13,21 @@ import type {
   WorkspaceWritebackRecord
 } from '@agent-cluster/shared';
 import { workspaceMetrics } from '../../common/workspace-metrics.js';
+import { resolve } from 'node:path';
 import { PersistenceService, type PersistedState } from '../persistence/persistence.service.js';
 import { assertIntentExecutionCurrent, INTENT_EXECUTION_COLLECTIONS } from '../message-routing/intent-execution-guard.js';
 import type { RuntimeInvocationLog } from '../runtimes/runtime.service.js';
 import { SessionLifecycleStore } from '../runtimes/session-lifecycle-store.js';
 import type { WorkspaceProvider } from './workspace-provider.js';
 import { WorkspaceProviderResolver } from './workspace-provider-resolver.js';
+import { ServerLocalWorkspaceProvider } from './server-local-workspace-provider.js';
+import { IntentSourceAuthorityStore, INTENT_SOURCE_COLLECTIONS } from '../message-routing/intent-source-authority.js';
+import { assertIntentSourceChangeSet } from './intent-source-write-guard.js';
 
 const COLLECTION = 'workspaceWritebacks';
 const MAX_CONFLICT_TEXT_BYTES = 512 * 1024;
 type StoredWriteback = WorkspaceWritebackRecord & {
+  sourceCandidateBinding?: import('@agent-cluster/shared').IntentSourceCandidateBinding;
   conflictView?: ConflictView;
   conflictObservedHashes?: Record<string, string | null>;
 };
@@ -34,12 +39,14 @@ export class WorkspaceWritebackService {
   private readonly resolutionTails = new Map<string, Promise<unknown>>();
   private readonly activeOperations = new Map<string, Promise<WorkspaceWritebackRecord>>();
   private readonly lifecycle: SessionLifecycleStore;
+  private readonly sources: IntentSourceAuthorityStore;
 
   constructor(
     private readonly persistence: PersistenceService,
     private readonly providers: WorkspaceProviderResolver
   ) {
     this.lifecycle = new SessionLifecycleStore(persistence);
+    this.sources = new IntentSourceAuthorityStore(persistence);
     let recovered = false;
     for (const record of persistence.getCollection<StoredWriteback[]>(COLLECTION, [])) {
       if (['queued', 'merging', 'applying'].includes(record.status)) {
@@ -109,7 +116,7 @@ export class WorkspaceWritebackService {
     const record = this.requireConflict(sessionId, conflictId);
     return this.serializeResolution(record, async () => {
       this.requireConflict(sessionId, conflictId);
-      const view = record.conflictView!;
+      const view = record.sourceCandidateBinding ? structuredClone(record.conflictView!) : record.conflictView!;
       if (view.version !== input.expectedVersion) throw new ConflictException('WORKSPACE_CONFLICT_VERSION_CONFLICT');
       const file = view.files.find((item) => item.fileId === fileId);
       if (!file) throw new NotFoundException('Workspace conflict file not found.');
@@ -122,6 +129,15 @@ export class WorkspaceWritebackService {
         if (input.confirm && containsConflictMarkers(input.resultContent)) {
           throw new BadRequestException('Unresolved conflict markers remain in the result.');
         }
+        if (record.sourceCandidateBinding) {
+          const original = record.changeSet.changes.find(part => part.operation === 'update' && part.path === file.path);
+          if (!original || original.operation !== 'update') throw new ConflictException('INTENT_SOURCE_UPDATE_REQUIRED');
+          const editedContents = new Map(view.files.filter(part => part.kind === 'text')
+            .map(part => [part.path, part.fileId === file.fileId ? input.resultContent! : part.resultContent]));
+          await this.assertSourceWrite(record, { ...record.changeSet,
+            changes: record.changeSet.changes.map(part => part.operation === 'update' && editedContents.has(part.path)
+              ? { ...part, content: editedContents.get(part.path) ?? part.content } : part) });
+        }
         file.resultContent = input.resultContent;
       } else {
         if (input.binaryChoice !== 'ours' && input.binaryChoice !== 'theirs') {
@@ -133,7 +149,8 @@ export class WorkspaceWritebackService {
       file.version += 1;
       view.version += 1;
       view.updatedAt = new Date().toISOString();
-      await this.persist();
+      if (record.sourceCandidateBinding) await this.update(record, { conflictView: view });
+      else await this.persist();
       return structuredClone(view);
     });
   }
@@ -147,6 +164,13 @@ export class WorkspaceWritebackService {
   }): Promise<WorkspaceWritebackRecord> {
     const sessionGeneration = this.lifecycle.generation(input.session.id);
     this.assertActiveGeneration(input.session.id, sessionGeneration);
+    const sourceCandidateBinding = this.sources.bindingForCandidate({ sessionId: input.session.id,
+      taskId: input.taskId, invocationId: input.invocationId, changeSetId: input.execution.changeSet.id,
+      changeSet: input.execution.changeSet });
+    if (sourceCandidateBinding) {
+      const authority = await this.sources.loadLive(sourceCandidateBinding);
+      await assertIntentSourceChangeSet(authority, input.execution.changeSet);
+    }
     const existing = input.execution.writeback?.id
       ? this.records.get(input.execution.writeback.id)
       : [...this.records.values()].find((record) => record.changeSet.id === input.execution.changeSet.id);
@@ -166,7 +190,8 @@ export class WorkspaceWritebackService {
       invocationId: input.invocationId,
       workspaceId: input.session.workspaceId,
       providerKind: input.session.workspaceContext?.binding.providerKind ?? 'server_local',
-      changeSet: input.execution.changeSet,
+      changeSet: structuredClone(input.execution.changeSet),
+      ...(sourceCandidateBinding ? { sourceCandidateBinding: structuredClone(sourceCandidateBinding) } : {}),
       ...(input.resultSummary ? { resultSummary: input.resultSummary } : {}),
       status: 'queued',
       conflicts: [],
@@ -265,6 +290,10 @@ export class WorkspaceWritebackService {
 
   private async apply(record: StoredWriteback, session: SessionDetail, force: boolean,
     resolvedChangeSet?: WorkspaceChangeSet) {
+    let sourceClaim: Awaited<ReturnType<IntentSourceAuthorityStore['beginApply']>> | undefined;
+    let sourceSettled = false;
+    let providerEntered = false;
+    let filesApplied = false;
     try {
       this.assertActiveGeneration(record.sessionId, record.sessionGeneration);
     } catch (error) {
@@ -278,8 +307,23 @@ export class WorkspaceWritebackService {
     try {
       await this.update(record, { status: 'merging', conflicts: [] });
       const changeSet = resolvedChangeSet ?? (force ? await forceChangeSet(provider, record.changeSet) : record.changeSet);
+      if (record.sourceCandidateBinding) {
+        if (!(provider instanceof ServerLocalWorkspaceProvider)) throw new ConflictException('INTENT_SOURCE_PROVIDER_UNSUPPORTED');
+        await this.assertSourceWrite(record, changeSet);
+        sourceClaim = await this.sources.beginApply(record.sourceCandidateBinding, {
+          writebackId: record.id, attemptId: crypto.randomUUID()
+        });
+      }
       await this.update(record, { status: 'applying' });
-      const result = await provider.applyChangeSet(changeSet);
+      providerEntered = true;
+      const result = record.sourceCandidateBinding
+        ? await provider.applyChangeSetGuarded!(changeSet, (rootPath, final) => this.assertSourceWrite(record, final, rootPath))
+        : await provider.applyChangeSet(changeSet);
+      filesApplied = result.ok;
+      if (sourceClaim) {
+        await this.sources.finishApply(sourceClaim, result.ok ? 'applied' : 'not_applied');
+        sourceSettled = true;
+      }
       if (!result.ok) {
         workspaceMetrics.increment('workspace_writeback_conflict_total', result.conflicts.length, {
           providerKind: record.providerKind
@@ -297,11 +341,29 @@ export class WorkspaceWritebackService {
         conflictObservedHashes: undefined
       });
     } catch (error) {
+      if (sourceClaim && !sourceSettled) {
+        const noWrites = !filesApplied && (!providerEntered ||
+          (error as { workspaceApplyOutcome?: string })?.workspaceApplyOutcome === 'not_applied');
+        // Keep uncertain or interrupted applications fenced; never turn an unknown effect into a retry.
+        await this.sources.finishApply(sourceClaim, noWrites ? 'not_applied' : 'unknown').catch(() => undefined);
+      }
       return this.update(record, {
         status: 'failed',
         error: error instanceof Error ? error.message : String(error)
       });
     }
+  }
+
+  private async assertSourceWrite(record: StoredWriteback, changeSet: WorkspaceChangeSet, rootPath?: string) {
+    const binding = record.sourceCandidateBinding;
+    if (!binding) throw new ConflictException('INTENT_SOURCE_BINDING_REQUIRED');
+    const authority = await this.sources.loadLive(binding);
+    if (rootPath && resolve(rootPath) !== resolve(authority.rootPath)) throw new ConflictException('INTENT_SOURCE_ROOT_MISMATCH');
+    await this.persistence.mutateCollections([...new Set([...INTENT_SOURCE_COLLECTIONS, ...INTENT_EXECUTION_COLLECTIONS])], draft => {
+      assertWritebackIntent(draft, record);
+      this.sources.assertLiveInDraft(draft, binding);
+    }, { sessionIds: [record.sessionId] });
+    await assertIntentSourceChangeSet(authority, changeSet);
   }
 
   private requireConflict(sessionId: string, conflictId: string): StoredWriteback {
@@ -414,8 +476,8 @@ export class WorkspaceWritebackService {
   }
 
   private async update(record: StoredWriteback, patch: Partial<StoredWriteback>) {
-    const committed = await this.persistence.mutateCollections([COLLECTION, 'sessions', 'sessionLifecyclesBySession',
-      'runtimeInvocationsBySession', ...INTENT_EXECUTION_COLLECTIONS], draft => {
+    const committed = await this.persistence.mutateCollections([...new Set([COLLECTION, ...INTENT_SOURCE_COLLECTIONS,
+      ...INTENT_EXECUTION_COLLECTIONS])], draft => {
       const next = { ...record, ...patch, updatedAt: new Date().toISOString() };
       const session = (draft.sessions as SessionDetail[] | undefined)?.find(item => item.id === next.sessionId);
       const lifecycle = (draft.sessionLifecyclesBySession as Record<string, { state: string }> | undefined)?.[next.sessionId];
@@ -424,7 +486,11 @@ export class WorkspaceWritebackService {
         if (['queued', 'merging', 'applying'].includes(next.status)) throw new ConflictException('INTENT_EXECUTION_STALE');
         return { record: { ...next, status: 'failed' as const, error: 'INTENT_EXECUTION_STALE' }, persisted: false };
       }
-      if (['queued', 'merging', 'applying'].includes(next.status)) assertWritebackIntent(draft, next);
+      if (['queued', 'merging', 'applying'].includes(next.status)) {
+        assertWritebackIntent(draft, next);
+        if (next.sourceCandidateBinding) this.sources.assertLiveInDraft(draft, next.sourceCandidateBinding);
+      }
+      if (next.sourceCandidateBinding && patch.conflictView) this.sources.assertLiveInDraft(draft, next.sourceCandidateBinding);
       const records = (draft[COLLECTION] ??= []) as StoredWriteback[];
       const index = records.findIndex(item => item.id === next.id);
       if (index < 0) records.push(next);

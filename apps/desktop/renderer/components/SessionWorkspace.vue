@@ -41,6 +41,7 @@ import UiIcon from '@/components/UiIcon.vue'
 import UserInputBox from '@/components/UserInputBox.vue'
 import RuntimeStopStatePanel from '@/components/RuntimeStopStatePanel.vue'
 import RuntimeRequestHealthPanel from '@/components/RuntimeRequestHealthPanel.vue'
+import IntentFollowUpStatusCard from '@/components/IntentFollowUpStatusCard.vue'
 import { useWorkspaceSync } from '@/composables/useWorkspaceSync'
 import { useSessionSwitch } from '@/composables/useSessionSwitch'
 import { latestSessionStatusEvent, resolveSessionStatus } from '@/utils/sessionStatus'
@@ -1390,6 +1391,10 @@ async function resolveConfirmation(optionKey: string, confirmationId?: string) {
     if (confirmationSessionId.value === origin) confirmationBeingHandled.value = undefined
   }
 }
+async function reconciliationDecided(sessionId: string) {
+  try { await reconcileSessionEvents(sessionId) }
+  catch (error) { if (currentSessionId.value === sessionId) showErrorMessage(error, '决定已记录，刷新会话失败，请刷新查看。') }
+}
 async function resolveConfirmationAction(optionKey: string, sessionId: string, confirmation?: ConfirmationCardState) {
   if (!confirmation) return
   if (
@@ -2065,6 +2070,7 @@ async function submitWorkflowStepRevision() {
             :retrying="runtimeStopStateRetrying"
             @retry="retryRuntimeStopState"
           />
+          <IntentFollowUpStatusCard :session="sessionStore.currentSession" />
           <ChatTimeline
             :session-id="currentSessionId"
             :status="derivedStatus"
@@ -2075,6 +2081,7 @@ async function submitWorkflowStepRevision() {
             :workspace-snapshot="sessionStore.currentSession?.workspaceSnapshot"
             :capability-approval-busy="capabilityApprovalBusy"
             @resolve-confirmation="resolveConfirmation"
+            @reconciliation-decided="reconciliationDecided"
             @approve-capability="approveCapability"
           />
           <div v-if="navigation.state.phase === 'loading'" role="status" aria-live="polite">正在加载会话…</div>

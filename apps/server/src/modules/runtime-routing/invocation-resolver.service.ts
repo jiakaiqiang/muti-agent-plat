@@ -50,6 +50,9 @@ export type InvocationRuntimeCandidate = {
 };
 
 export type ResolveInvocationInput = {
+  sourceCandidateBinding?: InvocationPlan['sourceCandidateBinding'];
+  /** Explicit server operation for candidate-only admission; never inferred from model output. */
+  operation?: InvocationPlan['operation'];
   intentTestBinding?: InvocationPlan['intentTestBinding'];
   admissionClass?: InvocationPlan['admissionClass'];
   intentStepId?: string;
@@ -128,7 +131,7 @@ export class InvocationResolverService {
       throw new InvocationResolutionError('CAPABILITY_BLOCKED', 'OUTPUT_CONTRACT_VERSION_UNSUPPORTED: task submission v2 requires an advertising local Runtime.');
     }
     const identity = this.profileCompiler.compileIdentity({ agent: input.agent });
-    const allowedToolNames = input.effectScope ? new Set(intentScopeToolNames(input.effectScope)) : input.writeModeOverride === 'proposal_only'
+    const allowedToolNames = input.effectScope ? new Set(intentScopeToolNames(input.effectScope, input.sourceCandidateBinding)) : input.writeModeOverride === 'proposal_only'
       ? new Set<string>(PROPOSAL_ONLY_TOOL_NAMES)
       : undefined;
     const requiredToolIds = identity.requestedToolIds.filter((capabilityId) =>
@@ -146,7 +149,7 @@ export class InvocationResolverService {
       reason: selection.reason,
       requiredCapabilities,
       requiredToolIds,
-      writeMode: input.effectScope
+      writeMode: input.sourceCandidateBinding ? 'none' : input.effectScope
         ? (input.effectScope.effects.some(effect => effect.kind === 'modify_source') ? 'propose_changes' : 'none')
         : input.writeModeOverride ?? (input.taskRequiresCodeChanges ? 'propose_changes' : 'none'),
       workspaceProviderKind: input.workspace.providerKind,
@@ -197,6 +200,8 @@ export class InvocationResolverService {
       : undefined;
 
     const plan: InvocationPlan = {
+      ...(input.sourceCandidateBinding ? { sourceCandidateBinding: structuredClone(input.sourceCandidateBinding),
+        ...(input.operation ? { operation: structuredClone(input.operation) } : {}) } : {}),
       ...(input.intentTestBinding ? { intentTestBinding: structuredClone(input.intentTestBinding) } : {}),
       ...(input.admissionClass ? { admissionClass: input.admissionClass, dataEpoch: input.dataEpoch } : {}),
       ...(input.intentStepId ? { intentStepId: input.intentStepId } : {}),
@@ -227,6 +232,7 @@ export class InvocationResolverService {
     const requirements = new Set<WorkspaceCapabilityKey>();
     if (
       input.phase === 'task_execution' &&
+      !input.sourceCandidateBinding &&
       (input.effectScope ? input.effectScope.effects.some(effect => effect.kind === 'modify_source') : input.taskRequiresCodeChanges) &&
       input.writeModeOverride !== 'proposal_only'
     ) {
@@ -249,7 +255,8 @@ export class InvocationResolverService {
       if (!candidate.available || excluded.has(candidate.runtimeType) || (allowed && !allowed.has(candidate.runtimeType))) return false;
       if (input.admissionClass === 'routing' && !supportsRestrictedIntentClassification(candidate.runtimeType, input.workspace.providerKind)) return false;
       if (input.admissionClass === 'response' && !['generic_llm', 'mock'].includes(candidate.runtimeType)) return false;
-      if (input.effectScope && !supportsIntentEffectScope(candidate.runtimeType, input.effectScope, input.workspace.workspaceId)) return false;
+      if (input.sourceCandidateBinding && input.workspace.providerKind !== 'server_local') return false;
+      if (input.effectScope && !supportsIntentEffectScope(candidate.runtimeType, input.effectScope, input.workspace.workspaceId, input.sourceCandidateBinding)) return false;
       if (
         candidate.supportedWorkspaceProviderKinds?.length &&
         !candidate.supportedWorkspaceProviderKinds.includes(input.workspace.providerKind)
@@ -364,7 +371,8 @@ export class InvocationResolverService {
     if (!candidate.available) return false;
     if (input.admissionClass === 'routing' && !supportsRestrictedIntentClassification(candidate.runtimeType, input.workspace.providerKind)) return false;
     if (input.admissionClass === 'response' && !['generic_llm', 'mock'].includes(candidate.runtimeType)) return false;
-    if (input.effectScope && !supportsIntentEffectScope(candidate.runtimeType, input.effectScope, input.workspace.workspaceId)) return false;
+    if (input.sourceCandidateBinding && input.workspace.providerKind !== 'server_local') return false;
+    if (input.effectScope && !supportsIntentEffectScope(candidate.runtimeType, input.effectScope, input.workspace.workspaceId, input.sourceCandidateBinding)) return false;
     const allowed = input.sessionPreference?.allowedRuntimeTypes;
     if (allowed && !allowed.includes(candidate.runtimeType)) return false;
     if (input.excludedRuntimeTypes?.includes(candidate.runtimeType)) return false;

@@ -247,6 +247,34 @@ test('scoped tests without isolated runner support cannot fall back to an unrest
     prohibitions: [], grantIds: ['test-grant'], scopeHash: 'test-hash' } }), /No eligible runtime/);
 });
 
+test('opt-in source candidates resolve generic read-only execution without write or command capabilities', () => {
+  const { resolver, calls } = setup({ runtimeCandidates: [candidate('generic_llm', { supportedWorkspaceCapabilities: ['read'],
+    supportedToolNames: ['read_file', 'search_code', 'read_attachment'] })] });
+  const hash = 'a'.repeat(64);
+  const binding = { mode: 'candidate_only', authorityId: 'authority', authorityRevision: 1, authorityHash: hash,
+    sourceResourceId: 'source:authority', grantId: 'source-grant', workspaceId: 'workspace-1', workspaceBindingHash: hash,
+    sessionId: 'session-1', dataEpoch: 'epoch', sessionGeneration: 1, workItemId: 'work', taskId: 'task-1', intentStepId: 'step',
+    invocationId: 'invocation-1', operationId: 'operation', effectScopeHash: hash };
+  const input = { sourceCandidateBinding: binding, admissionClass: 'business', dataEpoch: 'epoch', workItemId: 'work', intentStepId: 'step',
+    operationId: 'operation', operation: { id: 'operation', sessionGeneration: 1, policyVersion: 'v1', maxAttempts: 1,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString() }, taskRequiresCodeChanges: true, writeModeOverride: 'direct_audited',
+    expectedOutput: { kind: 'intent_source_candidate', schemaVersion: '1.0' },
+    executionBinding: { routingId: 'routing', intentRevision: 1, requirementRevision: 1, executionEpoch: 1, sessionGeneration: 1,
+      decisionSetHash: hash, effectScopeHash: hash },
+    effectScope: { effects: [{ kind: 'modify_source', target: { kind: 'source', refId: 'source:authority' }, evidenceRefs: ['request'] },
+      { kind: 'read_workspace', target: { kind: 'workspace', refId: 'workspace-1' }, evidenceRefs: ['read'] }],
+      prohibitions: [], grantIds: ['source-grant', 'read-grant'], scopeHash: hash } } as any;
+  const plan = resolve(resolver, input);
+  assert.equal(plan.executionTarget.runtimeType, 'generic_llm');
+  assert.equal(plan.executionTarget.writeMode, 'none');
+  assert.deepEqual(plan.executionTarget.requiredCapabilities, ['read']);
+  assert.deepEqual(calls[0].allowedToolNames, ['read_file', 'search_code']);
+  assert.deepEqual((plan as any).sourceCandidateBinding, binding);
+  binding.authorityId = 'changed';
+  assert.equal((plan as any).sourceCandidateBinding.authorityId, 'authority');
+  assert.throws(() => resolve(resolver, { ...input, sourceCandidateBinding: undefined } as any), /No eligible runtime/);
+});
+
 test('compiles an immutable Agent identity before producing the InvocationPlan', () => {
   const { resolver } = setup();
   const plan = resolve(resolver);

@@ -1,5 +1,26 @@
 import { INTENT_TEST_SCRIPTS, type InvocationPlan, type RuntimeType } from './contracts.js';
 import type { IntentEffectScope } from './intent-plan-contracts.js';
+import type { IntentSourceCandidateBinding } from './intent-source-contracts.js';
+
+function isCandidateDescription(scope: IntentEffectScope, workspaceId: string, binding: IntentSourceCandidateBinding): boolean {
+  const identifiers = ['authorityId', 'sourceResourceId', 'grantId', 'sessionId', 'dataEpoch', 'workItemId', 'taskId',
+    'intentStepId', 'invocationId', 'operationId'] as const;
+  if (binding.mode !== 'candidate_only' || binding.workspaceId !== workspaceId ||
+    identifiers.some(key => typeof binding[key] !== 'string' || !binding[key].trim()) ||
+    !Number.isSafeInteger(binding.authorityRevision) || binding.authorityRevision < 1 ||
+    !Number.isSafeInteger(binding.sessionGeneration) || binding.sessionGeneration < 1 ||
+    ![binding.authorityHash, binding.workspaceBindingHash, binding.effectScopeHash].every(hash => /^[a-f0-9]{64}$/.test(hash)) ||
+    binding.effectScopeHash !== scope.scopeHash || !scope.grantIds.includes(binding.grantId)) return false;
+  const source = scope.effects.filter(effect => effect.kind === 'modify_source');
+  if (source.length !== 1 || source[0].target.kind !== 'source' || source[0].target.refId !== binding.sourceResourceId ||
+    scope.effects.filter(effect => effect.kind === 'read_workspace').length > 1 ||
+    scope.effects.some(effect => effect.kind !== 'modify_source' && (effect.kind !== 'read_workspace' ||
+      effect.target.kind !== 'workspace' || effect.target.refId !== workspaceId))) return false;
+  if (scope.effects.some(effect => effect.kind === 'read_workspace') && scope.grantIds.every(id => id === binding.grantId)) return false;
+  return !scope.prohibitions.some(ban => ban.object.kind === 'unresolved' || !ban.object.refId ||
+    scope.effects.some(effect => effect.kind === ban.effectKind && (effect.kind === 'read_workspace' ||
+      effect.target.kind === ban.object.kind && effect.target.refId === ban.object.refId)));
+}
 
 /** CLI support is provider-specific: older local bridges have no isolated classifier. */
 export function supportsRestrictedIntentClassification(runtime: RuntimeType, provider?: string): boolean {
@@ -24,7 +45,9 @@ export function isIsolatedTestScope(scope: IntentEffectScope): boolean {
 }
 
 /** Capability support is intentionally conservative until an adapter has enforcement evidence. */
-export function supportsIntentEffectScope(runtime: RuntimeType, scope: IntentEffectScope, workspaceId: string): boolean {
+export function supportsIntentEffectScope(runtime: RuntimeType, scope: IntentEffectScope, workspaceId: string,
+  sourceCandidateBinding?: IntentSourceCandidateBinding): boolean {
+  if (sourceCandidateBinding) return runtime === 'generic_llm' && isCandidateDescription(scope, workspaceId, sourceCandidateBinding);
   if (runtime === 'test_runner') return isIsolatedTestScope(scope);
   if (!['generic_llm', 'mock'].includes(runtime)) return false;
   if (scope.effects.some(effect => effect.kind !== 'answer' &&
@@ -34,8 +57,9 @@ export function supportsIntentEffectScope(runtime: RuntimeType, scope: IntentEff
   return scope.effects.every(effect => effect.kind === 'answer' || scope.grantIds.length > 0);
 }
 
-export function intentScopeToolNames(scope: IntentEffectScope): string[] {
+export function intentScopeToolNames(scope: IntentEffectScope, sourceCandidateBinding?: IntentSourceCandidateBinding): string[] {
   const effects = new Set(scope.effects.map(effect => effect.kind));
+  if (sourceCandidateBinding) return effects.has('read_workspace') ? ['read_file', 'search_code'] : [];
   return [
     ...(effects.has('read_workspace') ? ['read_file', 'search_code'] : []),
     ...(effects.has('modify_source') ? ['write_file'] : []),
@@ -45,6 +69,21 @@ export function intentScopeToolNames(scope: IntentEffectScope): string[] {
 
 /** Also used at the runtime/Bridge boundary so callers cannot bypass InvocationResolver. */
 export function assertIntentInvocationScope(plan: InvocationPlan) {
+  const candidate = plan.sourceCandidateBinding;
+  if (candidate || plan.expectedOutput?.kind === 'intent_source_candidate') {
+    if (!candidate || !plan.effectScope || !isCandidateDescription(plan.effectScope, plan.contextEnvelope.workspaceId, candidate) ||
+      plan.admissionClass !== 'business' || plan.phase !== 'task_execution' || plan.resume ||
+      plan.sessionId !== candidate.sessionId || plan.dataEpoch !== candidate.dataEpoch || plan.workItemId !== candidate.workItemId ||
+      plan.taskId !== candidate.taskId || plan.intentStepId !== candidate.intentStepId || plan.invocationId !== candidate.invocationId ||
+      plan.contextEnvelope.sessionId !== candidate.sessionId || plan.operation?.id !== candidate.operationId ||
+      plan.operation.sessionGeneration !== candidate.sessionGeneration || plan.executionBinding?.sessionGeneration !== candidate.sessionGeneration ||
+      plan.executionBinding?.effectScopeHash !== candidate.effectScopeHash || plan.expectedOutput.kind !== 'intent_source_candidate' ||
+      plan.expectedOutput.schemaVersion !== '1.0' || plan.executionTarget.runtimeType !== 'generic_llm' ||
+      plan.executionTarget.workspaceProviderKind !== 'server_local' || plan.executionTarget.writeMode !== 'none' ||
+      plan.executionTarget.requiredCapabilities.some(capability => capability !== 'read')) {
+      throw new Error('INTENT_SOURCE_CANDIDATE_INVOCATION_INVALID');
+    }
+  }
   if (plan.executionBinding && ['brief_generation', 'brief_revision'].includes(plan.phase) &&
     (plan.admissionClass !== 'business' || !plan.dataEpoch || !plan.intentStepId || !plan.workItemId || plan.taskId || plan.resume ||
       !plan.effectScope || plan.effectScope.effects.length || plan.effectScope.grantIds.length ||
@@ -88,13 +127,13 @@ export function assertIntentInvocationScope(plan: InvocationPlan) {
       throw new Error('INTENT_TEST_INVOCATION_INVALID');
     }
   }
-  if (!supportsIntentEffectScope(plan.executionTarget.runtimeType, scope, plan.contextEnvelope.workspaceId)) {
+  if (!supportsIntentEffectScope(plan.executionTarget.runtimeType, scope, plan.contextEnvelope.workspaceId, candidate)) {
     throw new Error('INTENT_EFFECT_SCOPE_UNSUPPORTED');
   }
   if (!scope.effects.some(effect => effect.kind === 'modify_source') && plan.executionTarget.writeMode !== 'none') {
     throw new Error('INTENT_SOURCE_WRITE_NOT_AUTHORIZED');
   }
-  const allowed = new Set(intentScopeToolNames(scope));
+  const allowed = new Set(intentScopeToolNames(scope, candidate));
   if (plan.toolCatalog.tools.some(tool => !allowed.has(tool.name))) throw new Error('INTENT_TOOL_SCOPE_MISMATCH');
   if (plan.executionBinding && plan.executionBinding.effectScopeHash !== scope.scopeHash) throw new Error('INTENT_EFFECT_SCOPE_HASH_MISMATCH');
 }

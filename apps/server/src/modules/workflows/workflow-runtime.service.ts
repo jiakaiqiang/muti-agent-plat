@@ -194,6 +194,19 @@ export class WorkflowRuntimeService {
     return this.nodeRunsByRunId.get(runId) ?? [];
   }
 
+  /** A human reconciliation records status only; it must never call the workflow advancement path. */
+  acceptReconciledState(sessionId: string) {
+    const state = this.persistence.getCollection<WorkflowRuntimeState>(RUNTIME_KEY, { schemaVersion: 2, runs: [], nodeRunsByRunId: {}, approvalsByRunId: {}, effectsByRunId: {} });
+    for (const run of state.runs.filter(item => item.sessionId === sessionId)) {
+      const live = this.runs.get(run.id);
+      this.runs.set(run.id, live ? Object.assign(live, run) : run);
+      const nodes = this.nodeRunsByRunId.get(run.id) ?? [];
+      this.nodeRunsByRunId.set(run.id, (state.nodeRunsByRunId[run.id] ?? []).map(node => {
+        const liveNode = nodes.find(item => item.id === node.id); return liveNode ? Object.assign(liveNode, node) : node;
+      }));
+    }
+  }
+
   listApprovals(runId: string) {
     this.get(runId);
     return this.approvalsByRunId.get(runId) ?? [];

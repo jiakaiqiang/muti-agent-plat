@@ -1,5 +1,6 @@
 export * from './contract-types.js';
 export * from './intent-understanding.js';
+export * from './intent-source-candidate.js';
 export {
   RuntimeTaskEvidenceRefSchema,
   RuntimeFileChangeProposalSchema,

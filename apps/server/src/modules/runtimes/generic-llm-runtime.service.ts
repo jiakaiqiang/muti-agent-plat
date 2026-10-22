@@ -62,6 +62,7 @@ import { PersistenceService } from '../persistence/persistence.service.js';
 import { InputBudgetStore, INPUT_BUDGET_EXCEEDED } from './input-budget-store.js';
 import { assertIntentExecutionCurrent, INTENT_EXECUTION_COLLECTIONS } from '../message-routing/intent-execution-guard.js';
 import { assertIntentInvocationScope, type SessionDetail, type LogicalOperation } from '@agent-cluster/shared';
+import { IntentSourceCandidateService } from '../message-routing/intent-source-candidate.service.js';
 import {
   abortWithTermination,
   createExecutionTermination,
@@ -232,7 +233,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     @Optional() private readonly discussionDocuments?: DiscussionDocumentsService,
     @Optional() private readonly attachmentReader?: AttachmentReaderTool,
     @Optional() private readonly codeSearch?: CodeSearchTool,
-    @Optional() private readonly intentPersistence?: PersistenceService
+    @Optional() private readonly intentPersistence?: PersistenceService,
+    @Optional() private readonly sourceCandidates?: IntentSourceCandidateService
   ) {}
 
   maxStructuredOutputTokens(input: { modelId?: string }) {
@@ -293,7 +295,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
     } }, input, controller.signal);
   }
 
-  private readonly observationContext = new AsyncLocalStorage<{ invocationId: string; channel: RuntimeObservationChannel; sequence: number }>();
+  private readonly observationContext = new AsyncLocalStorage<{ invocationId: string; channel: RuntimeObservationChannel; sequence: number;
+    sourceCandidateBaseline?: { files: Array<{ path: string; content: string; hash: unknown }> } }>();
   private observeRequest(kind: RuntimeObservationKind | 'observation_due', count?: number) {
     const context = this.observationContext.getStore();
     if (!context) return;
@@ -304,6 +307,63 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   }
 
   private async execute(input: InvocationPlan, signal?: AbortSignal): Promise<AgentRunResult> {
+    if (!input.sourceCandidateBinding && input.expectedOutput.kind !== 'intent_source_candidate') return this.executePrepared(input, signal);
+    const startedAt = nowIso();
+    const model = this.modelConfig.connectionForModelId(input.executionTarget.modelId).model;
+    let generated: AgentRunResult | undefined;
+    try {
+      assertIntentInvocationScope(input);
+      this.assertSourceCandidateBudgetScope(input);
+      if (genericLlmMockFallbackEnabled()) throw new Error('INTENT_SOURCE_CANDIDATE_MOCK_FALLBACK_FORBIDDEN');
+      if (!this.sourceCandidates) throw new Error('INTENT_SOURCE_CANDIDATE_GUARD_UNAVAILABLE');
+      signal?.throwIfAborted();
+      const baseline = await this.sourceCandidates.prepare(input);
+      const context = this.observationContext.getStore();
+      if (!context) throw new Error('INTENT_SOURCE_CANDIDATE_CONTEXT_UNAVAILABLE');
+      context.sourceCandidateBaseline = structuredClone(baseline);
+      generated = await this.executePrepared(input, signal);
+      if (generated.status !== 'completed') return generated;
+      if (generated.output.kind !== 'intent_source_candidate') throw new Error('INTENT_SOURCE_CANDIDATE_OUTPUT_REQUIRED');
+      signal?.throwIfAborted();
+      await this.assertSourceCandidateLive(input);
+      const executionCandidate = await this.sourceCandidates.capture(input, generated.output);
+      return { ...generated, executionCandidate };
+    } catch (error) {
+      if ((error as { code?: string }).code === INPUT_BUDGET_EXCEEDED) return this.inputBudgetBlockedResult(input, startedAt, model, error, generated?.usage);
+      return this.failedResult(input, startedAt, model, error instanceof Error ? error.message : String(error),
+        signal?.aborted ? 'RUNTIME_CANCELLED' : 'CAPABILITY_BLOCKED', { sourceCandidateAdmissionDenied: true }, generated?.usage);
+    }
+  }
+
+  private async assertSourceCandidateLive(input: InvocationPlan) {
+    if (!input.sourceCandidateBinding && input.expectedOutput.kind !== 'intent_source_candidate') return;
+    try {
+      assertIntentInvocationScope(input);
+      this.assertSourceCandidateBudgetScope(input);
+      if (!this.sourceCandidates) throw new Error('INTENT_SOURCE_CANDIDATE_GUARD_UNAVAILABLE');
+      await this.sourceCandidates.assertLive(input);
+    } catch (error) {
+      throw Object.assign(new Error(error instanceof Error ? error.message : String(error)), {
+        code: 'CAPABILITY_BLOCKED', retryable: false, details: { sourceCandidateAdmissionDenied: true }
+      });
+    }
+  }
+
+  private assertSourceCandidateBudgetScope(input: InvocationPlan) {
+    const binding = input.sourceCandidateBinding, policy = input.inputBudgetPolicy;
+    if (!binding || !policy || policy.kind !== 'agent_task' || typeof policy.actorId !== 'string' || !policy.actorId.trim() ||
+      policy.dataEpoch !== binding.dataEpoch || policy.sessionGeneration !== binding.sessionGeneration ||
+      policy.taskId !== binding.taskId || policy.slot !== `task:${binding.taskId}:task_execution:${binding.operationId}` ||
+      !Number.isSafeInteger(input.budget.maxInputTokens) || input.budget.maxInputTokens! <= 0) {
+      throw new Error('INTENT_SOURCE_CANDIDATE_BUDGET_SCOPE_REQUIRED');
+    }
+  }
+
+  private candidateBaseline(input: InvocationPlan) {
+    return input.sourceCandidateBinding ? this.observationContext.getStore()?.sourceCandidateBaseline : undefined;
+  }
+
+  private async executePrepared(input: InvocationPlan, signal?: AbortSignal): Promise<AgentRunResult> {
     const startedAt = nowIso();
     const selectedConnection = this.modelConfig.connectionForModelId(input.executionTarget.modelId);
     if (signal?.aborted) {
@@ -475,7 +535,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         let usage = this.toUsage(completion.body.usage, selectedConnection);
         accruedUsage = usage;
         let evaluated = this.evaluateRuntimeOutput(completion.body, input.expectedOutput.kind);
-        const callerOwnsRepair = (input.admissionClass === 'routing' && input.phase === 'user_message_routing' &&
+        const callerOwnsRepair = Boolean(input.sourceCandidateBinding) || (input.admissionClass === 'routing' && input.phase === 'user_message_routing' &&
           ['intent_understanding', 'intent_routing_decision'].includes(input.expectedOutput.kind)) || input.admissionClass === 'response' ||
           (['brief_generation', 'brief_revision'].includes(input.phase) && Boolean(input.intentStepId && input.executionBinding));
         while (!evaluated.output && !callerOwnsRepair && repairAttempts < Math.min(1, llmSchemaRepairAttempts())) {
@@ -510,7 +570,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
               contentLength: diagnostics.contentLength,
               contentHash: diagnostics.contentHash,
               sanitizedPreview: diagnostics.sanitizedPreview,
-              ...(callerOwnsRepair ? { schemaRepairOwner: input.admissionClass === 'response' ? 'intent_response' : ['brief_generation', 'brief_revision'].includes(input.phase) ? 'intent_brief' : 'intent_classifier',
+              ...(callerOwnsRepair ? { schemaRepairOwner: input.sourceCandidateBinding ? 'intent_source_candidate' : input.admissionClass === 'response' ? 'intent_response' : ['brief_generation', 'brief_revision'].includes(input.phase) ? 'intent_brief' : 'intent_classifier',
                 previousOutput: this.sanitizeDiagnosticPreview(diagnostics.content, 8000),
                 validationErrors: diagnostics.validationErrors.slice(0, 20).map(error => this.sanitizeDiagnosticPreview(error, 500)) } : {}),
               repairAttempts
@@ -548,7 +608,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         };
       } catch (error) {
         if ((error as { code?: string }).code === INPUT_BUDGET_EXCEEDED) return this.inputBudgetBlockedResult(input, startedAt, selectedModel, error, accruedUsage);
-        if ((error as { details?: { inputBudgetAdmissionDenied?: boolean } }).details?.inputBudgetAdmissionDenied) {
+        if ((error as { details?: { inputBudgetAdmissionDenied?: boolean; sourceCandidateAdmissionDenied?: boolean } }).details?.inputBudgetAdmissionDenied ||
+          (error as { details?: { sourceCandidateAdmissionDenied?: boolean } }).details?.sourceCandidateAdmissionDenied) {
           return this.failedResult(input, startedAt, selectedModel, (error as Error).message, 'CAPABILITY_BLOCKED', this.errorDetails(error));
         }
         const isAbort = error instanceof Error && (error.name === 'AbortError' || Boolean(signal?.aborted));
@@ -594,7 +655,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
   private completionMessages(input: InvocationPlan, connection: RuntimeModelConnection) {
     return [{ role: 'system', content: connection.kind === 'local' ? this.buildLocalSystemPrompt(input) : this.buildRemoteSystemPrompt(input) },
       { role: 'user', content: JSON.stringify({ phase: input.phase, expectedOutput: input.expectedOutput,
-        contextEnvelope: input.contextEnvelope, toolCatalog: input.toolCatalog, budget: input.budget }) }];
+        contextEnvelope: input.contextEnvelope, toolCatalog: input.toolCatalog, budget: input.budget,
+        ...(input.sourceCandidateBinding ? { sourceCandidateBaseline: this.candidateBaseline(input) } : {}) }) }];
   }
 
   estimatePreparedInputTokens(input: InvocationPlan) {
@@ -644,6 +706,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       const requestStartedAt = nowIso();
       const requestStartedMs = Date.now();
       await this.assertScopedInputBudget(input, messages);
+      await this.assertSourceCandidateLive(input);
       this.observeRequest('request_started');
       const response = await fetch(this.chatCompletionsUrl(connection.baseUrl), {
         method: 'POST',
@@ -834,6 +897,9 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       input.expectedOutput.kind === 'task_execution_result'
         ? 'For task_execution_result, include changedArtifacts with file changes if applicable.'
         : '',
+      input.expectedOutput.kind === 'intent_source_candidate'
+        ? `Return only update proposals against the fixed sourceCandidateBaseline, never apply files. Required JSON Schema: ${JSON.stringify(runtimeOutputSchema('intent_source_candidate'))}`
+        : '',
       input.expectedOutput.kind === 'post_review_report' ? POST_REVIEW_CONTEXT_ACTION_INSTRUCTION : ''
     ]
       .filter(Boolean)
@@ -844,7 +910,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
       expectedOutput: input.expectedOutput,
       contextEnvelope: input.contextEnvelope,
       toolCatalog: input.toolCatalog,
-      budget: input.budget
+      budget: input.budget,
+      ...(input.sourceCandidateBinding ? { sourceCandidateBaseline: this.candidateBaseline(input) } : {})
     });
 
     const baseMessages: Array<{ role: string; content: string }> = [
@@ -1029,6 +1096,7 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         try {
           if (signal?.aborted) onAbort();
           await this.assertScopedInputBudget(input, messages);
+          await this.assertSourceCandidateLive(input);
           this.observeRequest('request_started');
           const response = await fetch(this.chatCompletionsUrl(selectedConnection.baseUrl), {
             method: 'POST',
@@ -1072,7 +1140,8 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
           break;
         } catch (error) {
           if ((error as { code?: string }).code === INPUT_BUDGET_EXCEEDED) return this.inputBudgetBlockedResult(input, startedAt, selectedModel, error, loopUsage);
-          if ((error as { details?: { inputBudgetAdmissionDenied?: boolean } }).details?.inputBudgetAdmissionDenied) {
+          if ((error as { details?: { inputBudgetAdmissionDenied?: boolean } }).details?.inputBudgetAdmissionDenied ||
+            (error as { details?: { sourceCandidateAdmissionDenied?: boolean } }).details?.sourceCandidateAdmissionDenied) {
             return this.failedResult(input, startedAt, selectedModel, (error as Error).message, 'CAPABILITY_BLOCKED', this.errorDetails(error));
           }
           const isAbort = error instanceof Error && (error.name === 'AbortError' || Boolean(signal?.aborted));
@@ -1224,23 +1293,28 @@ export class GenericLlmRuntimeService implements AgentRuntimeAdapter {
         }
         if (input.executionBinding) {
           try {
-            assertIntentInvocationScope(input);
-            signal?.throwIfAborted();
-            if (!this.intentPersistence) throw new Error('INTENT_TOOL_GUARD_UNAVAILABLE');
-            const boundRoot = await this.intentPersistence.mutateCollections(['sessions', 'sessionLifecyclesBySession',
-              'logicalOperationsBySession', ...INTENT_EXECUTION_COLLECTIONS], draft => {
-              assertIntentExecutionCurrent(draft, input);
-              const operation = (draft.logicalOperationsBySession as Record<string, LogicalOperation[]> | undefined)?.[input.sessionId]
-                ?.find(row => row.id === input.operation?.id);
-              if (!operation || operation.activeInvocationId !== input.invocationId || ['requested', 'unconfirmed'].includes(operation.stopState)) {
-                throw new Error('INTENT_TOOL_OPERATION_STALE');
+            if (input.sourceCandidateBinding) {
+              signal?.throwIfAborted();
+              await this.assertSourceCandidateLive(input);
+            } else {
+              assertIntentInvocationScope(input);
+              signal?.throwIfAborted();
+              if (!this.intentPersistence) throw new Error('INTENT_TOOL_GUARD_UNAVAILABLE');
+              const boundRoot = await this.intentPersistence.mutateCollections(['sessions', 'sessionLifecyclesBySession',
+                'logicalOperationsBySession', ...INTENT_EXECUTION_COLLECTIONS], draft => {
+                assertIntentExecutionCurrent(draft, input);
+                const operation = (draft.logicalOperationsBySession as Record<string, LogicalOperation[]> | undefined)?.[input.sessionId]
+                  ?.find(row => row.id === input.operation?.id);
+                if (!operation || operation.activeInvocationId !== input.invocationId || ['requested', 'unconfirmed'].includes(operation.stopState)) {
+                  throw new Error('INTENT_TOOL_OPERATION_STALE');
+                }
+                const session = (draft.sessions as SessionDetail[]).find(row => row.id === input.sessionId)!;
+                return input.admissionClass === 'response' ? session.workingDirectory?.path : undefined;
+              }, { sessionIds: [input.sessionId] });
+              if (input.admissionClass === 'response') {
+                if (!boundRoot) throw new Error('INTENT_WORKSPACE_ROOT_UNAVAILABLE');
+                rootPath = boundRoot;
               }
-              const session = (draft.sessions as SessionDetail[]).find(row => row.id === input.sessionId)!;
-              return input.admissionClass === 'response' ? session.workingDirectory?.path : undefined;
-            }, { sessionIds: [input.sessionId] });
-            if (input.admissionClass === 'response') {
-              if (!boundRoot) throw new Error('INTENT_WORKSPACE_ROOT_UNAVAILABLE');
-              rootPath = boundRoot;
             }
           } catch (error) {
             return this.failedResult(input, startedAt, selectedModel, '本次工具调用的意图版本或只读授权已失效。',

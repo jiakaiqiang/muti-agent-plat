@@ -68,9 +68,13 @@ import { DiscussionDocumentsService } from '../discussion-documents/discussion-d
 import { RuntimeHealthStore } from './runtime-health-store.js';
 import { assertIntentExecutionCurrent, INTENT_EXECUTION_COLLECTIONS, IntentExecutionSupersededError } from '../message-routing/intent-execution-guard.js';
 import type { SessionLifecyclesBySession } from './session-lifecycle-store.js';
-import { assertIntentRetryRuntimeSafe } from '../message-routing/intent-retry-guard.js';
+import { assertIntentRetryRuntimeSafe, readIntentRetryState } from '../message-routing/intent-retry-guard.js';
+import { hasReconciledCliConfirmation, reserveReconciliationInvocation } from '../message-routing/intent-reconciliation-state.js';
 
 export type RuntimeInvocationLog = {
+  sourceCandidateBinding?: InvocationPlan['sourceCandidateBinding'];
+  effectScope?: InvocationPlan['effectScope'];
+  reconciliationAttempt?: InvocationPlan['reconciliationAttempt'];
   executionBinding?: InvocationPlan['executionBinding'];
   intentAdmission?: AgentRunResult['intentAdmission'];
   /** Original response retained only for rejected late results; never used for dispatch. */
@@ -320,7 +324,9 @@ export class RuntimeService implements OnModuleInit {
   start(input: InvocationPlan, signal?: AbortSignal): RuntimeExecutionHandle {
     if (input.intentRetryBinding && this.persistence.getCollection<SessionDetail[]>('sessions', [])
       .some(session => session.id === input.sessionId && session.intentContractVersion === 'intent-understanding-v1')) {
-      assertIntentRetryRuntimeSafe(input.executionTarget.runtimeType);
+      if (!hasReconciledCliConfirmation(readIntentRetryState(this.persistence), input.intentRetryBinding, input.executionTarget.runtimeType)) {
+        assertIntentRetryRuntimeSafe(input.executionTarget.runtimeType);
+      }
     }
     input.dataEpoch ??= this.persistence.getCollection<SessionDetail[]>('sessions', [])
       .find(session => session.id === input.sessionId)?.dataEpoch;
@@ -375,10 +381,11 @@ export class RuntimeService implements OnModuleInit {
     const result = (async (): Promise<AgentRunResult> => {
       try {
         assertIntentInvocationScope(input);
+        await reserveReconciliationInvocation(this.persistence, input);
         const operation = await this.operations.begin({ id: input.operation?.id ?? input.invocationId,
           sessionId: input.sessionId, taskId: input.taskId, phase: input.phase,
           admissionClass: input.admissionClass, dataEpoch: input.dataEpoch,
-          intentStepId: input.intentStepId,
+          intentStepId: input.intentStepId, reconciliationAttempt: input.reconciliationAttempt,
           workItemId: input.workItemId, executionBinding: input.executionBinding });
         input.operation = { id: operation.id, deadlineAt: operation.deadlineAt, sessionGeneration: operation.sessionGeneration,
           maxAttempts: operation.maxAttempts, policyVersion: operation.policyVersion };
@@ -1070,7 +1077,8 @@ export class RuntimeService implements OnModuleInit {
       ?.find(item => item.invocationId === invocationId);
     if (!log || log.intentAdmission?.status === 'superseded') throw new IntentExecutionSupersededError('INTENT_EXECUTION_STALE');
     try { await this.operations.assertCurrentIntent({ sessionId, taskId: log.taskId, workItemId: log.workItemId,
-      dataEpoch: log.dataEpoch, sessionGeneration: log.contextGeneration, executionBinding: log.executionBinding }); }
+      dataEpoch: log.dataEpoch, sessionGeneration: log.contextGeneration, executionBinding: log.executionBinding,
+      reconciliationAttempt: log.reconciliationAttempt, invocationId: log.invocationId }); }
     catch (error) {
       if (error instanceof Error && /^INTENT_/.test(error.message)) throw new IntentExecutionSupersededError(error.message);
       throw error;
@@ -1153,6 +1161,9 @@ export class RuntimeService implements OnModuleInit {
 
   private async recordInvocation(input: InvocationPlan, result: AgentRunResult, startedAt: string) {
     const log: RuntimeInvocationLog = {
+      sourceCandidateBinding: input.sourceCandidateBinding ? structuredClone(input.sourceCandidateBinding) : undefined,
+      effectScope: input.effectScope ? structuredClone(input.effectScope) : undefined,
+      reconciliationAttempt: input.reconciliationAttempt,
       executionBinding: input.executionBinding,
       operationTelemetry: result.operationTelemetry,
       executionCandidate: result.executionCandidate,

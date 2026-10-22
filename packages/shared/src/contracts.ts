@@ -1582,6 +1582,13 @@ export type SessionDetail = {
   intentWorkspaceReadAuthority?: { bindingHash: string; grant: import('./intent-plan-contracts.js').IntentEffectGrant };
   /** Explicit user grant for one pinned isolated runner; never inferred from a model proposal. */
   intentTestAuthority?: IntentTestAuthority;
+  /** Explicit server-issued source authorities; never inferred from legacy write flags. */
+  intentSourceAuthorities?: import('./intent-source-authority-contracts.js').IntentSourceAuthority[];
+  /** Pre-call baselines and captured source candidates; retained until explicit resolution. */
+  intentSourceCandidates?: import('./intent-source-authority-contracts.js').IntentSourceCandidateRecord[];
+  intentSourceAuthorizationRequests?: import('./intent-follow-up-contracts.js').IntentSourceAuthorizationRequest[];
+  intentFollowUps?: import('./intent-follow-up-contracts.js').IntentFollowUp[];
+  intentSourceApplyResolutions?: import('./intent-follow-up-contracts.js').IntentSourceApplyResolution[];
   title: string;
   originalInput: string;
   /**
@@ -3394,6 +3401,7 @@ export type IsolatedTestAttempt = {
 };
 
 export type LogicalOperation = {
+  reconciliationAttempt?: import('./intent-reconciliation-contracts.js').IntentReconciliationAttemptRef;
   inputBudgetDecisions?: import('./input-budget.js').InputBudgetDecision[];
   isolatedTestAttempts?: IsolatedTestAttempt[];
   workItemId?: string;
@@ -3495,6 +3503,9 @@ export type RuntimeExecutionCandidate = {
 };
 
 export type InvocationPlan = {
+  /** Opt-in read-only source proposal path, bound by the server before any model request. */
+  sourceCandidateBinding?: import('./intent-source-contracts.js').IntentSourceCandidateBinding;
+  reconciliationAttempt?: import('./intent-reconciliation-contracts.js').IntentReconciliationAttemptRef;
   /** A bounded retry must also fence the ultimately selected Runtime. */
   intentRetryBinding?: import('./intent-correction-contracts.js').IntentRetryBinding;
   inputBudgetPolicy?: import('./input-budget.js').InputBudgetPolicy;

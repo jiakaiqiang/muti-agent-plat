@@ -19,6 +19,7 @@ import { PersistenceService } from '../persistence/persistence.service.js';
 import { IntentExecutionSupersededError } from '../message-routing/intent-execution-guard.js';
 import { bindIntentResume, readIntentResumeState } from '../message-routing/intent-resume-guard.js';
 import { bindIntentRetry, readIntentRetryState } from '../message-routing/intent-retry-guard.js';
+import { assertReconciliationOutcome } from '../message-routing/intent-reconciliation-state.js';
 
 @Injectable()
 export class ExecutionWorker implements OnModuleInit, OnModuleDestroy {
@@ -105,7 +106,12 @@ export class ExecutionWorker implements OnModuleInit, OnModuleDestroy {
     }
     const controller = this.executionQueue.registerAbortController(sessionId);
     try {
-      const outcome = await this.orchestrator.runPipeline(session, brief, unfinishedTasks, controller.signal, retryBinding);
+      const outcome = await this.orchestrator.runPipeline(session, brief, unfinishedTasks, controller.signal, retryBinding, resumeBinding?.reconciliationAttempt);
+      try { assertReconciliationOutcome(readIntentResumeState(this.persistence), sessionId, unfinishedTasks.map(task => task.id),
+        retryBinding?.reconciliationAttempt ?? resumeBinding?.reconciliationAttempt); } catch (error) {
+        if (error instanceof Error && error.message === 'INTENT_RECONCILIATION_OUTCOME_STALE') return;
+        throw error;
+      }
       await this.sessions.applyQueuedExecutionOutcome(sessionId, outcome, sessionGeneration);
     } catch (error) {
       if (!(error instanceof IntentExecutionSupersededError)) throw error;

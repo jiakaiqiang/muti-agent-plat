@@ -77,11 +77,23 @@ export class ServerLocalWorkspaceProvider implements WorkspaceProvider {
   }
 
   async applyChangeSet(input: WorkspaceChangeSet): Promise<ApplyChangeSetResult> {
+    return this.applyChangeSetInternal(input);
+  }
+
+  async applyChangeSetGuarded(input: WorkspaceChangeSet,
+    guard: (rootPath: string, finalChangeSet: WorkspaceChangeSet) => Promise<void>): Promise<ApplyChangeSetResult> {
+    if (typeof guard !== 'function') throw new Error('INTENT_SOURCE_WRITEBACK_GUARD_REQUIRED');
+    return this.applyChangeSetInternal(input, guard);
+  }
+
+  private async applyChangeSetInternal(input: WorkspaceChangeSet,
+    authorize?: (rootPath: string, finalChangeSet: WorkspaceChangeSet) => Promise<void>): Promise<ApplyChangeSetResult> {
     if (!this.writable) throw new Error('server_local workspace is read-only');
     const result = await applyServerLocalChangeSet({
       rootPath: this.rootPath,
       currentRevision: this.state.revision,
-      changeSet: input
+      changeSet: structuredClone(input),
+      authorize
     });
     updateServerLocalWorkspaceRevision(this.rootPath, this.state, result.revision);
     return result;

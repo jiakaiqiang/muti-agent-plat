@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
 import { useIntentBriefConfirmationStore } from './intentBriefConfirmation'
 import { useIntentBriefRevisionStore } from './intentBriefRevision'
+import { normalizeReconciliationViews, reconciliationNeedsCliConfirmation, reconciliationReadOnly, RECONCILIATION_CLI_RISK_VERSION } from '@/components/intentReconciliationModel'
+import type { IntentReconciliationView, IntentReconciliationAction, DecideIntentReconciliationInput } from '@agent-cluster/shared'
 import type { TaskBrief } from '@agent-cluster/shared'
 import type { SessionSwitchContext } from '@/composables/useSessionSwitch'
 import { readPoolFor } from '@/utils/readPool'
@@ -32,6 +34,7 @@ import type {
   WorkflowMemberMappingResolution,
   WorkItem
 } from '@/types/contracts'
+import type { IntentSourceAuthorizationCandidate } from '@/types/contracts'
 import type { PostReviewAction } from '@/types/contracts'
 import type { GroupChatMessageDirectives } from '@agent-cluster/shared'
 import type { DecisionRecord } from '@agent-cluster/shared'
@@ -67,7 +70,26 @@ type LoadStopStateOptions = {
 
 const stopStateRequests = new Map<string, Promise<RuntimeStopSummary>>()
 const trackedStores = new WeakSet<object>()
+const reconciliationReads = new WeakMap<object, Map<string, Promise<IntentReconciliationView[]>>>()
+
+export type IntentSourceCandidatePage = {
+  candidates: Array<Pick<IntentSourceAuthorizationCandidate, 'ref' | 'path' | 'size' | 'hash' | 'suggested' | 'expiresAt'>>
+  nextCursor?: string
+  total: number
+  truncated: boolean
+  truncatedReason?: string
+}
+export type IntentSourceWritebackView = {
+  id: string
+  source: 'source_writeback'
+  claim: { id: string; candidateId: string; [key: string]: unknown }
+  authorityId: string
+  candidateId: string
+  evidence: { files: Array<{ path: string; baseHash: string; targetHash: string; currentHash: string }>; evidenceHash: string; note?: string }
+  actions: Array<{ action: 'redispatch' | 'confirm_completed' | 'abandon'; enabled: boolean; reason?: string }>
+}
 const sessionWriteActions = new Set([
+  'decideIntentReconciliation',
   'sendMessage', 'clarifyIntentRouting', 'saveFileRevisionDraft', 'reprocessFileRevision',
   'resolveFileRevisionFailure', 'retryInterruptedFileRevision', 'captureFileRevisionBaseline',
   'startFileRevision', 'decideFileRevision', 'deleteSession', 'archiveSession', 'restoreSession',
@@ -169,7 +191,17 @@ export const useSessionStore = defineStore('session', {
     intentRoutingIdsBySession: {} as Record<string, string[]>,
     stopStatesBySession: {} as Record<string, RuntimeStopSummary>,
     stopStateErrorsBySession: {} as Record<string, string>,
-    stopStateLoadingBySession: {} as Record<string, boolean>
+    stopStateLoadingBySession: {} as Record<string, boolean>,
+    intentReconciliationsBySession: {} as Record<string, IntentReconciliationView[]>,
+    intentReconciliationBusy: {} as Record<string, boolean>,
+    intentReconciliationErrors: {} as Record<string, string>,
+    intentSourceCandidatesByRequest: {} as Record<string, IntentSourceCandidatePage>,
+    intentSourceCandidateBusy: {} as Record<string, boolean>,
+    intentSourceAuthorizationBusy: {} as Record<string, boolean>,
+    intentSourceAuthorizationErrors: {} as Record<string, string>,
+    intentSourceReconciliationsBySession: {} as Record<string, IntentSourceWritebackView[]>,
+    intentSourceReconciliationBusy: {} as Record<string, boolean>,
+    intentSourceReconciliationErrors: {} as Record<string, string>
   }),
   getters: {
     isFavorite: (state) => (sessionId: string) => state.favoriteSessionIds.includes(sessionId),
@@ -363,7 +395,11 @@ export const useSessionStore = defineStore('session', {
         })
         await Promise.all([
           this.loadWorkItems(selectedSessionId, { signal: context?.signal }),
-          this.loadStopState(selectedSessionId)
+          this.loadStopState(selectedSessionId),
+          ...(session.intentContractVersion === 'intent-understanding-v1' ? [
+            this.loadIntentReconciliations(selectedSessionId),
+            this.loadIntentSourceReconciliations(selectedSessionId).catch(() => [])
+          ] : [])
         ])
       } finally {
         if (generation === this.sessionLoadGeneration) this.switching = false
@@ -1056,6 +1092,143 @@ export const useSessionStore = defineStore('session', {
     },
     async decideInputBudget(sessionId: string, input: import('@agent-cluster/shared').DecideInputBudgetInput) {
       return apiPost(`/sessions/${sessionId}/input-budget/decision`, input)
+    },
+    loadIntentReconciliations(sessionId: string, options: { fresh?: boolean } = {}): Promise<IntentReconciliationView[]> {
+      let pending = reconciliationReads.get(this)
+      if (!pending) { pending = new Map(); reconciliationReads.set(this, pending) }
+      const existing = pending.get(sessionId)
+      if (existing) return options.fresh
+        ? existing.catch(() => []).then(() => this.loadIntentReconciliations(sessionId)) : existing
+      const request = apiGet<unknown>(`/sessions/${encodeURIComponent(sessionId)}/intent-reconciliations`, { cache: 'no-store' })
+        .then(raw => {
+          const views = normalizeReconciliationViews(raw)
+          if (views.some(view => view.record.sessionId !== sessionId)) throw new Error('对账案件不属于当前会话。')
+          this.intentReconciliationsBySession[sessionId] = views
+          delete this.intentReconciliationErrors[sessionId]
+          return views
+        }).catch(error => {
+          this.intentReconciliationErrors[sessionId] = error instanceof Error ? error.message : '加载对账事实失败'
+          throw error
+        }).finally(() => pending!.delete(sessionId))
+      pending.set(sessionId, request)
+      return request
+    },
+    async decideIntentReconciliation(sessionId: string, caseId: string, action: IntentReconciliationAction, acceptWorkspaceResponsibility = false) {
+      const busyKey = `${sessionId}:${caseId}`
+      if (this.intentReconciliationBusy[busyKey]) return
+      const view = this.intentReconciliationsBySession[sessionId]?.find(row => row.record.id === caseId)
+      if (!view || this.intentReconciliationErrors[sessionId] || reconciliationReadOnly(view) || view.record.status !== 'open' ||
+        !view.actions.some(row => row.action === action && row.enabled)) throw new Error('当前对账动作不可用，请刷新事实。')
+      const cli = action === 'redispatch' && reconciliationNeedsCliConfirmation(view)
+      if (cli && !acceptWorkspaceResponsibility) throw new Error('请先确认：工作区改动由我负责。')
+      const input: DecideIntentReconciliationInput = {
+        expectedCaseRevision: view.record.revision, expectedSessionRevision: view.sessionRevision, action,
+        // Case identity already includes session/epoch/generation. Identical requests, including after reload, use the same key.
+        idempotencyKey: `${caseId}:${view.record.revision}:${view.sessionRevision}:${action}:${cli ? 'cli-v1' : 'standard'}`,
+        ...(cli ? { acceptWorkspaceResponsibility: true as const, riskVersion: RECONCILIATION_CLI_RISK_VERSION } : {})
+      }
+      this.intentReconciliationBusy[busyKey] = true
+      try {
+        await this.assertBackendCompatible()
+        const result = await apiPost<{ record: IntentReconciliationView['record']; idempotentReplay: boolean }>(
+          `/sessions/${encodeURIComponent(sessionId)}/intent-reconciliations/${encodeURIComponent(caseId)}/decision`, input)
+        view.record = result.record
+        view.actions = view.actions.map(row => ({ ...row, enabled: false, reason: '决定已提交，请以刷新后的事实为准。' }))
+        await Promise.allSettled([this.loadIntentReconciliations(sessionId, { fresh: true }), this.refreshSessionCache(sessionId)])
+        return result
+      } catch (error) {
+        if (error instanceof ApiRequestError && error.status === 409) await this.loadIntentReconciliations(sessionId, { fresh: true }).catch(() => undefined)
+        throw error
+      } finally { delete this.intentReconciliationBusy[busyKey] }
+    },
+    async loadIntentSourceCandidates(sessionId: string, requestId: string, options: { query?: string; cursor?: string; fresh?: boolean } = {}) {
+      const key = requestId
+      this.intentSourceCandidateBusy[key] = true
+      try {
+        const params = new URLSearchParams()
+        if (options.query) params.set('query', options.query)
+        if (options.cursor) params.set('cursor', options.cursor)
+        const suffix = params.toString() ? `?${params.toString()}` : ''
+        const result = await apiGet<IntentSourceCandidatePage>(
+          `/sessions/${encodeURIComponent(sessionId)}/intent-source-authorization/${encodeURIComponent(requestId)}/candidates${suffix}`,
+          { cache: 'no-store' }
+        )
+        this.intentSourceCandidatesByRequest[key] = result
+        delete this.intentSourceAuthorizationErrors[key]
+        return result
+      } catch (error) {
+        this.intentSourceAuthorizationErrors[key] = error instanceof Error ? error.message : '加载候选文件失败'
+        throw error
+      } finally {
+        delete this.intentSourceCandidateBusy[key]
+      }
+    },
+    async decideIntentSourceAuthorization(sessionId: string, requestId: string, input: {
+      action: 'approve' | 'reject'
+      expectedRequestRevision: number
+      expectedSessionRevision: number
+      idempotencyKey: string
+      candidateRefs: string[]
+      prohibitions: Array<'no_schema_change'>
+    }) {
+      const busyKey = `${sessionId}:${requestId}`
+      if (this.intentSourceAuthorizationBusy[busyKey]) return
+      this.intentSourceAuthorizationBusy[busyKey] = true
+      try {
+        await this.assertBackendCompatible()
+        const result = await apiPost(`/sessions/${encodeURIComponent(sessionId)}/intent-source-authorization/${encodeURIComponent(requestId)}/decision`, input)
+        await this.refreshSessionCache(sessionId)
+        return result
+      } catch (error) {
+        if (error instanceof ApiRequestError && error.status === 409) {
+          await this.loadIntentSourceCandidates(sessionId, requestId, { fresh: true }).catch(() => undefined)
+          await this.refreshSessionCache(sessionId).catch(() => undefined)
+        }
+        throw error
+      } finally { delete this.intentSourceAuthorizationBusy[busyKey] }
+    },
+    async cancelIntentFollowUp(sessionId: string, followId: string, input: { expectedRevision: number; idempotencyKey: string }) {
+      await this.assertBackendCompatible()
+      try {
+        const result = await apiPost<{ id: string; status: string; revision: number }>(
+          `/sessions/${encodeURIComponent(sessionId)}/intent-follow-ups/${encodeURIComponent(followId)}/cancel`, input)
+        await this.refreshSessionCache(sessionId)
+        return result
+      } catch (error) {
+        if (error instanceof ApiRequestError && error.status === 409) await this.refreshSessionCache(sessionId).catch(() => undefined)
+        throw error
+      }
+    },
+    async loadIntentSourceReconciliations(sessionId: string, options: { fresh?: boolean } = {}) {
+      try {
+        const views = await apiGet<IntentSourceWritebackView[]>(`/sessions/${encodeURIComponent(sessionId)}/intent-source-reconciliations`, { cache: 'no-store' })
+        this.intentSourceReconciliationsBySession[sessionId] = views
+        delete this.intentSourceReconciliationErrors[sessionId]
+        return views
+      } catch (error) {
+        this.intentSourceReconciliationErrors[sessionId] = error instanceof Error ? error.message : '加载源码写回事实失败'
+        throw error
+      }
+    },
+    async decideIntentSourceReconciliation(sessionId: string, view: IntentSourceWritebackView, action: IntentSourceWritebackView['actions'][number]['action']) {
+      const busyKey = `${sessionId}:${view.claim.id}`
+      if (this.intentSourceReconciliationBusy[busyKey]) return
+      const available = view.actions.find(row => row.action === action)
+      if (!available?.enabled) throw new Error(available?.reason ?? '当前写回动作不可用，请刷新事实。')
+      this.intentSourceReconciliationBusy[busyKey] = true
+      try {
+        await this.assertBackendCompatible()
+        const result = await apiPost(`/sessions/${encodeURIComponent(sessionId)}/intent-source-reconciliations/${encodeURIComponent(view.claim.id)}/decision`, {
+          action,
+          expectedEvidenceHash: view.evidence.evidenceHash,
+          idempotencyKey: `${view.claim.id}:${view.evidence.evidenceHash}:${action}`
+        })
+        await Promise.allSettled([this.loadIntentSourceReconciliations(sessionId, { fresh: true }), this.refreshSessionCache(sessionId)])
+        return result
+      } catch (error) {
+        if (error instanceof ApiRequestError && error.status === 409) await this.loadIntentSourceReconciliations(sessionId, { fresh: true }).catch(() => undefined)
+        throw error
+      } finally { delete this.intentSourceReconciliationBusy[busyKey] }
     },
     async decideFeishuNotification(
       sessionId: string,

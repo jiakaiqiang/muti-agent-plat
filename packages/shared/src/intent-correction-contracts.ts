@@ -131,6 +131,7 @@ export type IntentPlanStepRecord = {
 };
 
 export type IntentResumeBinding = {
+  reconciliationAttempt?: import('./intent-reconciliation-contracts.js').IntentReconciliationAttemptRef;
   sessionId: string;
   dataEpoch: string;
   sessionGeneration: number;

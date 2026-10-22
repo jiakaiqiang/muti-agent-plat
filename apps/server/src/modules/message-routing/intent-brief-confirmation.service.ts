@@ -5,12 +5,14 @@ import { isConfirmIntentBriefInput, type CollaborationEvent, type DecisionRecord
 import { PersistenceService } from '../persistence/persistence.service.js';
 import { EventsService } from '../events/events.service.js';
 import { appendDecisionInDraft } from '../context-management/context-management.service.js';
+import { approveFollowUpInDraft } from './intent-follow-up-state.js';
 import { decisionSetHash, effectiveDecisions } from '../context-management/effective-decisions.js';
 import type { SessionLifecyclesBySession } from '../runtimes/session-lifecycle-store.js';
 import { correctionRows as rows, appendCorrectionEvent as appendEvent } from './intent-correction-state.js';
 
 const collections = ['sessions', 'sessionLifecyclesBySession', 'briefsBySession', 'workItemsBySession', 'decisionRecordsBySession',
-  'intentRoutingRecordsBySession', 'intentRouteRevisionsBySession', 'intentPlanStepsBySession', 'eventsBySession', 'eventOutbox'];
+  'intentRoutingRecordsBySession', 'intentRouteRevisionsBySession', 'intentPlanStepsBySession', 'contextSnapshotsBySession', 'tasksBySession',
+  'logicalOperationsBySession', 'followUpMessagesBySession', 'eventsBySession', 'eventOutbox'];
 
 @Injectable()
 export class IntentBriefConfirmationService {
@@ -90,6 +92,8 @@ export class IntentBriefConfirmationService {
         metadata: { schemaVersion: '0.1', renderAs: 'system_notice', payload: { briefId: brief.id, confirmationId: request.confirmationId,
           receiptId: receipt.id, routingId: route.id, intentRevision: binding.intentRevision, requirementRevision: work.requirementRevision } } };
       appendEvent(draft, source); appendEvent(draft, confirmed);
+      // A follow-up Brief is the sole owner-confirmed gate for creating its one AgentTask.
+      approveFollowUpInDraft(draft, session, brief);
       return { accepted: true as const, sessionId, briefId, dataEpoch: session.dataEpoch, status, receipt: structuredClone(receipt), idempotentReplay: false, events: [source, confirmed] };
     }, { sessionIds: [sessionId] });
     for (const event of result.events) this.events?.acceptCommitted(event);

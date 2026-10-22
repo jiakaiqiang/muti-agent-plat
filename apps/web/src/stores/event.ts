@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { apiGet, apiPage, eventStreamUrl, parseSseEvent } from '@/api/client'
 import { useAgentStore } from '@/stores/agent'
 import { useSessionStore } from '@/stores/session'
+import { reconciliationConfirmation, withReconciliationMessages } from '@/components/intentReconciliationModel'
 import { useKnowledgeStore } from '@/stores/knowledge'
 import { actorAgentId, eventAgentId } from '@/composables/useActor'
 import { applicableArtifactFileChanges } from '@/components/artifactFileChangeModel'
@@ -424,7 +425,8 @@ export const useEventStore = defineStore('event', {
     chatMessages: (state) => (sessionId: string): ChatMessage[] => {
       const events = state.eventsBySessionId[sessionId] ?? []
       const cached = messageProjections.get(events)
-      if (cached) return cached
+      const reconciliations = useSessionStore().intentReconciliationsBySession[sessionId] ?? []
+      if (cached) return withReconciliationMessages(cached, reconciliations)
       const confirmationStatusById = confirmationStatuses(events)
       const discussionDocumentReadStateById = discussionDocumentReadStates(events)
       const messages = collapseLegacyStopReceipts(events.filter(shouldRenderInTimeline).map((event) => {
@@ -451,7 +453,7 @@ export const useEventStore = defineStore('event', {
         }
       }))
       messageProjections.set(events, messages)
-      return messages
+      return withReconciliationMessages(messages, reconciliations)
     },
     agentCards: (state) => (sessionId: string, participantAgentIds?: string[]): AgentCardState[] => {
       const agentStore = useAgentStore()
@@ -621,6 +623,12 @@ export const useEventStore = defineStore('event', {
           if (finalStatuses.get(payload.confirmationId) !== 'pending') continue
           card = {
             confirmationId: payload.confirmationId,
+            requestRevision: payload.requestRevision as number | undefined,
+            sessionRevision: payload.sessionRevision as number | undefined,
+            sourceEventId: payload.sourceEventId as string | undefined,
+            sourceAuthorization: payload.sourceAuthorization as ConfirmationCardState['sourceAuthorization'],
+            scopeResolved: payload.scopeResolved as boolean | undefined,
+            explanation: payload.explanation as string | undefined,
             reason: payload.reason,
             title: payload.title,
             description: payload.description,
@@ -678,7 +686,13 @@ export const useEventStore = defineStore('event', {
           }
         }
       }
-      return card?.status === 'pending' ? card : undefined
+      if (card?.reason === 'intent_reconciliation_required') {
+        const view = useSessionStore().intentReconciliationsBySession[sessionId]?.find(row => row.record.id === card!.confirmationId)
+        if (view) card = reconciliationConfirmation(view)
+      }
+      if (card?.status === 'pending') return { ...card, sessionId }
+      const pendingReconciliation = useSessionStore().intentReconciliationsBySession[sessionId]?.find(row => row.record.status === 'open')
+      return pendingReconciliation ? reconciliationConfirmation(pendingReconciliation) : undefined
     }
   },
   actions: {
@@ -724,6 +738,10 @@ export const useEventStore = defineStore('event', {
       this.refreshVisibleEvents(sessionId)
       this.cacheRecency = [...this.cacheRecency.filter(id => id !== sessionId), sessionId]
       this.trimEventCache()
+      if (normalized.some(event => ['user_confirmation_requested', 'user_confirmation_resolved'].includes(event.type) &&
+        event.metadata.payload?.reason === 'intent_reconciliation_required')) {
+        void useSessionStore().loadIntentReconciliations(sessionId, { fresh: true }).catch(() => undefined)
+      }
     },
     removeEvent(sessionId: string, eventId: string) {
       if (eventId.startsWith('evt-local-')) {

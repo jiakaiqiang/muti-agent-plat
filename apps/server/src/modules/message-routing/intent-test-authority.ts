@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { INTENT_TEST_SCRIPTS, type IntentEffectGrant, type IntentTestAuthority, type IntentTestRunnerBinding,
   type IntentTestScript, type SessionDetail } from '@agent-cluster/shared';
 import { currentWorkspaceReadGrant, workspaceReadBindingHash } from './intent-workspace-read.js';
+import { currentSourceGrants } from './intent-source-authority.js';
 
 /** Configuration and validated workspace facts only. Model output cannot select an image or shell. */
 export function testRunnerBinding(session: SessionDetail, script: IntentTestScript,
@@ -48,9 +49,9 @@ export function currentTestGrant(session: SessionDetail): IntentEffectGrant | un
 /** Bounded snapshot data. These are candidates/grants, not capability or dispatch approval. */
 export function intentEffectAuthoritySnapshot(session: SessionDetail) {
   const testRunnerBindings = availableTestRunnerBindings(session);
-  const grants = [currentWorkspaceReadGrant(session), currentTestGrant(session), currentTestReportGrant(session)].filter((grant): grant is IntentEffectGrant => Boolean(grant));
+  const grants = [currentWorkspaceReadGrant(session), currentTestGrant(session), currentTestReportGrant(session), ...currentSourceGrants(session)].filter((grant): grant is IntentEffectGrant => Boolean(grant));
   return { grants: structuredClone(grants), testRunnerBindings,
-    resources: [{ kind: 'workspace' as const, refId: session.workspaceId },
+    resources: [{ kind: 'workspace' as const, refId: session.workspaceId }, ...currentSourceGrants(session).map(grant => grant.resource),
       ...testRunnerBindings.flatMap(binding => [{ kind: 'test_runner' as const, refId: binding.resourceId },
         { kind: 'artifact' as const, refId: `test-report:${binding.bindingHash}` }])] };
 }

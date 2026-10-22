@@ -85,6 +85,17 @@ export class TasksService {
     return this.tasksBySession.get(sessionId) ?? [];
   }
 
+  /** Reconciliation commits task state atomically; refresh live references without writing a stale snapshot. */
+  acceptReconciledState(sessionId: string) {
+    const committed = this.persistence.getCollection<Record<string, AgentTask[]>>('tasksBySession', {})[sessionId] ?? [];
+    this.tasksBySession.set(sessionId, committed.map(task => {
+      const live = this.find(sessionId, task.id);
+      if (!live) return task;
+      for (const key of Object.keys(live)) if (!(key in task)) delete (live as any)[key];
+      return Object.assign(live, task);
+    }));
+  }
+
   add(task: AgentTask) {
     const existing = this.list(task.sessionId).find((candidate) => candidate.id === task.id);
     if (existing) return existing;

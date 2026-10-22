@@ -78,7 +78,8 @@ import type {
   SystemAgentRole,
   SystemAgentRuntimePolicy,
   WorkflowStatus,
-  WorkflowMemberMappingGap
+  WorkflowMemberMappingGap,
+  IntentSourceAuthorizationCandidate
 } from '@agent-cluster/shared'
 
 export type {
@@ -180,7 +181,8 @@ export type {
   WorkflowStatus,
   WorkflowMemberMappingGap,
   WorkflowMemberMappingNodeEvidence,
-  WorkflowMemberMappingReason
+  WorkflowMemberMappingReason,
+  IntentSourceAuthorizationCandidate
 } from '@agent-cluster/shared'
 
 export { DEFAULT_CONTEXT_PIPELINE_VERSION, SUPPORTED_CONTEXT_PIPELINE_VERSIONS } from '@agent-cluster/shared'
@@ -188,6 +190,8 @@ export { DEFAULT_CONTEXT_PIPELINE_VERSION, SUPPORTED_CONTEXT_PIPELINE_VERSIONS }
 export type SessionViewMode = 'collaboration_plan' | 'chat' | 'collaboration_graph' | 'workflow' | 'workflow_details' | 'debug'
 
 export type ConfirmationReason =
+  | 'intent_source_authorization'
+  | 'intent_reconciliation_required'
   | 'input_budget_exceeded'
   | 'confirm_task_brief'
   | 'select_workflow'
@@ -320,6 +324,18 @@ export type ConfirmationRequestedPayload = {
   routingRevision?: number
   followUpMessageId?: string
   reasonCodes?: string[]
+  requestRevision?: number
+  sessionRevision?: number
+  sourceEventId?: string
+  sourceAuthorization?: {
+    sourceEventId: string
+    workspaceId?: string
+    workItemId: string
+    candidateRefs: string[]
+    prohibitions: Array<'no_schema_change'>
+  }
+  scopeResolved?: boolean
+  explanation?: string
 }
 
 export type TaskEventPayload = {
@@ -523,6 +539,15 @@ export type AgentCardState = {
 }
 
 export type ConfirmationCardState = {
+  sessionId?: string
+  requestRevision?: number
+  sessionRevision?: number
+  sourceEventId?: string
+  sourceAuthorization?: ConfirmationRequestedPayload['sourceAuthorization']
+  scopeResolved?: boolean
+  explanation?: string
+  reconciliationCaseId?: string
+  intentReconciliation?: import('@agent-cluster/shared').IntentReconciliationView
   inputBudgetDecision?: import('@agent-cluster/shared').InputBudgetDecision
   confirmationId: string
   reason: ConfirmationReason

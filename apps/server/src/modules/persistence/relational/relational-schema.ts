@@ -1306,6 +1306,12 @@ export const RELATIONAL_SCHEMA_V23_TABLES: RelationalTableDefinition[] = [
 export const RELATIONAL_SCHEMA_V23_SQL = 'create unique index if not exists intent_routing_records_id_session_uq on agent_cluster.intent_routing_records(id,session_id);\n\n' +
   renderTables(RELATIONAL_SCHEMA_V23_TABLES);
 
+export const RELATIONAL_SCHEMA_V24_TABLES: RelationalTableDefinition[] = [table('intent_reconciliations', '人工对账案件、不可变决定与单次派发认领。',
+  RELATIONAL_SCHEMA_V23_TABLES[0].columns,
+  ['unique (session_id,data_epoch,identity_key)', 'foreign key (routing_id,session_id) references agent_cluster.intent_routing_records(id,session_id) on delete cascade'],
+  ['create index if not exists intent_reconciliations_session_status_idx on agent_cluster.intent_reconciliations(session_id,status,updated_at)'])];
+export const RELATIONAL_SCHEMA_V24_SQL = renderTables(RELATIONAL_SCHEMA_V24_TABLES);
+
 export function expectedRelationalComments() {
   return [
     SCHEMA_MIGRATIONS_TABLE,
@@ -1328,7 +1334,8 @@ export function expectedRelationalComments() {
     ...RELATIONAL_SCHEMA_V19_TABLES,
     ...RELATIONAL_SCHEMA_V20_TABLES,
     ...RELATIONAL_SCHEMA_V21_TABLES,
-    ...RELATIONAL_SCHEMA_V23_TABLES
+    ...RELATIONAL_SCHEMA_V23_TABLES,
+    ...RELATIONAL_SCHEMA_V24_TABLES
   ].flatMap((definition) => [
     { table: definition.name, column: null, comment: definition.comment },
     ...definition.columns.map((item) => ({ table: definition.name, column: item.name, comment: item.comment }))

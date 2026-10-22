@@ -26,12 +26,15 @@ import { IntentBriefExecutorService } from './intent-brief-executor.service.js';
 import { IntentResumeControlService } from './intent-resume-control.service.js';
 import { assertActiveIntentContinuation, assertNoPendingInputBudget, bindIntentResume } from './intent-resume-guard.js';
 import { bindIntentRetry } from './intent-retry-guard.js';
+import { IntentFollowUpService } from './intent-follow-up.service.js';
+import { isSourceFollowUp } from './intent-source-authorization.service.js';
 
 const collections = ['sessions', 'sessionLifecyclesBySession', 'intentRoutingRecordsBySession', 'contextSnapshotsBySession',
   'workItemsBySession', 'decisionRecordsBySession', 'tasksBySession', 'logicalOperationsBySession', 'briefsBySession',
   'followUpMessagesBySession', 'intentRouteRevisionsBySession', 'intentResolutionReceiptsBySession', 'intentPlanStepsBySession', 'eventsBySession', 'eventOutbox', 'artifacts',
   'sessionStopRequestsBySession', 'workflowRuntime', 'runtimeInvocationsBySession', 'workspaceWritebacks'];
 const localActions = ['create_initial_work_item', 'create_related_work_item', 'create_independent_work_item', 'record_information', 'record_constraint'];
+export type IntentCommitResult = { routing: IntentRoutingRecord; plan: ValidatedRoutePlan; idempotentReplay: boolean; event?: CollaborationEvent; additionalEvents?: CollaborationEvent[] };
 
 /** Accepts a persisted proposal identity only, never a caller-supplied plan or authority. */
 @Injectable()
@@ -39,11 +42,14 @@ export class IntentPlanCommitService {
   constructor(private readonly persistence: PersistenceService, private readonly runtimes: RuntimeRegistryService,
     @Optional() private readonly events?: EventsService, @Optional() private readonly answers?: IntentAnswerExecutorService,
     @Optional() private readonly tests?: IntentTestExecutorService, @Optional() private readonly briefs?: IntentBriefExecutorService,
-    @Optional() private readonly resumeControl?: IntentResumeControlService) {}
+    @Optional() private readonly resumeControl?: IntentResumeControlService,
+    @Optional() private readonly followUps?: IntentFollowUpService) {}
 
   async commit(input: { sessionId: string; routingId: string; actorId: string; expectedRoutingRevision: number;
     clarification?: ClarifyIntentRoutingInput; clarificationOwner?: string;
-    authorizationRetry?: { request: RetryIntentAuthorizationInput; snapshotId: string } }) {
+    authorizationRetry?: { request: RetryIntentAuthorizationInput; snapshotId: string } }): Promise<IntentCommitResult> {
+    const persistedRoute = this.persistence.getCollection<Record<string, IntentRoutingRecord[]>>('intentRoutingRecordsBySession', {})[input.sessionId]?.find(row => row.id === input.routingId);
+    if (this.followUps && isSourceFollowUp(persistedRoute)) return this.followUps.tryCommit(input);
     const result = await this.persistence.mutateCollections(collections, draft => {
       const session = (draft.sessions as SessionDetail[] | undefined)?.find(row => row.id === input.sessionId);
       const lifecycle = (draft.sessionLifecyclesBySession as SessionLifecyclesBySession | undefined)?.[input.sessionId];

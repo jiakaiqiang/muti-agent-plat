@@ -6,6 +6,8 @@ import type { AgentTask, Artifact, IntentPlanStepRecord, IntentRetryBinding, Log
 import type { PersistenceService, PersistedState } from '../persistence/persistence.service.js';
 import type { RuntimeInvocationLog } from '../runtimes/runtime.service.js';
 import { assertNoPendingInputBudget, bindIntentRecoveryAuthority, INTENT_RESUME_COLLECTIONS } from './intent-resume-guard.js';
+import { activeReconciliationAttempt, claimReconciliationExecution, hasReconciledCliConfirmation, originalReconciliationBinding,
+  settleReconciliationExecution } from './intent-reconciliation-state.js';
 
 export const INTENT_RETRY_COLLECTIONS = [...INTENT_RESUME_COLLECTIONS, 'runtimeInvocationsBySession', 'workspaceWritebacks', 'artifacts'];
 const rows = <T>(state: PersistedState, key: string, sessionId: string): T[] =>
@@ -20,6 +22,10 @@ export const isIntentRetryExecutionLocal = (execution: { processId: string }) =>
 
 /** Dispatch acceptance is not execution ownership. Fence duplicate/stalled queue deliveries before a Runtime call. */
 export async function claimIntentRetryExecution(persistence: PersistenceService, binding: IntentRetryBinding) {
+  if (binding.reconciliationAttempt) {
+    bindIntentRetry(readIntentRetryState(persistence), binding.sessionId, binding.actorId, binding, true);
+    return claimReconciliationExecution(persistence, binding.sessionId, binding.reconciliationAttempt);
+  }
   const claim = await persistence.mutateCollections(INTENT_RETRY_COLLECTIONS, draft => {
     const receipt = rows<IntentPlanStepRecord>(draft, 'intentPlanStepsBySession', binding.sessionId)
       .find(row => row.id === binding.task.stepId)?.retryReceipts?.find(row => row.binding.checkpointId === binding.checkpointId);
@@ -41,6 +47,7 @@ export async function claimIntentRetryExecution(persistence: PersistenceService,
 }
 
 export async function settleIntentRetryExecution(persistence: PersistenceService, binding: IntentRetryBinding, claimId: string, unknown = false) {
+  if (binding.reconciliationAttempt) return settleReconciliationExecution(persistence, binding.sessionId, binding.reconciliationAttempt, claimId, unknown);
   await persistence.mutateCollections(['intentPlanStepsBySession'], draft => {
     const execution = rows<IntentPlanStepRecord>(draft, 'intentPlanStepsBySession', binding.sessionId)
       .find(row => row.id === binding.task.stepId)?.retryReceipts?.find(row => row.binding.checkpointId === binding.checkpointId)?.execution;
@@ -97,11 +104,12 @@ export function bindIntentRetry(state: PersistedState, sessionId: string, actorI
   const checkpoint = session.activeRecoveryCheckpoint;
   const saved = expected ?? checkpoint?.retryBinding;
   if (!saved) return fail('RETRY_CHECKPOINT_REQUIRED');
+  if (saved.reconciliationAttempt) activeReconciliationAttempt(state, sessionId, saved.reconciliationAttempt, saved);
   if (saved.actorId !== actorId || saved.sessionId !== sessionId || !saved.checkpointId) fail('INTENT_RETRY_CHECKPOINT_STALE');
-  if (!dispatch && (!checkpoint || checkpoint.confirmationId !== saved.checkpointId || !isDeepStrictEqual(checkpoint.retryBinding, saved))) {
+  if (!dispatch && (!checkpoint || checkpoint.confirmationId !== saved.checkpointId || !isDeepStrictEqual(checkpoint.retryBinding, originalReconciliationBinding(saved)))) {
     fail('INTENT_RETRY_CHECKPOINT_STALE');
   }
-  if (dispatch) {
+  if (dispatch && !saved.reconciliationAttempt) {
     const receipt = unique(rows<IntentPlanStepRecord>(state, 'intentPlanStepsBySession', sessionId).flatMap(row => row.retryReceipts ?? [])
       .filter(row => row.binding.checkpointId === saved.checkpointId));
     if (!receipt || receipt.execution?.status === 'reconciliation_required' || !['running', 'applied'].includes(receipt.status) || !isDeepStrictEqual(receipt.binding, saved) ||
@@ -120,7 +128,7 @@ export function bindIntentRetry(state: PersistedState, sessionId: string, actorI
     (operation.status === 'ready' && operation.deadlineAt && Date.parse(operation.deadlineAt) <= Date.now())) {
     fail('INTENT_RETRY_OPERATION_BUDGET_EXHAUSTED');
   }
-  const authority = bindIntentRecoveryAuthority(state, sessionId, actorId, task.id, dispatch);
+  const authority = bindIntentRecoveryAuthority(state, sessionId, actorId, task.id, dispatch, saved.reconciliationAttempt);
   const { tasks, workflow, ...base } = authority;
   if (saved.workflow) {
     const runtime = state.workflowRuntime as { runs?: WorkflowRun[]; nodeRunsByRunId?: Record<string, WorkflowNodeRun[]> };
@@ -131,7 +139,7 @@ export function bindIntentRetry(state: PersistedState, sessionId: string, actorI
   }
   const current = { ...base, actorId, checkpointId: saved.checkpointId, task: tasks[0], failure: saved.failure,
     ...(workflow ? { workflow: { ...workflow, revision: saved.workflow?.revision, attempt: saved.workflow?.attempt } } : {}) };
-  if (!isDeepStrictEqual(current, saved)) fail('INTENT_RETRY_CHECKPOINT_STALE');
+  if (!isDeepStrictEqual(current, originalReconciliationBinding(saved))) fail('INTENT_RETRY_CHECKPOINT_STALE');
   const writebacks = [...((state.workspaceWritebacks as WorkspaceWritebackRecord[] | undefined) ?? []), ...(session.workspaceWritebacks ?? [])]
     .filter(row => row.sessionId === sessionId && (row.taskId === task.id || row.invocationId === call.invocationId));
   const submissions = Object.values((state.artifacts as { artifactsById?: Record<string, Artifact> } | undefined)?.artifactsById ?? {})
@@ -144,6 +152,6 @@ export function bindIntentRetry(state: PersistedState, sessionId: string, actorI
         resolution: { method: 'POST', path: `/sessions/${sessionId}/workspace-writebacks/:writebackId/resolve`,
           note: '使用现有写回/冲突处理入口；没有写回记录时不支持自动阶段接续。' } } });
   }
-  assertIntentRetryRuntimeSafe(call.runtimeType);
+  if (!hasReconciledCliConfirmation(state, saved, call.runtimeType)) assertIntentRetryRuntimeSafe(call.runtimeType);
   return structuredClone(saved);
 }

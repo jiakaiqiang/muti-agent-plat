@@ -15,10 +15,13 @@ import { IntentBriefStoreService } from './intent-brief-store.service.js';
 import { IntentBriefExecutorService } from './intent-brief-executor.service.js';
 import { IntentBriefRetryService } from './intent-brief-retry.service.js';
 import { IntentResumeControlService } from './intent-resume-control.service.js';
+import { IntentSourceAuthorizationService } from './intent-source-authorization.service.js';
+import { IntentFollowUpService } from './intent-follow-up.service.js';
+import { IntentSourceReconciliationService } from './intent-source-reconciliation.service.js';
 
 @Module({
   imports: [ContextManagementModule, EventsModule, AgentsModule, RuntimeModule, RuntimeInvocationModule],
-  providers: [CommandStateResolverService, CommandApplicationService, MessageIngressService, RouteApplicationService, IntentPlanCommitService, IntentAnswerExecutorService, IntentTestExecutorService, IntentBriefStoreService, IntentBriefExecutorService, IntentBriefRetryService, IntentResumeControlService],
-  exports: [CommandStateResolverService, CommandApplicationService, MessageIngressService, RouteApplicationService, IntentPlanCommitService, IntentAnswerExecutorService, IntentTestExecutorService, IntentBriefExecutorService, IntentBriefRetryService, IntentResumeControlService]
+  providers: [CommandStateResolverService, CommandApplicationService, MessageIngressService, RouteApplicationService, IntentPlanCommitService, IntentAnswerExecutorService, IntentTestExecutorService, IntentBriefStoreService, IntentBriefExecutorService, IntentBriefRetryService, IntentResumeControlService, IntentSourceAuthorizationService, IntentFollowUpService, IntentSourceReconciliationService],
+  exports: [CommandStateResolverService, CommandApplicationService, MessageIngressService, RouteApplicationService, IntentPlanCommitService, IntentAnswerExecutorService, IntentTestExecutorService, IntentBriefExecutorService, IntentBriefRetryService, IntentResumeControlService, IntentSourceAuthorizationService, IntentFollowUpService, IntentSourceReconciliationService]
 })
 export class MessageRoutingModule {}

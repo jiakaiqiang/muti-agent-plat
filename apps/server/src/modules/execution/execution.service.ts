@@ -15,6 +15,7 @@ import { PersistenceService } from '../persistence/persistence.service.js';
 import { Optional } from '@nestjs/common';
 import type { IntentResumeBinding, IntentRetryBinding } from '@agent-cluster/shared';
 import { bindIntentRetry, readIntentRetryState } from '../message-routing/intent-retry-guard.js';
+import { assertReconciliationOutcome } from '../message-routing/intent-reconciliation-state.js';
 
 /**
  * Drives the post-confirmation execution pipeline in the background so HTTP
@@ -93,7 +94,7 @@ export class ExecutionService implements BeforeApplicationShutdown {
 
     const controller = new AbortController();
     const done = this.orchestrator
-      .runPipeline(session, brief, tasks, controller.signal, intentRetryBinding)
+      .runPipeline(session, brief, tasks, controller.signal, intentRetryBinding, intentResumeBinding?.reconciliationAttempt)
       .catch((error): ExecutionOutcome | undefined => {
         if (error instanceof IntentExecutionSupersededError) return undefined;
         const termination = terminationFromSignal(controller.signal);
@@ -118,6 +119,14 @@ export class ExecutionService implements BeforeApplicationShutdown {
         const current = this.running.get(session.id);
         if (current?.controller === controller) {
           this.running.delete(session.id);
+        }
+        if (outcome && this.persistence) {
+          try { assertReconciliationOutcome(readIntentResumeState(this.persistence), session.id, tasks.map(task => task.id),
+            intentRetryBinding?.reconciliationAttempt ?? intentResumeBinding?.reconciliationAttempt); }
+          catch (error) {
+            if (error instanceof Error && error.message === 'INTENT_RECONCILIATION_OUTCOME_STALE') return;
+            throw error;
+          }
         }
         if (outcome) onOutcome(outcome);
       })

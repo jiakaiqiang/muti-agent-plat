@@ -160,6 +160,8 @@ import { DiscussionDocumentsService } from '../discussion-documents/discussion-d
 import { InputBudgetStore } from '../runtimes/input-budget-store.js';
 import type { IntentRetryBinding } from '@agent-cluster/shared';
 import { claimIntentRetryExecution, settleIntentRetryExecution } from '../message-routing/intent-retry-guard.js';
+import { activeReconciliationAttempt, claimReconciliationExecution, settleReconciliationExecution } from '../message-routing/intent-reconciliation-state.js';
+import { readIntentResumeState } from '../message-routing/intent-resume-guard.js';
 import { llmInputSafetyMarginRatio } from '../../common/runtime-config.js';
 import { reserveInputTokenSafetyMargin } from '../../common/token.js';
 
@@ -1900,8 +1902,21 @@ export class OrchestratorService {
     brief: TaskBrief,
     tasks: AgentTask[],
     signal?: AbortSignal,
-    intentRetryBinding?: IntentRetryBinding
+    intentRetryBinding?: IntentRetryBinding,
+    reconciliationAttempt?: import('@agent-cluster/shared').IntentReconciliationAttemptRef
   ): Promise<ExecutionOutcome> {
+    if (session.intentContractVersion === 'intent-understanding-v1' && reconciliationAttempt) {
+      const claimId = await claimReconciliationExecution(this.persistence, session.id, reconciliationAttempt);
+      for (const task of tasks) (this.reconciliationTaskBindings ??= new Map()).set(`${session.id}:${task.id}`, reconciliationAttempt);
+      try {
+        const outcome = await this.runPipeline(session, brief, tasks, signal, intentRetryBinding);
+        await settleReconciliationExecution(this.persistence, session.id, reconciliationAttempt, claimId);
+        return outcome;
+      } catch (error) {
+        await settleReconciliationExecution(this.persistence, session.id, reconciliationAttempt, claimId, true).catch(() => undefined);
+        throw error;
+      } finally { for (const task of tasks) this.reconciliationTaskBindings.delete(`${session.id}:${task.id}`); }
+    }
     if (session.intentContractVersion === 'intent-understanding-v1' && intentRetryBinding) {
       return this.runBoundRetryTask(session, brief, tasks, intentRetryBinding, signal);
     }
@@ -2061,6 +2076,7 @@ export class OrchestratorService {
   }
 
   private retryTaskBindings = new Map<string, IntentRetryBinding>();
+  private reconciliationTaskBindings = new Map<string, import('@agent-cluster/shared').IntentReconciliationAttemptRef>();
 
   private async runBoundRetryTask(session: SessionDetail, brief: TaskBrief, tasks: AgentTask[], binding: IntentRetryBinding,
     signal?: AbortSignal): Promise<ExecutionOutcome> {
@@ -4667,11 +4683,15 @@ export class OrchestratorService {
       // An explicit user takeover opens a new logical operation, while the cumulative WorkItem budget remains authoritative.
       this.tasks.update(task, { previousExecutionOperationId: task.executionOperationId, executionOperationId: undefined });
     }
+    const retry = this.retryTaskBindings?.get(`${session.id}:${task.id}`);
+    const ref = retry?.reconciliationAttempt ?? this.reconciliationTaskBindings?.get(`${session.id}:${task.id}`);
+    const reconciledTarget = ref ? activeReconciliationAttempt(readIntentResumeState(this.persistence), session.id, ref).row.binding : undefined;
+    const target = retry?.task ?? (reconciledTarget && ('task' in reconciledTarget ? reconciledTarget.task : reconciledTarget.tasks.find(item => item.taskId === task.id)));
     let operation = await this.runtime.operations.begin({ id: task.executionOperationId ?? invocationId,
       sessionId: session.id, taskId: task.id, phase: 'task_execution', previousId: task.previousExecutionOperationId,
-      ...(this.retryTaskBindings?.get(`${session.id}:${task.id}`) ? { dataEpoch: session.dataEpoch, workItemId: task.workItemId,
-        intentStepId: this.retryTaskBindings.get(`${session.id}:${task.id}`)!.task.stepId,
-        executionBinding: this.retryTaskBindings.get(`${session.id}:${task.id}`)!.task.executionBinding } : {}) });
+      reconciliationAttempt: ref,
+      ...(target ? { dataEpoch: session.dataEpoch, workItemId: task.workItemId,
+        intentStepId: target.stepId, executionBinding: target.executionBinding } : {}) });
     if (operation.status === 'paused') operation = await this.runtime.operations.resume(session.id, operation.id);
     if (!task.executionOperationId) this.tasks.update(task, { executionOperationId: operation.id });
     return operation;
@@ -8247,7 +8267,9 @@ export class OrchestratorService {
         workItemId: input.contextAssembly.workItemId ?? inputSession.activeWorkItemId,
         attempt: input.attempt
       };
-      const retryBinding = input.taskId && this.retryTaskBindings?.get(`${inputSession.id}:${input.taskId}`);
+      const retryBinding = input.taskId ? this.retryTaskBindings?.get(`${inputSession.id}:${input.taskId}`) : undefined;
+      resolvedPlan.reconciliationAttempt = retryBinding?.reconciliationAttempt ||
+        (input.taskId ? this.reconciliationTaskBindings?.get(`${inputSession.id}:${input.taskId}`) : undefined);
       if (retryBinding) {
         resolvedPlan.intentRetryBinding = retryBinding;
         resolvedPlan.intentStepId = retryBinding.task.stepId;

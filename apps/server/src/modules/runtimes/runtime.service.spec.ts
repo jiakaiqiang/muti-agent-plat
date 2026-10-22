@@ -7,6 +7,10 @@ import { RuntimeService } from './runtime.service.js';
 import { createExecutionTermination } from '../../common/execution-termination.js';
 import { WorktreeExecutionService } from '../worktree-execution/worktree-execution.service.js';
 import { SessionLifecycleStore } from './session-lifecycle-store.js';
+import { approvedRetryState } from '../message-routing/intent-retry.fixture.js';
+import { IntentReconciliationService } from '../message-routing/intent-reconciliation.service.js';
+import { IntentResumeControlService } from '../message-routing/intent-resume-control.service.js';
+import { CLI_RISK_VERSION, claimReconciliationExecution } from '../message-routing/intent-reconciliation-state.js';
 
 test('R8 final Runtime selection blocks unproven adapters before any adapter start', () => {
   for (const type of ['codex', 'claude_code', 'test_runner', 'mcp_tool', 'human'] as const) {
@@ -18,6 +22,46 @@ test('R8 final Runtime selection blocks unproven adapters before any adapter sta
     plan.intentRetryBinding = {} as NonNullable<InvocationPlan['intentRetryBinding']>;
     assert.throws(() => service.start(plan), /INTENT_RETRY_RECONCILIATION_REQUIRED/); assert.equal(starts, 0);
   }
+});
+
+for (const type of ['generic_llm', 'codex', 'claude_code'] as const) test(`R9a actual Runtime ${type} keeps one-attempt ownership and independent capability guards`, async () => {
+  let starts = 0;
+  const selected = adapter(type, async plan => { starts++; return completed(plan); });
+  const { service, persistence, persisted } = createService([selected]);
+  const state: any = approvedRetryState();
+  state.sessions[0].activeRecoveryCheckpoint.retryBinding.failure.runtimeType = type;
+  state.runtimeInvocationsBySession.session[0].runtimeType = type;
+  if (type === 'generic_llm') state.intentPlanStepsBySession.session[0].retryReceipts = [{ status: 'reconciliation_required',
+    processId: 'old-process', binding: structuredClone(state.sessions[0].activeRecoveryCheckpoint.retryBinding) }];
+  for (const [key, value] of Object.entries(state)) persisted.set(key, value);
+  const reconciliation = new IntentReconciliationService(persistence as never), control = new IntentResumeControlService(persistence as never);
+  let binding: any;
+  reconciliation.bind((id, ref) => control.retry(id, 'user', async checked => { binding = checked; }, undefined, ref));
+  const view = (await reconciliation.list('session', 'user'))[0];
+  await reconciliation.decide('session', view.record.id, 'user', { action: 'redispatch', idempotencyKey: 'runtime-human',
+    expectedCaseRevision: view.record.revision, expectedSessionRevision: view.sessionRevision,
+    ...(type === 'generic_llm' ? {} : { acceptWorkspaceResponsibility: true, riskVersion: CLI_RISK_VERSION }) });
+  await claimReconciliationExecution(persistence as never, 'session', binding.reconciliationAttempt);
+  (persisted.get('sessions') as any[])[0].status = 'EXECUTING';
+  (persisted.get('sessionLifecyclesBySession') as any).session.admission = 'open';
+  (persisted.get('tasksBySession') as any).session[0].status = 'running';
+  const step = (persisted.get('intentPlanStepsBySession') as any).session[0].step;
+  const plan = makeInvocationPlan({ sessionId: 'session', taskId: 'original-task', workItemId: 'work', dataEpoch: 'epoch', phase: 'task_execution',
+    executionTarget: { runtimeType: type, writeMode: 'none' }, contextEnvelope: { workspaceId: 'workspace' },
+    executionBinding: binding.task.executionBinding, intentStepId: binding.task.stepId,
+    effectScope: step.effectScope, intentRetryBinding: binding, reconciliationAttempt: binding.reconciliationAttempt,
+    operation: { id: 'original-operation' } as any });
+  const result = await service.start(plan).result;
+  if (type !== 'generic_llm') {
+    assert.equal(result.status, 'failed'); assert.equal(starts, 0);
+    assert.equal((persisted.get('runtimeInvocationsBySession') as any).session.at(-1)?.supersededResult?.error?.details?.reason, 'INTENT_EFFECT_SCOPE_UNSUPPORTED');
+    assert.throws(() => service.start({ ...plan, executionTarget: { ...plan.executionTarget, runtimeType: type === 'codex' ? 'claude_code' : 'codex' } }), /RECONCILIATION_REQUIRED/);
+    return;
+  }
+  assert.equal(result.status, 'completed', JSON.stringify({ error: result.error,
+    original: (persisted.get('runtimeInvocationsBySession') as any).session.at(-1)?.supersededResult?.error })); assert.equal(starts, 1);
+  const duplicate = await service.start({ ...plan, invocationId: `${plan.invocationId}-duplicate` }).result;
+  assert.equal(duplicate.status, 'failed'); assert.equal(starts, 1);
 });
 
 function completed(plan: InvocationPlan, runtimeType: RuntimeType = plan.executionTarget.runtimeType): AgentRunResult {
@@ -1062,6 +1106,28 @@ test('persists Runtime usage and result status', async () => {
   assert.equal(log.dataEpoch, 'epoch-test');
   assert.equal(log.usage?.totalTokens, 15);
   assert.equal(log.systemEvidence.invocationId, plan.invocationId);
+});
+
+test('source candidate invocation audit preserves an independent copy of its server authority and effect scope', async () => {
+  const plan = makeInvocationPlan({ executionTarget: { runtimeType: 'generic_llm' },
+    sourceCandidateBinding: { mode: 'candidate_only', authorityId: 'authority', authorityRevision: 1,
+      authorityHash: 'a'.repeat(64), sourceResourceId: 'source:authority', grantId: 'source-grant',
+      workspaceId: 'workspace-test', workspaceBindingHash: 'b'.repeat(64), sessionId: 'session',
+      dataEpoch: 'epoch', sessionGeneration: 1, workItemId: 'work', taskId: 'task', intentStepId: 'step',
+      invocationId: 'invocation', operationId: 'operation', effectScopeHash: 'c'.repeat(64) },
+    effectScope: { effects: [{ kind: 'modify_source', target: { kind: 'source', refId: 'source:authority' }, evidenceRefs: ['request'] }],
+      prohibitions: [], grantIds: ['source-grant'], scopeHash: 'c'.repeat(64) } });
+  const expectedBinding = structuredClone(plan.sourceCandidateBinding), expectedScope = structuredClone(plan.effectScope);
+  const { service, persisted } = createService([adapter('generic_llm')]);
+  await (service as any).recordInvocation(plan, completed(plan), new Date().toISOString());
+  plan.sourceCandidateBinding!.authorityId = 'mutated';
+  plan.effectScope!.grantIds.push('mutated');
+  const [log] = service.listInvocations(plan.sessionId);
+  assert.deepEqual((log as any).sourceCandidateBinding, expectedBinding);
+  assert.deepEqual((log as any).effectScope, expectedScope);
+  const stored = (persisted.get('runtimeInvocationsBySession') as any)[plan.sessionId][0];
+  assert.deepEqual(stored.sourceCandidateBinding, expectedBinding);
+  assert.deepEqual(stored.effectScope, expectedScope);
 });
 
 test('persists the exact output contract identity used by the invocation', async () => {

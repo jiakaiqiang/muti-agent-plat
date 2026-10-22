@@ -2,6 +2,7 @@ import { Type, type Static } from '@sinclair/typebox';
 import { RuntimeArtifactOutputSchema, RuntimeTaskEvidenceRefSchema } from './artifact-contracts.js';
 import { RUNTIME_OUTPUT_SCHEMA_VERSION } from './contract-types.js';
 import { IntentUnderstandingOutputSchema, intentUnderstandingExample, type IntentUnderstandingOutput } from './intent-understanding.js';
+import { IntentSourceCandidateOutputSchema, intentSourceCandidateExample, type IntentSourceCandidateOutput } from './intent-source-candidate.js';
 import {
   NonEmptyString,
   NullableString,
@@ -269,6 +270,7 @@ export const DiscussionPlanOutputSchema = strictObject({
 });
 
 export const runtimeOutputSchemas = {
+  intent_source_candidate: IntentSourceCandidateOutputSchema,
   agent_message: AgentMessageOutputSchema,
   task_acceptance_decision: TaskAcceptanceDecisionOutputSchema,
   task_brief: TaskBriefOutputSchema,
@@ -298,6 +300,7 @@ export type IntentRoutingDecisionOutput = Static<typeof IntentRoutingDecisionOut
 export type DiscussionPlanOutput = Static<typeof DiscussionPlanOutputSchema>;
 
 export type RuntimeOutput =
+  | IntentSourceCandidateOutput
   | AgentMessageOutput
   | TaskAcceptanceDecisionOutput
   | TaskBriefOutput
@@ -315,6 +318,7 @@ export type RuntimeOutputByKind = {
 };
 
 export const runtimeOutputExamples = {
+  intent_source_candidate: intentSourceCandidateExample,
   intent_understanding: intentUnderstandingExample,
   agent_message: {
     schemaVersion: '1.0',

@@ -25,7 +25,8 @@ import {
   RELATIONAL_SCHEMA_V20_SQL,
   RELATIONAL_SCHEMA_V21_SQL,
   RELATIONAL_SCHEMA_V22_SQL,
-  RELATIONAL_SCHEMA_V23_SQL
+  RELATIONAL_SCHEMA_V23_SQL,
+  RELATIONAL_SCHEMA_V24_SQL
 } from './relational-schema.js';
 
 type Migration = {
@@ -149,6 +150,11 @@ const MIGRATIONS: Migration[] = [
     version: 23,
     name: 'intent_versions_corrections_and_steps',
     sql: RELATIONAL_SCHEMA_V23_SQL
+  },
+  {
+    version: 24,
+    name: 'intent_human_reconciliation',
+    sql: RELATIONAL_SCHEMA_V24_SQL
   }
 ];
 
